@@ -154,6 +154,14 @@ planning notes `gia_notes.md` / `gia_adjoint_plan.md`. Key pieces to port:
   (layered models with repeated-radius discontinuities map directly), complex
   ordinates (spline spectral lines), thread-safe `CubicSplineSystem`.
 - **FFTWpp / NumericConcepts**: reached only through GSHTrans.
+- **GSHTrans is a live target** (noted 15 Oct 2026): recently updated with
+  pseudo-spectral work in mind, and where sl3dpp needs something it cannot
+  do, updates can be planned. Running wishlist:
+  1. `GaussLegendreGrid` passthrough of the base's `nPhi` parameter
+     (requesting `nlon = 2 lmax + 1`). Low priority: benchmark comparisons
+     are done in coefficient space and through grid-independent
+     functionals, not by matching grids (decided 15 Oct 2026) — but an
+     explicit `nPhi` may still be wanted for IO-grid interop one day.
 - Version hygiene: GaussQuad and Interpolation pin NumericConcepts to a commit
   while GSHTrans/FFTWpp track `main` — **sl3dpp must pin all five tags** (and
   can override via `FETCHCONTENT_SOURCE_DIR_<NAME>` for local development).
@@ -354,6 +362,23 @@ GB of viscous-element state.
 Each stage verifiable against an existing code — this is what makes the port
 largely mechanical and automatable stage by stage.
 
+**Where references disagree, pyslfp is authoritative for the elastic
+problem.** Elastic Love numbers from an updated Fortran build (an abortive
+sl3d update, not itself a reference) sit ~1% off pyslfp — more than
+numerics, cause not chased, and possibly shared by sl3d suitably isolated —
+so the stage-1/2 gates compare against pyslfp, and Fortran comparisons are
+reserved for the time-dependent stages (3–5), at tolerances judged per
+case.
+
+**Cross-library field comparisons are made in coefficient space** (via the
+documented basis conversion) **or through grid-independent functionals**
+(rotation vector, mean sea level, surface integrals), never by matching
+grids point for point (decided 15 Oct 2026). Tight gates use smooth,
+band-limited analytic inputs — including a smooth ocean-function override
+in the SLE — so results are grid-independent to spectral accuracy; the
+sharp flotation ocean function is compared separately at the coarser
+tolerance its coastline quadrature permits, and documented as such.
+
 **Verification mechanics** (decided 15 Oct 2026): reference values are
 produced by small Python scripts in `scripts/` that drive pyslfp/planetmodel
 and dump committed fixtures into `tests/data/` (text/JSON, with a provenance
@@ -405,12 +430,40 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
 6. Config: namelist-style run files served the Fortran well; AdGIA uses C++
    setters + `OptionsParser`. Lean: `Options` structs in the library, a small
    TOML/INI-style run file in the drivers.
+7. **Transversely isotropic viscoelasticity** (raised 15 Oct 2026; pyslfp
+   keeps viscoelasticity isotropic). The defining physical condition: a
+   Maxwell-type TI material relaxes towards a state supporting **no
+   deviatoric stress**, so the long-time stiffness is an isotropic-stress
+   projection (σ∞ = κ* tr ε I). That condition alone should pin the
+   structure of the relaxation; open residuals are (a) the relaxed bulk
+   response κ* when the TI tensor couples volumetric and deviatoric parts
+   (hydrostatic strain in a TI medium produces deviatoric stress, so
+   relaxation shifts the apparent bulk modulus), and (b) whether different
+   moduli carry different relaxation time-scales, i.e. several internal
+   variables/branches rather than one — representable in the planned
+   ntau > 1 weight algebra. Not to be solved now, but stage 3's
+   `Rheology`/`StepWeights` interface must not preclude moduli-resolved
+   branches. Whatever is settled here is intended to translate back to
+   pyslfp/AdGIA.
 
 ## 9. Decision log
 
 - **15 Oct 2026** — Elastic sea-level fingerprints are a first-class public
   capability (stage 2), pyslfp-shaped, so sl3dpp can later serve as a faster
   pyslfp backend; the binding itself is outside this plan (§1).
+- **15 Oct 2026** — Stage-2 gate calibration: with everything band-limited
+  (smooth ocean override) the SLE solutions agree with pyslfp at ~2e-9 in
+  coefficient space; with the sharp flotation ocean function the solution
+  is grid-determined only to the coastline quadrature — pyslfp's own DH vs
+  GLQ spread at lmax 32 is 0.44% in ocean area, 0.049 of the largest
+  sea-level coefficient, and a factor ~2 in the (ill-determined, nearly
+  zonal) transverse rotation. sl3dpp sits inside that spread; the sharp
+  gate's tolerances are set to it.
+- **15 Oct 2026** — pyslfp is the authoritative elastic benchmark; a ~1%
+  Love-number discrepancy against an updated Fortran build is known and
+  unexplained (§6). TI viscoelasticity added as open question 7: relaxation
+  defined by vanishing relaxed deviatoric stress, possibly with
+  per-modulus time-scales; stage 3's interface must keep it representable.
 
 - **15 Oct 2026** — Verification gates run on committed fixtures generated by
   Python scripts in `scripts/` (see §6); no Python at test time.

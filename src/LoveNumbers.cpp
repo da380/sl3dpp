@@ -2,7 +2,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <format>
+#include <fstream>
 #include <numbers>
+#include <sstream>
 #include <stdexcept>
 
 #include "sl3dpp/DegreeOperator.hpp"
@@ -160,6 +163,89 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
         *name = InertiaMoment(material, nodal.U) * factor;
       }
     }
+  }
+  return out;
+}
+
+LoveNumbers LoveNumbers::ConvertedTo(const Scales& scales) const {
+  LoveNumbers out = *this;
+  const double hLoad = scales.Factor(kHPerLoad);
+  const double kLoad = scales.Factor(kKPerLoad);
+  const double hPot = scales.Factor(kHPerPotential);
+  const double kPot = scales.Factor(kKPerPotential);
+  auto divide = [](std::vector<double>& v, double f) {
+    for (auto& x : v) x /= f;
+  };
+  for (auto* v :
+       {&out.h_u, &out.l_u, &out.h_phi, &out.l_phi, &out.h_v, &out.l_v}) {
+    divide(*v, hLoad);
+  }
+  for (auto* v : {&out.k_u, &out.k_phi, &out.k_v}) divide(*v, kLoad);
+  divide(out.h_t, hPot);
+  divide(out.l_t, hPot);
+  divide(out.k_t, kPot);
+  out.h_c /= hPot;
+  out.k_c /= kPot;
+  out.m_u /= scales.Factor(kMomentPerLoad);
+  out.m_phi /= scales.Factor(kMomentPerLoad);
+  out.m_c /= scales.Factor(kMomentPerPotential);
+  out.radius /= scales.Length();
+  out.surface_gravity /= scales.Factor(AccelerationDimensions);
+  return out;
+}
+
+std::expected<LoveNumbers, ModelError> LoveNumbers::FromFile(
+    const std::filesystem::path& path) {
+  std::ifstream file(path);
+  if (!file) {
+    return std::unexpected(
+        ModelError{std::format("cannot open {}", path.string())});
+  }
+  LoveNumbers out;
+  std::vector<double>* columns[12] = {
+      &out.h_u, &out.l_u, &out.k_u, &out.h_phi, &out.l_phi, &out.k_phi,
+      &out.h_v, &out.l_v, &out.k_v, &out.h_t,   &out.l_t,   &out.k_t};
+  bool inTable = false;
+  for (std::string line; std::getline(file, line);) {
+    if (line.empty() || line.front() == '#') continue;
+    std::istringstream row(line);
+    if (!inTable) {
+      std::string head;
+      row >> head;
+      if (head == "radius") {
+        row >> out.radius;
+      } else if (head == "surface_gravity") {
+        row >> out.surface_gravity;
+      } else if (head == "axial") {
+        row >> out.h_c >> out.k_c >> out.m_u >> out.m_phi >> out.m_c;
+      } else if (head == "table") {
+        inTable = true;
+      }
+      continue;
+    }
+    int l = 0;
+    row >> l;
+    if (!row || l != static_cast<int>(out.degrees.size())) {
+      return std::unexpected(ModelError{
+          std::format("{}: table degrees must run 0, 1, 2, ... without gaps",
+                      path.string())});
+    }
+    out.degrees.push_back(l);
+    for (auto* column : columns) {
+      double value = 0;
+      row >> value;
+      column->push_back(value);
+    }
+    if (!row) {
+      return std::unexpected(ModelError{
+          std::format("{}: a table row needs l and 12 values", path.string())});
+    }
+  }
+  if (out.degrees.empty() || out.radius <= 0 || out.surface_gravity <= 0) {
+    return std::unexpected(ModelError{std::format(
+        "{}: not a Love-number table (needs radius, surface_gravity and a "
+        "table)",
+        path.string())});
   }
   return out;
 }

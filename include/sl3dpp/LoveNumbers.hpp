@@ -28,6 +28,8 @@
  * `ReciprocityResidual` reports the worst relative violation.
  */
 
+#include <expected>
+#include <filesystem>
 #include <vector>
 
 #include "sl3dpp/Material.hpp"
@@ -54,6 +56,17 @@ struct LoveNumbers {
   /// the degrees (and the axial pair), a structural check of the
   /// assembly's symmetry.
   [[nodiscard]] double ReciprocityResidual() const;
+
+  /// The same numbers with every value divided by its dimensions' factor
+  /// under the given scales: what an internal, non-dimensional component
+  /// (the sea level solver) works with. The table itself stays SI.
+  [[nodiscard]] LoveNumbers ConvertedTo(const Scales& scales) const;
+
+  /// A table from a fixture-style file as `scripts/make_stage1_fixtures.py`
+  /// writes one (SI): the `radius`, `surface_gravity`, `axial` and `table`
+  /// records. Also the interchange route from pyslfp.
+  [[nodiscard]] static std::expected<LoveNumbers, ModelError> FromFile(
+      const std::filesystem::path& path);
 };
 
 struct LoveNumberOptions {

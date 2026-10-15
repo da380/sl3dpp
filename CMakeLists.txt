@@ -97,9 +97,11 @@ add_library(sl3dpp STATIC
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp
+  src/Fingerprint.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
   src/RadialMesh.cpp
+  src/SeaLevel.cpp
   src/Version.cpp)
 
 add_library(sl3dpp::sl3dpp ALIAS sl3dpp)

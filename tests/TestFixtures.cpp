@@ -6,17 +6,24 @@
 #include <gtest/gtest.h>
 
 #include <array>
+#include <cctype>
+#include <complex>
 #include <filesystem>
 #include <fstream>
+#include <map>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
+#include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
+#include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/ShConventions.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
 
 namespace {
 
@@ -54,6 +61,187 @@ GravityFixture ReadFixture(const std::filesystem::path& path) {
 }
 
 }  // namespace
+
+namespace {
+
+/// A stage-2 fixture: named coefficient blocks (converted into GSHTrans's
+/// basis on read) and named scalar rows.
+struct Stage2Fixture {
+  std::map<std::string, std::vector<std::complex<double>>> fields;
+  std::map<std::string, std::vector<double>> scalars;
+};
+
+Stage2Fixture ReadStage2(const std::filesystem::path& path, int lmax) {
+  Stage2Fixture fixture;
+  std::ifstream file(path);
+  EXPECT_TRUE(file.is_open()) << path;
+  std::vector<std::complex<double>>* current = nullptr;
+  const auto size = static_cast<std::size_t>((lmax + 1) * (lmax + 2) / 2);
+  for (std::string line; std::getline(file, line);) {
+    if (line.empty() || line.front() == '#') continue;
+    std::istringstream row(line);
+    if (!std::isdigit(line.front())) {
+      std::string head;
+      row >> head;
+      if (head == "field") {
+        std::string name;
+        row >> name;
+        current = &fixture.fields[name];
+        current->assign(size, 0.0);
+      } else {
+        auto& values = fixture.scalars[head];
+        for (double v; row >> v;) values.push_back(v);
+        current = nullptr;
+      }
+      continue;
+    }
+    if (current == nullptr) {
+      ADD_FAILURE() << "coefficient row outside a field block";
+      continue;
+    }
+    int l = 0, m = 0;
+    double a = 0, b = 0;
+    row >> l >> m >> a >> b;
+    (*current)[sl3dpp::SurfaceGrid::Index(l, m)] =
+        sl3dpp::ComplexFromRealPair({a, b}, m);
+  }
+  return fixture;
+}
+
+/// Worst coefficient difference relative to the field's largest
+/// coefficient.
+double CoefficientError(std::span<const std::complex<double>> ours,
+                        std::span<const std::complex<double>> theirs) {
+  double scale = 0.0, diff = 0.0;
+  for (std::size_t i = 0; i < ours.size(); ++i) {
+    scale = std::max(scale, std::abs(theirs[i]));
+    diff = std::max(diff, std::abs(ours[i] - theirs[i]));
+  }
+  return scale > 0.0 ? diff / scale : 0.0;
+}
+
+}  // namespace
+
+TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
+  const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
+  constexpr int lmax = 32;
+  auto table =
+      sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
+  sl3dpp::SeaLevelSolver solver(sl3dpp::SurfaceGrid(lmax), table,
+                                sl3dpp::SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const auto& scales = solver.SolverScales();
+  const auto fixture = ReadStage2(data / "stage2_generalised.txt", lmax);
+
+  constexpr sl3dpp::Dimensions kSigma{.mass = 1, .length = -2};
+  constexpr sl3dpp::Dimensions kMoment{.mass = 1, .length = 2};
+  auto gridInput = [&](const std::string& name, sl3dpp::Dimensions dims) {
+    auto si = grid.Synthesise(fixture.fields.at(name));
+    for (auto& v : si) v /= scales.Factor(dims);
+    return si;
+  };
+  auto coefInput = [&](const std::string& name, sl3dpp::Dimensions dims) {
+    auto c = fixture.fields.at(name);
+    for (auto& v : c) v /= scales.Factor(dims);
+    return c;
+  };
+
+  sl3dpp::SeaLevelSolver::GeneralisedForcing forcing;
+  forcing.oceanFunctionOverride = gridInput("ocean_function", {});
+  forcing.directLoad = gridInput("direct_load", kSigma);
+  forcing.displacementLoad = gridInput("displacement_load", kSigma);
+  forcing.potentialLoad = gridInput("potential_load", kSigma);
+  forcing.displacementResponse =
+      coefInput("displacement_response", {.length = 1});
+  forcing.potentialResponse =
+      coefInput("potential_response", sl3dpp::PotentialDimensions);
+  forcing.inertiaMomentChange =
+      fixture.scalars.at("inertia_moment")[0] / scales.Factor(kMoment);
+  for (int i = 0; i < 3; ++i) {
+    forcing.angularMomentumChange[i] =
+        fixture.scalars.at("angular_momentum")[i] /
+        scales.Factor({.mass = 1, .length = 2, .time = -1});
+  }
+  forcing.rotation = sl3dpp::RotationalFeedback::Full;
+
+  // Any state: the ocean function is overridden.
+  auto state = solver.MakeState(
+      grid.ZeroField(), grid.FromFunction([](double, double) { return 1.0; }));
+  const auto response = solver.SolveGeneralised(
+      state, forcing, {.rtol = 1e-13, .max_iterations = 500});
+  ASSERT_TRUE(response.converged);
+
+  auto toSi = [&](std::span<const double> field, sl3dpp::Dimensions dims) {
+    auto c = grid.Expand(field);
+    for (auto& v : c) v *= scales.Factor(dims);
+    return c;
+  };
+  // The floor is the aliasing tail of near-lmax products, which differs
+  // between grids; observed ~2e-9.
+  constexpr double tol = 5e-9;
+  EXPECT_LT(CoefficientError(toSi(response.seaLevelChange, {.length = 1}),
+                             fixture.fields.at("sea_level_change")),
+            tol);
+  EXPECT_LT(CoefficientError(toSi(response.displacement, {.length = 1}),
+                             fixture.fields.at("displacement")),
+            tol);
+  EXPECT_LT(
+      CoefficientError(toSi(response.potential, sl3dpp::PotentialDimensions),
+                       fixture.fields.at("potential")),
+      tol);
+  const auto& omega = fixture.scalars.at("omega");
+  double omegaScale = 0.0;
+  for (auto v : omega) omegaScale = std::max(omegaScale, std::abs(v));
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_NEAR(response.angularVelocity[i] * scales.Factor({.time = -1}),
+                omega[i], tol * omegaScale)
+        << "omega component " << i;
+  }
+}
+
+TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
+  // The true flotation ocean function is a step function sampled on each
+  // code's own grid, so agreement is limited by the coastline quadrature,
+  // not by either implementation; the comparison is correspondingly
+  // coarse (plan §6).
+  const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
+  constexpr int lmax = 32;
+  auto table =
+      sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
+  sl3dpp::Fingerprint fingerprint(lmax, table);
+  fingerprint.SetAnalyticTestState(0.0);
+  const auto& grid = fingerprint.Grid();
+  const auto fixture = ReadStage2(data / "stage2_fingerprint.txt", lmax);
+
+  auto ice = fingerprint.IceThickness();
+  std::vector<double> iceChange(ice.size());
+  for (std::size_t i = 0; i < ice.size(); ++i) iceChange[i] = -0.1 * ice[i];
+  const auto result = fingerprint.SolveForIceChange(
+      iceChange, sl3dpp::RotationalFeedback::Full);
+  ASSERT_TRUE(result.converged);
+
+  // The tolerances below are pyslfp's own measured grid sensitivity for
+  // this problem (DH vs GLQ at lmax 32): ocean area 0.44%, sea-level
+  // coefficients 0.049 of the largest, the axial rotation 4%. The
+  // transverse rotation is a small residual of a nearly zonal load and is
+  // not determined at this resolution (pyslfp's own grids disagree on it
+  // by a factor of two), so it is not compared.
+  std::vector<double> ocean(fingerprint.OceanFunction().begin(),
+                            fingerprint.OceanFunction().end());
+  const double area = table.radius * table.radius * grid.Integrate(ocean);
+  EXPECT_NEAR(area, fixture.scalars.at("ocean_area")[0], 1e-2 * area);
+
+  auto toSi = [&](std::span<const double> field) { return grid.Expand(field); };
+  constexpr double tol = 8e-2;
+  EXPECT_LT(CoefficientError(toSi(result.seaLevelChange),
+                             fixture.fields.at("sea_level_change")),
+            tol);
+  EXPECT_LT(CoefficientError(toSi(result.displacement),
+                             fixture.fields.at("displacement")),
+            tol);
+  const auto& omega = fixture.scalars.at("omega");
+  EXPECT_NEAR(result.angularVelocity[2], omega[2], 0.1 * std::abs(omega[2]));
+}
 
 TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
