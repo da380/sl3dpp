@@ -122,6 +122,18 @@ class GridCoupling {
                       std::span<const Complex> M, std::span<const Complex> R,
                       std::span<const Complex> S) const;
 
+  /// Adds the deviatoric strain of degree solutions to a spectral tensor:
+  /// per degree, complex (l, m) columns over the spheroidal system's dofs
+  /// (column-major, 2l + 1 columns) and, optionally, the toroidal
+  /// system's. The nodal values and their r d_r derivatives are gathered
+  /// through the operators' dof maps and the mesh's differentiation
+  /// matrix, then mapped by DeviatoricComponents.
+  void AddStrainOfSolution(SpectralTensor& spectral, int l,
+                           const DegreeOperator& spheroidal,
+                           std::span<const Complex> x,
+                           const ToroidalOperator* toroidal = nullptr,
+                           std::span<const Complex> w = {}) const;
+
   /// The memory force of an analysed tensor whose components have been
   /// scaled by sum_k mu_k(r) per node: per degree, the complex column
   /// right-hand sides over the spheroidal system's dofs (column m + l of

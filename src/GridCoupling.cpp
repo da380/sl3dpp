@@ -147,6 +147,56 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
   }
 }
 
+void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
+                                       const DegreeOperator& spheroidal,
+                                       std::span<const Complex> x,
+                                       const ToroidalOperator* toroidal,
+                                       std::span<const Complex> w) const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  const auto n = mesh.NGll();
+  const auto columns = static_cast<std::size_t>(2 * l + 1);
+  const auto ndof = spheroidal.DofCount();
+  const auto first = FirstNodeFor(spheroidal.FirstElement());
+
+  auto gatherS = [&](int e, int i, Component component,
+                     std::size_t column) -> Complex {
+    const auto d = spheroidal.Dof(mesh.GlobalIndex(e, i), component);
+    return d >= 0 ? x[column * ndof + d] : Complex{};
+  };
+  auto gatherT = [&](int e, int i, std::size_t column) -> Complex {
+    if (toroidal == nullptr) return {};
+    const auto d = toroidal->Dof(mesh.GlobalIndex(e, i));
+    return d >= 0 ? w[column * toroidal->DofCount() + d] : Complex{};
+  };
+
+  for (auto node = first; node < NodeCount(); ++node) {
+    const auto e = nodes_[node].element;
+    const auto q = nodes_[node].nodeInElement;
+    const auto r = nodes_[node].radius;
+    const auto jac = mesh.Jacobian(e);
+    for (std::size_t column = 0; column < columns; ++column) {
+      DegreeNodeValues values;
+      values.U = gatherS(e, q, Component::U, column);
+      values.V = gatherS(e, q, Component::V, column);
+      values.W = gatherT(e, q, column);
+      for (auto i = 0; i < n; ++i) {
+        const auto b = r * mesh.Derivative(q, i) / jac;
+        values.rdU += b * gatherS(e, i, Component::U, column);
+        values.rdV += b * gatherS(e, i, Component::V, column);
+        values.rdW += b * gatherT(e, i, column);
+      }
+      const auto A = DeviatoricComponents(l, values, r);
+      const auto m = static_cast<int>(column) - l;
+      for (auto c = 0; c < 5; ++c) {
+        if (l < std::abs(kSpins[c])) continue;
+        const auto size = grid_.SpinCoefficientSize(kSpins[c]);
+        spectral.c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)] +=
+            A[c];
+      }
+    }
+  }
+}
+
 std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
     const SpectralTensor& weighted,
     const std::function<const DegreeOperator&(int)>& system) const {

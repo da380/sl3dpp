@@ -165,6 +165,32 @@ c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
    ladder (the research measurements).
 d. **AdGIA on a common model** — the headline benchmark (plan §1).
 
+## 5a. Measured within-step convergence (15 Oct 2026, first numbers)
+
+PREM-deck Maxwell mantle, lmax 16, a sin(theta)cos(phi) log-viscosity
+pattern of amplitude A (peak-to-peak contrast e^{2A}), unit loads on all
+degrees, trapezoid steps; iterations to 1e-11 on the second step:
+
+    contrast   dt/tau:   0.5      2       10
+    3x (plain Picard)     12      22       67
+    3x (Anderson 5)       10      17       23
+    10x    Picard         21      54     FAIL (oscillates)
+    10x    Anderson       14      29       52
+    100x   Picard         64     FAIL    FAIL
+    100x   Anderson       27      68     FAIL*
+    1000x  Anderson       49     147     FAIL*
+    10^4x  Anderson       92     FAIL*   FAIL*
+
+(*) the Anderson failures are slow grinds (residual 1e-3..1e-9 at the
+200-iteration cap), not divergence — unlike Picard's oscillation at
+residual ~1.8 — so a larger budget, a better reference profile
+(per-degree or worst-case, plan §3) or IMEX would extend the envelope.
+Headline: Anderson mixing roughly squares the practical contrast ceiling
+at fixed dt, and one-decade contrasts at dt = 10 tau — far beyond the old
+explicit code's dt <= tau_min limit — converge in ~50 passes. At the
+saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
+iteration trivialises, as it should.
+
 ## 7a. Nonlinear Maxwell rheologies (readily buildable here)
 
 Stress-dependent relaxation times — AdGIA's `RelaxationLaw`
@@ -193,3 +219,9 @@ AdGIA's `RelaxationLaw` path.
   worst-case; possibly per-degree. To be measured in (c).
 - Hermitian-pair exploitation in the transforms (halves the spin-2
   work) once gated.
+- GSHTrans's field algebra (noted 15 Oct 2026): not needed for the
+  stepping pipeline (plain batched transforms + hand loops), but the
+  stage-5 kernel accumulation is a pointwise tensor contraction
+  mu s (d - m):(d^+ - m^+) whose null-basis metric signs (the g(+,-) = -1
+  pairings across the component slots) the library's tensor types encode
+  — use them there rather than hand-rolling the contraction weights.

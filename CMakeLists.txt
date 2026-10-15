@@ -107,7 +107,8 @@ add_library(sl3dpp STATIC
   src/SeaLevel.cpp
   src/ToroidalOperator.cpp
   src/Version.cpp
-  src/Viscoelastic.cpp)
+  src/Viscoelastic.cpp
+  src/Viscoelastic3D.cpp)
 
 add_library(sl3dpp::sl3dpp ALIAS sl3dpp)
 

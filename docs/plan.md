@@ -456,7 +456,12 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
 6. Config: namelist-style run files served the Fortran well; AdGIA uses C++
    setters + `OptionsParser`. Lean: `Options` structs in the library, a small
    TOML/INI-style run file in the drivers.
-7. **Transversely isotropic viscoelasticity** (raised 15 Oct 2026; pyslfp
+7. **Second-order adjoints** (raised 15 Oct 2026): Yu et al. 2025
+   (AdGIA's `doc/Elasticity/ggae388.pdf`) details them and they are
+   planned for AdGIA; a matching addition here is worth considering once
+   the first-order adjoints (stage 5) are gated, but it is not a
+   priority — this code is not aimed at production-scale inversion runs.
+8. **Transversely isotropic viscoelasticity** (raised 15 Oct 2026; pyslfp
    keeps viscoelasticity isotropic). The defining physical condition: a
    Maxwell-type TI material relaxes towards a state supporting **no
    deviatoric stress**, so the long-time stiffness is an isotropic-stress
