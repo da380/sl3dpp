@@ -200,6 +200,12 @@ sl3dpp has only **lightweight readers**. What exists today:
 - Precedent for a C++ reader of a planetmodel format with a frozen schema
   string: `AdGIA::MeshManifest` (reads `planetmodel.mesh.manifest/5`).
 
+A candidate input source for (2): the curated collection at
+https://github.com/shuleyu/seismic-tomography-models wraps many published
+tomographic models in one consistent netCDF format (noted 15 Oct 2026) —
+the natural feed for the ingestion chain and a format worth aligning the
+reader with.
+
 **planetmodel workstream** (Python; prerequisite for sl3dpp stage 5, useful to
 AdGIA regardless):
 

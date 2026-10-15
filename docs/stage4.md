@@ -191,6 +191,37 @@ explicit code's dt <= tau_min limit — converge in ~50 passes. At the
 saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
 iteration trivialises, as it should.
 
+## 5b. The Fortran gate (visco_test)
+
+The old code's `visco_test` is the weak-contrast external gate: PREM
+(`prem.simp.vm1`, natural splines), the analytic lateral pattern
+s = s(r) exp(0.3 (Y_2,-2 + Y_2,2)) (our delta is minus that, being a
+log-viscosity perturbation), a constant zonal load RATE
+sigma_dot_l = exp(-2 pi (l+1)/10.5) sqrt((2l+1)/4 pi) x 5515 / 30 yr
+(SI), explicit RK2 at dt = 50 yr against our trapezoid at the same dt.
+The driver was patched (I/O only: an lmax argument and coefficient
+output, `tests/data/stage4_fortran_visco.txt` at lmax 32); the physics
+is untouched, so the comparison pits the two codes' discretisations —
+rate-form explicit stepping on a coarse uniform mesh against implicit
+stepping on the graded mesh — against each other at physical accuracy.
+Measured (lmax 8, laptop, 15 Oct 2026): the two codes agree at
+3-13 x 1e-4 relative in the surface U and phi coefficients over the full
+5 kyr history for every degree l >= 2 — independent discretisations in
+space AND time, with the lateral viscosity on, agreeing at observational
+accuracy. The drift grows slowly with time in phi, consistent with the
+Fortran's explicit RK2 truncation at dt/tau ~ 0.5. Degree 1 is
+excluded from the comparison: sl3dpp works in the centre-of-mass frame,
+while the Fortran's l = 1 handling was a known loose end (deferred until
+rotation was added, which it never was), so its l = 1 output is neither
+our frame nor a settled one — the driver reports it separately for the
+record.
+
+Detailed runs are server work (the original always was): the kit is
+`benchmarks/fortran_gate` plus `scripts/run_fortran_gate.sh`, which
+builds both repos and runs the comparison at a chosen lmax; the lmax-32
+fixture is committed for reference. The sl3d driver patch (I/O only)
+must be committed in that repo for the kit to work from a fresh clone.
+
 ## 7a. Nonlinear Maxwell rheologies (readily buildable here)
 
 Stress-dependent relaxation times — AdGIA's `RelaxationLaw`
@@ -217,8 +248,18 @@ AdGIA's `RelaxationLaw` path.
   an observable output only.
 - The reference profile τ̄(r): laterally averaged log-viscosity vs
   worst-case; possibly per-degree. To be measured in (c).
-- Hermitian-pair exploitation in the transforms (halves the spin-2
-  work) once gated.
+- Hermitian-pair exploitation in the transforms (halves the spin
+  work), once gated — **via GSHTrans's tensor layer, not by hand**
+  (noted 15 Oct 2026): `TensorField`'s Reality parameter and its orbit
+  table (`Tensor/Orbits.hpp`) encode exactly the pair structure derived
+  here (sign-and-conjugation relations between component slots, the
+  anti-conjugating spin-1 pair included), so the reduced storage and
+  transforms come with the signs tested in the library. Kernel
+  implications checked: the kernel contraction is pointwise on the grid,
+  where negative-spin fields reconstruct by sign * conj for free; the
+  adjoint fields are real tensors too; the one discipline is that the
+  discrete adjoint must transpose the reduced pipeline consistently
+  (as with the Gauss-point memory migration).
 - GSHTrans's field algebra (noted 15 Oct 2026): not needed for the
   stepping pipeline (plain batched transforms + hand loops), but the
   stage-5 kernel accumulation is a pointwise tensor contraction

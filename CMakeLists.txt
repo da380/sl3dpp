@@ -16,6 +16,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(SL3DPP_BUILD_TESTS "Build the test suite" ON)
+option(SL3DPP_BUILD_BENCHMARKS "Build the cross-code benchmark drivers" OFF)
 
 # ---------------------------------------------------------------------------
 # Dependencies.
@@ -145,4 +146,8 @@ endif()
 if(SL3DPP_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
+endif()
+
+if(SL3DPP_BUILD_BENCHMARKS)
+  add_subdirectory(benchmarks)
 endif()
