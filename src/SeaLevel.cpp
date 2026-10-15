@@ -182,7 +182,7 @@ SeaLevelParameters WithHydrostaticMoments(SeaLevelParameters parameters,
 
 SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
                                SeaLevelParameters parameters)
-    : grid_(std::move(grid)) {
+    : grid_(std::move(grid)), parameters_(parameters) {
   const int lmax = grid_.LMax();
   if (static_cast<int>(table.degrees.size()) < lmax + 1) {
     throw std::invalid_argument(
@@ -258,6 +258,16 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
   axialRotationDenominator_ =
       1.0 + axialInertiaFactor_ * kt2_ * axialRotationFactor_ +
       traceFactor_ * mc_ * uniformRotationFactor_;
+}
+
+std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
+    const std::array<double, 3>& omega) const {
+  auto psi = grid_.ZeroCoefficients();
+  psi[SurfaceGrid::Index(2, 1)] = ComplexFromRealPair(
+      {rotationFactor_ * omega[0], rotationFactor_ * omega[1]}, 1);
+  psi[SurfaceGrid::Index(2, 0)] = axialRotationFactor_ * omega[2];
+  psi[SurfaceGrid::Index(0, 0)] = uniformRotationFactor_ * omega[2];
+  return psi;
 }
 
 double SeaLevelSolver::IntegrateSurface(std::span<const double> field) const {

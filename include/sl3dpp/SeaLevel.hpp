@@ -97,6 +97,13 @@ class SeaLevelSolver {
   /// The non-dimensional scheme everything inside is stated under.
   [[nodiscard]] const Scales& SolverScales() const { return scales_; }
 
+  /// The SI parameters this solver was built with (as given, before the
+  /// body was taken from the Love table): what a driver building solvers
+  /// for other Love tables of the same body must reuse.
+  [[nodiscard]] const SeaLevelParameters& Parameters() const {
+    return parameters_;
+  }
+
   // Non-dimensional parameters internal consumers need.
   [[nodiscard]] double WaterDensity() const { return waterDensity_; }
   [[nodiscard]] double IceDensity() const { return iceDensity_; }
@@ -108,6 +115,21 @@ class SeaLevelSolver {
   [[nodiscard]] double TransverseRotationDenominator() const {
     return rotationDenominator_;
   }
+
+  /// The transverse margin against a given degree-2 tidal number: a
+  /// viscoelastic evolution must check the model's hydrostatic fluid
+  /// limit (FluidTidalNumber), which long steps approach, not just the
+  /// elastic kt2 the denominator above carries.
+  [[nodiscard]] double TransverseMarginFor(double tidalNumber) const {
+    return 1.0 - inertiaFactor_ * tidalNumber * rotationFactor_;
+  }
+
+  /// The centrifugal potential coefficients of an angular velocity
+  /// change (non-dimensional): degree 2 at orders 0 and 1, and the
+  /// degree-0 coefficient of the (r/a)^2 mean that an l = 0 tide channel
+  /// carries.
+  [[nodiscard]] std::vector<std::complex<double>> CentrifugalCoefficients(
+      const std::array<double, 3>& omega) const;
 
   // -- the surface state ------------------------------------------------------
 
@@ -253,6 +275,7 @@ class SeaLevelSolver {
 
   SurfaceGrid grid_;
   Scales scales_;
+  SeaLevelParameters parameters_;  // as given (SI)
   // Non-dimensional Love arrays, degree 0..lmax: channel sums and splits.
   std::vector<double> h_, k_, hU_, kU_, hPhi_, kPhi_;
   std::vector<double> slcFactor_;  // -(h + k / g), per degree

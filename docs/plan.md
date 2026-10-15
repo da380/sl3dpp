@@ -356,6 +356,26 @@ GB of viscous-element state.
   frame; body (b, g, G) consistent with the radial model).
 - Memory variables stored only over viscous elements; 5 canonical deviatoric
   components on the grid (3D) / spectral (1D path).
+- **Memory-variable point set** (raised 15 Oct 2026): m currently lives at
+  the same ngll GLL nodes as the displacement (pyslfp/Fortran parity). A
+  plain order drop would lose accuracy — the drives e_M, e_R, e_S are
+  degree-N polynomials per element (the differentiated terms carry the
+  affine factor r) — but storing m at the N interior **Gauss** points
+  instead is not an order drop: the N-point Gauss rule matches the
+  (N+1)-point GLL rule's 2N-1 exactness for the memory-force integral, m
+  is only ever sampled/updated/integrated at its own points (no inf-sup
+  issue: m is local and undifferentiated), and boundary doubling
+  disappears. Saves ~20% of the internal-variable storage and, at stage 4,
+  ~20% of the radial nodes driving the spin-weighted transforms in the
+  memory update. Plan (revised 15 Oct 2026): keep GLL storage as the
+  default through stages 3 and 5, where the machine-tight pyslfp gates
+  (identical algebra) are the porting-bug detector; implement the
+  Gauss-point set as a switchable option around stage 4. The divergence
+  from pyslfp is then a **benchmarking asset, not a cost**: machine-level
+  agreement between algebraically identical codes checks the port, but
+  what the community values is independent implementations with
+  *different* discretisations agreeing at observational accuracy — the
+  Gauss-point variant adds exactly such an axis, cheaply.
 
 ## 6. Staging
 
