@@ -140,10 +140,16 @@ Picard, a better reference profile (per-degree or worst-case), IMEX.
   full reduced pass is **5.2 s at lmax 128 / 0.6 s at lmax 64, batched
   loop kernel, 8 threads** — the 12.9 s loop figure roughly halved, as
   the component count predicts. Grid construction is 0.1 s at lmax 128.
-  The matrix kernel is OFF until GSHTrans's open issue 8 (its GEMMs
-  livelock under a threaded BLAS inside the transform's parallel
-  region — diagnosed here, fix planned there); the Gauss-point memory
-  nodes (~20% fewer) remain to compound.
+  The BLAS-threading livelock diagnosed here (GSHTrans open issue 8:
+  GEMMs inside the transform's parallel region) is FIXED upstream
+  (15 Oct 2026, GSHTrans `ecc4dcd`: the matrix kernel's order loops run
+  sequentially and the BLAS threads the GEMMs). Post-fix, the unsafe
+  path no longer exists (the nesting is structurally unrepresentable),
+  and the kernels are comparable on the reduced pass: matrix 4.4 s vs
+  loop 4.9 s at lmax 128, a wash at lmax 64 — the old 2.6x matrix edge
+  was partly an artefact of the nesting the fix removed. The matrix
+  kernel stays opt-in only because its gain is now marginal. The Gauss-point
+  memory nodes (~20% fewer) remain to compound.
 - Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
   mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
   complex ≈ 11 GB per branch... **the oversampled grid is for products
@@ -273,8 +279,12 @@ AdGIA's `RelaxationLaw` path.
   the derived spins reconstruct by sign * conj for free; adjoint fields
   are real tensors too; the discrete adjoint must transpose the reduced
   pipeline consistently (as with the Gauss-point memory migration).
-  Remaining documented option: m >= 0 degree columns (halves the banded
-  solves and the entry/exit loops, churns the public column convention).
+  The m >= 0 degree-column reduction is DONE too (15 Oct 2026): the
+  degree boundary carries l + 1 columns per degree (the fields are real;
+  Scatter writes each column's -m twin into the full-m spin blocks),
+  halving the banded solves, the boundary loops and the solution
+  storage, and deleting Evolution3D's Hermitian mirror layer. Public
+  column convention: index m, m >= 0, m = 0 real.
 - Depth-variable lmax (declined for now, 15 Oct 2026): deep memory nodes
   carry only the degrees whose truncation reaches them, yet the batched
   transforms run every node at full lmax, so truncation-banded node

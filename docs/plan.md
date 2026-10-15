@@ -162,6 +162,8 @@ planning notes `gia_notes.md` / `gia_adjoint_plan.md`. Key pieces to port:
      are done in coefficient space and through grid-independent
      functionals, not by matching grids (decided 15 Oct 2026) — but an
      explicit `nPhi` may still be wanted for IO-grid interop one day.
+     (Reading nPhi needs nothing: `NumberOfLongitudes()` exists — the
+     open item is only choosing it at construction.)
 - Version hygiene: GaussQuad and Interpolation pin NumericConcepts to a commit
   while GSHTrans/FFTWpp track `main` — **sl3dpp must pin all five tags** (and
   can override via `FETCHCONTENT_SOURCE_DIR_<NAME>` for local development).
@@ -485,6 +487,12 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
 
 ## 9. Decision log
 
+- **15 Oct 2026** — No frequency-domain machinery in this library: the time
+  domain keeps every operator real, so the degree solves stay real
+  factorisations with [Re | Im] right-hand-side pairs (the cheap corner —
+  a complex solve against a real matrix only adds arithmetic). Complex
+  moduli / complex-frequency Love numbers (normal-mode or Laplace-domain
+  work) would need a complex DegreeOperator flavour and are out of scope.
 - **15 Oct 2026** — Elastic sea-level fingerprints are a first-class public
   capability (stage 2), pyslfp-shaped, so sl3dpp can later serve as a faster
   pyslfp backend; the binding itself is outside this plan (§1).

@@ -61,16 +61,14 @@ struct Body {
   }
 };
 
-/// A deterministic constant load: Hermitian complex (l, m) columns — a
-/// real field, the pipeline's contract — for the 3D channels and the
-/// matching [Re | Im] real blocks for the 1D ones.
+/// A deterministic constant load: the m >= 0 columns of a real field
+/// (m = 0 real) for the 3D channels and the matching [Re | Im] real
+/// blocks for the 1D ones.
 std::vector<Complex> LoadColumns(int l) {
-  std::vector<Complex> columns(2 * l + 1);
+  std::vector<Complex> columns(l + 1);
   for (int m = 0; m <= l; ++m) {
-    const auto v = m == 0 ? Complex(Noise(97 * l), 0.0)
-                          : Complex(Noise(97 * l + m), Noise(55 * l + m));
-    columns[l + m] = v;
-    columns[l - m] = (m % 2 == 0 ? 1.0 : -1.0) * std::conj(v);
+    columns[m] = m == 0 ? Complex(Noise(97 * l), 0.0)
+                        : Complex(Noise(97 * l + m), Noise(55 * l + m));
   }
   return columns;
 }
@@ -101,7 +99,7 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     // Two steps from rest under the held load, both paths.
-    auto s1 = op1.ZeroState([](int l) { return 2 * (2 * l + 1); });
+    auto s1 = op1.ZeroState([](int l) { return 2 * (l + 1); });
     auto s3 = op3.ZeroState();
     std::map<int, std::vector<double>> x1;
     Viscoelastic3D::Solutions x3;
@@ -121,7 +119,7 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     const auto u3 = op3.Surface(x3, Component::U);
     double scale = 0.0, diff = 0.0;
     for (int l = 0; l <= kLmax; ++l) {
-      const auto columns = 2 * l + 1;
+      const auto columns = l + 1;
       for (int c = 0; c < columns; ++c) {
         const Complex ours = u3.at(l)[c];
         const Complex ref(u1.at(l)[c], u1.at(l)[columns + c]);
@@ -136,7 +134,7 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     auto spectral = coupling.ZeroSpectral();
     const auto K = body.rheology.BranchCount();
     for (int l = 0; l <= kLmax; ++l) {
-      const auto columns = static_cast<std::size_t>(2 * l + 1);
+      const auto columns = static_cast<std::size_t>(l + 1);
       std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
       std::vector<Complex> R = M, S = M;
       const auto e0 =

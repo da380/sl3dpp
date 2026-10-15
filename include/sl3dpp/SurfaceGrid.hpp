@@ -43,11 +43,8 @@ class SurfaceGrid {
     double oversampling = 1.0;
     /// Whether GSHTrans transforms run threaded.
     bool parallel = false;
-    /// Use GSHTrans's BLAS matrix kernel. CAUTION: with a BLAS that
-    /// threads (Ubuntu's default OpenBLAS), its GEMMs livelock inside
-    /// the transform's parallel region at production sizes — GSHTrans
-    /// docs/open-issues.md item 8 has the diagnosis and the planned
-    /// fix; leave this off until that lands.
+    /// Use GSHTrans's BLAS matrix kernel for the transforms (its order
+    /// loops run sequentially and the BLAS supplies the threading).
     bool matrix_kernel = false;
   };
 
@@ -74,11 +71,11 @@ class SurfaceGrid {
   [[nodiscard]] int LMax() const { return lmax_; }
   /// The largest upper index (spin) the grid's Wigner table covers.
   [[nodiscard]] int NMax() const { return nmax_; }
-  [[nodiscard]] int NTheta() const {
-    return static_cast<int>(coLatitudes_.size());
+  [[nodiscard]] int NumberOfCoLatitudes() const {
+    return static_cast<int>(grid_->NumberOfCoLatitudes());
   }
-  [[nodiscard]] int NPhi() const {
-    return static_cast<int>(longitudes_.size());
+  [[nodiscard]] int NumberOfLongitudes() const {
+    return static_cast<int>(grid_->NumberOfLongitudes());
   }
 
   [[nodiscard]] std::span<const double> CoLatitudes() const {

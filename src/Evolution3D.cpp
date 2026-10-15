@@ -42,14 +42,9 @@ Viscoelastic3D::LoadCallable3D SeaLevelEvolution3D::Columns(
     const std::vector<Complex>& coefficients, double factor) const {
   return [coefficients, factor](int l,
                                 double) -> std::optional<std::vector<Complex>> {
-    std::vector<Complex> columns(2 * l + 1);
+    std::vector<Complex> columns(l + 1);
     for (int m = 0; m <= l; ++m) {
-      const auto c = factor * coefficients[SurfaceGrid::Index(l, m)];
-      columns[l + m] = c;
-      if (m > 0) {
-        // The Hermitian symmetry of a real field in this basis.
-        columns[l - m] = (m % 2 == 0 ? 1.0 : -1.0) * std::conj(c);
-      }
+      columns[m] = factor * coefficients[SurfaceGrid::Index(l, m)];
     }
     return columns;
   };
@@ -60,7 +55,7 @@ std::vector<SeaLevelEvolution3D::Complex> SeaLevelEvolution3D::Coefficients(
   auto out = solver_->Grid().ZeroCoefficients();
   for (const auto& [l, columns] : perDegree) {
     for (int m = 0; m <= l; ++m) {
-      out[SurfaceGrid::Index(l, m)] = factor * columns[l + m];
+      out[SurfaceGrid::Index(l, m)] = factor * columns[m];
     }
   }
   return out;

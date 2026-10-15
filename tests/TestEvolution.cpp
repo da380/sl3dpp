@@ -162,7 +162,7 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
   // coastline makes the solution itself grid-determined at the ~19%
   // level (the fixture header records pyslfp's own DH-vs-GLQ spread).
   auto setup = Setup::Make(true);
-  ASSERT_EQ(setup.solver.Grid().NPhi(), 2 * kLmax + 1)
+  ASSERT_EQ(setup.solver.Grid().NumberOfLongitudes(), 2 * kLmax + 1)
       << "the GSHTrans grid no longer coincides with pyshtools GLQ here";
   ViscoelasticOperator op(setup.rheology, kLmax);
   SeaLevelEvolution evolution(op, setup.solver, setup.state, {.rtol = 1e-11});

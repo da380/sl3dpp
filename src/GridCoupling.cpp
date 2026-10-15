@@ -133,7 +133,7 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
                                   std::span<const Complex> M,
                                   std::span<const Complex> R,
                                   std::span<const Complex> S) const {
-  const auto columns = static_cast<std::size_t>(2 * l + 1);
+  const auto columns = static_cast<std::size_t>(l + 1);
   if (M.size() != nodes_.size() * columns || R.size() != M.size() ||
       S.size() != M.size()) {
     throw std::invalid_argument(
@@ -143,10 +143,9 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
   const auto first = FirstNodeFor(firstElementOf_.at(l));
   for (auto node = first; node < NodeCount(); ++node) {
     const auto r = nodes_[node].radius;
-    for (std::size_t column = 0; column < columns; ++column) {
-      const auto at = node * columns + column;
+    for (auto m = 0; m <= l; ++m) {
+      const auto at = node * columns + m;
       const auto A = ComponentsFromScalars(l, M[at], R[at], S[at], r);
-      const auto m = static_cast<int>(column) - l;
       Scatter(spectral, node, l, m, A);
     }
   }
@@ -154,19 +153,21 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
 
 void GridCoupling::Scatter(SpectralTensor& spectral, int node, int l, int m,
                            std::span<const Complex, 5> A) const {
+  // One m >= 0 column of a real field carries its m < 0 twin implicitly:
+  // the stored spin blocks are full-m, so the -m entries are written here
+  // from the derived components, A^{(-N)}_{l,-m} = (-1)^m conj(A^{(N)}_{lm}).
+  const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
   for (auto c = 0; c < 2; ++c) {
     if (l < std::abs(kSpins[c])) continue;
     const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    spectral.c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)] +=
-        A[c];
+    auto* block = &spectral.c[c][node * size];
+    block[SurfaceGrid::SpinIndex(kSpins[c], l, m)] += A[c];
+    if (m > 0) {
+      block[SurfaceGrid::SpinIndex(kSpins[c], l, -m)] +=
+          sign * std::conj(A[4 - c]);
+    }
   }
-  // The spin 0 component is stored in the real m >= 0 layout; its m < 0
-  // coefficients are the Hermitian images of what Hermitian columns put
-  // here, so dropping them loses nothing (the header's contract).
-  if (m >= 0) {
-    spectral.r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, m)] +=
-        A[2];
-  }
+  spectral.r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, m)] += A[2];
 }
 
 std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
@@ -201,7 +202,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
                                        std::span<const Complex> w) const {
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  const auto columns = static_cast<std::size_t>(2 * l + 1);
+  const auto columns = static_cast<std::size_t>(l + 1);
   const auto ndof = spheroidal.DofCount();
   const auto first = FirstNodeFor(spheroidal.FirstElement());
 
@@ -233,8 +234,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
         values.rdW += b * gatherT(e, i, column);
       }
       const auto A = DeviatoricComponents(l, values, r);
-      const auto m = static_cast<int>(column) - l;
-      Scatter(spectral, node, l, m, A);
+      Scatter(spectral, node, l, static_cast<int>(column), A);
     }
   }
 }
@@ -248,7 +248,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
   std::map<int, std::vector<Complex>> out;
   for (auto l = 0; l <= lmax_; ++l) {
     const auto& op = system(l);
-    const auto columns = static_cast<std::size_t>(2 * l + 1);
+    const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
     const auto first = FirstNodeFor(op.FirstElement());
@@ -258,7 +258,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
       for (std::size_t column = 0; column < columns; ++column) {
-        const auto m = static_cast<int>(column) - l;
+        const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
         // The pointwise rows at the quadrature node itself.
@@ -291,7 +291,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
   std::map<int, std::vector<Complex>> out;
   for (auto l = 2; l <= lmax_; ++l) {
     const auto& op = system(l);
-    const auto columns = static_cast<std::size_t>(2 * l + 1);
+    const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
     const auto first = FirstNodeFor(op.FirstElement());
@@ -301,7 +301,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
       for (std::size_t column = 0; column < columns; ++column) {
-        const auto m = static_cast<int>(column) - l;
+        const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
         const auto iW = op.Dof(mesh.GlobalIndex(e, q));

@@ -113,10 +113,10 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   // The same deterministic random scalars feed both paths. The 1D state
   // carries 2(2l+1) real columns (Re then Im blocks of the m-columns);
   // the grid path takes the complex columns directly.
-  auto vstate = op.ZeroState([](int l) { return 2 * (2 * l + 1); });
+  auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
   auto spectral = coupling.ZeroSpectral();
   for (int l = 0; l <= lmax; ++l) {
-    const auto columns = static_cast<std::size_t>(2 * l + 1);
+    const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
     std::vector<Complex> R = M, S = M;
     auto& m1d = vstate.m.at(l);
@@ -130,9 +130,8 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
       const auto e = coupling.ElementOfNode(node);
       if (e < e0) continue;
       const auto q = node - (node / n) * n;  // nodes are (element, node)
-      // Random Hermitian columns — the pipeline carries real tensors, so
-      // f_{l,-m} = (-1)^m conj(f_{lm}) is its contract — fed identically
-      // to both paths.
+      // Random m >= 0 columns of a real field (m = 0 real), fed
+      // identically to both paths.
       for (int m = 0; m <= l; ++m) {
         const auto seed = 1000 * l + 31 * m + 7 * node;
         Complex values[3] = {
@@ -142,18 +141,14 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
         if (m == 0) {
           for (auto& v : values) v = v.real();
         }
-        const auto sign = m % 2 == 0 ? 1.0 : -1.0;
         const auto eL = e - e0;
         for (int s = 0; s < 3; ++s) {
           auto& scalars = s == 0 ? M : (s == 1 ? R : S);
-          scalars[node * columns + (l + m)] = values[s];
-          scalars[node * columns + (l - m)] = sign * std::conj(values[s]);
+          scalars[node * columns + m] = values[s];
           const auto at =
               ((static_cast<std::size_t>(s) * ne + eL) * n + q) * ncols1d;
-          m1d[at + (l + m)] = values[s].real();
-          m1d[at + columns + (l + m)] = values[s].imag();
-          m1d[at + (l - m)] = sign * values[s].real();
-          m1d[at + columns + (l - m)] = -sign * values[s].imag();
+          m1d[at + m] = values[s].real();
+          m1d[at + columns + m] = values[s].imag();
         }
         (void)block;
       }
@@ -193,7 +188,7 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   for (int l = 0; l <= lmax; ++l) {
     const auto& system = systems.at(l);
     const auto ndof = system.DofCount();
-    const auto columns = 2 * l + 1;
+    const auto columns = l + 1;
     // Complex force columns -> interleaved real solves.
     std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
     const auto& bc = forces.at(l);

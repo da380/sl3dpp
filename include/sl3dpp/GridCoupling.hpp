@@ -36,9 +36,13 @@
  * pipeline is Hermitian, f_{l,-m} = (-1)^m conj(f_{lm}), i.e. represents
  * a real field — the m < 0 spin-0 information is derived, not stored.
  *
- * All orders m in -l..l are still carried as columns at the degree-basis
- * boundary (the Fortran's convention); reducing those columns to m >= 0
- * — halving the banded solves — is the remaining documented option.
+ * The degree-basis boundary carries m >= 0 columns only (l + 1 per
+ * degree, index m): the fields are real, so the m < 0 columns are the
+ * Hermitian images and never exist as data. Scatter writes each
+ * column's -m twin into the full-m spin blocks from the derived
+ * components; the forces come back as m >= 0 columns likewise. (The
+ * Fortran carried all 2l + 1; this halves the banded solves and the
+ * boundary loops.)
  */
 
 #include <array>
@@ -134,8 +138,8 @@ class GridCoupling {
   // -----------------------------------------------
 
   /// Adds a degree-basis internal-variable state to a spectral tensor:
-  /// per degree l, the scalars (M, R, S) as complex (l, m) columns at
-  /// every radial node, laid out (node, column m + l), zero below the
+  /// per degree l, the scalars (M, R, S) as complex m >= 0 columns at
+  /// every radial node, laid out (node, column m), zero below the
   /// degree's element subset. The state enters through
   /// ComponentsFromScalars at each node.
   void AddScalarState(SpectralTensor& spectral, int l,
@@ -143,8 +147,8 @@ class GridCoupling {
                       std::span<const Complex> S) const;
 
   /// Adds the deviatoric strain of degree solutions to a spectral tensor:
-  /// per degree, complex (l, m) columns over the spheroidal system's dofs
-  /// (column-major, 2l + 1 columns) and, optionally, the toroidal
+  /// per degree, complex m >= 0 columns over the spheroidal system's dofs
+  /// (column-major, l + 1 columns) and, optionally, the toroidal
   /// system's. The nodal values and their r d_r derivatives are gathered
   /// through the operators' dof maps and the mesh's differentiation
   /// matrix, then mapped by DeviatoricComponents.
@@ -156,8 +160,8 @@ class GridCoupling {
 
   /// The memory force of an analysed tensor whose components have been
   /// scaled by sum_k mu_k(r) per node: per degree, the complex column
-  /// right-hand sides over the spheroidal system's dofs (column m + l of
-  /// 2l + 1, column-major) and, where requested, the toroidal system's.
+  /// right-hand sides over the spheroidal system's dofs (column m of
+  /// l + 1, column-major) and, where requested, the toroidal system's.
   [[nodiscard]] std::map<int, std::vector<Complex>> SpheroidalForce(
       const SpectralTensor& weighted,
       const std::function<const DegreeOperator&(int)>& system) const;

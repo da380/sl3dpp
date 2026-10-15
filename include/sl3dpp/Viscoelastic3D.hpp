@@ -34,8 +34,9 @@
  *
  * With delta = 0 the lateral term vanishes identically and a step
  * reproduces the 1D two-phase stepper exactly — the zero-lateral step
- * gate. Load channels are prescribed here (complex (l, m) columns); the
- * sea-level coupling drives this class through the same channels.
+ * gate. Load channels are prescribed here (complex m >= 0 columns of real
+ * fields); the sea-level coupling drives this class through the same
+ * channels.
  */
 
 #include <complex>
@@ -56,8 +57,9 @@ namespace sl3dpp {
 class Viscoelastic3D {
  public:
   using Complex = std::complex<double>;
-  /// A load channel: the complex (l, m) columns (2l + 1, index m + l) at
-  /// a time, or std::nullopt where silent.
+  /// A load channel: the complex m >= 0 columns (l + 1, index m; the
+  /// field is real, so m < 0 is implied) at a time, or std::nullopt
+  /// where silent.
   using LoadCallable3D =
       std::function<std::optional<std::vector<Complex>>(int l, double t)>;
 
@@ -112,8 +114,8 @@ class Viscoelastic3D {
   };
   [[nodiscard]] State ZeroState() const;
 
-  /// Per-degree solutions: spheroidal complex columns (ndof x (2l + 1),
-  /// column-major) and toroidal likewise (degrees >= 2).
+  /// Per-degree solutions: spheroidal complex m >= 0 columns
+  /// (ndof x (l + 1), column-major) and toroidal likewise (degrees >= 2).
   struct Solutions {
     std::map<int, std::vector<Complex>> spheroidal;
     std::map<int, std::vector<Complex>> toroidal;
@@ -146,7 +148,7 @@ class Viscoelastic3D {
                                 const LoadCallable3D& load = {},
                                 const LoadCallable3D& tide = {}) const;
 
-  /// The surface value of U, V or phi per degree: complex (l, m) columns.
+  /// The surface value of U, V or phi per degree: complex m >= 0 columns.
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 

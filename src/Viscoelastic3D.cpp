@@ -159,7 +159,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
   auto torForces = coupling_.ToroidalForce(weighted, toroidal);
   for (auto& [l, b] : sphForces) {
     const auto& op = spheroidal(l);
-    const auto columns = 2 * l + 1;
+    const auto columns = l + 1;
     const auto ndof = op.DofCount();
     // The load channels enter through the cached unit responses of the
     // same operator: solve the complex columns as real pairs.
@@ -209,7 +209,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
   }
   for (auto& [l, b] : torForces) {
     const auto& op = toroidal(l);
-    const auto columns = 2 * l + 1;
+    const auto columns = l + 1;
     const auto ndof = op.DofCount();
     std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
     for (auto c = 0; c < columns; ++c) {
@@ -421,7 +421,7 @@ void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,
       found = flavour.units.emplace(l, system.Solve(unit, 2)).first;
     }
     const auto& responses = found->second;
-    const auto columns = 2 * l + 1;
+    const auto columns = l + 1;
     auto add = [&](const std::optional<std::vector<Complex>>& columnsIn,
                    int which) {
       if (!columnsIn) return;
@@ -567,7 +567,7 @@ std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
   std::map<int, std::vector<Complex>> out;
   for (const auto& [l, x] : solutions.spheroidal) {
     const auto& op = Spheroidal(l);
-    const auto columns = 2 * l + 1;
+    const auto columns = l + 1;
     const auto dof = op.SurfaceDof(component);
     std::vector<Complex> values(columns, 0.0);
     if (dof >= 0) {

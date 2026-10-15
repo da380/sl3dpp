@@ -64,9 +64,9 @@ int main(int argc, char** argv) {
   };
   Viscoelastic3D::Options options;
   options.parallel = parallel;
-  // The matrix kernel stays off until GSHTrans's open issue 8 is fixed:
-  // under a threaded BLAS its GEMMs livelock inside the transform's
-  // parallel region at production sizes.
+#ifdef GSHTRANS_HAVE_BLAS
+  options.matrix_kernel = true;
+#endif
   options.rtol = 1e-10;
   Viscoelastic3D op(rheology, lmax, delta, options);
 
@@ -80,8 +80,8 @@ int main(int argc, char** argv) {
   }
   auto load = [&](int l, double t) -> std::optional<std::vector<Complex>> {
     if (l < 1) return std::nullopt;
-    std::vector<Complex> columns(2 * l + 1, 0.0);
-    columns[l] = rate[l] * (t * timeFactor) / sigmaFactor;  // m = 0
+    std::vector<Complex> columns(l + 1, 0.0);
+    columns[0] = rate[l] * (t * timeFactor) / sigmaFactor;  // m = 0
     return columns;
   };
 
@@ -103,12 +103,17 @@ int main(int argc, char** argv) {
       std::printf("t = %d kyr done (%d iterations last step)\n", iout,
                   result.info.iterations);
       std::fflush(stdout);
+      // The solutions carry m >= 0 (real fields); the fixture's m < 0
+      // rows are compared against the Hermitian images.
       auto U = op.Surface(result.solutions, Component::U);
       auto P = op.Surface(result.solutions, Component::Phi);
       for (int l = 0; l <= lmax; ++l) {
         for (int m = -l; m <= l; ++m) {
-          oursU[iout][{l, m}] = U.at(l)[l + m] * lengthF;
-          oursP[iout][{l, m}] = P.at(l)[l + m] * potF;
+          const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
+          const auto u = U.at(l)[std::abs(m)];
+          const auto p = P.at(l)[std::abs(m)];
+          oursU[iout][{l, m}] = (m < 0 ? sign * std::conj(u) : u) * lengthF;
+          oursP[iout][{l, m}] = (m < 0 ? sign * std::conj(p) : p) * potF;
         }
       }
     }
