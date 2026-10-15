@@ -99,6 +99,7 @@ add_library(sl3dpp STATIC
   src/EarthModel.cpp
   src/Evolution.cpp
   src/Fingerprint.cpp
+  src/GridCoupling.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
   src/RadialMesh.cpp

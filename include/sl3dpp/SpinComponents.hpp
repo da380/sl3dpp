@@ -71,6 +71,29 @@ struct DegreeNodeValues {
   return A;
 }
 
+/// The components of a tensor given by its spheroidal degree-basis
+/// scalars (M, R, S) — an internal-variable state rather than a strain;
+/// the map is the same as the strain's with (e_M, e_R, e_S) replaced by
+/// (M, R, S) and no toroidal part.
+[[nodiscard]] inline std::array<std::complex<double>, 5> ComponentsFromScalars(
+    int l, std::complex<double> M, std::complex<double> R,
+    std::complex<double> S, double r) {
+  const auto zeta2 = l * (l + 1.0);
+  const auto zeta = std::sqrt(zeta2);
+  std::array<std::complex<double>, 5> A{};
+  A[2] = R / (3.0 * r);
+  if (l >= 1) {
+    A[1] = zeta * S / (2.0 * std::numbers::sqrt2 * r);
+    A[3] = A[1];
+  }
+  if (l >= 2) {
+    const auto factor = 0.5 * zeta * std::sqrt(zeta2 - 2.0) / r;
+    A[0] = factor * M;
+    A[4] = A[0];
+  }
+  return A;
+}
+
 /// The memory-force rows of (weighted) components at one node: see the
 /// file comment for the quadrature weights the caller applies.
 struct MemoryForceRows {
