@@ -149,3 +149,29 @@ TEST(RadialMesh, NodalFieldsCarryOneSidedValues) {
     EXPECT_DOUBLE_EQ(gravity[i], nd.Gravity(radii[i]));
   }
 }
+
+TEST(RadialMesh, GradedMeshResolvesEveryDegree) {
+  auto model = TwoLayerModel();
+  constexpr int lmax = 256;
+  auto graded = RadialMesh::CreateGraded(model, lmax).value();
+  auto uniform = RadialMesh::Create(model, {.lmax = lmax}).value();
+  // Far fewer elements, boundaries still conforming.
+  EXPECT_LT(graded.ElementCount(), uniform.ElementCount() / 4);
+  bool boundaryIsEdge = false;
+  for (int e = 0; e < graded.ElementCount(); ++e) {
+    boundaryIsEdge = boundaryIsEdge || graded.Right(e) == 0.5;
+  }
+  EXPECT_TRUE(boundaryIsEdge);
+  // Every element is no wider than the uniform rule at its own top:
+  // within a degree's subset the graded mesh is at least as fine.
+  const double a = 1.0;
+  const double logEps = std::log(1e-8);
+  for (int e = 0; e < graded.ElementCount(); ++e) {
+    const double depth = a - graded.Right(e);
+    const double rule =
+        depth <= 0.0 ? 0.1 * a / (lmax + 1)
+                     : std::max(0.1 * a / (lmax + 1),
+                                0.1 * a * std::log1p(-depth / a) / logEps);
+    EXPECT_LE(graded.Right(e) - graded.Left(e), rule * (1.0 + 1e-9));
+  }
+}

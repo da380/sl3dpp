@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <limits>
 #include <numeric>
 
 namespace sl3dpp {
@@ -51,6 +52,60 @@ std::expected<RadialMesh, MeshError> RadialMesh::Create(
   std::vector<int> spanLayer(breakpoints.empty() ? 0 : breakpoints.size() - 1);
   std::iota(spanLayer.begin(), spanLayer.end(), 0);
   return Build(breakpoints, spanLayer, options);
+}
+
+std::expected<RadialMesh, MeshError> RadialMesh::CreateGraded(
+    const EarthModel& model, int lmax, int ngll, double eps) {
+  if (lmax < 0) {
+    return std::unexpected(MeshError{"lmax must be non-negative"});
+  }
+  if (!(eps > 0.0 && eps < 1.0)) {
+    return std::unexpected(MeshError{"eps must lie in (0, 1)"});
+  }
+  const auto nd = model.DimensionlessView();
+  const auto b = nd.Boundaries();
+  const double a = b.back();
+  const double floor = 0.1 * a / (lmax + 1);
+  const double logEps = std::log(eps);
+
+  auto width = [&](double r) {
+    const double depth = a - r;
+    if (depth <= 0.0) return floor;
+    return std::max(floor, 0.1 * a * std::log1p(-depth / a) / logEps);
+  };
+
+  // Edges from the surface down, every model boundary pinned; the last
+  // elements above a boundary shortened or split so none is wider than
+  // the rule at its top.
+  std::vector<double> edges{a};
+  for (std::size_t s = b.size() - 1; s-- > 0;) {
+    const double lo = b[s];
+    double r = edges.back();
+    while (true) {
+      const double w = width(r);
+      if (r - lo <= 2.0 * w) {
+        const int n = r - lo <= w ? 1 : 2;
+        for (int k = 1; k <= n; ++k) {
+          edges.push_back(std::lerp(r, lo, static_cast<double>(k) / n));
+        }
+        edges.back() = lo;  // exact
+        break;
+      }
+      r -= w;
+      edges.push_back(r);
+    }
+  }
+  std::ranges::reverse(edges);
+
+  std::vector<int> spanLayer(edges.size() - 1);
+  for (std::size_t e = 0; e + 1 < edges.size(); ++e) {
+    spanLayer[e] = static_cast<int>(
+        nd.LayerOf(0.5 * (edges[e] + edges[e + 1]), Side::Above));
+  }
+  Options options;
+  options.ngll = ngll;
+  options.drmax = std::numeric_limits<double>::infinity();
+  return Build(edges, spanLayer, options);
 }
 
 std::expected<RadialMesh, MeshError> RadialMesh::Build(

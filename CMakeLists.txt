@@ -101,8 +101,10 @@ add_library(sl3dpp STATIC
   src/LoveNumbers.cpp
   src/Material.cpp
   src/RadialMesh.cpp
+  src/Rheology.cpp
   src/SeaLevel.cpp
-  src/Version.cpp)
+  src/Version.cpp
+  src/Viscoelastic.cpp)
 
 add_library(sl3dpp::sl3dpp ALIAS sl3dpp)
 

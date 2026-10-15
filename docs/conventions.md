@@ -36,8 +36,16 @@ model to copy. Items marked **(provisional)** await confirmation.
   value and usable with designated initialisers:
   `Solver(mesh, {.tol = 1e-10, .max_iterations = 50})`.
 - `enum class` always; `[[nodiscard]]` on factories, solves and queries;
-  `constexpr`/`static constexpr` wherever meaningful; `auto` where the type
-  is evident or deduced, spelled out where it informs.
+  `constexpr`/`static constexpr` wherever meaningful.
+- **Not a template library, and double throughout** (decided 15 Oct 2026):
+  the banded solves live on LAPACK's d-routines, so precision templating
+  would buy nothing real; `double` is the honest choice. Templates are for
+  constraints and small utilities, not a precision axis.
+- **Almost-always-auto**: `auto` is the default for locals and loop
+  variables, with the type on the right where it needs saying
+  (`auto x = Thing{...}`); spell a type only where it changes behaviour
+  (a deliberate conversion, a span over an owning return). Existing code
+  migrates opportunistically, not in sweeps.
 - **Errors:** `std::expected<T, E>` with a small error enum/struct for
   recoverable, caller-decidable failures (parsing a deck, a factorisation
   that may legitimately fail); exceptions (`std::runtime_error` or a thin

@@ -81,6 +81,25 @@ class RadialMesh {
   [[nodiscard]] static std::expected<RadialMesh, MeshError> Create(
       std::span<const double> breakpoints, Options options);
 
+  /**
+   * @brief A mesh for every degree up to lmax, fine at the surface and
+   * widening with depth (pyslfp's `graded_mesh`).
+   *
+   * The degree-l solution is negligible below eps of its surface value
+   * deeper than a(1 - eps^(1/(l+1))), and the uniform lmax rule resolves
+   * it with elements no wider than 0.1 a / (l + 1); at depth d the highest
+   * degree reaching it has (l + 1) = ln(eps) / ln(1 - d/a), so an element
+   * there need be no narrower than 0.1 a ln(1 - d/a) / ln(eps) — about
+   * d / 184 for eps = 1e-8 — floored at the uniform rule's width for lmax.
+   * Every degree then sees at least the uniform rule's resolution
+   * throughout its own element subset, while the whole mesh has a few
+   * hundred elements rather than the ten (lmax + 1) of the uniform rule.
+   * Every model boundary is an element boundary, the last elements above
+   * one shortened or split so none is wider than the rule at its top.
+   */
+  [[nodiscard]] static std::expected<RadialMesh, MeshError> CreateGraded(
+      const EarthModel& model, int lmax, int ngll = 5, double eps = 1e-8);
+
   // -- geometry ---------------------------------------------------------------
 
   [[nodiscard]] int ElementCount() const {

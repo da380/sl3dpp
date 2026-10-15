@@ -21,9 +21,11 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
+#include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/ShConventions.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/Viscoelastic.hpp"
 
 namespace {
 
@@ -241,6 +243,119 @@ TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
             tol);
   const auto& omega = fixture.scalars.at("omega");
   EXPECT_NEAR(result.angularVelocity[2], omega[2], 0.1 * std::abs(omega[2]));
+}
+
+TEST(Stage3Gate, StepperMatchesPyslfp) {
+  // The 1D Love-number history: grid-free, so the stepper is isolated
+  // from the SLE and the agreement is near machine precision.
+  const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
+  constexpr int lmax = 10;
+  constexpr int kDegrees[3] = {2, 5, 10};
+  auto deck = sl3dpp::Deck::Read(
+                  data / "prem8.elastic.deck",
+                  sl3dpp::DeckFormat(
+                      "elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+                  .value();
+  auto model = sl3dpp::EarthModel::FromDeck(deck).value();
+  auto mesh = sl3dpp::RadialMesh::Create(model, {.lmax = lmax}).value();
+  auto material = sl3dpp::Material::Create(model, mesh).value();
+  const auto& scales = model.ModelScales();
+
+  // The fixture's rheology rule: 1e21 Pa s on solid layers fully inside
+  // [3480, 6151] km.
+  std::map<std::size_t, sl3dpp::RadialValue> viscosity;
+  const auto b = model.DimensionlessView().Boundaries();
+  const double etaNd = 1e21 / scales.Factor(sl3dpp::ViscosityDimensions);
+  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
+        b[i + 1] <= 6.1511e6 / scales.Length()) {
+      viscosity.emplace(i, etaNd);
+    }
+  }
+  auto rheology = sl3dpp::Rheology::Maxwell(material, viscosity).value();
+  sl3dpp::ViscoelasticOperator op(rheology, lmax);
+
+  const double sigma =
+      scales.Factor(sl3dpp::Dimensions{.mass = 1, .length = -2});
+  const auto load = [&](int, double) {
+    return std::vector<double>{1.0 / sigma};  // 1 kg m^-2
+  };
+  const double length = scales.Length();
+  const double potential = scales.Factor(sl3dpp::PotentialDimensions);
+  const double dt = 3.15576e9 / scales.Time();
+
+  // Parse and replay the fixture.
+  std::ifstream file(data / "stage3_stepper.txt");
+  ASSERT_TRUE(file.is_open());
+  constexpr double tol = 1e-9;
+  sl3dpp::Scheme scheme = sl3dpp::Scheme::ExponentialTrapezoid;
+  std::optional<sl3dpp::ViscoelasticState> state;
+  std::map<int, std::vector<double>> solutions;
+  bool inEffective = false;
+  double tauMin = 0.0;
+  for (std::string line; std::getline(file, line);) {
+    if (line.empty() || line.front() == '#') continue;
+    std::istringstream row(line);
+    if (!std::isdigit(line.front()) && line.front() != '-') {
+      std::string head;
+      row >> head;
+      if (head == "min_relaxation_time") {
+        row >> tauMin;
+        EXPECT_NEAR(rheology.MinRelaxationTime() * scales.Time(), tauMin,
+                    1e-10 * tauMin);
+      } else if (head == "scheme") {
+        std::string name;
+        row >> name;
+        scheme = name == "backward_euler"
+                     ? sl3dpp::Scheme::BackwardEuler
+                     : sl3dpp::Scheme::ExponentialTrapezoid;
+        state = op.ZeroState();
+        solutions = op.SolveElastic(*state, load);
+      } else if (head == "effective_love") {
+        inEffective = true;
+      }
+      continue;
+    }
+    if (inEffective) {
+      int l = 0;
+      double hU = 0, kU = 0, hT = 0, kT = 0;
+      row >> l >> hU >> kU >> hT >> kT;
+      const auto& table =
+          op.EffectiveLoveNumbers(sl3dpp::Scheme::ExponentialTrapezoid, dt);
+      // Each value against its column's natural scale: a number that is
+      // zero up to roundoff (k_u at l = 0, say) is compared absolutely.
+      const double hScale = std::max(std::abs(hU), std::abs(table.h_u[2]));
+      const double kScale = std::max(std::abs(kU), std::abs(table.k_u[2]));
+      EXPECT_NEAR(table.h_u[l], hU, tol * hScale) << "l = " << l;
+      EXPECT_NEAR(table.k_u[l], kU, tol * kScale) << "l = " << l;
+      EXPECT_NEAR(table.h_t[l], hT, tol * std::max(std::abs(hT), hScale))
+          << "l = " << l;
+      EXPECT_NEAR(table.k_t[l], kT, tol * std::max(std::abs(kT), kScale))
+          << "l = " << l;
+      continue;
+    }
+    // A history row: t then (U, phi) per compared degree, all SI.
+    ASSERT_TRUE(state.has_value());
+    double t = 0.0;
+    row >> t;
+    if (t > 0.0) {
+      auto [next, sols] = op.Step(*state, dt, scheme, load);
+      state = std::move(next);
+      solutions = std::move(sols);
+      EXPECT_NEAR(state->t * scales.Time(), t, 1e-9 * t);
+    }
+    const auto U = op.Surface(solutions, sl3dpp::Component::U);
+    const auto phi = op.Surface(solutions, sl3dpp::Component::Phi);
+    for (int l : kDegrees) {
+      double uRef = 0, phiRef = 0;
+      row >> uRef >> phiRef;
+      EXPECT_NEAR(U.at(l)[0] * length, uRef, tol * std::abs(uRef))
+          << "t = " << t << ", l = " << l;
+      EXPECT_NEAR(phi.at(l)[0] * potential, phiRef, tol * std::abs(phiRef))
+          << "t = " << t << ", l = " << l;
+    }
+  }
+  EXPECT_GT(tauMin, 0.0);
 }
 
 TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
