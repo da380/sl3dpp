@@ -155,10 +155,12 @@ class RadialMesh {
 
   /// A model field at the nodes, per element, row-major (element, node):
   /// each element takes the field of its own layer, so a node on a model
-  /// boundary carries both one-sided values. An element whose layer lacks
-  /// the field is refused (std::domain_error), as the model's Require is.
+  /// boundary carries both one-sided values; `nu` asks for the nu-th
+  /// radial derivative. An element whose layer lacks the field is refused
+  /// (std::domain_error), as the model's Require is.
   [[nodiscard]] std::vector<double> Nodal(const EarthModel& model,
-                                          const std::string& name) const;
+                                          const std::string& name,
+                                          int nu = 0) const;
 
   /// The model's reference gravity at the nodes, per element.
   [[nodiscard]] std::vector<double> NodalGravity(const EarthModel& model) const;

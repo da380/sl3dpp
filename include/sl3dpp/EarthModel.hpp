@@ -134,9 +134,11 @@ class EarthModel {
                                 Side side = Side::Above) const;
 
   /// The field's SI value at r (metres) from a named layer's interpolant
-  /// (which continues smoothly slightly outside its interval).
+  /// (which continues smoothly slightly outside its interval); `nu` asks
+  /// for the nu-th radial derivative (0, 1 or 2).
   [[nodiscard]] double EvaluateInLayer(const std::string& name,
-                                       std::size_t layer, double r) const;
+                                       std::size_t layer, double r,
+                                       int nu = 0) const;
 
   /// The density at r, kg m^-3; every model has one.
   [[nodiscard]] double Density(double r, Side side = Side::Above) const {
@@ -190,8 +192,9 @@ class EarthModel {
       return model_->EvaluateND(name, r, side);
     }
     [[nodiscard]] double EvaluateInLayer(const std::string& name,
-                                         std::size_t layer, double r) const {
-      return model_->EvaluateInLayerND(name, layer, r);
+                                         std::size_t layer, double r,
+                                         int nu = 0) const {
+      return model_->EvaluateInLayerND(name, layer, r, nu);
     }
     [[nodiscard]] double Density(double r, Side side = Side::Above) const {
       return model_->EvaluateND("rho", r, side);
@@ -239,7 +242,8 @@ class EarthModel {
   [[nodiscard]] double EvaluateND(const std::string& name, double r,
                                   Side side) const;
   [[nodiscard]] double EvaluateInLayerND(const std::string& name,
-                                         std::size_t layer, double r) const;
+                                         std::size_t layer, double r,
+                                         int nu = 0) const;
   [[nodiscard]] double MassND(double r) const;
   [[nodiscard]] double MomentOfInertiaND() const;
   [[nodiscard]] double GravityND(double r) const;

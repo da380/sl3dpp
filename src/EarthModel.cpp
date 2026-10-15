@@ -211,8 +211,19 @@ double EarthModel::EvaluateND(const std::string& name, double r,
 }
 
 double EarthModel::EvaluateInLayerND(const std::string& name, std::size_t layer,
-                                     double r) const {
-  return Require(name, layer).Evaluate(r);
+                                     double r, int nu) const {
+  const auto& spline = Require(name, layer);
+  switch (nu) {
+    case 0:
+      return spline.Evaluate(r);
+    case 1:
+      return spline.Evaluate<1>(r);
+    case 2:
+      return spline.Evaluate<2>(r);
+    default:
+      throw std::invalid_argument(
+          std::format("nu must be 0, 1 or 2, got {}", nu));
+  }
 }
 
 double EarthModel::ShellMoment(std::size_t layer, double a, double b,
@@ -299,10 +310,12 @@ double EarthModel::Evaluate(const std::string& name, double r,
 }
 
 double EarthModel::EvaluateInLayer(const std::string& name, std::size_t layer,
-                                   double r) const {
+                                   double r, int nu) const {
   const auto field = IndexOf(name);
-  return EvaluateInLayerND(name, layer, r / scales_.Length()) *
-         scales_.Factor(dimensions_[field]);
+  // Each radial derivative divides the quantity's dimensions by a length.
+  double factor = scales_.Factor(dimensions_[field]);
+  for (int k = 0; k < nu; ++k) factor /= scales_.Length();
+  return EvaluateInLayerND(name, layer, r / scales_.Length(), nu) * factor;
 }
 
 double EarthModel::Mass() const {

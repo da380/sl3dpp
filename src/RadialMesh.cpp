@@ -174,14 +174,14 @@ int RadialMesh::StartElement(int l, TruncationRule rule, double eps) const {
 }
 
 std::vector<double> RadialMesh::Nodal(const EarthModel& model,
-                                      const std::string& name) const {
+                                      const std::string& name, int nu) const {
   const auto nd = model.DimensionlessView();
   std::vector<double> out(radius_.size());
   for (std::size_t e = 0; e < left_.size(); ++e) {
     const auto layer = static_cast<std::size_t>(layer_[e]);
     for (int i = 0; i < ngll_; ++i) {
       out[e * ngll_ + i] =
-          nd.EvaluateInLayer(name, layer, radius_[e * ngll_ + i]);
+          nd.EvaluateInLayer(name, layer, radius_[e * ngll_ + i], nu);
     }
   }
   return out;
