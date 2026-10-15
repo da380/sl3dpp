@@ -138,3 +138,11 @@ All five sibling header-only libraries pinned by commit in the top-level
 `CMakeLists.txt` (`SL3DPP_<NAME>_TAG`); local development via
 `FETCHCONTENT_SOURCE_DIR_<NAME>`. Moving a pin is a deliberate, reviewed
 change.
+
+## Test cost
+
+Tests run at small degree (lmax <= 8) and few steps: the gates are
+identities and convergence orders, which small problems pin as tightly
+as large ones. High-degree or long-duration 3D runs are benchmark or
+server work (`benchmarks/`, `scripts/run_fortran_gate.sh`), never suite
+tests.

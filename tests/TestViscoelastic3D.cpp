@@ -61,12 +61,16 @@ struct Body {
   }
 };
 
-/// A deterministic constant load: complex (l, m) columns for the 3D
-/// channels and the matching [Re | Im] real blocks for the 1D ones.
+/// A deterministic constant load: Hermitian complex (l, m) columns — a
+/// real field, the pipeline's contract — for the 3D channels and the
+/// matching [Re | Im] real blocks for the 1D ones.
 std::vector<Complex> LoadColumns(int l) {
   std::vector<Complex> columns(2 * l + 1);
-  for (int c = 0; c <= 2 * l; ++c) {
-    columns[c] = Complex(Noise(97 * l + c), Noise(55 * l + c));
+  for (int m = 0; m <= l; ++m) {
+    const auto v = m == 0 ? Complex(Noise(97 * l), 0.0)
+                          : Complex(Noise(97 * l + m), Noise(55 * l + m));
+    columns[l + m] = v;
+    columns[l - m] = (m % 2 == 0 ? 1.0 : -1.0) * std::conj(v);
   }
   return columns;
 }
@@ -161,11 +165,15 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     }
     const auto reference = coupling.Synthesise(spectral);
     double mScale = 0.0, mDiff = 0.0;
-    for (int c = 0; c < 5; ++c) {
+    for (int c = 0; c < 2; ++c) {
       for (std::size_t i = 0; i < reference.c[c].size(); ++i) {
         mScale = std::max(mScale, std::abs(reference.c[c][i]));
         mDiff = std::max(mDiff, std::abs(s3.m[0].c[c][i] - reference.c[c][i]));
       }
+    }
+    for (std::size_t i = 0; i < reference.r.size(); ++i) {
+      mScale = std::max(mScale, std::abs(reference.r[i]));
+      mDiff = std::max(mDiff, std::abs(s3.m[0].r[i] - reference.r[i]));
     }
     EXPECT_GT(mScale, 0.0);
     EXPECT_LT(mDiff, 1e-10 * mScale) << "scheme " << static_cast<int>(scheme);

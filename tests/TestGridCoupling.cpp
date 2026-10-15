@@ -33,6 +33,57 @@ double Noise(std::size_t k) {
 
 }  // namespace
 
+TEST(Stage4, CouplingsShareOneGrid) {
+  constexpr int lmax = 4;
+  auto deck =
+      Deck::Read(
+          std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
+          DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+          .value();
+  auto model = EarthModel::FromDeck(deck).value();
+  auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
+  auto material = Material::Create(model, mesh).value();
+  const auto& scales = model.ModelScales();
+  std::map<std::size_t, RadialValue> viscosity;
+  const auto boundaries = model.DimensionlessView().Boundaries();
+  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
+        boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
+      viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
+    }
+  }
+  auto rheology = Rheology::Maxwell(material, viscosity).value();
+
+  // One grid, two couplings; the handle is cheap and the results equal
+  // a coupling that built its own.
+  SurfaceGrid grid(lmax, {.nmax = 2, .oversampling = 1.5});
+  GridCoupling own(rheology, lmax);
+  GridCoupling shared1(rheology, lmax, grid, {});
+  GridCoupling shared2(rheology, lmax, grid, {});
+  EXPECT_EQ(&shared1.Grid().Grid(), &shared2.Grid().Grid());
+
+  auto spectral = own.ZeroSpectral();
+  for (std::size_t i = 0; i < spectral.c[0].size(); ++i) {
+    spectral.c[0][i] = Complex(Noise(i), Noise(i + 1));
+  }
+  for (std::size_t i = 0; i < spectral.r.size(); ++i) {
+    spectral.r[i] = Noise(3 * i);
+  }
+  const auto a = own.Synthesise(spectral);
+  const auto b = shared1.Synthesise(spectral);
+  for (std::size_t i = 0; i < a.c[0].size(); ++i) {
+    ASSERT_EQ(a.c[0][i], b.c[0][i]);
+  }
+  for (std::size_t i = 0; i < a.r.size(); ++i) ASSERT_EQ(a.r[i], b.r[i]);
+
+  // A grid without spin coverage, or at another lmax, is refused.
+  EXPECT_THROW(GridCoupling(rheology, lmax, SurfaceGrid(lmax), {}),
+               std::invalid_argument);
+  EXPECT_THROW(
+      GridCoupling(rheology, lmax, SurfaceGrid(lmax + 1, {.nmax = 2}), {}),
+      std::invalid_argument);
+}
+
 TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   constexpr int lmax = 8;
   auto deck =
@@ -79,21 +130,30 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
       const auto e = coupling.ElementOfNode(node);
       if (e < e0) continue;
       const auto q = node - (node / n) * n;  // nodes are (element, node)
-      for (std::size_t column = 0; column < columns; ++column) {
-        const auto seed = 1000 * l + 31 * column + 7 * node;
-        const Complex values[3] = {
+      // Random Hermitian columns — the pipeline carries real tensors, so
+      // f_{l,-m} = (-1)^m conj(f_{lm}) is its contract — fed identically
+      // to both paths.
+      for (int m = 0; m <= l; ++m) {
+        const auto seed = 1000 * l + 31 * m + 7 * node;
+        Complex values[3] = {
             l >= 2 ? Complex(Noise(seed), Noise(seed + 1)) : 0.0,
             Complex(Noise(seed + 2), Noise(seed + 3)),
             l >= 1 ? Complex(Noise(seed + 4), Noise(seed + 5)) : 0.0};
-        M[node * columns + column] = values[0];
-        R[node * columns + column] = values[1];
-        S[node * columns + column] = values[2];
+        if (m == 0) {
+          for (auto& v : values) v = v.real();
+        }
+        const auto sign = m % 2 == 0 ? 1.0 : -1.0;
         const auto eL = e - e0;
         for (int s = 0; s < 3; ++s) {
+          auto& scalars = s == 0 ? M : (s == 1 ? R : S);
+          scalars[node * columns + (l + m)] = values[s];
+          scalars[node * columns + (l - m)] = sign * std::conj(values[s]);
           const auto at =
               ((static_cast<std::size_t>(s) * ne + eL) * n + q) * ncols1d;
-          m1d[at + column] = values[s].real();
-          m1d[at + columns + column] = values[s].imag();
+          m1d[at + (l + m)] = values[s].real();
+          m1d[at + columns + (l + m)] = values[s].imag();
+          m1d[at + (l - m)] = sign * values[s].real();
+          m1d[at + columns + (l - m)] = -sign * values[s].imag();
         }
         (void)block;
       }

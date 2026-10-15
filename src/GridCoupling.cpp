@@ -7,13 +7,22 @@
 namespace sl3dpp {
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
-    : rheology_(&rheology),
-      lmax_(lmax),
-      options_(options),
-      grid_(lmax, {.nmax = 2,
-                   .oversampling = options.oversampling,
-                   .parallel = options.parallel,
-                   .matrix_kernel = options.matrix_kernel}) {
+    : GridCoupling(rheology, lmax,
+                   SurfaceGrid(lmax, {.nmax = 2,
+                                      .oversampling = options.oversampling,
+                                      .parallel = options.parallel,
+                                      .matrix_kernel = options.matrix_kernel}),
+                   options) {}
+
+GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
+                           const SurfaceGrid& grid, Options options)
+    : rheology_(&rheology), lmax_(lmax), options_(options), grid_(grid) {
+  if (grid.LMax() != lmax || grid.NMax() < 2) {
+    throw std::invalid_argument(
+        std::format("the shared grid is lmax {} with spin coverage {}; the "
+                    "coupling needs lmax {} and spins to 2",
+                    grid.LMax(), grid.NMax(), lmax));
+  }
   const auto& material = rheology.BaseMaterial();
   const auto& mesh = material.Mesh();
   const auto n = mesh.NGll();
@@ -43,45 +52,39 @@ GridCoupling::TensorField GridCoupling::ZeroTensor() const {
   for (auto& component : field.c) {
     component.assign(nodes_.size() * grid_.FieldSize(), 0.0);
   }
+  field.r.assign(nodes_.size() * grid_.FieldSize(), 0.0);
   return field;
 }
 
 GridCoupling::SpectralTensor GridCoupling::ZeroSpectral() const {
   SpectralTensor spectral;
-  for (auto c = 0; c < 5; ++c) {
+  for (auto c = 0; c < 2; ++c) {
     spectral.c[c].assign(nodes_.size() * grid_.SpinCoefficientSize(kSpins[c]),
                          0.0);
   }
+  spectral.r.assign(nodes_.size() * grid_.CoefficientSize(), 0.0);
   return spectral;
 }
 
 GridCoupling::TensorField GridCoupling::Synthesise(
     const SpectralTensor& spectral) const {
   auto field = ZeroTensor();
-  const auto fieldSize = grid_.FieldSize();
-  for (auto c = 0; c < 5; ++c) {
-    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    for (std::size_t node = 0; node < nodes_.size(); ++node) {
-      grid_.SynthesiseSpin(
-          kSpins[c], std::span(spectral.c[c]).subspan(node * size, size),
-          std::span(field.c[c]).subspan(node * fieldSize, fieldSize));
-    }
+  const auto count = static_cast<int>(nodes_.size());
+  for (auto c = 0; c < 2; ++c) {
+    grid_.SynthesiseSpinBatch(kSpins[c], spectral.c[c], count, field.c[c]);
   }
+  grid_.SynthesiseBatch(spectral.r, count, field.r);
   return field;
 }
 
 GridCoupling::SpectralTensor GridCoupling::Analyse(
     const TensorField& field) const {
   auto spectral = ZeroSpectral();
-  const auto fieldSize = grid_.FieldSize();
-  for (auto c = 0; c < 5; ++c) {
-    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    for (std::size_t node = 0; node < nodes_.size(); ++node) {
-      grid_.ExpandSpin(
-          kSpins[c], std::span(field.c[c]).subspan(node * fieldSize, fieldSize),
-          std::span(spectral.c[c]).subspan(node * size, size));
-    }
+  const auto count = static_cast<int>(nodes_.size());
+  for (auto c = 0; c < 2; ++c) {
+    grid_.ExpandSpinBatch(kSpins[c], field.c[c], count, spectral.c[c]);
   }
+  grid_.ExpandBatch(field.r, count, spectral.r);
   return spectral;
 }
 
@@ -95,6 +98,7 @@ void GridCoupling::Multiply(TensorField& field,
   for (auto& component : field.c) {
     for (std::size_t i = 0; i < size; ++i) component[i] *= weight[i];
   }
+  for (std::size_t i = 0; i < size; ++i) field.r[i] *= weight[i];
 }
 
 void GridCoupling::ScaleByNode(SpectralTensor& spectral,
@@ -102,12 +106,18 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
   if (factor.size() != nodes_.size()) {
     throw std::invalid_argument("one factor per radial node, please");
   }
-  for (auto c = 0; c < 5; ++c) {
+  for (auto c = 0; c < 2; ++c) {
     const auto size = grid_.SpinCoefficientSize(kSpins[c]);
     for (std::size_t node = 0; node < nodes_.size(); ++node) {
       for (std::size_t k = 0; k < size; ++k) {
         spectral.c[c][node * size + k] *= factor[node];
       }
+    }
+  }
+  const auto size = grid_.CoefficientSize();
+  for (std::size_t node = 0; node < nodes_.size(); ++node) {
+    for (std::size_t k = 0; k < size; ++k) {
+      spectral.r[node * size + k] *= factor[node];
     }
   }
 }
@@ -137,14 +147,51 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
       const auto at = node * columns + column;
       const auto A = ComponentsFromScalars(l, M[at], R[at], S[at], r);
       const auto m = static_cast<int>(column) - l;
-      for (auto c = 0; c < 5; ++c) {
-        if (l < std::abs(kSpins[c])) continue;
-        const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-        spectral.c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)] +=
-            A[c];
-      }
+      Scatter(spectral, node, l, m, A);
     }
   }
+}
+
+void GridCoupling::Scatter(SpectralTensor& spectral, int node, int l, int m,
+                           std::span<const Complex, 5> A) const {
+  for (auto c = 0; c < 2; ++c) {
+    if (l < std::abs(kSpins[c])) continue;
+    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
+    spectral.c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)] +=
+        A[c];
+  }
+  // The spin 0 component is stored in the real m >= 0 layout; its m < 0
+  // coefficients are the Hermitian images of what Hermitian columns put
+  // here, so dropping them loses nothing (the header's contract).
+  if (m >= 0) {
+    spectral.r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, m)] +=
+        A[2];
+  }
+}
+
+std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
+    const SpectralTensor& spectral, int node, int l, int m) const {
+  // The derived components by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}).
+  const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
+  std::array<Complex, 5> A{};
+  const auto real = [&](int mm) {
+    return spectral
+        .r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, mm)];
+  };
+  A[2] = m >= 0 ? real(m) : sign * std::conj(real(-m));
+  if (l >= 1) {
+    const auto size = grid_.SpinCoefficientSize(-1);
+    const auto* block = &spectral.c[1][node * size];
+    A[1] = block[SurfaceGrid::SpinIndex(-1, l, m)];
+    A[3] = sign * std::conj(block[SurfaceGrid::SpinIndex(-1, l, -m)]);
+  }
+  if (l >= 2) {
+    const auto size = grid_.SpinCoefficientSize(-2);
+    const auto* block = &spectral.c[0][node * size];
+    A[0] = block[SurfaceGrid::SpinIndex(-2, l, m)];
+    A[4] = sign * std::conj(block[SurfaceGrid::SpinIndex(-2, l, -m)]);
+  }
+  return A;
 }
 
 void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
@@ -187,12 +234,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
       }
       const auto A = DeviatoricComponents(l, values, r);
       const auto m = static_cast<int>(column) - l;
-      for (auto c = 0; c < 5; ++c) {
-        if (l < std::abs(kSpins[c])) continue;
-        const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-        spectral.c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)] +=
-            A[c];
-      }
+      Scatter(spectral, node, l, m, A);
     }
   }
 }
@@ -217,14 +259,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
       const auto jac = mesh.Jacobian(e);
       for (std::size_t column = 0; column < columns; ++column) {
         const auto m = static_cast<int>(column) - l;
-        std::array<Complex, 5> A{};
-        for (auto c = 0; c < 5; ++c) {
-          if (l < std::abs(kSpins[c])) continue;
-          const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-          A[c] =
-              weighted
-                  .c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)];
-        }
+        const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
         // The pointwise rows at the quadrature node itself.
         const auto iU = op.Dof(mesh.GlobalIndex(e, q), Component::U);
@@ -267,14 +302,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
       const auto jac = mesh.Jacobian(e);
       for (std::size_t column = 0; column < columns; ++column) {
         const auto m = static_cast<int>(column) - l;
-        std::array<Complex, 5> A{};
-        for (auto c = 0; c < 5; ++c) {
-          if (l < std::abs(kSpins[c])) continue;
-          const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-          A[c] =
-              weighted
-                  .c[c][node * size + SurfaceGrid::SpinIndex(kSpins[c], l, m)];
-        }
+        const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
         const auto iW = op.Dof(mesh.GlobalIndex(e, q));
         if (iW >= 0) {

@@ -83,6 +83,12 @@ class Viscoelastic3D {
   Viscoelastic3D(const Rheology& rheology, int lmax,
                  const std::function<double(double, double, double)>& delta)
       : Viscoelastic3D(rheology, lmax, delta, Options{}) {}
+  /// Shares an existing grid (lmax-matched, spin coverage >= 2) instead
+  /// of building one — the way several operators at one lmax, or a
+  /// driver that also owns the grid, avoid repeating its construction.
+  Viscoelastic3D(const Rheology& rheology, int lmax, const SurfaceGrid& grid,
+                 const std::function<double(double, double, double)>& delta,
+                 Options options);
   ~Viscoelastic3D();  // out of line: unique_ptr of an incomplete type
   Viscoelastic3D(Viscoelastic3D&&) noexcept;
   Viscoelastic3D& operator=(Viscoelastic3D&&) noexcept;

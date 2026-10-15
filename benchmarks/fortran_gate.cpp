@@ -64,9 +64,9 @@ int main(int argc, char** argv) {
   };
   Viscoelastic3D::Options options;
   options.parallel = parallel;
-#ifdef GSHTRANS_HAVE_BLAS
-  options.matrix_kernel = true;
-#endif
+  // The matrix kernel stays off until GSHTrans's open issue 8 is fixed:
+  // under a threaded BLAS its GEMMs livelock inside the transform's
+  // parallel region at production sizes.
   options.rtol = 1e-10;
   Viscoelastic3D op(rheology, lmax, delta, options);
 

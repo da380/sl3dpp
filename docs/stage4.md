@@ -134,10 +134,16 @@ Picard, a better reference profile (per-degree or worst-case), IMEX.
   options. Measured on the PREM-deck Maxwell body (15 Oct 2026, 8
   threads): a full synthesis + analysis pass over all five components,
   lmax 128, 1630 graded-mesh viscous nodes: 51.6 s naive single-field
-  loop kernel → 12.9 s batched loop → **5.0 s batched matrix kernel** —
-  about 10x; lmax 64 (1170 nodes): 0.8 s. The Hermitian m >= 0 reduction
-  (halving the batch) and the Gauss-point memory nodes (~20% fewer)
-  compound on top.
+  loop kernel → 12.9 s batched loop → 5.0 s batched matrix kernel —
+  about 10x; lmax 64 (1170 nodes): 0.8 s. (Those are the five-component
+  pipeline's numbers.) With the reality reduction (15 Oct 2026): the
+  full reduced pass is **5.2 s at lmax 128 / 0.6 s at lmax 64, batched
+  loop kernel, 8 threads** — the 12.9 s loop figure roughly halved, as
+  the component count predicts. Grid construction is 0.1 s at lmax 128.
+  The matrix kernel is OFF until GSHTrans's open issue 8 (its GEMMs
+  livelock under a threaded BLAS inside the transform's parallel
+  region — diagnosed here, fix planned there); the Gauss-point memory
+  nodes (~20% fewer) remain to compound.
 - Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
   mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
   complex ≈ 11 GB per branch... **the oversampled grid is for products
@@ -248,18 +254,39 @@ AdGIA's `RelaxationLaw` path.
   an observable output only.
 - The reference profile τ̄(r): laterally averaged log-viscosity vs
   worst-case; possibly per-degree. To be measured in (c).
-- Hermitian-pair exploitation in the transforms (halves the spin
-  work), once gated — **via GSHTrans's tensor layer, not by hand**
-  (noted 15 Oct 2026): `TensorField`'s Reality parameter and its orbit
-  table (`Tensor/Orbits.hpp`) encode exactly the pair structure derived
-  here (sign-and-conjugation relations between component slots, the
-  anti-conjugating spin-1 pair included), so the reduced storage and
-  transforms come with the signs tested in the library. Kernel
-  implications checked: the kernel contraction is pointwise on the grid,
-  where negative-spin fields reconstruct by sign * conj for free; the
-  adjoint fields are real tensors too; the one discipline is that the
-  discrete adjoint must transpose the reduced pipeline consistently
-  (as with the Gauss-point memory migration).
+- Hermitian-pair exploitation in the transforms: DONE (15 Oct 2026).
+  The tensors are real, so GridCoupling stores spins -2, -1 as complex
+  fields and spin 0 as a real field; spins +1, +2 are reconstructed at
+  the force exit by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}) — the
+  same orbit relation GSHTrans's tensor layer encodes (eq:reality,
+  Tensor/TensorField.hpp; its sign table corroborates the convention our
+  tests pinned, the anti-conjugating spin-1 pair included). A full
+  TensorField adoption was considered and set aside: its transform
+  batches the components of ONE tensor, while this pipeline's dominant
+  win is batching across the ~10^3 radial memory nodes, so the hybrid
+  keeps our cross-node batched calls (now wired into Synthesise/Analyse,
+  previously per-node loops) over the stored spins plus the real N = 0
+  path. The contract the reduction rests on — every degree-column set
+  entering the pipeline is Hermitian, i.e. a real field — is stated in
+  GridCoupling.hpp and the gate tests feed Hermitian data. Kernel
+  implications checked: contractions are pointwise on the grid, where
+  the derived spins reconstruct by sign * conj for free; adjoint fields
+  are real tensors too; the discrete adjoint must transpose the reduced
+  pipeline consistently (as with the Gauss-point memory migration).
+  Remaining documented option: m >= 0 degree columns (halves the banded
+  solves and the entry/exit loops, churns the public column convention).
+- Depth-variable lmax (declined for now, 15 Oct 2026): deep memory nodes
+  carry only the degrees whose truncation reaches them, yet the batched
+  transforms run every node at full lmax, so truncation-banded node
+  groups at reduced lmax would save transform work. Declined because it
+  fragments the cross-node batches and complicates the entry/exit
+  bookkeeping for a saving concentrated in the few deep nodes of a
+  graded mesh; revisit only if production profiles say otherwise.
+- The grid (its Wigner table is the gigabytes) is shared: SurfaceGrid is
+  a cheap handle to one immutable GSHTrans grid, and GridCoupling /
+  Viscoelastic3D accept an existing grid. One grid per resolution: the
+  sea level machinery's band-exact scalar grid and the coupling's
+  oversampled spin-2 grid are deliberately different samplings.
 - GSHTrans's field algebra (noted 15 Oct 2026): not needed for the
   stepping pipeline (plain batched transforms + hand loops), but the
   stage-5 kernel accumulation is a pointwise tensor contraction

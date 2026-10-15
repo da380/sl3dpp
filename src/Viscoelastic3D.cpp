@@ -19,10 +19,21 @@ struct Viscoelastic3D::Flavour {
 Viscoelastic3D::Viscoelastic3D(
     const Rheology& rheology, int lmax,
     const std::function<double(double, double, double)>& delta, Options options)
+    : Viscoelastic3D(
+          rheology, lmax,
+          SurfaceGrid(lmax, {.nmax = 2,
+                             .oversampling = options.oversampling,
+                             .parallel = options.parallel,
+                             .matrix_kernel = options.matrix_kernel}),
+          delta, options) {}
+
+Viscoelastic3D::Viscoelastic3D(
+    const Rheology& rheology, int lmax, const SurfaceGrid& grid,
+    const std::function<double(double, double, double)>& delta, Options options)
     : rheology_(std::make_shared<const Rheology>(rheology)),
       lmax_(lmax),
       options_(options),
-      coupling_(*rheology_, lmax,
+      coupling_(*rheology_, lmax, grid,
                 {.eps = options.eps,
                  .truncation = options.truncation,
                  .oversampling = options.oversampling,
@@ -32,14 +43,14 @@ Viscoelastic3D::Viscoelastic3D(
                  {.eps = options.eps, .truncation = options.truncation}) {
   // Sample exp(-delta) once and scale every branch's inverse times; the
   // reference profile is the unperturbed radial rheology itself.
-  const auto& grid = coupling_.Grid();
+  const auto& sampling = coupling_.Grid();
   const auto& mesh = rheology_->BaseMaterial().Mesh();
-  const auto fieldSize = grid.FieldSize();
+  const auto fieldSize = sampling.FieldSize();
   const auto n = mesh.NGll();
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   std::vector<double> factor(nodes * fieldSize);
-  const auto thetas = grid.CoLatitudes();
-  const auto phis = grid.Longitudes();
+  const auto thetas = sampling.CoLatitudes();
+  const auto phis = sampling.Longitudes();
   for (std::size_t node = 0; node < nodes; ++node) {
     const auto r = coupling_.RadiusOfNode(static_cast<int>(node));
     std::size_t x = 0;
@@ -229,18 +240,21 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveElastic(
   // The combined weighted memory tensor sum_k mu_k(r) m_k(x).
   auto combined = coupling_.ZeroTensor();
   const auto fieldSize = coupling_.Grid().FieldSize();
-  for (std::size_t k = 0; k < state.m.size(); ++k) {
-    for (auto c = 0; c < 5; ++c) {
-      for (std::size_t node = 0;
-           node < static_cast<std::size_t>(coupling_.NodeCount()); ++node) {
-        const auto mu = muBranch_[k][node];
-        if (mu == 0.0) continue;
-        for (std::size_t x = 0; x < fieldSize; ++x) {
-          combined.c[c][node * fieldSize + x] +=
-              mu * state.m[k].c[c][node * fieldSize + x];
-        }
+  auto accumulate = [&](auto& out, const auto& in, std::size_t k) {
+    for (std::size_t node = 0;
+         node < static_cast<std::size_t>(coupling_.NodeCount()); ++node) {
+      const auto mu = muBranch_[k][node];
+      if (mu == 0.0) continue;
+      for (std::size_t x = 0; x < fieldSize; ++x) {
+        out[node * fieldSize + x] += mu * in[node * fieldSize + x];
       }
     }
+  };
+  for (std::size_t k = 0; k < state.m.size(); ++k) {
+    for (auto c = 0; c < 2; ++c) {
+      accumulate(combined.c[c], state.m[k].c[c], k);
+    }
+    accumulate(combined.r, state.m[k].r, k);
   }
   const auto weighted = coupling_.Analyse(combined);
   return SolveAll(
@@ -337,11 +351,12 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
         }
         step.beta_[k][node * fieldSize + x] = b_w;
         step.dbeta_[k][node * fieldSize + x] = b_w - refBeta;
-        for (auto c = 0; c < 5; ++c) {
-          step.memory_[k].c[c][node * fieldSize + x] =
-              e_w * state.m[k].c[c][node * fieldSize + x] +
-              a_w * step.d0_.c[c][node * fieldSize + x];
+        const auto at = node * fieldSize + x;
+        for (auto c = 0; c < 2; ++c) {
+          step.memory_[k].c[c][at] =
+              e_w * state.m[k].c[c][at] + a_w * step.d0_.c[c][at];
         }
+        step.memory_[k].r[at] = e_w * state.m[k].r[at] + a_w * step.d0_.r[at];
       }
     }
   }
@@ -356,18 +371,22 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
   auto& flavour = op.FlavourOf(scheme_, dt_);
   auto combined = coupling.ZeroTensor();
-  for (std::size_t k = 0; k < memory_.size(); ++k) {
-    for (auto c = 0; c < 5; ++c) {
-      for (std::size_t node = 0; node < nodes; ++node) {
-        const auto mu = op.muBranch_[k][node];
-        if (mu == 0.0) continue;
-        for (std::size_t x = 0; x < fieldSize; ++x) {
-          const auto at = node * fieldSize + x;
-          combined.c[c][at] +=
-              mu * (memory_[k].c[c][at] + dbeta_[k][at] * d.c[c][at]);
-        }
+  auto accumulate = [&](auto& out, const auto& mem, const auto& dIn,
+                        std::size_t k) {
+    for (std::size_t node = 0; node < nodes; ++node) {
+      const auto mu = op.muBranch_[k][node];
+      if (mu == 0.0) continue;
+      for (std::size_t x = 0; x < fieldSize; ++x) {
+        const auto at = node * fieldSize + x;
+        out[at] += mu * (mem[at] + dbeta_[k][at] * dIn[at]);
       }
     }
+  };
+  for (std::size_t k = 0; k < memory_.size(); ++k) {
+    for (auto c = 0; c < 2; ++c) {
+      accumulate(combined.c[c], memory_[k].c[c], d.c[c], k);
+    }
+    accumulate(combined.r, memory_[k].r, d.r, k);
   }
   const auto weighted = coupling.Analyse(combined);
   return op.SolveAll(
@@ -453,10 +472,13 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
   next.t = t_;
   for (std::size_t k = 0; k < memory_.size(); ++k) {
     auto tensor = memory_[k];
-    for (auto c = 0; c < 5; ++c) {
+    for (auto c = 0; c < 2; ++c) {
       for (std::size_t i = 0; i < tensor.c[c].size(); ++i) {
         tensor.c[c][i] += beta_[k][i] * d.c[c][i];
       }
+    }
+    for (std::size_t i = 0; i < tensor.r.size(); ++i) {
+      tensor.r[i] += beta_[k][i] * d.r[i];
     }
     next.m.push_back(std::move(tensor));
   }
@@ -475,24 +497,26 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
   detail::AndersonMixer mixer(options_.anderson_memory);
   auto flatten = [&](const GridCoupling::TensorField& tensor) {
     std::vector<double> flat;
-    flat.reserve(2 * 5 * tensor.c[0].size());
-    for (auto c = 0; c < 5; ++c) {
+    flat.reserve(2 * 2 * tensor.c[0].size() + tensor.r.size());
+    for (auto c = 0; c < 2; ++c) {
       for (const auto& v : tensor.c[c]) {
         flat.push_back(v.real());
         flat.push_back(v.imag());
       }
     }
+    for (auto v : tensor.r) flat.push_back(v);
     return flat;
   };
   auto unflatten = [&](std::span<const double> flat) {
     auto tensor = coupling_.ZeroTensor();
     std::size_t at = 0;
-    for (auto c = 0; c < 5; ++c) {
+    for (auto c = 0; c < 2; ++c) {
       for (auto& v : tensor.c[c]) {
         v = {flat[at], flat[at + 1]};
         at += 2;
       }
     }
+    for (auto& v : tensor.r) v = flat[at++];
     return tensor;
   };
   for (auto pass = 0; pass < options_.max_iterations; ++pass) {
@@ -501,11 +525,15 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
     auto dNext = step.StrainOf(solutions);
 
     double scale = 0.0, diff = 0.0;
-    for (auto c = 0; c < 5; ++c) {
+    for (auto c = 0; c < 2; ++c) {
       for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
         scale = std::max(scale, std::abs(dNext.c[c][i]));
         diff = std::max(diff, std::abs(dNext.c[c][i] - d.c[c][i]));
       }
+    }
+    for (std::size_t i = 0; i < dNext.r.size(); ++i) {
+      scale = std::max(scale, std::abs(dNext.r[i]));
+      diff = std::max(diff, std::abs(dNext.r[i] - d.r[i]));
     }
     info.iterations = pass + 1;
     info.residual = scale > 0.0 ? diff / scale : 0.0;
@@ -515,11 +543,14 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
       break;
     }
     if (options_.damping != 1.0) {
-      for (auto c = 0; c < 5; ++c) {
+      for (auto c = 0; c < 2; ++c) {
         for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
           dNext.c[c][i] =
               d.c[c][i] + options_.damping * (dNext.c[c][i] - d.c[c][i]);
         }
+      }
+      for (std::size_t i = 0; i < dNext.r.size(); ++i) {
+        dNext.r[i] = d.r[i] + options_.damping * (dNext.r[i] - d.r[i]);
       }
     }
     if (options_.anderson_memory > 0) {

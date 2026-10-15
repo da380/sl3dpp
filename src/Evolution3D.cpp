@@ -164,24 +164,26 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     detail::AndersonMixer mixer(options_.anderson_memory);
     auto flatten = [&](const GridCoupling::TensorField& tensor) {
       std::vector<double> flat;
-      flat.reserve(2 * 5 * tensor.c[0].size());
-      for (auto c = 0; c < 5; ++c) {
+      flat.reserve(2 * 2 * tensor.c[0].size() + tensor.r.size());
+      for (auto c = 0; c < 2; ++c) {
         for (const auto& v : tensor.c[c]) {
           flat.push_back(v.real());
           flat.push_back(v.imag());
         }
       }
+      for (auto v : tensor.r) flat.push_back(v);
       return flat;
     };
     auto unflatten = [&](std::span<const double> flat) {
       auto tensor = op.Coupling().ZeroTensor();
       std::size_t at = 0;
-      for (auto c = 0; c < 5; ++c) {
+      for (auto c = 0; c < 2; ++c) {
         for (auto& v : tensor.c[c]) {
           v = {flat[at], flat[at + 1]};
           at += 2;
         }
       }
+      for (auto& v : tensor.r) v = flat[at++];
       return tensor;
     };
     int iterations = 0;
@@ -207,11 +209,15 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
       auto dNext = step.StrainOf(responses);
 
       double scale = 0.0, diff = 0.0;
-      for (auto c = 0; c < 5; ++c) {
+      for (auto c = 0; c < 2; ++c) {
         for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
           scale = std::max(scale, std::abs(dNext.c[c][i]));
           diff = std::max(diff, std::abs(dNext.c[c][i] - d.c[c][i]));
         }
+      }
+      for (std::size_t i = 0; i < dNext.r.size(); ++i) {
+        scale = std::max(scale, std::abs(dNext.r[i]));
+        diff = std::max(diff, std::abs(dNext.r[i] - d.r[i]));
       }
       iterations = pass + 1;
       residual = scale > 0.0 ? diff / scale : 0.0;

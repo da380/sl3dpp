@@ -25,10 +25,20 @@
  * reduces exactly to the 1D degree-basis memory force: the zero-lateral
  * gate of stage 4.
  *
- * First version: all orders m in -l..l are carried as complex columns
- * (the Fortran's storage). The Hermitian m >= 0 reduction — halving
- * storage and transforms — is the documented optimisation to take once
- * the lateral iteration is gated.
+ * Reality: the pipeline carries REAL tensors, so only the spin -2 and -1
+ * components are stored as complex fields and the spin 0 component as a
+ * real field; the +1 and +2 components are their pointwise images under
+ * A(+N) = (-1)^N conj(A(-N)) and are reconstructed in coefficient space
+ * by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}) at the force exit — the
+ * same orbit relation GSHTrans's tensor layer encodes (eq:reality in
+ * Tensor/TensorField.hpp). This halves the storage and the transforms.
+ * The contract it rests on: every set of degree columns entering the
+ * pipeline is Hermitian, f_{l,-m} = (-1)^m conj(f_{lm}), i.e. represents
+ * a real field — the m < 0 spin-0 information is derived, not stored.
+ *
+ * All orders m in -l..l are still carried as columns at the degree-basis
+ * boundary (the Fortran's convention); reducing those columns to m >= 0
+ * — halving the banded solves — is the remaining documented option.
  */
 
 #include <array>
@@ -64,6 +74,10 @@ class GridCoupling {
   GridCoupling(const Rheology& rheology, int lmax, Options options);
   GridCoupling(const Rheology& rheology, int lmax)
       : GridCoupling(rheology, lmax, Options{}) {}
+  /// Shares an existing grid (a cheap handle to its Wigner table) rather
+  /// than building one: it must be at this lmax with spin coverage >= 2.
+  GridCoupling(const Rheology& rheology, int lmax, const SurfaceGrid& grid,
+               Options options);
 
   [[nodiscard]] const SurfaceGrid& Grid() const { return grid_; }
   [[nodiscard]] int LMax() const { return lmax_; }
@@ -84,21 +98,27 @@ class GridCoupling {
   // -- tensors, grid and spectral
   // ----------------------------------------------
 
-  /// The five component fields, [c][node * Grid().FieldSize() + x].
+  /// The stored component fields of a real tensor: the spin -2 and -1
+  /// components, [c][node * Grid().FieldSize() + x], and the real spin 0
+  /// component likewise; spins +1 and +2 are derived (file comment).
   struct TensorField {
-    std::array<std::vector<Complex>, 5> c;
+    std::array<std::vector<Complex>, 2> c;
+    std::vector<double> r;
   };
   [[nodiscard]] TensorField ZeroTensor() const;
 
-  /// The spin-N coefficients of the five components per radial node,
-  /// [c][node * Grid().SpinCoefficientSize(spin of c) + k].
+  /// The coefficients of the stored components per radial node: spin -2
+  /// and -1 over all orders, [c][node * Grid().SpinCoefficientSize(spin)
+  /// + k], and the spin 0 component in the real m >= 0 layout,
+  /// [node * Grid().CoefficientSize() + Index(l, m)].
   struct SpectralTensor {
-    std::array<std::vector<Complex>, 5> c;
+    std::array<std::vector<Complex>, 2> c;
+    std::vector<Complex> r;
   };
   [[nodiscard]] SpectralTensor ZeroSpectral() const;
 
-  /// The spins of the component slots.
-  static constexpr std::array<int, 5> kSpins{-2, -1, 0, 1, 2};
+  /// The spins of the stored complex component slots.
+  static constexpr std::array<int, 2> kSpins{-2, -1};
 
   /// Synthesis of every component at every node.
   [[nodiscard]] TensorField Synthesise(const SpectralTensor& spectral) const;
@@ -160,6 +180,14 @@ class GridCoupling {
   /// The first radial memory node whose element is within degree l's
   /// subset (the nodes are element-ordered).
   [[nodiscard]] int FirstNodeFor(int firstElement) const;
+
+  /// Adds one (l, m) column's five components to the stored blocks.
+  void Scatter(SpectralTensor& spectral, int node, int l, int m,
+               std::span<const Complex, 5> A) const;
+  /// The five components of one (l, m) column from the stored blocks,
+  /// the derived ones reconstructed by the reality relation.
+  [[nodiscard]] std::array<Complex, 5> Gather(const SpectralTensor& spectral,
+                                              int node, int l, int m) const;
 
   const Rheology* rheology_;
   int lmax_;

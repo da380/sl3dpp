@@ -23,6 +23,7 @@
 #include <GSHTrans/All>
 #include <complex>
 #include <cstddef>
+#include <memory>
 #include <numbers>
 #include <span>
 #include <vector>
@@ -42,25 +43,37 @@ class SurfaceGrid {
     double oversampling = 1.0;
     /// Whether GSHTrans transforms run threaded.
     bool parallel = false;
-    /// Use GSHTrans's BLAS matrix kernel (~6x on batched forwards).
+    /// Use GSHTrans's BLAS matrix kernel. CAUTION: with a BLAS that
+    /// threads (Ubuntu's default OpenBLAS), its GEMMs livelock inside
+    /// the transform's parallel region at production sizes — GSHTrans
+    /// docs/open-issues.md item 8 has the diagnosis and the planned
+    /// fix; leave this off until that lands.
     bool matrix_kernel = false;
   };
 
   SurfaceGrid(int lmax, Options options)
       : lmax_(lmax),
+        nmax_(options.nmax),
         parallel_(options.parallel),
-        grid_(Gsh::ForBand(
+        grid_(std::make_shared<const Gsh>(Gsh::ForBand(
             lmax, options.nmax, options.oversampling, FFTWpp::Measure,
             GSHTrans::Chunking::Automatic(), GSHTrans::WignerValues::Stored(),
             options.matrix_kernel ? GSHTrans::TransformKernel::Matrix()
-                                  : GSHTrans::TransformKernel::Loop())) {
-    for (auto theta : grid_.CoLatitudes()) coLatitudes_.push_back(theta);
-    for (auto w : grid_.CoLatitudeWeights()) coLatitudeWeights_.push_back(w);
-    for (auto phi : grid_.Longitudes()) longitudes_.push_back(phi);
+                                  : GSHTrans::TransformKernel::Loop()))) {
+    for (auto theta : grid_->CoLatitudes()) coLatitudes_.push_back(theta);
+    for (auto w : grid_->CoLatitudeWeights()) coLatitudeWeights_.push_back(w);
+    for (auto phi : grid_->Longitudes()) longitudes_.push_back(phi);
   }
   explicit SurfaceGrid(int lmax) : SurfaceGrid(lmax, Options{}) {}
 
+  // The underlying GSHTrans grid — with its Wigner table, gigabytes at
+  // large lmax — is immutable and held shared: copies of a SurfaceGrid
+  // are cheap handles to the one grid, which is how the sea level
+  // machinery and the 3D coupling share a single table.
+
   [[nodiscard]] int LMax() const { return lmax_; }
+  /// The largest upper index (spin) the grid's Wigner table covers.
+  [[nodiscard]] int NMax() const { return nmax_; }
   [[nodiscard]] int NTheta() const {
     return static_cast<int>(coLatitudes_.size());
   }
@@ -111,7 +124,7 @@ class SurfaceGrid {
   /// Forward transform of a real scalar field into the m >= 0 coefficients.
   void Expand(std::span<const double> field,
               std::span<std::complex<double>> coefficients) const {
-    grid_.ForwardTransformation(lmax_, 0, field, coefficients, Policy());
+    grid_->ForwardTransformation(lmax_, 0, field, coefficients, Policy());
   }
   [[nodiscard]] std::vector<std::complex<double>> Expand(
       std::span<const double> field) const {
@@ -123,13 +136,38 @@ class SurfaceGrid {
   /// Inverse transform back to grid values.
   void Synthesise(std::span<const std::complex<double>> coefficients,
                   std::span<double> field) const {
-    grid_.InverseTransformation(lmax_, 0, coefficients, field, Policy());
+    grid_->InverseTransformation(lmax_, 0, coefficients, field, Policy());
   }
   [[nodiscard]] std::vector<double> Synthesise(
       std::span<const std::complex<double>> coefficients) const {
     std::vector<double> out(FieldSize());
     Synthesise(coefficients, out);
     return out;
+  }
+
+  /// Batched analysis of `count` real scalar fields laid end to end (one
+  /// per radial node, say): exactly equal to the per-field calls, faster.
+  void ExpandBatch(std::span<const double> fields, int count,
+                   std::span<std::complex<double>> coefficients) const {
+    grid_->ForwardTransformation(
+        lmax_, 0, fields,
+        GSHTrans::Batch::Contiguous(count, static_cast<long>(FieldSize())),
+        coefficients,
+        GSHTrans::Batch::Contiguous(count,
+                                    static_cast<long>(CoefficientSize())),
+        Policy());
+  }
+
+  /// Batched synthesis, the mirror of ExpandBatch.
+  void SynthesiseBatch(std::span<const std::complex<double>> coefficients,
+                       int count, std::span<double> fields) const {
+    grid_->InverseTransformation(
+        lmax_, 0, coefficients,
+        GSHTrans::Batch::Contiguous(count,
+                                    static_cast<long>(CoefficientSize())),
+        fields,
+        GSHTrans::Batch::Contiguous(count, static_cast<long>(FieldSize())),
+        Policy());
   }
 
   // -- spin-weighted (complex) fields, |N| <= the grid's nmax -----------------
@@ -151,7 +189,7 @@ class SurfaceGrid {
   /// order) into its coefficients.
   void ExpandSpin(int N, std::span<const std::complex<double>> field,
                   std::span<std::complex<double>> coefficients) const {
-    grid_.ForwardTransformation(lmax_, N, field, coefficients, Policy());
+    grid_->ForwardTransformation(lmax_, N, field, coefficients, Policy());
   }
   [[nodiscard]] std::vector<std::complex<double>> ExpandSpin(
       int N, std::span<const std::complex<double>> field) const {
@@ -165,7 +203,7 @@ class SurfaceGrid {
   void ExpandSpinBatch(int N, std::span<const std::complex<double>> fields,
                        int count,
                        std::span<std::complex<double>> coefficients) const {
-    grid_.ForwardTransformation(
+    grid_->ForwardTransformation(
         lmax_, N, fields,
         GSHTrans::Batch::Contiguous(count, static_cast<long>(FieldSize())),
         coefficients,
@@ -177,7 +215,7 @@ class SurfaceGrid {
   /// Inverse transform of spin-N coefficients back to grid values.
   void SynthesiseSpin(int N, std::span<const std::complex<double>> coefficients,
                       std::span<std::complex<double>> field) const {
-    grid_.InverseTransformation(lmax_, N, coefficients, field, Policy());
+    grid_->InverseTransformation(lmax_, N, coefficients, field, Policy());
   }
   [[nodiscard]] std::vector<std::complex<double>> SynthesiseSpin(
       int N, std::span<const std::complex<double>> coefficients) const {
@@ -191,7 +229,7 @@ class SurfaceGrid {
                            std::span<const std::complex<double>> coefficients,
                            int count,
                            std::span<std::complex<double>> fields) const {
-    grid_.InverseTransformation(
+    grid_->InverseTransformation(
         lmax_, N, coefficients,
         GSHTrans::Batch::Contiguous(count,
                                     static_cast<long>(SpinCoefficientSize(N))),
@@ -215,7 +253,7 @@ class SurfaceGrid {
   }
 
   /// The underlying GSHTrans grid, for machinery beyond scalars.
-  [[nodiscard]] const Gsh& Grid() const { return grid_; }
+  [[nodiscard]] const Gsh& Grid() const { return *grid_; }
 
  private:
   [[nodiscard]] GSHTrans::Execution Policy() const {
@@ -224,8 +262,9 @@ class SurfaceGrid {
   }
 
   int lmax_;
+  int nmax_;
   bool parallel_;
-  Gsh grid_;
+  std::shared_ptr<const Gsh> grid_;
   std::vector<double> coLatitudes_;
   std::vector<double> coLatitudeWeights_;
   std::vector<double> longitudes_;
