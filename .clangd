@@ -1,0 +1,5 @@
+# clangd is clang-18-based here: it reports __cpp_concepts = 201907, which
+# makes libstdc++ hide <expected>. Mirror the CMake workaround so the editor
+# parses the code the way GCC compiles it (see CMakeLists.txt).
+CompileFlags:
+  Add: [-D__cpp_concepts=202002L, -Wno-builtin-macro-redefined]

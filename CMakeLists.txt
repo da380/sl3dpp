@@ -94,6 +94,9 @@ pkg_check_modules(NETCDF REQUIRED IMPORTED_TARGET netcdf)
 # The library.
 # ---------------------------------------------------------------------------
 add_library(sl3dpp STATIC
+  src/Deck.cpp
+  src/EarthModel.cpp
+  src/RadialMesh.cpp
   src/Version.cpp)
 
 add_library(sl3dpp::sl3dpp ALIAS sl3dpp)
@@ -113,6 +116,16 @@ target_link_libraries(sl3dpp PUBLIC
 
 target_compile_options(sl3dpp PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)
+
+# Clang 18 reports __cpp_concepts = 201907, which makes libstdc++ disable
+# <expected> although the needed support is present; Clang 19 fixed the
+# macro. The usual workaround until the floor rises (also in .clangd, for
+# the editor tooling).
+if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
+   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
+  target_compile_definitions(sl3dpp PUBLIC __cpp_concepts=202002L)
+  target_compile_options(sl3dpp PUBLIC -Wno-builtin-macro-redefined)
+endif()
 
 # ---------------------------------------------------------------------------
 # Tests.

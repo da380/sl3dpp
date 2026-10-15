@@ -23,8 +23,8 @@ TEST(Toolkit, SphericalHarmonicRoundTrip) {
   using namespace GSHTrans;
   constexpr auto lMax = 16;
   auto grid = GaussLegendreGrid<double, All, Single>(lMax, 0);
-  auto f = SpinField<0, decltype(grid), RealValued>(
-      grid, [](auto theta, auto phi) {
+  auto f =
+      SpinField<0, decltype(grid), RealValued>(grid, [](auto theta, auto phi) {
         return std::cos(theta) + std::sin(theta) * std::cos(phi);
       });
   auto g = Evaluate(Expand(f, lMax));
