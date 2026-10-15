@@ -128,6 +128,16 @@ Picard, a better reference profile (per-degree or worst-case), IMEX.
 - Grid: one `SurfaceGrid` with nMax = 2 and `ForBand` oversampling 1.5
   (the 3/2 rule) for the pointwise products — an improvement over the
   Fortran, which never dealiased (plan §2.1).
+- Transforms are issued **batched** (one call per spin component, the
+  radial nodes as the batch — GSHTrans guarantees exact equality with the
+  per-field calls) with the BLAS matrix kernel and threaded execution as
+  options. Measured on the PREM-deck Maxwell body (15 Oct 2026, 8
+  threads): a full synthesis + analysis pass over all five components,
+  lmax 128, 1630 graded-mesh viscous nodes: 51.6 s naive single-field
+  loop kernel → 12.9 s batched loop → **5.0 s batched matrix kernel** —
+  about 10x; lmax 64 (1170 nodes): 0.8 s. The Hermitian m >= 0 reduction
+  (halving the batch) and the Gauss-point memory nodes (~20% fewer)
+  compound on top.
 - Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
   mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
   complex ≈ 11 GB per branch... **the oversampled grid is for products

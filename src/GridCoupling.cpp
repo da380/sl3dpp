@@ -12,7 +12,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
       options_(options),
       grid_(lmax, {.nmax = 2,
                    .oversampling = options.oversampling,
-                   .parallel = options.parallel}) {
+                   .parallel = options.parallel,
+                   .matrix_kernel = options.matrix_kernel}) {
   const auto& material = rheology.BaseMaterial();
   const auto& mesh = material.Mesh();
   const auto n = mesh.NGll();

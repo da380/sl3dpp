@@ -56,6 +56,8 @@ class GridCoupling {
     /// Headroom for the pointwise products (the 3/2 rule by default).
     double oversampling = 1.5;
     bool parallel = false;
+    /// GSHTrans's BLAS matrix kernel for the batched transforms.
+    bool matrix_kernel = false;
   };
 
   /// The rheology is borrowed and must outlive the coupling.

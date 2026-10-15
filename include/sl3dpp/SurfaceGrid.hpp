@@ -42,12 +42,18 @@ class SurfaceGrid {
     double oversampling = 1.0;
     /// Whether GSHTrans transforms run threaded.
     bool parallel = false;
+    /// Use GSHTrans's BLAS matrix kernel (~6x on batched forwards).
+    bool matrix_kernel = false;
   };
 
   SurfaceGrid(int lmax, Options options)
       : lmax_(lmax),
         parallel_(options.parallel),
-        grid_(Gsh::ForBand(lmax, options.nmax, options.oversampling)) {
+        grid_(Gsh::ForBand(
+            lmax, options.nmax, options.oversampling, FFTWpp::Measure,
+            GSHTrans::Chunking::Automatic(), GSHTrans::WignerValues::Stored(),
+            options.matrix_kernel ? GSHTrans::TransformKernel::Matrix()
+                                  : GSHTrans::TransformKernel::Loop())) {
     for (auto theta : grid_.CoLatitudes()) coLatitudes_.push_back(theta);
     for (auto w : grid_.CoLatitudeWeights()) coLatitudeWeights_.push_back(w);
     for (auto phi : grid_.Longitudes()) longitudes_.push_back(phi);
@@ -154,6 +160,20 @@ class SurfaceGrid {
     return out;
   }
 
+  /// Batched analysis of `count` spin-N fields laid end to end (one per
+  /// radial node, say): exactly equal to the per-field calls, faster.
+  void ExpandSpinBatch(int N, std::span<const std::complex<double>> fields,
+                       int count,
+                       std::span<std::complex<double>> coefficients) const {
+    grid_.ForwardTransformation(
+        lmax_, N, fields,
+        GSHTrans::Batch::Contiguous(count, static_cast<long>(FieldSize())),
+        coefficients,
+        GSHTrans::Batch::Contiguous(count,
+                                    static_cast<long>(SpinCoefficientSize(N))),
+        Policy());
+  }
+
   /// Inverse transform of spin-N coefficients back to grid values.
   void SynthesiseSpin(int N, std::span<const std::complex<double>> coefficients,
                       std::span<std::complex<double>> field) const {
@@ -164,6 +184,20 @@ class SurfaceGrid {
     std::vector<std::complex<double>> out(FieldSize());
     SynthesiseSpin(N, coefficients, out);
     return out;
+  }
+
+  /// Batched synthesis, the mirror of ExpandSpinBatch.
+  void SynthesiseSpinBatch(int N,
+                           std::span<const std::complex<double>> coefficients,
+                           int count,
+                           std::span<std::complex<double>> fields) const {
+    grid_.InverseTransformation(
+        lmax_, N, coefficients,
+        GSHTrans::Batch::Contiguous(count,
+                                    static_cast<long>(SpinCoefficientSize(N))),
+        fields,
+        GSHTrans::Batch::Contiguous(count, static_cast<long>(FieldSize())),
+        Policy());
   }
 
   /// int f dOmega over the unit sphere, by the grid's quadrature (exact
