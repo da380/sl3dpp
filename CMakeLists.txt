@@ -98,6 +98,7 @@ add_library(sl3dpp STATIC
   src/DegreeOperator.cpp
   src/EarthModel.cpp
   src/Evolution.cpp
+  src/Evolution3D.cpp
   src/Fingerprint.cpp
   src/GridCoupling.cpp
   src/LoveNumbers.cpp

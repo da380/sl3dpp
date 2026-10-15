@@ -89,6 +89,13 @@ class Viscoelastic3D {
 
   [[nodiscard]] const GridCoupling& Coupling() const { return coupling_; }
   [[nodiscard]] int LMax() const { return lmax_; }
+  [[nodiscard]] const Rheology& GetRheology() const { return *rheology_; }
+  [[nodiscard]] const Options& GetOptions() const { return options_; }
+
+  /// The unrelaxed solid's Love numbers (SI), cached.
+  [[nodiscard]] const LoveNumbers& ElasticLove() const {
+    return reference_.ElasticLoveNumbers();
+  }
 
   /// The grid-held state: one five-component tensor per branch, plus the
   /// strain cache of the last consistent solve.
