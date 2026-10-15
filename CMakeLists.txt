@@ -104,6 +104,7 @@ add_library(sl3dpp STATIC
   src/RadialMesh.cpp
   src/Rheology.cpp
   src/SeaLevel.cpp
+  src/ToroidalOperator.cpp
   src/Version.cpp
   src/Viscoelastic.cpp)
 

@@ -15,6 +15,7 @@
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Scales.hpp"
+#include "sl3dpp/ToroidalOperator.hpp"
 
 using namespace sl3dpp;
 
@@ -148,4 +149,71 @@ TEST(DegreeOperator, ReciprocityAndSigns) {
   }
   // The axial pair: m_phi vanishes with k_c (the shell theorem).
   EXPECT_NEAR(ln.k_c, 0.0, 1e-12);
+}
+
+TEST(ToroidalOperator, HomogeneousSphereClosedForm) {
+  // In a uniform solid sphere the static toroidal solution regular at the
+  // centre is W = c r^l, and a unit generalised surface force gives
+  // W(a) = 1 / (k^2 mu (l - 1) a) through the natural boundary term.
+  auto material = HomogeneousMaterial(8);
+  const auto [kappa, mu] = material.Moduli().KappaMu();
+  const auto& mesh = material.Mesh();
+  const double a = material.Radius();
+  for (int l : {2, 4}) {
+    ToroidalOperator toroidal(material, l);
+    std::vector<double> b(toroidal.DofCount(), 0.0);
+    b[toroidal.SurfaceDof()] = 1.0;
+    const auto x = toroidal.Solve(b);
+    const double k2 = l * (l + 1.0);
+    const double expected = 1.0 / (k2 * mu[0] * (l - 1.0) * a);
+    EXPECT_NEAR(x[toroidal.SurfaceDof()], expected, 1e-6 * expected)
+        << "l = " << l;
+    // ... and the radial shape is r^l through the upper elements.
+    const auto nodal = toroidal.Expand(x);
+    const int n = mesh.NGll();
+    const int e = mesh.ElementCount() - 2;
+    for (int i = 0; i < n; ++i) {
+      const double r = mesh.Radius(e, i);
+      const double ratio = nodal[e * n + i] / std::pow(r / a, l);
+      EXPECT_NEAR(ratio, x[toroidal.SurfaceDof()],
+                  1e-5 * std::abs(x[toroidal.SurfaceDof()]))
+          << "l = " << l << ", node " << i;
+    }
+  }
+}
+
+TEST(ToroidalOperator, FluidDecouplingAndDegreeGuard) {
+  auto material = CoreMantleMaterial(8);
+  const auto& mesh = material.Mesh();
+  ToroidalOperator toroidal(material, 2);
+
+  // No toroidal dofs inside the fluid outer core.
+  int fluidInteriorNode = -1;
+  for (int e = 1; e + 1 < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e - 1) && material.IsFluid(e) &&
+        material.IsFluid(e + 1)) {
+      fluidInteriorNode = mesh.GlobalIndex(e, 1);
+      break;
+    }
+  }
+  ASSERT_GE(fluidInteriorNode, 0);
+  EXPECT_EQ(toroidal.Dof(fluidInteriorNode), -1);
+
+  // A surface force leaves the decoupled inner core at rest.
+  std::vector<double> b(toroidal.DofCount(), 0.0);
+  b[toroidal.SurfaceDof()] = 1.0;
+  const auto nodal = toroidal.Expand(toroidal.Solve(b));
+  const int n = mesh.NGll();
+  double inner = 0.0, surface = std::abs(nodal.back());
+  for (int e = 0; e < mesh.ElementCount() && !material.IsFluid(e); ++e) {
+    for (int i = 0; i < n; ++i) {
+      inner = std::max(inner, std::abs(nodal[e * n + i]));
+    }
+  }
+  EXPECT_GT(surface, 0.0);
+  EXPECT_LT(inner, 1e-12 * surface);
+
+  // Degrees without a toroidal problem are refused.
+  EXPECT_THROW(ToroidalOperator(material, 1), std::invalid_argument);
+  EXPECT_THROW(ToroidalOperator(material, 0), std::invalid_argument);
 }

@@ -126,6 +126,46 @@ class SurfaceGrid {
     return out;
   }
 
+  // -- spin-weighted (complex) fields, |N| <= the grid's nmax -----------------
+
+  /// The number of coefficients of a spin-N field: degrees |N|..lmax,
+  /// all orders.
+  [[nodiscard]] std::size_t SpinCoefficientSize(int N) const {
+    return static_cast<std::size_t>((lmax_ + 1) * (lmax_ + 1) - N * N);
+  }
+
+  /// The coefficient index of (l, m) at upper index N (GSHTrans's
+  /// GSHIndices<All> layout): l^2 - N^2 + (m + l).
+  [[nodiscard]] static std::size_t SpinIndex(int N, int l, int m) {
+    return static_cast<std::size_t>(l) * l - static_cast<std::size_t>(N * N) +
+           (m + l);
+  }
+
+  /// Forward transform of a complex spin-N field (values in storage
+  /// order) into its coefficients.
+  void ExpandSpin(int N, std::span<const std::complex<double>> field,
+                  std::span<std::complex<double>> coefficients) const {
+    grid_.ForwardTransformation(lmax_, N, field, coefficients, Policy());
+  }
+  [[nodiscard]] std::vector<std::complex<double>> ExpandSpin(
+      int N, std::span<const std::complex<double>> field) const {
+    std::vector<std::complex<double>> out(SpinCoefficientSize(N));
+    ExpandSpin(N, field, out);
+    return out;
+  }
+
+  /// Inverse transform of spin-N coefficients back to grid values.
+  void SynthesiseSpin(int N, std::span<const std::complex<double>> coefficients,
+                      std::span<std::complex<double>> field) const {
+    grid_.InverseTransformation(lmax_, N, coefficients, field, Policy());
+  }
+  [[nodiscard]] std::vector<std::complex<double>> SynthesiseSpin(
+      int N, std::span<const std::complex<double>> coefficients) const {
+    std::vector<std::complex<double>> out(FieldSize());
+    SynthesiseSpin(N, coefficients, out);
+    return out;
+  }
+
   /// int f dOmega over the unit sphere, by the grid's quadrature (exact
   /// for fields band-limited at the grid's resolution).
   [[nodiscard]] double Integrate(std::span<const double> field) const {

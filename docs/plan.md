@@ -375,7 +375,13 @@ GB of viscous-element state.
   agreement between algebraically identical codes checks the port, but
   what the community values is independent implementations with
   *different* discretisations agreeing at observational accuracy — the
-  Gauss-point variant adds exactly such an axis, cheaply.
+  Gauss-point variant adds exactly such an axis, cheaply. Kernels fit the
+  reduced set naturally: the viscosity kernel is accumulated pointwise at
+  the memory points and integrated with the matching (equally exact)
+  rule, and the machine-precision discrete-adjoint identity is a property
+  of the discretisation's self-consistency, not of the point set — the
+  one discipline being that τ, the step weights, their h-derivatives and
+  the kernel accumulators all migrate to the Gauss points together.
 
 ## 6. Staging
 
@@ -471,6 +477,15 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
 - **15 Oct 2026** — Elastic sea-level fingerprints are a first-class public
   capability (stage 2), pyslfp-shaped, so sl3dpp can later serve as a faster
   pyslfp backend; the binding itself is outside this plan (§1).
+- **15 Oct 2026** — Stage-4 design recorded in `docs/stage4.md`: the five
+  canonical spin components, the degree ↔ spin maps and memory-force rows
+  extracted from the Fortran; the toroidal degree operator added to
+  stage-4 scope in its TI form (Myhill & Al-Attar, verified against
+  DSpecM1D); nonlinear Maxwell rheologies (stress-dependent τ, AdGIA's
+  `RelaxationLaw`, Crawford et al. 2017 App. A) added as a readily
+  buildable stage-4 option — the stress invariant comes from the grid
+  components the pipeline already carries, and the nonlinearity folds
+  into the same within-step fixed point.
 - **15 Oct 2026** — Stage-2 gate calibration: with everything band-limited
   (smooth ocean override) the SLE solutions agree with pyslfp at ~2e-9 in
   coefficient space; with the sharp flotation ocean function the solution
