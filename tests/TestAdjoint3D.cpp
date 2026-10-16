@@ -273,3 +273,112 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     previousError = error;
   }
 }
+
+TEST(Adjoint3D, TaylorRemainderConvergence) {
+  // The canonical Taylor test of the 3D log-viscosity kernel: along an
+  // analytic direction p, the zeroth remainder |J(delta + h p) - J|
+  // falls at O(h) while the gradient-corrected remainder
+  // |J(delta + h p) - J - h <K, p>| falls at O(h^2) — until it meets
+  // the continuous formulation's commute floor (h times the
+  // discretise/transpose error), where the observed order relaxes
+  // towards one. The machine-grade version of this test (second order
+  // to solver precision) belongs to the discrete 3D transpose.
+  auto scene = Scene::Make(1e22);
+  const auto& scales = scene.solver.SolverScales();
+  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  constexpr std::size_t npts = 9;
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto direction = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto load = scene.MeltLoad(-0.1);
+  std::vector<double> times;
+  for (std::size_t n = 0; n < npts; ++n) {
+    times.push_back(10.0 * static_cast<double>(n) /
+                    static_cast<double>(npts - 1) * kyr);
+  }
+  auto iceLoad = [&](double t) {
+    std::vector<double> out(load.size());
+    const double ramp = t / times.back();
+    for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+    return out;
+  };
+  std::map<std::size_t, Measurement> measurements;
+  measurements[npts - 1].seaLevelDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+
+  auto evaluate = [&](double h, Kernels3D* kernelsOut) -> double {
+    Viscoelastic3D op(scene.rheology, kLmax,
+                      [&](double r, double theta, double phi) {
+                        return baseDelta(r, theta, phi) +
+                               h * direction(theta, phi);
+                      });
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.rtol = 1e-12,
+         .coupled_rtol = 1e-12,
+         .record_stride = kernelsOut != nullptr ? 1 : 0});
+    auto snapshots = evolution.Run(times, iceLoad);
+    if (kernelsOut != nullptr) {
+      const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+      AdjointSolver3D adjoint(evolution,
+                              {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      *kernelsOut =
+          adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    }
+    return scene.Surface(measurements[npts - 1].seaLevelDual,
+                         snapshots.back().seaLevelChange);
+  };
+
+  Kernels3D kernels;
+  const double J0 = evaluate(0.0, &kernels);
+
+  // <K, p>: the angular-density pairing per memory node.
+  Viscoelastic3D probe(scene.rheology, kLmax,
+                       [](double, double, double) { return 0.0; });
+  const auto& coupling = probe.Coupling();
+  const auto& grid = coupling.Grid();
+  const auto p = grid.FromFunction(direction);
+  const auto gridF = grid.FieldSize();
+  double predicted = 0.0;
+  std::vector<double> product(gridF);
+  for (int rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto row =
+        std::span(kernels.logViscosityKernel3D[0])
+            .subspan(static_cast<std::size_t>(rn) * gridF, gridF);
+    for (std::size_t x = 0; x < gridF; ++x) product[x] = row[x] * p[x];
+    predicted += grid.Integrate(product);
+  }
+  ASSERT_NE(predicted, 0.0);
+
+  const std::vector<double> hs{0.2, 0.1, 0.05, 0.025};
+  std::vector<double> r0(hs.size()), r1(hs.size());
+  for (std::size_t i = 0; i < hs.size(); ++i) {
+    const double J = evaluate(hs[i], nullptr);
+    r0[i] = std::abs(J - J0);
+    r1[i] = std::abs(J - J0 - hs[i] * predicted);
+  }
+
+  // Zeroth order: the perturbation registers at O(h).
+  for (std::size_t i = 1; i < hs.size(); ++i) {
+    const double rate = std::log2(r0[i - 1] / r0[i]);
+    EXPECT_GT(rate, 0.8) << "R0 rates: " << r0[0] << " " << r0[1] << " "
+                         << r0[2] << " " << r0[3];
+    EXPECT_LT(rate, 1.3) << "R0 rate " << rate << " at h " << hs[i];
+  }
+  // Gradient-corrected: second order at the curvature-dominated end,
+  // and never worse than the commute floor anywhere.
+  const double firstRate = std::log2(r1[0] / r1[1]);
+  EXPECT_GT(firstRate, 1.5) << "R1: " << r1[0] << " " << r1[1] << " "
+                            << r1[2] << " " << r1[3]
+                            << " (predicted " << predicted << ")";
+  for (std::size_t i = 0; i < hs.size(); ++i) {
+    EXPECT_LT(r1[i], 0.1 * hs[i] * std::abs(predicted))
+        << "commute floor exceeded at h " << hs[i];
+    if (i > 0) {
+      EXPECT_LT(r1[i], r1[i - 1]) << "R1 not decreasing at h " << hs[i];
+    }
+  }
+}

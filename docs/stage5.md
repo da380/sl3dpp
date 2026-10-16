@@ -213,7 +213,63 @@ reduction equal the 1D continuous sweep's at 1e-6 through the whole
 pipeline; lateral — the full 3D log-viscosity kernel against central
 differences of the coupled forward along an analytic direction, at the
 commute level (< 10%) in the resolved regime and improving under step
-refinement.
+refinement; and the canonical TAYLOR TEST (added 16 Oct 2026 at
+David's prompt): |J(δ+hp) − J| = O(h) and the gradient-corrected
+remainder |J(δ+hp) − J − h⟨K,p⟩| at second order on the
+curvature-dominated end of the h-sweep, monotone, and inside the
+commute floor (0.1·h·|⟨K,p⟩|) everywhere. The machine-grade Taylor
+test — second order to solver precision at every h — belongs to the
+discrete transpose (5e).
+
+## 6b. The discrete 3D transpose: design (16 Oct 2026, to implement)
+
+The step is LINEAR throughout, so its exact transpose is mechanical
+once the pairings are fixed. Write the forward within-step pass (the
+code of Evolution3D::Run and OpenStep) as d' = Exit K⁻¹ [Entry(m̃ +
+Δβ d) + units·closure(f, S K⁻¹ Entry(...))] with
+- Entry(T) = SpheroidalForce/ToroidalForce(Analyse(μ_k-scaled T)) — the
+  grid entry with branch moduli,
+- Exit(u) = Synthesise(AddStrainOfSolution(u)) — the strain exit,
+- K the reference effective systems (symmetric), S the surface reads,
+  closure the (linear) generalised SLE, Δβ = diag(β_k(x) − β_ref_k(r)).
+
+**The load-bearing duality**: Entry = Exitᵀ under the ENERGY pairing
+⟨S, T⟩_W0 = Σ_node Wq(node) · r² [12 S₀T₀ + 8 Re(S₋₁T̄₋₁) +
+4 Re(S₋₂T̄₋₂)] on the reduced components against the REAL dof pairing
+with m ≥ 0 column weights (1, 2, 2, ...) — the SAME metric the
+continuous kernel contraction derived from the 1D force weights, and
+which the zero-lateral kernel gate already validated. With duals
+carried in this pairing, the transposed pass is the forward pass with
+the force/strain pair swapped and the SLE replaced by its stage-2
+adjoint:
+
+  passᵀ(y): x† = Entry-with-Δβμ-weights(y) … K⁻¹ (symmetric) …
+            unit-response contraction → SLE ADJOINT → surface-dual +
+            moment-row injections → K⁻¹ … Exit → Δβ-weighted tensor.
+
+The transposed step: w = d† + Σ_k β_k(x) m†_k; solve y = Mᵀy + w by the
+SAME Anderson-mixed iteration (the transpose of the converged fixed
+point is the transposed system's solution, as the SLE adjoint already
+does); then one application of the constant part's transpose yields
+m̃†_k (→ the e/α recursion closing m† and d†, pointwise fields) and the
+node's load dual; the measurement duals enter the forcing w through one
+SLE-adjoint chain per node, as in the 1D discrete sweep.
+
+**Implementation order, micro-gated** (each pinned by a randomized
+adjointness identity at lmax 4 with Hermitian data BEFORE the next
+layer — the reduced pipeline's ±m bookkeeping lives inside
+Scatter/Gather and must be verified, not trusted):
+  i.   ⟨Exit(x), y⟩_W0 = ⟨x, Entry(W0-images of y)⟩_dof — the
+       force/strain duality with every quadrature factor;
+  ii.  the pass transpose: ⟨dNext(d), y⟩_W0 = ⟨d, passᵀ(y)⟩_W0 with
+       the SLE closure in the loop (random smooth state);
+  iii. the single-step transpose: the dot-product identity of one
+       coupled Step against (m†, d†) duals;
+  iv.  the sweep: gradient identity at solver tolerance (the forward's
+       coupled_rtol is the floor), zero-lateral == the 1D DISCRETE
+       sweep, machine-grade Taylor test (second order at every h), and
+       the continuous-vs-discrete contrast ladder (the §5a-style
+       research measurement).
 
 ## 7. Implementation order and gates
 
