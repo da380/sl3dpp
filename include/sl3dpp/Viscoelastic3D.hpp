@@ -129,6 +129,12 @@ class Viscoelastic3D {
                                        const LoadCallable3D& load = {},
                                        const LoadCallable3D& tide = {}) const;
 
+  /// Ensures the state carries a strain cache consistent with (m, t)
+  /// under the given loads, solving once if not (the 1D operator's
+  /// PrimeStrain; a recording run needs the start node's cache).
+  void PrimeStrain(State& state, const LoadCallable3D& load = {},
+                   const LoadCallable3D& tide = {}) const;
+
   struct StepInfo {
     int iterations = 0;
     double residual = 0.0;
@@ -206,6 +212,8 @@ class Viscoelastic3D {
                                    const LoadCallable3D& tide = {}) const;
 
  private:
+  friend class AdjointSolver3D;  // the sweeps transpose these internals
+
   struct Flavour;  // reference effective systems per (scheme, dt)
 
   [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;

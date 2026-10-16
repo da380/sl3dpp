@@ -1,0 +1,106 @@
+#pragma once
+
+/**
+ * @file Adjoint3D.hpp
+ * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
+ * evolution by the CONTINUOUS adjoint — the preferred path (stage5.md
+ * §1, §6): ice-history kernels, and the full 3D inverse-relaxation-time
+ * kernel on the (memory node × angular grid) together with its
+ * spherical reduction. The discrete transpose of the reduced pipeline
+ * is stage 5e, to follow.
+ *
+ * The continuous adjoint equations have the forward problem's form, so
+ * between observations the adjoint state is stepped by the SAME coupled
+ * machinery as a zero-ice-load forward run in reversed time — the
+ * within-step lateral fixed point included — with the finite jump
+ * m-dagger += itau(x) d-tilde-dagger of the instantaneous (unrelaxed,
+ * laterally uniform) adjoint fingerprint at each observation.
+ *
+ * The viscosity kernel is the pointwise multiplier integral: per branch
+ * and memory node, the null-basis tensor contraction of the adjoint
+ * state with the forward (d - m), over itau, with the branch modulus
+ * and radial quadrature — the metric weights are fixed by requiring the
+ * angle-uniform limit to reproduce the (gated) 1D force weights
+ * (4/3, k^2, k^2 (k^2 - 2)) exactly, which is also the zero-lateral
+ * gate's identity.
+ *
+ * Conventions follow Adjoint.hpp: times increasing in SLE units,
+ * measurements keyed by node index, duals paired by the surface
+ * integral; itau in MATERIAL units.
+ */
+
+#include <map>
+#include <optional>
+#include <span>
+#include <vector>
+
+#include "sl3dpp/Adjoint.hpp"
+#include "sl3dpp/Evolution3D.hpp"
+
+namespace sl3dpp {
+
+/// A recorded 3D forward trajectory. No backward reconstruction exists
+/// for the grid state yet, so the viscosity kernels need every node
+/// stored (a run with record_stride = 1).
+struct ForwardTrajectory3D {
+  std::vector<std::optional<Viscoelastic3D::State>> states;
+  std::vector<std::vector<std::complex<double>>> loads;
+  std::vector<std::vector<std::complex<double>>> tides;
+
+  [[nodiscard]] static ForwardTrajectory3D FromSnapshots(
+      std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
+};
+
+/**
+ * @brief The 3D kernels. `ice` carries the ice-history views exactly as
+ * the 1D IceKernels does.
+ *
+ * `itauKernel3D[k][node * FieldSize + x]` is dJ / d itau(x) for branch
+ * k as an ANGULAR DENSITY on the coupling's (oversampled) grid at each
+ * radial memory node: dJ = sum_node int K delta-itau dOmega, the radial
+ * quadrature folded in as in the 1D nodal pairing; itau in material
+ * units. `itauKernelSpherical[k][node]` is its angular integral — it
+ * pairs with angle-uniform perturbations exactly as the 1D
+ * AdjointSolver's nodal kernel does at that (element, gll) node, which
+ * is the zero-lateral bridge between the two. `logViscosityKernel3D` is
+ * dJ / d delta(x) for the operator's log-viscosity perturbation
+ * (eta = eta_ref exp(delta), so itau = itau_ref exp(-delta)):
+ * -itau(x) itauKernel3D(x), same layout. All empty unless a trajectory
+ * was supplied.
+ */
+struct Kernels3D {
+  IceKernels ice;
+  std::vector<std::vector<double>> itauKernel3D;
+  std::vector<std::vector<double>> itauKernelSpherical;
+  std::vector<std::vector<double>> logViscosityKernel3D;
+};
+
+class AdjointSolver3D {
+ public:
+  struct Options {
+    /// The per-solve tolerance of the SLE solves.
+    double rtol = 1e-9;
+    int anderson_memory = 5;
+    /// The within-step lateral fixed point of the reversed steps.
+    int max_coupled_iterations = 60;
+    double coupled_rtol = 1e-9;
+  };
+
+  explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution,
+                           Options options);
+  explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution)
+      : AdjointSolver3D(evolution, Options{}) {}
+
+  /// The continuous-adjoint kernels over the forward time grid; with a
+  /// fully recorded `trajectory` the viscosity kernels are carried too.
+  [[nodiscard]] Kernels3D IceHistoryKernels(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory3D* trajectory = nullptr) const;
+
+ private:
+  const SeaLevelEvolution3D* evolution_;
+  Options options_;
+};
+
+}  // namespace sl3dpp

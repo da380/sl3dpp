@@ -179,6 +179,42 @@ dual by the dot product; densities/rates are per unit SLE time.
   over lateral contrast (the resolution diagnostic in action — a
   research measurement alongside stage 4's §5a table).
 
+## 6a. The 3D continuous sweep as built (16 Oct 2026)
+
+`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (continuous only; the discrete
+transpose remains 5e), `ForwardTrajectory3D` (full recording via
+`SeaLevelEvolution3D::Options::record_stride` — no 3D backward
+reconstruction yet, so the viscosity kernels demand stride 1), and
+`Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, an
+ANGULAR DENSITY over memory node × coupling grid, radial quadrature
+folded in), its angular integral `itauKernelSpherical` (the 1D bridge),
+and `logViscosityKernel3D` = −itau(x)·K (the operator's delta
+parameterisation).
+
+The pieces, each mirroring a gated 1D counterpart:
+- the observation JUMP is the 1D one (the unrelaxed problem is
+  laterally uniform): the elastic adjoint fingerprint's channels drive
+  the reference unit/split responses, the strain enters the pipeline
+  via `AddStrainOfSolution` + `Synthesise`, and
+  m† += itau(x)·d̃†(x) pointwise with the laterally varying itau;
+- between observations the reversed stepping is Evolution3D's coupled
+  pass loop verbatim with no ice load (`OpenStep::Respond` /
+  `AddChannels` / `StrainOf` / `Finish` under the Anderson mixer);
+- the kernel contraction's null-basis metric is FIXED by the 1D limit:
+  on the reduced storage, C(x) = r²·[12·A₀B₀ + 8 Re(A₋₁B̄₋₁) +
+  4 Re(A₋₂B̄₋₂)] — derived by requiring the angle-uniform Parseval
+  reduction to reproduce the force weights (4/3, k², k²(k²−2)) through
+  `ComponentsFromScalars`, and verified by the zero-lateral gate;
+- the covariant pairing ratio of the 1D sweep (the pyslfp
+  units-covariance fix) carries over unchanged.
+
+GATES (TestAdjoint3D): zero-lateral — ice kernels and the spherical
+reduction equal the 1D continuous sweep's at 1e-6 through the whole
+pipeline; lateral — the full 3D log-viscosity kernel against central
+differences of the coupled forward along an analytic direction, at the
+commute level (< 10%) in the resolved regime and improving under step
+refinement.
+
 ## 7. Implementation order and gates
 
 a. **Discrete 1D sweep** (ice kernels, full Measurement). GATES:

@@ -98,6 +98,9 @@ class GridCoupling {
   [[nodiscard]] double RadiusOfNode(int node) const {
     return nodes_[node].radius;
   }
+  [[nodiscard]] int NodeInElementOf(int node) const {
+    return nodes_[node].nodeInElement;
+  }
 
   // -- tensors, grid and spectral
   // ----------------------------------------------

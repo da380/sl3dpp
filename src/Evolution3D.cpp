@@ -105,6 +105,8 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     return found->second;
   };
 
+  const auto stride = options_.record_stride;
+  const auto lastNode = times.size() - 1;
   vstate_ = op.ZeroState();
   vstate_.t = times[0] * toMatTime_;
 
@@ -130,9 +132,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
                  ? grid.ZeroCoefficients()
                  : solver.CentrifugalCoefficients(response.angularVelocity);
 
+  if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma, toMatDensity_),
+                                 Columns(psi, toMatPotential_));
+
   std::vector<Snapshot> snapshots;
   auto record = [&](double t, SeaLevelSolver::Response& r, int iterations,
-                    double residual, bool converged) {
+                    double residual, bool converged, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
     snapshot.seaLevelChange = std::move(r.seaLevelChange);
@@ -142,9 +147,14 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     snapshot.coupledIterations = iterations;
     snapshot.coupledResidual = residual;
     snapshot.converged = converged;
+    if (keepState) snapshot.internalState = vstate_;
+    if (stride > 0) {
+      snapshot.loadCoefficients = sigma;
+      snapshot.tideCoefficients = psi;
+    }
     snapshots.push_back(std::move(snapshot));
   };
-  record(times[0], response, 0, 0.0, true);
+  record(times[0], response, 0, 0.0, true, stride > 0);
 
   for (std::size_t node = 1; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
@@ -228,7 +238,8 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
       }
     }
     vstate_ = step.Finish(std::move(d));
-    record(times[node], response, iterations, residual, converged);
+    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
+    record(times[node], response, iterations, residual, converged, keep);
   }
   return snapshots;
 }

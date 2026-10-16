@@ -293,6 +293,15 @@ const ToroidalOperator& Viscoelastic3D::FlavourToroidal(Flavour& flavour,
   return *found->second;
 }
 
+void Viscoelastic3D::PrimeStrain(State& state, const LoadCallable3D& load,
+                                 const LoadCallable3D& tide) const {
+  if (state.strain.has_value()) return;
+  state.strain = StrainField(
+      SolveElastic(state, load, tide),
+      [&](int l) -> const DegreeOperator& { return Spheroidal(l); },
+      [&](int l) -> const ToroidalOperator& { return Toroidal(l); });
+}
+
 Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
     const LoadCallable3D& tide) const {

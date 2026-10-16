@@ -49,6 +49,12 @@ class SeaLevelEvolution3D {
     /// The combined (strain) fixed point.
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
+    /// Keep every stride-th node's internal state on its snapshot (and
+    /// the last; 0 keeps none); the per-node load and centrifugal
+    /// coefficients are kept whenever the stride is set. (No 3D
+    /// backward reconstruction exists yet: a reverse sweep needs
+    /// stride 1.)
+    int record_stride = 0;
   };
 
   struct Snapshot {
@@ -60,6 +66,9 @@ class SeaLevelEvolution3D {
     int coupledIterations = 0;
     double coupledResidual = 0.0;
     bool converged = true;
+    std::optional<Viscoelastic3D::State> internalState;
+    std::vector<std::complex<double>> loadCoefficients;
+    std::vector<std::complex<double>> tideCoefficients;
   };
 
   /// The operator and solver are borrowed for the evolution's lifetime;
@@ -81,6 +90,8 @@ class SeaLevelEvolution3D {
   }
 
  private:
+  friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
+
   using Complex = std::complex<double>;
 
   /// A degree-column callable over m >= 0 coefficients, the negative

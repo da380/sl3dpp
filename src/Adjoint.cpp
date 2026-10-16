@@ -808,7 +808,20 @@ IceKernels AdjointSolver::ContinuousSweep(
     const auto meshSize = op.GetRheology().BranchAt(0).itau.size();
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
-  const double gMat = op.BaseMaterial().SurfaceGravity();
+  // The self-adjoint channel mapping poses the adjoint in the sea level
+  // equation's energy form on the MODEL surface (r^2, solver units),
+  // while the jump drives the unit-response machinery whose load
+  // pairing lives on the MATERIAL surface (g a^2, material units); the
+  // carried state is the true multiplier times the ratio of the two
+  // pairings. The ratio is dimensionless but not 1 even in matched
+  // frames (the solver's sea-floor radius differs from the surface) —
+  // pyslfp's units-covariance fix of 16 Oct 2026, mirrored here.
+  const auto& matMesh = op.BaseMaterial().Mesh();
+  const double aMat =
+      matMesh.Radius(matMesh.ElementCount() - 1, matMesh.NGll() - 1);
+  const double pairing =
+      r2 * ev.toNdLength_ /
+      (aMat * aMat * ev.toMatDensity_ * op.BaseMaterial().SurfaceGravity());
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (!cursor.has_value() || weight == 0.0) return;
     const auto& fwd = cursor->State(node);
@@ -843,7 +856,7 @@ IceKernels AdjointSolver::ContinuousSweep(
               }
             }
             itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.ngll +
-                          q] += weight * sum / (itau * gMat);
+                          q] += pairing * weight * sum / itau;
           }
         }
       }
@@ -938,9 +951,17 @@ IceKernels AdjointSolver::AssembleViews(
     std::span<const double> times, std::vector<std::vector<double>> loadDuals,
     std::vector<std::vector<double>> density,
     std::map<std::size_t, std::vector<double>> lumps) const {
-  const auto& ev = *evolution_;
-  const auto& C = ev.state_.oceanFunction;
-  const double rhoI = ev.solver_->IceDensity();
+  return detail::AssembleIceViews(evolution_->state_.oceanFunction,
+                                  evolution_->solver_->IceDensity(), times,
+                                  std::move(loadDuals), std::move(density),
+                                  std::move(lumps));
+}
+
+IceKernels detail::AssembleIceViews(
+    std::span<const double> C, double rhoI, std::span<const double> times,
+    std::vector<std::vector<double>> loadDuals,
+    std::vector<std::vector<double>> density,
+    std::map<std::size_t, std::vector<double>> lumps) {
   const auto fieldSize = loadDuals.front().size();
 
   auto ground = [&](const std::vector<double>& f) {

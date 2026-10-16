@@ -40,7 +40,7 @@ cd build/examples
 ./ExampleFingerprint        # ~a second (lmax 256)
 ./ExampleEvolution          # ~a minute (lmax 128, 31 steps)
 ./ExampleLateralViscosity   # ~a minute (lmax 16, the 3D fixed point)
-./ExampleIceKernels         # ~seconds (lmax 32, two reverse sweeps)
+./ExampleIceKernels        # ~a minute (lmax 128, two reverse sweeps)
 
 # 3. One-off: create the plotting environment HERE (not in the source).
 poetry install --no-root

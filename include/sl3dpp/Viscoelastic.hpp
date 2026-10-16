@@ -204,7 +204,8 @@ class ViscoelasticOperator {
 
  private:
   friend class ViscoelasticStep;
-  friend class AdjointSolver;  // the sweeps transpose these internals
+  friend class AdjointSolver;    // the sweeps transpose these internals
+  friend class AdjointSolver3D;  // and the 3D continuous sweep's jump
 
   /// Per-degree workspace: the unrelaxed system, strain operators and
   /// branch data restricted to the degree's element subset
