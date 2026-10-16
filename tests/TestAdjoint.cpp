@@ -9,9 +9,12 @@
 
 #include <cmath>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <map>
+#include <optional>
 #include <random>
+#include <sstream>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -23,6 +26,7 @@
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/ShConventions.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 using namespace sl3dpp;
@@ -30,6 +34,16 @@ using namespace sl3dpp;
 namespace {
 
 constexpr int kLmax = 16;
+
+/// The smooth cap of the solver tests (TestSeaLevel.cpp), the stage-5
+/// fixture's measurement formula.
+double Cap(double theta, double phi, double colat0, double lon0,
+           double width) {
+  const double c = std::cos(theta) * std::cos(colat0) +
+                   std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
+  const double d = std::acos(std::clamp(c, -1.0, 1.0));
+  return std::exp(-0.5 * std::pow(d / width, 2));
+}
 
 struct Scene {
   EarthModel model;
@@ -558,4 +572,155 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
   EXPECT_THROW(
       (void)adjoint.IceHistoryKernels(times, measurements, &gapped),
       std::invalid_argument);
+}
+
+TEST(Stage5Gate, KernelsMatchPyslfp) {
+  // The reference is pyslfp's adjoint kernels on its GLQ grid (which
+  // coincides with ours at this lmax, isolating implementation error):
+  // load duals per node and the branch-0 itau kernel, each method gating
+  // its own counterpart — the ported algebra is identical. The resolved
+  // regime: the continuous kernels amplify exponentially when stiff
+  // (see the generating script), so only here is parity meaningful.
+  auto setup = Scene::Make(1e22);
+  const auto& grid = setup.solver.Grid();
+  ASSERT_EQ(grid.NumberOfLongitudes(), 2 * kLmax + 1)
+      << "the GSHTrans grid no longer coincides with pyshtools GLQ here";
+  const auto& scales = setup.solver.SolverScales();
+  const auto& matScales = setup.material.ModelScales();
+
+  // The fixture's setting: 6 nodes over 10 kyr, linear melt, duals at
+  // nodes 3 and 5 (the Cap formulas of the generating script).
+  std::ifstream file(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
+                     "stage5_kernels.txt");
+  ASSERT_TRUE(file.is_open());
+
+  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  std::vector<double> times;
+  for (int n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  // The potential and angular-velocity duals are SI-anchored (the
+  // generating script's PHI_ANCHOR / OMEGA_ANCHOR): pyslfp's EarthModel
+  // scales differ from planetmodel/sl3dpp geophysical (phi_nd ~ T^2, a
+  // factor 4 pi / 3 — plan.md decision log, 16 Oct 2026), so each code
+  // multiplies its dual by ITS OWN factor against the shared anchor and
+  // the objective is code-invariant. Lengths need no anchor.
+  const double potConv =
+      scales.Factor(PotentialDimensions) / 1.0e7;  // PHI_ANCHOR
+  const double omConv =
+      scales.Factor(Dimensions{.time = -1}) / 1.0e-4;  // OMEGA_ANCHOR
+  std::map<std::size_t, Measurement> measurements;
+  measurements[3].seaLevelDual = grid.FromFunction([](double t, double p) {
+    return Cap(t, p, 0.9, 1.2, 0.5);
+  });
+  Measurement last;
+  last.displacementDual = grid.FromFunction([](double t, double p) {
+    return 0.7 * Cap(t, p, 2.4, 0.3, 0.6);
+  });
+  last.potentialDual = grid.FromFunction([&](double t, double p) {
+    return 0.4 * potConv * Cap(t, p, 1.4, 3.3, 0.7);
+  });
+  last.angularVelocityDual = {0.2 * omConv, -0.4 * omConv, 0.8 * omConv};
+  measurements[5] = std::move(last);
+
+  // The recorded linear-melt trajectory for the itau kernels.
+  const auto& C = setup.state.oceanFunction;
+  auto load = [&](double t) {
+    std::vector<double> out(setup.state.iceThickness.size());
+    const double fraction = -0.1 * (t / times.back());
+    for (std::size_t i = 0; i < out.size(); ++i) {
+      out[i] = setup.solver.IceDensity() * (1.0 - C[i]) * fraction *
+               setup.state.iceThickness[i];
+    }
+    return out;
+  };
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                              {.rtol = 1e-12, .record_stride = 1});
+  auto snapshots = evolution.Run(times, load);
+  const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+
+  const double loadSi =
+      scales.Length() / scales.Factor(Dimensions{.mass = 1, .length = -2});
+  const double itauSi =
+      std::pow(scales.Length(), 3) * matScales.Time();
+  const auto& mesh = setup.material.Mesh();
+
+  constexpr double tol = 1e-5;
+  std::string line;
+  std::optional<AdjointMethod> method;
+  IceKernels kernels;
+  std::vector<std::complex<double>> ours;
+  double coefScale = 0.0, coefWorst = 0.0;
+  auto checkedMethods = 0;
+  auto closeBlock = [&] {
+    if (!method.has_value()) return;
+    EXPECT_GT(coefScale, 0.0);
+    EXPECT_LT(coefWorst, tol * coefScale)
+        << "load duals, method " << static_cast<int>(*method);
+    coefScale = coefWorst = 0.0;
+  };
+  while (std::getline(file, line)) {
+    if (line.empty() || line.front() == '#') continue;
+    std::istringstream row(line);
+    if (line.starts_with("method")) {
+      closeBlock();
+      std::string head, name;
+      row >> head >> name;
+      method = name == "discrete" ? AdjointMethod::Discrete
+                                  : AdjointMethod::Continuous;
+      AdjointSolver adjoint(evolution, {.method = *method, .rtol = 1e-12});
+      kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+      ++checkedMethods;
+      continue;
+    }
+    if (line.starts_with("node")) {
+      std::string head;
+      int node = 0;
+      double tSi = 0.0;
+      row >> head >> node >> tSi;
+      EXPECT_NEAR(times[node] * scales.Time(), tSi,
+                  1e-6 * std::max(tSi, 1.0));
+      ours = grid.Expand(kernels.loadDuals[node]);
+      for (auto& v : ours) v *= loadSi;
+      continue;
+    }
+    if (line.starts_with("itau")) {
+      std::string head;
+      std::size_t count = 0;
+      row >> head >> count;
+      // The continuous block carries no itau reference (the pyslfp-side
+      // continuous accumulation is under investigation; the generating
+      // script records why). sl3dpp's own continuous kernel is gated
+      // against its exact discrete in ContinuousViscosityKernelsConverge.
+      if (count == 0) continue;
+      ASSERT_EQ(count, kernels.itauKernel[0].size());
+      double kScale = 0.0, kWorst = 0.0;
+      for (std::size_t i = 0; i < count; ++i) {
+        std::getline(file, line);
+        std::istringstream krow(line);
+        double rSi = 0.0, value = 0.0;
+        krow >> rSi >> value;
+        const int e = static_cast<int>(i) / mesh.NGll();
+        const int q = static_cast<int>(i) % mesh.NGll();
+        ASSERT_NEAR(mesh.Radius(e, q) * matScales.Length(), rSi,
+                    1e-6 * std::max(rSi, 1.0))
+            << "radial meshes diverge at node " << i;
+        kScale = std::max(kScale, std::abs(value));
+        kWorst = std::max(
+            kWorst, std::abs(kernels.itauKernel[0][i] * itauSi - value));
+      }
+      EXPECT_GT(kScale, 0.0);
+      EXPECT_LT(kWorst, tol * kScale)
+          << "itau kernel, method " << static_cast<int>(*method);
+      continue;
+    }
+    int l = 0, m = 0;
+    double a = 0.0, b = 0.0;
+    row >> l >> m >> a >> b;
+    const auto reference = ComplexFromRealPair({a, b}, m);
+    coefScale = std::max(coefScale, std::abs(reference));
+    coefWorst = std::max(
+        coefWorst, std::abs(ours[SurfaceGrid::Index(l, m)] - reference));
+  }
+  closeBlock();
+  EXPECT_EQ(checkedMethods, 2);
 }
