@@ -82,6 +82,8 @@ class SeaLevelEvolution {
   [[nodiscard]] const ViscoelasticState& FinalState() const { return vstate_; }
 
  private:
+  friend class AdjointSolver;  // reuses the operator/solver/state/ratios
+
   /// A degree-column callable over a coefficient vector in material
   /// units: degree l maps to its 2 (l + 1) columns, the real block then
   /// the imaginary block of orders 0..l.

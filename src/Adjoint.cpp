@@ -1,0 +1,984 @@
+#include "sl3dpp/Adjoint.hpp"
+
+#include <algorithm>
+#include <cmath>
+#include <format>
+#include <stdexcept>
+
+#include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/ViscoelasticDegree.hpp"
+
+namespace sl3dpp {
+
+namespace {
+
+using Complex = std::complex<double>;
+
+/// The transpose of SeaLevelEvolution::Columns under the plain per-column
+/// pairing on the degree side and the L2 coefficient pairing of real
+/// fields on the other: per-degree column duals to a coefficient dual.
+/// The pairing weights m > 0 twice, so those entries halve; the m = 0
+/// imaginary column pairs with nothing (real fields) and is dropped.
+std::vector<Complex> CoefficientDualFromColumnDuals(
+    const SurfaceGrid& grid, const std::map<int, std::vector<double>>& duals,
+    double factor) {
+  auto out = grid.ZeroCoefficients();
+  for (const auto& [l, cols] : duals) {
+    out[SurfaceGrid::Index(l, 0)] = factor * cols[0];
+    for (int m = 1; m <= l; ++m) {
+      out[SurfaceGrid::Index(l, m)] =
+          0.5 * factor * Complex(cols[m], cols[static_cast<std::size_t>(l) + 1 + m]);
+    }
+  }
+  return out;
+}
+
+/// The transpose of SeaLevelEvolution::Coefficients: a coefficient dual
+/// to one degree's column duals (the m > 0 entries doubled by the
+/// pairing).
+std::vector<double> ColumnDualsOf(std::span<const Complex> dual, int l,
+                                  double factor) {
+  std::vector<double> cols(2 * (static_cast<std::size_t>(l) + 1), 0.0);
+  cols[0] = factor * dual[SurfaceGrid::Index(l, 0)].real();
+  for (int m = 1; m <= l; ++m) {
+    const auto d = dual[SurfaceGrid::Index(l, m)];
+    cols[m] = 2.0 * factor * d.real();
+    cols[static_cast<std::size_t>(l) + 1 + m] = 2.0 * factor * d.imag();
+  }
+  return cols;
+}
+
+/// The trapezoid weights of the time grid.
+std::vector<double> NodeWeights(std::span<const double> times) {
+  std::vector<double> w(times.size());
+  w.front() = 0.5 * (times[1] - times[0]);
+  w.back() = 0.5 * (times[times.size() - 1] - times[times.size() - 2]);
+  for (std::size_t n = 1; n + 1 < times.size(); ++n) {
+    w[n] = 0.5 * (times[n + 1] - times[n - 1]);
+  }
+  return w;
+}
+
+void CheckGrids(const Measurement& m, std::size_t fieldSize,
+                std::size_t node) {
+  for (const auto* f :
+       {&m.seaLevelDual, &m.displacementDual, &m.potentialDual}) {
+    if (!f->empty() && f->size() != fieldSize) {
+      throw std::invalid_argument(std::format(
+          "the measurement at node {} does not live on the solver grid",
+          node));
+    }
+  }
+}
+
+/// Serves the forward internal states to a reverse sweep, strictly
+/// backwards: stored states where the recording kept them, exact backward
+/// steps under the recorded loads between.
+class TrajectoryCursor {
+ public:
+  TrajectoryCursor(const ViscoelasticOperator& op,
+                   const ForwardTrajectory& trajectory,
+                   std::vector<double> dts, Scheme scheme,
+                   std::function<LoadCallable(const std::vector<Complex>&)>
+                       loadOf,
+                   std::function<LoadCallable(const std::vector<Complex>&)>
+                       tideOf)
+      : op_(&op),
+        trajectory_(&trajectory),
+        dts_(std::move(dts)),
+        scheme_(scheme),
+        loadOf_(std::move(loadOf)),
+        tideOf_(std::move(tideOf)),
+        node_(trajectory.states.size() - 1),
+        state_(*trajectory.states.back()) {}
+
+  /// The forward state at a node, reconstructing as needed; the
+  /// reference stays valid until the next call.
+  const ViscoelasticState& State(std::size_t node) {
+    if (node > node_) {
+      throw std::logic_error("the trajectory cursor moves backwards");
+    }
+    while (node_ > node) {
+      const auto target = node_ - 1;
+      if (trajectory_->states[target].has_value()) {
+        state_ = *trajectory_->states[target];
+      } else {
+        auto [prev, solutions] =
+            op_->StepBack(state_, dts_[target], scheme_,
+                          loadOf_(trajectory_->loads[target]),
+                          tideOf_(trajectory_->tides[target]));
+        state_ = std::move(prev);
+      }
+      node_ = target;
+    }
+    return state_;
+  }
+
+ private:
+  const ViscoelasticOperator* op_;
+  const ForwardTrajectory* trajectory_;
+  std::vector<double> dts_;
+  Scheme scheme_;
+  std::function<LoadCallable(const std::vector<Complex>&)> loadOf_, tideOf_;
+  std::size_t node_;
+  ViscoelasticState state_;
+};
+
+}  // namespace
+
+ForwardTrajectory ForwardTrajectory::FromSnapshots(
+    std::span<const SeaLevelEvolution::Snapshot> snapshots) {
+  ForwardTrajectory out;
+  for (const auto& snapshot : snapshots) {
+    out.states.push_back(snapshot.internalState);
+    out.loads.push_back(snapshot.loadCoefficients);
+    out.tides.push_back(snapshot.tideCoefficients);
+  }
+  return out;
+}
+
+std::vector<std::vector<double>> IceKernels::Viscosity(
+    const Rheology& rheology) const {
+  if (itauKernel.empty()) {
+    throw std::invalid_argument(
+        "no itau kernels: run the adjoint with a forward trajectory");
+  }
+  std::vector<std::vector<double>> out;
+  for (std::size_t k = 0; k < rheology.BranchCount(); ++k) {
+    const auto& branch = rheology.BranchAt(k);
+    std::vector<double> kernel(itauKernel[k].size(), 0.0);
+    for (std::size_t i = 0; i < kernel.size(); ++i) {
+      if (branch.mu[i] > 0.0) {
+        kernel[i] =
+            -(branch.itau[i] * branch.itau[i]) / branch.mu[i] * itauKernel[k][i];
+      }
+    }
+    out.push_back(std::move(kernel));
+  }
+  return out;
+}
+
+AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
+                             Options options)
+    : evolution_(&evolution), options_(options) {}
+
+IceKernels AdjointSolver::IceHistoryKernels(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory* trajectory) const {
+  if (times.size() < 2) {
+    throw std::invalid_argument("times must hold at least two entries");
+  }
+  for (std::size_t i = 1; i < times.size(); ++i) {
+    if (times[i] <= times[i - 1]) {
+      throw std::invalid_argument("times must be increasing");
+    }
+  }
+  const auto& ev = *evolution_;
+  const auto fieldSize = ev.solver_->Grid().FieldSize();
+  for (const auto& [node, m] : measurements) {
+    if (node >= times.size()) {
+      throw std::invalid_argument(
+          std::format("measurement node {} is off the time grid", node));
+    }
+    CheckGrids(m, fieldSize, node);
+  }
+  if (trajectory != nullptr) {
+    if (trajectory->states.size() != times.size()) {
+      throw std::invalid_argument(
+          "the trajectory must give one entry per time node");
+    }
+    if (!trajectory->states.back().has_value() ||
+        !trajectory->states.back()->HasStrain()) {
+      throw std::invalid_argument(
+          "the trajectory must be recorded forward states (a run with "
+          "record_stride)");
+    }
+    bool gaps = false;
+    for (const auto& state : trajectory->states) {
+      if (!state.has_value()) {
+        gaps = true;
+      } else if (!state->HasStrain()) {
+        throw std::invalid_argument(
+            "the trajectory must be recorded forward states (a run with "
+            "record_stride)");
+      }
+    }
+    if (gaps && (trajectory->loads.size() != times.size() ||
+                 trajectory->tides.size() != times.size())) {
+      throw std::invalid_argument(
+          "a checkpointed trajectory needs the recorded load and "
+          "centrifugal coefficients: build it from the recording run's "
+          "snapshots");
+    }
+  }
+  if (ev.options_.rotation == RotationalFeedback::Full) {
+    // The forward run's stability condition (see SeaLevelEvolution::Run).
+    const auto kHyd = FluidTidalNumber(ev.op_->BaseMaterial(), 2);
+    if (ev.solver_->TransverseMarginFor(kHyd) <= 0.0) {
+      throw std::invalid_argument(
+          "the transverse rotational feedback is unstable; see "
+          "SeaLevelEvolution::Run");
+    }
+  }
+  return options_.method == AdjointMethod::Discrete
+             ? DiscreteSweep(times, measurements, trajectory)
+             : ContinuousSweep(times, measurements, trajectory);
+}
+
+// -- the discrete transpose
+// ---------------------------------------------------
+
+IceKernels AdjointSolver::DiscreteSweep(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory* trajectory) const {
+  const auto& ev = *evolution_;
+  const auto& op = *ev.op_;
+  const auto& solver = *ev.solver_;
+  const auto& grid = solver.Grid();
+  const auto scheme = ev.options_.scheme;
+  const bool implicit = scheme == Scheme::BackwardEuler;
+  const auto rotation = ev.options_.rotation;
+  const auto& C = ev.state_.oceanFunction;
+  const double rhoW = solver.WaterDensity();
+  const double r2 = solver.Radius() * solver.Radius();
+  const auto fieldSize = grid.FieldSize();
+  const int lmax = op.LMax();
+  const auto K = op.GetRheology().BranchCount();
+  const std::size_t N = times.size() - 1;
+
+  SeaLevelSolver::Options sleOptions;
+  sleOptions.rtol = options_.rtol;
+  sleOptions.anderson_memory = options_.anderson_memory;
+
+  // The flavoured solvers, as the forward run builds them (keyed by the
+  // material dt; 0 is the unrelaxed table).
+  std::map<double, SeaLevelSolver> flavours;
+  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+    auto found = flavours.find(dt);
+    if (found == flavours.end()) {
+      found = flavours
+                  .emplace(dt, SeaLevelSolver(
+                                   grid,
+                                   dt == 0.0 ? op.ElasticLoveNumbers()
+                                             : op.EffectiveLoveNumbers(
+                                                   ev.options_.scheme, dt),
+                                   solver.Parameters()))
+                  .first;
+    }
+    return found->second;
+  };
+
+  // The dual state: m-dagger per branch and d-dagger, the layouts of
+  // ViscoelasticState over every degree's 2 (l + 1) columns.
+  std::map<int, std::vector<double>> mdual, ddual;
+  for (int l = 0; l <= lmax; ++l) {
+    const auto& deg = op.Deg(l);
+    const int ncols = 2 * (l + 1);
+    mdual[l].assign(K * 3 * deg.NodalSize(ncols), 0.0);
+    ddual[l].assign(3 * deg.NodalSize(ncols), 0.0);
+  }
+
+  // The itau kernels pair the sweep's duals with the recorded forward
+  // trajectory through the scheme-weight derivatives — the exact
+  // discrete sensitivity.
+  std::optional<TrajectoryCursor> cursor;
+  std::vector<std::vector<double>> itauKernel;
+  if (trajectory != nullptr) {
+    std::vector<double> dts;
+    for (std::size_t m = 0; m + 1 < times.size(); ++m) {
+      dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
+    }
+    cursor.emplace(
+        op, *trajectory, std::move(dts), scheme,
+        [&ev](const std::vector<Complex>& c) {
+          return ev.Columns(c, ev.toMatDensity_);
+        },
+        [&ev](const std::vector<Complex>& c) {
+          return ev.Columns(c, ev.toMatPotential_);
+        });
+    const auto meshSize = op.GetRheology().BranchAt(0).itau.size();
+    itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
+  }
+
+  // The engine-adjoint inputs at a node: the measurement's duals plus
+  // those carried by the node's total-load and centrifugal coefficients.
+  auto engineDuals = [&](const std::vector<Complex>& sigmaDual,
+                         const std::vector<Complex>& psiDual,
+                         std::size_t node) {
+    SeaLevelSolver::AdjointForcing duals;
+    duals.rotation = rotation;
+    auto synth = grid.Synthesise(sigmaDual);
+    duals.seaLevelDual.assign(fieldSize, 0.0);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      duals.seaLevelDual[i] = rhoW * C[i] * synth[i] / r2;
+    }
+    std::array<double, 3> gOmega{0.0, 0.0, 0.0};
+    if (rotation != RotationalFeedback::None) {
+      gOmega = solver.CentrifugalDual(psiDual);
+    }
+    if (auto found = measurements.find(node); found != measurements.end()) {
+      const auto& m = found->second;
+      for (std::size_t i = 0; i < m.seaLevelDual.size(); ++i) {
+        duals.seaLevelDual[i] += m.seaLevelDual[i];
+      }
+      duals.displacementDual = m.displacementDual;
+      duals.potentialDual = m.potentialDual;
+      for (int j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
+    }
+    duals.angularVelocityDual = gOmega;
+    return std::pair(std::move(duals), std::move(synth));
+  };
+
+  std::vector<std::vector<double>> loadDuals(times.size());
+
+  for (std::size_t n = N; n >= 1; --n) {
+    const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
+    const auto& weights = op.SchemeWeightsOf(scheme, dt);
+    auto& flavour = op.FlavourOf(scheme, dt);
+
+    // The duals of the end-of-step solve, through the strain transpose,
+    // and their contraction with the unit responses: the duals of the
+    // step's load and tide coefficients.
+    std::map<int, std::vector<double>> xd;
+    std::map<int, std::vector<double>> sigCols, psiCols;
+    for (int l = 0; l <= lmax; ++l) {
+      const auto& deg = op.Deg(l);
+      const int ncols = 2 * (l + 1);
+      const std::size_t block = deg.NodalSize(ncols);
+      auto summed = ddual[l];
+      const auto& md = mdual[l];
+      for (std::size_t k = 0; k < K; ++k) {
+        const auto& w = weights[k];
+        for (int s = 0; s < 3; ++s) {
+          for (int e = 0; e < deg.ne; ++e) {
+            for (int q = 0; q < deg.ngll; ++q) {
+              const std::size_t full =
+                  static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+              const double b = implicit ? 1.0 - w.e[full] : w.beta[full];
+              const std::size_t node =
+                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+              const std::size_t at = (k * 3 + s) * block + node;
+              for (int c = 0; c < ncols; ++c) {
+                summed[s * block + node + c] += b * md[at + c];
+              }
+            }
+          }
+        }
+      }
+      auto x = deg.DualFromScalars(summed, ncols);
+      const auto& units = op.UnitResponses(&flavour, l);
+      std::vector<double> sc(ncols, 0.0), pc(ncols, 0.0);
+      for (int c = 0; c < ncols; ++c) {
+        double s = 0.0, p = 0.0;
+        for (int d = 0; d < deg.ndof; ++d) {
+          const double v = x[static_cast<std::size_t>(c) * deg.ndof + d];
+          s += units[d] * v;
+          p += units[static_cast<std::size_t>(deg.ndof) + d] * v;
+        }
+        sc[c] = s;
+        pc[c] = p;
+      }
+      sigCols.emplace(l, std::move(sc));
+      psiCols.emplace(l, std::move(pc));
+      xd.emplace(l, std::move(x));
+    }
+    const auto sigmaDual =
+        CoefficientDualFromColumnDuals(grid, sigCols, ev.toMatDensity_);
+    const auto psiDual =
+        CoefficientDualFromColumnDuals(grid, psiCols, ev.toMatPotential_);
+
+    auto [duals, synth] = engineDuals(sigmaDual, psiDual, n);
+    const auto adj = solverFor(dt).SolveAdjoint(ev.state_, duals, sleOptions);
+    if (!adj.converged) {
+      throw std::runtime_error(
+          std::format("the adjoint sea level solve at node {} did not "
+                      "converge (error {})",
+                      n, adj.error));
+    }
+    loadDuals[n].assign(fieldSize, 0.0);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      loadDuals[n][i] = adj.directLoadDual[i] + synth[i] / r2;
+    }
+
+    // The forward states this step's itau sensitivity pairs with.
+    const ViscoelasticState* fwdPrev = nullptr;
+    std::optional<ViscoelasticState> fwdN;
+    const std::vector<ViscoelasticOperator::BranchWeights>* dweights = nullptr;
+    if (cursor.has_value()) {
+      fwdN = cursor->State(n);  // copied before the cursor moves on
+      fwdPrev = &cursor->State(n - 1);
+      dweights = &op.SchemeWeightDerivativesOf(scheme, dt);
+    }
+
+    // The transposed radial update: one symmetric effective solve per
+    // degree, then the weight recursion closing m-dagger and d-dagger.
+    for (int l = 0; l <= lmax; ++l) {
+      const auto& deg = op.Deg(l);
+      const int ncols = 2 * (l + 1);
+      const std::size_t block = deg.NodalSize(ncols);
+      auto rhs = std::move(xd[l]);
+      const auto suCols =
+          ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
+      const auto sphiCols =
+          ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
+      const int su = deg.system.SurfaceDof(Component::U);
+      const int sphi = deg.system.SurfaceDof(Component::Phi);
+      for (int c = 0; c < ncols; ++c) {
+        if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
+        if (sphi >= 0) {
+          rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
+        }
+      }
+      if (l == 0) {
+        const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
+        for (int d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
+      }
+      const auto y = op.EffectiveSystem(flavour, l).Solve(rhs, ncols);
+      const auto sy = deg.Strain(y, ncols);
+      const auto wsy = deg.ApplyWeights(sy, ncols);
+      // The forward pairings of this degree's itau sensitivity.
+      const std::vector<double>* mPrev = nullptr;
+      const std::vector<double>* d0 = nullptr;
+      const std::vector<double>* d1 = nullptr;
+      std::vector<double> wd1;
+      if (cursor.has_value()) {
+        mPrev = &fwdPrev->m.at(l);
+        d0 = &fwdPrev->strain.at(l);
+        d1 = &fwdN->strain.at(l);
+        wd1 = deg.ApplyWeights(*d1, ncols);
+      }
+      auto& md = mdual[l];
+      auto& dd = ddual[l];
+      std::ranges::fill(dd, 0.0);
+      for (std::size_t k = 0; k < K; ++k) {
+        const auto& w = weights[k];
+        for (int s = 0; s < 3; ++s) {
+          for (int e = 0; e < deg.ne; ++e) {
+            for (int q = 0; q < deg.ngll; ++q) {
+              const std::size_t full =
+                  static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+              const std::size_t node =
+                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+              const std::size_t at = (k * 3 + s) * block + node;
+              for (int c = 0; c < ncols; ++c) {
+                const double mdOld = md[at + c];
+                const double mtilde = mdOld + wsy[at + c];
+                if (dweights != nullptr) {
+                  // The derivative of the step in h = dt itau pairs the
+                  // duals with the forward trajectory; dh = dt d(itau).
+                  const auto& dw = (*dweights)[k];
+                  const std::size_t sn = s * block + node + c;
+                  const double g =
+                      implicit
+                          ? (mtilde * (*mPrev)[at + c] - mdOld * (*d1)[sn] -
+                             wd1[at + c] * sy[sn]) *
+                                dw.e[full]
+                          : mtilde * (dw.e[full] * (*mPrev)[at + c] +
+                                      dw.alpha[full] * (*d0)[sn]) +
+                                (mdOld * (*d1)[sn] + wd1[at + c] * sy[sn]) *
+                                    dw.beta[full];
+                  itauKernel[k][full] += dt * g;
+                }
+                // backward Euler stores its weight 1/(1 + h) in e
+                md[at + c] = w.e[full] * mtilde;
+                if (!implicit) {
+                  dd[s * block + node + c] += w.alpha[full] * mtilde;
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // The start: the transposed instantaneous elastic solve at times[0].
+  {
+    std::map<int, std::vector<double>> sigCols, psiCols;
+    std::vector<Complex> sigmaDual, psiDual;
+    for (int l = 0; l <= lmax; ++l) {
+      const auto& deg = op.Deg(l);
+      const int ncols = 2 * (l + 1);
+      const auto x = deg.DualFromScalars(ddual[l], ncols);
+      const auto& units = op.UnitResponses(nullptr, l);
+      std::vector<double> sc(ncols, 0.0), pc(ncols, 0.0);
+      for (int c = 0; c < ncols; ++c) {
+        double s = 0.0, p = 0.0;
+        for (int d = 0; d < deg.ndof; ++d) {
+          const double v = x[static_cast<std::size_t>(c) * deg.ndof + d];
+          s += units[d] * v;
+          p += units[static_cast<std::size_t>(deg.ndof) + d] * v;
+        }
+        sc[c] = s;
+        pc[c] = p;
+      }
+      sigCols.emplace(l, std::move(sc));
+      psiCols.emplace(l, std::move(pc));
+    }
+    sigmaDual = CoefficientDualFromColumnDuals(grid, sigCols, ev.toMatDensity_);
+    psiDual = CoefficientDualFromColumnDuals(grid, psiCols, ev.toMatPotential_);
+    auto [duals, synth] = engineDuals(sigmaDual, psiDual, 0);
+    const auto adj = solverFor(0.0).SolveAdjoint(ev.state_, duals, sleOptions);
+    if (!adj.converged) {
+      throw std::runtime_error(
+          "the adjoint elastic sea level solve did not converge");
+    }
+    loadDuals[0].assign(fieldSize, 0.0);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      loadDuals[0][i] = adj.directLoadDual[i] + synth[i] / r2;
+    }
+  }
+
+  // The delta amplitudes: the instantaneous (unrelaxed) fingerprint
+  // adjoint of each measurement, independent of the time grid.
+  std::map<std::size_t, std::vector<double>> lumps;
+  for (const auto& [node, m] : measurements) {
+    SeaLevelSolver::AdjointForcing duals;
+    duals.rotation = rotation;
+    duals.seaLevelDual = m.seaLevelDual;
+    duals.displacementDual = m.displacementDual;
+    duals.potentialDual = m.potentialDual;
+    duals.angularVelocityDual = m.angularVelocityDual;
+    const auto adj = solverFor(0.0).SolveAdjoint(ev.state_, duals, sleOptions);
+    if (!adj.converged) {
+      throw std::runtime_error(
+          "the instantaneous adjoint fingerprint did not converge");
+    }
+    lumps.emplace(node, adj.directLoadDual);
+  }
+
+  // The continuous part of the distributional view: the node duals less
+  // the lumps, per unit time.
+  const auto w = NodeWeights(times);
+  std::vector<std::vector<double>> densityLoad(times.size());
+  for (std::size_t n = 0; n < times.size(); ++n) {
+    densityLoad[n].assign(fieldSize, 0.0);
+    const auto lump = lumps.find(n);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      const double lumped =
+          lump == lumps.end() ? 0.0 : lump->second[i];
+      densityLoad[n][i] = (loadDuals[n][i] - lumped) / w[n];
+    }
+  }
+
+  auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
+                           std::move(lumps));
+  out.itauKernel = std::move(itauKernel);
+  return out;
+}
+
+// -- the continuous adjoint, discretised
+// --------------------------------------
+
+IceKernels AdjointSolver::ContinuousSweep(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory* trajectory) const {
+  const auto& ev = *evolution_;
+  const auto& op = *ev.op_;
+  const auto& solver = *ev.solver_;
+  const auto& grid = solver.Grid();
+  const auto scheme = ev.options_.scheme;
+  const auto rotation = ev.options_.rotation;
+  const auto& C = ev.state_.oceanFunction;
+  const double rhoW = solver.WaterDensity();
+  const double g = solver.SurfaceGravity();
+  const double r2 = solver.Radius() * solver.Radius();
+  const auto fieldSize = grid.FieldSize();
+  const auto K = op.GetRheology().BranchCount();
+  const std::size_t N = times.size() - 1;
+
+  SeaLevelSolver::Options sleOptions;
+  sleOptions.rtol = options_.rtol;
+  sleOptions.anderson_memory = options_.anderson_memory;
+
+  std::map<double, SeaLevelSolver> flavours;
+  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+    auto found = flavours.find(dt);
+    if (found == flavours.end()) {
+      found = flavours
+                  .emplace(dt, SeaLevelSolver(
+                                   grid,
+                                   dt == 0.0 ? op.ElasticLoveNumbers()
+                                             : op.EffectiveLoveNumbers(
+                                                   ev.options_.scheme, dt),
+                                   solver.Parameters()))
+                  .first;
+    }
+    return found->second;
+  };
+
+  // The adjoint state, stepped by the forward machinery in reversed time
+  // with no ice load; sigmaC/psiC are its SLE-closure load and
+  // centrifugal coefficients.
+  auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
+  auto sigmaC = grid.ZeroCoefficients();
+  auto psiC = grid.ZeroCoefficients();
+
+  // Psi*: the adjoint of the centrifugal potential operator, a potential
+  // dual (dS-paired density) to angular-velocity space.
+  auto psiStar = [&](const std::vector<double>& potentialDual) {
+    auto d = solver.CentrifugalDual(grid.Expand(potentialDual));
+    for (auto& v : d) v *= r2;
+    return d;
+  };
+
+  // The instantaneous adjoint fingerprint of a measurement, through the
+  // forward channel mapping of the elastic adjoint (stage5.md §3): its
+  // sea level (the delta amplitude), and the converged channel
+  // coefficients that drive the radial jump.
+  struct Jump {
+    std::vector<double> xiA;
+    std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent
+  };
+  auto jump = [&](const Measurement& m) {
+    SeaLevelSolver::GeneralisedForcing f;
+    f.rotation = rotation;
+    if (!m.seaLevelDual.empty()) f.directLoad = m.seaLevelDual;
+    std::vector<double> zetaU, zetaPhi;
+    if (!m.displacementDual.empty()) {
+      zetaU.resize(fieldSize);
+      for (std::size_t i = 0; i < fieldSize; ++i) {
+        zetaU[i] = -m.displacementDual[i];
+      }
+      f.displacementLoad = zetaU;
+    }
+    if (!m.potentialDual.empty()) {
+      zetaPhi.resize(fieldSize);
+      for (std::size_t i = 0; i < fieldSize; ++i) {
+        zetaPhi[i] = -g * m.potentialDual[i];
+      }
+      f.potentialLoad = zetaPhi;
+    }
+    if (rotation != RotationalFeedback::None) {
+      std::array<double, 3> avc{0.0, 0.0, 0.0};
+      for (int j = 0; j < 3; ++j) avc[j] = -g * m.angularVelocityDual[j];
+      if (!m.potentialDual.empty()) {
+        const auto ps = psiStar(m.potentialDual);
+        for (int j = 0; j < 3; ++j) avc[j] += g * ps[j];
+      }
+      f.angularMomentumChange = avc;
+    }
+    const auto resp = solverFor(0.0).SolveGeneralised(ev.state_, f, sleOptions);
+    if (!resp.converged) {
+      throw std::runtime_error(
+          "the instantaneous adjoint fingerprint did not converge");
+    }
+    Jump out;
+    out.xiA = resp.seaLevelChange;
+    std::vector<double> lamGrid(fieldSize);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
+                   rhoW * C[i] * out.xiA[i];
+    }
+    out.lam = grid.Expand(lamGrid);
+    out.psiA = rotation != RotationalFeedback::None
+                   ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                   : grid.ZeroCoefficients();
+    if (!zetaU.empty()) out.zu = grid.Expand(zetaU);
+    if (!zetaPhi.empty()) out.zphi = grid.Expand(zetaPhi);
+    return out;
+  };
+
+  // Yu et al. eq. (80): the strain of the instantaneous adjoint solution,
+  // over the relaxation time, jumps the adjoint internal variables; the
+  // split load channels carry displacement and potential measurements
+  // into the radial field.
+  auto applyJump = [&](const Jump& j) {
+    const auto lamCols = ev.Columns(j.lam, ev.toMatDensity_);
+    const auto psiCols = ev.Columns(j.psiA, ev.toMatPotential_);
+    const auto zuCols =
+        j.zu.empty() ? LoadCallable{} : ev.Columns(j.zu, ev.toMatDensity_);
+    const auto zphiCols =
+        j.zphi.empty() ? LoadCallable{} : ev.Columns(j.zphi, ev.toMatDensity_);
+    for (auto& [l, m] : vstate.m) {
+      const auto& deg = op.Deg(l);
+      const int ncols = 2 * (l + 1);
+      const std::size_t block = deg.NodalSize(ncols);
+      std::vector<double> x(static_cast<std::size_t>(deg.ndof) * ncols, 0.0);
+      auto add = [&](const double* unit, const std::vector<double>& amps) {
+        for (int c = 0; c < ncols; ++c) {
+          for (int d = 0; d < deg.ndof; ++d) {
+            x[static_cast<std::size_t>(c) * deg.ndof + d] += unit[d] * amps[c];
+          }
+        }
+      };
+      const auto& units = op.UnitResponses(nullptr, l);
+      add(units.data(), *lamCols(l, 0.0));
+      add(units.data() + deg.ndof, *psiCols(l, 0.0));
+      if (zuCols || zphiCols) {
+        const auto& split = op.SplitUnitResponses(nullptr, l);
+        if (zuCols) add(split.data(), *zuCols(l, 0.0));
+        if (zphiCols) add(split.data() + deg.ndof, *zphiCols(l, 0.0));
+      }
+      const auto dTilde = deg.Strain(x, ncols);
+      for (std::size_t k = 0; k < K; ++k) {
+        for (int s = 0; s < 3; ++s) {
+          for (int e = 0; e < deg.ne; ++e) {
+            for (int q = 0; q < deg.ngll; ++q) {
+              const double itau =
+                  deg.itau[k][static_cast<std::size_t>(e) * deg.ngll + q];
+              if (itau == 0.0) continue;
+              const std::size_t node =
+                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+              const std::size_t at = (k * 3 + s) * block + node;
+              for (int c = 0; c < ncols; ++c) {
+                m[at + c] += itau * dTilde[s * block + node + c];
+              }
+            }
+          }
+        }
+      }
+    }
+    vstate.Invalidate();
+  };
+
+  // The memory-only adjoint equilibrium of the current state: its sea
+  // level (the smooth kernel density, per material time) and the load
+  // and centrifugal coefficients the next reversed step starts from.
+  auto smoothEquilibrium = [&]() {
+    const auto solutions = op.SolveElastic(vstate);
+    SeaLevelSolver::GeneralisedForcing f;
+    f.rotation = rotation;
+    f.displacementResponse =
+        ev.Coefficients(op.Surface(solutions, Component::U), ev.toNdLength_);
+    f.potentialResponse =
+        ev.Coefficients(op.Surface(solutions, Component::Phi),
+                        ev.toNdPotential_);
+    f.inertiaMomentChange =
+        op.InertiaMoment(solutions.at(0), 2)[0] * ev.toNdMoment_;
+    const auto resp = solverFor(0.0).SolveGeneralised(ev.state_, f, sleOptions);
+    if (!resp.converged) {
+      throw std::runtime_error(
+          "the adjoint equilibrium solve did not converge");
+    }
+    std::vector<double> sig(fieldSize);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
+    }
+    sigmaC = grid.Expand(sig);
+    psiC = rotation != RotationalFeedback::None
+               ? solver.CentrifugalCoefficients(resp.angularVelocity)
+               : grid.ZeroCoefficients();
+    return resp.seaLevelChange;
+  };
+
+  // The density is discontinuous at each observation (a finite jump), so
+  // both one-sided values are kept: 'late' towards times.back(), 'early'
+  // towards times[0]; empty means zero. The node weight splits across
+  // the discontinuity the same way.
+  std::vector<std::vector<double>> densityLate(times.size()),
+      densityEarly(times.size());
+  std::map<std::size_t, std::vector<double>> lumps;
+  const double perTime = ev.toMatTime_;
+  std::vector<double> wEarly(times.size(), 0.0), wLate(times.size(), 0.0);
+  for (std::size_t n = 1; n < times.size(); ++n) {
+    wEarly[n] = 0.5 * (times[n] - times[n - 1]);
+  }
+  for (std::size_t n = 0; n + 1 < times.size(); ++n) {
+    wLate[n] = 0.5 * (times[n + 1] - times[n]);
+  }
+
+  // The itau kernels: the multiplier integral int W_k m-dagger / itau
+  // (d - m) dt over the reversed nodes with the split trapezoid (the
+  // adjoint state jumps at observations; the forward integrand is
+  // continuous). The self-adjoint channel mapping poses the adjoint in
+  // the g-weighted energy form of the sea level equation, so the radial
+  // state carried here is the surface gravity times the true multiplier
+  // of the internal-variable dynamics — hence the division, with g in
+  // the material's units.
+  std::optional<TrajectoryCursor> cursor;
+  std::vector<std::vector<double>> itauKernel;
+  if (trajectory != nullptr) {
+    std::vector<double> dts;
+    for (std::size_t m = 0; m + 1 < times.size(); ++m) {
+      dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
+    }
+    cursor.emplace(
+        op, *trajectory, std::move(dts), scheme,
+        [&ev](const std::vector<Complex>& c) {
+          return ev.Columns(c, ev.toMatDensity_);
+        },
+        [&ev](const std::vector<Complex>& c) {
+          return ev.Columns(c, ev.toMatPotential_);
+        });
+    const auto meshSize = op.GetRheology().BranchAt(0).itau.size();
+    itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
+  }
+  const double gMat = op.BaseMaterial().SurfaceGravity();
+  auto accumulateItau = [&](std::size_t node, double weight) {
+    if (!cursor.has_value() || weight == 0.0) return;
+    const auto& fwd = cursor->State(node);
+    for (const auto& [l, mdual] : vstate.m) {
+      const auto& deg = op.Deg(l);
+      const int ncols = 2 * (l + 1);
+      const std::size_t block = deg.NodalSize(ncols);
+      const auto& dFwd = fwd.strain.at(l);
+      const auto& mFwd = fwd.m.at(l);
+      const auto weighted = deg.ApplyWeights(mdual, ncols);
+      for (std::size_t k = 0; k < K; ++k) {
+        for (int e = 0; e < deg.ne; ++e) {
+          for (int q = 0; q < deg.ngll; ++q) {
+            const double itau =
+                deg.itau[k][static_cast<std::size_t>(e) * deg.ngll + q];
+            if (itau <= 0.0) continue;
+            const std::size_t gridNode =
+                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+            double sum = 0.0;
+            for (int s = 0; s < 3; ++s) {
+              const std::size_t at = (k * 3 + s) * block + gridNode;
+              const std::size_t sn = s * block + gridNode;
+              for (int c = 0; c < ncols; ++c) {
+                // Both factors are forward-convention m >= 0 columns, so
+                // the spherical sum over orders weights m > 0 twice (the
+                // discrete sweep's duals absorb this in the transposes;
+                // here it is explicit). The m = 0 imaginary column is
+                // identically zero.
+                const int m = c <= l ? c : c - (l + 1);
+                const double cw = m == 0 ? (c == 0 ? 1.0 : 0.0) : 2.0;
+                sum += cw * weighted[at + c] * (dFwd[sn + c] - mFwd[at + c]);
+              }
+            }
+            itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.ngll +
+                          q] += weight * sum / (itau * gMat);
+          }
+        }
+      }
+    }
+  };
+
+  auto observe = [&](std::size_t node) {
+    const auto found = measurements.find(node);
+    if (found == measurements.end()) return;
+    const auto j = jump(found->second);
+    lumps.emplace(node, j.xiA);
+    applyJump(j);
+    auto early = smoothEquilibrium();
+    if (node > 0) densityEarly[node] = std::move(early);
+  };
+
+  // The reversed sweep, nodes N down to 0; the state starts undisturbed,
+  // so an unmeasured terminal node has zero density.
+  observe(N);
+  accumulateItau(N, wEarly[N] * perTime);
+  for (std::size_t n = N; n >= 1; --n) {
+    const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
+    const auto step =
+        op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),
+                     ev.Columns(psiC, ev.toMatPotential_));
+    SeaLevelSolver::GeneralisedForcing f;
+    f.rotation = rotation;
+    f.displacementResponse = ev.Coefficients(
+        step.MemorySurface(Component::U), ev.toNdLength_);
+    f.potentialResponse = ev.Coefficients(
+        step.MemorySurface(Component::Phi), ev.toNdPotential_);
+    f.inertiaMomentChange = step.InertiaMoment()[0] * ev.toNdMoment_;
+    const auto resp = solverFor(dt).SolveGeneralised(ev.state_, f, sleOptions);
+    if (!resp.converged) {
+      throw std::runtime_error(std::format(
+          "the adjoint coupled solve at node {} did not converge", n - 1));
+    }
+    densityLate[n - 1] = resp.seaLevelChange;
+    std::vector<double> sig(fieldSize);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
+    }
+    sigmaC = grid.Expand(sig);
+    psiC = rotation != RotationalFeedback::None
+               ? solver.CentrifugalCoefficients(resp.angularVelocity)
+               : grid.ZeroCoefficients();
+    auto [next, solutions] =
+        step.Finish(ev.Columns(sigmaC, ev.toMatDensity_),
+                    ev.Columns(psiC, ev.toMatPotential_));
+    vstate = std::move(next);
+    accumulateItau(n - 1, wLate[n - 1] * perTime);
+    observe(n - 1);
+    accumulateItau(n - 1, wEarly[n - 1] * perTime);
+  }
+
+  // Node duals from the density and the lumps. The jumps divide by
+  // relaxation times in the MATERIAL's units, so the smooth fields are
+  // densities per material time; toMatTime_ converts them to per SLE
+  // time, and at an observation the node weight splits across the
+  // discontinuity: the half-interval towards the present pairs with the
+  // late side, the half towards times[0] with the early side.
+  std::vector<std::vector<double>> loadDuals(times.size()),
+      densityLoad(times.size());
+  for (std::size_t n = 0; n < times.size(); ++n) {
+    loadDuals[n].assign(fieldSize, 0.0);
+    densityLoad[n].assign(fieldSize, 0.0);
+    const auto* late = densityLate[n].empty() ? nullptr : &densityLate[n];
+    const auto* early =
+        densityEarly[n].empty() ? late : &densityEarly[n];
+    const auto lump = lumps.find(n);
+    const double totalW = wEarly[n] + wLate[n];
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      const double lateV = late == nullptr ? 0.0 : (*late)[i] * perTime;
+      const double earlyV = early == nullptr ? 0.0 : (*early)[i] * perTime;
+      const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
+      loadDuals[n][i] =
+          smooth + (lump == lumps.end() ? 0.0 : lump->second[i]);
+      densityLoad[n][i] = smooth / totalW;
+    }
+  }
+
+  auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
+                           std::move(lumps));
+  out.itauKernel = std::move(itauKernel);
+  return out;
+}
+
+// -- the shared views
+// ----------------------------------------------------------
+
+IceKernels AdjointSolver::AssembleViews(
+    std::span<const double> times, std::vector<std::vector<double>> loadDuals,
+    std::vector<std::vector<double>> density,
+    std::map<std::size_t, std::vector<double>> lumps) const {
+  const auto& ev = *evolution_;
+  const auto& C = ev.state_.oceanFunction;
+  const double rhoI = ev.solver_->IceDensity();
+  const auto fieldSize = loadDuals.front().size();
+
+  auto ground = [&](const std::vector<double>& f) {
+    std::vector<double> out(fieldSize);
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      out[i] = rhoI * (1.0 - C[i]) * f[i];
+    }
+    return out;
+  };
+
+  IceKernels out;
+  out.times.assign(times.begin(), times.end());
+  out.baseline.assign(fieldSize, 0.0);
+  for (const auto& ld : loadDuals) {
+    for (std::size_t i = 0; i < fieldSize; ++i) {
+      out.baseline[i] -= rhoI * (1.0 - C[i]) * ld[i];
+    }
+  }
+  for (const auto& ld : loadDuals) out.thickness.push_back(ground(ld));
+  for (std::size_t i = 0; i < fieldSize; ++i) {
+    out.thickness[0][i] += out.baseline[i];
+  }
+  // Identically zero under frozen shorelines (every C_n equals C).
+  out.initialSeaLevel.assign(fieldSize, 0.0);
+  for (const auto& [node, lump] : lumps) {
+    out.instantaneous.emplace(node, ground(lump));
+  }
+  for (const auto& d : density) out.density.push_back(ground(d));
+  // The quelled view: the cumulative tail of the thickness duals.
+  std::vector<double> tail(fieldSize, 0.0);
+  out.rate.resize(times.size() - 1);
+  for (std::size_t n = times.size() - 1; n >= 1; --n) {
+    const auto grounded = ground(loadDuals[n]);
+    for (std::size_t i = 0; i < fieldSize; ++i) tail[i] += grounded[i];
+    out.rate[n - 1] = tail;
+  }
+  out.loadDuals = std::move(loadDuals);
+  return out;
+}
+
+}  // namespace sl3dpp

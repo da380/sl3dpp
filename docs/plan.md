@@ -531,6 +531,16 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   non-dimensionalise on entry, writers/returns re-dimensionalise on exit);
   components exchange non-dimensional numbers (`EarthModel::Dimensionless`).
   Scheme and constants are planetmodel's `Scales.geophysical` (G = 1).
+- **16 Oct 2026** — Stage 5 implements BOTH the discrete and the continuous
+  adjoint as options behind one interface and result type, with the
+  **continuous adjoint the preferred production path** (design in
+  `docs/stage5.md`). Rationale: the discrete adjoint is a numerically exact
+  gradient, but of the discretised problem — exact-but-possibly-wrong
+  precisely when the run is under-resolved; for a good discretisation the
+  two agree to practical accuracy, so their disagreement is itself the
+  resolution diagnostic. pyslfp's recent adjoint work (discrete +
+  continuous + quelling + 1D viscous kernels + checkpointing) is the
+  porting template for the 1D path.
 - **15 Oct 2026** — Conventions recorded in `docs/conventions.md`;
   `.clang-format` taken verbatim from AdGIA. AdGIA supplies naming/layering
   only: the idiom is modern C++23 (concepts, ranges, `std::expected`, value

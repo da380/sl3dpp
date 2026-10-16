@@ -131,6 +131,13 @@ class SeaLevelSolver {
   [[nodiscard]] std::vector<std::complex<double>> CentrifugalCoefficients(
       const std::array<double, 3>& omega) const;
 
+  /// The exact transpose of CentrifugalCoefficients: a coefficient dual
+  /// (paired by the L2 coefficient pairing of real fields) to the
+  /// angular-velocity dual (paired by the dot product). The adjoint
+  /// sweeps' psi-dagger exit.
+  [[nodiscard]] std::array<double, 3> CentrifugalDual(
+      std::span<const std::complex<double>> tideDual) const;
+
   // -- the surface state ------------------------------------------------------
 
   /**

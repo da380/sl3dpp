@@ -95,6 +95,7 @@ pkg_check_modules(NETCDF REQUIRED IMPORTED_TARGET netcdf)
 # The library.
 # ---------------------------------------------------------------------------
 add_library(sl3dpp STATIC
+  src/Adjoint.cpp
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp

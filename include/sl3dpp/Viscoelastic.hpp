@@ -204,9 +204,11 @@ class ViscoelasticOperator {
 
  private:
   friend class ViscoelasticStep;
+  friend class AdjointSolver;  // the sweeps transpose these internals
 
   /// Per-degree workspace: the unrelaxed system, strain operators and
-  /// branch data restricted to the degree's element subset.
+  /// branch data restricted to the degree's element subset
+  /// (detail/ViscoelasticDegree.hpp).
   struct Degree;
   /// A (scheme, dt) flavour: its effective material, factorised systems
   /// and cached unit responses.
@@ -220,6 +222,11 @@ class ViscoelasticOperator {
   /// (load, tide); flavour nullptr means the unrelaxed system.
   [[nodiscard]] const std::vector<double>& UnitResponses(Flavour* flavour,
                                                          int l) const;
+  /// The flavour's responses to the SPLIT unit-load channels, columns
+  /// (traction-only, attraction-only): what the continuous adjoint's jump
+  /// needs for displacement and potential measurements.
+  [[nodiscard]] const std::vector<double>& SplitUnitResponses(Flavour* flavour,
+                                                              int l) const;
   void AddChannels(std::vector<double>& x, int l, Flavour* flavour, double t,
                    const LoadCallable& load, const LoadCallable& tide,
                    int ncols) const;
@@ -232,6 +239,11 @@ class ViscoelasticOperator {
   };
   [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightsOf(
       Scheme scheme, double dt) const;
+  /// The h-derivatives of the scheme weights, nodal per branch (dw kept
+  /// in e for backward Euler; de, dalpha, dbeta for the trapezoid). A
+  /// viscosity sensitivity pairs them with dh = dt d(itau).
+  [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightDerivativesOf(
+      Scheme scheme, double dt) const;
 
   std::shared_ptr<const Rheology> rheology_;  ///< owned, immutable
   int lmax_;
@@ -240,9 +252,12 @@ class ViscoelasticOperator {
   mutable std::list<std::pair<std::pair<int, double>, std::unique_ptr<Flavour>>>
       flavours_;  // LRU, most recent at front
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>> weights_;
+  mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
+      weightDerivatives_;
   mutable std::map<std::pair<int, double>, LoveNumbers> effectiveLove_;
   mutable std::vector<double> unitUnrelaxed_;  // placeholder, see cpp
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;
+  mutable std::map<int, std::vector<double>> unrelaxedSplitUnits_;
 };
 
 /// One opened implicit or trapezoid step. On construction the start state
