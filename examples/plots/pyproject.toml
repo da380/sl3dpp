@@ -1,0 +1,21 @@
+# The plotting environment for the sl3dpp examples. This file is copied
+# into build/examples at configure time: create the environment THERE
+# (poetry keeps its lock and venv beside this file or in its cache), so
+# the source tree stays untouched. See examples/README.md.
+
+[tool.poetry]
+name = "sl3dpp-example-plots"
+version = "0.1.0"
+description = "Plotting environment for the sl3dpp example drivers"
+authors = ["sl3dpp"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.10"
+numpy = ">=1.26"
+matplotlib = ">=3.8"
+cartopy = ">=0.22"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
