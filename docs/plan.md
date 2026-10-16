@@ -531,6 +531,30 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   non-dimensionalise on entry, writers/returns re-dimensionalise on exit);
   components exchange non-dimensional numbers (`EarthModel::Dimensionless`).
   Scheme and constants are planetmodel's `Scales.geophysical` (G = 1).
+- **16 Oct 2026** — Cross-project convention (David): pyslfp, AdGIA and
+  sl3dpp should share ONE internal non-dimensionalisation. Found the same
+  day: pyslfp's EarthModel scales (T ≈ 805 s, g_nd ≈ 1) deviate from
+  planetmodel's documented `geophysical` (T ≈ 1648 s, G_nd = 1), which
+  sl3dpp follows; the non-dimensional potential scales as T², a clean
+  4π/3 between the codes, invisible to every stage 0–4 gate. Until the
+  convention is unified (a pyslfp-side change, David's call), cross-code
+  comparisons of potentials and frequencies anchor through SI per
+  channel; raw non-dimensional values are never compared.
+- **16 Oct 2026** — Examples (stage 6, pulled forward as features settle):
+  example programs per feature with linked Python plotting scripts
+  (cartopy or pyslfp for maps), a poetry environment for the plotting
+  side with the setup documented, and the scripts run **in the build
+  tree, never from source** (no outputs polluting the source tree).
+- **16 Oct 2026** — Stage 5 implements BOTH the discrete and the continuous
+  adjoint as options behind one interface and result type, with the
+  **continuous adjoint the preferred production path** (design in
+  `docs/stage5.md`). Rationale: the discrete adjoint is a numerically exact
+  gradient, but of the discretised problem — exact-but-possibly-wrong
+  precisely when the run is under-resolved; for a good discretisation the
+  two agree to practical accuracy, so their disagreement is itself the
+  resolution diagnostic. pyslfp's recent adjoint work (discrete +
+  continuous + quelling + 1D viscous kernels + checkpointing) is the
+  porting template for the 1D path.
 - **15 Oct 2026** — Conventions recorded in `docs/conventions.md`;
   `.clang-format` taken verbatim from AdGIA. AdGIA supplies naming/layering
   only: the idiom is modern C++23 (concepts, ranges, `std::expected`, value

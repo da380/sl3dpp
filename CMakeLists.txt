@@ -17,6 +17,7 @@ endif()
 
 option(SL3DPP_BUILD_TESTS "Build the test suite" ON)
 option(SL3DPP_BUILD_BENCHMARKS "Build the cross-code benchmark drivers" OFF)
+option(SL3DPP_BUILD_EXAMPLES "Build the example drivers" ON)
 
 # ---------------------------------------------------------------------------
 # Dependencies.
@@ -95,6 +96,7 @@ pkg_check_modules(NETCDF REQUIRED IMPORTED_TARGET netcdf)
 # The library.
 # ---------------------------------------------------------------------------
 add_library(sl3dpp STATIC
+  src/Adjoint.cpp
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp
@@ -150,4 +152,8 @@ endif()
 
 if(SL3DPP_BUILD_BENCHMARKS)
   add_subdirectory(benchmarks)
+endif()
+
+if(SL3DPP_BUILD_EXAMPLES)
+  add_subdirectory(examples)
 endif()

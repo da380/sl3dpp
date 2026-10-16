@@ -178,6 +178,17 @@ std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
   return psi;
 }
 
+std::array<double, 3> SeaLevelSolver::CentrifugalDual(
+    std::span<const std::complex<double>> tideDual) const {
+  // Pair(a, b) = sum_l a_l0 b_l0 + 2 sum_{m>0} Re(a conj b) equals the
+  // plain real-pair pairing under RealPairFromComplex, so the transpose
+  // reads the (cos, sin) parts of the degree-2 dual directly.
+  const auto pair = RealPairFromComplex(tideDual[SurfaceGrid::Index(2, 1)], 1);
+  return {rotationFactor_ * pair.cos, rotationFactor_ * pair.sin,
+          axialRotationFactor_ * tideDual[SurfaceGrid::Index(2, 0)].real() +
+              uniformRotationFactor_ * tideDual[SurfaceGrid::Index(0, 0)].real()};
+}
+
 double SeaLevelSolver::IntegrateSurface(std::span<const double> field) const {
   return radius_ * radius_ * grid_.Integrate(field);
 }

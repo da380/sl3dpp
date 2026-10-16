@@ -1,0 +1,107 @@
+/**
+ * @file ExampleLateralViscosity.cpp
+ * @brief 3D viscosity (stage 4): the coupled evolution with a laterally
+ * varying mantle, against its radially averaged twin.
+ *
+ * The viscosity is eta(x) = eta_bar(r) exp(delta(x)) with a degree-2-like
+ * log perturbation of one decade peak to peak; the within-step lateral
+ * iteration (the research content of plan §3) converges each implicit
+ * step under the same Anderson-mixed fixed point as the ocean load and
+ * rotation. The zero-lateral twin isolates what the lateral structure
+ * does to the predictions.
+ *
+ * Outputs (SI): final sea-level maps for both runs and their difference,
+ * and the per-step iteration counts of the lateral fixed point. Run from
+ * the build tree; plot with plots/plot_lateral.py.
+ */
+
+#include <cmath>
+#include <iostream>
+#include <numbers>
+
+#include "Common.hpp"
+#include "sl3dpp/Evolution3D.hpp"
+#include "sl3dpp/Fingerprint.hpp"
+#include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/Viscoelastic3D.hpp"
+
+using namespace sl3dpp;
+
+int main() {
+  constexpr int lmax = 16;
+  constexpr double meltFraction = 0.1;
+  constexpr double tEnd = 10.0e3 * examples::kYear;
+  constexpr int nodes = 11;
+
+  const auto earth = examples::Earth::Make(lmax, 1e21);
+  Viscoelastic3D lateral(earth.rheology, lmax,
+                         [](double, double theta, double phi) {
+                           // one decade peak to peak
+                           return 1.15 * std::sin(theta) * std::cos(theta) *
+                                  std::cos(phi);
+                         });
+  Viscoelastic3D flat(earth.rheology, lmax,
+                      [](double, double, double) { return 0.0; });
+
+  SeaLevelSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
+                        SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const auto& scales = solver.SolverScales();
+
+  Fingerprint fingerprint(lmax, lateral.ElasticLove());
+  fingerprint.SetAnalyticTestState(0.0);
+  const double length = scales.Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto iceSi = fingerprint.IceThickness();
+  auto state = solver.MakeState(toNd(iceSi), toNd(fingerprint.SeaLevel()));
+
+  // A held melt load switched on at t = 0 (the north-polar cap).
+  const auto& C = state.oceanFunction;
+  std::vector<double> load(grid.FieldSize());
+  for (std::size_t i = 0; i < load.size(); ++i) {
+    load[i] = -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
+              iceSi[i] / length;
+  }
+  auto iceLoad = [&](double) { return load; };
+  std::vector<double> times;
+  for (int n = 0; n < nodes; ++n) {
+    times.push_back(tEnd * n / (nodes - 1) / scales.Time());
+  }
+
+  SeaLevelEvolution3D run3(lateral, solver, state, {});
+  const auto with = run3.Run(times, iceLoad);
+  SeaLevelEvolution3D run1(flat, solver, state, {});
+  const auto without = run1.Run(times, iceLoad);
+
+  examples::Writer out("lateral.txt");
+  out.Comment(
+      "3D lateral viscosity (one decade peak to peak) vs the radial "
+      "reference, held northern melt, 10 kyr (SI)");
+  out.Grid(grid);
+  out.Field("slc_lateral_m", with.back().seaLevelChange, length);
+  out.Field("slc_radial_m", without.back().seaLevelChange, length);
+  std::vector<double> difference(grid.FieldSize());
+  for (std::size_t i = 0; i < difference.size(); ++i) {
+    difference[i] =
+        with.back().seaLevelChange[i] - without.back().seaLevelChange[i];
+  }
+  out.Field("slc_difference_m", difference, length);
+  // The lateral log-viscosity pattern at the surface, for the plot.
+  out.Field("delta_log_viscosity",
+            grid.FromFunction([](double theta, double phi) {
+              return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+            }));
+  std::vector<std::vector<double>> rows;
+  for (std::size_t n = 0; n < with.size(); ++n) {
+    rows.push_back({times[n] * scales.Time() / (1.0e3 * examples::kYear),
+                    static_cast<double>(with[n].coupledIterations),
+                    with[n].coupledResidual});
+  }
+  out.Series("iterations", {"t_kyr", "coupled_iterations", "residual"}, rows);
+
+  std::cout << "wrote lateral.txt\n";
+  return 0;
+}

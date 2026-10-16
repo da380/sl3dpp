@@ -7,6 +7,7 @@
 #include <cmath>
 #include <numbers>
 
+#include "sl3dpp/Geography.hpp"
 #include "sl3dpp/Version.hpp"
 
 TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.1.0"); }
@@ -33,4 +34,26 @@ TEST(Toolkit, SphericalHarmonicRoundTrip) {
     err = std::max(err, std::abs(v1 - v2));
   }
   EXPECT_LT(err, 1e-12);
+}
+
+// Geographic <-> spherical polar conversions round-trip and hit the
+// landmarks.
+TEST(Toolkit, GeographicConversions) {
+  using namespace sl3dpp;
+  EXPECT_DOUBLE_EQ(CoLatitudeOf(90.0), 0.0);
+  EXPECT_NEAR(CoLatitudeOf(0.0), std::numbers::pi / 2.0, 1e-15);
+  EXPECT_NEAR(CoLatitudeOf(-90.0), std::numbers::pi, 1e-15);
+  EXPECT_DOUBLE_EQ(LatitudeOf(CoLatitudeOf(37.5)), 37.5);
+
+  const GeographicPoint cambridge{52.2, 0.12};
+  EXPECT_NEAR(cambridge.CoLatitude(), Radians(90.0 - 52.2), 1e-15);
+  EXPECT_NEAR(cambridge.Longitude(), Radians(0.12), 1e-15);
+  const auto back = GeographicPoint::FromSpherical(cambridge.CoLatitude(),
+                                                   cambridge.Longitude());
+  EXPECT_NEAR(back.latitude, cambridge.latitude, 1e-12);
+  EXPECT_NEAR(back.longitude, cambridge.longitude, 1e-12);
+
+  // A west longitude lands in [0, 360).
+  const auto west = GeographicPoint::FromSpherical(1.0, Radians(-70.0));
+  EXPECT_NEAR(west.longitude, 290.0, 1e-12);
 }
