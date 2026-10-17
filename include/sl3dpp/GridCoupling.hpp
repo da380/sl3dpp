@@ -69,7 +69,9 @@ class GridCoupling {
     TruncationRule truncation = TruncationRule::Graded;
     /// Headroom for the pointwise products (the 3/2 rule by default).
     double oversampling = 1.5;
-    bool parallel = false;
+    /// Threaded transforms (GSHTrans) and per-degree force loops (OpenMP),
+    /// on OpenMP's thread count (OMP_NUM_THREADS); false forces serial.
+    bool parallel = true;
     /// GSHTrans's BLAS matrix kernel for the batched transforms.
     bool matrix_kernel = false;
   };

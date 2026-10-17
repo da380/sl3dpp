@@ -4,10 +4,12 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
 #include "sl3dpp/detail/AndersonMixer.hpp"
+#include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
 
@@ -173,16 +175,31 @@ GridCoupling::SpectralTensor Viscoelastic3D::StrainCoefficients(
     const Solutions& solutions,
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal) const {
-  auto spectral = coupling_.ZeroSpectral();
+  // The operators are resolved first (any built lazily, serially); one
+  // task per degree then writes only that degree's coefficient slots.
+  struct Task {
+    int l;
+    const std::vector<Complex>* x;
+    const DegreeOperator* sph;
+    const ToroidalOperator* tor;
+    const std::vector<Complex>* w;
+  };
+  std::vector<Task> tasks;
   for (const auto& [l, x] : solutions.spheroidal) {
     const auto torIt = solutions.toroidal.find(l);
-    coupling_.AddStrainOfSolution(
-        spectral, l, spheroidal(l), x,
-        torIt == solutions.toroidal.end() ? nullptr : &toroidal(l),
-        torIt == solutions.toroidal.end()
-            ? std::span<const Complex>{}
-            : std::span<const Complex>(torIt->second));
+    const auto hasTor = torIt != solutions.toroidal.end();
+    tasks.push_back({l, &x, &spheroidal(l), hasTor ? &toroidal(l) : nullptr,
+                     hasTor ? &torIt->second : nullptr});
   }
+  auto spectral = coupling_.ZeroSpectral();
+  const auto count = static_cast<int>(tasks.size());
+  detail::ParallelFor(count, options_.parallel, [&](int i) {
+    const auto& task = tasks[count - 1 - i];  // the largest degrees first
+    coupling_.AddStrainOfSolution(
+        spectral, task.l, *task.sph, *task.x, task.tor,
+        task.w == nullptr ? std::span<const Complex>{}
+                          : std::span<const Complex>(*task.w));
+  });
   return spectral;
 }
 
@@ -199,62 +216,42 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
     const LoadCallable3D& load, const LoadCallable3D& tide,
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal) const {
-  Solutions out;
   auto sphForces = coupling_.SpheroidalForce(weighted, spheroidal);
   auto torForces = coupling_.ToroidalForce(weighted, toroidal);
-  for (auto& [l, b] : sphForces) {
-    const auto& op = spheroidal(l);
-    const auto columns = l + 1;
-    const auto ndof = op.DofCount();
-    // The load channels enter through the cached unit responses of the
-    // same operator: solve the complex columns as real pairs.
-    std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
-    for (auto c = 0; c < columns; ++c) {
-      for (auto d = 0; d < ndof; ++d) {
-        rhs[static_cast<std::size_t>(c) * ndof + d] =
-            b[static_cast<std::size_t>(c) * ndof + d].real();
-        rhs[static_cast<std::size_t>(columns + c) * ndof + d] =
-            b[static_cast<std::size_t>(c) * ndof + d].imag();
-      }
-    }
-    auto x = op.Solve(rhs, 2 * columns);
-    std::vector<Complex> solution(static_cast<std::size_t>(ndof) * columns);
-    for (auto c = 0; c < columns; ++c) {
-      for (auto d = 0; d < ndof; ++d) {
-        solution[static_cast<std::size_t>(c) * ndof + d] = {
-            x[static_cast<std::size_t>(c) * ndof + d],
-            x[static_cast<std::size_t>(columns + c) * ndof + d]};
-      }
-    }
-    // Channels: linear in the forcing, through unit load/tide solutions.
-    if (load || tide) {
-      std::vector<double> unit(static_cast<std::size_t>(ndof) * 2, 0.0);
-      auto loadVec = op.Load();
-      auto tideVec = op.Tide(l == 0 ? 2 : -1);
-      std::ranges::copy(loadVec, unit.begin());
-      std::ranges::copy(tideVec, unit.begin() + ndof);
-      const auto responses = op.Solve(unit, 2);
-      auto add = [&](const std::optional<std::vector<Complex>>& columnsIn,
-                     int which) {
-        if (!columnsIn) return;
-        for (auto c = 0; c < columns; ++c) {
-          const auto amplitude = (*columnsIn)[c];
-          if (amplitude == 0.0) continue;
-          for (auto d = 0; d < ndof; ++d) {
-            solution[static_cast<std::size_t>(c) * ndof + d] +=
-                amplitude *
-                responses[static_cast<std::size_t>(which) * ndof + d];
-          }
-        }
-      };
-      if (load) add(load(l, t), 0);
-      if (tide) add(tide(l, t), 1);
-    }
-    out.spheroidal.emplace(l, std::move(solution));
+
+  // The degree tasks, spheroidal and toroidal, with their operators
+  // resolved and their channel amplitudes fetched here, serially (the
+  // caller's callables need not be thread-safe); each task then writes
+  // only its own solution.
+  struct Task {
+    int l = 0;
+    const std::vector<Complex>* b = nullptr;
+    const DegreeOperator* sph = nullptr;    // a spheroidal task
+    const ToroidalOperator* tor = nullptr;  // a toroidal task
+    std::optional<std::vector<Complex>> load, tide;
+    std::vector<Complex> solution;
+  };
+  std::vector<Task> tasks;
+  for (const auto& [l, b] : sphForces) {
+    Task task;
+    task.l = l;
+    task.b = &b;
+    task.sph = &spheroidal(l);
+    if (load) task.load = load(l, t);
+    if (tide) task.tide = tide(l, t);
+    tasks.push_back(std::move(task));
   }
-  for (auto& [l, b] : torForces) {
-    const auto& op = toroidal(l);
-    const auto columns = l + 1;
+  for (const auto& [l, b] : torForces) {
+    Task task;
+    task.l = l;
+    task.b = &b;
+    task.tor = &toroidal(l);
+    tasks.push_back(std::move(task));
+  }
+  std::ranges::stable_sort(tasks, std::greater{}, &Task::l);  // largest first
+
+  // The complex columns solved as real pairs.
+  auto solve = [](const auto& op, const std::vector<Complex>& b, int columns) {
     const auto ndof = op.DofCount();
     std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
     for (auto c = 0; c < columns; ++c) {
@@ -274,7 +271,52 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
             x[static_cast<std::size_t>(columns + c) * ndof + d]};
       }
     }
-    out.toroidal.emplace(l, std::move(solution));
+    return solution;
+  };
+
+  detail::ParallelFor(
+      static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
+        auto& task = tasks[i];
+        const auto l = task.l;
+        const auto columns = l + 1;
+        if (task.tor != nullptr) {
+          task.solution = solve(*task.tor, *task.b, columns);
+          return;
+        }
+        const auto& op = *task.sph;
+        const auto ndof = op.DofCount();
+        task.solution = solve(op, *task.b, columns);
+        // Channels: linear in the forcing, through unit load/tide
+        // solutions of the same operator.
+        if (load || tide) {
+          std::vector<double> unit(static_cast<std::size_t>(ndof) * 2, 0.0);
+          auto loadVec = op.Load();
+          auto tideVec = op.Tide(l == 0 ? 2 : -1);
+          std::ranges::copy(loadVec, unit.begin());
+          std::ranges::copy(tideVec, unit.begin() + ndof);
+          const auto responses = op.Solve(unit, 2);
+          auto add = [&](const std::optional<std::vector<Complex>>& columnsIn,
+                         int which) {
+            if (!columnsIn) return;
+            for (auto c = 0; c < columns; ++c) {
+              const auto amplitude = (*columnsIn)[c];
+              if (amplitude == 0.0) continue;
+              for (auto d = 0; d < ndof; ++d) {
+                task.solution[static_cast<std::size_t>(c) * ndof + d] +=
+                    amplitude *
+                    responses[static_cast<std::size_t>(which) * ndof + d];
+              }
+            }
+          };
+          add(task.load, 0);
+          add(task.tide, 1);
+        }
+      });
+
+  Solutions out;
+  for (auto& task : tasks) {
+    (task.tor != nullptr ? out.toroidal : out.spheroidal)
+        .emplace(task.l, std::move(task.solution));
   }
   return out;
 }

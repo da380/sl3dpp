@@ -39,7 +39,7 @@ cmake -B build && cmake --build build -j
 cd build/examples
 ./ExampleFingerprint        # ~a second (lmax 256)
 ./ExampleEvolution          # ~a minute (lmax 128, 31 steps)
-./ExampleLateralViscosity   # ~a minute (lmax 16, the 3D fixed point)
+./ExampleLateralViscosity   # seconds (lmax 16, the 3D fixed point)
 ./ExampleIceKernels        # ~a minute (lmax 128, two reverse sweeps)
 
 # 3. One-off: create the plotting environment HERE (not in the source).
@@ -54,6 +54,10 @@ poetry run python plot_kernels.py
 
 Notes:
 
+- The drivers run **threaded by default** (OpenMP; the library's
+  `parallel` options default on), on every core unless told otherwise:
+  set `OMP_NUM_THREADS=N` to choose the thread count, e.g.
+  `OMP_NUM_THREADS=8 ./ExampleLateralViscosity`, or 1 for a serial run.
 - **cartopy** provides the map projections and coastlines; its first use
   downloads the coastline data (one-off, needs network). If cartopy is
   not importable the scripts fall back to plain lat/lon maps, so any

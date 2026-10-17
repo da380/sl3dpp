@@ -135,6 +135,13 @@ latitude loops (pointwise grid operations), and GSHTrans's own
 unless documented, but `const` solve/apply methods must be safe to call from
 parallel loops.
 
+Threaded by default (decided 17 Oct 2026): the `parallel` options default
+on, and the thread count is OpenMP's (`OMP_NUM_THREADS`; 1 for a serial
+run). `parallel = false` forces serial, for a caller already inside its own
+parallel region. Threaded runs agree with serial ones to round-off, which
+is all that is required; the test harness runs each test on one thread
+(`tests/CMakeLists.txt`).
+
 ## Dependencies
 
 All five sibling header-only libraries pinned by commit in the top-level

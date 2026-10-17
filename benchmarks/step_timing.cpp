@@ -9,13 +9,14 @@
 //
 //   analyse     GridCoupling::Analyse of a full tensor (3 batched SHTs)
 //   synthesise  GridCoupling::Synthesise of a full spectral tensor
+//   pointwise   GridCoupling::Multiply of a full tensor by a weight field
 //   force       SpheroidalForce + ToroidalForce, every degree
-//   solves      the banded solves, 2(l + 1) real columns per degree
-//   strain      AddStrainOfSolution, every degree
 //   respond     OpenStep::Respond (synthesise + pointwise + analyse +
 //               force + solves)
+//   solves      the banded solves, 2(l + 1) real columns per degree:
+//               respond less its other parts (SolveAll is private)
 //   channels    OpenStep::AddChannels
-//   strainOf    OpenStep::StrainOf (strain)
+//   strainOf    OpenStep::StrainOf (strain recovery, every degree)
 //
 // and then whole Viscoelastic3D::Step calls, whose per-pass time less
 // respond + channels + strainOf is the iteration's own overhead (the
@@ -26,8 +27,11 @@
 // Usage:
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix]
 //
-// Threading follows fortran_gate: the transforms run threaded when
-// OMP_NUM_THREADS > 1; everything else in the step is serial today.
+// Options::parallel is set when OMP_NUM_THREADS > 1, as in fortran_gate:
+// the transforms and the per-degree loops (force, solves, strain) then run
+// threaded; the pointwise loops and the mixing stay serial. The
+// fingerprint is reproducible run to run on one thread; on several,
+// GSHTrans's per-thread FFTW plans (FFTW_MEASURE) can differ at round-off.
 
 #include <omp.h>
 #include <sys/resource.h>
@@ -188,7 +192,7 @@ int main(int argc, char** argv) {
   const auto d = coupling.Synthesise(s0);
 
   // Unrelaxed operators of the same sizes and dof maps as the step's own,
-  // for the force/solve/strain phases the operator keeps private.
+  // for the force phase (the step keeps its own operators private).
   const auto& base = rheology.BaseMaterial();
   std::map<int, std::unique_ptr<DegreeOperator>> sph;
   std::map<int, std::unique_ptr<ToroidalOperator>> tor;
@@ -210,58 +214,10 @@ int main(int argc, char** argv) {
     torForce = coupling.ToroidalForce(spectral, torOf);
   });
 
-  // Real-pair right-hand sides, laid out as Viscoelastic3D::SolveAll does.
-  auto realPairs = [](const std::vector<Complex>& b, int ndof, int columns) {
-    std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
-    for (int c = 0; c < columns; ++c) {
-      for (int i = 0; i < ndof; ++i) {
-        const auto at = static_cast<std::size_t>(c) * ndof + i;
-        rhs[at] = b[at].real();
-        rhs[static_cast<std::size_t>(columns + c) * ndof + i] = b[at].imag();
-      }
-    }
-    return rhs;
-  };
-  std::map<int, std::vector<double>> sphRhs, torRhs;
-  for (const auto& [l, b] : sphForce) {
-    sphRhs.emplace(l, realPairs(b, sphOf(l).DofCount(), l + 1));
-  }
-  for (const auto& [l, b] : torForce) {
-    torRhs.emplace(l, realPairs(b, torOf(l).DofCount(), l + 1));
-  }
-  const double solves = Best(repeats, [&] {
-    for (const auto& [l, rhs] : sphRhs) {
-      auto x = sphOf(l).Solve(rhs, 2 * (l + 1));
-    }
-    for (const auto& [l, rhs] : torRhs) {
-      auto x = torOf(l).Solve(rhs, 2 * (l + 1));
-    }
-  });
-
-  // The strain phase reads solution columns; their values do not matter
-  // to the cost, so zeros of the right sizes stand in.
-  std::map<int, std::vector<Complex>> sphX, torX;
-  for (int l = 0; l <= lmax; ++l) {
-    sphX.emplace(
-        l, std::vector<Complex>(static_cast<std::size_t>(sphOf(l).DofCount()) *
-                                (l + 1)));
-    if (l >= 2) {
-      torX.emplace(
-          l, std::vector<Complex>(
-                 static_cast<std::size_t>(torOf(l).DofCount()) * (l + 1)));
-    }
-  }
-  const double strain = Best(repeats, [&] {
-    auto out = coupling.ZeroSpectral();
-    for (int l = 0; l <= lmax; ++l) {
-      const auto found = torX.find(l);
-      coupling.AddStrainOfSolution(
-          out, l, sphOf(l), sphX.at(l),
-          found == torX.end() ? nullptr : &torOf(l),
-          found == torX.end() ? std::span<const Complex>{}
-                              : std::span<const Complex>(found->second));
-    }
-  });
+  auto field = d;
+  const std::vector<double> weight(field.r.size(), 1.0);
+  const double pointwise =
+      Best(repeats, [&] { coupling.Multiply(field, weight); });
 
   Viscoelastic3D::Solutions solutions;
   const double respond = Best(repeats, [&] { solutions = step.Respond(s0); });
@@ -272,20 +228,20 @@ int main(int argc, char** argv) {
   const double strainOf =
       Best(repeats, [&] { auto out = step.StrainOf(solutions); });
 
+  const double solves = respond - synthesise - pointwise - analyse - force;
   std::printf("  one pass, phase by phase (best of %d) [s]\n", repeats);
   std::printf("    %-11s %9.4f\n", "analyse", analyse);
   std::printf("    %-11s %9.4f\n", "synthesise", synthesise);
+  std::printf("    %-11s %9.4f\n", "pointwise", pointwise);
   std::printf("    %-11s %9.4f\n", "force", force);
-  std::printf("    %-11s %9.4f\n", "solves", solves);
-  std::printf("    %-11s %9.4f\n", "strain", strain);
+  std::printf("    %-11s %9.4f  (respond less its other parts)\n", "solves",
+              solves);
   std::printf(
       "    %-11s %9.4f  (synthesise + pointwise + analyse + force + "
       "solves)\n",
       "respond", respond);
   std::printf("    %-11s %9.4f\n", "channels", channels);
-  std::printf("    %-11s %9.4f  (strain)\n", "strainOf", strainOf);
-  std::printf("    %-11s %9.4f  (respond less its parts)\n", "pointwise",
-              respond - synthesise - analyse - force - solves);
+  std::printf("    %-11s %9.4f  (strain recovery)\n", "strainOf", strainOf);
   std::fflush(stdout);
 
   // Whole steps: per-pass time and the iteration's own overhead.

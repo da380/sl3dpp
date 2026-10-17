@@ -4,11 +4,15 @@
 
 #include <GSHTrans/All>
 #include <GaussQuad/All>
+#include <algorithm>
 #include <cmath>
 #include <numbers>
+#include <stdexcept>
+#include <vector>
 
 #include "sl3dpp/Geography.hpp"
 #include "sl3dpp/Version.hpp"
+#include "sl3dpp/detail/ParallelFor.hpp"
 
 TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.1.0"); }
 
@@ -56,4 +60,19 @@ TEST(Toolkit, GeographicConversions) {
   // A west longitude lands in [0, 360).
   const auto west = GeographicPoint::FromSpherical(1.0, Radians(-70.0));
   EXPECT_NEAR(west.longitude, 290.0, 1e-12);
+}
+
+// The threaded task loop rethrows a task's exception after the loop (one
+// leaving an OpenMP region would terminate), and the other tasks still run.
+TEST(Toolkit, ParallelForRethrowsAfterTheLoop) {
+  std::vector<int> ran(16, 0);
+  EXPECT_THROW(sl3dpp::detail::ParallelFor(16, true,
+                                           [&](int i) {
+                                             ran[i] = 1;
+                                             if (i == 5) {
+                                               throw std::runtime_error("5");
+                                             }
+                                           }),
+               std::runtime_error);
+  EXPECT_EQ(std::ranges::count(ran, 1), 16);
 }

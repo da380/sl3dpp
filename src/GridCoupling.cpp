@@ -1,8 +1,11 @@
 #include "sl3dpp/GridCoupling.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <stdexcept>
+
+#include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
 
@@ -245,9 +248,14 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
   const auto w = mesh.Weights();
-  std::map<int, std::vector<Complex>> out;
-  for (auto l = 0; l <= lmax_; ++l) {
-    const auto& op = system(l);
+  // The operators are resolved first (any built lazily, serially), so the
+  // degree tasks below only read; each task writes only its own force.
+  std::vector<const DegreeOperator*> ops(lmax_ + 1);
+  for (auto l = 0; l <= lmax_; ++l) ops[l] = &system(l);
+  std::vector<std::vector<Complex>> forces(lmax_ + 1);
+  detail::ParallelFor(lmax_ + 1, options_.parallel, [&](int task) {
+    const auto l = lmax_ - task;  // the largest degrees first
+    const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
@@ -277,8 +285,10 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
         }
       }
     }
-    out.emplace(l, std::move(b));
-  }
+    forces[l] = std::move(b);
+  });
+  std::map<int, std::vector<Complex>> out;
+  for (auto l = 0; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
 
@@ -288,9 +298,13 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
   const auto w = mesh.Weights();
-  std::map<int, std::vector<Complex>> out;
-  for (auto l = 2; l <= lmax_; ++l) {
-    const auto& op = system(l);
+  // As SpheroidalForce: operators resolved first, one task per degree.
+  std::vector<const ToroidalOperator*> ops(lmax_ + 1, nullptr);
+  for (auto l = 2; l <= lmax_; ++l) ops[l] = &system(l);
+  std::vector<std::vector<Complex>> forces(lmax_ + 1);
+  detail::ParallelFor(std::max(lmax_ - 1, 0), options_.parallel, [&](int task) {
+    const auto l = lmax_ - task;  // the largest degrees first
+    const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
@@ -317,8 +331,10 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
         }
       }
     }
-    out.emplace(l, std::move(b));
-  }
+    forces[l] = std::move(b);
+  });
+  std::map<int, std::vector<Complex>> out;
+  for (auto l = 2; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
 

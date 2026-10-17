@@ -2,10 +2,13 @@
 // the grid machinery equals the 1D two-phase stepper at machine
 // precision), the onset of spheroidal-toroidal coupling under lateral
 // viscosity, and the dt self-convergence of the laterally varying step —
-// the first research-grade measurements of stage 4.
+// the first research-grade measurements of stage 4 — and the threaded step
+// against the serial one.
 
 #include <gtest/gtest.h>
+#include <omp.h>
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -236,4 +239,55 @@ TEST(Stage4, LateralStepSelfConvergesAtSecondOrder) {
   const auto x4 = advance(16);
   const auto ratio = (x1 - x2) / (x2 - x4);
   EXPECT_NEAR(ratio, 4.0, 1.5);  // the trapezoid's order two
+}
+
+TEST(Stage4, ThreadedStepMatchesSerial) {
+  // Options::parallel threads the transforms and the per-degree loops
+  // (force assembly, solves, strain recovery). The degree loops are
+  // bitwise independent of the thread count; the threaded transforms are
+  // not (each thread plans its own FFTs), so the comparison is at the
+  // iteration's tolerance, not bitwise.
+  auto body = Body::Make();
+  const double tau = body.rheology.MinRelaxationTime();
+  const auto delta = [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto run = [&](bool parallel) {
+    Viscoelastic3D::Options options;
+    options.parallel = parallel;
+    Viscoelastic3D op(body.rheology, kLmax, delta, options);
+    auto state = op.ZeroState();
+    Viscoelastic3D::Solutions solutions;
+    for (int i = 0; i < 2; ++i) {
+      auto result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(result.info.converged);
+      state = std::move(result.state);
+      solutions = std::move(result.solutions);
+    }
+    return solutions;
+  };
+  const auto serial = run(false);
+  const int saved = omp_get_max_threads();
+  omp_set_num_threads(4);
+  const auto threaded = run(true);
+  omp_set_num_threads(saved);
+
+  double scale = 0.0, diff = 0.0;
+  auto compare = [&](const std::map<int, std::vector<Complex>>& a,
+                     const std::map<int, std::vector<Complex>>& b) {
+    ASSERT_EQ(a.size(), b.size());
+    for (const auto& [l, x] : a) {
+      const auto& y = b.at(l);
+      ASSERT_EQ(x.size(), y.size());
+      for (std::size_t i = 0; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(x[i]));
+        diff = std::max(diff, std::abs(x[i] - y[i]));
+      }
+    }
+  };
+  compare(serial.spheroidal, threaded.spheroidal);
+  compare(serial.toroidal, threaded.toroidal);
+  EXPECT_GT(scale, 0.0);
+  EXPECT_LE(diff, 1e-10 * scale);
 }

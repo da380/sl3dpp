@@ -41,8 +41,9 @@ class SurfaceGrid {
     /// Grid resolution headroom for pointwise products (1.5 = the 3/2
     /// dealiasing rule); 1 resolves the band exactly.
     double oversampling = 1.0;
-    /// Whether GSHTrans transforms run threaded.
-    bool parallel = false;
+    /// Whether GSHTrans transforms run threaded, on OpenMP's thread count
+    /// (OMP_NUM_THREADS); false forces them serial.
+    bool parallel = true;
     /// Use GSHTrans's BLAS matrix kernel for the transforms (its order
     /// loops run sequentially and the BLAS supplies the threading).
     bool matrix_kernel = false;

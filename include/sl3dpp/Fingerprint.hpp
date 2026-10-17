@@ -28,7 +28,9 @@ class Fingerprint {
  public:
   struct Options {
     SeaLevelParameters parameters = {};
-    bool parallel_transforms = false;
+    /// Threaded transforms, on OpenMP's thread count (OMP_NUM_THREADS);
+    /// false forces them serial.
+    bool parallel_transforms = true;
     double rtol = 1e-9;
     int anderson_memory = 5;
   };
