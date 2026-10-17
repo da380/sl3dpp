@@ -24,7 +24,7 @@
 using namespace sl3dpp;
 
 int main() {
-  constexpr int lmax = 256;
+  constexpr auto lmax = 256;
   const auto earth = examples::Earth::Make(lmax, 1e21);  // viscosity unused
   const auto love = ComputeLoveNumbers(earth.material, lmax);
 
@@ -41,8 +41,8 @@ int main() {
                          greenland.Longitude(), 0.28);
   });
   const auto& ice = state.iceThickness;
-  std::vector<double> iceChange(ice.size());
-  for (std::size_t i = 0; i < ice.size(); ++i) {
+  auto iceChange = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < ice.size(); ++i) {
     iceChange[i] = -0.1 * mask[i] * ice[i];
   }
 

@@ -20,7 +20,7 @@ template <typename Body>
 void ParallelFor(int count, bool parallel, Body&& body) {
   std::exception_ptr failure;
 #pragma omp parallel for schedule(dynamic) if (parallel)
-  for (int i = 0; i < count; ++i) {
+  for (auto i = 0; i < count; ++i) {
     try {
       body(i);
     } catch (...) {
@@ -39,7 +39,7 @@ void ParallelFor(int count, bool parallel, Body&& body) {
 template <typename Body>
 void ParallelElements(std::size_t count, bool parallel, Body&& body) {
 #pragma omp parallel for schedule(static) if (parallel)
-  for (std::size_t i = 0; i < count; ++i) body(i);
+  for (auto i = std::size_t{0}; i < count; ++i) body(i);
 }
 
 }  // namespace sl3dpp::detail

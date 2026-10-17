@@ -79,8 +79,8 @@ double Seconds(std::chrono::steady_clock::time_point start) {
 
 // The best of `repeats` timings of f, in seconds.
 double Best(int repeats, const std::function<void()>& f) {
-  double best = 0.0;
-  for (int i = 0; i < repeats; ++i) {
+  auto best = 0.0;
+  for (auto i = 0; i < repeats; ++i) {
     const auto start = std::chrono::steady_clock::now();
     f();
     const auto t = Seconds(start);
@@ -101,7 +101,7 @@ std::uint64_t Fingerprint(const Viscoelastic3D::State& state) {
   std::uint64_t hash = 1469598103934665603ULL;
   auto add = [&](const void* data, std::size_t bytes) {
     const auto* p = static_cast<const unsigned char*>(data);
-    for (std::size_t i = 0; i < bytes; ++i) {
+    for (auto i = std::size_t{0}; i < bytes; ++i) {
       hash = (hash ^ p[i]) * 1099511628211ULL;
     }
   };
@@ -127,13 +127,13 @@ int main(int argc, char** argv) {
     return 1;
   }
   const std::string deckPath = argv[1];
-  const int lmax = std::atoi(argv[2]);
-  const int steps = argc > 3 ? std::atoi(argv[3]) : 3;
-  const int repeats = argc > 4 ? std::atoi(argv[4]) : 3;
-  const bool matrix = argc > 5 && std::string(argv[5]) == "matrix";
+  const auto lmax = std::atoi(argv[2]);
+  const auto steps = argc > 3 ? std::atoi(argv[3]) : 3;
+  const auto repeats = argc > 4 ? std::atoi(argv[4]) : 3;
+  const auto matrix = argc > 5 && std::string(argv[5]) == "matrix";
   const auto gauss = argc <= 6 || std::string(argv[6]) != "gll";
-  const int threads = omp_get_max_threads();
-  constexpr double year = 365.25 * 24.0 * 3600.0;
+  const auto threads = omp_get_max_threads();
+  constexpr auto year = 365.25 * 24.0 * 3600.0;
 
   auto deck = Deck::ReadLegacySl3d(deckPath).value();
   auto model =
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
   auto rheology = Rheology::FromModel(material, model).value();
   const auto& scales = model.ModelScales();
 
-  const double c22 = 0.25 * std::sqrt(15.0 / (2.0 * std::numbers::pi));
+  const auto c22 = 0.25 * std::sqrt(15.0 / (2.0 * std::numbers::pi));
   auto delta = [c22](double, double theta, double phi) {
     return -0.6 * c22 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
   };
@@ -155,23 +155,23 @@ int main(int argc, char** argv) {
 
   auto start = std::chrono::steady_clock::now();
   Viscoelastic3D op(rheology, lmax, delta, options);
-  const double construction = Seconds(start);
+  const auto construction = Seconds(start);
 
-  const double sigmaFactor = scales.Factor({.mass = 1, .length = -2});
-  const double timeFactor = scales.Time();
-  std::vector<double> rate(lmax + 1, 0.0);
-  for (int l = 1; l <= lmax; ++l) {
+  const auto sigmaFactor = scales.Factor({.mass = 1, .length = -2});
+  const auto timeFactor = scales.Time();
+  auto rate = std::vector<double>(lmax + 1, 0.0);
+  for (auto l = 1; l <= lmax; ++l) {
     rate[l] = std::exp(-2.0 * std::numbers::pi * (l + 1) / 10.5) *
               std::sqrt((2.0 * l + 1) / (4.0 * std::numbers::pi)) * 5515.0 /
               (30.0 * year);
   }
   auto load = [&](int l, double t) -> std::optional<std::vector<Complex>> {
     if (l < 1) return std::nullopt;
-    std::vector<Complex> columns(l + 1, 0.0);
+    auto columns = std::vector<Complex>(l + 1, 0.0);
     columns[0] = rate[l] * (t * timeFactor) / sigmaFactor;
     return columns;
   };
-  const double dt = 50.0 * year / timeFactor;
+  const auto dt = 50.0 * year / timeFactor;
   const auto scheme = Scheme::ExponentialTrapezoid;
 
   const auto& coupling = op.Coupling();
@@ -191,7 +191,7 @@ int main(int argc, char** argv) {
   // Warm-up: the first steps build and factorise every operator.
   auto state = op.ZeroState();
   start = std::chrono::steady_clock::now();
-  for (int i = 0; i < 2; ++i) {
+  for (auto i = 0; i < 2; ++i) {
     state = op.Step(state, dt, scheme, load).state;
   }
   std::printf("  warm-up (2 steps) %.3f s\n\n", Seconds(start));
@@ -209,9 +209,9 @@ int main(int argc, char** argv) {
     // Unrelaxed operators of the same sizes and dof maps as the step's own,
     // for the force phase (the step keeps its own operators private).
     const auto& base = rheology.BaseMaterial();
-    std::map<int, std::unique_ptr<DegreeOperator>> sph;
-    std::map<int, std::unique_ptr<ToroidalOperator>> tor;
-    for (int l = 0; l <= lmax; ++l) {
+    auto sph = std::map<int, std::unique_ptr<DegreeOperator>>{};
+    auto tor = std::map<int, std::unique_ptr<ToroidalOperator>>{};
+    for (auto l = 0; l <= lmax; ++l) {
       sph.emplace(l, std::make_unique<DegreeOperator>(base, l));
       if (l >= 1) tor.emplace(l, std::make_unique<ToroidalOperator>(base, l));
     }
@@ -229,7 +229,7 @@ int main(int argc, char** argv) {
       torForce = coupling.ToroidalForce(spectral, torOf);
     });
 
-    const std::vector<double> weight(field.r.size(), 1.0);
+    const auto weight = std::vector<double>(field.r.size(), 1.0);
     pointwise = Best(repeats, [&] { coupling.Multiply(field, weight); });
 
     // The first Respond of s0 finds its force formed by StartStep; spent
@@ -245,7 +245,7 @@ int main(int argc, char** argv) {
   startStep = Best(
       repeats, [&] { auto opened = op.StartStep(state, dt, scheme, load); });
 
-  const double solves = respond - synthesise - pointwise - analyse - force;
+  const auto solves = respond - synthesise - pointwise - analyse - force;
   std::printf("  one pass, phase by phase (best of %d) [s]\n", repeats);
   std::printf("    %-11s %9.4f\n", "analyse", analyse);
   std::printf("    %-11s %9.4f\n", "synthesise", synthesise);
@@ -264,11 +264,11 @@ int main(int argc, char** argv) {
   std::fflush(stdout);
 
   // Whole steps: per-pass time and the iteration's own overhead.
-  int passes = 0;
+  auto passes = 0;
   start = std::chrono::steady_clock::now();
   std::printf("\n  %d whole steps:", steps);
   Viscoelastic3D::Solutions last;
-  for (int i = 0; i < steps; ++i) {
+  for (auto i = 0; i < steps; ++i) {
     auto result = op.Step(state, dt, scheme, load);
     passes += result.info.iterations;
     std::printf(" %d%s", result.info.iterations,
@@ -276,8 +276,8 @@ int main(int argc, char** argv) {
     state = std::move(result.state);
     last = std::move(result.solutions);
   }
-  const double total = Seconds(start);
-  const double perPass = passes > 0 ? total / passes : 0.0;
+  const auto total = Seconds(start);
+  const auto perPass = passes > 0 ? total / passes : 0.0;
   std::printf(" passes\n");
   std::printf("    %-11s %9.4f\n", "total", total);
   std::printf("    %-11s %9.4f\n", "per pass", perPass);
@@ -285,7 +285,7 @@ int main(int argc, char** argv) {
               "overhead", perPass - respond - channels - strainOf);
   // The last step's surface response, to full precision: what a change
   // that is exact only to the iteration tolerance must leave agreeing.
-  double sumU = 0.0, sumPhi = 0.0;
+  auto sumU = 0.0, sumPhi = 0.0;
   for (const auto& [l, columns] : op.Surface(last, Component::U)) {
     for (const auto& v : columns) sumU += std::abs(v);
   }

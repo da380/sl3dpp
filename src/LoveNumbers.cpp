@@ -18,14 +18,14 @@ namespace {
 /// displacement: int rho u . x dV for u = U Y_00 r_hat.
 double InertiaMoment(const Material& material, std::span<const double> U) {
   const auto& mesh = material.Mesh();
-  const int n = mesh.NGll();
+  const auto n = mesh.NGll();
   const auto rho = material.Rho();
   const auto w = mesh.Weights();
-  double sum = 0.0;
-  for (int e = 0; e < mesh.ElementCount(); ++e) {
-    for (int q = 0; q < n; ++q) {
-      const std::size_t i = static_cast<std::size_t>(e) * n + q;
-      const double r = mesh.Radius(e, q);
+  auto sum = 0.0;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < n; ++q) {
+      const auto i = static_cast<std::size_t>(e) * n + q;
+      const auto r = mesh.Radius(e, q);
       sum += w[q] * mesh.Jacobian(e) * rho[i] * U[i] * r * r * r;
     }
   }
@@ -45,16 +45,16 @@ constexpr Dimensions kMomentPerPotential{.mass = 1, .time = 2};
 }  // namespace
 
 double LoveNumbers::ReciprocityResidual() const {
-  double worst = 0.0;
+  auto worst = 0.0;
   const double g = surface_gravity;
-  for (std::size_t i = 0; i < degrees.size(); ++i) {
+  for (auto i = std::size_t{0}; i < degrees.size(); ++i) {
     const double k2 = degrees[i] * (degrees[i] + 1.0);
     const double pairs[3][2] = {
         {g * h_phi[i], k_u[i]},
         {h_v[i], k2 * l_u[i]},
         {k_v[i], g * k2 * l_phi[i]},
     };
-    double scale = 0.0;
+    auto scale = 0.0;
     for (const auto& p : pairs) {
       scale = std::max({scale, std::abs(p[0]), std::abs(p[1])});
     }
@@ -63,13 +63,13 @@ double LoveNumbers::ReciprocityResidual() const {
       worst = std::max(worst, std::abs(p[0] - p[1]) / scale);
     }
   }
-  const double root = std::sqrt(4.0 * std::numbers::pi);
+  const auto root = std::sqrt(4.0 * std::numbers::pi);
   const double a4 = std::pow(radius, 4);
   const double axial[2][2] = {
       {m_u, root * g * a4 * h_c / 2.0},
       {m_phi, root * a4 * k_c / 2.0},
   };
-  double scale = 0.0;
+  auto scale = 0.0;
   for (const auto& p : axial) {
     scale = std::max({scale, std::abs(p[0]), std::abs(p[1])});
   }
@@ -89,7 +89,7 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   const auto& scales = material.ModelScales();
   LoveNumbers out;
   out.degrees.resize(lmax + 1);
-  for (int l = 0; l <= lmax; ++l) out.degrees[l] = l;
+  for (auto l = 0; l <= lmax; ++l) out.degrees[l] = l;
   for (auto* v :
        {&out.h_u, &out.l_u, &out.k_u, &out.h_phi, &out.l_phi, &out.k_phi,
         &out.h_v, &out.l_v, &out.k_v, &out.h_t, &out.l_t, &out.k_t}) {
@@ -99,24 +99,24 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   out.surface_gravity =
       material.SurfaceGravity() * scales.Factor(AccelerationDimensions);
 
-  const double hLoad = scales.Factor(kHPerLoad);
-  const double kLoad = scales.Factor(kKPerLoad);
-  const double hPot = scales.Factor(kHPerPotential);
-  const double kPot = scales.Factor(kKPerPotential);
+  const auto hLoad = scales.Factor(kHPerLoad);
+  const auto kLoad = scales.Factor(kKPerLoad);
+  const auto hPot = scales.Factor(kHPerPotential);
+  const auto kPot = scales.Factor(kKPerPotential);
 
 #pragma omp parallel for schedule(dynamic)
-  for (int l = 0; l <= lmax; ++l) {
+  for (auto l = 0; l <= lmax; ++l) {
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
                        .point_shear = options.point_shear});
-    const int n = op.DofCount();
-    const int nrhs = l == 0 ? 5 : 4;
-    std::vector<double> rhs(static_cast<std::size_t>(n) * nrhs);
+    const auto n = op.DofCount();
+    const auto nrhs = l == 0 ? 5 : 4;
+    auto rhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
     const auto columns = {op.Load(LoadPart::Force),
                           op.Load(LoadPart::Potential), op.Tangential(),
                           op.Tide()};
-    int k = 0;
+    auto k = 0;
     for (const auto& column : columns) {
       std::ranges::copy(column, rhs.begin() + (k++) * n);
     }
@@ -125,9 +125,9 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
     }
     const auto x = op.Solve(rhs, nrhs);
 
-    const int iU = op.SurfaceDof(Component::U);
-    const int iV = op.SurfaceDof(Component::V);
-    const int iP = op.SurfaceDof(Component::Phi);
+    const auto iU = op.SurfaceDof(Component::U);
+    const auto iV = op.SurfaceDof(Component::V);
+    const auto iP = op.SurfaceDof(Component::Phi);
     auto value = [&](int dof, int column) {
       return dof >= 0 ? x[static_cast<std::size_t>(column) * n + dof] : 0.0;
     };
@@ -154,8 +154,8 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
     if (l == 0) {
       out.h_c = value(iU, 4) * hPot;
       out.k_c = value(iP, 4) * kPot;
-      const double mLoad = scales.Factor(kMomentPerLoad);
-      const double mPot = scales.Factor(kMomentPerPotential);
+      const auto mLoad = scales.Factor(kMomentPerLoad);
+      const auto mPot = scales.Factor(kMomentPerPotential);
       for (const auto& [name, column, factor] :
            {std::tuple{&out.m_u, 0, mLoad}, std::tuple{&out.m_phi, 1, mLoad},
             std::tuple{&out.m_c, 4, mPot}}) {
@@ -170,11 +170,11 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
 }
 
 LoveNumbers LoveNumbers::ConvertedTo(const Scales& scales) const {
-  LoveNumbers out = *this;
-  const double hLoad = scales.Factor(kHPerLoad);
-  const double kLoad = scales.Factor(kKPerLoad);
-  const double hPot = scales.Factor(kHPerPotential);
-  const double kPot = scales.Factor(kKPerPotential);
+  auto out = *this;
+  const auto hLoad = scales.Factor(kHPerLoad);
+  const auto kLoad = scales.Factor(kKPerLoad);
+  const auto hPot = scales.Factor(kHPerPotential);
+  const auto kPot = scales.Factor(kKPerPotential);
   auto divide = [](std::vector<double>& v, double f) {
     for (auto& x : v) x /= f;
   };
@@ -207,12 +207,12 @@ std::expected<LoveNumbers, ModelError> LoveNumbers::FromFile(
   std::vector<double>* columns[12] = {
       &out.h_u, &out.l_u, &out.k_u, &out.h_phi, &out.l_phi, &out.k_phi,
       &out.h_v, &out.l_v, &out.k_v, &out.h_t,   &out.l_t,   &out.k_t};
-  bool inTable = false;
+  auto inTable = false;
   for (std::string line; std::getline(file, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (!inTable) {
-      std::string head;
+      auto head = std::string{};
       row >> head;
       if (head == "radius") {
         row >> out.radius;
@@ -225,7 +225,7 @@ std::expected<LoveNumbers, ModelError> LoveNumbers::FromFile(
       }
       continue;
     }
-    int l = 0;
+    auto l = 0;
     row >> l;
     if (!row || l != static_cast<int>(out.degrees.size())) {
       return std::unexpected(ModelError{
@@ -234,7 +234,7 @@ std::expected<LoveNumbers, ModelError> LoveNumbers::FromFile(
     }
     out.degrees.push_back(l);
     for (auto* column : columns) {
-      double value = 0;
+      auto value = 0.0;
       row >> value;
       column->push_back(value);
     }

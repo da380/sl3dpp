@@ -45,7 +45,7 @@ struct GeographicPoint {
 
   [[nodiscard]] static GeographicPoint FromSpherical(double theta,
                                                      double phi) {
-    double lon = std::fmod(Degrees(phi), 360.0);
+    auto lon = std::fmod(Degrees(phi), 360.0);
     if (lon < 0.0) lon += 360.0;
     return {LatitudeOf(theta), lon};
   }

@@ -813,3 +813,11 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   1D kernels example runs 31 s for 48 on 8 threads. The radial-major
   force layout was considered and deferred (~9% of a pass). The AAA
   sweep follows as its own change.
+- **17 Oct 2026** — The almost-always-auto sweep (conventions.md): 1375
+  explicitly typed locals and loop variables across src, include, tests,
+  examples and benchmarks rewritten to `auto`, each checked by the compiler
+  to deduce exactly the old type before the checks were removed; every
+  output byte-identical. Left explicit: struct members, initialisers of a
+  different type (a deliberate conversion), multi-line declarations, and
+  loops with non-literal starts.
+

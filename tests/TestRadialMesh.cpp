@@ -21,11 +21,11 @@ namespace {
 EarthModel TwoLayerModel(double b = 6.0e6, double rhoLower = 5000.0,
                          double rhoUpper = 3000.0) {
   std::vector<double> radius, rho;
-  for (int k = 0; k < 5; ++k) {
+  for (auto k = 0; k < 5; ++k) {
     radius.push_back(std::lerp(0.0, 0.5 * b, k / 4.0));
     rho.push_back(rhoLower);
   }
-  for (int k = 0; k < 5; ++k) {
+  for (auto k = 0; k < 5; ++k) {
     radius.push_back(std::lerp(0.5 * b, b, k / 4.0));
     rho.push_back(rhoUpper);
   }
@@ -36,7 +36,7 @@ EarthModel TwoLayerModel(double b = 6.0e6, double rhoLower = 5000.0,
 }  // namespace
 
 TEST(RadialMesh, SubdividesBreakpoints) {
-  const std::vector<double> breakpoints{0.0, 1.0};
+  const auto breakpoints = std::vector<double>{0.0, 1.0};
   auto mesh = RadialMesh::Create(breakpoints, {.drmax = 0.26}).value();
   EXPECT_EQ(mesh.ElementCount(), 4);  // ceil(1 / 0.26)
   EXPECT_EQ(mesh.NGll(), 5);
@@ -44,7 +44,7 @@ TEST(RadialMesh, SubdividesBreakpoints) {
   EXPECT_DOUBLE_EQ(mesh.Left(0), 0.0);
   EXPECT_DOUBLE_EQ(mesh.Right(3), 1.0);
   // Shared edges agree exactly and the node radii are increasing.
-  for (int e = 0; e + 1 < mesh.ElementCount(); ++e) {
+  for (auto e = 0; e + 1 < mesh.ElementCount(); ++e) {
     EXPECT_DOUBLE_EQ(mesh.Right(e), mesh.Left(e + 1));
     EXPECT_DOUBLE_EQ(mesh.Radius(e, 4), mesh.Radius(e + 1, 0));
   }
@@ -57,15 +57,15 @@ TEST(RadialMesh, SubdividesBreakpoints) {
 TEST(RadialMesh, ReferenceElementIsConsistent) {
   auto mesh =
       RadialMesh::Create(std::vector<double>{0.0, 1.0}, {.drmax = 1.0}).value();
-  const int n = mesh.NGll();
+  const auto n = mesh.NGll();
   // GLL weights integrate constants on [-1, 1].
-  double sum = 0.0;
+  auto sum = 0.0;
   for (auto w : mesh.Weights()) sum += w;
   EXPECT_NEAR(sum, 2.0, 1e-14);
   // The derivative matrix kills constants and differentiates xi exactly.
-  for (int k = 0; k < n; ++k) {
-    double dConst = 0.0, dXi = 0.0;
-    for (int i = 0; i < n; ++i) {
+  for (auto k = 0; k < n; ++k) {
+    auto dConst = 0.0, dXi = 0.0;
+    for (auto i = 0; i < n; ++i) {
       dConst += mesh.Derivative(k, i);
       dXi += mesh.Derivative(k, i) * mesh.Points()[i];
     }
@@ -78,11 +78,11 @@ TEST(RadialMesh, ConformsToModelBoundaries) {
   auto model = TwoLayerModel();
   auto mesh = RadialMesh::Create(model, {.lmax = 32}).value();
   // planetmodel's sizing rule, in the model's non-dimensional numbers.
-  const double drmax = 0.1 * 1.0 / (32 + 1);
+  const auto drmax = 0.1 * 1.0 / (32 + 1);
   // The internal boundary (0.5 in non-dimensional radius) is an element
   // edge, and every element is within drmax and inside one layer.
-  bool boundaryIsEdge = false;
-  for (int e = 0; e < mesh.ElementCount(); ++e) {
+  auto boundaryIsEdge = false;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
     EXPECT_LE(mesh.Right(e) - mesh.Left(e), drmax * (1 + 1e-12));
     boundaryIsEdge = boundaryIsEdge || mesh.Right(e) == 0.5;
     EXPECT_EQ(mesh.LayerOf(e), mesh.Left(e) < 0.5 ? 0 : 1);
@@ -117,7 +117,7 @@ TEST(RadialMesh, TruncationRules) {
   EXPECT_NEAR(mesh.TruncationRadius(100, TruncationRule::Legacy),
               1.0 - 20.0 / 100.5, 1e-12);
   // The start element contains the truncation radius.
-  const int start = mesh.StartElement(100, TruncationRule::Legacy);
+  const auto start = mesh.StartElement(100, TruncationRule::Legacy);
   EXPECT_LE(mesh.Left(start),
             mesh.TruncationRadius(100, TruncationRule::Legacy));
   EXPECT_GT(mesh.Right(start),
@@ -129,45 +129,45 @@ TEST(RadialMesh, NodalFieldsCarryOneSidedValues) {
   auto nd = model.DimensionlessView();
   auto mesh = RadialMesh::Create(model, {.drmax = 5e5}).value();
   auto rho = mesh.Nodal(model, "rho");
-  const int n = mesh.NGll();
+  const auto n = mesh.NGll();
 
   // Find the elements meeting at the internal boundary.
-  int below = -1;
-  for (int e = 0; e < mesh.ElementCount(); ++e) {
+  auto below = -1;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
     if (mesh.Right(e) == 0.5) below = e;
   }
   ASSERT_GE(below, 0);
-  const double lower = 5000.0 / sl3dpp::EarthMeanDensitySI;
-  const double upper = 3000.0 / sl3dpp::EarthMeanDensitySI;
+  const auto lower = 5000.0 / sl3dpp::EarthMeanDensitySI;
+  const auto upper = 3000.0 / sl3dpp::EarthMeanDensitySI;
   EXPECT_NEAR(rho[below * n + (n - 1)], lower, 1e-12);
   EXPECT_NEAR(rho[(below + 1) * n + 0], upper, 1e-12);
 
   // Nodal gravity matches the model's at the nodes.
   auto gravity = mesh.NodalGravity(model);
   const auto radii = mesh.Radii();
-  for (std::size_t i = 0; i < radii.size(); i += 7) {
+  for (auto i = std::size_t{0}; i < radii.size(); i += 7) {
     EXPECT_DOUBLE_EQ(gravity[i], nd.Gravity(radii[i]));
   }
 }
 
 TEST(RadialMesh, GradedMeshResolvesEveryDegree) {
   auto model = TwoLayerModel();
-  constexpr int lmax = 256;
+  constexpr auto lmax = 256;
   auto graded = RadialMesh::CreateGraded(model, lmax).value();
   auto uniform = RadialMesh::Create(model, {.lmax = lmax}).value();
   // Far fewer elements, boundaries still conforming.
   EXPECT_LT(graded.ElementCount(), uniform.ElementCount() / 4);
-  bool boundaryIsEdge = false;
-  for (int e = 0; e < graded.ElementCount(); ++e) {
+  auto boundaryIsEdge = false;
+  for (auto e = 0; e < graded.ElementCount(); ++e) {
     boundaryIsEdge = boundaryIsEdge || graded.Right(e) == 0.5;
   }
   EXPECT_TRUE(boundaryIsEdge);
   // Every element is no wider than the uniform rule at its own top:
   // within a degree's subset the graded mesh is at least as fine.
-  const double a = 1.0;
-  const double logEps = std::log(1e-8);
-  for (int e = 0; e < graded.ElementCount(); ++e) {
-    const double depth = a - graded.Right(e);
+  const auto a = 1.0;
+  const auto logEps = std::log(1e-8);
+  for (auto e = 0; e < graded.ElementCount(); ++e) {
+    const auto depth = a - graded.Right(e);
     const double rule =
         depth <= 0.0 ? 0.1 * a / (lmax + 1)
                      : std::max(0.1 * a / (lmax + 1),

@@ -26,7 +26,7 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr int kLmax = 16;
+constexpr auto kLmax = 16;
 
 struct Setup {
   EarthModel model;
@@ -56,9 +56,9 @@ struct Setup {
         zero.itau.assign(material.Rho().size(), 0.0);
         return Rheology::Create(material, {std::move(zero)}).value();
       }
-      std::map<std::size_t, RadialValue> viscosity;
+      auto viscosity = std::map<std::size_t, RadialValue>{};
       const auto b = model.DimensionlessView().Boundaries();
-      for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+      for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
         if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
             b[i + 1] <= 6.1511e6 / scales.Length()) {
           viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -75,7 +75,7 @@ struct Setup {
     // rebuilt in the solver's units.
     Fingerprint fingerprint(kLmax, op.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
-    const double length = solver.SolverScales().Length();
+    const auto length = solver.SolverScales().Length();
     auto toNd = [&](std::vector<double> si) {
       for (auto& v : si) v /= length;
       return si;
@@ -88,8 +88,8 @@ struct Setup {
 
   /// The grounded load of a melt fraction, solver units.
   [[nodiscard]] std::vector<double> MeltLoad(double fraction) const {
-    std::vector<double> load(iceNd.size());
-    for (std::size_t i = 0; i < load.size(); ++i) {
+    auto load = std::vector<double>(iceNd.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
       load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
                 fraction * iceNd[i];
     }
@@ -104,8 +104,8 @@ TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
   ViscoelasticOperator op(setup.rheology, kLmax);
   SeaLevelEvolution evolution(op, setup.solver, setup.state, {.rtol = 1e-12});
 
-  const double tauScale = 1e10 / setup.solver.SolverScales().Time();
-  const std::vector<double> times{0.0, tauScale, 3.0 * tauScale};
+  const auto tauScale = 1e10 / setup.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, tauScale, 3.0 * tauScale};
   auto load = setup.MeltLoad(-0.1);
   auto snapshots = evolution.Run(times, [&](double) { return load; });
   ASSERT_EQ(snapshots.size(), 3u);
@@ -113,16 +113,16 @@ TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
   // With nothing relaxing, every node is the same elastic solve.
   auto reference = setup.solver.Solve(
       setup.state, load, RotationalFeedback::Full, {.rtol = 1e-12});
-  double scale = 0.0;
+  auto scale = 0.0;
   for (auto v : reference.seaLevelChange) scale = std::max(scale, std::abs(v));
   for (const auto& snapshot : snapshots) {
-    double diff = 0.0;
-    for (std::size_t i = 0; i < reference.seaLevelChange.size(); ++i) {
+    auto diff = 0.0;
+    for (auto i = std::size_t{0}; i < reference.seaLevelChange.size(); ++i) {
       diff = std::max(diff, std::abs(snapshot.seaLevelChange[i] -
                                      reference.seaLevelChange[i]));
     }
     EXPECT_LT(diff, 1e-9 * scale) << "t = " << snapshot.t;
-    for (int i = 0; i < 3; ++i) {
+    for (auto i = 0; i < 3; ++i) {
       EXPECT_NEAR(snapshot.angularVelocity[i], reference.angularVelocity[i],
                   1e-9 * std::abs(reference.angularVelocity[1]) + 1e-30);
     }
@@ -134,9 +134,9 @@ TEST(Evolution, ViscousMantleKeepsRelaxing) {
   ViscoelasticOperator op(setup.rheology, kLmax);
   SeaLevelEvolution evolution(op, setup.solver, setup.state, {});
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int i = 0; i <= 10; ++i) times.push_back(i * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto i = 0; i <= 10; ++i) times.push_back(i * kyr);
 
   // A load switched on at t = 0 and held.
   auto load = setup.MeltLoad(-0.1);
@@ -144,13 +144,13 @@ TEST(Evolution, ViscousMantleKeepsRelaxing) {
 
   // Viscous flow keeps amplifying the response after the elastic step:
   // the peak sea-level change grows monotonically over the history.
-  std::vector<double> peaks;
+  auto peaks = std::vector<double>{};
   for (const auto& snapshot : snapshots) {
-    double peak = 0.0;
+    auto peak = 0.0;
     for (auto v : snapshot.seaLevelChange) peak = std::max(peak, std::abs(v));
     peaks.push_back(peak);
   }
-  for (std::size_t i = 1; i < peaks.size(); ++i) {
+  for (auto i = std::size_t{1}; i < peaks.size(); ++i) {
     EXPECT_GT(peaks[i], peaks[i - 1] * (1.0 - 1e-9)) << "node " << i;
   }
   EXPECT_GT(peaks.back(), 1.2 * peaks.front());
@@ -169,9 +169,9 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
   const auto& grid = setup.solver.Grid();
   const auto& scales = setup.solver.SolverScales();
 
-  const double tFinal = 5000.0 * 3.15576e7;  // s
+  const auto tFinal = 5000.0 * 3.15576e7;  // s
   std::vector<double> times, timesSi;
-  for (int i = 0; i <= 10; ++i) {
+  for (auto i = 0; i <= 10; ++i) {
     timesSi.push_back(i * tFinal / 10.0);
     times.push_back(timesSi.back() / scales.Time());
   }
@@ -184,19 +184,19 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
   std::ifstream file(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
                      "stage3_evolution.txt");
   ASSERT_TRUE(file.is_open());
-  const double length = scales.Length();
-  const double frequency = scales.Factor(Dimensions{.time = -1});
-  int node = -1;
-  std::vector<std::complex<double>> ours;
-  double scale = 0.0, worst = 0.0;
-  constexpr double tol = 1e-5;
+  const auto length = scales.Length();
+  const auto frequency = scales.Factor(Dimensions{.time = -1});
+  auto node = -1;
+  auto ours = std::vector<std::complex<double>>{};
+  auto scale = 0.0, worst = 0.0;
+  constexpr auto tol = 1e-5;
   for (std::string line; std::getline(file, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (line.starts_with("node")) {
-      std::string head;
-      double t = 0;
-      std::array<double, 3> omega{};
+      auto head = std::string{};
+      auto t = 0.0;
+      auto omega = std::array<double, 3>{};
       row >> head >> node >> t >> omega[0] >> omega[1] >> omega[2];
       ASSERT_LT(static_cast<std::size_t>(node), snapshots.size());
       EXPECT_NEAR(timesSi[node], t, 1e-6 * std::max(t, 1.0));
@@ -205,7 +205,7 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
       if (node > 0) {
         const double omegaScale = std::max(
             {std::abs(omega[0]), std::abs(omega[1]), std::abs(omega[2])});
-        for (int i = 0; i < 3; ++i) {
+        for (auto i = 0; i < 3; ++i) {
           EXPECT_NEAR(snapshots[node].angularVelocity[i] * frequency, omega[i],
                       tol * omegaScale)
               << "node " << node << " omega " << i;
@@ -213,8 +213,8 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
       }
       continue;
     }
-    int l = 0, m = 0;
-    double a = 0, b = 0;
+    auto l = 0, m = 0;
+    auto a = 0.0, b = 0.0;
     row >> l >> m >> a >> b;
     const auto reference = ComplexFromRealPair({a, b}, m);
     scale = std::max(scale, std::abs(reference));

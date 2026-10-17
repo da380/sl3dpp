@@ -50,7 +50,7 @@ struct TrapezoidWeights {
 
 namespace detail {
 
-inline constexpr double kSeriesSwitch = 1e-3;
+inline constexpr auto kSeriesSwitch = 1e-3;
 
 /// (1 - exp(-h)) / h: the quotient away from zero, the alternating series
 /// below the switch, exact at h = 0.
@@ -76,8 +76,8 @@ inline double DPhi1(double h, double e, double phi1) {
 /// The exponential trapezoid weights at h = dt / tau; negative h gives the
 /// exact inverse step's. The effective-modulus weight is 1 - beta = phi1.
 [[nodiscard]] inline TrapezoidWeights ExponentialTrapezoidWeights(double h) {
-  const double e = std::exp(-h);
-  const double phi1 = detail::Phi1(h, e);
+  const auto e = std::exp(-h);
+  const auto phi1 = detail::Phi1(h, e);
   return {e, phi1 - e, 1.0 - phi1};
 }
 
@@ -94,9 +94,9 @@ inline double DPhi1(double h, double e, double phi1) {
 [[nodiscard]] inline TrapezoidWeights ExponentialTrapezoidWeightDerivatives(
     double h) {
   if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
-  const double e = std::exp(-h);
-  const double phi1 = detail::Phi1(h, e);
-  const double dphi1 = detail::DPhi1(h, e, phi1);
+  const auto e = std::exp(-h);
+  const auto phi1 = detail::Phi1(h, e);
+  const auto dphi1 = detail::DPhi1(h, e, phi1);
   return {-e, dphi1 + e, -dphi1};
 }
 

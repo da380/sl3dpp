@@ -27,7 +27,7 @@ std::vector<Complex> CoefficientDualFromColumnDuals(
   auto out = grid.ZeroCoefficients();
   for (const auto& [l, cols] : duals) {
     out[SurfaceGrid::Index(l, 0)] = factor * cols[0];
-    for (int m = 1; m <= l; ++m) {
+    for (auto m = 1; m <= l; ++m) {
       out[SurfaceGrid::Index(l, m)] =
           0.5 * factor * Complex(cols[m], cols[static_cast<std::size_t>(l) + 1 + m]);
     }
@@ -40,9 +40,9 @@ std::vector<Complex> CoefficientDualFromColumnDuals(
 /// pairing).
 std::vector<double> ColumnDualsOf(std::span<const Complex> dual, int l,
                                   double factor) {
-  std::vector<double> cols(2 * (static_cast<std::size_t>(l) + 1), 0.0);
+  auto cols = std::vector<double>(2 * (static_cast<std::size_t>(l) + 1), 0.0);
   cols[0] = factor * dual[SurfaceGrid::Index(l, 0)].real();
-  for (int m = 1; m <= l; ++m) {
+  for (auto m = 1; m <= l; ++m) {
     const auto d = dual[SurfaceGrid::Index(l, m)];
     cols[m] = 2.0 * factor * d.real();
     cols[static_cast<std::size_t>(l) + 1 + m] = 2.0 * factor * d.imag();
@@ -52,10 +52,10 @@ std::vector<double> ColumnDualsOf(std::span<const Complex> dual, int l,
 
 /// The trapezoid weights of the time grid.
 std::vector<double> NodeWeights(std::span<const double> times) {
-  std::vector<double> w(times.size());
+  auto w = std::vector<double>(times.size());
   w.front() = 0.5 * (times[1] - times[0]);
   w.back() = 0.5 * (times[times.size() - 1] - times[times.size() - 2]);
-  for (std::size_t n = 1; n + 1 < times.size(); ++n) {
+  for (auto n = std::size_t{1}; n + 1 < times.size(); ++n) {
     w[n] = 0.5 * (times[n + 1] - times[n - 1]);
   }
   return w;
@@ -155,11 +155,11 @@ std::vector<std::vector<double>> IceKernels::Viscosity(
     throw std::invalid_argument(
         "no itau kernels: run the adjoint with a forward trajectory");
   }
-  std::vector<std::vector<double>> out;
-  for (std::size_t k = 0; k < rheology.BranchCount(); ++k) {
+  auto out = std::vector<std::vector<double>>{};
+  for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
     const auto& branch = rheology.BranchAt(k);
-    std::vector<double> kernel(itauKernel[k].size(), 0.0);
-    for (std::size_t i = 0; i < kernel.size(); ++i) {
+    auto kernel = std::vector<double>(itauKernel[k].size(), 0.0);
+    for (auto i = std::size_t{0}; i < kernel.size(); ++i) {
       if (branch.mu[i] > 0.0) {
         kernel[i] =
             -(branch.itau[i] * branch.itau[i]) / branch.mu[i] * itauKernel[k][i];
@@ -181,7 +181,7 @@ IceKernels AdjointSolver::IceHistoryKernels(
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
-  for (std::size_t i = 1; i < times.size(); ++i) {
+  for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
       throw std::invalid_argument("times must be increasing");
     }
@@ -242,12 +242,12 @@ IceKernels AdjointSolver::DiscreteSweep(
   const bool implicit = scheme == Scheme::BackwardEuler;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
-  const double rhoW = solver.WaterDensity();
-  const double r2 = solver.Radius() * solver.Radius();
+  const auto rhoW = solver.WaterDensity();
+  const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
-  const int lmax = op.LMax();
+  const auto lmax = op.LMax();
   const auto K = op.GetRheology().BranchCount();
-  const std::size_t N = times.size() - 1;
+  const auto N = times.size() - 1;
 
   SeaLevelSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
@@ -255,7 +255,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   // The flavoured solvers, as the forward run builds them (keyed by the
   // material dt; 0 is the unrelaxed table).
-  std::map<double, SeaLevelSolver> flavours;
+  auto flavours = std::map<double, SeaLevelSolver>{};
   auto solverFor = [&](double dt) -> const SeaLevelSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
@@ -274,9 +274,9 @@ IceKernels AdjointSolver::DiscreteSweep(
   // The dual state: m-dagger per branch and d-dagger, the layouts of
   // ViscoelasticState over every degree's 2 (l + 1) columns.
   std::map<int, std::vector<double>> mdual, ddual;
-  for (int l = 0; l <= lmax; ++l) {
+  for (auto l = 0; l <= lmax; ++l) {
     const auto& deg = op.Deg(l);
-    const int ncols = 2 * (l + 1);
+    const auto ncols = 2 * (l + 1);
     mdual[l].assign(K * 3 * deg.NodalSize(ncols), 0.0);
     ddual[l].assign(3 * deg.NodalSize(ncols), 0.0);
   }
@@ -284,11 +284,11 @@ IceKernels AdjointSolver::DiscreteSweep(
   // The itau kernels pair the sweep's duals with the recorded forward
   // trajectory through the scheme-weight derivatives — the exact
   // discrete sensitivity.
-  std::optional<TrajectoryCursor> cursor;
-  std::vector<std::vector<double>> itauKernel;
+  auto cursor = std::optional<TrajectoryCursor>{};
+  auto itauKernel = std::vector<std::vector<double>>{};
   if (trajectory != nullptr) {
-    std::vector<double> dts;
-    for (std::size_t m = 0; m + 1 < times.size(); ++m) {
+    auto dts = std::vector<double>{};
+    for (auto m = std::size_t{0}; m + 1 < times.size(); ++m) {
       dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
     }
     cursor.emplace(
@@ -313,27 +313,27 @@ IceKernels AdjointSolver::DiscreteSweep(
     duals.rotation = rotation;
     auto synth = grid.Synthesise(sigmaDual);
     duals.seaLevelDual.assign(fieldSize, 0.0);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       duals.seaLevelDual[i] = rhoW * C[i] * synth[i] / r2;
     }
-    std::array<double, 3> gOmega{0.0, 0.0, 0.0};
+    auto gOmega = std::array<double, 3>{0.0, 0.0, 0.0};
     if (rotation != RotationalFeedback::None) {
       gOmega = solver.CentrifugalDual(psiDual);
     }
     if (auto found = measurements.find(node); found != measurements.end()) {
       const auto& m = found->second;
-      for (std::size_t i = 0; i < m.seaLevelDual.size(); ++i) {
+      for (auto i = std::size_t{0}; i < m.seaLevelDual.size(); ++i) {
         duals.seaLevelDual[i] += m.seaLevelDual[i];
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
-      for (int j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
+      for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
     return std::pair(std::move(duals), std::move(synth));
   };
 
-  std::vector<std::vector<double>> loadDuals(times.size());
+  auto loadDuals = std::vector<std::vector<double>>(times.size());
 
   for (std::size_t n = N; n >= 1; --n) {
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
@@ -363,22 +363,22 @@ IceKernels AdjointSolver::DiscreteSweep(
     detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
-      const int ncols = 2 * (l + 1);
-      const std::size_t block = deg.NodalSize(ncols);
+      const auto ncols = 2 * (l + 1);
+      const auto block = deg.NodalSize(ncols);
       auto summed = *dds[l];
       const auto& md = *mds[l];
-      for (std::size_t k = 0; k < K; ++k) {
+      for (auto k = std::size_t{0}; k < K; ++k) {
         const auto& w = weights[k];
-        for (int s = 0; s < 3; ++s) {
-          for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.np; ++q) {
+        for (auto s = 0; s < 3; ++s) {
+          for (auto e = 0; e < deg.ne; ++e) {
+            for (auto q = 0; q < deg.np; ++q) {
               const std::size_t full =
                   static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const double b = implicit ? 1.0 - w.e[full] : w.beta[full];
               const std::size_t node =
                   (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-              const std::size_t at = (k * 3 + s) * block + node;
-              for (int c = 0; c < ncols; ++c) {
+              const auto at = (k * 3 + s) * block + node;
+              for (auto c = 0; c < ncols; ++c) {
                 summed[s * block + node + c] += b * md[at + c];
               }
             }
@@ -388,10 +388,10 @@ IceKernels AdjointSolver::DiscreteSweep(
       auto x = deg.DualFromScalars(summed, ncols);
       const auto& units = *unitsOf[l];
       std::vector<double> sc(ncols, 0.0), pc(ncols, 0.0);
-      for (int c = 0; c < ncols; ++c) {
-        double s = 0.0, p = 0.0;
-        for (int d = 0; d < deg.ndof; ++d) {
-          const double v = x[static_cast<std::size_t>(c) * deg.ndof + d];
+      for (auto c = 0; c < ncols; ++c) {
+        auto s = 0.0, p = 0.0;
+        for (auto d = 0; d < deg.ndof; ++d) {
+          const auto v = x[static_cast<std::size_t>(c) * deg.ndof + d];
           s += units[d] * v;
           p += units[static_cast<std::size_t>(deg.ndof) + d] * v;
         }
@@ -421,13 +421,13 @@ IceKernels AdjointSolver::DiscreteSweep(
                       n, adj.error));
     }
     loadDuals[n].assign(fieldSize, 0.0);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       loadDuals[n][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
 
     // The forward states this step's itau sensitivity pairs with.
     const ViscoelasticState* fwdPrev = nullptr;
-    std::optional<ViscoelasticState> fwdN;
+    auto fwdN = std::optional<ViscoelasticState>{};
     const std::vector<ViscoelasticOperator::BranchWeights>* dweights = nullptr;
     if (cursor.has_value()) {
       fwdN = cursor->State(n);  // copied before the cursor moves on
@@ -445,16 +445,16 @@ IceKernels AdjointSolver::DiscreteSweep(
     detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
-      const int ncols = 2 * (l + 1);
-      const std::size_t block = deg.NodalSize(ncols);
+      const auto ncols = 2 * (l + 1);
+      const auto block = deg.NodalSize(ncols);
       auto rhs = std::move(xd[l]);
       const auto suCols =
           ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
       const auto sphiCols =
           ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
-      const int su = deg.system.SurfaceDof(Component::U);
-      const int sphi = deg.system.SurfaceDof(Component::Phi);
-      for (int c = 0; c < ncols; ++c) {
+      const auto su = deg.system.SurfaceDof(Component::U);
+      const auto sphi = deg.system.SurfaceDof(Component::Phi);
+      for (auto c = 0; c < ncols; ++c) {
         if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
         if (sphi >= 0) {
           rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
@@ -462,7 +462,7 @@ IceKernels AdjointSolver::DiscreteSweep(
       }
       if (l == 0) {
         const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
-        for (int d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
+        for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
       }
       const auto y = systems[l]->Solve(rhs, ncols);
       const auto sy = deg.Strain(y, ncols);
@@ -471,7 +471,7 @@ IceKernels AdjointSolver::DiscreteSweep(
       const std::vector<double>* mPrev = nullptr;
       const std::vector<double>* d0 = nullptr;
       const std::vector<double>* d1 = nullptr;
-      std::vector<double> wd1;
+      auto wd1 = std::vector<double>{};
       if (cursor.has_value()) {
         mPrev = &fwdPrev->m.at(l);
         d0 = &fwdPrev->strain.at(l);
@@ -485,24 +485,24 @@ IceKernels AdjointSolver::DiscreteSweep(
       if (terms != nullptr) {
         terms->assign(K * static_cast<std::size_t>(deg.ne) * deg.np, 0.0);
       }
-      for (std::size_t k = 0; k < K; ++k) {
+      for (auto k = std::size_t{0}; k < K; ++k) {
         const auto& w = weights[k];
-        for (int s = 0; s < 3; ++s) {
-          for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.np; ++q) {
+        for (auto s = 0; s < 3; ++s) {
+          for (auto e = 0; e < deg.ne; ++e) {
+            for (auto q = 0; q < deg.np; ++q) {
               const std::size_t full =
                   static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const std::size_t node =
                   (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-              const std::size_t at = (k * 3 + s) * block + node;
-              for (int c = 0; c < ncols; ++c) {
-                const double mdOld = md[at + c];
-                const double mtilde = mdOld + wsy[at + c];
+              const auto at = (k * 3 + s) * block + node;
+              for (auto c = 0; c < ncols; ++c) {
+                const auto mdOld = md[at + c];
+                const auto mtilde = mdOld + wsy[at + c];
                 if (dweights != nullptr) {
                   // The derivative of the step in h = dt itau pairs the
                   // duals with the forward trajectory; dh = dt d(itau).
                   const auto& dw = (*dweights)[k];
-                  const std::size_t sn = s * block + node + c;
+                  const auto sn = s * block + node + c;
                   const double g =
                       implicit
                           ? (mtilde * (*mPrev)[at + c] - mdOld * (*d1)[sn] -
@@ -542,16 +542,16 @@ IceKernels AdjointSolver::DiscreteSweep(
   {
     std::map<int, std::vector<double>> sigCols, psiCols;
     std::vector<Complex> sigmaDual, psiDual;
-    for (int l = 0; l <= lmax; ++l) {
+    for (auto l = 0; l <= lmax; ++l) {
       const auto& deg = op.Deg(l);
-      const int ncols = 2 * (l + 1);
+      const auto ncols = 2 * (l + 1);
       const auto x = deg.DualFromScalars(ddual[l], ncols);
       const auto& units = op.UnitResponses(nullptr, l);
       std::vector<double> sc(ncols, 0.0), pc(ncols, 0.0);
-      for (int c = 0; c < ncols; ++c) {
-        double s = 0.0, p = 0.0;
-        for (int d = 0; d < deg.ndof; ++d) {
-          const double v = x[static_cast<std::size_t>(c) * deg.ndof + d];
+      for (auto c = 0; c < ncols; ++c) {
+        auto s = 0.0, p = 0.0;
+        for (auto d = 0; d < deg.ndof; ++d) {
+          const auto v = x[static_cast<std::size_t>(c) * deg.ndof + d];
           s += units[d] * v;
           p += units[static_cast<std::size_t>(deg.ndof) + d] * v;
         }
@@ -570,14 +570,14 @@ IceKernels AdjointSolver::DiscreteSweep(
           "the adjoint elastic sea level solve did not converge");
     }
     loadDuals[0].assign(fieldSize, 0.0);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       loadDuals[0][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
   }
 
   // The delta amplitudes: the instantaneous (unrelaxed) fingerprint
   // adjoint of each measurement, independent of the time grid.
-  std::map<std::size_t, std::vector<double>> lumps;
+  auto lumps = std::map<std::size_t, std::vector<double>>{};
   for (const auto& [node, m] : measurements) {
     SeaLevelSolver::AdjointForcing duals;
     duals.rotation = rotation;
@@ -596,11 +596,11 @@ IceKernels AdjointSolver::DiscreteSweep(
   // The continuous part of the distributional view: the node duals less
   // the lumps, per unit time.
   const auto w = NodeWeights(times);
-  std::vector<std::vector<double>> densityLoad(times.size());
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  auto densityLoad = std::vector<std::vector<double>>(times.size());
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     densityLoad[n].assign(fieldSize, 0.0);
     const auto lump = lumps.find(n);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       const double lumped =
           lump == lumps.end() ? 0.0 : lump->second[i];
       densityLoad[n][i] = (loadDuals[n][i] - lumped) / w[n];
@@ -627,18 +627,18 @@ IceKernels AdjointSolver::ContinuousSweep(
   const auto scheme = ev.options_.scheme;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
-  const double rhoW = solver.WaterDensity();
-  const double g = solver.SurfaceGravity();
-  const double r2 = solver.Radius() * solver.Radius();
+  const auto rhoW = solver.WaterDensity();
+  const auto g = solver.SurfaceGravity();
+  const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
   const auto K = op.GetRheology().BranchCount();
-  const std::size_t N = times.size() - 1;
+  const auto N = times.size() - 1;
 
   SeaLevelSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
 
-  std::map<double, SeaLevelSolver> flavours;
+  auto flavours = std::map<double, SeaLevelSolver>{};
   auto solverFor = [&](double dt) -> const SeaLevelSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
@@ -684,24 +684,24 @@ IceKernels AdjointSolver::ContinuousSweep(
     std::vector<double> zetaU, zetaPhi;
     if (!m.displacementDual.empty()) {
       zetaU.resize(fieldSize);
-      for (std::size_t i = 0; i < fieldSize; ++i) {
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         zetaU[i] = -m.displacementDual[i];
       }
       f.displacementLoad = zetaU;
     }
     if (!m.potentialDual.empty()) {
       zetaPhi.resize(fieldSize);
-      for (std::size_t i = 0; i < fieldSize; ++i) {
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         zetaPhi[i] = -g * m.potentialDual[i];
       }
       f.potentialLoad = zetaPhi;
     }
     if (rotation != RotationalFeedback::None) {
-      std::array<double, 3> avc{0.0, 0.0, 0.0};
-      for (int j = 0; j < 3; ++j) avc[j] = -g * m.angularVelocityDual[j];
+      auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
+      for (auto j = 0; j < 3; ++j) avc[j] = -g * m.angularVelocityDual[j];
       if (!m.potentialDual.empty()) {
         const auto ps = psiStar(m.potentialDual);
-        for (int j = 0; j < 3; ++j) avc[j] += g * ps[j];
+        for (auto j = 0; j < 3; ++j) avc[j] += g * ps[j];
       }
       f.angularMomentumChange = avc;
     }
@@ -712,8 +712,8 @@ IceKernels AdjointSolver::ContinuousSweep(
     }
     Jump out;
     out.xiA = resp.seaLevelChange;
-    std::vector<double> lamGrid(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto lamGrid = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
                    rhoW * C[i] * out.xiA[i];
     }
@@ -771,10 +771,11 @@ IceKernels AdjointSolver::ContinuousSweep(
       const auto& deg = *task.deg;
       const int ncols = 2 * (l + 1);
       const std::size_t block = deg.NodalSize(ncols);
-      std::vector<double> x(static_cast<std::size_t>(deg.ndof) * ncols, 0.0);
+      auto x =
+          std::vector<double>(static_cast<std::size_t>(deg.ndof) * ncols, 0.0);
       auto add = [&](const double* unit, const std::vector<double>& amps) {
-        for (int c = 0; c < ncols; ++c) {
-          for (int d = 0; d < deg.ndof; ++d) {
+        for (auto c = 0; c < ncols; ++c) {
+          for (auto d = 0; d < deg.ndof; ++d) {
             x[static_cast<std::size_t>(c) * deg.ndof + d] += unit[d] * amps[c];
           }
         }
@@ -784,17 +785,17 @@ IceKernels AdjointSolver::ContinuousSweep(
       if (task.zu) add(task.split->data(), *task.zu);
       if (task.zphi) add(task.split->data() + deg.ndof, *task.zphi);
       const auto dTilde = deg.Strain(x, ncols);
-      for (std::size_t k = 0; k < K; ++k) {
-        for (int s = 0; s < 3; ++s) {
-          for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.np; ++q) {
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        for (auto s = 0; s < 3; ++s) {
+          for (auto e = 0; e < deg.ne; ++e) {
+            for (auto q = 0; q < deg.np; ++q) {
               const double itau =
                   deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
               if (itau == 0.0) continue;
               const std::size_t node =
                   (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
-              for (int c = 0; c < ncols; ++c) {
+              for (auto c = 0; c < ncols; ++c) {
                 m[at + c] += itau * dTilde[s * block + node + c];
               }
             }
@@ -824,8 +825,8 @@ IceKernels AdjointSolver::ContinuousSweep(
       throw std::runtime_error(
           "the adjoint equilibrium solve did not converge");
     }
-    std::vector<double> sig(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto sig = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
@@ -841,13 +842,13 @@ IceKernels AdjointSolver::ContinuousSweep(
   // the discontinuity the same way.
   std::vector<std::vector<double>> densityLate(times.size()),
       densityEarly(times.size());
-  std::map<std::size_t, std::vector<double>> lumps;
+  auto lumps = std::map<std::size_t, std::vector<double>>{};
   const double perTime = ev.toMatTime_;
   std::vector<double> wEarly(times.size(), 0.0), wLate(times.size(), 0.0);
-  for (std::size_t n = 1; n < times.size(); ++n) {
+  for (auto n = std::size_t{1}; n < times.size(); ++n) {
     wEarly[n] = 0.5 * (times[n] - times[n - 1]);
   }
-  for (std::size_t n = 0; n + 1 < times.size(); ++n) {
+  for (auto n = std::size_t{0}; n + 1 < times.size(); ++n) {
     wLate[n] = 0.5 * (times[n + 1] - times[n]);
   }
 
@@ -859,11 +860,11 @@ IceKernels AdjointSolver::ContinuousSweep(
   // state carried here is the surface gravity times the true multiplier
   // of the internal-variable dynamics — hence the division, with g in
   // the material's units.
-  std::optional<TrajectoryCursor> cursor;
-  std::vector<std::vector<double>> itauKernel;
+  auto cursor = std::optional<TrajectoryCursor>{};
+  auto itauKernel = std::vector<std::vector<double>>{};
   if (trajectory != nullptr) {
-    std::vector<double> dts;
-    for (std::size_t m = 0; m + 1 < times.size(); ++m) {
+    auto dts = std::vector<double>{};
+    for (auto m = std::size_t{0}; m + 1 < times.size(); ++m) {
       dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
     }
     cursor.emplace(
@@ -911,33 +912,33 @@ IceKernels AdjointSolver::ContinuousSweep(
       const auto l = tasks[j].first;
       const auto& mdual = *tasks[j].second;
       const auto& deg = *degs[j];
-      const int ncols = 2 * (l + 1);
-      const std::size_t block = deg.NodalSize(ncols);
+      const auto ncols = 2 * (l + 1);
+      const auto block = deg.NodalSize(ncols);
       const auto& dFwd = fwd.strain.at(l);
       const auto& mFwd = fwd.m.at(l);
       const auto weighted = deg.ApplyWeights(mdual, ncols);
       auto& term = terms[j];
       term.assign(K * static_cast<std::size_t>(deg.ne) * deg.np, 0.0);
-      for (std::size_t k = 0; k < K; ++k) {
-        for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.np; ++q) {
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
             const double itau =
                 deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
             if (itau <= 0.0) continue;
             const std::size_t gridNode =
                 (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-            double sum = 0.0;
-            for (int s = 0; s < 3; ++s) {
-              const std::size_t at = (k * 3 + s) * block + gridNode;
-              const std::size_t sn = s * block + gridNode;
-              for (int c = 0; c < ncols; ++c) {
+            auto sum = 0.0;
+            for (auto s = 0; s < 3; ++s) {
+              const auto at = (k * 3 + s) * block + gridNode;
+              const auto sn = s * block + gridNode;
+              for (auto c = 0; c < ncols; ++c) {
                 // Both factors are forward-convention m >= 0 columns, so
                 // the spherical sum over orders weights m > 0 twice (the
                 // discrete sweep's duals absorb this in the transposes;
                 // here it is explicit). The m = 0 imaginary column is
                 // identically zero.
-                const int m = c <= l ? c : c - (l + 1);
-                const double cw = m == 0 ? (c == 0 ? 1.0 : 0.0) : 2.0;
+                const auto m = c <= l ? c : c - (l + 1);
+                const auto cw = m == 0 ? (c == 0 ? 1.0 : 0.0) : 2.0;
                 sum += cw * weighted[at + c] * (dFwd[sn + c] - mFwd[at + c]);
               }
             }
@@ -993,8 +994,8 @@ IceKernels AdjointSolver::ContinuousSweep(
           "the adjoint coupled solve at node {} did not converge", n - 1));
     }
     densityLate[n - 1] = resp.seaLevelChange;
-    std::vector<double> sig(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto sig = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
@@ -1018,15 +1019,15 @@ IceKernels AdjointSolver::ContinuousSweep(
   // late side, the half towards times[0] with the early side.
   std::vector<std::vector<double>> loadDuals(times.size()),
       densityLoad(times.size());
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     loadDuals[n].assign(fieldSize, 0.0);
     densityLoad[n].assign(fieldSize, 0.0);
     const auto* late = densityLate[n].empty() ? nullptr : &densityLate[n];
     const auto* early =
         densityEarly[n].empty() ? late : &densityEarly[n];
     const auto lump = lumps.find(n);
-    const double totalW = wEarly[n] + wLate[n];
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    const auto totalW = wEarly[n] + wLate[n];
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       const double lateV = late == nullptr ? 0.0 : (*late)[i] * perTime;
       const double earlyV = early == nullptr ? 0.0 : (*early)[i] * perTime;
       const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
@@ -1063,8 +1064,8 @@ IceKernels detail::AssembleIceViews(
   const auto fieldSize = loadDuals.front().size();
 
   auto ground = [&](const std::vector<double>& f) {
-    std::vector<double> out(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto out = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       out[i] = rhoI * (1.0 - C[i]) * f[i];
     }
     return out;
@@ -1074,12 +1075,12 @@ IceKernels detail::AssembleIceViews(
   out.times.assign(times.begin(), times.end());
   out.baseline.assign(fieldSize, 0.0);
   for (const auto& ld : loadDuals) {
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       out.baseline[i] -= rhoI * (1.0 - C[i]) * ld[i];
     }
   }
   for (const auto& ld : loadDuals) out.thickness.push_back(ground(ld));
-  for (std::size_t i = 0; i < fieldSize; ++i) {
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.thickness[0][i] += out.baseline[i];
   }
   // Identically zero under frozen shorelines (every C_n equals C).
@@ -1089,11 +1090,11 @@ IceKernels detail::AssembleIceViews(
   }
   for (const auto& d : density) out.density.push_back(ground(d));
   // The quelled view: the cumulative tail of the thickness duals.
-  std::vector<double> tail(fieldSize, 0.0);
+  auto tail = std::vector<double>(fieldSize, 0.0);
   out.rate.resize(times.size() - 1);
   for (std::size_t n = times.size() - 1; n >= 1; --n) {
     const auto grounded = ground(loadDuals[n]);
-    for (std::size_t i = 0; i < fieldSize; ++i) tail[i] += grounded[i];
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) tail[i] += grounded[i];
     out.rate[n - 1] = tail;
   }
   out.loadDuals = std::move(loadDuals);

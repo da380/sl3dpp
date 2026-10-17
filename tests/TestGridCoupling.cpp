@@ -36,7 +36,7 @@ double Noise(std::size_t k) {
 }  // namespace
 
 TEST(Stage4, CouplingsShareOneGrid) {
-  constexpr int lmax = 4;
+  constexpr auto lmax = 4;
   auto deck =
       Deck::Read(
           std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -46,9 +46,9 @@ TEST(Stage4, CouplingsShareOneGrid) {
   auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
   auto material = Material::Create(model, mesh).value();
   const auto& scales = model.ModelScales();
-  std::map<std::size_t, RadialValue> viscosity;
+  auto viscosity = std::map<std::size_t, RadialValue>{};
   const auto boundaries = model.DimensionlessView().Boundaries();
-  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+  for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
     if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
         boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
       viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -65,18 +65,18 @@ TEST(Stage4, CouplingsShareOneGrid) {
   EXPECT_EQ(&shared1.Grid().Grid(), &shared2.Grid().Grid());
 
   auto spectral = own.ZeroSpectral();
-  for (std::size_t i = 0; i < spectral.c[0].size(); ++i) {
+  for (auto i = std::size_t{0}; i < spectral.c[0].size(); ++i) {
     spectral.c[0][i] = Complex(Noise(i), Noise(i + 1));
   }
-  for (std::size_t i = 0; i < spectral.r.size(); ++i) {
+  for (auto i = std::size_t{0}; i < spectral.r.size(); ++i) {
     spectral.r[i] = Noise(3 * i);
   }
   const auto a = own.Synthesise(spectral);
   const auto b = shared1.Synthesise(spectral);
-  for (std::size_t i = 0; i < a.c[0].size(); ++i) {
+  for (auto i = std::size_t{0}; i < a.c[0].size(); ++i) {
     ASSERT_EQ(a.c[0][i], b.c[0][i]);
   }
-  for (std::size_t i = 0; i < a.r.size(); ++i) ASSERT_EQ(a.r[i], b.r[i]);
+  for (auto i = std::size_t{0}; i < a.r.size(); ++i) ASSERT_EQ(a.r[i], b.r[i]);
 
   // A grid without spin coverage, or at another lmax, is refused.
   EXPECT_THROW(GridCoupling(rheology, lmax, SurfaceGrid(lmax), {}),
@@ -91,7 +91,7 @@ TEST(Stage4, TransformsIntoBuffersAndThreadedPointwise) {
   // overwrite every value: on buffers full of junk they give bitwise the
   // allocating forms. The pointwise loops are element-wise, so threaded
   // they are bitwise the serial ones.
-  constexpr int lmax = 4;
+  constexpr auto lmax = 4;
   auto deck =
       Deck::Read(
           std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -161,7 +161,7 @@ TEST(Stage4, TransformsIntoBuffersAndThreadedPointwise) {
 }
 
 TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
-  constexpr int lmax = 8;
+  constexpr auto lmax = 8;
   auto deck =
       Deck::Read(
           std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -171,9 +171,9 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
   auto material = Material::Create(model, mesh).value();
   const auto& scales = model.ModelScales();
-  std::map<std::size_t, RadialValue> viscosity;
+  auto viscosity = std::map<std::size_t, RadialValue>{};
   const auto boundaries = model.DimensionlessView().Boundaries();
-  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+  for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
     if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
         boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
       viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -195,9 +195,9 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
     // the grid path takes the complex columns directly.
     auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
     auto spectral = coupling.ZeroSpectral();
-    for (int l = 0; l <= lmax; ++l) {
+    for (auto l = 0; l <= lmax; ++l) {
       const auto columns = static_cast<std::size_t>(l + 1);
-      std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
+      auto M = std::vector<Complex>(coupling.NodeCount() * columns, 0.0);
       std::vector<Complex> R = M, S = M;
       auto& m1d = vstate.m.at(l);
       // The 1D state spans the degree's memory window.
@@ -206,13 +206,13 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
       const auto ne = window.second;
       const auto ncols1d = 2 * columns;
       const auto block = static_cast<std::size_t>(ne) * np * ncols1d;
-      for (int node = 0; node < coupling.NodeCount(); ++node) {
+      for (auto node = 0; node < coupling.NodeCount(); ++node) {
         const auto e = coupling.ElementOfNode(node);
         if (e < e0 || e >= e0 + ne) continue;
         const auto q = coupling.NodeInElementOf(node);
         // Random m >= 0 columns of a real field (m = 0 real), fed
         // identically to both paths.
-        for (int m = 0; m <= l; ++m) {
+        for (auto m = 0; m <= l; ++m) {
           const auto seed = 1000 * l + 31 * m + 7 * node;
           Complex values[3] = {
               l >= 2 ? Complex(Noise(seed), Noise(seed + 1)) : 0.0,
@@ -222,7 +222,7 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
             for (auto& v : values) v = v.real();
           }
           const auto eL = e - e0;
-          for (int s = 0; s < 3; ++s) {
+          for (auto s = 0; s < 3; ++s) {
             auto& scalars = s == 0 ? M : (s == 1 ? R : S);
             scalars[node * columns + m] = values[s];
             const auto at =
@@ -249,16 +249,16 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
         1.0);
     coupling.Multiply(field, ones);
     auto analysed = coupling.Analyse(field);
-    std::vector<double> mu(coupling.NodeCount());
-    for (int node = 0; node < coupling.NodeCount(); ++node) {
+    auto mu = std::vector<double>(coupling.NodeCount());
+    for (auto node = 0; node < coupling.NodeCount(); ++node) {
       const auto e = coupling.ElementOfNode(node);
       const auto q = coupling.NodeInElementOf(node);
       mu[node] = op.PointMu(0)[static_cast<std::size_t>(e) * np + q];
     }
     coupling.ScaleByNode(analysed, mu);
 
-    std::map<int, DegreeOperator> systems;
-    for (int l = 0; l <= lmax; ++l) {
+    auto systems = std::map<int, DegreeOperator>{};
+    for (auto l = 0; l <= lmax; ++l) {
       systems.emplace(l,
                       DegreeOperator(op.NodalMaterial(), l,
                                      {.point_shear = op.ElasticPointShear()}));
@@ -267,16 +267,17 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
         analysed,
         [&](int l) -> const DegreeOperator& { return systems.at(l); });
 
-    double worst = 0.0, scale = 0.0;
-    for (int l = 0; l <= lmax; ++l) {
+    auto worst = 0.0, scale = 0.0;
+    for (auto l = 0; l <= lmax; ++l) {
       const auto& system = systems.at(l);
       const auto ndof = system.DofCount();
       const auto columns = l + 1;
       // Complex force columns -> interleaved real solves.
-      std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
+      auto rhs =
+          std::vector<double>(static_cast<std::size_t>(ndof) * 2 * columns);
       const auto& bc = forces.at(l);
-      for (int c = 0; c < columns; ++c) {
-        for (int d = 0; d < ndof; ++d) {
+      for (auto c = 0; c < columns; ++c) {
+        for (auto d = 0; d < ndof; ++d) {
           rhs[static_cast<std::size_t>(c) * ndof + d] =
               bc[static_cast<std::size_t>(c) * ndof + d].real();
           rhs[static_cast<std::size_t>(columns + c) * ndof + d] =
@@ -285,7 +286,7 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
       }
       const auto x = system.Solve(rhs, 2 * columns);
       const auto& ref = reference.at(l);
-      for (std::size_t i = 0; i < x.size(); ++i) {
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
         scale = std::max(scale, std::abs(ref[i]));
         worst = std::max(worst, std::abs(x[i] - ref[i]));
       }
@@ -294,8 +295,8 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
     EXPECT_LT(worst, 1e-11 * scale);
 
     // A purely spheroidal state exerts no toroidal force.
-    std::map<int, ToroidalOperator> toroidal;
-    for (int l = 1; l <= lmax; ++l) {
+    auto toroidal = std::map<int, ToroidalOperator>{};
+    for (auto l = 1; l <= lmax; ++l) {
       toroidal.emplace(
           l, ToroidalOperator(op.NodalMaterial(), l,
                               {.point_shear = op.ElasticPointShear()}));
@@ -303,11 +304,11 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
     const auto torForces = coupling.ToroidalForce(
         analysed,
         [&](int l) -> const ToroidalOperator& { return toroidal.at(l); });
-    double torWorst = 0.0;
+    auto torWorst = 0.0;
     for (const auto& [l, b] : torForces) {
       for (auto v : b) torWorst = std::max(torWorst, std::abs(v));
     }
-    double forceScale = 0.0;
+    auto forceScale = 0.0;
     for (const auto& [l, b] : forces) {
       for (auto v : b) forceScale = std::max(forceScale, std::abs(v));
     }
@@ -320,7 +321,7 @@ TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
   // rigid rotations (a symmetric stress does no work on a rigid motion):
   // the discrete consistency condition that lets the pinned degree-1
   // toroidal solve solve the full singular system.
-  constexpr int lmax = 4;
+  constexpr auto lmax = 4;
   auto deck =
       Deck::Read(
           std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -330,9 +331,9 @@ TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
   auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
   auto material = Material::Create(model, mesh).value();
   const auto& scales = model.ModelScales();
-  std::map<std::size_t, RadialValue> viscosity;
+  auto viscosity = std::map<std::size_t, RadialValue>{};
   const auto boundaries = model.DimensionlessView().Boundaries();
-  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+  for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
     if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
         boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
       viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -344,15 +345,16 @@ TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
   // An arbitrary real tensor: any stored spin -2 and -1 values, real spin 0.
   auto field = coupling.ZeroTensor();
   for (auto c = 0; c < 2; ++c) {
-    for (std::size_t i = 0; i < field.c[c].size(); ++i) {
+    for (auto i = std::size_t{0}; i < field.c[c].size(); ++i) {
       field.c[c][i] = Complex(Noise(7 * i + c), Noise(11 * i + 3 * c + 1));
     }
   }
-  for (std::size_t i = 0; i < field.r.size(); ++i) field.r[i] = Noise(5 * i);
+  for (auto i = std::size_t{0}; i < field.r.size(); ++i)
+    field.r[i] = Noise(5 * i);
   const auto analysed = coupling.Analyse(field);
 
-  std::map<int, ToroidalOperator> toroidal;
-  for (int l = 1; l <= lmax; ++l) {
+  auto toroidal = std::map<int, ToroidalOperator>{};
+  for (auto l = 1; l <= lmax; ++l) {
     toroidal.emplace(l, ToroidalOperator(material, l));
   }
   const auto forces = coupling.ToroidalForce(
@@ -361,15 +363,15 @@ TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
   const auto& degreeOne = toroidal.at(1);
   const auto& b = forces.at(1);
   const auto ndof = static_cast<std::size_t>(degreeOne.DofCount());
-  double scale = 0.0;
+  auto scale = 0.0;
   for (auto v : b) scale = std::max(scale, std::abs(v));
   ASSERT_GT(scale, 0.0);
-  for (int k = 0; k < degreeOne.RegionCount(); ++k) {
+  for (auto k = 0; k < degreeOne.RegionCount(); ++k) {
     const auto rigid = degreeOne.RigidRotation(k);
-    for (std::size_t column = 0; column < 2; ++column) {
+    for (auto column = std::size_t{0}; column < 2; ++column) {
       Complex torque = 0.0;
-      double size = 0.0;
-      for (std::size_t d = 0; d < ndof; ++d) {
+      auto size = 0.0;
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
         torque += b[column * ndof + d] * rigid[d];
         size += std::abs(b[column * ndof + d]) * rigid[d];
       }

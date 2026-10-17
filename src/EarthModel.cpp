@@ -33,10 +33,10 @@ Dimensions VocabularyDimensions(
 template <int n>
 double IntegrateSegment(const auto& f, double a, double b) {
   static const auto rule = GaussQuad::GaussLegendreQuadrature1D<double>(n);
-  const double mid = 0.5 * (a + b);
-  const double jac = 0.5 * (b - a);
-  double sum = 0.0;
-  for (int i = 0; i < n; ++i) {
+  const auto mid = 0.5 * (a + b);
+  const auto jac = 0.5 * (b - a);
+  auto sum = 0.0;
+  for (auto i = 0; i < n; ++i) {
     sum += rule.Weights()[i] * f(mid + jac * rule.Points()[i]);
   }
   return jac * sum;
@@ -55,20 +55,20 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
   model.scales_ =
       options.scales.value_or(Scales::Geophysical(model.boundariesSI_.back()));
   model.G_ = model.scales_.GravitationalConstant();
-  const double length = model.scales_.Length();
+  const auto length = model.scales_.Length();
 
   model.boundaries_ = model.boundariesSI_;
   for (auto& b : model.boundaries_) b /= length;
 
   const auto layers = deck.Layers();
   model.layers_.resize(layers.size());
-  for (std::size_t i = 0; i < layers.size(); ++i) {
+  for (auto i = std::size_t{0}; i < layers.size(); ++i) {
     model.layers_[i].lo = model.boundaries_[i];
     model.layers_[i].hi = model.boundaries_[i + 1];
   }
 
   if (!deck.Has("rho")) {
-    std::string have;
+    auto have = std::string{};
     for (const auto& name : deck.Names()) {
       have += have.empty() ? name : ", " + name;
     }
@@ -84,11 +84,11 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
     const auto dimensions = VocabularyDimensions(name, options.dimensions);
     const double factor = model.scales_.Factor(dimensions);
     const auto values = deck.Column(name);
-    std::vector<std::optional<Spline>> perLayer(layers.size());
-    for (std::size_t i = 0; i < layers.size(); ++i) {
+    auto perLayer = std::vector<std::optional<Spline>>(layers.size());
+    for (auto i = std::size_t{0}; i < layers.size(); ++i) {
       const auto [first, last] = layers[i];
       const auto n = last - first;
-      std::size_t nans = 0;
+      auto nans = std::size_t{0};
       for (std::size_t k = first; k < last; ++k) {
         nans += std::isnan(values[k]) ? 1 : 0;
       }
@@ -100,7 +100,7 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
             name, i)});
       }
       std::vector<double> x(n), y(n);
-      for (std::size_t k = 0; k < n; ++k) {
+      for (auto k = std::size_t{0}; k < n; ++k) {
         x[k] = radii[first + k] / length;
         y[k] = values[first + k] / factor;
       }
@@ -133,7 +133,7 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
       break;
     }
   }
-  for (std::size_t i = 0; i < layers.size(); ++i) {
+  for (auto i = std::size_t{0}; i < layers.size(); ++i) {
     const auto [first, last] = layers[i];
     if (shear != nullptr) {
       const auto values = deck.Column(shear);
@@ -151,7 +151,7 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
 
   // The mass inside every boundary, accumulated layer by layer.
   model.massBelow_.resize(model.boundaries_.size(), 0.0);
-  for (std::size_t i = 0; i < model.layers_.size(); ++i) {
+  for (auto i = std::size_t{0}; i < model.layers_.size(); ++i) {
     model.massBelow_[i + 1] =
         model.massBelow_[i] +
         model.ShellMoment(i, model.layers_[i].lo, model.layers_[i].hi, 2);
@@ -234,10 +234,10 @@ double EarthModel::ShellMoment(std::size_t layer, double a, double b,
   if (b <= a) return 0.0;
   // Segment by segment on the spline, so the rule's exactness (degree 9
   // with five points) covers the cubic-times-s^p integrand.
-  double sum = 0.0;
-  for (std::size_t i = 0; i + 1 < rho.Size(); ++i) {
-    const double lo = std::max(a, rho.Node(i));
-    const double hi = std::min(b, rho.Node(i + 1));
+  auto sum = 0.0;
+  for (auto i = std::size_t{0}; i + 1 < rho.Size(); ++i) {
+    const auto lo = std::max(a, rho.Node(i));
+    const auto hi = std::min(b, rho.Node(i + 1));
     if (hi <= lo) continue;
     sum += IntegrateSegment<5>(
         [&](double s) { return rho.Evaluate(s) * std::pow(s, p); }, lo, hi);
@@ -253,8 +253,8 @@ double EarthModel::MassND(double r) const {
 }
 
 double EarthModel::MomentOfInertiaND() const {
-  double sum = 0.0;
-  for (std::size_t i = 0; i < layers_.size(); ++i) {
+  auto sum = 0.0;
+  for (auto i = std::size_t{0}; i < layers_.size(); ++i) {
     sum += ShellMoment(i, layers_[i].lo, layers_[i].hi, 4);
   }
   return (2.0 / 3.0) * sum;  // (8 pi / 3) int rho s^4: ShellMoment has 4 pi
@@ -269,13 +269,13 @@ double EarthModel::PotentialND(double r) const {
   const double b = boundaries_.back();
   if (r >= b) return -G_ * massBelow_.back() / r;
   // -G [ M(r)/r + 4 pi int_r^b rho s ds ], the M/r term vanishing with r.
-  double outer = 0.0;
+  auto outer = 0.0;
   const auto layer = LayerOfND(std::max(r, boundaries_.front()), Side::Above);
   outer += ShellMoment(layer, r, layers_[layer].hi, 1);
   for (std::size_t j = layer + 1; j < layers_.size(); ++j) {
     outer += ShellMoment(j, layers_[j].lo, layers_[j].hi, 1);
   }
-  const double inner = r > 0.0 ? MassND(r) / r : 0.0;
+  const auto inner = r > 0.0 ? MassND(r) / r : 0.0;
   return -G_ * (inner + outer);
 }
 
@@ -285,13 +285,13 @@ double EarthModel::PressureND(double r) const {
   r = std::max(r, boundaries_.front());
   // int_r^b rho g ds, per spline segment; the integrand is smooth within a
   // segment but not polynomial, so the eight-point rule is merely accurate.
-  double sum = 0.0;
+  auto sum = 0.0;
   for (std::size_t i = LayerOfND(r, Side::Above); i < layers_.size(); ++i) {
     const auto& rho = Require("rho", i);
     const double a = std::max(r, layers_[i].lo);
-    for (std::size_t k = 0; k + 1 < rho.Size(); ++k) {
+    for (auto k = std::size_t{0}; k + 1 < rho.Size(); ++k) {
       const double lo = std::max(a, rho.Node(k));
-      const double hi = rho.Node(k + 1);
+      const auto hi = rho.Node(k + 1);
       if (hi <= lo) continue;
       sum += IntegrateSegment<8>(
           [&](double s) { return rho.Evaluate(s) * GravityND(s); }, lo, hi);
@@ -314,7 +314,7 @@ double EarthModel::EvaluateInLayer(const std::string& name, std::size_t layer,
   const auto field = IndexOf(name);
   // Each radial derivative divides the quantity's dimensions by a length.
   double factor = scales_.Factor(dimensions_[field]);
-  for (int k = 0; k < nu; ++k) factor /= scales_.Length();
+  for (auto k = 0; k < nu; ++k) factor /= scales_.Length();
   return EvaluateInLayerND(name, layer, r / scales_.Length(), nu) * factor;
 }
 

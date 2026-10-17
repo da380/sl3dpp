@@ -37,7 +37,7 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr int kLmax = 8;
+constexpr auto kLmax = 8;
 
 struct Body {
   EarthModel model;
@@ -55,7 +55,7 @@ struct Body {
     auto mesh = RadialMesh::Create(model, meshOptions).value();
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
-    std::map<std::size_t, RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
     for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
@@ -80,7 +80,7 @@ ViscoelasticOperator Operator(const Rheology& rheology, MemoryPointSet set) {
 std::vector<double> SurfaceAfter(const ViscoelasticOperator& op, int steps) {
   const auto dt = op.MinRelaxationTime();
   auto state = op.ZeroState();
-  std::map<int, std::vector<double>> solutions;
+  auto solutions = std::map<int, std::vector<double>>{};
   for (auto i = 0; i < steps; ++i) {
     auto [next, sols] =
         op.Step(state, dt, Scheme::ExponentialTrapezoid, UnitLoad());
@@ -318,7 +318,7 @@ TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
     return out;
   };
 
-  std::vector<std::vector<double>> finals;
+  auto finals = std::vector<std::vector<double>>{};
   for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
     const auto op = Operator(body.rheology, set);
     SeaLevelEvolution evolution(op, solver, state, {.rtol = 1e-12});

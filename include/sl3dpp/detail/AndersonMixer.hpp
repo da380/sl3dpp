@@ -45,9 +45,9 @@ class AndersonMixer {
 
   std::vector<double> Update(std::span<const double> x,
                              std::span<const double> gx) {
-    std::vector<double> next(x.begin(), x.end());
-    const std::array<std::span<double>, 1> out{next};
-    const std::array<std::span<const double>, 1> g{gx};
+    auto next = std::vector<double>(x.begin(), x.end());
+    const auto out = std::array<std::span<double>, 1>{next};
+    const auto g = std::array<std::span<const double>, 1>{gx};
     UpdateInPlace(out, g);
     return next;
   }
@@ -116,8 +116,8 @@ class AndersonMixer {
     // right-hand side: per thread, then the partials in thread order.
     const int slot = slot_;
     const int m = std::min(count_ + 1, memory_);
-    std::vector<const double*> dF(m);
-    for (int i = 0; i < m; ++i) dF[i] = dF_[i].data();
+    auto dF = std::vector<const double*>(m);
+    for (auto i = 0; i < m; ++i) dF[i] = dF_[i].data();
     auto* dGs = dG_[slot].data();
     auto* dFs = dF_[slot].data();
     const auto threads = parallel_ ? omp_get_max_threads() : 1;
@@ -135,13 +135,13 @@ class AndersonMixer {
 #pragma omp for schedule(static) nowait
         for (auto j = std::size_t{0}; j < size; ++j) {
           const auto at = offset[s] + j;
-          const double f = gs[j] - xs[j];
+          const auto f = gs[j] - xs[j];
           const auto dx = xs[j] - xPrev_[at];
           dFs[at] = f - fPrev_[at];
           dGs[at] = dx + dFs[at];
           xPrev_[at] = xs[j];
           fPrev_[at] = f;
-          for (int i = 0; i < m; ++i) {
+          for (auto i = 0; i < m; ++i) {
             column[i] += dF[i][at] * dFs[at];
             gamma[i] += dF[i][at] * f;
           }
@@ -152,14 +152,14 @@ class AndersonMixer {
         gamma(partial.begin() + m, partial.begin() + 2 * m);
     for (auto t = 1; t < threads; ++t) {
       const auto* p = partial.data() + static_cast<std::size_t>(t) * 2 * m;
-      for (int i = 0; i < m; ++i) {
+      for (auto i = 0; i < m; ++i) {
         column[i] += p[i];
         gamma[i] += p[m + i];
       }
     }
     count_ = m;
     slot_ = (slot + 1) % memory_;
-    for (int i = 0; i < m; ++i) {
+    for (auto i = 0; i < m; ++i) {
       gram_[static_cast<std::size_t>(slot) * memory_ + i] = column[i];
       gram_[static_cast<std::size_t>(i) * memory_ + slot] = column[i];
     }
@@ -167,18 +167,18 @@ class AndersonMixer {
     // gamma = argmin |F gamma - f|, through the Gram system by LAPACK's
     // SVD least squares (singular directions dropped at machine
     // precision, as numpy's lstsq with rcond=None does).
-    std::vector<double> a(static_cast<std::size_t>(m) * m);
-    for (int j = 0; j < m; ++j) {
-      for (int i = 0; i < m; ++i) {
+    auto a = std::vector<double>(static_cast<std::size_t>(m) * m);
+    for (auto j = 0; j < m; ++j) {
+      for (auto i = 0; i < m; ++i) {
         a[static_cast<std::size_t>(j) * m + i] =
             gram_[static_cast<std::size_t>(i) * memory_ + j];
       }
     }
-    std::vector<double> singular(m);
-    const double rcond = -1.0;
-    int rank = 0, info = 0, nrhs = 1;
+    auto singular = std::vector<double>(m);
+    const auto rcond = -1.0;
+    auto rank = 0, info = 0, nrhs = 1;
     int lwork = 12 * m + 64;
-    std::vector<double> work(lwork);
+    auto work = std::vector<double>(lwork);
     dgelss_(&m, &m, &nrhs, a.data(), &m, gamma.data(), &m, singular.data(),
             &rcond, &rank, work.data(), &lwork, &info);
     if (info != 0) {  // fall back to the Picard step
@@ -187,11 +187,11 @@ class AndersonMixer {
     }
 
     // The mixed iterate; x is no longer read, so it takes the result.
-    std::vector<const double*> dG(m);
-    for (int i = 0; i < m; ++i) dG[i] = dG_[i].data();
+    auto dG = std::vector<const double*>(m);
+    for (auto i = 0; i < m; ++i) dG[i] = dG_[i].data();
     sweep([&](std::size_t s, std::size_t j, std::size_t at) {
-      double value = gx[s][j];
-      for (int i = 0; i < m; ++i) value -= gamma[i] * dG[i][at];
+      auto value = gx[s][j];
+      for (auto i = 0; i < m; ++i) value -= gamma[i] * dG[i][at];
       x[s][j] = value;
     });
   }

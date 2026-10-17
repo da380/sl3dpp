@@ -111,19 +111,19 @@ ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = weights_.find(key);
   if (found == weights_.end()) {
-    std::vector<BranchWeights> out;
-    for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
+    auto out = std::vector<BranchWeights>{};
+    for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
       const auto& itau = pointItau_[k];
       BranchWeights w;
       w.e.resize(itau.size());
       if (scheme == Scheme::BackwardEuler) {
-        for (std::size_t i = 0; i < itau.size(); ++i) {
+        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
           w.e[i] = BackwardEulerWeight(dt * itau[i]);
         }
       } else {
         w.alpha.resize(itau.size());
         w.beta.resize(itau.size());
-        for (std::size_t i = 0; i < itau.size(); ++i) {
+        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
           const auto tw = ExponentialTrapezoidWeights(dt * itau[i]);
           w.e[i] = tw.e;
           w.alpha[i] = tw.alpha;
@@ -143,19 +143,19 @@ ViscoelasticOperator::SchemeWeightDerivativesOf(Scheme scheme,
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = weightDerivatives_.find(key);
   if (found == weightDerivatives_.end()) {
-    std::vector<BranchWeights> out;
-    for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
+    auto out = std::vector<BranchWeights>{};
+    for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
       const auto& itau = pointItau_[k];
       BranchWeights w;
       w.e.resize(itau.size());
       if (scheme == Scheme::BackwardEuler) {
-        for (std::size_t i = 0; i < itau.size(); ++i) {
+        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
           w.e[i] = BackwardEulerWeightDerivative(dt * itau[i]);
         }
       } else {
         w.alpha.resize(itau.size());
         w.beta.resize(itau.size());
-        for (std::size_t i = 0; i < itau.size(); ++i) {
+        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
           const auto tw = ExponentialTrapezoidWeightDerivatives(dt * itau[i]);
           w.e[i] = tw.e;
           w.alpha[i] = tw.alpha;
@@ -216,13 +216,13 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
         "memory points (MemoryPoints.hpp), not a material");
   }
   const auto& weights = SchemeWeightsOf(scheme, dt);
-  std::vector<std::vector<double>> w;
+  auto w = std::vector<std::vector<double>>{};
   for (const auto& branch : weights) {
     if (scheme == Scheme::BackwardEuler) {
       w.push_back(branch.e);
     } else {
-      std::vector<double> phi1(branch.beta.size());
-      for (std::size_t i = 0; i < phi1.size(); ++i) {
+      auto phi1 = std::vector<double>(branch.beta.size());
+      for (auto i = std::size_t{0}; i < phi1.size(); ++i) {
         phi1[i] = 1.0 - branch.beta[i];
       }
       w.push_back(std::move(phi1));
@@ -240,7 +240,7 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
       return *flavours_.front().second;
     }
   }
-  constexpr std::size_t kFlavourCache = 4;
+  constexpr auto kFlavourCache = std::size_t{4};
   while (flavours_.size() >= kFlavourCache) flavours_.pop_back();
   auto flavour = std::make_unique<Flavour>();
   if (options_.memory_points == MemoryPointSet::Gll) {
@@ -283,7 +283,7 @@ const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
   if (found == cache.end()) {
     const auto& system =
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
-    std::vector<double> rhs(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
+    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
     std::ranges::copy(deg.loadVec, rhs.begin());
     std::ranges::copy(deg.tideVec, rhs.begin() + deg.ndof);
     found = cache.emplace(l, system.Solve(rhs, 2)).first;
@@ -302,7 +302,7 @@ const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
     const auto force = deg.system.Load(LoadPart::Force);
     const auto potential = deg.system.Load(LoadPart::Potential);
-    std::vector<double> rhs(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
+    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
     std::ranges::copy(force, rhs.begin());
     std::ranges::copy(potential, rhs.begin() + deg.ndof);
     found = cache.emplace(l, system.Solve(rhs, 2)).first;
@@ -330,7 +330,7 @@ ViscoelasticState ViscoelasticOperator::ZeroState(
     const std::function<int(int)>& ncols) const {
   ViscoelasticState state;
   const auto K = rheology_->BranchCount();
-  for (int l = 0; l <= lmax_; ++l) {
+  for (auto l = 0; l <= lmax_; ++l) {
     const auto& deg = Deg(l);
     state.m[l].assign(K * 3 * deg.NodalSize(ncols(l)), 0.0);
   }
@@ -353,7 +353,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     std::vector<double> x;
   };
   const auto K = rheology_->BranchCount();
-  std::vector<Task> tasks;
+  auto tasks = std::vector<Task>{};
   for (const auto& [l, m] : state.m) {
     Task task;
     task.l = l;
@@ -380,7 +380,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
       AddColumns(task.x, *task.units, 1, deg.ndof, *task.tide, task.ncols);
     }
   });
-  std::map<int, std::vector<double>> solutions;
+  auto solutions = std::map<int, std::vector<double>>{};
   for (auto& task : tasks) solutions.emplace(task.l, std::move(task.x));
   return solutions;
 }
@@ -388,20 +388,20 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
 std::map<int, std::vector<double>> ViscoelasticOperator::Strain(
     const std::map<int, std::vector<double>>& solutions) const {
   // One task per degree, the workspaces resolved first.
-  std::vector<std::pair<int, const std::vector<double>*>> inputs;
-  std::vector<const Degree*> degs;
+  auto inputs = std::vector<std::pair<int, const std::vector<double>*>>{};
+  auto degs = std::vector<const Degree*>{};
   for (const auto& [l, x] : solutions) {
     inputs.emplace_back(l, &x);
     degs.push_back(&Deg(l));
   }
-  std::vector<std::vector<double>> strains(inputs.size());
+  auto strains = std::vector<std::vector<double>>(inputs.size());
   const auto count = static_cast<int>(inputs.size());
   detail::ParallelFor(count, options_.parallel, [&](int i) {
     const auto j = static_cast<std::size_t>(count - 1 - i);
     const auto& x = *inputs[j].second;
     strains[j] = degs[j]->Strain(x, static_cast<int>(x.size() / degs[j]->ndof));
   });
-  std::map<int, std::vector<double>> out;
+  auto out = std::map<int, std::vector<double>>{};
   for (auto j = std::size_t{0}; j < inputs.size(); ++j) {
     out.emplace(inputs[j].first, std::move(strains[j]));
   }
@@ -411,14 +411,14 @@ std::map<int, std::vector<double>> ViscoelasticOperator::Strain(
 std::map<int, std::vector<double>> ViscoelasticOperator::Surface(
     const std::map<int, std::vector<double>>& solutions,
     Component component) const {
-  std::map<int, std::vector<double>> out;
+  auto out = std::map<int, std::vector<double>>{};
   for (const auto& [l, x] : solutions) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(x.size() / deg.ndof);
-    const int dof = deg.system.SurfaceDof(component);
-    std::vector<double> values(ncols, 0.0);
+    const auto ncols = static_cast<int>(x.size() / deg.ndof);
+    const auto dof = deg.system.SurfaceDof(component);
+    auto values = std::vector<double>(ncols, 0.0);
     if (dof >= 0) {
-      for (int c = 0; c < ncols; ++c) {
+      for (auto c = 0; c < ncols; ++c) {
         values[c] = x[static_cast<std::size_t>(c) * deg.ndof + dof];
       }
     }
@@ -446,10 +446,10 @@ const std::map<int, std::vector<double>>& ViscoelasticOperator::PrimeStrain(
 std::vector<double> ViscoelasticOperator::InertiaMoment(
     std::span<const double> solution0, int ncols) const {
   const auto& deg = Deg(0);
-  std::vector<double> out(ncols, 0.0);
-  for (int c = 0; c < ncols; ++c) {
-    double sum = 0.0;
-    for (int d = 0; d < deg.ndof; ++d) {
+  auto out = std::vector<double>(ncols, 0.0);
+  for (auto c = 0; c < ncols; ++c) {
+    auto sum = 0.0;
+    for (auto d = 0; d < deg.ndof; ++d) {
       sum += deg.momentRow[d] *
              solution0[static_cast<std::size_t>(c) * deg.ndof + d];
     }
@@ -467,22 +467,22 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
                                    const LoadCallable& tide)
     : op_(&op), scheme_(scheme), dt_(dt), t_(state.t + dt) {
   const auto& weights = op.SchemeWeightsOf(scheme, dt);
-  std::map<int, std::vector<double>> dStart;
+  auto dStart = std::map<int, std::vector<double>>{};
   if (scheme == Scheme::ExponentialTrapezoid) {
     dStart = op.StartStrain(state, load, tide);
   }
   const auto K = op.GetRheology().BranchCount();
   // One task per degree, the workspaces resolved first: the decayed
   // memory, pointwise.
-  std::vector<std::pair<int, const std::vector<double>*>> inputs;
-  std::vector<const ViscoelasticOperator::Degree*> degs;
+  auto inputs = std::vector<std::pair<int, const std::vector<double>*>>{};
+  auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
   for (const auto& [l, m] : state.m) {
     const auto& deg = op.Deg(l);
     ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     inputs.emplace_back(l, &m);
     degs.push_back(&deg);
   }
-  std::vector<std::vector<double>> decayed(inputs.size());
+  auto decayed = std::vector<std::vector<double>>(inputs.size());
   const auto count = static_cast<int>(inputs.size());
   detail::ParallelFor(count, op.options_.parallel, [&](int i) {
     const auto j = static_cast<std::size_t>(count - 1 - i);
@@ -491,7 +491,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
     const auto& deg = *degs[j];
     const auto ncols = ncols_.at(l);
     const auto block = deg.NodalSize(ncols);
-    std::vector<double> mem(m.size());
+    auto mem = std::vector<double>(m.size());
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
       for (auto s = 0; s < 3; ++s) {
@@ -527,15 +527,15 @@ const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     auto& flavour = op_->FlavourOf(scheme_, dt_);
     // One task per degree, the workspaces and effective systems resolved
     // first: the memory force through the effective system.
-    std::vector<std::pair<int, const std::vector<double>*>> inputs;
-    std::vector<const ViscoelasticOperator::Degree*> degs;
-    std::vector<const DegreeOperator*> systems;
+    auto inputs = std::vector<std::pair<int, const std::vector<double>*>>{};
+    auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
+    auto systems = std::vector<const DegreeOperator*>{};
     for (const auto& [l, mem] : mem_) {
       inputs.emplace_back(l, &mem);
       degs.push_back(&op_->Deg(l));
       systems.push_back(&op_->EffectiveSystem(flavour, l));
     }
-    std::vector<std::vector<double>> solved(inputs.size());
+    auto solved = std::vector<std::vector<double>>(inputs.size());
     const auto count = static_cast<int>(inputs.size());
     detail::ParallelFor(count, op_->options_.parallel, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
@@ -589,7 +589,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     std::optional<std::vector<double>> load, tide;
     std::vector<double> x, d1, mNew;
   };
-  std::vector<Task> tasks;
+  auto tasks = std::vector<Task>{};
   for (const auto& [l, mem] : mem_) {
     Task task;
     task.l = l;
@@ -640,7 +640,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
 
   ViscoelasticState out;
   out.t = t_;
-  std::map<int, std::vector<double>> solutions;
+  auto solutions = std::map<int, std::vector<double>>{};
   for (auto& task : tasks) {
     out.m.emplace(task.l, std::move(task.mNew));
     out.strain.emplace(task.l, std::move(task.d1));
@@ -676,18 +676,18 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
       const auto& deg = Deg(l);
       const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
       const std::size_t block = deg.NodalSize(ncols);
-      std::vector<double> mNew(m.size());
-      for (std::size_t k = 0; k < K; ++k) {
+      auto mNew = std::vector<double>(m.size());
+      for (auto k = std::size_t{0}; k < K; ++k) {
         const auto& w = weights[k];
-        for (int s = 0; s < 3; ++s) {
-          for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.np; ++q) {
+        for (auto s = 0; s < 3; ++s) {
+          for (auto e = 0; e < deg.ne; ++e) {
+            for (auto q = 0; q < deg.np; ++q) {
               const std::size_t full =
                   static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const std::size_t node =
                   (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
-              for (int c = 0; c < ncols; ++c) {
+              for (auto c = 0; c < ncols; ++c) {
                 mNew[at + c] =
                     w.e[full] * m[at + c] +
                     (1.0 - w.e[full]) * dStart[l][s * block + node + c];
@@ -733,17 +733,17 @@ ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
     const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     const std::size_t block = deg.NodalSize(ncols);
     const auto& d1 = state.strain.at(l);
-    std::vector<double> mPrev(m.size());
-    for (std::size_t k = 0; k < K; ++k) {
-      for (int s = 0; s < 3; ++s) {
-        for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.np; ++q) {
+    auto mPrev = std::vector<double>(m.size());
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
             const double h =
                 dt * deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
             const std::size_t node =
                 (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             const std::size_t at = (k * 3 + s) * block + node;
-            for (int c = 0; c < ncols; ++c) {
+            for (auto c = 0; c < ncols; ++c) {
               mPrev[at + c] =
                   (1.0 + h) * m[at + c] - h * d1[s * block + node + c];
             }
@@ -768,30 +768,30 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
       Step(state, dt, Scheme::ExponentialTrapezoid, load, tide);
 
   const auto K = rheology_->BranchCount();
-  double top = 0.0;
+  auto top = 0.0;
   for (const auto& [l, m] : newState.m) {
     for (double v : m) top = std::max(top, std::abs(v));
   }
-  const double atol = top > 0.0 ? 1e-6 * rtol * top : 1e-300;
+  const auto atol = top > 0.0 ? 1e-6 * rtol * top : 1e-300;
 
-  double total = 0.0;
-  std::size_t count = 0;
+  auto total = 0.0;
+  auto count = std::size_t{0};
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
     const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     const std::size_t block = deg.NodalSize(ncols);
     const auto& mNew = newState.m.at(l);
-    for (std::size_t k = 0; k < K; ++k) {
+    for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
-      for (int s = 0; s < 3; ++s) {
-        for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.np; ++q) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
             const std::size_t full =
                 static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
             const std::size_t node =
                 (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             const std::size_t at = (k * 3 + s) * block + node;
-            for (int c = 0; c < ncols; ++c) {
+            for (auto c = 0; c < ncols; ++c) {
               const double companion =
                   w.e[full] * m[at + c] +
                   (1.0 - w.e[full]) * dStart.at(l)[s * block + node + c];
@@ -807,8 +807,8 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
       }
     }
   }
-  const double err = count ? std::sqrt(total / count) : 0.0;
-  constexpr double kSafety = 0.9, kMin = 0.2, kMax = 4.0;
+  const auto err = count ? std::sqrt(total / count) : 0.0;
+  constexpr auto kSafety = 0.9, kMin = 0.2, kMax = 4.0;
   const double factor =
       err == 0.0 ? kMax : std::clamp(kSafety / std::sqrt(err), kMin, kMax);
   AdaptiveResult result;

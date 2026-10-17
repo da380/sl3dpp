@@ -148,7 +148,7 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
 }
 
 int GridCoupling::FirstNodeFor(int firstElement) const {
-  for (std::size_t node = 0; node < nodes_.size(); ++node) {
+  for (auto node = std::size_t{0}; node < nodes_.size(); ++node) {
     if (nodes_[node].element >= firstElement) return static_cast<int>(node);
   }
   return static_cast<int>(nodes_.size());
@@ -199,7 +199,7 @@ std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
     const SpectralTensor& spectral, int node, int l, int m) const {
   // The derived components by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}).
   const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
-  std::array<Complex, 5> A{};
+  auto A = std::array<Complex, 5>{};
   const auto real = [&](int mm) {
     return spectral
         .r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, mm)];
@@ -248,7 +248,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
     const auto q = nodes_[node].nodeInElement;
     const auto r = nodes_[node].radius;
     const auto jac = mesh.Jacobian(e);
-    for (std::size_t column = 0; column < columns; ++column) {
+    for (auto column = std::size_t{0}; column < columns; ++column) {
       DegreeNodeValues values;
       if (gll) {
         values.U = gatherS(e, q, Component::U, column);
@@ -285,9 +285,9 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
   const auto gll = points_.set == MemoryPointSet::Gll;
   // The operators are resolved first (any built lazily, serially), so the
   // degree tasks below only read; each task writes only its own force.
-  std::vector<const DegreeOperator*> ops(lmax_ + 1);
+  auto ops = std::vector<const DegreeOperator*>(lmax_ + 1);
   for (auto l = 0; l <= lmax_; ++l) ops[l] = &system(l);
-  std::vector<std::vector<Complex>> forces(lmax_ + 1);
+  auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
   detail::ParallelFor(lmax_ + 1, options_.parallel, [&](int task) {
     const auto l = lmax_ - task;  // the largest degrees first
     const auto& op = *ops[l];
@@ -300,7 +300,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
       const auto q = nodes_[node].nodeInElement;
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
-      for (std::size_t column = 0; column < columns; ++column) {
+      for (auto column = std::size_t{0}; column < columns; ++column) {
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
@@ -333,7 +333,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
     }
     forces[l] = std::move(b);
   });
-  std::map<int, std::vector<Complex>> out;
+  auto out = std::map<int, std::vector<Complex>>{};
   for (auto l = 0; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
@@ -347,9 +347,9 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
   const auto gll = points_.set == MemoryPointSet::Gll;
   // As SpheroidalForce: operators resolved first, one task per degree,
   // from degree 1 (whose rigid rotations the operator's gauge fixes).
-  std::vector<const ToroidalOperator*> ops(lmax_ + 1, nullptr);
+  auto ops = std::vector<const ToroidalOperator*>(lmax_ + 1, nullptr);
   for (auto l = 1; l <= lmax_; ++l) ops[l] = &system(l);
-  std::vector<std::vector<Complex>> forces(lmax_ + 1);
+  auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
   detail::ParallelFor(lmax_, options_.parallel, [&](int task) {
     const auto l = lmax_ - task;  // the largest degrees first
     const auto& op = *ops[l];
@@ -362,7 +362,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
       const auto q = nodes_[node].nodeInElement;
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
-      for (std::size_t column = 0; column < columns; ++column) {
+      for (auto column = std::size_t{0}; column < columns; ++column) {
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
@@ -391,7 +391,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
     }
     forces[l] = std::move(b);
   });
-  std::map<int, std::vector<Complex>> out;
+  auto out = std::map<int, std::vector<Complex>>{};
   for (auto l = 1; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }

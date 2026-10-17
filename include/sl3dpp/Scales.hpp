@@ -12,14 +12,14 @@
 namespace sl3dpp {
 
 /// Newton's constant in SI, planetmodel's value (`units.G_SI`).
-inline constexpr double GravitationalConstantSI = 6.6743e-11;
+inline constexpr auto GravitationalConstantSI = 6.6743e-11;
 
 /// The Earth's mean density in SI, planetmodel's value
 /// (`units.EARTH_MEAN_DENSITY`).
-inline constexpr double EarthMeanDensitySI = 5515.0;
+inline constexpr auto EarthMeanDensitySI = 5515.0;
 
 /// The Earth's radius in SI, the old Fortran's `r_norm`.
-inline constexpr double EarthRadiusSI = 6.371e6;
+inline constexpr auto EarthRadiusSI = 6.371e6;
 
 /**
  * @brief Integer exponents of the base dimensions of a quantity.
@@ -98,7 +98,7 @@ class Scales {
 
   static constexpr double Power(double x, int n) {
     if (n < 0) return 1.0 / Power(x, -n);
-    double result = 1.0;
+    auto result = 1.0;
     for (; n > 0; --n) result *= x;
     return result;
   }

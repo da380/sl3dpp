@@ -41,7 +41,7 @@ EarthModel Model() {
 
 Rheology Maxwell(const EarthModel& model, const Material& material) {
   const auto& scales = model.ModelScales();
-  std::map<std::size_t, RadialValue> viscosity;
+  auto viscosity = std::map<std::size_t, RadialValue>{};
   const auto b = model.DimensionlessView().Boundaries();
   for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
     if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
@@ -234,7 +234,7 @@ TEST(PointShear, GaussConvergesToGllUnderRefinement) {
     const auto rheology = Maxwell(model, material);
     const auto dt = 2.0 * rheology.MinRelaxationTime();
     auto worst = 0.0;
-    std::vector<LoveNumbers> love;
+    auto love = std::vector<LoveNumbers>{};
     for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
       const auto points = MemoryPoints::Of(set, mesh);
       const auto s = UnrelaxedShear(rheology, points, scheme, dt);

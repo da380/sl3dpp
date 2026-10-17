@@ -37,7 +37,7 @@ TEST(Toolkit, SphericalHarmonicRoundTrip) {
         return std::cos(theta) + std::sin(theta) * std::cos(phi);
       });
   auto g = Evaluate(Expand(f, lMax));
-  double err = 0;
+  auto err = 0.0;
   for (auto [v1, v2] : std::views::zip(f, g)) {
     err = std::max(err, std::abs(v1 - v2));
   }
@@ -69,7 +69,7 @@ TEST(Toolkit, GeographicConversions) {
 // The threaded task loop rethrows a task's exception after the loop (one
 // leaving an OpenMP region would terminate), and the other tasks still run.
 TEST(Toolkit, ParallelForRethrowsAfterTheLoop) {
-  std::vector<int> ran(16, 0);
+  auto ran = std::vector<int>(16, 0);
   EXPECT_THROW(sl3dpp::detail::ParallelFor(16, true,
                                            [&](int i) {
                                              ran[i] = 1;

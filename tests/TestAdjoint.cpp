@@ -33,7 +33,7 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr int kLmax = 16;
+constexpr auto kLmax = 16;
 
 /// The smooth cap of the solver tests (TestSeaLevel.cpp), the stage-5
 /// fixture's measurement formula.
@@ -41,7 +41,7 @@ double Cap(double theta, double phi, double colat0, double lon0,
            double width) {
   const double c = std::cos(theta) * std::cos(colat0) +
                    std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
-  const double d = std::acos(std::clamp(c, -1.0, 1.0));
+  const auto d = std::acos(std::clamp(c, -1.0, 1.0));
   return std::exp(-0.5 * std::pow(d / width, 2));
 }
 
@@ -65,9 +65,9 @@ struct Scene {
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
 
-    std::map<std::size_t, RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
-    for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
         viscosity.emplace(i,
@@ -82,7 +82,7 @@ struct Scene {
 
     Fingerprint fingerprint(kLmax, op.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
-    const double length = solver.SolverScales().Length();
+    const auto length = solver.SolverScales().Length();
     auto toNd = [&](std::vector<double> si) {
       for (auto& v : si) v /= length;
       return si;
@@ -99,8 +99,8 @@ struct Scene {
     const auto& grid = solver.Grid();
     std::normal_distribution<double> normal;
     auto coeffs = grid.ZeroCoefficients();
-    for (int l = 0; l <= kLmax; ++l) {
-      for (int m = 0; m <= l; ++m) {
+    for (auto l = 0; l <= kLmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
         coeffs[SurfaceGrid::Index(l, m)] = {normal(rng),
                                             m == 0 ? 0.0 : normal(rng)};
       }
@@ -112,9 +112,9 @@ struct Scene {
 
   [[nodiscard]] double Surface(std::span<const double> f,
                                std::span<const double> g) const {
-    const double a = solver.Radius();
-    std::vector<double> fg(f.size());
-    for (std::size_t i = 0; i < f.size(); ++i) fg[i] = f[i] * g[i];
+    const auto a = solver.Radius();
+    auto fg = std::vector<double>(f.size());
+    for (auto i = std::size_t{0}; i < f.size(); ++i) fg[i] = f[i] * g[i];
     return a * a * solver.Grid().Integrate(fg);
   }
 };
@@ -123,7 +123,7 @@ struct Scene {
 double Objective(const Scene& setup,
                  const std::vector<SeaLevelEvolution::Snapshot>& snapshots,
                  const std::map<std::size_t, Measurement>& measurements) {
-  double total = 0.0;
+  auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
     if (!m.seaLevelDual.empty()) {
@@ -135,7 +135,7 @@ double Objective(const Scene& setup,
     if (!m.potentialDual.empty()) {
       total += setup.Surface(m.potentialDual, snap.potential);
     }
-    for (int j = 0; j < 3; ++j) {
+    for (auto j = 0; j < 3; ++j) {
       total += m.angularVelocityDual[j] * snap.angularVelocity[j];
     }
   }
@@ -147,7 +147,7 @@ std::function<std::vector<double>(double)> History(
     const std::vector<double>& times,
     const std::vector<std::vector<double>>& loads) {
   return [&times, &loads](double t) {
-    for (std::size_t n = 0; n < times.size(); ++n) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
       if (std::abs(t - times[n]) <= 1e-12 * std::abs(times.back())) {
         return loads[n];
       }
@@ -167,17 +167,17 @@ TEST(Adjoint, DiscreteGradientIdentity) {
   std::mt19937 rng(7);
 
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
 
-  const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  std::vector<std::vector<double>> loads;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
 
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].seaLevelDual = setup.Smooth(rng, 0.3);
   Measurement middle;
   middle.seaLevelDual = setup.Smooth(rng, 1.0);
@@ -194,13 +194,13 @@ TEST(Adjoint, DiscreteGradientIdentity) {
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme, .rtol = 1e-12});
     auto snapshots = evolution.Run(times, History(times, loads));
-    const double exact = Objective(setup, snapshots, measurements);
+    const auto exact = Objective(setup, snapshots, measurements);
 
     AdjointSolver adjoint(evolution,
                           {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     const auto kernels = adjoint.IceHistoryKernels(times, measurements);
-    double predicted = 0.0;
-    for (std::size_t n = 0; n < times.size(); ++n) {
+    auto predicted = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
       predicted += setup.Surface(kernels.loadDuals[n], loads[n]);
     }
     EXPECT_NEAR(predicted, exact, 1e-8 * std::abs(exact))
@@ -217,22 +217,22 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
   std::mt19937 rng(11);
 
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 4; ++n) times.push_back(2.5 * n * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * kyr);
 
-  const double length = scales.Length();
-  std::vector<std::vector<double>> thicknesses;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  const auto length = scales.Length();
+  auto thicknesses = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     thicknesses.push_back(setup.Smooth(rng, 10.0 / length));
   }
   const auto& C = setup.state.oceanFunction;
-  const double rhoI = setup.solver.IceDensity();
+  const auto rhoI = setup.solver.IceDensity();
   auto groundedLoads = [&](const std::vector<std::vector<double>>& I) {
-    std::vector<std::vector<double>> loads;
-    for (std::size_t n = 0; n < times.size(); ++n) {
-      std::vector<double> load(I[n].size());
-      for (std::size_t i = 0; i < load.size(); ++i) {
+    auto loads = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      auto load = std::vector<double>(I[n].size());
+      for (auto i = std::size_t{0}; i < load.size(); ++i) {
         load[i] = rhoI * (1.0 - C[i]) * (I[n][i] - I[0][i]);
       }
       loads.push_back(std::move(load));
@@ -241,33 +241,33 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
   };
   const auto loads = groundedLoads(thicknesses);
 
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[2].seaLevelDual = setup.Smooth(rng, 1.0);
   measurements[4].seaLevelDual = setup.Smooth(rng, -0.6);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
   SeaLevelEvolution evolution(op, setup.solver, setup.state, {.rtol = 1e-12});
   auto snapshots = evolution.Run(times, History(times, loads));
-  const double exact = Objective(setup, snapshots, measurements);
+  const auto exact = Objective(setup, snapshots, measurements);
 
   AdjointSolver adjoint(evolution,
                         {.method = AdjointMethod::Discrete, .rtol = 1e-12});
   const auto kernels = adjoint.IceHistoryKernels(times, measurements);
-  double predicted = 0.0;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  auto predicted = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     predicted += setup.Surface(kernels.thickness[n], thicknesses[n]);
   }
   EXPECT_NEAR(predicted, exact, 1e-8 * std::abs(exact));
 
   // A uniform shift of the whole history pairs to zero: the node
   // thickness duals and the baseline cancel identically.
-  std::vector<double> ones(setup.solver.Grid().FieldSize(), 1.0);
-  double shift = 0.0;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  auto ones = std::vector<double>(setup.solver.Grid().FieldSize(), 1.0);
+  auto shift = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     shift += setup.Surface(kernels.thickness[n], ones);
   }
-  double scale = 0.0;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  auto scale = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     scale = std::max(scale, std::abs(setup.Surface(kernels.thickness[n],
                                                    thicknesses[n])));
   }
@@ -288,19 +288,19 @@ TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
                             std::map<AdjointMethod, IceKernels>* kernelsOut =
                                 nullptr) {
     const auto& scales = setup.solver.SolverScales();
-    const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-    std::vector<double> times;
-    for (std::size_t n = 0; n < npts; ++n) {
+    const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+    auto times = std::vector<double>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(T * static_cast<double>(n) /
                       static_cast<double>(npts - 1) * kyr);
     }
-    const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+    const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
     std::mt19937 local(17);  // the same loads at every resolution
-    std::vector<std::vector<double>> loads;
-    for (std::size_t n = 0; n < npts; ++n) {
+    auto loads = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
       loads.push_back(setup.Smooth(local, 100.0 / sigma));
     }
-    std::map<std::size_t, Measurement> measurements;
+    auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts / 2].seaLevelDual = setup.Smooth(local, 1.0);
     measurements[npts - 1].seaLevelDual = setup.Smooth(local, 0.5);
 
@@ -308,14 +308,14 @@ TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.rtol = 1e-12});
     auto snapshots = evolution.Run(times, History(times, loads));
-    const double exact = Objective(setup, snapshots, measurements);
+    const auto exact = Objective(setup, snapshots, measurements);
 
-    std::map<AdjointMethod, double> errors;
+    auto errors = std::map<AdjointMethod, double>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       AdjointSolver adjoint(evolution, {.method = method, .rtol = 1e-12});
       auto kernels = adjoint.IceHistoryKernels(times, measurements);
-      double predicted = 0.0;
-      for (std::size_t n = 0; n < npts; ++n) {
+      auto predicted = 0.0;
+      for (auto n = std::size_t{0}; n < npts; ++n) {
         predicted += setup.Surface(kernels.loadDuals[n], loads[n]);
       }
       errors[method] = std::abs(predicted - exact) / std::abs(exact);
@@ -326,7 +326,7 @@ TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
 
   // The stiff regime: 2.5 kyr steps over several 450-yr relaxation times.
   auto stiff = Scene::Make(1e21);
-  std::map<AdjointMethod, IceKernels> kernels;
+  auto kernels = std::map<AdjointMethod, IceKernels>{};
   auto coarse = gradientErrors(stiff, 5, 10.0, &kernels);
   auto fine = gradientErrors(stiff, 9, 10.0);
   EXPECT_LT(coarse[AdjointMethod::Discrete], 1e-8);
@@ -339,8 +339,8 @@ TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
   // The delta amplitudes cross-validate the two realisations.
   for (const auto& [node, a] : kernels[AdjointMethod::Discrete].instantaneous) {
     const auto& b = kernels[AdjointMethod::Continuous].instantaneous.at(node);
-    double top = 0.0, diff = 0.0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
+    auto top = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
       top = std::max(top, std::abs(a[i]));
       diff = std::max(diff, std::abs(a[i] - b[i]));
     }
@@ -370,29 +370,29 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
   std::mt19937 rng(7);
 
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
-  const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  std::vector<std::vector<double>> loads;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
 
   // A smooth nodal perturbation of the branch's inverse relaxation time,
   // in material units, supported where the branch lives.
   const auto& base = setup.rheology.BranchAt(0);
   const auto& mesh = setup.material.Mesh();
-  double itauTop = 0.0;
+  auto itauTop = 0.0;
   for (auto v : base.itau) itauTop = std::max(itauTop, v);
-  std::vector<double> ditau(base.itau.size(), 0.0);
-  for (int e = 0; e < mesh.ElementCount(); ++e) {
-    for (int q = 0; q < mesh.NGll(); ++q) {
-      const std::size_t i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+  auto ditau = std::vector<double>(base.itau.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       if (base.itau[i] > 0.0) {
-        const double r = mesh.Radius(e, q);
+        const auto r = mesh.Radius(e, q);
         ditau[i] = (0.3 + 0.7 * r * r) * itauTop;
       }
     }
@@ -400,7 +400,7 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
 
   auto functional = [&](double eps, Scheme scheme) {
     auto branch = base;
-    for (std::size_t i = 0; i < branch.itau.size(); ++i) {
+    for (auto i = std::size_t{0}; i < branch.itau.size(); ++i) {
       branch.itau[i] += eps * ditau[i];
     }
     auto rheology = Rheology::Create(setup.material, {std::move(branch)}).value();
@@ -424,21 +424,21 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
     const auto kernels =
         adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_FALSE(kernels.itauKernel.empty());
-    double predicted = 0.0;
-    for (std::size_t i = 0; i < ditau.size(); ++i) {
+    auto predicted = 0.0;
+    for (auto i = std::size_t{0}; i < ditau.size(); ++i) {
       predicted += kernels.itauKernel[0][i] * ditau[i];
     }
 
-    std::map<double, double> fd;
+    auto fd = std::map<double, double>{};
     for (double eps : {0.02, 0.01}) {
       fd[eps] =
           (functional(eps, scheme) - functional(-eps, scheme)) / (2.0 * eps);
     }
-    const double r1 = std::abs(fd[0.02] - predicted);
-    const double r2 = std::abs(fd[0.01] - predicted);
+    const auto r1 = std::abs(fd[0.02] - predicted);
+    const auto r2 = std::abs(fd[0.01] - predicted);
     EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme);
     EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
-    const double richardson = (4.0 * fd[0.01] - fd[0.02]) / 3.0;
+    const auto richardson = (4.0 * fd[0.01] - fd[0.02]) / 3.0;
     // The identity to FD/solver noise: the directional derivative is
     // five orders below J, so the difference quotient keeps ~6 digits.
     EXPECT_NEAR(richardson, predicted, 1e-5 * std::abs(predicted))
@@ -446,7 +446,7 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
 
     // The viscosity mapping, and the refusal without a trajectory.
     const auto eta = kernels.Viscosity(setup.rheology);
-    for (std::size_t i = 0; i < ditau.size(); ++i) {
+    for (auto i = std::size_t{0}; i < ditau.size(); ++i) {
       if (base.mu[i] > 0.0) {
         EXPECT_NEAR(eta[0][i],
                     -(base.itau[i] * base.itau[i]) / base.mu[i] *
@@ -467,21 +467,21 @@ TEST(Adjoint, ContinuousViscosityKernelsConverge) {
   auto setup = Scene::Make(1e22);
   std::mt19937 rng(3);
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
 
   auto kernelDiff = [&](std::size_t npts) {
-    std::vector<double> times;
-    for (std::size_t n = 0; n < npts; ++n) {
+    auto times = std::vector<double>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(10.0 * static_cast<double>(n) /
                       static_cast<double>(npts - 1) * kyr);
     }
-    const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+    const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
     std::mt19937 local(23);
-    std::vector<std::vector<double>> loads;
-    for (std::size_t n = 0; n < npts; ++n) {
+    auto loads = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
       loads.push_back(setup.Smooth(local, 100.0 / sigma));
     }
-    std::map<std::size_t, Measurement> measurements;
+    auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts - 1].seaLevelDual = setup.Smooth(local, 1.0);
 
     ViscoelasticOperator op(setup.rheology, kLmax);
@@ -490,25 +490,25 @@ TEST(Adjoint, ContinuousViscosityKernelsConverge) {
     auto snapshots = evolution.Run(times, History(times, loads));
     const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
 
-    std::map<AdjointMethod, std::vector<double>> kernels;
+    auto kernels = std::map<AdjointMethod, std::vector<double>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       AdjointSolver adjoint(evolution, {.method = method, .rtol = 1e-12});
       kernels[method] =
           adjoint.IceHistoryKernels(times, measurements, &trajectory)
               .itauKernel[0];
     }
-    double diff = 0.0, norm = 0.0;
+    auto diff = 0.0, norm = 0.0;
     const auto& a = kernels[AdjointMethod::Discrete];
     const auto& b = kernels[AdjointMethod::Continuous];
-    for (std::size_t i = 0; i < a.size(); ++i) {
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
       diff += (a[i] - b[i]) * (a[i] - b[i]);
       norm += a[i] * a[i];
     }
     return std::sqrt(diff / norm);
   };
 
-  const double coarse = kernelDiff(6);
-  const double fine = kernelDiff(11);
+  const auto coarse = kernelDiff(6);
+  const auto fine = kernelDiff(11);
   EXPECT_LT(coarse, 0.3);
   EXPECT_LT(fine, coarse / 1.5);
 }
@@ -522,15 +522,15 @@ TEST(Adjoint, SavedAndRegeneratedStrainsAgree) {
   auto setup = Scene::Make(1e22);
   std::mt19937 rng(13);
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 5; ++n) times.push_back(n * kyr);
-  const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  std::vector<std::vector<double>> loads;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(n * kyr);
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[5].seaLevelDual = setup.Smooth(rng, 1.0);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
@@ -553,8 +553,8 @@ TEST(Adjoint, SavedAndRegeneratedStrainsAgree) {
     const auto b =
         adjoint.IceHistoryKernels(times, measurements, &withoutStrain)
             .itauKernel[0];
-    double scale = 0.0, worst = 0.0;
-    for (std::size_t i = 0; i < a.size(); ++i) {
+    auto scale = 0.0, worst = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
       scale = std::max(scale, std::abs(a[i]));
       worst = std::max(worst, std::abs(a[i] - b[i]));
     }
@@ -571,15 +571,15 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
   auto setup = Scene::Make(1e22);
   std::mt19937 rng(9);
   const auto& scales = setup.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 10; ++n) times.push_back(n * kyr);
-  const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  std::vector<std::vector<double>> loads;
-  for (std::size_t n = 0; n < times.size(); ++n) {
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 10; ++n) times.push_back(n * kyr);
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[10].seaLevelDual = setup.Smooth(rng, 1.0);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
@@ -593,7 +593,7 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
   auto sparseSnapshots = sparse.Run(times, History(times, loads));
   const auto sparseTrajectory =
       ForwardTrajectory::FromSnapshots(sparseSnapshots);
-  int kept = 0;
+  auto kept = 0;
   for (const auto& s : sparseSnapshots) kept += s.internalState.has_value();
   ASSERT_LT(kept, static_cast<int>(sparseSnapshots.size()));
 
@@ -605,8 +605,8 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
     const auto kernels =
         adjoint.IceHistoryKernels(times, measurements, &sparseTrajectory)
             .itauKernel[0];
-    double diff = 0.0, norm = 0.0;
-    for (std::size_t i = 0; i < reference.size(); ++i) {
+    auto diff = 0.0, norm = 0.0;
+    for (auto i = std::size_t{0}; i < reference.size(); ++i) {
       diff += (kernels[i] - reference[i]) * (kernels[i] - reference[i]);
       norm += reference[i] * reference[i];
     }
@@ -644,9 +644,9 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
                      "stage5_kernels.txt");
   ASSERT_TRUE(file.is_open());
 
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
   // The potential and angular-velocity duals are SI-anchored (the
   // generating script's PHI_ANCHOR / OMEGA_ANCHOR): pyslfp's EarthModel
   // scales differ from planetmodel/sl3dpp geophysical (phi_nd ~ T^2, a
@@ -657,7 +657,7 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
       scales.Factor(PotentialDimensions) / 1.0e7;  // PHI_ANCHOR
   const double omConv =
       scales.Factor(Dimensions{.time = -1}) / 1.0e-4;  // OMEGA_ANCHOR
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[3].seaLevelDual = grid.FromFunction([](double t, double p) {
     return Cap(t, p, 0.9, 1.2, 0.5);
   });
@@ -674,9 +674,9 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
   // The recorded linear-melt trajectory for the itau kernels.
   const auto& C = setup.state.oceanFunction;
   auto load = [&](double t) {
-    std::vector<double> out(setup.state.iceThickness.size());
-    const double fraction = -0.1 * (t / times.back());
-    for (std::size_t i = 0; i < out.size(); ++i) {
+    auto out = std::vector<double>(setup.state.iceThickness.size());
+    const auto fraction = -0.1 * (t / times.back());
+    for (auto i = std::size_t{0}; i < out.size(); ++i) {
       out[i] = setup.solver.IceDensity() * (1.0 - C[i]) * fraction *
                setup.state.iceThickness[i];
     }
@@ -694,12 +694,12 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
       std::pow(scales.Length(), 3) * matScales.Time();
   const auto& mesh = setup.material.Mesh();
 
-  constexpr double tol = 1e-5;
-  std::string line;
-  std::optional<AdjointMethod> method;
+  constexpr auto tol = 1e-5;
+  auto line = std::string{};
+  auto method = std::optional<AdjointMethod>{};
   IceKernels kernels;
-  std::vector<std::complex<double>> ours;
-  double coefScale = 0.0, coefWorst = 0.0;
+  auto ours = std::vector<std::complex<double>>{};
+  auto coefScale = 0.0, coefWorst = 0.0;
   auto checkedMethods = 0;
   auto closeBlock = [&] {
     if (!method.has_value()) return;
@@ -723,9 +723,9 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
       continue;
     }
     if (line.starts_with("node")) {
-      std::string head;
-      int node = 0;
-      double tSi = 0.0;
+      auto head = std::string{};
+      auto node = 0;
+      auto tSi = 0.0;
       row >> head >> node >> tSi;
       EXPECT_NEAR(times[node] * scales.Time(), tSi,
                   1e-6 * std::max(tSi, 1.0));
@@ -734,8 +734,8 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
       continue;
     }
     if (line.starts_with("itau")) {
-      std::string head;
-      std::size_t count = 0;
+      auto head = std::string{};
+      auto count = std::size_t{0};
       row >> head >> count;
       // The continuous block carries no itau reference (the pyslfp-side
       // continuous accumulation is under investigation; the generating
@@ -743,14 +743,14 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
       // against its exact discrete in ContinuousViscosityKernelsConverge.
       if (count == 0) continue;
       ASSERT_EQ(count, kernels.itauKernel[0].size());
-      double kScale = 0.0, kWorst = 0.0;
-      for (std::size_t i = 0; i < count; ++i) {
+      auto kScale = 0.0, kWorst = 0.0;
+      for (auto i = std::size_t{0}; i < count; ++i) {
         std::getline(file, line);
         std::istringstream krow(line);
-        double rSi = 0.0, value = 0.0;
+        auto rSi = 0.0, value = 0.0;
         krow >> rSi >> value;
-        const int e = static_cast<int>(i) / mesh.NGll();
-        const int q = static_cast<int>(i) % mesh.NGll();
+        const auto e = static_cast<int>(i) / mesh.NGll();
+        const auto q = static_cast<int>(i) % mesh.NGll();
         ASSERT_NEAR(mesh.Radius(e, q) * matScales.Length(), rSi,
                     1e-6 * std::max(rSi, 1.0))
             << "radial meshes diverge at node " << i;
@@ -763,8 +763,8 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
           << "itau kernel, method " << static_cast<int>(*method);
       continue;
     }
-    int l = 0, m = 0;
-    double a = 0.0, b = 0.0;
+    auto l = 0, m = 0;
+    auto a = 0.0, b = 0.0;
     row >> l >> m >> a >> b;
     const auto reference = ComplexFromRealPair({a, b}, m);
     coefScale = std::max(coefScale, std::abs(reference));

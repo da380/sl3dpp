@@ -31,13 +31,13 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr int kLmax = 8;
+constexpr auto kLmax = 8;
 
 double Cap(double theta, double phi, double colat0, double lon0,
            double width) {
   const double c = std::cos(theta) * std::cos(colat0) +
                    std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
-  const double d = std::acos(std::clamp(c, -1.0, 1.0));
+  const auto d = std::acos(std::clamp(c, -1.0, 1.0));
   return std::exp(-0.5 * std::pow(d / width, 2));
 }
 
@@ -60,9 +60,9 @@ struct Scene {
     auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
-    std::map<std::size_t, RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
-    for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
         viscosity.emplace(i,
@@ -87,8 +87,8 @@ struct Scene {
   }
 
   [[nodiscard]] std::vector<double> MeltLoad(double fraction) const {
-    std::vector<double> load(iceNd.size());
-    for (std::size_t i = 0; i < load.size(); ++i) {
+    auto load = std::vector<double>(iceNd.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
       load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
                 fraction * iceNd[i];
     }
@@ -97,9 +97,9 @@ struct Scene {
 
   [[nodiscard]] double Surface(std::span<const double> f,
                                std::span<const double> g) const {
-    const double a = solver.Radius();
-    std::vector<double> fg(f.size());
-    for (std::size_t i = 0; i < f.size(); ++i) fg[i] = f[i] * g[i];
+    const auto a = solver.Radius();
+    auto fg = std::vector<double>(f.size());
+    for (auto i = std::size_t{0}; i < f.size(); ++i) fg[i] = f[i] * g[i];
     return a * a * solver.Grid().Integrate(fg);
   }
 };
@@ -112,17 +112,17 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
   // reduced viscosity kernels must agree to the pipeline's round-off.
   auto scene = Scene::Make(1e21);
   const auto& scales = scene.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
   auto load = scene.MeltLoad(-0.1);
   auto iceLoad = [&](double t) {
-    std::vector<double> out(load.size());
-    const double ramp = t / times.back();
-    for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+    auto out = std::vector<double>(load.size());
+    const auto ramp = t / times.back();
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
     return out;
   };
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[5].seaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
@@ -156,9 +156,9 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
       adjoint3.IceHistoryKernels(times, measurements, &trajectory3);
 
   // Ice kernels: node duals, all nodes against the 1D sweep.
-  double scale = 0.0, worst = 0.0;
-  for (std::size_t n = 0; n < times.size(); ++n) {
-    for (std::size_t i = 0; i < kernels1.loadDuals[n].size(); ++i) {
+  auto scale = 0.0, worst = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    for (auto i = std::size_t{0}; i < kernels1.loadDuals[n].size(); ++i) {
       scale = std::max(scale, std::abs(kernels1.loadDuals[n][i]));
       worst = std::max(worst, std::abs(kernels3.ice.loadDuals[n][i] -
                                        kernels1.loadDuals[n][i]));
@@ -170,10 +170,10 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
   // Viscosity kernels: the spherical reduction at each memory node
   // against the 1D nodal kernel at its (element, gll) node.
   const auto& coupling = op3.Coupling();
-  const int ngll = scene.material.Mesh().NGll();
-  for (std::size_t k = 0; k < scene.rheology.BranchCount(); ++k) {
-    double kScale = 0.0, kWorst = 0.0;
-    for (int rn = 0; rn < coupling.NodeCount(); ++rn) {
+  const auto ngll = scene.material.Mesh().NGll();
+  for (auto k = std::size_t{0}; k < scene.rheology.BranchCount(); ++k) {
+    auto kScale = 0.0, kWorst = 0.0;
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
       const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) *
                             ngll +
                         coupling.NodeInElementOf(rn);
@@ -193,17 +193,17 @@ TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
   // strain) give the same 3D viscosity kernels, to the forward tolerance.
   auto scene = Scene::Make(1e22);
   const auto& scales = scene.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times;
-  for (int n = 0; n <= 4; ++n) times.push_back(2.0 * n * kyr);
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.0 * n * kyr);
   auto load = scene.MeltLoad(-0.1);
   auto iceLoad = [&](double t) {
-    std::vector<double> out(load.size());
-    const double ramp = t / times.back();
-    for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+    auto out = std::vector<double>(load.size());
+    const auto ramp = t / times.back();
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
     return out;
   };
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[4].seaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
@@ -229,8 +229,8 @@ TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
   const auto a = kernels(true);
   const auto b = kernels(false);
   ASSERT_EQ(a.size(), b.size());
-  double scale = 0.0, worst = 0.0;
-  for (std::size_t i = 0; i < a.size(); ++i) {
+  auto scale = 0.0, worst = 0.0;
+  for (auto i = std::size_t{0}; i < a.size(); ++i) {
     scale = std::max(scale, std::abs(a[i]));
     worst = std::max(worst, std::abs(a[i] - b[i]));
   }
@@ -309,7 +309,7 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   // under step refinement.
   auto scene = Scene::Make(1e22);
   const auto& scales = scene.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -320,18 +320,19 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
 
   auto run = [&](std::size_t npts, double eps,
                  Kernels3D* kernelsOut) -> double {
-    std::vector<double> times;
-    for (std::size_t n = 0; n < npts; ++n) {
+    auto times = std::vector<double>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(10.0 * static_cast<double>(n) /
                       static_cast<double>(npts - 1) * kyr);
     }
     auto iceLoad = [&](double t) {
-      std::vector<double> out(load.size());
-      const double ramp = t / times.back();
-      for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+      auto out = std::vector<double>(load.size());
+      const auto ramp = t / times.back();
+      for (auto i = std::size_t{0}; i < out.size(); ++i)
+        out[i] = ramp * load[i];
       return out;
     };
-    std::map<std::size_t, Measurement> measurements;
+    auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts - 1].seaLevelDual = scene.solver.Grid().FromFunction(
         [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
@@ -358,7 +359,7 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   };
 
   // The kernel from the unperturbed run, then central differences.
-  double previousError = 0.0;
+  auto previousError = 0.0;
   for (const std::size_t npts : {5ul, 9ul}) {
     Kernels3D kernels;
     (void)run(npts, 0.0, &kernels);
@@ -369,19 +370,19 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     const auto& grid = coupling.Grid();
     const auto p = grid.FromFunction(direction);
     const auto gridF = grid.FieldSize();
-    double predicted = 0.0;
-    std::vector<double> product(gridF);
-    for (int rn = 0; rn < coupling.NodeCount(); ++rn) {
+    auto predicted = 0.0;
+    auto product = std::vector<double>(gridF);
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
       const auto row = std::span(kernels.logViscosityKernel3D[0])
                            .subspan(static_cast<std::size_t>(rn) * gridF,
                                     gridF);
-      for (std::size_t x = 0; x < gridF; ++x) product[x] = row[x] * p[x];
+      for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
       predicted += grid.Integrate(product);
     }
-    const double eps = 0.1;
+    const auto eps = 0.1;
     const double fd = (run(npts, eps, nullptr) - run(npts, -eps, nullptr)) /
                       (2.0 * eps);
-    const double error = std::abs(fd - predicted) / std::abs(fd);
+    const auto error = std::abs(fd - predicted) / std::abs(fd);
     EXPECT_LT(error, 0.1) << "npts " << npts;
     if (npts > 5) {
       EXPECT_LT(error, previousError) << "no refinement improvement";
@@ -401,8 +402,8 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
   // to solver precision) belongs to the discrete 3D transpose.
   auto scene = Scene::Make(1e22);
   const auto& scales = scene.solver.SolverScales();
-  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
-  constexpr std::size_t npts = 9;
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  constexpr auto npts = std::size_t{9};
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -410,18 +411,18 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
   };
   auto load = scene.MeltLoad(-0.1);
-  std::vector<double> times;
-  for (std::size_t n = 0; n < npts; ++n) {
+  auto times = std::vector<double>{};
+  for (auto n = std::size_t{0}; n < npts; ++n) {
     times.push_back(10.0 * static_cast<double>(n) /
                     static_cast<double>(npts - 1) * kyr);
   }
   auto iceLoad = [&](double t) {
-    std::vector<double> out(load.size());
-    const double ramp = t / times.back();
-    for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+    auto out = std::vector<double>(load.size());
+    const auto ramp = t / times.back();
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
     return out;
   };
-  std::map<std::size_t, Measurement> measurements;
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[npts - 1].seaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
@@ -449,7 +450,7 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
   };
 
   Kernels3D kernels;
-  const double J0 = evaluate(0.0, &kernels);
+  const auto J0 = evaluate(0.0, &kernels);
 
   // <K, p>: the angular-density pairing per memory node.
   Viscoelastic3D probe(scene.rheology, kLmax,
@@ -458,39 +459,39 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
   const auto& grid = coupling.Grid();
   const auto p = grid.FromFunction(direction);
   const auto gridF = grid.FieldSize();
-  double predicted = 0.0;
-  std::vector<double> product(gridF);
-  for (int rn = 0; rn < coupling.NodeCount(); ++rn) {
+  auto predicted = 0.0;
+  auto product = std::vector<double>(gridF);
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
     const auto row =
         std::span(kernels.logViscosityKernel3D[0])
             .subspan(static_cast<std::size_t>(rn) * gridF, gridF);
-    for (std::size_t x = 0; x < gridF; ++x) product[x] = row[x] * p[x];
+    for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
     predicted += grid.Integrate(product);
   }
   ASSERT_NE(predicted, 0.0);
 
-  const std::vector<double> hs{0.2, 0.1, 0.05, 0.025};
+  const auto hs = std::vector<double>{0.2, 0.1, 0.05, 0.025};
   std::vector<double> r0(hs.size()), r1(hs.size());
-  for (std::size_t i = 0; i < hs.size(); ++i) {
-    const double J = evaluate(hs[i], nullptr);
+  for (auto i = std::size_t{0}; i < hs.size(); ++i) {
+    const auto J = evaluate(hs[i], nullptr);
     r0[i] = std::abs(J - J0);
     r1[i] = std::abs(J - J0 - hs[i] * predicted);
   }
 
   // Zeroth order: the perturbation registers at O(h).
-  for (std::size_t i = 1; i < hs.size(); ++i) {
-    const double rate = std::log2(r0[i - 1] / r0[i]);
+  for (auto i = std::size_t{1}; i < hs.size(); ++i) {
+    const auto rate = std::log2(r0[i - 1] / r0[i]);
     EXPECT_GT(rate, 0.8) << "R0 rates: " << r0[0] << " " << r0[1] << " "
                          << r0[2] << " " << r0[3];
     EXPECT_LT(rate, 1.3) << "R0 rate " << rate << " at h " << hs[i];
   }
   // Gradient-corrected: second order at the curvature-dominated end,
   // and never worse than the commute floor anywhere.
-  const double firstRate = std::log2(r1[0] / r1[1]);
+  const auto firstRate = std::log2(r1[0] / r1[1]);
   EXPECT_GT(firstRate, 1.5) << "R1: " << r1[0] << " " << r1[1] << " "
                             << r1[2] << " " << r1[3]
                             << " (predicted " << predicted << ")";
-  for (std::size_t i = 0; i < hs.size(); ++i) {
+  for (auto i = std::size_t{0}; i < hs.size(); ++i) {
     EXPECT_LT(r1[i], 0.1 * hs[i] * std::abs(predicted))
         << "commute floor exceeded at h " << hs[i];
     if (i > 0) {

@@ -42,8 +42,8 @@ Viscoelastic3D::LoadCallable3D SeaLevelEvolution3D::Columns(
     const std::vector<Complex>& coefficients, double factor) const {
   return [coefficients, factor](int l,
                                 double) -> std::optional<std::vector<Complex>> {
-    std::vector<Complex> columns(l + 1);
-    for (int m = 0; m <= l; ++m) {
+    auto columns = std::vector<Complex>(l + 1);
+    for (auto m = 0; m <= l; ++m) {
       columns[m] = factor * coefficients[SurfaceGrid::Index(l, m)];
     }
     return columns;
@@ -54,7 +54,7 @@ std::vector<SeaLevelEvolution3D::Complex> SeaLevelEvolution3D::Coefficients(
     const std::map<int, std::vector<Complex>>& perDegree, double factor) const {
   auto out = solver_->Grid().ZeroCoefficients();
   for (const auto& [l, columns] : perDegree) {
-    for (int m = 0; m <= l; ++m) {
+    for (auto m = 0; m <= l; ++m) {
       out[SurfaceGrid::Index(l, m)] = factor * columns[m];
     }
   }
@@ -67,7 +67,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
-  for (std::size_t i = 1; i < times.size(); ++i) {
+  for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
       throw std::invalid_argument("times must be increasing");
     }
@@ -93,7 +93,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
 
   // Flavour SLE solvers under the caller's parameters, keyed by the
   // (operator-cached, address-stable) Love table.
-  std::map<const LoveNumbers*, SeaLevelSolver> flavours;
+  auto flavours = std::map<const LoveNumbers*, SeaLevelSolver>{};
   auto solverFor = [&](const LoveNumbers& table) -> const SeaLevelSolver& {
     auto found = flavours.find(&table);
     if (found == flavours.end()) {
@@ -112,8 +112,8 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
 
   auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
                                    const std::vector<double>& slc) {
-    std::vector<double> total(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto total = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       total[i] = loadGrid[i] +
                  solver.WaterDensity() * state_.oceanFunction[i] * slc[i];
     }
@@ -135,7 +135,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
   if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma, toMatDensity_),
                                  Columns(psi, toMatPotential_));
 
-  std::vector<Snapshot> snapshots;
+  auto snapshots = std::vector<Snapshot>{};
   auto record = [&](double t, SeaLevelSolver::Response& r, int iterations,
                     double residual, bool converged, bool keepState) {
     Snapshot snapshot;
@@ -166,7 +166,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
   };
   record(times[0], response, 0, 0.0, true, stride > 0);
 
-  for (std::size_t node = 1; node < times.size(); ++node) {
+  for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme,
                              Columns(sigma, toMatDensity_),

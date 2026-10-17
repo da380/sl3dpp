@@ -101,7 +101,7 @@ TEST(Deck, ReadsTheLegacySl3dModel) {
   EXPECT_NEAR(deck.Column("kappa")[0], 1425.3394787252205e9, 1e2);
   EXPECT_TRUE(std::isnan(deck.Column("viscosity")[0]));
   const auto viscosity = deck.Column("viscosity");
-  bool anyViscous = false;
+  auto anyViscous = false;
   for (auto v : viscosity) anyViscous = anyViscous || v > 1e20;
   EXPECT_TRUE(anyViscous);  // the mantle's 10^21.7
 }

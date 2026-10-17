@@ -55,7 +55,7 @@ struct DegreeNodeValues {
   constexpr std::complex<double> i(0.0, 1.0);
   const auto zeta2 = l * (l + 1.0);
   const auto zeta = std::sqrt(zeta2);
-  std::array<std::complex<double>, 5> A{};
+  auto A = std::array<std::complex<double>, 5>{};
   A[2] = (v.rdU - v.U + 0.5 * zeta2 * v.V) / (3.0 * r);
   if (l >= 1) {
     const auto tangential = v.rdV - v.V + v.U;
@@ -80,7 +80,7 @@ struct DegreeNodeValues {
     std::complex<double> S, double r) {
   const auto zeta2 = l * (l + 1.0);
   const auto zeta = std::sqrt(zeta2);
-  std::array<std::complex<double>, 5> A{};
+  auto A = std::array<std::complex<double>, 5>{};
   A[2] = R / (3.0 * r);
   if (l >= 1) {
     A[1] = zeta * S / (2.0 * std::numbers::sqrt2 * r);

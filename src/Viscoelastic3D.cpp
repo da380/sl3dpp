@@ -60,7 +60,7 @@ bool SameValues(const GridCoupling::SpectralTensor& a,
     if (u.size() != v.size()) return false;
     const auto size = u.size();
 #pragma omp parallel for schedule(static) reduction(&& : same) if (parallel)
-    for (std::size_t i = 0; i < size; ++i) same = same && u[i] == v[i];
+    for (auto i = std::size_t{0}; i < size; ++i) same = same && u[i] == v[i];
   }
   return same;
 }
@@ -124,12 +124,12 @@ Viscoelastic3D::Viscoelastic3D(
   const auto fieldSize = sampling.FieldSize();
   const auto np = coupling_.Points().count;
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
-  std::vector<double> factor(nodes * fieldSize);
+  auto factor = std::vector<double>(nodes * fieldSize);
   const auto thetas = sampling.CoLatitudes();
   const auto phis = sampling.Longitudes();
-  for (std::size_t node = 0; node < nodes; ++node) {
+  for (auto node = std::size_t{0}; node < nodes; ++node) {
     const auto r = coupling_.RadiusOfNode(static_cast<int>(node));
-    std::size_t x = 0;
+    auto x = std::size_t{0};
     for (auto theta : thetas) {
       for (auto phi : phis) {
         factor[node * fieldSize + x++] = std::exp(-delta(r, theta, phi));
@@ -165,7 +165,7 @@ Viscoelastic3D& Viscoelastic3D::operator=(Viscoelastic3D&&) noexcept = default;
 
 Viscoelastic3D::State Viscoelastic3D::ZeroState() const {
   State state;
-  for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
+  for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
     state.m.push_back(coupling_.ZeroTensor());
   }
   return state;
@@ -253,7 +253,7 @@ void Viscoelastic3D::AddStrainCoefficients(
     const ToroidalOperator* tor;
     const std::vector<Complex>* w;
   };
-  std::vector<Task> tasks;
+  auto tasks = std::vector<Task>{};
   for (const auto& [l, x] : solutions.spheroidal) {
     const auto torIt = solutions.toroidal.find(l);
     const auto hasTor = torIt != solutions.toroidal.end();
@@ -286,7 +286,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
     const ToroidalOperator* tor = nullptr;  // a toroidal task
     std::vector<Complex> solution;
   };
-  std::vector<Task> tasks;
+  auto tasks = std::vector<Task>{};
   for (const auto& [l, b] : sphForces) {
     Task task;
     task.l = l;
@@ -306,7 +306,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
   // The complex columns solved as real pairs.
   auto solve = [](const auto& op, const std::vector<Complex>& b, int columns) {
     const auto ndof = op.DofCount();
-    std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
+    auto rhs =
+        std::vector<double>(static_cast<std::size_t>(ndof) * 2 * columns);
     for (auto c = 0; c < columns; ++c) {
       for (auto d = 0; d < ndof; ++d) {
         rhs[static_cast<std::size_t>(c) * ndof + d] =
@@ -316,7 +317,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
       }
     }
     auto x = op.Solve(rhs, 2 * columns);
-    std::vector<Complex> solution(static_cast<std::size_t>(ndof) * columns);
+    auto solution =
+        std::vector<Complex>(static_cast<std::size_t>(ndof) * columns);
     for (auto c = 0; c < columns; ++c) {
       for (auto d = 0; d < ndof; ++d) {
         solution[static_cast<std::size_t>(c) * ndof + d] = {
@@ -391,7 +393,8 @@ void Viscoelastic3D::AddUnitChannels(
       const auto lock = LockCaches();
       auto found = units.find(l);
       if (found == units.end()) {
-        std::vector<double> unit(static_cast<std::size_t>(ndof) * 2, 0.0);
+        auto unit =
+            std::vector<double>(static_cast<std::size_t>(ndof) * 2, 0.0);
         auto loadVec = system.Load();
         auto tideVec = system.Tide(l == 0 ? 2 : -1);
         std::ranges::copy(loadVec, unit.begin());
@@ -527,7 +530,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   step.weight_.assign(nodes * fieldSize, 0.0);
   step.grid_ = coupling_.ZeroTensor();
   auto& fixed = step.grid_;
-  for (std::size_t k = 0; k < K; ++k) {
+  for (auto k = std::size_t{0}; k < K; ++k) {
     step.memory_.push_back(coupling_.ZeroTensor());
     step.beta_[k].assign(nodes * fieldSize, 0.0);
     detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
@@ -536,7 +539,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
                                ? 1.0 - BackwardEulerWeight(dt * itauRef)
                                : ExponentialTrapezoidWeights(dt * itauRef).beta;
       const auto mu = muBranch_[k][node];
-      for (std::size_t x = 0; x < fieldSize; ++x) {
+      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
         const auto h = dt * itau_[k][node * fieldSize + x];
         double e_w, a_w, b_w;
         if (scheme == Scheme::BackwardEuler) {
@@ -603,7 +606,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
     coupling.Analyse(grid_, analysed_);
     const auto fixed = Blocks(fixed_);
     const auto out = Blocks(analysed_);
-    for (std::size_t b = 0; b < out.size(); ++b) {
+    for (auto b = std::size_t{0}; b < out.size(); ++b) {
       auto& o = *out[b];
       const auto& f = *fixed[b];
       detail::ParallelElements(o.size(), op.options_.parallel,
@@ -663,8 +666,8 @@ GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
 double Viscoelastic3D::OpenStep::InertiaMoment(
     const Solutions& solutions) const {
   const auto& x = solutions.spheroidal.at(0);
-  std::vector<double> column(x.size());
-  for (std::size_t i = 0; i < x.size(); ++i) column[i] = x[i].real();
+  auto column = std::vector<double>(x.size());
+  for (auto i = std::size_t{0}; i < x.size(); ++i) column[i] = x[i].real();
   const auto lock = op_->LockCaches();
   return op_->reference_.InertiaMoment(column, 1)[0];
 }
@@ -679,7 +682,7 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
   auto d = op_->coupling_.Synthesise(strain);
   State next;
   next.t = t_;
-  for (std::size_t k = 0; k < memory_.size(); ++k) {
+  for (auto k = std::size_t{0}; k < memory_.size(); ++k) {
     auto tensor = memory_[k];
     AdvanceMemory(tensor, beta_[k], d, op_->options_.parallel);
     next.m.push_back(std::move(tensor));
@@ -696,7 +699,7 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
   op_->coupling_.Synthesise(strain, grid_);
   State next;
   next.t = t_;
-  for (std::size_t k = 0; k < memory_.size(); ++k) {
+  for (auto k = std::size_t{0}; k < memory_.size(); ++k) {
     AdvanceMemory(memory_[k], beta_[k], grid_, op_->options_.parallel);
     next.m.push_back(std::move(memory_[k]));
   }
@@ -730,15 +733,15 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
     // squared magnitudes (maxima: the same whatever the thread count).
     // The maxima pass over NaNs, so a diverged pass is caught apart: it
     // ends the iteration unconverged, on the last finite iterate.
-    double scale = 0.0, diff = 0.0;
+    auto scale = 0.0, diff = 0.0;
     auto finite = true;
-    for (std::size_t b = 0; b < next.size(); ++b) {
+    for (auto b = std::size_t{0}; b < next.size(); ++b) {
       const auto& n = *next[b];
       const auto& o = *now[b];
       const auto size = n.size();
 #pragma omp parallel for schedule(static) reduction(max : scale, diff) \
     reduction(&& : finite) if (parallel)
-      for (std::size_t i = 0; i < size; ++i) {
+      for (auto i = std::size_t{0}; i < size; ++i) {
         finite =
             finite && std::isfinite(n[i].real()) && std::isfinite(n[i].imag());
         scale = std::max(scale, std::norm(n[i]));
@@ -757,7 +760,7 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
       break;
     }
     if (control.damping != 1.0) {
-      for (std::size_t b = 0; b < next.size(); ++b) {
+      for (auto b = std::size_t{0}; b < next.size(); ++b) {
         auto& n = *next[b];
         const auto& o = *now[b];
         detail::ParallelElements(n.size(), parallel, [&](std::size_t i) {
@@ -804,12 +807,12 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
 
 std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
     const Solutions& solutions, Component component) const {
-  std::map<int, std::vector<Complex>> out;
+  auto out = std::map<int, std::vector<Complex>>{};
   for (const auto& [l, x] : solutions.spheroidal) {
     const auto& op = Spheroidal(l);
     const auto columns = l + 1;
     const auto dof = op.SurfaceDof(component);
-    std::vector<Complex> values(columns, 0.0);
+    auto values = std::vector<Complex>(columns, 0.0);
     if (dof >= 0) {
       for (auto c = 0; c < columns; ++c) {
         values[c] = x[static_cast<std::size_t>(c) * op.DofCount() + dof];

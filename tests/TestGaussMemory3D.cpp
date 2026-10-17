@@ -37,7 +37,7 @@ using Complex = std::complex<double>;
 
 namespace {
 
-constexpr int kLmax = 8;
+constexpr auto kLmax = 8;
 
 double Noise(std::size_t k) {
   const auto x = std::sin(12.9898 * static_cast<double>(k + 1)) * 43758.5453;

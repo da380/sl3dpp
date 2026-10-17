@@ -193,7 +193,7 @@ std::vector<double> ToroidalOperator::Solve(std::span<const double> b,
     throw std::invalid_argument(std::format(
         "expected {} x {} right-hand-side values, got {}", n, nrhs, b.size()));
   }
-  std::vector<double> x(b.begin(), b.end());
+  auto x = std::vector<double>(b.begin(), b.end());
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j) {
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
@@ -223,7 +223,7 @@ std::vector<double> ToroidalOperator::Apply(std::span<const double> x,
         std::format("expected {} x {} values, got {}", n, nrhs, x.size()));
   }
   const auto ldab = kd_ + 1;
-  std::vector<double> y(x.size(), 0.0);
+  auto y = std::vector<double>(x.size(), 0.0);
   for (auto k = 0; k < nrhs; ++k) {
     const auto* xk = x.data() + static_cast<std::size_t>(k) * n;
     auto* yk = y.data() + static_cast<std::size_t>(k) * n;
@@ -245,7 +245,7 @@ std::vector<double> ToroidalOperator::RigidRotation(int region) const {
   }
   const auto [first, end] = regions_[static_cast<std::size_t>(region)];
   const auto& mesh = material_->Mesh();
-  std::vector<double> out(ndof_, 0.0);
+  auto out = std::vector<double>(ndof_, 0.0);
   for (auto e = firstElement_; e < mesh.ElementCount(); ++e) {
     for (auto i = 0; i < mesh.NGll(); ++i) {
       const auto d = dof_[mesh.GlobalIndex(e, i)];

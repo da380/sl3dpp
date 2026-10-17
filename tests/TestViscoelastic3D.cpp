@@ -32,7 +32,7 @@ using Complex = std::complex<double>;
 
 namespace {
 
-constexpr int kLmax = 8;
+constexpr auto kLmax = 8;
 
 double Noise(std::size_t k) {
   const auto x = std::sin(12.9898 * static_cast<double>(k + 1)) * 43758.5453;
@@ -55,9 +55,9 @@ struct Body {
     auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
-    std::map<std::size_t, RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
-    for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
         viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -72,8 +72,8 @@ struct Body {
 /// (m = 0 real) for the 3D channels and the matching [Re | Im] real
 /// blocks for the 1D ones.
 std::vector<Complex> LoadColumns(int l) {
-  std::vector<Complex> columns(l + 1);
-  for (int m = 0; m <= l; ++m) {
+  auto columns = std::vector<Complex>(l + 1);
+  for (auto m = 0; m <= l; ++m) {
     columns[m] = m == 0 ? Complex(Noise(97 * l), 0.0)
                         : Complex(Noise(97 * l + m), Noise(55 * l + m));
   }
@@ -84,7 +84,7 @@ std::vector<Complex> LoadColumns(int l) {
 
 TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   auto body = Body::Make();
-  const double tau = body.rheology.MinRelaxationTime();
+  const auto tau = body.rheology.MinRelaxationTime();
   const auto& mesh = body.material.Mesh();
   const auto n = mesh.NGll();
 
@@ -100,8 +100,8 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   const auto load3 = [](int l, double) { return LoadColumns(l); };
   const auto load1 = [](int l, double) {
     const auto columns = LoadColumns(l);
-    std::vector<double> real(2 * columns.size());
-    for (std::size_t c = 0; c < columns.size(); ++c) {
+    auto real = std::vector<double>(2 * columns.size());
+    for (auto c = std::size_t{0}; c < columns.size(); ++c) {
       real[c] = columns[c].real();
       real[columns.size() + c] = columns[c].imag();
     }
@@ -112,9 +112,9 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     // Two steps from rest under the held load, both paths.
     auto s1 = op1.ZeroState([](int l) { return 2 * (l + 1); });
     auto s3 = op3.ZeroState();
-    std::map<int, std::vector<double>> x1;
+    auto x1 = std::map<int, std::vector<double>>{};
     Viscoelastic3D::Solutions x3;
-    for (int step = 0; step < 2; ++step) {
+    for (auto step = 0; step < 2; ++step) {
       auto [n1, sols1] = op1.Step(s1, 0.7 * tau, scheme, load1);
       s1 = std::move(n1);
       x1 = std::move(sols1);
@@ -128,11 +128,11 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     // The end-time surface responses agree per (l, m).
     const auto u1 = op1.Surface(x1, Component::U);
     const auto u3 = op3.Surface(x3, Component::U);
-    double scale = 0.0, diff = 0.0;
-    for (int l = 0; l <= kLmax; ++l) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto l = 0; l <= kLmax; ++l) {
       const auto columns = l + 1;
-      for (int c = 0; c < columns; ++c) {
-        const Complex ours = u3.at(l)[c];
+      for (auto c = 0; c < columns; ++c) {
+        const auto ours = u3.at(l)[c];
         const Complex ref(u1.at(l)[c], u1.at(l)[columns + c]);
         scale = std::max(scale, std::abs(ref));
         diff = std::max(diff, std::abs(ours - ref));
@@ -144,9 +144,9 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
     // The grid state equals the synthesised degree-basis state.
     auto spectral = coupling.ZeroSpectral();
     const auto K = body.rheology.BranchCount();
-    for (int l = 0; l <= kLmax; ++l) {
+    for (auto l = 0; l <= kLmax; ++l) {
       const auto columns = static_cast<std::size_t>(l + 1);
-      std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
+      auto M = std::vector<Complex>(coupling.NodeCount() * columns, 0.0);
       std::vector<Complex> R = M, S = M;
       // The 1D state spans the degree's memory window.
       const auto window = op1.MemoryElements(l);
@@ -154,12 +154,12 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
       const auto ne = window.second;
       const auto& m1 = s1.m.at(l);
       const auto ncols = 2 * columns;
-      for (int node = 0; node < coupling.NodeCount(); ++node) {
+      for (auto node = 0; node < coupling.NodeCount(); ++node) {
         const auto e = coupling.ElementOfNode(node);
         if (e < e0 || e >= e0 + ne) continue;
         const auto q = node % n;
         const auto eL = e - e0;
-        for (std::size_t c = 0; c < columns; ++c) {
+        for (auto c = std::size_t{0}; c < columns; ++c) {
           auto scalar = [&](int s) {
             const auto at =
                 ((static_cast<std::size_t>(s) * ne + eL) * n + q) * ncols;
@@ -174,14 +174,14 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
       (void)K;
     }
     const auto reference = coupling.Synthesise(spectral);
-    double mScale = 0.0, mDiff = 0.0;
-    for (int c = 0; c < 2; ++c) {
-      for (std::size_t i = 0; i < reference.c[c].size(); ++i) {
+    auto mScale = 0.0, mDiff = 0.0;
+    for (auto c = 0; c < 2; ++c) {
+      for (auto i = std::size_t{0}; i < reference.c[c].size(); ++i) {
         mScale = std::max(mScale, std::abs(reference.c[c][i]));
         mDiff = std::max(mDiff, std::abs(s3.m[0].c[c][i] - reference.c[c][i]));
       }
     }
-    for (std::size_t i = 0; i < reference.r.size(); ++i) {
+    for (auto i = std::size_t{0}; i < reference.r.size(); ++i) {
       mScale = std::max(mScale, std::abs(reference.r[i]));
       mDiff = std::max(mDiff, std::abs(s3.m[0].r[i] - reference.r[i]));
     }
@@ -192,7 +192,7 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
 
 TEST(Stage4, LateralViscosityCouplesAndConverges) {
   auto body = Body::Make();
-  const double tau = body.rheology.MinRelaxationTime();
+  const auto tau = body.rheology.MinRelaxationTime();
   // A strong smooth lateral pattern: one decade peak to peak.
   Viscoelastic3D op(body.rheology, kLmax, [](double, double theta, double phi) {
     return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
@@ -209,7 +209,7 @@ TEST(Stage4, LateralViscosityCouplesAndConverges) {
 
   // Lateral viscosity couples spheroidal and toroidal motion: after a
   // step, the toroidal response is alive.
-  double toroidal = 0.0, spheroidal = 0.0;
+  auto toroidal = 0.0, spheroidal = 0.0;
   for (const auto& [l, x] : result.solutions.toroidal) {
     for (auto v : x) toroidal = std::max(toroidal, std::abs(v));
   }
@@ -223,17 +223,17 @@ TEST(Stage4, LateralViscosityCouplesAndConverges) {
 
 TEST(Stage4, LateralStepSelfConvergesAtSecondOrder) {
   auto body = Body::Make();
-  const double tau = body.rheology.MinRelaxationTime();
+  const auto tau = body.rheology.MinRelaxationTime();
   Viscoelastic3D op(body.rheology, kLmax, [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::sin(phi);
   });
   const auto load = [](int l, double) { return LoadColumns(l); };
-  const double T = 2.0 * tau;
+  const auto T = 2.0 * tau;
 
   auto advance = [&](int steps) {
     auto state = op.ZeroState();
     Viscoelastic3D::Solutions solutions;
-    for (int i = 0; i < steps; ++i) {
+    for (auto i = 0; i < steps; ++i) {
       auto result =
           op.Step(state, T / steps, Scheme::ExponentialTrapezoid, load);
       EXPECT_TRUE(result.info.converged);
@@ -259,7 +259,7 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
   // are the mixer's partial sums, so the comparison is at the iteration's
   // tolerance, not bitwise.
   auto body = Body::Make();
-  const double tau = body.rheology.MinRelaxationTime();
+  const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {
     return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -270,7 +270,7 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
     Viscoelastic3D op(body.rheology, kLmax, delta, options);
     auto state = op.ZeroState();
     Viscoelastic3D::Solutions solutions;
-    for (int i = 0; i < 2; ++i) {
+    for (auto i = 0; i < 2; ++i) {
       auto result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
       EXPECT_TRUE(result.info.converged);
       state = std::move(result.state);
@@ -279,19 +279,19 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
     return solutions;
   };
   const auto serial = run(false);
-  const int saved = omp_get_max_threads();
+  const auto saved = omp_get_max_threads();
   omp_set_num_threads(4);
   const auto threaded = run(true);
   omp_set_num_threads(saved);
 
-  double scale = 0.0, diff = 0.0;
+  auto scale = 0.0, diff = 0.0;
   auto compare = [&](const std::map<int, std::vector<Complex>>& a,
                      const std::map<int, std::vector<Complex>>& b) {
     ASSERT_EQ(a.size(), b.size());
     for (const auto& [l, x] : a) {
       const auto& y = b.at(l);
       ASSERT_EQ(x.size(), y.size());
-      for (std::size_t i = 0; i < x.size(); ++i) {
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
         scale = std::max(scale, std::abs(x[i]));
         diff = std::max(diff, std::abs(x[i] - y[i]));
       }
@@ -493,7 +493,7 @@ TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
   // change the degree-1 toroidal solution only by rigid rotations
   // (plan.md §4: don't measure things that are gauge).
   auto body = Body::Make();
-  const double tau = body.rheology.MinRelaxationTime();
+  const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {
     return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -504,7 +504,7 @@ TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
     Viscoelastic3D op(body.rheology, kLmax, delta, options);
     auto state = op.ZeroState();
     Viscoelastic3D::StepResult result;
-    for (int i = 0; i < 2; ++i) {
+    for (auto i = 0; i < 2; ++i) {
       result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
       EXPECT_TRUE(result.info.converged);
       state = result.state;
@@ -516,11 +516,11 @@ TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
   const auto a = run(0.0);
   const auto b = run(0.5);
 
-  double scale = 0.0, diff = 0.0;
+  auto scale = 0.0, diff = 0.0;
   auto compare = [&](const std::vector<Complex>& x,
                      const std::vector<Complex>& y) {
     ASSERT_EQ(x.size(), y.size());
-    for (std::size_t i = 0; i < x.size(); ++i) {
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
       scale = std::max(scale, std::abs(x[i]));
       diff = std::max(diff, std::abs(x[i] - y[i]));
     }
@@ -545,24 +545,24 @@ TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
   const auto& wb = b.solutions.toroidal.at(1);
   const auto ndof = static_cast<std::size_t>(probe.DofCount());
   ASSERT_EQ(wa.size(), 2 * ndof);
-  double size = 0.0, gaugeShift = 0.0;
+  auto size = 0.0, gaugeShift = 0.0;
   for (auto v : wa) size = std::max(size, std::abs(v));
   EXPECT_GT(size, 1e-8 * scale);
-  for (int k = 0; k < probe.RegionCount(); ++k) {
+  for (auto k = 0; k < probe.RegionCount(); ++k) {
     const auto rigid = probe.RigidRotation(k);
-    for (std::size_t column = 0; column < 2; ++column) {
+    for (auto column = std::size_t{0}; column < 2; ++column) {
       Complex dr = 0.0;
-      double rr = 0.0;
-      for (std::size_t d = 0; d < ndof; ++d) {
+      auto rr = 0.0;
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
         dr += (wa[column * ndof + d] - wb[column * ndof + d]) * rigid[d];
         rr += rigid[d] * rigid[d];
       }
       const auto alpha = dr / rr;
-      for (std::size_t d = 0; d < ndof; ++d) {
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
         gaugeShift = std::max(gaugeShift, std::abs(alpha) * rigid[d]);
       }
-      double off = 0.0;
-      for (std::size_t d = 0; d < ndof; ++d) {
+      auto off = 0.0;
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
         if (rigid[d] == 0.0) continue;
         off = std::max(off, std::abs(wa[column * ndof + d] -
                                      wb[column * ndof + d] - alpha * rigid[d]));

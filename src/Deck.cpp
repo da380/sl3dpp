@@ -14,13 +14,13 @@ namespace {
 /// naming the offending token.
 std::expected<std::vector<double>, DeckError> ParseRow(
     const std::string& line) {
-  std::vector<double> row;
+  auto row = std::vector<double>{};
   std::istringstream stream(line);
-  std::string token;
+  auto token = std::string{};
   while (stream >> token) {
     try {
-      std::size_t used = 0;
-      double value = std::stod(token, &used);
+      auto used = std::size_t{0};
+      auto value = std::stod(token, &used);
       if (used != token.size()) throw std::invalid_argument(token);
       row.push_back(value);
     } catch (const std::exception&) {
@@ -53,7 +53,7 @@ std::expected<Deck, DeckError> Deck::Create(
   if (radius.size() < 2) {
     return std::unexpected(DeckError{"a deck needs at least two knot radii"});
   }
-  for (std::size_t i = 1; i < radius.size(); ++i) {
+  for (auto i = std::size_t{1}; i < radius.size(); ++i) {
     if (radius[i] < radius[i - 1]) {
       return std::unexpected(DeckError{std::format(
           "knot radii must be non-decreasing; knot {} (r = {:g}) is below "
@@ -78,9 +78,9 @@ std::expected<Deck, DeckError> Deck::Create(
   }
 
   // The layering: one layer per span between repeated radii.
-  std::size_t start = 0;
+  auto start = std::size_t{0};
   deck.boundaries_.push_back(radius.front());
-  for (std::size_t i = 1; i < radius.size(); ++i) {
+  for (auto i = std::size_t{1}; i < radius.size(); ++i) {
     if (radius[i] == radius[i - 1]) {
       if (i + 1 < radius.size() && radius[i + 1] == radius[i]) {
         return std::unexpected(DeckError{std::format(
@@ -117,7 +117,7 @@ std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
     return std::unexpected(
         DeckError{std::format("cannot open {}", path.string())});
   }
-  std::vector<std::string> lines;
+  auto lines = std::vector<std::string>{};
   for (std::string line; std::getline(file, line);) lines.push_back(line);
 
   if (lines.size() < format.header_lines) {
@@ -128,8 +128,8 @@ std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
   std::vector<std::string> header(lines.begin(),
                                   lines.begin() + format.header_lines);
 
-  std::vector<double> radius;
-  std::vector<std::vector<double>> table;  // one vector per column
+  auto radius = std::vector<double>{};
+  auto table = std::vector<std::vector<double>>{};  // one vector per column
   const std::vector<std::string>* names = nullptr;
   for (std::size_t i = format.header_lines; i < lines.size(); ++i) {
     auto row = ParseRow(lines[i]);
@@ -154,15 +154,16 @@ std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
           path.string(), i + 1, width, names->size())});
     }
     radius.push_back((*row)[0]);
-    for (std::size_t j = 0; j < width; ++j) table[j].push_back((*row)[j + 1]);
+    for (auto j = std::size_t{0}; j < width; ++j)
+      table[j].push_back((*row)[j + 1]);
   }
   if (names == nullptr) {
     return std::unexpected(
         DeckError{std::format("{}: no knots after the header", path.string())});
   }
 
-  std::vector<std::pair<std::string, std::vector<double>>> columns;
-  for (std::size_t j = 0; j < names->size(); ++j) {
+  auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
+  for (auto j = std::size_t{0}; j < names->size(); ++j) {
     columns.emplace_back((*names)[j], std::move(table[j]));
   }
   auto deck = Create(std::move(radius), std::move(columns), std::move(header));
@@ -180,10 +181,10 @@ std::expected<Deck, DeckError> Deck::ReadLegacySl3d(
     return std::unexpected(
         DeckError{std::format("cannot open {}", path.string())});
   }
-  std::string title;
+  auto title = std::string{};
   std::getline(file, title);
-  std::size_t nknot = 0;
-  int ntau = 0;
+  auto nknot = std::size_t{0};
+  auto ntau = 0;
   if (!(file >> nknot >> ntau)) {
     return std::unexpected(DeckError{std::format(
         "{}: the second line must hold `nknot ntau`", path.string())});
@@ -196,7 +197,7 @@ std::expected<Deck, DeckError> Deck::ReadLegacySl3d(
 
   std::vector<double> radius(nknot), rho(nknot), kappa(nknot), mu(nknot),
       viscosity(nknot);
-  for (std::size_t i = 0; i < nknot; ++i) {
+  for (auto i = std::size_t{0}; i < nknot; ++i) {
     if (!(file >> radius[i] >> rho[i] >> kappa[i] >> mu[i] >> viscosity[i])) {
       return std::unexpected(DeckError{std::format(
           "{}: expected {} knot rows `r rho kappa mu viscosity`, failed "
@@ -226,7 +227,7 @@ std::expected<Deck, DeckError> Deck::ReadLegacySl3d(
   // the 0-means-none convention was translated.
   auto values = deck->Column("viscosity");
   for (auto [first, last] : deck->Layers()) {
-    const bool absent = std::isnan(values[first]);
+    const auto absent = std::isnan(values[first]);
     for (std::size_t i = first; i < last; ++i) {
       if (std::isnan(values[i]) != absent) {
         return std::unexpected(DeckError{std::format(

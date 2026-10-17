@@ -27,7 +27,7 @@ Deck LayeredDeck(const std::vector<std::array<double, 5>>& layers,
                  std::size_t n = 5) {
   std::vector<double> radius, rho, kappa, mu;
   for (const auto& [lo, hi, density, bulk, shear] : layers) {
-    for (std::size_t k = 0; k < n; ++k) {
+    for (auto k = std::size_t{0}; k < n; ++k) {
       radius.push_back(std::lerp(lo, hi, static_cast<double>(k) / (n - 1)));
       rho.push_back(density);
       kappa.push_back(bulk);
@@ -41,7 +41,7 @@ Deck LayeredDeck(const std::vector<std::array<double, 5>>& layers,
 }
 
 Material HomogeneousMaterial(int lmax) {
-  constexpr double b = 6.371e6;
+  constexpr auto b = 6.371e6;
   static auto model =
       EarthModel::FromDeck(LayeredDeck({{0.0, 0.5 * b, 5515.0, 400e9, 150e9},
                                         {0.5 * b, b, 5515.0, 400e9, 150e9}}))
@@ -53,7 +53,7 @@ Material HomogeneousMaterial(int lmax) {
 /// Elastic inner core, fluid outer core, solid mantle: the interface terms
 /// and the fluid potential-only treatment all exercised.
 Material CoreMantleMaterial(int lmax) {
-  constexpr double b = 6.371e6;
+  constexpr auto b = 6.371e6;
   static auto model =
       EarthModel::FromDeck(LayeredDeck({{0.0, 1.2e6, 13000.0, 1300e9, 170e9},
                                         {1.2e6, 3.5e6, 11000.0, 1100e9, 0.0},
@@ -88,8 +88,8 @@ TEST(DegreeOperator, DofBookkeeping) {
 
   // Fluid elements carry the potential alone above degree zero.
   DegreeOperator l2(material, 2);
-  int fluidNode = -1;
-  for (int e = 0; e + 1 < mesh.ElementCount(); ++e) {
+  auto fluidNode = -1;
+  for (auto e = 0; e + 1 < mesh.ElementCount(); ++e) {
     if (material.IsFluid(e) && material.IsFluid(e + 1)) {
       fluidNode = mesh.GlobalIndex(e, mesh.NGll() - 1);
       break;
@@ -104,8 +104,8 @@ TEST(DegreeOperator, DofBookkeeping) {
   // Expand: NaN displacement through fluid elements, potential live.
   const auto x = l2.Solve(l2.Load());
   const auto nodal = l2.Expand(x);
-  bool sawNaN = false;
-  for (int e = 0; e < mesh.ElementCount(); ++e) {
+  auto sawNaN = false;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
     if (material.IsFluid(e)) {
       sawNaN = sawNaN || std::isnan(nodal.U[e * mesh.NGll()]);
       EXPECT_FALSE(std::isnan(nodal.phi[e * mesh.NGll()]));
@@ -119,7 +119,7 @@ TEST(DegreeOperator, KelvinFluidTidalNumber) {
   // k = 3 / (2 (l - 1)), whatever the (finite) compressibility.
   auto material = HomogeneousMaterial(8);
   for (int l : {2, 3, 4}) {
-    const double kelvin = 3.0 / (2.0 * (l - 1.0));
+    const auto kelvin = 3.0 / (2.0 * (l - 1.0));
     EXPECT_NEAR(FluidTidalNumber(material, l), kelvin, 1e-8 * kelvin)
         << "l = " << l;
   }
@@ -159,23 +159,23 @@ TEST(ToroidalOperator, HomogeneousSphereClosedForm) {
   auto material = HomogeneousMaterial(8);
   const auto [kappa, mu] = material.Moduli().KappaMu();
   const auto& mesh = material.Mesh();
-  const double a = material.Radius();
+  const auto a = material.Radius();
   for (int l : {2, 4}) {
     ToroidalOperator toroidal(material, l);
-    std::vector<double> b(toroidal.DofCount(), 0.0);
+    auto b = std::vector<double>(toroidal.DofCount(), 0.0);
     b[toroidal.SurfaceDof()] = 1.0;
     const auto x = toroidal.Solve(b);
-    const double k2 = l * (l + 1.0);
-    const double expected = 1.0 / (k2 * mu[0] * (l - 1.0) * a);
+    const auto k2 = l * (l + 1.0);
+    const auto expected = 1.0 / (k2 * mu[0] * (l - 1.0) * a);
     EXPECT_NEAR(x[toroidal.SurfaceDof()], expected, 1e-6 * expected)
         << "l = " << l;
     // ... and the radial shape is r^l through the upper elements.
     const auto nodal = toroidal.Expand(x);
-    const int n = mesh.NGll();
-    const int e = mesh.ElementCount() - 2;
-    for (int i = 0; i < n; ++i) {
-      const double r = mesh.Radius(e, i);
-      const double ratio = nodal[e * n + i] / std::pow(r / a, l);
+    const auto n = mesh.NGll();
+    const auto e = mesh.ElementCount() - 2;
+    for (auto i = 0; i < n; ++i) {
+      const auto r = mesh.Radius(e, i);
+      const auto ratio = nodal[e * n + i] / std::pow(r / a, l);
       EXPECT_NEAR(ratio, x[toroidal.SurfaceDof()],
                   1e-5 * std::abs(x[toroidal.SurfaceDof()]))
           << "l = " << l << ", node " << i;
@@ -189,8 +189,8 @@ TEST(ToroidalOperator, FluidDecouplingAndDegreeGuard) {
   ToroidalOperator toroidal(material, 2);
 
   // No toroidal dofs inside the fluid outer core.
-  int fluidInteriorNode = -1;
-  for (int e = 1; e + 1 < mesh.ElementCount(); ++e) {
+  auto fluidInteriorNode = -1;
+  for (auto e = 1; e + 1 < mesh.ElementCount(); ++e) {
     if (material.IsFluid(e - 1) && material.IsFluid(e) &&
         material.IsFluid(e + 1)) {
       fluidInteriorNode = mesh.GlobalIndex(e, 1);
@@ -201,13 +201,13 @@ TEST(ToroidalOperator, FluidDecouplingAndDegreeGuard) {
   EXPECT_EQ(toroidal.Dof(fluidInteriorNode), -1);
 
   // A surface force leaves the decoupled inner core at rest.
-  std::vector<double> b(toroidal.DofCount(), 0.0);
+  auto b = std::vector<double>(toroidal.DofCount(), 0.0);
   b[toroidal.SurfaceDof()] = 1.0;
   const auto nodal = toroidal.Expand(toroidal.Solve(b));
-  const int n = mesh.NGll();
+  const auto n = mesh.NGll();
   double inner = 0.0, surface = std::abs(nodal.back());
-  for (int e = 0; e < mesh.ElementCount() && !material.IsFluid(e); ++e) {
-    for (int i = 0; i < n; ++i) {
+  for (auto e = 0; e < mesh.ElementCount() && !material.IsFluid(e); ++e) {
+    for (auto i = 0; i < n; ++i) {
       inner = std::max(inner, std::abs(nodal[e * n + i]));
     }
   }
@@ -231,19 +231,19 @@ TEST(ToroidalOperator, DegreeOneRigidRotationsArePinned) {
   EXPECT_EQ(top.PinnedDofs().size(), 2u);
   const auto n = top.DofCount();
   auto maxAbs = [](const std::vector<double>& v) {
-    double m = 0.0;
+    auto m = 0.0;
     for (auto x : v) m = std::max(m, std::abs(x));
     return m;
   };
 
   // The rigid rotations span the null space of the full operator.
-  std::vector<double> y(n);
-  for (int d = 0; d < n; ++d) {
+  auto y = std::vector<double>(n);
+  for (auto d = 0; d < n; ++d) {
     y[d] = std::sin(1.3 * d + 0.4) + 0.3 * std::cos(2.9 * d);
   }
   const auto b = top.Apply(y);
   const auto bScale = maxAbs(b) / maxAbs(y);
-  for (int k = 0; k < top.RegionCount(); ++k) {
+  for (auto k = 0; k < top.RegionCount(); ++k) {
     const auto rigid = top.RigidRotation(k);
     EXPECT_LT(maxAbs(top.Apply(rigid)), 1e-11 * bScale * maxAbs(rigid))
         << "region " << k;
@@ -253,16 +253,16 @@ TEST(ToroidalOperator, DegreeOneRigidRotationsArePinned) {
   for (const auto* op : {&top, &deeper}) {
     const auto x = op->Solve(b);
     const auto residual = op->Apply(x);
-    double worst = 0.0;
-    for (int d = 0; d < n; ++d) {
+    auto worst = 0.0;
+    for (auto d = 0; d < n; ++d) {
       worst = std::max(worst, std::abs(residual[d] - b[d]));
     }
     EXPECT_LT(worst, 1e-9 * maxAbs(b));
     // ... and differ from y only by a rigid rotation of each region.
-    for (int k = 0; k < op->RegionCount(); ++k) {
+    for (auto k = 0; k < op->RegionCount(); ++k) {
       const auto rigid = op->RigidRotation(k);
-      double ratioMin = 1e300, ratioMax = -1e300;
-      for (int d = 0; d < n; ++d) {
+      auto ratioMin = 1e300, ratioMax = -1e300;
+      for (auto d = 0; d < n; ++d) {
         if (rigid[d] <= 0.0) continue;
         const auto ratio = (x[d] - y[d]) / rigid[d];
         ratioMin = std::min(ratioMin, ratio);

@@ -36,7 +36,7 @@
 
 namespace examples {
 
-constexpr double kYear = 3.15576e7;  // s
+constexpr auto kYear = 3.15576e7;  // s
 
 /// The PREM-like deck copied beside the executables, its mesh, material
 /// and a mantle Maxwell rheology (viscous between 3480 and 6151 km).
@@ -56,9 +56,9 @@ struct Earth {
     auto mesh = sl3dpp::RadialMesh::Create(model, {.lmax = lmax}).value();
     auto material = sl3dpp::Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
-    std::map<std::size_t, sl3dpp::RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, sl3dpp::RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
-    for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
         viscosity.emplace(
@@ -88,15 +88,15 @@ inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid) {
         "(SL3DPP_PYSLFP_DIR) so the build extracts it, and run from "
         "build/examples");
   }
-  const int lmax = grid.LMax();
-  int fileLmax = 0;
+  const auto lmax = grid.LMax();
+  auto fileLmax = 0;
   auto iceLm = grid.ZeroCoefficients();
   auto slLm = grid.ZeroCoefficients();
   for (std::string line; std::getline(in, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (line.starts_with("lmax")) {
-      std::string head;
+      auto head = std::string{};
       row >> head >> fileLmax;
       if (fileLmax < lmax) {
         throw std::runtime_error(
@@ -106,8 +106,8 @@ inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid) {
       }
       continue;
     }
-    int l = 0, m = 0;
-    double ia = 0, ib = 0, sa = 0, sb = 0;
+    auto l = 0, m = 0;
+    auto ia = 0.0, ib = 0.0, sa = 0.0, sb = 0.0;
     row >> l >> m >> ia >> ib >> sa >> sb;
     if (l > lmax) break;  // rows ascend in degree
     const auto i = sl3dpp::SurfaceGrid::Index(l, m);
@@ -126,7 +126,7 @@ inline double Cap(double theta, double phi, double colat0, double lon0,
                   double width) {
   const double c = std::cos(theta) * std::cos(colat0) +
                    std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
-  const double d = std::acos(std::clamp(c, -1.0, 1.0));
+  const auto d = std::acos(std::clamp(c, -1.0, 1.0));
   return std::exp(-0.5 * (d / width) * (d / width));
 }
 
@@ -158,8 +158,8 @@ class Writer {
   void Field(const std::string& name, std::span<const double> values,
              double factor = 1.0) {
     out_ << "field " << name << "\n";
-    for (int i = 0; i < nlat_; ++i) {
-      for (int j = 0; j < nlon_; ++j) {
+    for (auto i = 0; i < nlat_; ++i) {
+      for (auto j = 0; j < nlon_; ++j) {
         out_ << factor * values[static_cast<std::size_t>(i) * nlon_ + j]
              << (j + 1 == nlon_ ? "" : " ");
       }
@@ -175,7 +175,7 @@ class Writer {
     for (const auto& c : columns) out_ << c << " ";
     out_ << "\n";
     for (const auto& row : rows) {
-      for (std::size_t j = 0; j < row.size(); ++j) {
+      for (auto j = std::size_t{0}; j < row.size(); ++j) {
         out_ << row[j] << (j + 1 == row.size() ? "" : " ");
       }
       out_ << "\n";
