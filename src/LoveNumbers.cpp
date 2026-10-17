@@ -107,7 +107,9 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
 #pragma omp parallel for schedule(dynamic)
   for (int l = 0; l <= lmax; ++l) {
     DegreeOperator op(material, l,
-                      {.eps = options.eps, .truncation = options.truncation});
+                      {.eps = options.eps,
+                       .truncation = options.truncation,
+                       .relaxation = options.relaxation});
     const int n = op.DofCount();
     const int nrhs = l == 0 ? 5 : 4;
     std::vector<double> rhs(static_cast<std::size_t>(n) * nrhs);

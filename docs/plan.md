@@ -440,6 +440,19 @@ GB of viscous-element state.
   of the discretisation's self-consistency, not of the point set — the
   one discipline being that τ, the step weights, their h-derivatives and
   the kernel accumulators all migrate to the Gauss points together.
+  *(Added 17 Oct 2026.)* One more term must move with them: the implicit
+  step eliminates m⁺ = m̃ + β d(u) into equilibrium, giving
+  K_eff = K_U − Σ_k Dᵀ W (μ_k β_k) D at the memory points. At the GLL
+  nodes that is the relaxed-moduli assembly (the stiffness's own
+  quadrature points), which is how `EffectiveMaterial` builds it; at Gauss
+  points the relaxation term (degree 2N, exact in neither rule) must be
+  assembled at the Gauss points to keep the elimination exact. Done as
+  performance chunk 7a: `MemoryPoints` (GLL or Gauss reference geometry)
+  and a `Relaxation` term that `DegreeOperator`, `ToroidalOperator` and
+  `ComputeLoveNumbers` subtract; with GLL points it reproduces
+  `EffectiveMaterial`'s operators and Love numbers to round-off (the
+  gate), and the Gauss and GLL effective Love numbers differ by 8e-9 at
+  600 km elements, 1e-10 at 300 km, 4e-12 at 150 km.
 
 ## 6. Staging
 
@@ -665,3 +678,6 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   strain by one elastic solve under its recorded loads (performance
   chunk 6). Halves the stored state with one branch; costs one elastic
   solve per node per sweep.
+- **17 Oct 2026** — Save or recompute (David): `record_strain` on both
+  evolutions keeps the strain with the internal variables on request;
+  recompute (internal variables only) stays the default.

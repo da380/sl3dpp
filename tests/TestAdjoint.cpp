@@ -513,6 +513,56 @@ TEST(Adjoint, ContinuousViscosityKernelsConverge) {
   EXPECT_LT(fine, coarse / 1.5);
 }
 
+TEST(Adjoint, SavedAndRegeneratedStrainsAgree) {
+  // Recorded states keep only the internal variables unless
+  // record_strain is set; the sweeps then regenerate each node's strain
+  // by one elastic solve. Either way the viscosity kernels agree, the
+  // regenerated strain differing from the saved one only at the forward
+  // tolerance.
+  auto setup = Scene::Make(1e22);
+  std::mt19937 rng(13);
+  const auto& scales = setup.solver.SolverScales();
+  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  std::vector<double> times;
+  for (int n = 0; n <= 5; ++n) times.push_back(n * kyr);
+  const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  std::vector<std::vector<double>> loads;
+  for (std::size_t n = 0; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 / sigma));
+  }
+  std::map<std::size_t, Measurement> measurements;
+  measurements[5].seaLevelDual = setup.Smooth(rng, 1.0);
+
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  SeaLevelEvolution saving(
+      op, setup.solver, setup.state,
+      {.rtol = 1e-12, .record_stride = 1, .record_strain = true});
+  SeaLevelEvolution lean(op, setup.solver, setup.state,
+                         {.rtol = 1e-12, .record_stride = 1});
+  const auto saved = saving.Run(times, History(times, loads));
+  const auto plain = lean.Run(times, History(times, loads));
+  for (const auto& s : saved) EXPECT_TRUE(s.internalState->HasStrain());
+  for (const auto& s : plain) EXPECT_FALSE(s.internalState->HasStrain());
+  const auto withStrain = ForwardTrajectory::FromSnapshots(saved);
+  const auto withoutStrain = ForwardTrajectory::FromSnapshots(plain);
+
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    AdjointSolver adjoint(saving, {.method = method, .rtol = 1e-12});
+    const auto a = adjoint.IceHistoryKernels(times, measurements, &withStrain)
+                       .itauKernel[0];
+    const auto b =
+        adjoint.IceHistoryKernels(times, measurements, &withoutStrain)
+            .itauKernel[0];
+    double scale = 0.0, worst = 0.0;
+    for (std::size_t i = 0; i < a.size(); ++i) {
+      scale = std::max(scale, std::abs(a[i]));
+      worst = std::max(worst, std::abs(a[i] - b[i]));
+    }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(worst, 1e-8 * scale) << "method " << static_cast<int>(method);
+  }
+}
+
 TEST(Adjoint, CheckpointedKernelsReconstruct) {
   // A strided recording reproduces the full-record viscosity kernels
   // through exact backward reconstruction, the residual at the exp(sum h)

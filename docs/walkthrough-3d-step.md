@@ -470,14 +470,20 @@ expensive.
     threads, below the original, and the 1D forward example from 55.1 to
     24.8 s; results on one thread are unchanged. In 3D a regeneration
     costs about one pass, against ~7 per reverse step.
+    `Options::record_strain` (both evolutions, default false) keeps the
+    strain as well, trading memory back for the regeneration solves;
+    tests show the kernels agree either way.
 19. **Cost (planned): Gauss-point memory nodes** (`plan.md` §5.5). The
     memory lives at the GLL nodes, doubled at shared element boundaries;
     the N = ngll − 1 interior Gauss points match the GLL rule's exactness
     for the memory-force integral with ~20% fewer points (and ~20% fewer
     radial nodes in the transforms). A switchable option, GLL staying the
     default for the pyslfp gates; τ, the step weights, their
-    h-derivatives and the kernel accumulators move together. To
-    implement (David, 17 Oct).
+    h-derivatives and the kernel accumulators move together. In
+    progress (David, 17 Oct): 7a, done, makes the effective operators
+    take an explicit relaxation term at the memory points (needed for an
+    exact elimination at Gauss points; `MemoryPoints.hpp`); 7b moves the
+    1D memory, 7c the 3D.
 20. **Cost (small tidy-up): the 1D internal variables span each
     degree's whole subset**, from its first element to the surface, so
     they are stored (as zeros) in the lithosphere and, at low degrees,

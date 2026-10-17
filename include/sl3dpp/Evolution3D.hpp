@@ -55,6 +55,12 @@ class SeaLevelEvolution3D {
     /// backward reconstruction exists yet: a reverse sweep needs
     /// stride 1.)
     int record_stride = 0;
+    /// Whether a kept state also keeps its strain. By default (false)
+    /// only the internal variables are kept, and an adjoint regenerates
+    /// each node's strain by one elastic solve under its recorded loads;
+    /// true saves those solves at about twice the trajectory memory with
+    /// one branch.
+    bool record_strain = false;
   };
 
   struct Snapshot {
@@ -66,8 +72,9 @@ class SeaLevelEvolution3D {
     int coupledIterations = 0;
     double coupledResidual = 0.0;
     bool converged = true;
-    /// The internal variables (no strain cache: one elastic solve under
-    /// the recorded load and centrifugal coefficients regenerates it).
+    /// The internal variables, without the strain cache unless
+    /// Options::record_strain (one elastic solve under the recorded load
+    /// and centrifugal coefficients regenerates it).
     std::optional<Viscoelastic3D::State> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;

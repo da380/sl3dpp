@@ -107,6 +107,7 @@ add_library(sl3dpp STATIC
   src/GridCoupling.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
+  src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp
   src/SeaLevel.cpp

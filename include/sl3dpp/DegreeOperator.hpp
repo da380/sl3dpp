@@ -40,6 +40,7 @@
 #include <vector>
 
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 
 namespace sl3dpp {
@@ -58,6 +59,10 @@ class DegreeOperator {
     double eps = 1e-8;
     /// The truncation-radius rule (plan §5.3, open question 3).
     TruncationRule truncation = TruncationRule::Graded;
+    /// A relaxation term to subtract (MemoryPoints.hpp): the effective
+    /// operator of a step with internal variables at the given points.
+    /// Read during construction only.
+    const Relaxation* relaxation = nullptr;
   };
 
   /// Assemble and factorise the degree-l system. The material is
@@ -131,7 +136,7 @@ class DegreeOperator {
 
  private:
   void BuildDofMap();
-  void Assemble();
+  void Assemble(const Relaxation* relaxation);
   void Factorise();
 
   [[nodiscard]] double& Band(int i, int j) {

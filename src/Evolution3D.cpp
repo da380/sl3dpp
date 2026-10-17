@@ -146,9 +146,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     snapshot.coupledIterations = iterations;
     snapshot.coupledResidual = residual;
     snapshot.converged = converged;
-    // The internal variables only: an adjoint regenerates the strain by
-    // one elastic solve under the recorded loads.
-    if (keepState) {
+    // The internal variables, and the strain only on request: an adjoint
+    // otherwise regenerates it by one elastic solve under the recorded
+    // loads.
+    if (keepState && options_.record_strain) {
+      snapshot.internalState = vstate_;
+    } else if (keepState) {
       Viscoelastic3D::State kept;
       kept.t = vstate_.t;
       kept.m = vstate_.m;

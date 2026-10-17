@@ -157,9 +157,12 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;
-    // The internal variables only: an adjoint regenerates the strain by
-    // one elastic solve under the recorded loads.
-    if (keepState) {
+    // The internal variables, and the strain only on request: an adjoint
+    // otherwise regenerates it by one elastic solve under the recorded
+    // loads.
+    if (keepState && options_.record_strain) {
+      snapshot.internalState = vstate_;
+    } else if (keepState) {
       ViscoelasticState kept;
       kept.t = vstate_.t;
       kept.m = vstate_.m;

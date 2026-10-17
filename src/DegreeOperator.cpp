@@ -42,7 +42,7 @@ DegreeOperator::DegreeOperator(const Material& material, int l, Options options)
       l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   kd_ = 3 * (mesh.NGll() - 1) + 2;
   BuildDofMap();
-  Assemble();
+  Assemble(options.relaxation);
   Factorise();
 }
 
@@ -129,7 +129,7 @@ std::vector<DegreeOperator::Interface> DegreeOperator::Interfaces() const {
   return out;
 }
 
-void DegreeOperator::Assemble() {
+void DegreeOperator::Assemble(const Relaxation* relaxation) {
   const auto& mesh = material_->Mesh();
   const int n = mesh.NGll();
   const int n3 = 3 * n;
@@ -146,6 +146,7 @@ void DegreeOperator::Assemble() {
   std::vector<double> local(static_cast<std::size_t>(n3) * n3);
   std::vector<double> B(static_cast<std::size_t>(n) * n);
   std::vector<double> X(n3), Y(n3), S(n3);
+  std::vector<double> dM(n3), dR(n3), dS(n3);
 
   auto at = [n3](std::vector<double>& m, int a, int b) -> double& {
     return m[static_cast<std::size_t>(a) * n3 + b];
@@ -239,6 +240,45 @@ void DegreeOperator::Assemble() {
           const double m = mi * mesh.Derivative(i, j);
           at(local, 3 * i, 3 * j + 2) += m;
           at(local, 3 * j + 2, 3 * i) += m;
+        }
+      }
+    }
+
+    // The relaxation term (MemoryPoints.hpp): at each memory point, minus
+    // jac w_p c_p (k^2 (k^2 - 2) dM^2 + 4/3 dR^2 + k^2 dS^2) in the
+    // deviatoric scalars dM = V, dR = r d_r U - U + k^2 V / 2 and
+    // dS = U + r d_r V - V, which with GLL points is exactly the elastic
+    // block with the shear modulus lowered by c.
+    if (relaxation != nullptr && !fluid) {
+      const auto& points = *relaxation->points;
+      for (int p = 0; p < points.count; ++p) {
+        const double c =
+            relaxation
+                ->coefficient[static_cast<std::size_t>(e) * points.count + p];
+        if (c == 0.0) continue;
+        double rp = 0.0;
+        for (int i = 0; i < n; ++i)
+          rp += points.Value(p, i) * mesh.Radius(e, i);
+        std::ranges::fill(dM, 0.0);
+        std::ranges::fill(dR, 0.0);
+        std::ranges::fill(dS, 0.0);
+        for (int i = 0; i < n; ++i) {
+          const double v = points.Value(p, i);
+          const double b = rp * points.Derivative(p, i) / jac;
+          dR[3 * i] = b - v;
+          dR[3 * i + 1] = 0.5 * k2 * v;
+          dS[3 * i] = v;
+          dS[3 * i + 1] = b - v;
+          dM[3 * i + 1] = v;
+        }
+        const double weight = points.weight[p] * jac * c;
+        for (int a = 0; a < n3; ++a) {
+          if (dM[a] == 0.0 && dR[a] == 0.0 && dS[a] == 0.0) continue;
+          for (int b = 0; b < n3; ++b) {
+            at(local, a, b) -=
+                weight * (k2 * (k2 - 2.0) * dM[a] * dM[b] +
+                          (4.0 / 3.0) * dR[a] * dR[b] + k2 * dS[a] * dS[b]);
+          }
         }
       }
     }

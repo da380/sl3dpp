@@ -29,7 +29,7 @@ ToroidalOperator::ToroidalOperator(const Material& material, int l,
   firstElement_ = mesh.StartElement(l, options.truncation, options.eps);
   kd_ = mesh.NGll() - 1;
   BuildDofMap();
-  Assemble();
+  Assemble(options.relaxation);
   Factorise();
 }
 
@@ -75,7 +75,7 @@ void ToroidalOperator::BuildDofMap() {
   }
 }
 
-void ToroidalOperator::Assemble() {
+void ToroidalOperator::Assemble(const Relaxation* relaxation) {
   const auto& mesh = material_->Mesh();
   const auto n = mesh.NGll();
   const auto k2 = l_ * (l_ + 1.0);
@@ -107,6 +107,45 @@ void ToroidalOperator::Assemble() {
         }
         const auto [lo, hi] = std::minmax(gi, gj);
         Band(lo, hi) += value;
+      }
+    }
+  }
+
+  // The relaxation term (MemoryPoints.hpp): at each memory point, minus
+  // jac w_p c_p (k^2 t^2 + k^2 (k^2 - 2) w^2) with t = r d_r W - W and
+  // w = W there, which with GLL points is exactly the assembly above with
+  // L and N lowered by c.
+  if (relaxation != nullptr) {
+    const auto& points = *relaxation->points;
+    for (auto e = firstElement_; e < mesh.ElementCount(); ++e) {
+      if (material_->IsFluid(e)) continue;
+      const auto jac = mesh.Jacobian(e);
+      for (auto p = 0; p < points.count; ++p) {
+        const auto c =
+            relaxation
+                ->coefficient[static_cast<std::size_t>(e) * points.count + p];
+        if (c == 0.0) continue;
+        auto rp = 0.0;
+        for (auto i = 0; i < n; ++i)
+          rp += points.Value(p, i) * mesh.Radius(e, i);
+        const auto weight = points.weight[p] * jac * c;
+        for (auto i = 0; i < n; ++i) {
+          const auto gi = dof_[mesh.GlobalIndex(e, i)];
+          const auto ti =
+              rp * points.Derivative(p, i) / jac - points.Value(p, i);
+          const auto wi = points.Value(p, i);
+          for (auto j = i; j < n; ++j) {
+            const auto gj = dof_[mesh.GlobalIndex(e, j)];
+            const auto tj =
+                rp * points.Derivative(p, j) / jac - points.Value(p, j);
+            const auto wj = points.Value(p, j);
+            const auto value =
+                weight * (k2 * ti * tj + k2 * (k2 - 2.0) * wi * wj);
+            if (value == 0.0) continue;
+            const auto [lo, hi] = std::minmax(gi, gj);
+            Band(lo, hi) -= value;
+          }
+        }
       }
     }
   }

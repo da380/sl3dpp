@@ -184,6 +184,57 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
   }
 }
 
+TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
+  // As the 1D test: a recording that saves the strain and one that keeps
+  // only the internal variables (the sweep regenerating each node's
+  // strain) give the same 3D viscosity kernels, to the forward tolerance.
+  auto scene = Scene::Make(1e22);
+  const auto& scales = scene.solver.SolverScales();
+  const double kyr = 1000.0 * 3.15576e7 / scales.Time();
+  std::vector<double> times;
+  for (int n = 0; n <= 4; ++n) times.push_back(2.0 * n * kyr);
+  auto load = scene.MeltLoad(-0.1);
+  auto iceLoad = [&](double t) {
+    std::vector<double> out(load.size());
+    const double ramp = t / times.back();
+    for (std::size_t i = 0; i < out.size(); ++i) out[i] = ramp * load[i];
+    return out;
+  };
+  std::map<std::size_t, Measurement> measurements;
+  measurements[4].seaLevelDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+
+  Viscoelastic3D op(
+      scene.rheology, kLmax, [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto kernels = [&](bool recordStrain) {
+    SeaLevelEvolution3D evolution(op, scene.solver, scene.state,
+                                  {.rtol = 1e-12,
+                                   .coupled_rtol = 1e-12,
+                                   .record_stride = 1,
+                                   .record_strain = recordStrain});
+    const auto snapshots = evolution.Run(times, iceLoad);
+    for (const auto& s : snapshots) {
+      EXPECT_EQ(s.internalState->strain.has_value(), recordStrain);
+    }
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+    AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    return adjoint.IceHistoryKernels(times, measurements, &trajectory)
+        .itauKernel3D[0];
+  };
+  const auto a = kernels(true);
+  const auto b = kernels(false);
+  ASSERT_EQ(a.size(), b.size());
+  double scale = 0.0, worst = 0.0;
+  for (std::size_t i = 0; i < a.size(); ++i) {
+    scale = std::max(scale, std::abs(a[i]));
+    worst = std::max(worst, std::abs(a[i] - b[i]));
+  }
+  EXPECT_GT(scale, 0.0);
+  EXPECT_LT(worst, 1e-8 * scale);
+}
+
 TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   // The full 3D kernel with lateral structure on: dJ/d delta paired
   // with an analytic direction against central differences of the
