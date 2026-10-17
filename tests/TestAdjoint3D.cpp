@@ -238,6 +238,68 @@ TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
   EXPECT_LT(worst, 1e-8 * scale);
 }
 
+TEST(Adjoint3D, CheckpointedRecordingsRebuildTheGaps) {
+  // A recording that keeps every stride-th state (and the first and last):
+  // the sweep rebuilds the states between by stepping forward from the
+  // kept one below under the recorded loads, so its viscosity kernels
+  // agree with a full recording's to the forward tolerance; the ice
+  // kernels, which never read the forward states, are bitwise the same.
+  auto scene = Scene::Make(1e22);
+  const auto& scales = scene.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 6; ++n) times.push_back(1.5 * n * kyr);
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = [&](double t) {
+    auto out = std::vector<double>(load.size());
+    const auto ramp = t / times.back();
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[6].seaLevelDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  measurements[3].displacementDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
+
+  const auto op = Viscoelastic3D(
+      scene.rheology, kLmax, [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto kernels = [&](int stride) {
+    auto evolution = SeaLevelEvolution3D(
+        op, scene.solver, scene.state,
+        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = stride});
+    const auto snapshots = evolution.Run(times, iceLoad);
+    for (auto n = std::size_t{0}; n < snapshots.size(); ++n) {
+      const auto kept = n % stride == 0 || n + 1 == snapshots.size();
+      EXPECT_EQ(snapshots[n].internalState.has_value(), kept) << "node " << n;
+    }
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+    auto adjoint =
+        AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    return adjoint.IceHistoryKernels(times, measurements, &trajectory);
+  };
+  const auto full = kernels(1);
+  for (const auto stride : {2, 4}) {
+    const auto gapped = kernels(stride);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      ASSERT_EQ(gapped.ice.loadDuals[n], full.ice.loadDuals[n])
+          << "stride " << stride << ", node " << n;
+    }
+    const auto& a = full.itauKernel3D[0];
+    const auto& b = gapped.itauKernel3D[0];
+    ASSERT_EQ(a.size(), b.size());
+    auto scale = 0.0, worst = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
+      scale = std::max(scale, std::abs(a[i]));
+      worst = std::max(worst, std::abs(a[i] - b[i]));
+    }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(worst, 1e-10 * scale) << "stride " << stride;
+  }
+}
+
 TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   // The full 3D kernel with lateral structure on: dJ/d delta paired
   // with an analytic direction against central differences of the

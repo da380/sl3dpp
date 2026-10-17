@@ -232,7 +232,9 @@ int main(int argc, char** argv) {
     const std::vector<double> weight(field.r.size(), 1.0);
     pointwise = Best(repeats, [&] { coupling.Multiply(field, weight); });
 
-    Viscoelastic3D::Solutions solutions;
+    // The first Respond of s0 finds its force formed by StartStep; spent
+    // here, so that the timed ones do the whole pass.
+    auto solutions = step.Respond(s0);
     respond = Best(repeats, [&] { solutions = step.Respond(s0); });
     channels = Best(repeats, [&] {
       auto copy = solutions;

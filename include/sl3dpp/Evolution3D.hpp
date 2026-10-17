@@ -54,9 +54,9 @@ class SeaLevelEvolution3D {
     double anderson_rate = 0.5;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
-    /// coefficients are kept whenever the stride is set. (No 3D
-    /// backward reconstruction exists yet: a reverse sweep needs
-    /// stride 1.)
+    /// coefficients are kept whenever the stride is set. A reverse sweep
+    /// rebuilds the states between by forward steps (ForwardTrajectory3D):
+    /// a stride near sqrt(nodes) holds the fewest states.
     int record_stride = 0;
     /// Whether a kept state also keeps its strain. By default (false)
     /// only the internal variables are kept, and an adjoint regenerates

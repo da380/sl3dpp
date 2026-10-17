@@ -45,8 +45,10 @@
 
 #include <complex>
 #include <functional>
+#include <list>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <utility>
@@ -138,7 +140,17 @@ class Viscoelastic3D {
   struct State {
     double t = 0.0;
     std::vector<GridCoupling::TensorField> m;
+    /// The strain cache: its grid values and, from a step or a priming
+    /// solve, the coefficients they synthesise from (a step starts from
+    /// those rather than analysing the grid values; either alone is
+    /// enough to start from).
     std::optional<GridCoupling::TensorField> strain;
+    std::optional<GridCoupling::SpectralTensor> strainCoefficients;
+    /// Drops the strain cache, as after changing m by hand.
+    void Invalidate() {
+      strain.reset();
+      strainCoefficients.reset();
+    }
   };
   [[nodiscard]] State ZeroState() const;
 
@@ -220,6 +232,10 @@ class Viscoelastic3D {
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 
+ private:
+  struct Flavour;  // reference effective systems per (scheme, dt)
+
+ public:
   /**
    * @brief One opened implicit step, for drivers that close the step's
    * equilibrium themselves (the sea level coupling): the decayed memory
@@ -236,7 +252,9 @@ class Viscoelastic3D {
    * The step keeps its large buffers from pass to pass (Respond's grid
    * tensor, the analysed force, the iterate StrainOf fills), so an open
    * step is used from one thread at a time; its own loops run threaded
-   * under Options::parallel.
+   * under Options::parallel. It holds its effective systems itself, so
+   * the operator's cache may drop them (it keeps the four most recently
+   * used (scheme, dt)) while the step is open.
    */
   class OpenStep {
    public:
@@ -283,16 +301,18 @@ class Viscoelastic3D {
     [[nodiscard]] const LoveNumbers& EffectiveLove() const;
 
     /// Completes the step for the final strain coefficients: the strain d
-    /// on the grid, m+ = m~ + beta(x) d, with d cached. On a step that is
-    /// done with (std::move(step).Finish(strain)) the step's own buffers
-    /// become the new state instead of being copied.
+    /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
+    /// cached. On a step that is done with
+    /// (std::move(step).Finish(std::move(strain))) the step's own buffers
+    /// and the coefficients become the new state instead of being copied.
     [[nodiscard]] State Finish(
         const GridCoupling::SpectralTensor& strain) const&;
-    [[nodiscard]] State Finish(const GridCoupling::SpectralTensor& strain) &&;
+    [[nodiscard]] State Finish(GridCoupling::SpectralTensor strain) &&;
 
    private:
     friend class Viscoelastic3D;
     const Viscoelastic3D* op_ = nullptr;
+    std::shared_ptr<Flavour> flavour_;
     Scheme scheme_{};
     double dt_ = 0.0, t_ = 0.0;
     GridCoupling::SpectralTensor s0_;
@@ -306,6 +326,9 @@ class Viscoelastic3D {
     /// analysed force, and a spent iterate for StrainOf to fill.
     mutable GridCoupling::TensorField grid_;
     mutable GridCoupling::SpectralTensor analysed_, spare_;
+    /// Whether analysed_ holds the start strain's force, formed in
+    /// StartStep from the grid strain it had, for the first Respond.
+    mutable bool startForce_ = false;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
@@ -318,15 +341,27 @@ class Viscoelastic3D {
  private:
   friend class AdjointSolver3D;  // the sweeps transpose these internals
 
-  struct Flavour;  // reference effective systems per (scheme, dt)
-
+  /// The lazily filled caches below (and the reference operator's) are
+  /// filled under this lock, so the const methods may be called from
+  /// several threads at once.
+  [[nodiscard]] std::unique_lock<std::mutex> LockCaches() const {
+    return std::unique_lock(*cacheMutex_);
+  }
   [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;
   [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
-  [[nodiscard]] Flavour& FlavourOf(Scheme scheme, double dt) const;
+  /// The (scheme, dt) flavour, from a cache of the four most recently used
+  /// (a variable-dt run would otherwise keep every dt's factorisations).
+  [[nodiscard]] std::shared_ptr<Flavour> FlavourOf(Scheme scheme,
+                                                   double dt) const;
   [[nodiscard]] const DegreeOperator& FlavourSpheroidal(Flavour& flavour,
                                                         int l) const;
   [[nodiscard]] const ToroidalOperator& FlavourToroidal(Flavour& flavour,
                                                         int l) const;
+  /// The strain coefficients consistent with (m, t) under the given loads:
+  /// one elastic solve (ElasticStrain before its synthesis).
+  [[nodiscard]] GridCoupling::SpectralTensor ElasticStrainCoefficients(
+      const State& state, const LoadCallable3D& load,
+      const LoadCallable3D& tide) const;
   /// The strain coefficients of per-degree solutions, fresh or added to
   /// a spectral tensor.
   [[nodiscard]] GridCoupling::SpectralTensor StrainCoefficients(
@@ -335,11 +370,6 @@ class Viscoelastic3D {
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
   void AddStrainCoefficients(
       GridCoupling::SpectralTensor& spectral, const Solutions& solutions,
-      const std::function<const DegreeOperator&(int)>& spheroidal,
-      const std::function<const ToroidalOperator&(int)>& toroidal) const;
-  /// d(x) of per-degree solutions, through the pipeline.
-  [[nodiscard]] GridCoupling::TensorField StrainField(
-      const Solutions& solutions,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
   /// Solve all degrees of both blocks for a combined weighted tensor.
@@ -367,7 +397,9 @@ class Viscoelastic3D {
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;
   mutable std::map<int, std::unique_ptr<ToroidalOperator>> toroidal_;
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;  // (ndof x 2)
-  mutable std::map<std::pair<int, double>, std::unique_ptr<Flavour>> flavours_;
+  mutable std::list<std::pair<std::pair<int, double>, std::shared_ptr<Flavour>>>
+      flavours_;  // LRU, most recent at front
+  std::unique_ptr<std::mutex> cacheMutex_ = std::make_unique<std::mutex>();
 };
 
 }  // namespace sl3dpp

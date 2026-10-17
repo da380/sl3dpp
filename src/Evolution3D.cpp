@@ -201,7 +201,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
          .rtol = options_.coupled_rtol,
          .anderson_memory = options_.anderson_memory,
          .anderson_rate = options_.anderson_rate});
-    vstate_ = std::move(step).Finish(strain);
+    vstate_ = std::move(step).Finish(std::move(strain));
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);

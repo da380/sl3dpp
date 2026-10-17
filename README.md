@@ -72,3 +72,25 @@ ctest --test-dir build
 
 To develop against local checkouts instead of the pinned fetches, see the
 `FETCHCONTENT_SOURCE_DIR_*` comment at the top of `CMakeLists.txt`.
+
+## Running
+
+The library runs threaded by default (OpenMP): set `OMP_NUM_THREADS=N` for
+the thread count, or 1 for a serial run. One-thread runs are reproducible
+bitwise; threaded ones agree to round-off (each thread plans its own FFTs).
+
+The 3D path allocates large tensors (0.7 GB each at lmax 64, 21 GB at
+256, 98 GB at 512), and the first touch of fresh memory costs a page
+fault per 4 KB page, taken in the one thread that allocates. Where
+transparent huge pages are on request only
+(`/sys/kernel/mm/transparent_hugepage/enabled` reads `[madvise]`), ask
+glibc (2.35 or later) to request them:
+
+```
+GLIBC_TUNABLES=glibc.malloc.hugetlb=1 OMP_NUM_THREADS=8 ./ExampleLateralViscosity
+```
+
+At lmax 64 on 8 threads that makes a fresh tensor 4.5 times cheaper and
+the whole 3D run 11% faster; nothing changes in the results. Where the
+setting reads `[always]` it is already the case.
+

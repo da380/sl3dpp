@@ -190,7 +190,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 `Adjoint3D.hpp/cpp`: `AdjointSolver3D` (continuous only; the discrete
 transpose remains 5e), `ForwardTrajectory3D` (full recording via
 `SeaLevelEvolution3D::Options::record_stride` — no 3D backward
-reconstruction yet, so the viscosity kernels demand stride 1), and
+reconstruction yet, so the viscosity kernels demand stride 1; since 17
+Oct, performance chunk 10, the sweep rebuilds the gaps by forward steps
+from the kept states, so any stride serves), and
 `Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, an
 ANGULAR DENSITY over memory node × coupling grid, radial quadrature
 folded in), its angular integral `itauKernelSpherical` (the 1D bridge),

@@ -109,9 +109,12 @@ schedule).
 
 ### 4.1 StartStep (`:457`)
 
-- **The start strain.** From the state's strain cache if present: its
-  grid values d0 are used directly and analysed once for the starting
-  coefficients s0. Otherwise from `SolveElastic` (`:330`), the memory
+- **The start strain.** From the state's strain cache if present: since
+  chunk 10 a state from a step carries the converged coefficients
+  (`State::strainCoefficients`) beside the grid values d0, and s0 is
+  those, with no analysis; a cache of grid values alone is analysed once
+  for s0, and coefficients alone are synthesised once for d0. Otherwise
+  from `SolveElastic` (`:330`), the memory
   force of Σ_k mu_k m_k through the unrelaxed reference operators plus
   the load channels (`AddUnitChannels`, `:360`, through unit responses
   cached once per degree), whose strain coefficients are s0 and whose
@@ -127,6 +130,11 @@ schedule).
   `weight_` = Σ_k mu_k(r) (beta_k(x) − beta_ref,k(r)), and the fixed
   memory force Σ_k mu_k m̃_k, formed in `grid_` (which then serves as
   `Respond`'s workspace) and analysed into `fixed_`.
+- **The first pass's force** (chunk 10): W(x) d0, from the grid strain
+  already in hand, analysed and added to `fixed_` in `analysed_`. The
+  first `Respond`, given s0 (checked), then skips its synthesis and
+  analysis. With the carried coefficients, a step's transforms are two
+  per pass but the first, plus two at the start and one at `Finish`.
 
 ### 4.2 One pass of the within-step iteration
 
@@ -254,16 +262,17 @@ an `IterationControl`.
 ### 4.4 Finish (`:618`, `:632`)
 
 The final coefficients are synthesised to the grid strain d, then
-m⁺_k = m̃_k + beta_k(x) d, pointwise and threaded. d is cached in the
-new state as its strain, so the next `StartStep` skips the elastic
-solve (and analyses d once for its starting coefficients). The drivers
+m⁺_k = m̃_k + beta_k(x) d, pointwise and threaded. d and the coefficients
+are cached in the new state, so the next `StartStep` skips the elastic
+solve and starts from the coefficients with no analysis. The drivers
 finish a step they are done with (`std::move(step).Finish(s)`): d is
 synthesised into `grid_` and the decayed memory advances in place, and
 both become the new state, with no allocation or copy. Finishing a step
 that is still wanted copies instead.
 
-Transforms per step: two batches per pass, plus three per step (the
-start coefficients, the fixed memory force, and `Finish`'s synthesis).
+Transforms per step: two batches per pass but the first, plus three per
+step (the fixed memory force, the first pass's force, and `Finish`'s
+synthesis).
 
 ### 4.5 What is live during a step (one branch, lmax 64, GLL points)
 
@@ -300,9 +309,11 @@ now the bulk of it.
 
 So strain, ocean load and rotation converge together in one outer fixed
 point, and each outer pass contains a complete inner SLE solve.
-Recording (`record_stride > 0`) stores the whole `Viscoelastic3D::State`
-(K + 1 grid tensors) in each kept snapshot (`:149`). The 3D adjoint
-needs every step kept (`ForwardTrajectory3D`, `Adjoint3D.hpp`).
+Recording (`record_stride > 0`) keeps the internal variables of every
+stride-th node (and the strain only with `record_strain`), and every
+node's loads. The 3D adjoint rebuilds the nodes between by forward steps
+from the kept state below (`ForwardTrajectory3D`, `Adjoint3D.hpp`; §8,
+item 12).
 
 ## 6. What pins it down (the gates)
 
@@ -412,6 +423,13 @@ unchanged (6.36 GB for 6.39). At one thread every result is bitwise
 unchanged (state fingerprint, the three examples); at lmax 32 one thread
 the pass is 0.224 s for 0.243 (the allocations alone).
 
+After chunk 10 (the carried coefficients and the first pass's force;
+17 Oct 2026, 8 threads, lmax 64, Gauss): per pass 0.59 s for 0.70 after
+chunk 9 (the overhead 0.09 s for 0.16; repeat runs differ by ~0.03 s),
+and 0.54 s with `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` (README,
+Running), which also brings `StartStep` to 0.61 s from 0.94. The state
+carrying its coefficients adds 0.13 GB at peak.
+
 Re-run with `OMP_NUM_THREADS=N build/benchmarks/step_timing <deck>
 <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]` after each change
 (Gauss points by default).
@@ -468,13 +486,14 @@ expensive.
 6. **Fixed (17 Oct, chunk 3): the fixed part was recombined every
    pass.** Σ_k mu_k m̃_k is now analysed once per step (`fixed_`), and a
    pass multiplies d by the single weight field W(x).
-7. **Thread safety: the lazy caches.** `Spheroidal`, `Toroidal`,
-   `FlavourOf`, `FlavourSpheroidal`/`FlavourToroidal` and
-   `flavour.units` insert into `mutable` maps from `const` methods.
-   `conventions.md` says const solve/apply methods must be safe in
-   parallel loops; these are not. The threaded degree loops (chunk 4)
-   therefore look every operator up serially first, but calling these
-   methods concurrently from outside is still unsafe.
+7. **Fixed (17 Oct, chunk 10): thread safety of the lazy caches.**
+   `Spheroidal`, `Toroidal`, `FlavourOf`, `FlavourSpheroidal`/
+   `FlavourToroidal`, the unit-response caches and the reference
+   operator's caches are filled under one lock (`LockCaches`), so the
+   const methods may be called from several threads at once (a test
+   steps one operator from two threads). The transforms were safe
+   already: GSHTrans keeps its FFT workspaces per thread, and FFTWpp
+   serialises FFTW's planner. An open step is still one thread's.
 8. **Fixed (17 Oct, chunk 2): duplicated loop.** The residual and
    mixing loop existed three times (`Step`, `SeaLevelEvolution3D::Run`
    and the adjoint's reverse sweep). All three now call
@@ -492,12 +511,24 @@ expensive.
     fields per dt would hold 3K + 1 real fields (e, alpha, beta per
     branch and the summed weight: ~0.6 GB for one branch at lmax 64) per
     distinct dt, so it is left undone.
-11. **Memory: flavours keyed by exact dt.** `flavours_` is keyed by the
-    (scheme, dt) double and never evicted. A variable-dt run factorises
-    and keeps a full set of per-degree operators per distinct dt.
-12. **Memory: trajectories store grid states.** Each kept snapshot holds
-    K + 1 grid tensors (~1.8 GB at lmax 64, one branch), and the 3D
-    adjoint needs every step. A 100-step run at lmax 64 is ~180 GB.
+11. **Fixed (17 Oct, chunk 10): flavours keyed by exact dt.** The
+    flavours were never evicted, so a variable-dt run kept a full set of
+    factorised per-degree operators per distinct dt. They are now cached
+    for the four most recently used (scheme, dt), as in the 1D operator,
+    and an open step holds its own, so eviction never pulls one from
+    under it. A run cycling through more than four dts refactorises.
+12. **Fixed (17 Oct, chunk 10): trajectories stored every step.** The
+    3D adjoint needed every node's state (K grid tensors each, the strain
+    regenerated: 0.7 GB at lmax 64, 21 GB at 256, 98 GB at 512, one
+    branch). It now takes a recording at any stride and rebuilds the
+    states between two kept ones by forward steps under the recorded
+    loads, holding them while it passes through (keeping their strain as
+    coefficients): N / stride + stride states, smallest near
+    sqrt(N), for one more forward step per node not kept. The kernels
+    agree with a full recording's to 1.5e-12 at strides 2 and 4. At 60
+    steps a stride of 8 holds ~15 states: ~320 GB at lmax 256, ~1.5 TB
+    at 512, where states on disk or a memory-budgeted schedule (revolve)
+    would be next; both would reuse the rebuild.
 13. **Cost: force-assembly access pattern.** For each degree, the
     force loop walks node by node through the node-major spectral
     layout, jumping one coefficient block per node, and the strain

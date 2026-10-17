@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <map>
 #include <stdexcept>
 #include <utility>
 
@@ -81,13 +82,11 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       throw std::invalid_argument(
           "the trajectory must give one entry per time node");
     }
-    for (const auto& state : trajectory->states) {
-      if (!state.has_value()) {
-        throw std::invalid_argument(
-            "the 3D viscosity kernels need every node's recorded state "
-            "(a run with record_stride = 1; no 3D backward "
-            "reconstruction exists yet)");
-      }
+    if (!trajectory->states.front().has_value()) {
+      throw std::invalid_argument(
+          "the trajectory must keep the first node's state (a run with "
+          "record_stride set keeps it): the states between kept ones are "
+          "rebuilt forward from the kept one below");
     }
     if (trajectory->loads.size() != times.size() ||
         trajectory->tides.size() != times.size()) {
@@ -195,15 +194,26 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   // REFERENCE systems, mapped to tensor components by the pipeline —
   // jumps the adjoint state pointwise with the laterally varying itau.
   const auto& reference = op.reference_;
+  // The reference operator's lazily filled caches, under the operator's
+  // lock (Viscoelastic3D::LockCaches).
+  auto locked = [&](auto&& get) -> decltype(auto) {
+    const auto lock = op.LockCaches();
+    return get();
+  };
   auto applyJump = [&](const Jump& j) {
     auto spectral = coupling.ZeroSpectral();
     const bool split = !j.zu.empty() || !j.zphi.empty();
     for (int l = 0; l <= lmax; ++l) {
-      const auto& units = reference.UnitResponses(nullptr, l);
+      const auto& units = locked([&]() -> const std::vector<double>& {
+        return reference.UnitResponses(nullptr, l);
+      });
       const auto ndof = units.size() / 2;
       std::vector<Complex> x(ndof * (static_cast<std::size_t>(l) + 1), 0.0);
       const double* splitUnits =
-          split ? reference.SplitUnitResponses(nullptr, l).data() : nullptr;
+          split ? locked([&]() -> const std::vector<double>& {
+                    return reference.SplitUnitResponses(nullptr, l);
+                  }).data()
+                : nullptr;
       for (int m = 0; m <= l; ++m) {
         const auto i = SurfaceGrid::Index(l, m);
         const Complex lamAmp = ev.toMatDensity_ * j.lam[i];
@@ -235,13 +245,13 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
         m.r[i] += itau[i] * dTilde.r[i];
       }
     }
-    vstate.strain.reset();
+    vstate.Invalidate();
   };
 
   // The memory-only adjoint equilibrium of the current state through
   // the unrelaxed reference systems (laterally uniform, no iteration).
   auto momentOf = [&](const Viscoelastic3D::Solutions& solutions) {
-    const auto& deg = reference.Deg(0);
+    const auto& deg = locked([&]() -> const auto& { return reference.Deg(0); });
     const auto& x = solutions.spheroidal.at(0);
     double sum = 0.0;
     for (int d = 0; d < deg.ndof; ++d) {
@@ -304,27 +314,77 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   if (trajectory != nullptr) {
     itauKernel.assign(K, std::vector<double>(nodeCount * gridF, 0.0));
   }
+  // The forward state at a node. A kept one is read as recorded. The
+  // states between two kept ones are rebuilt when the sweep, coming down,
+  // first needs one of them: forward steps from the kept state below under
+  // the recorded loads, with the forward run's own iteration, so they
+  // agree with the run to its tolerance. They are held, their strain as
+  // coefficients only (the top one's grid strain kept), until the sweep
+  // has passed below them: N / stride kept states plus one stride's worth.
+  auto loadsAt = [&](std::size_t node) {
+    return ev.Columns(trajectory->loads[node], ev.toMatDensity_);
+  };
+  auto tidesAt = [&](std::size_t node) {
+    return ev.Columns(trajectory->tides[node], ev.toMatPotential_);
+  };
+  auto rebuilt = std::map<std::size_t, Viscoelastic3D::State>{};
+  auto forwardState = [&](std::size_t node) -> const Viscoelastic3D::State& {
+    if (trajectory->states[node].has_value()) return *trajectory->states[node];
+    rebuilt.erase(rebuilt.upper_bound(node), rebuilt.end());
+    if (const auto found = rebuilt.find(node); found != rebuilt.end()) {
+      return found->second;
+    }
+    rebuilt.clear();
+    auto start = node;
+    while (!trajectory->states[start].has_value()) --start;
+    const auto* previous = &*trajectory->states[start];
+    for (auto j = start + 1; j <= node; ++j) {
+      const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
+      auto step =
+          op.StartStep(*previous, dt, scheme, loadsAt(j - 1), tidesAt(j - 1));
+      const auto load = loadsAt(j);
+      const auto tide = tidesAt(j);
+      auto [strain, info] = step.Converge(
+          [&](const GridCoupling::SpectralTensor& s) {
+            auto solutions = step.Respond(s);
+            step.AddChannels(solutions, load, tide);
+            return step.StrainOf(solutions);
+          },
+          {.max_iterations = ev.options_.max_coupled_iterations,
+           .rtol = ev.options_.coupled_rtol,
+           .anderson_memory = ev.options_.anderson_memory,
+           .anderson_rate = ev.options_.anderson_rate});
+      if (!info.converged) {
+        throw std::runtime_error(std::format(
+            "rebuilding the forward state at node {} did not converge", j));
+      }
+      if (j > start + 1) rebuilt.at(j - 1).strain.reset();
+      previous = &(rebuilt[j] = std::move(step).Finish(std::move(strain)));
+    }
+    return rebuilt.at(node);
+  };
   // The forward strain at a node: the state's cache if it has one, else
-  // one elastic solve under the node's recorded loads (recordings keep
-  // only the internal variables), kept for the node's two accumulations.
+  // from its coefficients, else one elastic solve under the node's
+  // recorded loads (recordings keep only the internal variables); kept
+  // for the node's two accumulations.
   std::size_t strainNode = times.size();
   GridCoupling::TensorField regenerated;
   auto forwardStrain =
       [&](std::size_t node) -> const GridCoupling::TensorField& {
-    const auto& fwd = *trajectory->states[node];
+    const auto& fwd = forwardState(node);
     if (fwd.strain.has_value()) return *fwd.strain;
     if (strainNode != node) {
-      regenerated = op.ElasticStrain(
-          fwd, ev.Columns(trajectory->loads[node], ev.toMatDensity_),
-          ev.Columns(trajectory->tides[node], ev.toMatPotential_));
+      regenerated = fwd.strainCoefficients.has_value()
+                        ? coupling.Synthesise(*fwd.strainCoefficients)
+                        : op.ElasticStrain(fwd, loadsAt(node), tidesAt(node));
       strainNode = node;
     }
     return regenerated;
   };
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (trajectory == nullptr || weight == 0.0) return;
-    const auto& fwd = *trajectory->states[node];
     const auto& dFwd = forwardStrain(node);
+    const auto& fwd = forwardState(node);
     for (std::size_t k = 0; k < K; ++k) {
       const auto& itau = op.itau_[k];
       const auto& mu = op.muBranch_[k];
@@ -418,7 +478,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           n - 1));
     }
     densityLate[n - 1] = response.seaLevelChange;
-    vstate = std::move(step).Finish(strain);
+    vstate = std::move(step).Finish(std::move(strain));
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);

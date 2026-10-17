@@ -9,11 +9,13 @@
 #include <omp.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <complex>
 #include <filesystem>
 #include <limits>
 #include <map>
+#include <thread>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -413,6 +415,73 @@ TEST(Stage4, NonFinitePassEndsTheIteration) {
   EXPECT_EQ(stopped.iterations, 1);
   EXPECT_TRUE(std::isnan(stopped.residual));
   EXPECT_EQ(last.r, s0.r);
+}
+
+TEST(Stage4, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
+  // The operator keeps the effective systems of its four most recently
+  // used (scheme, dt); an open step holds its own, so it finishes as a
+  // fresh step would however many others have been opened since. And the
+  // const methods fill their caches under a lock: two threads stepping
+  // the one operator at different dts give the serial results.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto options = Viscoelastic3D::Options{};
+  options.parallel = false;
+  const auto op = Viscoelastic3D(
+      body.rheology, kLmax,
+      [](double, double theta, double phi) {
+        return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      },
+      options);
+  const auto scheme = Scheme::ExponentialTrapezoid;
+  const auto state = op.Step(op.ZeroState(), tau, scheme, load).state;
+  auto same = [](const Viscoelastic3D::State& a,
+                 const Viscoelastic3D::State& b) {
+    return a.m[0].c[0] == b.m[0].c[0] && a.m[0].c[1] == b.m[0].c[1] &&
+           a.m[0].r == b.m[0].r;
+  };
+
+  auto step = op.StartStep(state, 0.7 * tau, scheme, load);
+  for (const auto factor : {0.3, 0.4, 0.5, 0.6, 0.8}) {
+    auto other = op.Step(state, factor * tau, scheme, load);
+    EXPECT_TRUE(other.info.converged);
+  }
+  auto [strain, info] = step.Converge(
+      [&](const GridCoupling::SpectralTensor& s) {
+        auto solutions = step.Respond(s);
+        step.AddChannels(solutions, load, {});
+        return step.StrainOf(solutions);
+      },
+      {});
+  EXPECT_TRUE(info.converged);
+  const auto late = std::move(step).Finish(std::move(strain));
+  const auto fresh = op.Step(state, 0.7 * tau, scheme, load).state;
+  EXPECT_TRUE(same(late, fresh));
+
+  const auto dts = std::array{0.45 * tau, 0.9 * tau};
+  auto serial = std::vector<Viscoelastic3D::State>{};
+  for (const auto dt : dts)
+    serial.push_back(op.Step(state, dt, scheme, load).state);
+  const auto concurrent = Viscoelastic3D(
+      body.rheology, kLmax,
+      [](double, double theta, double phi) {
+        return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      },
+      options);
+  auto results = std::vector<Viscoelastic3D::State>(dts.size());
+  {
+    auto threads = std::vector<std::thread>{};
+    for (auto i = std::size_t{0}; i < dts.size(); ++i) {
+      threads.emplace_back([&, i] {
+        results[i] = concurrent.Step(state, dts[i], scheme, load).state;
+      });
+    }
+    for (auto& thread : threads) thread.join();
+  }
+  for (auto i = std::size_t{0}; i < dts.size(); ++i) {
+    EXPECT_TRUE(same(results[i], serial[i])) << "dt " << i;
+  }
 }
 
 TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {

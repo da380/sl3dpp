@@ -58,6 +58,8 @@ Notes:
   `parallel` options default on), on every core unless told otherwise:
   set `OMP_NUM_THREADS=N` to choose the thread count, e.g.
   `OMP_NUM_THREADS=8 ./ExampleLateralViscosity`, or 1 for a serial run.
+  For the 3D driver, `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` also asks for
+  huge pages for its large tensors (see the top-level README, Running).
 - **cartopy** provides the map projections and coastlines; its first use
   downloads the coastline data (one-off, needs network). If cartopy is
   not importable the scripts fall back to plain lat/lon maps, so any

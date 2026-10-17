@@ -781,3 +781,24 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   now ends the iteration unconverged. A resolution check (lmax 16/24/32,
   contrasts to 1000x) shows the pass counts independent of lmax and the
   low-degree response at lmax 16 good to 3e-8.
+- **17 Oct 2026** — Checkpointed 3D trajectories and three small items
+  (performance chunk 10). (1) The 3D reverse sweep takes a recording at
+  any stride: the states between two kept ones are rebuilt by forward
+  steps from the lower under the recorded loads (the forward run's own
+  iteration), held, their strain as coefficients, while the sweep passes
+  through: N / stride + stride states. Fixed stride (David), not revolve.
+  Kernels agree with a full recording's to 1.5e-12; ice kernels bitwise.
+  At production sizes (one state 21 GB at lmax 256, 98 GB at 512; ~60
+  steps of 500 yr over 21-26 kyr) lmax 256 fits a large node, lmax 512
+  will want states on disk or a memory-budgeted schedule. The rebuild
+  steps forward, so no backward-integration stability limits the stride.
+  (2) `Viscoelastic3D::State` carries the converged strain coefficients
+  (`strainCoefficients`, `Invalidate()`), so a step starts without
+  analysing its grid strain; and `StartStep` forms the first pass's force
+  from the grid strain in hand, so the first `Respond` transforms
+  nothing: two transforms fewer a step, results changed at round-off.
+  (3) Cache robustness: the flavours are an LRU of four, open steps hold
+  their own, and the lazy caches fill under one lock, so const methods
+  may run concurrently. (4) Huge pages documented (README, Running) and
+  set in `run_fortran_gate.sh`. lmax 64, 8 threads: 0.59 s a pass for
+  0.70, 0.54 s with huge pages.
