@@ -66,6 +66,8 @@ class SeaLevelEvolution3D {
     int coupledIterations = 0;
     double coupledResidual = 0.0;
     bool converged = true;
+    /// The internal variables (no strain cache: one elastic solve under
+    /// the recorded load and centrifugal coefficients regenerates it).
     std::optional<Viscoelastic3D::State> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;

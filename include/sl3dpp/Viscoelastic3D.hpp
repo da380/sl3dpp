@@ -146,9 +146,18 @@ class Viscoelastic3D {
                                        const LoadCallable3D& load = {},
                                        const LoadCallable3D& tide = {}) const;
 
+  /// The strain consistent with (m, t) under the given loads: one
+  /// elastic solve. The unrelaxed operator is laterally uniform, so no
+  /// iteration, and a step's end strain satisfies unrelaxed equilibrium
+  /// with its new memory, so this regenerates the strain of a state
+  /// recorded with its internal variables only.
+  [[nodiscard]] GridCoupling::TensorField ElasticStrain(
+      const State& state, const LoadCallable3D& load = {},
+      const LoadCallable3D& tide = {}) const;
+
   /// Ensures the state carries a strain cache consistent with (m, t)
   /// under the given loads, solving once if not (the 1D operator's
-  /// PrimeStrain; a recording run needs the start node's cache).
+  /// PrimeStrain).
   void PrimeStrain(State& state, const LoadCallable3D& load = {},
                    const LoadCallable3D& tide = {}) const;
 

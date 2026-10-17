@@ -453,15 +453,23 @@ expensive.
     (David, 17 Oct). A viscous inner core with lateral variation could
     drive its own toroidal motion, so the rule would be "no active
     branch", not "inner core".
-18. **Cost (agreed, next): stored states carry the strain.** A recorded
-    `State` holds the grid strain beside the internal variables, so with
-    one branch half of every 3D checkpoint is strain. As in pyslfp and
-    AdGIA, store only the internal variables and regenerate the strain
-    with one elastic solve under the recorded load and centrifugal
-    coefficients: the unrelaxed operator is laterally uniform, so no
-    iteration, and the end-of-step strain satisfies unrelaxed
-    equilibrium with the new memory (David, 17 Oct). Both adjoints read
-    stored strains today (`Adjoint.cpp`, `Adjoint3D.cpp` kernels).
+18. **Fixed (17 Oct, chunk 6): stored states carried the strain.** A
+    recorded state held the strain beside the internal variables, half of
+    every checkpoint with one branch. As in pyslfp and AdGIA, recordings
+    now keep only the internal variables, and the adjoints regenerate a
+    node's strain with one elastic solve under its recorded load and
+    centrifugal coefficients (`Viscoelastic3D::ElasticStrain`; the 1D
+    `TrajectoryCursor` primes each stored state it serves). The unrelaxed
+    operator is laterally uniform, so no iteration, and the end-of-step
+    strain satisfies unrelaxed equilibrium with the new memory (David,
+    17 Oct). On the 1D kernel example (lmax 128): peak memory 32.9 →
+    20.2 GB; viscosity kernels unchanged to 1e-9 (the forward coupled
+    tolerance); time 63.5 → 87.6 s, one serial 1D elastic solve per node
+    per sweep. Threading the 1D operator's degree loops (the same day,
+    `ViscoelasticOperator::Options::parallel`) brought it to 48.3 s on 8
+    threads, below the original, and the 1D forward example from 55.1 to
+    24.8 s; results on one thread are unchanged. In 3D a regeneration
+    costs about one pass, against ~7 per reverse step.
 19. **Cost (planned): Gauss-point memory nodes** (`plan.md` §5.5). The
     memory lives at the GLL nodes, doubled at shared element boundaries;
     the N = ngll − 1 interior Gauss points match the GLL rule's exactness

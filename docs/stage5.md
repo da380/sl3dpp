@@ -100,7 +100,10 @@ code; what follows fixes the sl3dpp mapping only.
   internal state every stride-th node and the per-node load/tide
   coefficients always; a `TrajectoryCursor` serves states strictly
   backwards, reconstructing gaps by `StepBack` under the recorded
-  loads. Roundoff grows as exp(Σh) across a gap — the stride buys
+  loads. *(17 Oct 2026: recordings keep the internal variables only, as
+  in pyslfp and AdGIA; the cursor regenerates each stored state's strain
+  by one elastic solve under that node's recorded loads, and the 3D
+  sweep does the same per node.)* Roundoff grows as exp(Σh) across a gap — the stride buys
   memory at the price of trailing digits (pyslfp `_TrajectoryCursor`).
 
 ## 4. Result type and views

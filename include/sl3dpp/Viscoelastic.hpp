@@ -82,6 +82,10 @@ class ViscoelasticOperator {
   struct Options {
     double eps = 1e-8;
     TruncationRule truncation = TruncationRule::Graded;
+    /// Whether the per-degree loops (the solves, the strains, the memory
+    /// updates) run threaded, on OpenMP's thread count (OMP_NUM_THREADS);
+    /// false forces serial. Results do not depend on it.
+    bool parallel = true;
   };
 
   /// The rheology is copied into immutable shared storage, so the

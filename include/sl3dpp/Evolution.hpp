@@ -54,6 +54,8 @@ class SeaLevelEvolution {
     std::vector<double> displacement;
     std::vector<double> potential;
     std::array<double, 3> angularVelocity{};
+    /// The internal variables (no strain cache: one elastic solve under
+    /// the recorded load and centrifugal coefficients regenerates it).
     std::optional<ViscoelasticState> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;

@@ -660,3 +660,8 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   degree-1 rigid rotation. Effect on the lateral example: 0.25% of the
   lateral-minus-radial sea-level difference; the Fortran gate is
   unchanged (its pattern cannot excite the mode, by symmetry).
+- **17 Oct 2026** — Recorded forward states keep the internal variables
+  only, as in pyslfp and AdGIA (David): the adjoints regenerate a node's
+  strain by one elastic solve under its recorded loads (performance
+  chunk 6). Halves the stored state with one branch; costs one elastic
+  solve per node per sweep.

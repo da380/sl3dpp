@@ -146,7 +146,14 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     snapshot.coupledIterations = iterations;
     snapshot.coupledResidual = residual;
     snapshot.converged = converged;
-    if (keepState) snapshot.internalState = vstate_;
+    // The internal variables only: an adjoint regenerates the strain by
+    // one elastic solve under the recorded loads.
+    if (keepState) {
+      Viscoelastic3D::State kept;
+      kept.t = vstate_.t;
+      kept.m = vstate_.m;
+      snapshot.internalState = std::move(kept);
+    }
     if (stride > 0) {
       snapshot.loadCoefficients = sigma;
       snapshot.tideCoefficients = psi;

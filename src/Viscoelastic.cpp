@@ -6,9 +6,42 @@
 #include <numbers>
 #include <stdexcept>
 
+#include "sl3dpp/detail/ParallelFor.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
+
+namespace {
+
+// A channel's columns at a degree and time, from the caller's callable
+// (called serially: it need not be thread-safe), checked for shape.
+std::optional<std::vector<double>> FetchColumns(const LoadCallable& channel,
+                                                int l, double t, int ncols) {
+  if (!channel) return std::nullopt;
+  auto columns = channel(l, t);
+  if (columns && static_cast<int>(columns->size()) != ncols) {
+    throw std::invalid_argument(
+        std::format("a degree-{} channel must supply {} columns, got {}", l,
+                    ncols, columns->size()));
+  }
+  return columns;
+}
+
+// Adds a channel's columns through its unit response, column by column.
+void AddColumns(std::vector<double>& x, const std::vector<double>& units,
+                int unit, int ndof, const std::vector<double>& columns,
+                int ncols) {
+  for (int c = 0; c < ncols; ++c) {
+    const double amplitude = columns[c];
+    if (amplitude == 0.0) continue;
+    for (int d = 0; d < ndof; ++d) {
+      x[static_cast<std::size_t>(c) * ndof + d] +=
+          units[static_cast<std::size_t>(unit) * ndof + d] * amplitude;
+    }
+  }
+}
+
+}  // namespace
 
 // The per-degree workspace and the flavour struct live in
 // detail/ViscoelasticDegree.hpp, shared with the adjoint sweeps.
@@ -195,24 +228,12 @@ void ViscoelasticOperator::AddChannels(std::vector<double>& x, int l,
   if (!load && !tide) return;
   const auto& deg = Deg(l);
   const auto& units = UnitResponses(flavour, l);
-  auto add = [&](const std::optional<std::vector<double>>& columns, int unit) {
-    if (!columns) return;
-    if (static_cast<int>(columns->size()) != ncols) {
-      throw std::invalid_argument(
-          std::format("a degree-{} channel must supply {} columns, got {}", l,
-                      ncols, columns->size()));
-    }
-    for (int c = 0; c < ncols; ++c) {
-      const double amplitude = (*columns)[c];
-      if (amplitude == 0.0) continue;
-      for (int d = 0; d < deg.ndof; ++d) {
-        x[static_cast<std::size_t>(c) * deg.ndof + d] +=
-            units[static_cast<std::size_t>(unit) * deg.ndof + d] * amplitude;
-      }
-    }
-  };
-  if (load) add(load(l, t), 0);
-  if (tide) add(tide(l, t), 1);
+  if (auto columns = FetchColumns(load, l, t, ncols)) {
+    AddColumns(x, units, 0, deg.ndof, *columns, ncols);
+  }
+  if (auto columns = FetchColumns(tide, l, t, ncols)) {
+    AddColumns(x, units, 1, deg.ndof, *columns, ncols);
+  }
 }
 
 ViscoelasticState ViscoelasticOperator::ZeroState(
@@ -229,25 +250,70 @@ ViscoelasticState ViscoelasticOperator::ZeroState(
 std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     const ViscoelasticState& state, const LoadCallable& load,
     const LoadCallable& tide) const {
-  std::map<int, std::vector<double>> solutions;
+  // Degree tasks: the workspaces, unit responses and channel columns are
+  // resolved here, serially (the caches fill lazily, and the callables
+  // need not be thread-safe); each task writes only its own solution.
+  struct Task {
+    int l = 0;
+    int ncols = 0;
+    const std::vector<double>* m = nullptr;
+    const Degree* deg = nullptr;
+    const std::vector<double>* units = nullptr;
+    std::optional<std::vector<double>> load, tide;
+    std::vector<double> x;
+  };
   const auto K = rheology_->BranchCount();
+  std::vector<Task> tasks;
   for (const auto& [l, m] : state.m) {
-    const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
-    auto x = deg.system.Solve(deg.MemoryForce(m, ncols), ncols);
-    AddChannels(x, l, nullptr, state.t, load, tide, ncols);
-    solutions.emplace(l, std::move(x));
+    Task task;
+    task.l = l;
+    task.m = &m;
+    task.deg = &Deg(l);
+    task.ncols =
+        static_cast<int>(m.size() / (K * 3 * task.deg->ne * task.deg->ngll));
+    if (load || tide) {
+      task.units = &UnitResponses(nullptr, l);
+      task.load = FetchColumns(load, l, state.t, task.ncols);
+      task.tide = FetchColumns(tide, l, state.t, task.ncols);
+    }
+    tasks.push_back(std::move(task));
   }
+  const auto count = static_cast<int>(tasks.size());
+  detail::ParallelFor(count, options_.parallel, [&](int i) {
+    auto& task = tasks[count - 1 - i];  // the largest degrees first
+    const auto& deg = *task.deg;
+    task.x = deg.system.Solve(deg.MemoryForce(*task.m, task.ncols), task.ncols);
+    if (task.load) {
+      AddColumns(task.x, *task.units, 0, deg.ndof, *task.load, task.ncols);
+    }
+    if (task.tide) {
+      AddColumns(task.x, *task.units, 1, deg.ndof, *task.tide, task.ncols);
+    }
+  });
+  std::map<int, std::vector<double>> solutions;
+  for (auto& task : tasks) solutions.emplace(task.l, std::move(task.x));
   return solutions;
 }
 
 std::map<int, std::vector<double>> ViscoelasticOperator::Strain(
     const std::map<int, std::vector<double>>& solutions) const {
-  std::map<int, std::vector<double>> out;
+  // One task per degree, the workspaces resolved first.
+  std::vector<std::pair<int, const std::vector<double>*>> inputs;
+  std::vector<const Degree*> degs;
   for (const auto& [l, x] : solutions) {
-    const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(x.size() / deg.ndof);
-    out.emplace(l, deg.Strain(x, ncols));
+    inputs.emplace_back(l, &x);
+    degs.push_back(&Deg(l));
+  }
+  std::vector<std::vector<double>> strains(inputs.size());
+  const auto count = static_cast<int>(inputs.size());
+  detail::ParallelFor(count, options_.parallel, [&](int i) {
+    const auto j = static_cast<std::size_t>(count - 1 - i);
+    const auto& x = *inputs[j].second;
+    strains[j] = degs[j]->Strain(x, static_cast<int>(x.size() / degs[j]->ndof));
+  });
+  std::map<int, std::vector<double>> out;
+  for (std::size_t j = 0; j < inputs.size(); ++j) {
+    out.emplace(inputs[j].first, std::move(strains[j]));
   }
   return out;
 }
@@ -316,10 +382,24 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
     dStart = op.StartStrain(state, load, tide);
   }
   const auto K = op.GetRheology().BranchCount();
+  // One task per degree, the workspaces resolved first: the decayed
+  // memory, pointwise.
+  std::vector<std::pair<int, const std::vector<double>*>> inputs;
+  std::vector<const ViscoelasticOperator::Degree*> degs;
   for (const auto& [l, m] : state.m) {
     const auto& deg = op.Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
-    ncols_[l] = ncols;
+    ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
+    inputs.emplace_back(l, &m);
+    degs.push_back(&deg);
+  }
+  std::vector<std::vector<double>> decayed(inputs.size());
+  const auto count = static_cast<int>(inputs.size());
+  detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    const auto j = static_cast<std::size_t>(count - 1 - i);
+    const auto l = inputs[j].first;
+    const auto& m = *inputs[j].second;
+    const auto& deg = *degs[j];
+    const int ncols = ncols_.at(l);
     const std::size_t block = deg.NodalSize(ncols);
     std::vector<double> mem(m.size());
     for (std::size_t k = 0; k < K; ++k) {
@@ -345,7 +425,10 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
         }
       }
     }
-    mem_.emplace(l, std::move(mem));
+    decayed[j] = std::move(mem);
+  });
+  for (std::size_t j = 0; j < inputs.size(); ++j) {
+    mem_.emplace(inputs[j].first, std::move(decayed[j]));
   }
 }
 
@@ -353,12 +436,26 @@ const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     const {
   if (memorySolutions_.empty()) {
     auto& flavour = op_->FlavourOf(scheme_, dt_);
+    // One task per degree, the workspaces and effective systems resolved
+    // first: the memory force through the effective system.
+    std::vector<std::pair<int, const std::vector<double>*>> inputs;
+    std::vector<const ViscoelasticOperator::Degree*> degs;
+    std::vector<const DegreeOperator*> systems;
     for (const auto& [l, mem] : mem_) {
-      const auto& deg = op_->Deg(l);
-      const int ncols = ncols_.at(l);
-      memorySolutions_.emplace(l,
-                               op_->EffectiveSystem(flavour, l)
-                                   .Solve(deg.MemoryForce(mem, ncols), ncols));
+      inputs.emplace_back(l, &mem);
+      degs.push_back(&op_->Deg(l));
+      systems.push_back(&op_->EffectiveSystem(flavour, l));
+    }
+    std::vector<std::vector<double>> solved(inputs.size());
+    const auto count = static_cast<int>(inputs.size());
+    detail::ParallelFor(count, op_->options_.parallel, [&](int i) {
+      const auto j = static_cast<std::size_t>(count - 1 - i);
+      const int ncols = ncols_.at(inputs[j].first);
+      solved[j] = systems[j]->Solve(
+          degs[j]->MemoryForce(*inputs[j].second, ncols), ncols);
+    });
+    for (std::size_t j = 0; j < inputs.size(); ++j) {
+      memorySolutions_.emplace(inputs[j].first, std::move(solved[j]));
     }
   }
   return memorySolutions_;
@@ -391,17 +488,43 @@ ViscoelasticStep::Finish(const LoadCallable& load,
   const auto& memory = MemorySolutions();
   const auto K = op.GetRheology().BranchCount();
 
-  ViscoelasticState out;
-  out.t = t_;
-  std::map<int, std::vector<double>> solutions;
+  // Degree tasks: the workspaces, unit responses and channel columns are
+  // resolved here, serially (the caches fill lazily, and the callables
+  // need not be thread-safe); each task writes only its own results.
+  struct Task {
+    int l = 0;
+    int ncols = 0;
+    const std::vector<double>* mem = nullptr;
+    const ViscoelasticOperator::Degree* deg = nullptr;
+    const std::vector<double>* units = nullptr;
+    std::optional<std::vector<double>> load, tide;
+    std::vector<double> x, d1, mNew;
+  };
+  std::vector<Task> tasks;
   for (const auto& [l, mem] : mem_) {
-    const auto& deg = op.Deg(l);
-    const int ncols = ncols_.at(l);
-    auto x = memory.at(l);
-    op.AddChannels(x, l, &flavour, t_, load, tide, ncols);
+    Task task;
+    task.l = l;
+    task.mem = &mem;
+    task.deg = &op.Deg(l);
+    task.ncols = ncols_.at(l);
+    if (load || tide) {
+      task.units = &op.UnitResponses(&flavour, l);
+      task.load = FetchColumns(load, l, t_, task.ncols);
+      task.tide = FetchColumns(tide, l, t_, task.ncols);
+    }
+    tasks.push_back(std::move(task));
+  }
+  const auto count = static_cast<int>(tasks.size());
+  detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    auto& task = tasks[count - 1 - i];  // the largest degrees first
+    const auto& deg = *task.deg;
+    const int ncols = task.ncols;
+    auto x = memory.at(task.l);
+    if (task.load) AddColumns(x, *task.units, 0, deg.ndof, *task.load, ncols);
+    if (task.tide) AddColumns(x, *task.units, 1, deg.ndof, *task.tide, ncols);
     auto d1 = deg.Strain(x, ncols);
     const std::size_t block = deg.NodalSize(ncols);
-    std::vector<double> mNew = mem;
+    std::vector<double> mNew = *task.mem;
     for (std::size_t k = 0; k < K; ++k) {
       const auto& w = weights[k];
       for (int s = 0; s < 3; ++s) {
@@ -422,9 +545,18 @@ ViscoelasticStep::Finish(const LoadCallable& load,
         }
       }
     }
-    out.m.emplace(l, std::move(mNew));
-    out.strain.emplace(l, std::move(d1));
-    solutions.emplace(l, std::move(x));
+    task.x = std::move(x);
+    task.d1 = std::move(d1);
+    task.mNew = std::move(mNew);
+  });
+
+  ViscoelasticState out;
+  out.t = t_;
+  std::map<int, std::vector<double>> solutions;
+  for (auto& task : tasks) {
+    out.m.emplace(task.l, std::move(task.mNew));
+    out.strain.emplace(task.l, std::move(task.d1));
+    solutions.emplace(task.l, std::move(task.x));
   }
   return {std::move(out), std::move(solutions)};
 }

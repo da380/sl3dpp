@@ -80,12 +80,19 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           "the trajectory must give one entry per time node");
     }
     for (const auto& state : trajectory->states) {
-      if (!state.has_value() || !state->strain.has_value()) {
+      if (!state.has_value()) {
         throw std::invalid_argument(
             "the 3D viscosity kernels need every node's recorded state "
             "(a run with record_stride = 1; no 3D backward "
             "reconstruction exists yet)");
       }
+    }
+    if (trajectory->loads.size() != times.size() ||
+        trajectory->tides.size() != times.size()) {
+      throw std::invalid_argument(
+          "the trajectory needs the recorded load and centrifugal "
+          "coefficients (to regenerate each node's strain): build it from "
+          "the recording run's snapshots");
     }
   }
   if (rotation == RotationalFeedback::Full) {
@@ -297,10 +304,27 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   if (trajectory != nullptr) {
     itauKernel.assign(K, std::vector<double>(nodeCount * gridF, 0.0));
   }
+  // The forward strain at a node: the state's cache if it has one, else
+  // one elastic solve under the node's recorded loads (recordings keep
+  // only the internal variables), kept for the node's two accumulations.
+  std::size_t strainNode = times.size();
+  GridCoupling::TensorField regenerated;
+  auto forwardStrain =
+      [&](std::size_t node) -> const GridCoupling::TensorField& {
+    const auto& fwd = *trajectory->states[node];
+    if (fwd.strain.has_value()) return *fwd.strain;
+    if (strainNode != node) {
+      regenerated = op.ElasticStrain(
+          fwd, ev.Columns(trajectory->loads[node], ev.toMatDensity_),
+          ev.Columns(trajectory->tides[node], ev.toMatPotential_));
+      strainNode = node;
+    }
+    return regenerated;
+  };
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (trajectory == nullptr || weight == 0.0) return;
     const auto& fwd = *trajectory->states[node];
-    const auto& dFwd = *fwd.strain;
+    const auto& dFwd = forwardStrain(node);
     for (std::size_t k = 0; k < K; ++k) {
       const auto& itau = op.itau_[k];
       const auto& mu = op.muBranch_[k];
