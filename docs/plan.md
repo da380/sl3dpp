@@ -298,20 +298,43 @@ this works is itself a benchmark-paper result alongside the AdGIA comparison.
     have no toroidal part, so the right-hand side is torque-free.
   - The convention only picks the representative. Rigid rotation carries
     no strain, so the memory evolution, every other degree and sea level
-    do not depend on it. Only the reported degree-1 toroidal displacement
-    does, and outputs of it must state their frame.
-  - The convention must agree with the frame the rotational feedback
-    assumes (the Liouville equation, pyslfp §7). Which one is open
-    question §8.9.
-  - Implementation that keeps the banded Cholesky: pin one dof per solid
-    region (the pinned matrix is SPD, and the pinned solve solves the
-    full consistent system), then add the rigid mode that satisfies the
-    convention's linear functional. The discrete adjoint transposes this
-    projection along with the solve.
-  - Gates: the right-hand side torque-free at round-off; the convention
-    satisfied; strain and every other output identical under two
-    different conventions; the zero-lateral gates unchanged (with no
-    lateral variation the toroidal block is not excited).
+    do not depend on it. Only the degree-1 toroidal displacement itself
+    does.
+  - Which convention does not matter at all, so the convenient one is
+    used (decided 17 Oct 2026, §9): pin one W dof per solid region. The
+    pinned matrix is SPD, so the banded Cholesky stands, and since the
+    right-hand side is consistent the pinned solve solves the full
+    system. No projection is needed.
+  - **What matters is what is measured.** Only quantities invariant under
+    the null space are well defined, and this is a requirement, not a
+    nicety: it is the solvability condition of the adjoint equations
+    (the measurement's dual must annihilate the rigid modes, or the
+    singular adjoint system has no solution), and it is the rule for
+    benchmarks and tests. Relative distances are fine; relative
+    displacements are not. Sea level, radial displacement, the
+    potential and the rotation vector do not see the degree-1 toroidal
+    rigid rotations (no radial part, no mass moved), so the current
+    measurement set (`Measurement`, `Adjoint.hpp`) qualifies. A
+    horizontal displacement at a point does not; a horizontal observable
+    must be built to be invariant, such as a change in distance between
+    sites.
+  - The degree-1 spheroidal translations are different (David, 17 Oct
+    2026). They are fixed by the centre-of-mass frame: the surface
+    degree-1 potential dof is removed, so there is no external degree-1
+    field and the centre of mass of Earth and load stays at the origin.
+    That frame is physical, not arbitrary, so quantities relative to it
+    are well defined. The degree-1 radial displacement the code computes
+    is the displacement relative to the centre of mass (u − u_CM·r̂ is
+    translation-invariant, and u_CM = 0 in this frame), and likewise the
+    potential and sea level may be measured. The binding constraint is
+    on horizontals, which see the arbitrary rotation gauge. (A first,
+    stricter reading the same day, allowing only u + φ/g at degree 1 and
+    enforcing it in the adjoint solvers, was reverted.)
+  - Gates: the right-hand side torque-free at round-off; strain, sea
+    level and every other invariant output identical (to round-off)
+    whichever dof is pinned, while W itself changes only by the rigid
+    mode; the zero-lateral gates unchanged (with no lateral variation
+    the toroidal block is not excited).
 - Internal-variable Maxwell/Prony rheology; exponential trapezoid default,
   BE and ETD1 variants; adaptive stepping optional. Implement ntau > 1
   properly (nearly free with the weight algebra).
@@ -511,15 +534,22 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
    `Rheology`/`StepWeights` interface must not preclude moduli-resolved
    branches. Whatever is settled here is intended to translate back to
    pyslfp/AdGIA.
-9. **The degree-1 toroidal frame** (raised 17 Oct 2026, §4). Which
-   convention fixes the rigid rotations. Candidates: zero net angular
-   momentum of the deformation (a mean-body, Tisserand-type frame: one
-   weighted radial integral of W per order); no net rotation of the
-   surface; the mantle's mean frame. The inner core needs a condition of
-   its own, because quasi-statically the fluid outer core transmits no
-   tangential traction, so its rigid rotation is free separately. Whatever
-   is chosen must match the frame the rotational feedback assumes, and
-   should be shared with AdGIA so the benchmark compares like with like.
+9. ~~**The degree-1 toroidal frame** (raised 17 Oct 2026, §4).~~
+   **Resolved** (17 Oct 2026, David): the choice does not matter at all,
+   so the convenient one is used (one pinned dof per solid region; the
+   inner core needs its own, because quasi-statically the fluid outer
+   core transmits no tangential traction). What matters instead is that
+   every measured, benchmarked or tested quantity is invariant under the
+   rigid rotations (§4).
+10. ~~**Gauge-dependent measurements in the existing tests**~~
+   **Withdrawn** (17 Oct 2026). The tests' displacement and potential
+   measurements have degree-1 content, but at degree 1 they are
+   relative to the centre of mass, a physical frame, so they are well
+   defined (§4). An enforcement briefly added the same day (rejecting
+   degree-1 displacement and potential duals not of the form u + φ/g,
+   with the tests and the stage-5 fixture changed to suit) was reverted.
+   A check belongs with any future horizontal-displacement measurement
+   type, which must be rotation-invariant (§4).
 
 ## 9. Decision log
 
@@ -605,3 +635,19 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   no reference for this mode: it factors the unconstrained, singular
   degree-1 form by banded LU (`aa_tor_1`, `module_mat.f90:58-62`;
   `amat_tor` applies no constraint), so it fixes no frame.
+- **17 Oct 2026** — The degree-1 toroidal frame does not matter (David):
+  the convenient gauge is used, one pinned dof per solid region (§4,
+  §8.9). The real requirement is on measurements: only quantities
+  invariant under the rigid rotations are well defined. It is the
+  existence condition for the adjoint equations, and the rule for
+  benchmarks and tests (relative distances are fine, relative
+  displacements are not).
+- **17 Oct 2026** — The measurement rule at degree 1 (David): the
+  spheroidal translations are fixed by the centre-of-mass frame, a
+  physical frame, so quantities relative to the centre of mass (radial
+  displacement, potential, sea level) are well defined and may be
+  measured. The toroidal rotations are fixed by an arbitrary pin, so a
+  horizontal displacement at a point is gauge: horizontal observables
+  must be rotation-invariant. A first, stricter reading (only u + φ/g
+  at degree 1, enforced in the adjoint solvers) was reverted the same
+  day (§4, §8.10).

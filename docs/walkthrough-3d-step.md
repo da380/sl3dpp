@@ -360,7 +360,8 @@ expensive.
 
 1. **Discrepancy: degree-1 toroidal is omitted.** *Decided 17 Oct 2026:
    it must be included, with its rigid-rotation null space removed by
-   convention (`plan.md` §4, §8.9, §9).* `ToroidalForce` starts
+   any convenient gauge; measurements must be invariant under it
+   (`plan.md` §4, §8.9, §9).* `ToroidalForce` starts
    at l = 2 (`src/GridCoupling.cpp:303`), so the degree-1 toroidal force
    is never assembled or solved. Only rigid rotation (W ∝ r) is strain-free:
    differential degree-1 toroidal motion carries strain through the

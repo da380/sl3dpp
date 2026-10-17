@@ -85,7 +85,11 @@ No gravity, no fluid terms, no DtN. At l = 1 the form is singular
 rigid rotations, one per order in each solid region that fluid separates
 (mantle, inner core), form a null space that is removed by convention.
 The right-hand side is torque-free, so the singular system is consistent.
-The frame is plan open question §8.9. The expectation first recorded here,
+Which frame does not matter, so a convenient gauge is used (one pinned
+dof per solid region; plan §4, §8.9). What matters is that measured,
+benchmarked and tested quantities are invariant under the rigid
+rotations, which is also the condition for the adjoint equations to
+exist. The expectation first recorded here,
 dropping the l = 1 toroidal response into the angular-momentum bookkeeping
 of the rotation feedback, was wrong: differential degree-1 rotation
 carries strain through W − r∂rW, and lateral viscosity drives it. The

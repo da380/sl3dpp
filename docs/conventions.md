@@ -84,9 +84,19 @@ From `pyslfp/docs/theory/pyslfp_theory.tex` (the authoritative statement):
 - Gravity `g = ∂_r Φ > 0`; potential perturbation sign conventions as there.
 - Sea level `ξ = −u − (φ+ψ)/g + c`.
 - Centre-of-mass frame at degree 1 (removes the spheroidal translations).
-- Degree-1 toroidal rigid rotations: removed by a frame convention still
-  to be chosen (`plan.md` §8.9). Any output of degree-1 toroidal
-  displacement must state its frame.
+- Degree-1 toroidal rigid rotations: removed by a convenient gauge (one
+  pinned dof per solid region); which one does not matter (`plan.md` §4,
+  §8.9).
+- Don't measure things that are gauge: measured, benchmarked and tested
+  quantities must be well defined, which is also the existence condition
+  for the adjoint equations (`plan.md` §4). At degree 1 the spheroidal
+  translations are fixed by the centre-of-mass frame, a physical frame,
+  so quantities relative to it are well defined: radial displacement,
+  potential and sea level as the code computes them. The degree-1
+  toroidal rotations are fixed by an arbitrary pin, so a horizontal
+  displacement at a point is gauge: horizontal observables must be
+  rotation-invariant (relative distances are fine, relative
+  displacements are not).
 - Love-number normalisations and the body triple (b, g, G) consistent with
   the radial model, per `pyslfp_theory.tex`.
 - Rotation: first-order quasi-static Liouville per pyslfp §7, ported
