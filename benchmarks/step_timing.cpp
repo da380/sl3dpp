@@ -12,15 +12,16 @@
 //   force       SpheroidalForce + ToroidalForce, every degree
 //   solves      the banded solves, 2(l + 1) real columns per degree
 //   strain      AddStrainOfSolution, every degree
-//   respond     OpenStep::Respond (pointwise + analyse + force + solves)
+//   respond     OpenStep::Respond (synthesise + pointwise + analyse +
+//               force + solves)
 //   channels    OpenStep::AddChannels
-//   strainOf    OpenStep::StrainOf (strain + synthesise)
+//   strainOf    OpenStep::StrainOf (strain)
 //
 // and then whole Viscoelastic3D::Step calls, whose per-pass time less
 // respond + channels + strainOf is the iteration's own overhead (the
-// residual, the copies and the mixing). A fingerprint of the final state
-// (equal before and after a pure refactor) and the peak RSS close the
-// report.
+// residual, the copies and the mixing). The last step's surface sums (to
+// full precision), a fingerprint of the final state (equal before and
+// after a pure refactor) and the peak RSS close the report.
 //
 // Usage:
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix]
@@ -183,7 +184,8 @@ int main(int argc, char** argv) {
 
   // The phases in isolation, on the warmed state's opened step.
   auto step = op.StartStep(state, dt, scheme, load);
-  const auto& d = step.StartStrain();
+  const auto& s0 = step.StartStrain();
+  const auto d = coupling.Synthesise(s0);
 
   // Unrelaxed operators of the same sizes and dof maps as the step's own,
   // for the force/solve/strain phases the operator keeps private.
@@ -262,13 +264,13 @@ int main(int argc, char** argv) {
   });
 
   Viscoelastic3D::Solutions solutions;
-  const double respond = Best(repeats, [&] { solutions = step.Respond(d); });
+  const double respond = Best(repeats, [&] { solutions = step.Respond(s0); });
   const double channels = Best(repeats, [&] {
     auto copy = solutions;
     step.AddChannels(copy, load, {});
   });
   const double strainOf =
-      Best(repeats, [&] { auto field = step.StrainOf(solutions); });
+      Best(repeats, [&] { auto out = step.StrainOf(solutions); });
 
   std::printf("  one pass, phase by phase (best of %d) [s]\n", repeats);
   std::printf("    %-11s %9.4f\n", "analyse", analyse);
@@ -276,24 +278,28 @@ int main(int argc, char** argv) {
   std::printf("    %-11s %9.4f\n", "force", force);
   std::printf("    %-11s %9.4f\n", "solves", solves);
   std::printf("    %-11s %9.4f\n", "strain", strain);
-  std::printf("    %-11s %9.4f  (pointwise + analyse + force + solves)\n",
-              "respond", respond);
+  std::printf(
+      "    %-11s %9.4f  (synthesise + pointwise + analyse + force + "
+      "solves)\n",
+      "respond", respond);
   std::printf("    %-11s %9.4f\n", "channels", channels);
-  std::printf("    %-11s %9.4f  (strain + synthesise)\n", "strainOf", strainOf);
+  std::printf("    %-11s %9.4f  (strain)\n", "strainOf", strainOf);
   std::printf("    %-11s %9.4f  (respond less its parts)\n", "pointwise",
-              respond - analyse - force - solves);
+              respond - synthesise - analyse - force - solves);
   std::fflush(stdout);
 
   // Whole steps: per-pass time and the iteration's own overhead.
   int passes = 0;
   start = std::chrono::steady_clock::now();
   std::printf("\n  %d whole steps:", steps);
+  Viscoelastic3D::Solutions last;
   for (int i = 0; i < steps; ++i) {
     auto result = op.Step(state, dt, scheme, load);
     passes += result.info.iterations;
     std::printf(" %d%s", result.info.iterations,
                 result.info.converged ? "" : "(NOT converged)");
     state = std::move(result.state);
+    last = std::move(result.solutions);
   }
   const double total = Seconds(start);
   const double perPass = passes > 0 ? total / passes : 0.0;
@@ -302,7 +308,17 @@ int main(int argc, char** argv) {
   std::printf("    %-11s %9.4f\n", "per pass", perPass);
   std::printf("    %-11s %9.4f  (per pass less respond, channels, strainOf)\n",
               "overhead", perPass - respond - channels - strainOf);
-  std::printf("\n  state fingerprint %016llx (bitwise check; one thread)\n",
+  // The last step's surface response, to full precision: what a change
+  // that is exact only to the iteration tolerance must leave agreeing.
+  double sumU = 0.0, sumPhi = 0.0;
+  for (const auto& [l, columns] : op.Surface(last, Component::U)) {
+    for (const auto& v : columns) sumU += std::abs(v);
+  }
+  for (const auto& [l, columns] : op.Surface(last, Component::Phi)) {
+    for (const auto& v : columns) sumPhi += std::abs(v);
+  }
+  std::printf("\n  surface sums |U| %.15e  |phi| %.15e\n", sumU, sumPhi);
+  std::printf("  state fingerprint %016llx (bitwise check; one thread)\n",
               static_cast<unsigned long long>(Fingerprint(state)));
   std::printf("  peak RSS %.2f GB\n", PeakRssGb());
   return 0;

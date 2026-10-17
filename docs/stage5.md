@@ -233,6 +233,17 @@ code of Evolution3D::Run and OpenStep) as d' = Exit K⁻¹ [Entry(m̃ +
 - K the reference effective systems (symmetric), S the surface reads,
   closure the (linear) generalised SLE, Δβ = diag(β_k(x) − β_ref_k(r)).
 
+*Note (17 Oct 2026, performance chunk 3; `walkthrough-3d-step.md` §4).*
+The forward code now iterates on the strain's COEFFICIENTS s, not its
+grid values d. A pass is s' = AddStrainOfSolution(K⁻¹[fixed +
+Analyse(W · Synthesise(s)) + channels]), where fixed = Analyse(Σ_k μ_k
+m̃_k) is formed once per step and W = Σ_k μ_k Δβ_k(x) is a single weight
+field. The step map, and so everything in this section, is unchanged.
+Only the code's split has moved: Exit now stops at the coefficients,
+Synthesise opens the next pass, and Entry's constant part is applied
+once per step. A transposed iteration can likewise run on coefficient
+duals.
+
 **The load-bearing duality**: Entry = Exitᵀ under the ENERGY pairing
 ⟨S, T⟩_W0 = Σ_node Wq(node) · r² [12 S₀T₀ + 8 Re(S₋₁T̄₋₁) +
 4 Re(S₋₂T̄₋₂)] on the reduced components against the REAL dof pairing

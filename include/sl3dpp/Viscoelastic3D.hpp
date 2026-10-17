@@ -145,9 +145,9 @@ class Viscoelastic3D {
   };
 
   /// The within-step fixed point's controls: at most max_iterations
-  /// passes, converged when the relative sup-norm change of the strain is
-  /// at most rtol; damping scales the Picard part, and anderson_memory 0
-  /// means plain (damped) Picard.
+  /// passes, converged when the relative sup-norm change of the strain's
+  /// coefficients is at most rtol; damping scales the Picard part, and
+  /// anderson_memory 0 means plain (damped) Picard.
   struct IterationControl {
     int max_iterations = 40;
     double rtol = 1e-11;
@@ -175,41 +175,52 @@ class Viscoelastic3D {
   /**
    * @brief One opened implicit step, for drivers that close the step's
    * equilibrium themselves (the sea level coupling): the decayed memory
-   * m~(x) and the weight fields are fixed on construction, and the
-   * driver alternates Respond / its own load closure, then finishes.
+   * m~(x), the weight fields and the memory force they fix are set on
+   * construction, and the driver alternates Respond / its own load
+   * closure, then finishes.
+   *
+   * The within-step iterate is the strain's COEFFICIENTS (a
+   * SpectralTensor, 5 L^2 reals per node), not its values on the
+   * oversampled grid: the grid strain exists only inside Respond and at
+   * Finish, and the mixing and the convergence test run on the
+   * coefficients, about 4.5 times fewer values.
    */
   class OpenStep {
    public:
     [[nodiscard]] double EndTime() const { return t_; }
-    [[nodiscard]] const GridCoupling::TensorField& StartStrain() const {
-      return d0_;
+    /// The start strain's coefficients: where the iteration starts.
+    [[nodiscard]] const GridCoupling::SpectralTensor& StartStrain() const {
+      return s0_;
     }
 
     /// The solutions of the (memory + lateral(d)) force through the
-    /// reference effective systems, with NO load channels: what enters a
-    /// sea level solver as ready response channels.
-    [[nodiscard]] Solutions Respond(const GridCoupling::TensorField& d) const;
+    /// reference effective systems, with NO load channels, for the strain
+    /// with the given coefficients: what enters a sea level solver as
+    /// ready response channels.
+    [[nodiscard]] Solutions Respond(
+        const GridCoupling::SpectralTensor& strain) const;
 
     /// Adds load/tide channels to zero-channel solutions by linearity
     /// (cached unit responses of the effective systems).
     void AddChannels(Solutions& solutions, const LoadCallable3D& load,
                      const LoadCallable3D& tide) const;
 
-    /// The strain field of solutions, for the next pass.
-    [[nodiscard]] GridCoupling::TensorField StrainOf(
+    /// The strain coefficients of solutions, for the next pass.
+    [[nodiscard]] GridCoupling::SpectralTensor StrainOf(
         const Solutions& solutions) const;
 
-    /// One pass of a driver's within-step iteration: the strain the
-    /// step's solutions take for a given strain (Respond, the driver's own
-    /// load closure, AddChannels, StrainOf).
-    using Pass = std::function<GridCoupling::TensorField(
-        const GridCoupling::TensorField&)>;
+    /// One pass of a driver's within-step iteration: the strain
+    /// coefficients the step's solutions take for given ones (Respond, the
+    /// driver's own load closure, AddChannels, StrainOf).
+    using Pass = std::function<GridCoupling::SpectralTensor(
+        const GridCoupling::SpectralTensor&)>;
 
-    /// The within-step fixed point d = pass(d) from the start strain,
+    /// The within-step fixed point s = pass(s) from the start strain,
     /// Anderson-mixed in place: the converged (or, when the budget runs
-    /// out, the last) strain and the diagnostics. The pass runs once per
-    /// iteration, so whatever it records is from the final pass.
-    [[nodiscard]] std::pair<GridCoupling::TensorField, StepInfo> Converge(
+    /// out, the last) strain coefficients and the diagnostics. The pass
+    /// runs once per iteration, so whatever it records is from the final
+    /// pass.
+    [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Converge(
         const Pass& pass, const IterationControl& control) const;
 
     /// The inertia moment of the degree-0, m = 0 column of solutions.
@@ -218,17 +229,23 @@ class Viscoelastic3D {
     /// The effective Love numbers of this step's reference solid (SI).
     [[nodiscard]] const LoveNumbers& EffectiveLove() const;
 
-    /// Completes the step: m+ = m~ + beta(x) d, with the strain cached.
-    [[nodiscard]] State Finish(GridCoupling::TensorField d) const;
+    /// Completes the step for the final strain coefficients: the strain d
+    /// on the grid, m+ = m~ + beta(x) d, with d cached.
+    [[nodiscard]] State Finish(
+        const GridCoupling::SpectralTensor& strain) const;
 
    private:
     friend class Viscoelastic3D;
     const Viscoelastic3D* op_ = nullptr;
     Scheme scheme_{};
     double dt_ = 0.0, t_ = 0.0;
-    GridCoupling::TensorField d0_;
+    GridCoupling::SpectralTensor s0_;
+    /// The analysed fixed memory force, sum_k mu_k(r) m~_k(x).
+    GridCoupling::SpectralTensor fixed_;
+    /// The lateral weight, sum_k mu_k(r) (beta_k(x) - beta_ref_k(r)).
+    std::vector<double> weight_;
     std::vector<GridCoupling::TensorField> memory_;
-    std::vector<std::vector<double>> beta_, dbeta_;
+    std::vector<std::vector<double>> beta_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
@@ -250,6 +267,11 @@ class Viscoelastic3D {
                                                         int l) const;
   [[nodiscard]] const ToroidalOperator& FlavourToroidal(Flavour& flavour,
                                                         int l) const;
+  /// The strain coefficients of per-degree solutions.
+  [[nodiscard]] GridCoupling::SpectralTensor StrainCoefficients(
+      const Solutions& solutions,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal) const;
   /// d(x) of per-degree solutions, through the pipeline.
   [[nodiscard]] GridCoupling::TensorField StrainField(
       const Solutions& solutions,

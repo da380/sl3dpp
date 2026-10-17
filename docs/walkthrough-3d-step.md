@@ -64,7 +64,7 @@ complex in coefficients.
 
 ## 3. Construction: what is built when
 
-`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp:56-106`):
+`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp:67-117`):
 
 1. Builds the `GridCoupling`, on a shared `SurfaceGrid` if one is passed,
    otherwise a new one with spins to 2 and oversampling 1.5, and the 1D
@@ -77,12 +77,12 @@ complex in coefficients.
 Nothing is factorised here. The degree operators are built lazily on
 first use and cached in `mutable` maps:
 
-- `Spheroidal(l)` / `Toroidal(l)` (`:120`, `:134`): the UNRELAXED
+- `Spheroidal(l)` / `Toroidal(l)` (`:131`, `:145`): the UNRELAXED
   reference systems, used by `SolveElastic`.
-- `FlavourOf(scheme, dt)` (`:148`): a reference EFFECTIVE material,
+- `FlavourOf(scheme, dt)` (`:159`): a reference EFFECTIVE material,
   mu_inf + Σ_k (1 − beta_ref,k(r)) mu_k, keyed by the exact
   (scheme, dt) pair. Its per-degree operators (`FlavourSpheroidal` /
-  `FlavourToroidal`, `:292`, `:307`) and its unit load/tide responses
+  `FlavourToroidal`, `:311`, `:326`) and its unit load/tide responses
   (`flavour.units`) are built on first use too.
 
 The elastic moduli stay 1D. Lateral variation enters ONLY through the
@@ -91,60 +91,73 @@ banded system. The lateral part is moved to the right-hand side.
 
 ## 4. One step, phase by phase
 
-`Step` (`src/Viscoelastic3D.cpp:574`) is `StartStep`, then the
+`Step` (`src/Viscoelastic3D.cpp:595`) is `StartStep`, then the
 iteration (`OpenStep::Converge`), then `Finish`. `OpenStep` exposes the
 same phases so the sea-level loop (§5) can close the step itself.
 
-### 4.1 StartStep (`:331`)
+The within-step iterate is the strain's COEFFICIENTS, s (a
+`SpectralTensor`), not its grid values d. The grid strain exists only
+inside `Respond` (synthesised from s and consumed there) and at `Finish`.
 
-- **The start strain d0.** Taken from the state's strain cache if
-  present; otherwise from `SolveElastic` (`:263`): the memory force of
-  Σ_k mu_k m_k through the unrelaxed reference operators, plus the load
-  channels. No iteration is needed there, because the unrelaxed operator
-  is laterally uniform.
-- **The weight fields, per branch and grid point** (`:374`):
+### 4.1 StartStep (`:350`)
+
+- **The start strain.** From the state's strain cache if present: its
+  grid values d0 are used directly and analysed once for the starting
+  coefficients s0 (`:372`). Otherwise from `SolveElastic` (`:282`), the
+  memory force of Σ_k mu_k m_k through the unrelaxed reference
+  operators plus the load channels, whose strain coefficients are s0
+  (`:374`) and whose synthesis is d0 (`:378`). No iteration is needed
+  there, because the unrelaxed operator is laterally uniform.
+- **The weights, per branch and grid point** (`:404`):
   h(x) = dt · itau(x) gives (e, alpha, beta) from `StepWeights.hpp`.
-  The reference beta_ref uses the radial itau at that node. Stored:
-  `beta_[k]` = beta(x) and `dbeta_[k]` = beta(x) − beta_ref(r), both
-  (node × grid) real fields.
-- **The decayed memory** (`:391`): `memory_[k]` = m̃_k = e(x) m_k +
+  The reference beta_ref uses the radial itau at that node. Stored per
+  branch for `Finish`: `beta_[k]` = beta(x), a (node × grid) real field.
+- **The decayed memory** (`:421`): `memory_[k]` = m̃_k = e(x) m_k +
   alpha(x) d0, pointwise, a full `TensorField` per branch.
+- **Summed over branches, once per step:** the single lateral weight
+  `weight_` = Σ_k mu_k(r) (beta_k(x) − beta_ref,k(r)) (`:425`), and the
+  fixed memory force Σ_k mu_k m̃_k, analysed into `fixed_` (`:431`).
 
 ### 4.2 One pass of the within-step iteration
 
 The equation being solved is (header of `Viscoelastic3D.hpp`)
 
-    K_ref u = F_load + b( Σ_k mu_k ( m̃_k + dbeta_k(x) d(u) ) ),
+    K_ref u = F_load + b( Σ_k mu_k m̃_k  +  W(x) d(u) ),
+    W(x) = Σ_k mu_k (beta_k(x) − beta_ref,k(r)),
 
-and a pass maps a strain field d to the next one.
+and a pass maps strain coefficients s to the next ones.
 
 ```
- d (grid)                                                       d' (grid)
+ s (coefficients)                                         s' (coefficients)
    │                                                               ▲
-   ▼  [pointwise, serial]                         [3 batched SHTs] │
- combined = Σ_k mu_k (m̃_k + dbeta_k · d)          Synthesise        │
+   ▼  [3 batched SHTs]                                             │
+ Synthesise → d (grid)                                             │
+   │                                                               │
+   ▼  [pointwise, serial]                                          │
+ W · d                                                             │
    │                                                               │
    ▼  [3 batched SHTs]                                             │
- Analyse ──► SpectralTensor                     SpectralTensor ◄───┤
-   │                                                  ▲            │
-   ▼  per degree l, per node, per m  [serial]         │ [serial]   │
- Gather 5 comps → force rows → quadrature into b      │            │
-   │                                                  │            │
-   ▼  per degree  [serial]                            │            │
+ Analyse, + fixed_ ──► SpectralTensor                              │
+   │                                                               │
+   ▼  per degree l, per node, per m  [serial]                      │
+ Gather 5 comps → force rows → quadrature into b                   │
+   │                                                    [serial]   │
+   ▼  per degree  [serial]                                         │
  banded solve, 2(l+1) real RHS ──► x ── + load/tide ──► strain of x
                                      channels          (gather U,V,W,
                                                         r∂r; Scatter)
 ```
 
-**Respond** (`:401`):
+**Respond** (`:435`):
 
-1. *Pointwise combine* (`:416`). `combined = Σ_k mu_k (m̃_k + dbeta_k d)`
-   over every node and grid point, into a freshly allocated
-   `TensorField`.
-2. *Analyse* (`:426` → `src/GridCoupling.cpp:80`). Three batched
-   forward transforms (spins −2, −1, 0), each with ALL memory nodes as
-   one contiguous batch.
-3. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp:242`;
+1. *Synthesise* (`:442` → `src/GridCoupling.cpp:69`). Three batched
+   inverse transforms (spins −2, −1, 0), each with ALL memory nodes as
+   one contiguous batch, into a freshly allocated grid `TensorField`.
+2. *Pointwise weight* (`:443`). `GridCoupling::Multiply` by `weight_`,
+   in place.
+3. *Analyse* (`:444` → `src/GridCoupling.cpp:80`). Three batched forward
+   transforms, then `fixed_` is added.
+4. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp:242`;
    `ToroidalForce`, `:285`). For each degree, each node in the degree's
    depth subset, and each m ≥ 0: `Gather` reads the five components,
    reconstructing spins +1 and +2 by reality (`:173`).
@@ -152,56 +165,62 @@ and a pass maps a strain field d to the next one.
    degree's right-hand side at the node's own dofs (the pointwise rows,
    weight jac·w_q·r) and at every node of its element (the derivative
    rows, through D(q, j)).
-4. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:178`). Per degree, the
+5. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:197`). Per degree, the
    complex columns are split into real pairs and solved as 2(l+1) real
    right-hand sides through the FLAVOUR operator: `dpbtrs` (banded
-   Cholesky) or `dgbtrs` (the LU fallback), at `:201` and `:249`.
+   Cholesky) or `dgbtrs` (the LU fallback), at `:220` and `:268`.
    Toroidal runs from l = 2 (see §8, item 1).
 
-**AddChannels** (`:437`). The load and tide enter by linearity:
+**AddChannels** (`:462`). The load and tide enter by linearity:
 amplitude × the cached unit response of the flavour operator (solved
-once per degree per flavour, `:456`).
+once per degree per flavour, `:481`).
 
-**StrainOf → StrainField** (`:478` → `:161`). Per degree,
+**StrainOf → StrainCoefficients** (`:503` → `:172`). Per degree,
 `AddStrainOfSolution` (`src/GridCoupling.cpp:198`) gathers U, V, W at
 each node through the operators' dof maps and forms r∂r through the
 element's derivative matrix. `DeviatoricComponents` gives the five
 components, and `Scatter` writes them into the (l, m) and (l, −m)
-slots. Then `Synthesise` runs three batched inverse transforms back to
-a fresh grid `TensorField`.
+slots of a fresh `SpectralTensor`: the next iterate, with no transform.
 
 **Degree truncation.** Each degree acts only on its element subset
 (`firstElementOf_`, `src/GridCoupling.cpp:45`; `FirstNodeFor`). Deep
 nodes therefore carry zero spectral content at high degrees. The
 transforms still run every node at full lmax.
 
-### 4.3 Convergence and mixing (`OpenStep::Converge`, `:524-572`)
+### 4.3 Convergence and mixing (`OpenStep::Converge`, `:550-593`)
 
 One loop serves all three drivers: `Step` here, the sea-level loop (§5)
 and the adjoint's reverse sweep (`src/Adjoint3D.cpp`). Each supplies its
 own pass (`Respond`, its own load closure, `AddChannels`, `StrainOf`) and
 an `IterationControl`.
 
-- Residual: max |d' − d| / max |d'| over every stored grid value at
-  every node (a relative sup-norm, `:548`), compared on squared
-  magnitudes.
+- Residual: max |s' − s| / max |s'| over every stored coefficient at
+  every node (a relative sup-norm on the coefficients, `:572`), compared
+  on squared magnitudes. Until 17 October (chunk 3) it was the same norm
+  on the grid values; the two agree in what they accept to within the
+  tolerance, and the results to round-off (§7).
 - Defaults (`Viscoelastic3D.hpp`, `Options`): rtol 1e-11, at most 40
   passes, damping 1, Anderson memory 5. The sea-level loop and the
   adjoint pass their own options, without damping.
-- Mixing: `detail::AndersonMixer::UpdateInPlace` (`:566`) works directly
-  on d's three component arrays and overwrites d with the mixed iterate,
-  with no copies and two sweeps over the data. The mixer keeps ring
-  buffers of 5 iterate differences and 5 residual differences, plus the
-  previous iterate and residual: 12 grid-tensor-sized vectors, allocated
-  afresh for each step.
+- Mixing: `detail::AndersonMixer::UpdateInPlace` (`:587`) works directly
+  on s's three coefficient blocks and overwrites s with the mixed
+  iterate, with no copies and two sweeps over the data. The mixer keeps
+  ring buffers of 5 iterate differences and 5 residual differences,
+  plus the previous iterate and residual: 12 spectral-tensor-sized
+  vectors, allocated afresh for each step.
 - Not converging is not an error here. `StepInfo.converged = false` is
   returned and the step finishes with the last iterate. The adjoint
   sweep throws instead.
 
-### 4.4 Finish (`:504`)
+### 4.4 Finish (`:529`)
 
-m⁺_k = m̃_k + beta_k(x) d, pointwise. The final d is cached in the new
-state as its strain, so the next `StartStep` skips the elastic solve.
+The final coefficients are synthesised to the grid strain d (`:531`),
+then m⁺_k = m̃_k + beta_k(x) d, pointwise. d is cached in the new state
+as its strain, so the next `StartStep` skips the elastic solve (and
+analyses d once for its starting coefficients).
+
+Transforms per step: two batches per pass, plus three per step (the
+start coefficients, the fixed memory force, and `Finish`'s synthesis).
 
 ### 4.5 What is live during a step (one branch, lmax 64)
 
@@ -209,15 +228,17 @@ state as its strain, so the next `StartStep` skips the elastic solve.
 |---|---|---|
 | `itau_` | K | 0.18 GB each |
 | State m, strain cache | K + 1 tensors | 0.9 GB each |
-| `d0_`, `memory_` | 1 + K tensors | 0.9 GB each |
-| `beta_`, `dbeta_` | 2K real fields | 0.18 GB each |
-| d, d', Respond's `combined` | 3 tensors | 0.9 GB each |
-| Anderson buffers | 12 tensor-sized | 0.9 GB each |
+| `memory_` | K tensors | 0.9 GB each |
+| `beta_`, `weight_` | K + 1 real fields | 0.18 GB each |
+| `Respond`'s grid strain d | 1 tensor | 0.9 GB |
+| s, s', `fixed_`, s0, `Respond`'s analysed tensor | 5 spectral | 0.2 GB each |
+| Anderson buffers | 12 spectral-sized | 0.2 GB each |
 
-That is about 18 GB, against a measured peak RSS of 19.6 GB
-(`step_timing`, lmax 64, one branch; 22.9 GB before the flatten copies
-and the mixer's temporaries went). The mixer's buffers are about
-two-thirds of it.
+That is about 8 GB during the iteration; `Finish` briefly adds the next
+state's two grid tensors. The measured peak RSS is 10.9 GB
+(`step_timing`, lmax 64, one branch; 22.9 GB at the baseline, 19.6 GB
+after chunk 2). The grid tensors of the state and the decayed memory are
+now the bulk of it.
 
 ## 5. The coupled loop with sea level (`SeaLevelEvolution3D::Run`)
 
@@ -226,11 +247,11 @@ two-thirds of it.
 1. `StartStep` under the previous step's total load σ and centrifugal
    potential ψ as channels.
 2. Outer passes, through `OpenStep::Converge` (`:167-191`). The pass:
-   `Respond(d)` gives the zero-channel solutions. Their surface U and Φ
+   `Respond(s)` gives the zero-channel solutions. Their surface U and Φ
    per degree and the inertia moment feed a full SLE solve,
    `SolveGeneralised` (`:180`), under the step's effective Love numbers,
    and that solve runs its OWN inner Anderson iteration. The new σ and ψ
-   go back in through `AddChannels` (`:185`), and `StrainOf` gives d'.
+   go back in through `AddChannels` (`:185`), and `StrainOf` gives s'.
    Residual and mixing are §4.3's.
 3. `Finish` (`:192`).
 
@@ -298,9 +319,21 @@ Peak RSS 22.9 GB in both. Eight threads speed up only the transforms
 After chunk 2 (one shared loop, the mixer in place): the overhead is
 1.14 s (1 thread) and 1.12 s (8 threads), the whole pass 3.30 s and
 2.52 s (1.41× and 1.48× faster), and the peak RSS 19.6 GB. The final
-state is bitwise unchanged. Re-run with
-`OMP_NUM_THREADS=N build/benchmarks/step_timing <deck> <lmax>` after
-each change.
+state is bitwise unchanged.
+
+After chunk 3 (the iterate in coefficients, the fixed force once per
+step): the whole pass is 2.60 s (1 thread) and 1.66 s (8 threads), 1.8×
+and 2.2× faster than the baseline, and the peak RSS 10.9 GB. Per pass
+at 8 threads: transforms 0.63 s, the serial degree loop (force + solves
++ strain) 0.44 s, pointwise 0.10 s, the rest 0.50 s (of which about
+0.15 s is the three per-step transforms, spread over 7 passes). Results
+agree with chunk 2 to round-off (surface sums to 2e-16 at lmax 16 and
+32; the Fortran gate table unchanged), the zero-lateral run is
+unchanged, and the coupled sea-level loop converges in one pass fewer
+per step on the lateral example.
+
+Re-run with `OMP_NUM_THREADS=N build/benchmarks/step_timing <deck>
+<lmax>` after each change.
 
 ## 8. Things to check against your intent
 
@@ -331,20 +364,18 @@ expensive.
    transforms run sequentially. Only `benchmarks/fortran_gate` sets it;
    no example or test does.
    Every other loop in the step is serial regardless.
-4. **Cost: the iterate is the full grid tensor.** Mixing and the
-   residual run on (node × oversampled grid) values. Since d' is always
-   `Synthesise` of a spectral tensor and mixing is linear, the same
-   fixed point can be iterated on the spectral strain (~4.5× smaller),
-   with the grid strain formed only inside a pass and at `Finish`.
-5. **Cost: allocation every pass.** `Respond` (`combined`),
-   `Synthesise` (output) and `Analyse` (`ZeroSpectral`) are fresh
-   allocations of tensor size per pass, and the mixer's buffers are
-   allocated afresh per step. (The flatten/unflatten copies and the
-   mixer's per-pass temporaries went in chunk 2.)
-6. **Cost: the fixed part is recombined every pass.** `Respond` re-forms
-   and re-analyses Σ_k mu_k m̃_k each pass, though it is constant within
-   the step. By linearity it could be analysed once, leaving one weight
-   field Σ_k mu_k dbeta_k(x) times d per pass.
+4. **Fixed (17 Oct, chunk 3): the iterate was the full grid tensor.**
+   Mixing and the residual now run on the strain's coefficients (~4.5×
+   fewer values), with the grid strain formed only inside `Respond` and
+   at `Finish`.
+5. **Cost: allocation every pass.** `Respond`'s grid strain and
+   analysed tensor and `StrainOf`'s coefficients are fresh allocations
+   per pass, and the mixer's buffers are allocated afresh per step. (The
+   flatten/unflatten copies and the mixer's per-pass temporaries went in
+   chunk 2.)
+6. **Fixed (17 Oct, chunk 3): the fixed part was recombined every
+   pass.** Σ_k mu_k m̃_k is now analysed once per step (`fixed_`), and a
+   pass multiplies d by the single weight field W(x).
 7. **Thread safety: the lazy caches.** `Spheroidal`, `Toroidal`,
    `FlavourOf`, `FlavourSpheroidal`/`FlavourToroidal` and
    `flavour.units` insert into `mutable` maps from `const` methods.

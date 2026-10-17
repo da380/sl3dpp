@@ -164,9 +164,9 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     loadGrid = iceLoad(times[node]);
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto [d, info] = step.Converge(
-        [&](const GridCoupling::TensorField& strain) {
-          auto responses = step.Respond(strain);
+    auto [strain, info] = step.Converge(
+        [&](const GridCoupling::SpectralTensor& s) {
+          auto responses = step.Respond(s);
           SeaLevelSolver::GeneralisedForcing coupled;
           coupled.directLoad = loadGrid;
           coupled.displacementResponse =
@@ -189,7 +189,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
         {.max_iterations = options_.max_coupled_iterations,
          .rtol = options_.coupled_rtol,
          .anderson_memory = options_.anderson_memory});
-    vstate_ = step.Finish(std::move(d));
+    vstate_ = step.Finish(strain);
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);

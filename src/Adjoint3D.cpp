@@ -14,7 +14,6 @@ namespace sl3dpp {
 namespace {
 
 using Complex = std::complex<double>;
-using TensorField = GridCoupling::TensorField;
 
 }  // namespace
 
@@ -358,9 +357,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
 
     SeaLevelSolver::Response response;
-    auto [d, info] = step.Converge(
-        [&](const TensorField& strain) {
-          auto responses = step.Respond(strain);
+    auto [strain, info] = step.Converge(
+        [&](const GridCoupling::SpectralTensor& s) {
+          auto responses = step.Respond(s);
           SeaLevelSolver::GeneralisedForcing coupled;
           coupled.displacementResponse = ev.Coefficients(
               op.Surface(responses, Component::U), ev.toNdLength_);
@@ -392,7 +391,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           n - 1));
     }
     densityLate[n - 1] = response.seaLevelChange;
-    vstate = step.Finish(std::move(d));
+    vstate = step.Finish(strain);
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);

@@ -13,24 +13,35 @@ namespace sl3dpp {
 
 namespace {
 
-// A tensor's stored components as real segments, in the order the mixer
-// has always taken them: spin -2 and spin -1 (each complex value as its
-// real-imaginary pair, the array layout std::complex guarantees), then
-// the real spin 0 component.
-std::array<std::span<double>, 3> RealSegments(GridCoupling::TensorField& t) {
+// A spectral tensor's coefficients as real segments for the mixer: the
+// spin -2, spin -1 and spin 0 blocks in turn, each complex value as its
+// real-imaginary pair (the array layout std::complex guarantees).
+std::array<std::span<double>, 3> RealSegments(GridCoupling::SpectralTensor& t) {
   auto pairs = [](std::vector<std::complex<double>>& v) {
     return std::span<double>(reinterpret_cast<double*>(v.data()), 2 * v.size());
   };
-  return {pairs(t.c[0]), pairs(t.c[1]), std::span<double>(t.r)};
+  return {pairs(t.c[0]), pairs(t.c[1]), pairs(t.r)};
 }
 
 std::array<std::span<const double>, 3> RealSegments(
-    const GridCoupling::TensorField& t) {
+    const GridCoupling::SpectralTensor& t) {
   auto pairs = [](const std::vector<std::complex<double>>& v) {
     return std::span<const double>(reinterpret_cast<const double*>(v.data()),
                                    2 * v.size());
   };
-  return {pairs(t.c[0]), pairs(t.c[1]), std::span<const double>(t.r)};
+  return {pairs(t.c[0]), pairs(t.c[1]), pairs(t.r)};
+}
+
+// The three coefficient blocks of a spectral tensor, for loops that treat
+// them alike.
+std::array<std::vector<std::complex<double>>*, 3> Blocks(
+    GridCoupling::SpectralTensor& t) {
+  return {&t.c[0], &t.c[1], &t.r};
+}
+
+std::array<const std::vector<std::complex<double>>*, 3> Blocks(
+    const GridCoupling::SpectralTensor& t) {
+  return {&t.c[0], &t.c[1], &t.r};
 }
 
 }  // namespace
@@ -158,7 +169,7 @@ Viscoelastic3D::Flavour& Viscoelastic3D::FlavourOf(Scheme scheme,
   return *found->second;
 }
 
-GridCoupling::TensorField Viscoelastic3D::StrainField(
+GridCoupling::SpectralTensor Viscoelastic3D::StrainCoefficients(
     const Solutions& solutions,
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal) const {
@@ -172,7 +183,15 @@ GridCoupling::TensorField Viscoelastic3D::StrainField(
             ? std::span<const Complex>{}
             : std::span<const Complex>(torIt->second));
   }
-  return coupling_.Synthesise(spectral);
+  return spectral;
+}
+
+GridCoupling::TensorField Viscoelastic3D::StrainField(
+    const Solutions& solutions,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal) const {
+  return coupling_.Synthesise(
+      StrainCoefficients(solutions, spheroidal, toroidal));
 }
 
 Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
@@ -345,22 +364,32 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   step.scheme_ = scheme;
   step.dt_ = dt;
   step.t_ = state.t + dt;
-  step.d0_ =
-      state.strain.has_value()
-          ? *state.strain
-          : StrainField(
-                SolveElastic(state, load, tide),
-                [&](int l) -> const DegreeOperator& { return Spheroidal(l); },
-                [&](int l) -> const ToroidalOperator& { return Toroidal(l); });
+  // The start strain, on the grid for the decayed memory and as the
+  // coefficients the iteration starts from: from the state's cache, or
+  // from a consistent solve under the start-time channels.
+  GridCoupling::TensorField solved;
+  if (state.strain.has_value()) {
+    step.s0_ = coupling_.Analyse(*state.strain);
+  } else {
+    step.s0_ = StrainCoefficients(
+        SolveElastic(state, load, tide),
+        [&](int l) -> const DegreeOperator& { return Spheroidal(l); },
+        [&](int l) -> const ToroidalOperator& { return Toroidal(l); });
+    solved = coupling_.Synthesise(step.s0_);
+  }
+  const auto& d0 = state.strain.has_value() ? *state.strain : solved;
 
+  // Per branch and grid point the step weights, the decayed memory m~_k
+  // and its beta_k for Finish; summed over branches, the lateral weight
+  // and the fixed memory force sum_k mu_k m~_k, analysed once here.
   const auto& branches = *rheology_;
   const auto& mesh = branches.BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  step.dbeta_.resize(K);
   step.beta_.resize(K);
+  step.weight_.assign(nodes * fieldSize, 0.0);
+  auto fixed = coupling_.ZeroTensor();
   for (std::size_t k = 0; k < K; ++k) {
     step.memory_.push_back(coupling_.ZeroTensor());
-    step.dbeta_[k].assign(nodes * fieldSize, 0.0);
     step.beta_[k].assign(nodes * fieldSize, 0.0);
     const auto& branch = branches.BranchAt(k);
     for (std::size_t node = 0; node < nodes; ++node) {
@@ -370,6 +399,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
       const auto refBeta = scheme == Scheme::BackwardEuler
                                ? 1.0 - BackwardEulerWeight(dt * itauRef)
                                : ExponentialTrapezoidWeights(dt * itauRef).beta;
+      const auto mu = muBranch_[k][node];
       for (std::size_t x = 0; x < fieldSize; ++x) {
         const auto h = dt * itau_[k][node * fieldSize + x];
         double e_w, a_w, b_w;
@@ -384,46 +414,41 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
           a_w = w.alpha;
           b_w = w.beta;
         }
-        step.beta_[k][node * fieldSize + x] = b_w;
-        step.dbeta_[k][node * fieldSize + x] = b_w - refBeta;
         const auto at = node * fieldSize + x;
+        step.beta_[k][at] = b_w;
+        auto& memory = step.memory_[k];
         for (auto c = 0; c < 2; ++c) {
-          step.memory_[k].c[c][at] =
-              e_w * state.m[k].c[c][at] + a_w * step.d0_.c[c][at];
+          memory.c[c][at] = e_w * state.m[k].c[c][at] + a_w * d0.c[c][at];
         }
-        step.memory_[k].r[at] = e_w * state.m[k].r[at] + a_w * step.d0_.r[at];
+        memory.r[at] = e_w * state.m[k].r[at] + a_w * d0.r[at];
+        if (mu == 0.0) continue;
+        step.weight_[at] += mu * (b_w - refBeta);
+        for (auto c = 0; c < 2; ++c) fixed.c[c][at] += mu * memory.c[c][at];
+        fixed.r[at] += mu * memory.r[at];
       }
     }
   }
+  step.fixed_ = coupling_.Analyse(fixed);
   return step;
 }
 
 Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
-    const GridCoupling::TensorField& d) const {
+    const GridCoupling::SpectralTensor& strain) const {
   const auto& op = *op_;
   const auto& coupling = op.coupling_;
-  const auto fieldSize = coupling.Grid().FieldSize();
-  const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
   auto& flavour = op.FlavourOf(scheme_, dt_);
-  auto combined = coupling.ZeroTensor();
-  auto accumulate = [&](auto& out, const auto& mem, const auto& dIn,
-                        std::size_t k) {
-    for (std::size_t node = 0; node < nodes; ++node) {
-      const auto mu = op.muBranch_[k][node];
-      if (mu == 0.0) continue;
-      for (std::size_t x = 0; x < fieldSize; ++x) {
-        const auto at = node * fieldSize + x;
-        out[at] += mu * (mem[at] + dbeta_[k][at] * dIn[at]);
-      }
+  // The lateral force of the strain (synthesised, weighted pointwise,
+  // analysed) plus the step's fixed memory force.
+  auto d = coupling.Synthesise(strain);
+  coupling.Multiply(d, weight_);
+  auto weighted = coupling.Analyse(d);
+  const auto fixed = Blocks(fixed_);
+  const auto out = Blocks(weighted);
+  for (std::size_t b = 0; b < out.size(); ++b) {
+    for (std::size_t i = 0; i < out[b]->size(); ++i) {
+      (*out[b])[i] += (*fixed[b])[i];
     }
-  };
-  for (std::size_t k = 0; k < memory_.size(); ++k) {
-    for (auto c = 0; c < 2; ++c) {
-      accumulate(combined.c[c], memory_[k].c[c], d.c[c], k);
-    }
-    accumulate(combined.r, memory_[k].r, d.r, k);
   }
-  const auto weighted = coupling.Analyse(combined);
   return op.SolveAll(
       weighted, t_, {}, {},
       [&](int l) -> const DegreeOperator& {
@@ -475,11 +500,11 @@ void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,
   }
 }
 
-GridCoupling::TensorField Viscoelastic3D::OpenStep::StrainOf(
+GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
     const Solutions& solutions) const {
   const auto& op = *op_;
   auto& flavour = op.FlavourOf(scheme_, dt_);
-  return op.StrainField(
+  return op.StrainCoefficients(
       solutions,
       [&](int l) -> const DegreeOperator& {
         return op.FlavourSpheroidal(flavour, l);
@@ -502,7 +527,8 @@ const LoveNumbers& Viscoelastic3D::OpenStep::EffectiveLove() const {
 }
 
 Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
-    GridCoupling::TensorField d) const {
+    const GridCoupling::SpectralTensor& strain) const {
+  auto d = op_->coupling_.Synthesise(strain);
   State next;
   next.t = t_;
   for (std::size_t k = 0; k < memory_.size(); ++k) {
@@ -521,54 +547,49 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
   return next;
 }
 
-std::pair<GridCoupling::TensorField, Viscoelastic3D::StepInfo>
+std::pair<GridCoupling::SpectralTensor, Viscoelastic3D::StepInfo>
 Viscoelastic3D::OpenStep::Converge(const Pass& pass,
                                    const IterationControl& control) const {
-  auto d = d0_;
+  auto s = s0_;
   StepInfo info;
   info.converged = false;
   detail::AndersonMixer mixer(control.anderson_memory);
   for (auto iteration = 0; iteration < control.max_iterations; ++iteration) {
-    auto dNext = pass(d);
+    auto sNext = pass(s);
+    const auto next = Blocks(sNext);
+    const auto now = Blocks(std::as_const(s));
 
-    // The relative sup-norm change, compared on squared magnitudes.
+    // The relative sup-norm change of the coefficients, compared on
+    // squared magnitudes.
     double scale = 0.0, diff = 0.0;
-    for (auto c = 0; c < 2; ++c) {
-      for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
-        scale = std::max(scale, std::norm(dNext.c[c][i]));
-        diff = std::max(diff, std::norm(dNext.c[c][i] - d.c[c][i]));
+    for (std::size_t b = 0; b < next.size(); ++b) {
+      for (std::size_t i = 0; i < next[b]->size(); ++i) {
+        scale = std::max(scale, std::norm((*next[b])[i]));
+        diff = std::max(diff, std::norm((*next[b])[i] - (*now[b])[i]));
       }
-    }
-    for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-      const auto change = dNext.r[i] - d.r[i];
-      scale = std::max(scale, dNext.r[i] * dNext.r[i]);
-      diff = std::max(diff, change * change);
     }
     info.iterations = iteration + 1;
     info.residual = scale > 0.0 ? std::sqrt(diff) / std::sqrt(scale) : 0.0;
     if (info.residual <= control.rtol) {
       info.converged = true;
-      d = std::move(dNext);
+      s = std::move(sNext);
       break;
     }
     if (control.damping != 1.0) {
-      for (auto c = 0; c < 2; ++c) {
-        for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
-          dNext.c[c][i] =
-              d.c[c][i] + control.damping * (dNext.c[c][i] - d.c[c][i]);
+      for (std::size_t b = 0; b < next.size(); ++b) {
+        for (std::size_t i = 0; i < next[b]->size(); ++i) {
+          (*next[b])[i] =
+              (*now[b])[i] + control.damping * ((*next[b])[i] - (*now[b])[i]);
         }
-      }
-      for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-        dNext.r[i] = d.r[i] + control.damping * (dNext.r[i] - d.r[i]);
       }
     }
     if (control.anderson_memory > 0) {
-      mixer.UpdateInPlace(RealSegments(d), RealSegments(std::as_const(dNext)));
+      mixer.UpdateInPlace(RealSegments(s), RealSegments(std::as_const(sNext)));
     } else {
-      d = std::move(dNext);
+      s = std::move(sNext);
     }
   }
-  return {std::move(d), info};
+  return {std::move(s), info};
 }
 
 Viscoelastic3D::StepResult Viscoelastic3D::Step(
@@ -576,9 +597,9 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
     const LoadCallable3D& tide) const {
   auto step = StartStep(state, dt, scheme, load, tide);
   Solutions solutions;
-  auto [d, info] = step.Converge(
-      [&](const GridCoupling::TensorField& strain) {
-        solutions = step.Respond(strain);
+  auto [strain, info] = step.Converge(
+      [&](const GridCoupling::SpectralTensor& s) {
+        solutions = step.Respond(s);
         step.AddChannels(solutions, load, tide);
         return step.StrainOf(solutions);
       },
@@ -586,7 +607,7 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
        .rtol = options_.rtol,
        .damping = options_.damping,
        .anderson_memory = options_.anderson_memory});
-  return {step.Finish(std::move(d)), std::move(solutions), info};
+  return {step.Finish(strain), std::move(solutions), info};
 }
 
 std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
