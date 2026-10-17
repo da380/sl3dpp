@@ -4,9 +4,11 @@
 #include <cmath>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/ParallelFor.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -328,27 +330,31 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       const auto& mu = op.muBranch_[k];
       const auto& mA = vstate.m[k];
       const auto& mF = fwd.m[k];
-      for (std::size_t rn = 0; rn < nodeCount; ++rn) {
-        if (mu[rn] <= 0.0) continue;
-        const double r = coupling.RadiusOfNode(static_cast<int>(rn));
-        const double wq = coupling.WeightOfNode(static_cast<int>(rn));
-        const double factor = pairing * weight * mu[rn] * wq * r * r;
-        const std::size_t base = rn * gridF;
-        for (std::size_t x = 0; x < gridF; ++x) {
-          const auto i = base + x;
-          if (itau[i] <= 0.0) continue;
-          // d - m of the forward state, against the adjoint state: the
-          // reduced-storage contraction (derived spins by reality).
-          const auto dm2 = dFwd.c[0][i] - mF.c[0][i];
-          const auto dm1 = dFwd.c[1][i] - mF.c[1][i];
-          const double dm0 = dFwd.r[i] - mF.r[i];
-          const double contraction =
-              12.0 * mA.r[i] * dm0 +
-              8.0 * (mA.c[1][i] * std::conj(dm1)).real() +
-              4.0 * (mA.c[0][i] * std::conj(dm2)).real();
-          itauKernel[k][i] += factor * contraction / itau[i];
-        }
-      }
+      auto& kernel = itauKernel[k];
+      // Node by node, each writing only its own grid values.
+      detail::ParallelElements(
+          nodeCount, op.options_.parallel, [&](std::size_t rn) {
+            if (mu[rn] <= 0.0) return;
+            const double r = coupling.RadiusOfNode(static_cast<int>(rn));
+            const double wq = coupling.WeightOfNode(static_cast<int>(rn));
+            const double factor = pairing * weight * mu[rn] * wq * r * r;
+            const std::size_t base = rn * gridF;
+            for (std::size_t x = 0; x < gridF; ++x) {
+              const auto i = base + x;
+              if (itau[i] <= 0.0) continue;
+              // d - m of the forward state, against the adjoint state:
+              // the reduced-storage contraction (derived spins by
+              // reality).
+              const auto dm2 = dFwd.c[0][i] - mF.c[0][i];
+              const auto dm1 = dFwd.c[1][i] - mF.c[1][i];
+              const double dm0 = dFwd.r[i] - mF.r[i];
+              const double contraction =
+                  12.0 * mA.r[i] * dm0 +
+                  8.0 * (mA.c[1][i] * std::conj(dm1)).real() +
+                  4.0 * (mA.c[0][i] * std::conj(dm2)).real();
+              kernel[i] += factor * contraction / itau[i];
+            }
+          });
     }
   };
 
@@ -371,7 +377,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   accumulateItau(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
-    const auto step =
+    auto step =
         op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),
                      ev.Columns(psiC, ev.toMatPotential_));
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
@@ -411,7 +417,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           n - 1));
     }
     densityLate[n - 1] = response.seaLevelChange;
-    vstate = step.Finish(strain);
+    vstate = std::move(step).Finish(strain);
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);

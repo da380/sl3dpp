@@ -6,6 +6,8 @@
  * sea level solvers and the within-step lateral iteration. Internal.
  */
 
+#include <omp.h>
+
 #include <algorithm>
 #include <array>
 #include <format>
@@ -27,10 +29,19 @@ namespace sl3dpp::detail {
 /// pyslfp's `AndersonMixer`: ring buffers of iterate and residual
 /// differences, combined in the least-squares sense through the small Gram
 /// system. Operates on flat real views; complex coefficient vectors pass
-/// through as twice-as-long real ones.
+/// through as twice-as-long real ones. The iterate differences are kept
+/// only as their sums with the residual differences, the one form the
+/// mixed iterate reads: the vectors are large and the update is bound by
+/// memory traffic.
+///
+/// With `parallel`, the sweeps over the vector run threaded on OpenMP's
+/// thread count, the sums as per-thread partials added in thread order:
+/// reproducible at a given thread count, and at one thread bitwise the
+/// serial update.
 class AndersonMixer {
  public:
-  explicit AndersonMixer(int memory) : memory_(memory) {}
+  explicit AndersonMixer(int memory, bool parallel = false)
+      : memory_(memory), parallel_(parallel) {}
 
   std::vector<double> Update(std::span<const double> x,
                              std::span<const double> gx) {
@@ -51,19 +62,35 @@ class AndersonMixer {
     if (x.size() != gx.size()) {
       throw std::invalid_argument("the iterate and its image differ in shape");
     }
-    std::size_t n = 0;
-    for (std::size_t s = 0; s < x.size(); ++s) {
+    // Where each segment starts in the concatenation.
+    auto offset = std::vector<std::size_t>(x.size() + 1, 0);
+    for (auto s = std::size_t{0}; s < x.size(); ++s) {
       if (x[s].size() != gx[s].size()) {
         throw std::invalid_argument(
             std::format("segment {} holds {} values, its image {}", s,
                         x[s].size(), gx[s].size()));
       }
-      n += x[s].size();
+      offset[s + 1] = offset[s] + x[s].size();
     }
-    auto takeImage = [&] {
-      for (std::size_t s = 0; s < x.size(); ++s) {
-        std::ranges::copy(gx[s], x[s].begin());
+    const auto n = offset.back();
+    // body(s, j, at) over every value, segment by segment, each thread
+    // taking the same static block of every segment.
+    auto sweep = [&](auto&& body) {
+#pragma omp parallel if (parallel_)
+      {
+        for (auto s = std::size_t{0}; s < x.size(); ++s) {
+          const auto size = x[s].size();
+#pragma omp for schedule(static) nowait
+          for (auto j = std::size_t{0}; j < size; ++j) {
+            body(s, j, offset[s] + j);
+          }
+        }
       }
+    };
+    auto takeImage = [&] {
+      sweep([&](std::size_t s, std::size_t j, std::size_t) {
+        x[s][j] = gx[s][j];
+      });
     };
     if (memory_ <= 0) {
       takeImage();
@@ -71,44 +98,63 @@ class AndersonMixer {
     }
 
     if (xPrev_.empty()) {
-      dX_.assign(memory_, std::vector<double>(n));
+      dG_.assign(memory_, std::vector<double>(n));
       dF_.assign(memory_, std::vector<double>(n));
       gram_.assign(static_cast<std::size_t>(memory_) * memory_, 0.0);
       xPrev_.resize(n);
       fPrev_.resize(n);
-      std::size_t at = 0;
-      for (std::size_t s = 0; s < x.size(); ++s) {
-        for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
-          xPrev_[at] = x[s][j];
-          fPrev_[at] = gx[s][j] - x[s][j];
-        }
-      }
-      takeImage();
+      sweep([&](std::size_t s, std::size_t j, std::size_t at) {
+        xPrev_[at] = x[s][j];
+        fPrev_[at] = gx[s][j] - x[s][j];
+        x[s][j] = gx[s][j];
+      });
       return;
     }
 
     // One sweep forms the new differences, stores the iterate and its
     // residual, and accumulates the new Gram column and the least-squares
-    // right-hand side; each sum takes its terms in index order.
+    // right-hand side: per thread, then the partials in thread order.
     const int slot = slot_;
     const int m = std::min(count_ + 1, memory_);
-    std::vector<double> column(m, 0.0), gamma(m, 0.0);
     std::vector<const double*> dF(m);
     for (int i = 0; i < m; ++i) dF[i] = dF_[i].data();
-    auto* dXs = dX_[slot].data();
+    auto* dGs = dG_[slot].data();
     auto* dFs = dF_[slot].data();
-    std::size_t at = 0;
-    for (std::size_t s = 0; s < x.size(); ++s) {
-      for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
-        const double f = gx[s][j] - x[s][j];
-        dXs[at] = x[s][j] - xPrev_[at];
-        dFs[at] = f - fPrev_[at];
-        xPrev_[at] = x[s][j];
-        fPrev_[at] = f;
-        for (int i = 0; i < m; ++i) {
-          column[i] += dF[i][at] * dFs[at];
-          gamma[i] += dF[i][at] * f;
+    const auto threads = parallel_ ? omp_get_max_threads() : 1;
+    auto partial =
+        std::vector<double>(static_cast<std::size_t>(threads) * 2 * m, 0.0);
+#pragma omp parallel if (parallel_) num_threads(threads)
+    {
+      auto* column = partial.data() +
+                     static_cast<std::size_t>(omp_get_thread_num()) * 2 * m;
+      auto* gamma = column + m;
+      for (auto s = std::size_t{0}; s < x.size(); ++s) {
+        const auto size = x[s].size();
+        const auto xs = x[s];
+        const auto gs = gx[s];
+#pragma omp for schedule(static) nowait
+        for (auto j = std::size_t{0}; j < size; ++j) {
+          const auto at = offset[s] + j;
+          const double f = gs[j] - xs[j];
+          const auto dx = xs[j] - xPrev_[at];
+          dFs[at] = f - fPrev_[at];
+          dGs[at] = dx + dFs[at];
+          xPrev_[at] = xs[j];
+          fPrev_[at] = f;
+          for (int i = 0; i < m; ++i) {
+            column[i] += dF[i][at] * dFs[at];
+            gamma[i] += dF[i][at] * f;
+          }
         }
+      }
+    }
+    std::vector<double> column(partial.begin(), partial.begin() + m),
+        gamma(partial.begin() + m, partial.begin() + 2 * m);
+    for (auto t = 1; t < threads; ++t) {
+      const auto* p = partial.data() + static_cast<std::size_t>(t) * 2 * m;
+      for (int i = 0; i < m; ++i) {
+        column[i] += p[i];
+        gamma[i] += p[m + i];
       }
     }
     count_ = m;
@@ -141,26 +187,22 @@ class AndersonMixer {
     }
 
     // The mixed iterate; x is no longer read, so it takes the result.
-    std::vector<const double*> dX(m);
-    for (int i = 0; i < m; ++i) dX[i] = dX_[i].data();
-    at = 0;
-    for (std::size_t s = 0; s < x.size(); ++s) {
-      for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
-        double value = gx[s][j];
-        for (int i = 0; i < m; ++i) {
-          value -= gamma[i] * (dX[i][at] + dF[i][at]);
-        }
-        x[s][j] = value;
-      }
-    }
+    std::vector<const double*> dG(m);
+    for (int i = 0; i < m; ++i) dG[i] = dG_[i].data();
+    sweep([&](std::size_t s, std::size_t j, std::size_t at) {
+      double value = gx[s][j];
+      for (int i = 0; i < m; ++i) value -= gamma[i] * dG[i][at];
+      x[s][j] = value;
+    });
   }
 
  private:
   int memory_;
+  bool parallel_;
   int count_ = 0;
   int slot_ = 0;
   std::vector<double> xPrev_, fPrev_, gram_;
-  std::vector<std::vector<double>> dX_, dF_;
+  std::vector<std::vector<double>> dG_, dF_;  // dX + dF, and dF
 };
 
 }  // namespace sl3dpp::detail

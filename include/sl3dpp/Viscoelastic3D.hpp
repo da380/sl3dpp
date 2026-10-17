@@ -218,6 +218,11 @@ class Viscoelastic3D {
    * oversampled grid: the grid strain exists only inside Respond and at
    * Finish, and the mixing and the convergence test run on the
    * coefficients, about 4.5 times fewer values.
+   *
+   * The step keeps its large buffers from pass to pass (Respond's grid
+   * tensor, the analysed force, the iterate StrainOf fills), so an open
+   * step is used from one thread at a time; its own loops run threaded
+   * under Options::parallel.
    */
   class OpenStep {
    public:
@@ -264,9 +269,12 @@ class Viscoelastic3D {
     [[nodiscard]] const LoveNumbers& EffectiveLove() const;
 
     /// Completes the step for the final strain coefficients: the strain d
-    /// on the grid, m+ = m~ + beta(x) d, with d cached.
+    /// on the grid, m+ = m~ + beta(x) d, with d cached. On a step that is
+    /// done with (std::move(step).Finish(strain)) the step's own buffers
+    /// become the new state instead of being copied.
     [[nodiscard]] State Finish(
-        const GridCoupling::SpectralTensor& strain) const;
+        const GridCoupling::SpectralTensor& strain) const&;
+    [[nodiscard]] State Finish(const GridCoupling::SpectralTensor& strain) &&;
 
    private:
     friend class Viscoelastic3D;
@@ -280,6 +288,10 @@ class Viscoelastic3D {
     std::vector<double> weight_;
     std::vector<GridCoupling::TensorField> memory_;
     std::vector<std::vector<double>> beta_;
+    /// Buffers reused from pass to pass: Respond's grid tensor and its
+    /// analysed force, and a spent iterate for StrainOf to fill.
+    mutable GridCoupling::TensorField grid_;
+    mutable GridCoupling::SpectralTensor analysed_, spare_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
@@ -301,9 +313,14 @@ class Viscoelastic3D {
                                                         int l) const;
   [[nodiscard]] const ToroidalOperator& FlavourToroidal(Flavour& flavour,
                                                         int l) const;
-  /// The strain coefficients of per-degree solutions.
+  /// The strain coefficients of per-degree solutions, fresh or added to
+  /// a spectral tensor.
   [[nodiscard]] GridCoupling::SpectralTensor StrainCoefficients(
       const Solutions& solutions,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal) const;
+  void AddStrainCoefficients(
+      GridCoupling::SpectralTensor& spectral, const Solutions& solutions,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
   /// d(x) of per-degree solutions, through the pipeline.
@@ -311,13 +328,19 @@ class Viscoelastic3D {
       const Solutions& solutions,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
-  /// Solve all degrees of both blocks for a combined weighted tensor,
-  /// adding the load channels.
+  /// Solve all degrees of both blocks for a combined weighted tensor.
   [[nodiscard]] Solutions SolveAll(
-      const GridCoupling::SpectralTensor& weighted, double t,
-      const LoadCallable3D& load, const LoadCallable3D& tide,
+      const GridCoupling::SpectralTensor& weighted,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
+  /// Adds load/tide channels at time t by linearity, through the
+  /// spheroidal systems' unit load and tide responses, solved once per
+  /// degree into `units` and kept there.
+  void AddUnitChannels(
+      Solutions& solutions, double t, const LoadCallable3D& load,
+      const LoadCallable3D& tide,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      std::map<int, std::vector<double>>& units) const;
 
   std::shared_ptr<const Rheology> rheology_;
   int lmax_;
@@ -329,6 +352,7 @@ class Viscoelastic3D {
   std::vector<std::vector<double>> itauRef_;   // per branch, per node
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;
   mutable std::map<int, std::unique_ptr<ToroidalOperator>> toroidal_;
+  mutable std::map<int, std::vector<double>> unrelaxedUnits_;  // (ndof x 2)
   mutable std::map<std::pair<int, double>, std::unique_ptr<Flavour>> flavours_;
 };
 

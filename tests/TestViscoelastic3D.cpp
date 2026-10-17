@@ -247,11 +247,13 @@ TEST(Stage4, LateralStepSelfConvergesAtSecondOrder) {
 }
 
 TEST(Stage4, ThreadedStepMatchesSerial) {
-  // Options::parallel threads the transforms and the per-degree loops
-  // (force assembly, solves, strain recovery). The degree loops are
-  // bitwise independent of the thread count; the threaded transforms are
-  // not (each thread plans its own FFTs), so the comparison is at the
-  // iteration's tolerance, not bitwise.
+  // Options::parallel threads the transforms, the per-degree loops (force
+  // assembly, solves, strain recovery) and the step's own loops (weights
+  // and decay, the residual, the mixing, the memory update). The degree
+  // and element-wise loops are bitwise independent of the thread count;
+  // the threaded transforms are not (each thread plans its own FFTs), nor
+  // are the mixer's partial sums, so the comparison is at the iteration's
+  // tolerance, not bitwise.
   auto body = Body::Make();
   const double tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {
@@ -295,6 +297,43 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
   compare(serial.toroidal, threaded.toroidal);
   EXPECT_GT(scale, 0.0);
   EXPECT_LE(diff, 1e-10 * scale);
+}
+
+TEST(Stage4, FinishingAMovedStepTakesItsBuffers) {
+  // A step that is done with finishes into its own buffers (the grid
+  // workspace becomes the strain, the decayed memory advances in place);
+  // the state is bitwise the copying Finish's.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto op = Viscoelastic3D(
+      body.rheology, kLmax, [](double, double theta, double phi) {
+        return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto state =
+      op.Step(op.ZeroState(), tau, Scheme::ExponentialTrapezoid, load).state;
+  auto step = op.StartStep(state, tau, Scheme::ExponentialTrapezoid, load);
+  const auto [strain, info] = step.Converge(
+      [&](const GridCoupling::SpectralTensor& s) {
+        auto solutions = step.Respond(s);
+        step.AddChannels(solutions, load, {});
+        return step.StrainOf(solutions);
+      },
+      {});
+  EXPECT_TRUE(info.converged);
+  const auto copied = step.Finish(strain);
+  const auto moved = std::move(step).Finish(strain);
+  ASSERT_EQ(copied.m.size(), moved.m.size());
+  auto same = [](const GridCoupling::TensorField& a,
+                 const GridCoupling::TensorField& b) {
+    return a.c[0] == b.c[0] && a.c[1] == b.c[1] && a.r == b.r;
+  };
+  for (auto k = std::size_t{0}; k < copied.m.size(); ++k) {
+    EXPECT_TRUE(same(copied.m[k], moved.m[k])) << "branch " << k;
+  }
+  ASSERT_TRUE(copied.strain.has_value() && moved.strain.has_value());
+  EXPECT_TRUE(same(*copied.strain, *moved.strain));
+  EXPECT_EQ(copied.t, moved.t);
 }
 
 TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {

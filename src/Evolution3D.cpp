@@ -3,6 +3,7 @@
 #include <cmath>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -199,7 +200,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
         {.max_iterations = options_.max_coupled_iterations,
          .rtol = options_.coupled_rtol,
          .anderson_memory = options_.anderson_memory});
-    vstate_ = step.Finish(strain);
+    vstate_ = std::move(step).Finish(strain);
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);

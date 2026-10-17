@@ -7,8 +7,10 @@
 // steps build the lazy operator caches; then each phase of one pass is
 // timed on its own, through the public pieces, best of `repeats`:
 //
-//   analyse     GridCoupling::Analyse of a full tensor (3 batched SHTs)
-//   synthesise  GridCoupling::Synthesise of a full spectral tensor
+//   analyse     GridCoupling::Analyse of a full tensor (3 batched SHTs),
+//               into a reused spectral tensor as Respond does
+//   synthesise  GridCoupling::Synthesise of a full spectral tensor, into a
+//               reused grid tensor as Respond does
 //   pointwise   GridCoupling::Multiply of a full tensor by a weight field
 //   force       SpheroidalForce + ToroidalForce, every degree
 //   respond     OpenStep::Respond (synthesise + pointwise + analyse +
@@ -18,11 +20,13 @@
 //   channels    OpenStep::AddChannels
 //   strainOf    OpenStep::StrainOf (strain recovery, every degree)
 //
-// and then whole Viscoelastic3D::Step calls, whose per-pass time less
-// respond + channels + strainOf is the iteration's own overhead (the
-// residual, the copies and the mixing). The last step's surface sums (to
-// full precision), a fingerprint of the final state (equal before and
-// after a pure refactor) and the peak RSS close the report.
+// and, once per step, StartStep (the weight fields, the decayed memory and
+// the fixed force). Then whole Viscoelastic3D::Step calls, whose per-pass
+// time less respond + channels + strainOf is the overhead: the residual
+// and the mixing, with StartStep and Finish spread over the step's passes.
+// The last step's surface sums (to full precision), a fingerprint of the
+// final state (equal before and after a pure refactor) and the peak RSS
+// close the report.
 //
 // Usage:
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
@@ -193,47 +197,51 @@ int main(int argc, char** argv) {
   std::printf("  warm-up (2 steps) %.3f s\n\n", Seconds(start));
   std::fflush(stdout);
 
-  // The phases in isolation, on the warmed state's opened step.
-  auto step = op.StartStep(state, dt, scheme, load);
-  const auto& s0 = step.StartStrain();
-  const auto d = coupling.Synthesise(s0);
+  // The phases in isolation, on the warmed state's opened step (scoped:
+  // its buffers are gone before the whole steps, for the peak RSS).
+  auto analyse = 0.0, synthesise = 0.0, force = 0.0, pointwise = 0.0,
+       respond = 0.0, channels = 0.0, strainOf = 0.0, startStep = 0.0;
+  {
+    auto step = op.StartStep(state, dt, scheme, load);
+    const auto& s0 = step.StartStrain();
+    const auto d = coupling.Synthesise(s0);
 
-  // Unrelaxed operators of the same sizes and dof maps as the step's own,
-  // for the force phase (the step keeps its own operators private).
-  const auto& base = rheology.BaseMaterial();
-  std::map<int, std::unique_ptr<DegreeOperator>> sph;
-  std::map<int, std::unique_ptr<ToroidalOperator>> tor;
-  for (int l = 0; l <= lmax; ++l) {
-    sph.emplace(l, std::make_unique<DegreeOperator>(base, l));
-    if (l >= 1) tor.emplace(l, std::make_unique<ToroidalOperator>(base, l));
+    // Unrelaxed operators of the same sizes and dof maps as the step's own,
+    // for the force phase (the step keeps its own operators private).
+    const auto& base = rheology.BaseMaterial();
+    std::map<int, std::unique_ptr<DegreeOperator>> sph;
+    std::map<int, std::unique_ptr<ToroidalOperator>> tor;
+    for (int l = 0; l <= lmax; ++l) {
+      sph.emplace(l, std::make_unique<DegreeOperator>(base, l));
+      if (l >= 1) tor.emplace(l, std::make_unique<ToroidalOperator>(base, l));
+    }
+    auto sphOf = [&](int l) -> const DegreeOperator& { return *sph.at(l); };
+    auto torOf = [&](int l) -> const ToroidalOperator& { return *tor.at(l); };
+
+    auto spectral = coupling.Analyse(d);
+    analyse = Best(repeats, [&] { coupling.Analyse(d, spectral); });
+    auto field = coupling.Synthesise(spectral);
+    synthesise = Best(repeats, [&] { coupling.Synthesise(spectral, field); });
+
+    std::map<int, std::vector<Complex>> sphForce, torForce;
+    force = Best(repeats, [&] {
+      sphForce = coupling.SpheroidalForce(spectral, sphOf);
+      torForce = coupling.ToroidalForce(spectral, torOf);
+    });
+
+    const std::vector<double> weight(field.r.size(), 1.0);
+    pointwise = Best(repeats, [&] { coupling.Multiply(field, weight); });
+
+    Viscoelastic3D::Solutions solutions;
+    respond = Best(repeats, [&] { solutions = step.Respond(s0); });
+    channels = Best(repeats, [&] {
+      auto copy = solutions;
+      step.AddChannels(copy, load, {});
+    });
+    strainOf = Best(repeats, [&] { auto out = step.StrainOf(solutions); });
   }
-  auto sphOf = [&](int l) -> const DegreeOperator& { return *sph.at(l); };
-  auto torOf = [&](int l) -> const ToroidalOperator& { return *tor.at(l); };
-
-  GridCoupling::SpectralTensor spectral;
-  const double analyse = Best(repeats, [&] { spectral = coupling.Analyse(d); });
-  const double synthesise =
-      Best(repeats, [&] { auto field = coupling.Synthesise(spectral); });
-
-  std::map<int, std::vector<Complex>> sphForce, torForce;
-  const double force = Best(repeats, [&] {
-    sphForce = coupling.SpheroidalForce(spectral, sphOf);
-    torForce = coupling.ToroidalForce(spectral, torOf);
-  });
-
-  auto field = d;
-  const std::vector<double> weight(field.r.size(), 1.0);
-  const double pointwise =
-      Best(repeats, [&] { coupling.Multiply(field, weight); });
-
-  Viscoelastic3D::Solutions solutions;
-  const double respond = Best(repeats, [&] { solutions = step.Respond(s0); });
-  const double channels = Best(repeats, [&] {
-    auto copy = solutions;
-    step.AddChannels(copy, load, {});
-  });
-  const double strainOf =
-      Best(repeats, [&] { auto out = step.StrainOf(solutions); });
+  startStep = Best(
+      repeats, [&] { auto opened = op.StartStep(state, dt, scheme, load); });
 
   const double solves = respond - synthesise - pointwise - analyse - force;
   std::printf("  one pass, phase by phase (best of %d) [s]\n", repeats);
@@ -249,6 +257,8 @@ int main(int argc, char** argv) {
       "respond", respond);
   std::printf("    %-11s %9.4f\n", "channels", channels);
   std::printf("    %-11s %9.4f  (strain recovery)\n", "strainOf", strainOf);
+  std::printf("  once per step [s]\n");
+  std::printf("    %-11s %9.4f\n", "startStep", startStep);
   std::fflush(stdout);
 
   // Whole steps: per-pass time and the iteration's own overhead.

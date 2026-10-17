@@ -5,7 +5,9 @@
 // the 1D stepper's slaved solutions at machine precision.
 
 #include <gtest/gtest.h>
+#include <omp.h>
 
+#include <algorithm>
 #include <cmath>
 #include <complex>
 #include <filesystem>
@@ -82,6 +84,80 @@ TEST(Stage4, CouplingsShareOneGrid) {
   EXPECT_THROW(
       GridCoupling(rheology, lmax, SurfaceGrid(lmax + 1, {.nmax = 2}), {}),
       std::invalid_argument);
+}
+
+TEST(Stage4, TransformsIntoBuffersAndThreadedPointwise) {
+  // The into-buffer transforms (what the step reuses its buffers through)
+  // overwrite every value: on buffers full of junk they give bitwise the
+  // allocating forms. The pointwise loops are element-wise, so threaded
+  // they are bitwise the serial ones.
+  constexpr int lmax = 4;
+  auto deck =
+      Deck::Read(
+          std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
+          DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+          .value();
+  const auto model = EarthModel::FromDeck(deck).value();
+  const auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
+  const auto material = Material::Create(model, mesh).value();
+  const auto& scales = model.ModelScales();
+  auto viscosity = std::map<std::size_t, RadialValue>{};
+  const auto boundaries = model.DimensionlessView().Boundaries();
+  for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
+    if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
+        boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
+      viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
+    }
+  }
+  const auto rheology = Rheology::Maxwell(material, viscosity).value();
+  const auto serial = GridCoupling(rheology, lmax, {.parallel = false});
+  const auto threaded = GridCoupling(rheology, lmax, {.parallel = true});
+
+  auto spectral = serial.ZeroSpectral();
+  for (auto c = 0; c < 2; ++c) {
+    for (auto i = std::size_t{0}; i < spectral.c[c].size(); ++i) {
+      spectral.c[c][i] = Complex(Noise(7 * i + c), Noise(7 * i + c + 3));
+    }
+  }
+  for (auto i = std::size_t{0}; i < spectral.r.size(); ++i) {
+    spectral.r[i] = Noise(5 * i + 1);
+  }
+  const auto field = serial.Synthesise(spectral);
+  auto reused = serial.ZeroTensor();
+  for (auto& component : reused.c) std::ranges::fill(component, 1e300);
+  std::ranges::fill(reused.r, -1e300);
+  serial.Synthesise(spectral, reused);
+  for (auto c = 0; c < 2; ++c) ASSERT_EQ(reused.c[c], field.c[c]);
+  ASSERT_EQ(reused.r, field.r);
+
+  const auto analysed = serial.Analyse(field);
+  auto reusedSpectral = serial.ZeroSpectral();
+  for (auto& block : reusedSpectral.c) std::ranges::fill(block, 1e300);
+  std::ranges::fill(reusedSpectral.r, -1e300);
+  serial.Analyse(field, reusedSpectral);
+  for (auto c = 0; c < 2; ++c) ASSERT_EQ(reusedSpectral.c[c], analysed.c[c]);
+  ASSERT_EQ(reusedSpectral.r, analysed.r);
+
+  const auto saved = omp_get_max_threads();
+  omp_set_num_threads(4);
+  auto weight = std::vector<double>(field.r.size());
+  for (auto i = std::size_t{0}; i < weight.size(); ++i) weight[i] = Noise(i);
+  auto factor = std::vector<double>(serial.NodeCount());
+  for (auto i = std::size_t{0}; i < factor.size(); ++i)
+    factor[i] = Noise(9 * i);
+  auto a = field, b = field;
+  serial.Multiply(a, weight);
+  threaded.Multiply(b, weight);
+  auto sa = analysed, sb = analysed;
+  serial.ScaleByNode(sa, factor);
+  threaded.ScaleByNode(sb, factor);
+  omp_set_num_threads(saved);
+  for (auto c = 0; c < 2; ++c) {
+    ASSERT_EQ(a.c[c], b.c[c]);
+    ASSERT_EQ(sa.c[c], sb.c[c]);
+  }
+  ASSERT_EQ(a.r, b.r);
+  ASSERT_EQ(sa.r, sb.r);
 }
 
 TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {

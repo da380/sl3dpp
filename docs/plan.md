@@ -748,3 +748,20 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   not investigated further. The 1D operator now holds its points by
   pointer, so the per-degree workspaces' references survive a move of
   the operator (a latent dangling pointer since 7b-i).
+- **17 Oct 2026** — The 3D step's serial remainder threaded (performance
+  chunk 8). The step's own loops (weights and decay, the pointwise
+  weight, the fixed-force add, the residual, the damping, the memory
+  update, `SolveElastic`'s weighting) run element-wise threaded
+  (`detail::ParallelElements`, a static schedule), and the Anderson
+  mixer's two sweeps are threaded with per-thread partial sums added in
+  thread order (`AndersonMixer(memory, parallel)`; the 1D users keep the
+  serial default). The mixer stores dX + dF in place of dX, the one form
+  its update reads. The open step keeps its buffers (`Respond`'s grid
+  tensor and analysed force, the spent iterate `StrainOf` refills;
+  `GridCoupling` gained into-buffer `Synthesise`/`Analyse`), and
+  `std::move(step).Finish` turns them into the new state. `SolveAll` only
+  solves; `SolveElastic` adds channels through the cached path
+  `AddChannels` uses. The 3D adjoint's itau accumulation is threaded
+  over memory nodes. At one thread every result is bitwise unchanged; at
+  lmax 64 on 8 threads a pass is 0.76–0.79 s for 1.05 (Gauss), 0.94 for
+  1.34 (GLL). `StartStep` (0.82 s a step) is now the largest overhead.

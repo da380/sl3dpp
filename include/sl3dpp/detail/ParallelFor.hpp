@@ -2,10 +2,11 @@
 
 /**
  * @file detail/ParallelFor.hpp
- * @brief An OpenMP loop over independent tasks that is safe to throw from.
- * Internal.
+ * @brief OpenMP loops: over independent tasks, safe to throw from; and
+ * over the elements of large arrays. Internal.
  */
 
+#include <cstddef>
 #include <exception>
 
 namespace sl3dpp::detail {
@@ -28,6 +29,17 @@ void ParallelFor(int count, bool parallel, Body&& body) {
     }
   }
   if (failure) std::rethrow_exception(failure);
+}
+
+/// Runs body(i) for i in [0, count): under OpenMP's static schedule when
+/// `parallel`, in order otherwise. For element-wise passes over large
+/// arrays: every pass over the same range hands each thread the same
+/// block. The body must not throw and must write only element i's
+/// outputs, so the result does not depend on the thread count.
+template <typename Body>
+void ParallelElements(std::size_t count, bool parallel, Body&& body) {
+#pragma omp parallel for schedule(static) if (parallel)
+  for (std::size_t i = 0; i < count; ++i) body(i);
 }
 
 }  // namespace sl3dpp::detail

@@ -83,23 +83,35 @@ GridCoupling::SpectralTensor GridCoupling::ZeroSpectral() const {
 GridCoupling::TensorField GridCoupling::Synthesise(
     const SpectralTensor& spectral) const {
   auto field = ZeroTensor();
+  Synthesise(spectral, field);
+  return field;
+}
+
+void GridCoupling::Synthesise(const SpectralTensor& spectral,
+                              TensorField& field) const {
+  if (field.r.empty()) field = ZeroTensor();
   const auto count = static_cast<int>(nodes_.size());
   for (auto c = 0; c < 2; ++c) {
     grid_.SynthesiseSpinBatch(kSpins[c], spectral.c[c], count, field.c[c]);
   }
   grid_.SynthesiseBatch(spectral.r, count, field.r);
-  return field;
 }
 
 GridCoupling::SpectralTensor GridCoupling::Analyse(
     const TensorField& field) const {
   auto spectral = ZeroSpectral();
+  Analyse(field, spectral);
+  return spectral;
+}
+
+void GridCoupling::Analyse(const TensorField& field,
+                           SpectralTensor& spectral) const {
+  if (spectral.r.empty()) spectral = ZeroSpectral();
   const auto count = static_cast<int>(nodes_.size());
   for (auto c = 0; c < 2; ++c) {
     grid_.ExpandSpinBatch(kSpins[c], field.c[c], count, spectral.c[c]);
   }
   grid_.ExpandBatch(field.r, count, spectral.r);
-  return spectral;
 }
 
 void GridCoupling::Multiply(TensorField& field,
@@ -109,10 +121,11 @@ void GridCoupling::Multiply(TensorField& field,
     throw std::invalid_argument(std::format(
         "the weight field has {} values, the tensor {}", weight.size(), size));
   }
-  for (auto& component : field.c) {
-    for (std::size_t i = 0; i < size; ++i) component[i] *= weight[i];
-  }
-  for (std::size_t i = 0; i < size; ++i) field.r[i] *= weight[i];
+  detail::ParallelElements(size, options_.parallel, [&](std::size_t i) {
+    field.c[0][i] *= weight[i];
+    field.c[1][i] *= weight[i];
+    field.r[i] *= weight[i];
+  });
 }
 
 void GridCoupling::ScaleByNode(SpectralTensor& spectral,
@@ -120,20 +133,18 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
   if (factor.size() != nodes_.size()) {
     throw std::invalid_argument("one factor per radial node, please");
   }
-  for (auto c = 0; c < 2; ++c) {
-    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    for (std::size_t node = 0; node < nodes_.size(); ++node) {
-      for (std::size_t k = 0; k < size; ++k) {
-        spectral.c[c][node * size + k] *= factor[node];
-      }
-    }
-  }
-  const auto size = grid_.CoefficientSize();
-  for (std::size_t node = 0; node < nodes_.size(); ++node) {
-    for (std::size_t k = 0; k < size; ++k) {
-      spectral.r[node * size + k] *= factor[node];
-    }
-  }
+  const auto sizes =
+      std::array{grid_.SpinCoefficientSize(kSpins[0]),
+                 grid_.SpinCoefficientSize(kSpins[1]), grid_.CoefficientSize()};
+  const auto blocks = std::array{&spectral.c[0], &spectral.c[1], &spectral.r};
+  detail::ParallelElements(
+      nodes_.size(), options_.parallel, [&](std::size_t node) {
+        for (auto b = std::size_t{0}; b < blocks.size(); ++b) {
+          for (auto k = std::size_t{0}; k < sizes[b]; ++k) {
+            (*blocks[b])[node * sizes[b] + k] *= factor[node];
+          }
+        }
+      });
 }
 
 int GridCoupling::FirstNodeFor(int firstElement) const {

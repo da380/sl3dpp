@@ -143,9 +143,16 @@ class GridCoupling {
 
   /// Synthesis of every component at every node.
   [[nodiscard]] TensorField Synthesise(const SpectralTensor& spectral) const;
+  /// The same into a caller's tensor, every value overwritten: reusing
+  /// one saves allocating (and the system zeroing) a fresh one per call.
+  /// Shaped as ZeroTensor's; an empty one is shaped first.
+  void Synthesise(const SpectralTensor& spectral, TensorField& field) const;
 
   /// Analysis back to spectral components.
   [[nodiscard]] SpectralTensor Analyse(const TensorField& field) const;
+  /// The same into a caller's spectral tensor, every value overwritten;
+  /// shaped as ZeroSpectral's, an empty one shaped first.
+  void Analyse(const TensorField& field, SpectralTensor& spectral) const;
 
   /// Pointwise multiplication by a real weight field over
   /// (node * FieldSize + x), all components alike.
