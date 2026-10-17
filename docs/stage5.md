@@ -156,12 +156,15 @@ dual by the dot product; densities/rates are per unit SLE time.
   machinery of Evolution3D — zero-load reversed stepping with the
   within-step lateral iteration intact, jumps at observations through
   the unrelaxed 3D solve, the lateral term entering the fixed point
-  exactly as forward. The viscosity kernel is then the pointwise grid
-  contraction μ s (d − m):(d† − m†) accumulated at the memory nodes
-  over the reversed nodes with the split trapezoid; the null-basis
-  metric signs (g(+,−) = −1 pairings across the component slots) come
-  from GSHTrans's tensor types, not hand-rolled weights (stage4.md
-  §8). The reality reduction gives the derived spins by sign·conj for
+  exactly as forward. The viscosity kernel is the 3D form of Yu et al.
+  2025's multiplier integral, as in pyslfp and the 1D sweep (not the
+  Fortran's rate-form kernel expression): per branch and memory point,
+  μ_k m†:(d − m)/itau, accumulated over the reversed nodes with the
+  split trapezoid. *(Corrected 17 Oct 2026: this paragraph first planned
+  the contraction μ s (d − m):(d† − m†) with metric signs from
+  GSHTrans's tensor types; as built, §6a, the contraction pairs the
+  adjoint memory with the forward d − m, and its metric on the reduced
+  storage is fixed by the 1D limit.)* The reality reduction gives the derived spins by sign·conj for
   free at the contraction, and the adjoint fields are real tensors too.
 - **Discrete option**: the exact transpose of the reduced pipeline —
   Scatter/batched-synthesis/pointwise-multiply/analysis/force-rows in

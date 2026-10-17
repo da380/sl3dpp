@@ -5,7 +5,8 @@
 #include <format>
 #include <stdexcept>
 
-// LAPACK banded Cholesky (the toroidal blocks are SPD at l >= 2).
+// LAPACK banded Cholesky (the toroidal blocks are SPD at l >= 2, and at
+// l = 1 once one dof per solid region is pinned).
 extern "C" {
 void dpbtrf_(const char* uplo, const int* n, const int* kd, double* ab,
              const int* ldab, int* info);
@@ -18,11 +19,11 @@ namespace sl3dpp {
 
 ToroidalOperator::ToroidalOperator(const Material& material, int l,
                                    Options options)
-    : material_(&material), l_(l) {
-  if (l < 2) {
+    : material_(&material), l_(l), pinFraction_(options.pin_fraction) {
+  if (l < 1) {
     throw std::invalid_argument(
-        "the toroidal system exists for degrees two and above (l = 0 has no "
-        "toroidal motion; l = 1 is the rigid-rotation null space)");
+        "the toroidal system exists for degrees one and above (l = 0 has no "
+        "toroidal motion)");
   }
   const auto& mesh = material.Mesh();
   firstElement_ = mesh.StartElement(l, options.truncation, options.eps);
@@ -37,16 +38,40 @@ void ToroidalOperator::BuildDofMap() {
   const auto n = mesh.NGll();
   dof_.assign(mesh.NodeCount(), -1);
   ndof_ = 0;
+  // The dofs run up through each solid region in turn, so a region (a run
+  // of solid elements between fluid ones) is a contiguous dof range.
+  auto inRegion = false;
   for (auto e = firstElement_; e < mesh.ElementCount(); ++e) {
-    if (material_->IsFluid(e)) continue;
+    if (material_->IsFluid(e)) {
+      if (inRegion) regions_.back().second = ndof_;
+      inRegion = false;
+      continue;
+    }
+    if (!inRegion) regions_.push_back({ndof_, ndof_});
+    inRegion = true;
     for (auto i = 0; i < n; ++i) {
       const auto gn = mesh.GlobalIndex(e, i);
       if (dof_[gn] < 0) dof_[gn] = ndof_++;
     }
   }
+  if (inRegion) regions_.back().second = ndof_;
   if (ndof_ == 0) {
     throw std::invalid_argument(
         "the degree's element subset holds no solid element");
+  }
+  // Degree 1: the gauge, one pinned dof per region, a fraction of the way
+  // down from the region's top (never its bottom node: the rigid mode
+  // vanishes at the centre).
+  if (l_ == 1) {
+    if (!(pinFraction_ >= 0.0 && pinFraction_ < 1.0)) {
+      throw std::invalid_argument(std::format(
+          "the pin fraction must lie in [0, 1), not {}", pinFraction_));
+    }
+    for (const auto& [first, end] : regions_) {
+      const auto below = static_cast<int>(
+          std::floor(pinFraction_ * static_cast<double>(end - first - 1)));
+      pinned_.push_back(end - 1 - below);
+    }
   }
 }
 
@@ -107,6 +132,14 @@ void ToroidalOperator::Factorise() {
           scale_[i] * scale_[j];
     }
   }
+  // The gauge: a pinned dof's row and column become the identity.
+  for (const auto p : pinned_) {
+    for (auto j = std::max(0, p - kd_); j <= std::min(n - 1, p + kd_); ++j) {
+      const auto [i, k] = std::minmax(p, j);
+      factor_[static_cast<std::size_t>(k) * ldab + (kd_ + i - k)] =
+          i == k ? 1.0 : 0.0;
+    }
+  }
   auto info = 0;
   dpbtrf_("U", &n, &kd_, factor_.data(), &ldab, &info);
   if (info != 0) {
@@ -127,6 +160,7 @@ std::vector<double> ToroidalOperator::Solve(std::span<const double> b,
     for (auto j = 0; j < n; ++j) {
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
     }
+    for (const auto p : pinned_) x[static_cast<std::size_t>(k) * n + p] = 0.0;
   }
   const auto ldab = kd_ + 1;
   auto info = 0;
@@ -141,6 +175,46 @@ std::vector<double> ToroidalOperator::Solve(std::span<const double> b,
     }
   }
   return x;
+}
+
+std::vector<double> ToroidalOperator::Apply(std::span<const double> x,
+                                            int nrhs) const {
+  const auto n = ndof_;
+  if (static_cast<int>(x.size()) != n * nrhs) {
+    throw std::invalid_argument(
+        std::format("expected {} x {} values, got {}", n, nrhs, x.size()));
+  }
+  const auto ldab = kd_ + 1;
+  std::vector<double> y(x.size(), 0.0);
+  for (auto k = 0; k < nrhs; ++k) {
+    const auto* xk = x.data() + static_cast<std::size_t>(k) * n;
+    auto* yk = y.data() + static_cast<std::size_t>(k) * n;
+    for (auto j = 0; j < n; ++j) {
+      for (auto i = std::max(0, j - kd_); i <= j; ++i) {
+        const auto a =
+            band_[static_cast<std::size_t>(j) * ldab + (kd_ + i - j)];
+        yk[i] += a * xk[j];
+        if (i != j) yk[j] += a * xk[i];
+      }
+    }
+  }
+  return y;
+}
+
+std::vector<double> ToroidalOperator::RigidRotation(int region) const {
+  if (region < 0 || region >= RegionCount()) {
+    throw std::invalid_argument(std::format("no solid region {}", region));
+  }
+  const auto [first, end] = regions_[static_cast<std::size_t>(region)];
+  const auto& mesh = material_->Mesh();
+  std::vector<double> out(ndof_, 0.0);
+  for (auto e = firstElement_; e < mesh.ElementCount(); ++e) {
+    for (auto i = 0; i < mesh.NGll(); ++i) {
+      const auto d = dof_[mesh.GlobalIndex(e, i)];
+      if (d >= first && d < end) out[d] = mesh.Radius(e, i);
+    }
+  }
+  return out;
 }
 
 int ToroidalOperator::SurfaceDof() const {

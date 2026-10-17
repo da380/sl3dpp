@@ -79,10 +79,10 @@ first use and cached in `mutable` maps:
 
 - `Spheroidal(l)` / `Toroidal(l)` (`:133`, `:147`): the UNRELAXED
   reference systems, used by `SolveElastic`.
-- `FlavourOf(scheme, dt)` (`:161`): a reference EFFECTIVE material,
+- `FlavourOf(scheme, dt)` (`:163`): a reference EFFECTIVE material,
   mu_inf + Σ_k (1 − beta_ref,k(r)) mu_k, keyed by the exact
   (scheme, dt) pair. Its per-degree operators (`FlavourSpheroidal` /
-  `FlavourToroidal`, `:353`, `:368`) and its unit load/tide responses
+  `FlavourToroidal`, `:355`, `:370`) and its unit load/tide responses
   (`flavour.units`) are built on first use too.
 
 The elastic moduli stay 1D. Lateral variation enters ONLY through the
@@ -91,7 +91,7 @@ banded system. The lateral part is moved to the right-hand side.
 
 ## 4. One step, phase by phase
 
-`Step` (`src/Viscoelastic3D.cpp:637`) is `StartStep`, then the
+`Step` (`src/Viscoelastic3D.cpp:641`) is `StartStep`, then the
 iteration (`OpenStep::Converge`), then `Finish`. `OpenStep` exposes the
 same phases so the sea-level loop (§5) can close the step itself.
 
@@ -99,24 +99,24 @@ The within-step iterate is the strain's COEFFICIENTS, s (a
 `SpectralTensor`), not its grid values d. The grid strain exists only
 inside `Respond` (synthesised from s and consumed there) and at `Finish`.
 
-### 4.1 StartStep (`:392`)
+### 4.1 StartStep (`:396`)
 
 - **The start strain.** From the state's strain cache if present: its
   grid values d0 are used directly and analysed once for the starting
-  coefficients s0 (`:414`). Otherwise from `SolveElastic` (`:324`), the
+  coefficients s0 (`:418`). Otherwise from `SolveElastic` (`:326`), the
   memory force of Σ_k mu_k m_k through the unrelaxed reference
   operators plus the load channels, whose strain coefficients are s0
-  (`:416`) and whose synthesis is d0 (`:420`). No iteration is needed
+  (`:420`) and whose synthesis is d0 (`:424`). No iteration is needed
   there, because the unrelaxed operator is laterally uniform.
-- **The weights, per branch and grid point** (`:446`):
+- **The weights, per branch and grid point** (`:450`):
   h(x) = dt · itau(x) gives (e, alpha, beta) from `StepWeights.hpp`.
   The reference beta_ref uses the radial itau at that node. Stored per
   branch for `Finish`: `beta_[k]` = beta(x), a (node × grid) real field.
-- **The decayed memory** (`:463`): `memory_[k]` = m̃_k = e(x) m_k +
+- **The decayed memory** (`:467`): `memory_[k]` = m̃_k = e(x) m_k +
   alpha(x) d0, pointwise, a full `TensorField` per branch.
 - **Summed over branches, once per step:** the single lateral weight
-  `weight_` = Σ_k mu_k(r) (beta_k(x) − beta_ref,k(r)) (`:467`), and the
-  fixed memory force Σ_k mu_k m̃_k, analysed into `fixed_` (`:473`).
+  `weight_` = Σ_k mu_k(r) (beta_k(x) − beta_ref,k(r)) (`:471`), and the
+  fixed memory force Σ_k mu_k m̃_k, analysed into `fixed_` (`:477`).
 
 ### 4.2 One pass of the within-step iteration
 
@@ -148,14 +148,14 @@ and a pass maps strain coefficients s to the next ones.
                                                         r∂r; Scatter)
 ```
 
-**Respond** (`:477`):
+**Respond** (`:481`):
 
-1. *Synthesise* (`:484` → `src/GridCoupling.cpp:72`). Three batched
+1. *Synthesise* (`:488` → `src/GridCoupling.cpp:72`). Three batched
    inverse transforms (spins −2, −1, 0), each with ALL memory nodes as
    one contiguous batch, into a freshly allocated grid `TensorField`.
-2. *Pointwise weight* (`:485`). `GridCoupling::Multiply` by `weight_`,
+2. *Pointwise weight* (`:489`). `GridCoupling::Multiply` by `weight_`,
    in place.
-3. *Analyse* (`:486` → `src/GridCoupling.cpp:83`). Three batched forward
+3. *Analyse* (`:490` → `src/GridCoupling.cpp:83`). Three batched forward
    transforms, then `fixed_` is added.
 4. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp:245`;
    `ToroidalForce`, `:295`). For each degree, each node in the degree's
@@ -165,11 +165,11 @@ and a pass maps strain coefficients s to the next ones.
    degree's right-hand side at the node's own dofs (the pointwise rows,
    weight jac·w_q·r) and at every node of its element (the derivative
    rows, through D(q, j)).
-5. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:214`). Per degree, the
+5. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:216`). Per degree, the
    complex columns are split into real pairs and solved as 2(l+1) real
    right-hand sides through the FLAVOUR operator: `dpbtrs` (banded
-   Cholesky) or `dgbtrs` (the LU fallback), at `:265`.
-   Toroidal runs from l = 2 (see §8, item 1).
+   Cholesky) or `dgbtrs` (the LU fallback), at `:267`.
+   Toroidal runs from l = 1, degree 1 in a pinned gauge (§8, item 1).
 
 The three per-degree loops (force assembly, solves, strain recovery)
 run as one OpenMP task per degree, largest degrees first, when
@@ -178,11 +178,11 @@ every degree's operator serially, filling the lazy caches, so the tasks
 only read shared data and each writes only its own degree's outputs.
 The results are therefore bitwise the same at any thread count.
 
-**AddChannels** (`:504`). The load and tide enter by linearity:
+**AddChannels** (`:508`). The load and tide enter by linearity:
 amplitude × the cached unit response of the flavour operator (solved
-once per degree per flavour, `:523`).
+once per degree per flavour, `:527`).
 
-**StrainOf → StrainCoefficients** (`:545` → `:174`). Per degree,
+**StrainOf → StrainCoefficients** (`:549` → `:176`). Per degree,
 `AddStrainOfSolution` (`src/GridCoupling.cpp:201`) gathers U, V, W at
 each node through the operators' dof maps and forms r∂r through the
 element's derivative matrix. `DeviatoricComponents` gives the five
@@ -194,7 +194,7 @@ slots of a fresh `SpectralTensor`: the next iterate, with no transform.
 nodes therefore carry zero spectral content at high degrees. The
 transforms still run every node at full lmax.
 
-### 4.3 Convergence and mixing (`OpenStep::Converge`, `:592-635`)
+### 4.3 Convergence and mixing (`OpenStep::Converge`, `:596-639`)
 
 One loop serves all three drivers: `Step` here, the sea-level loop (§5)
 and the adjoint's reverse sweep (`src/Adjoint3D.cpp`). Each supplies its
@@ -202,14 +202,14 @@ own pass (`Respond`, its own load closure, `AddChannels`, `StrainOf`) and
 an `IterationControl`.
 
 - Residual: max |s' − s| / max |s'| over every stored coefficient at
-  every node (a relative sup-norm on the coefficients, `:614`), compared
+  every node (a relative sup-norm on the coefficients, `:618`), compared
   on squared magnitudes. Until 17 October (chunk 3) it was the same norm
   on the grid values; the two agree in what they accept to within the
   tolerance, and the results to round-off (§7).
 - Defaults (`Viscoelastic3D.hpp`, `Options`): rtol 1e-11, at most 40
   passes, damping 1, Anderson memory 5. The sea-level loop and the
   adjoint pass their own options, without damping.
-- Mixing: `detail::AndersonMixer::UpdateInPlace` (`:629`) works directly
+- Mixing: `detail::AndersonMixer::UpdateInPlace` (`:633`) works directly
   on s's three coefficient blocks and overwrites s with the mixed
   iterate, with no copies and two sweeps over the data. The mixer keeps
   ring buffers of 5 iterate differences and 5 residual differences,
@@ -219,9 +219,9 @@ an `IterationControl`.
   returned and the step finishes with the last iterate. The adjoint
   sweep throws instead.
 
-### 4.4 Finish (`:571`)
+### 4.4 Finish (`:575`)
 
-The final coefficients are synthesised to the grid strain d (`:573`),
+The final coefficients are synthesised to the grid strain d (`:577`),
 then m⁺_k = m̃_k + beta_k(x) d, pointwise. d is cached in the new state
 as its strain, so the next `StartStep` skips the elastic solve (and
 analyses d once for its starting coefficients).
@@ -358,21 +358,24 @@ Ordered roughly by how much they matter. "Discrepancy" means the code
 differs from the Fortran or from the docs; "cost" means correct but
 expensive.
 
-1. **Discrepancy: degree-1 toroidal is omitted.** *Decided 17 Oct 2026:
-   it must be included, with its rigid-rotation null space removed by
-   any convenient gauge; measurements must be invariant under it
-   (`plan.md` §4, §8.9, §9).* `ToroidalForce` starts
-   at l = 2 (`src/GridCoupling.cpp:303`), so the degree-1 toroidal force
-   is never assembled or solved. Only rigid rotation (W ∝ r) is strain-free:
-   differential degree-1 toroidal motion carries strain through the
-   twist term W − r∂rW in A(−0) and A(0+) (`SpinComponents.hpp`,
-   `DeviatoricComponents`), and lateral viscosity can excite it. The
-   Fortran solves it with a banded LU on `aa_tor_1`
-   (`sl3d/src/module_gia.f90:503-506`, `module_mat.f90:58-62`), but on
-   the unconstrained singular form, so it fixes no frame. The omission
-   follows an expectation recorded in `stage4.md` §4, since corrected.
-   The Fortran gate compares l ≥ 2 only, and this enters other degrees
-   only through the lateral coupling, so no gate would have caught it.
+1. **Fixed (17 Oct, chunk 5): degree-1 toroidal was omitted.** The
+   toroidal force, solves and strain recovery started at l = 2, so the
+   degree-1 toroidal response was never assembled or solved. Only rigid
+   rotation (W ∝ r) is strain-free: differential degree-1 toroidal
+   motion carries strain through the twist term W − r∂rW in A(−0) and
+   A(0+) (`DeviatoricComponents`), and lateral viscosity drives it (the
+   omission followed an expectation in `stage4.md` §4, since corrected).
+   Now `ToroidalOperator` accepts l = 1 and fixes the gauge by pinning
+   one dof per solid region (the region's top node by default;
+   `Options::pin_fraction`), and the three loops run from l = 1. Tests:
+   the rigid rotations are the null space, a torque-free right-hand side
+   is solved in full (pinned rows included), the memory force is
+   torque-free, and moving the pin changes only the degree-1 rigid
+   rotation, nothing well defined. Effect on the lateral example: 0.25%
+   of the lateral-minus-radial sea-level difference. (The Fortran solves
+   this degree with an LU on the unconstrained singular form, so it
+   fixes no frame; its gate pattern does not excite the mode, by
+   symmetry.)
 2. **Fixed (17 Oct, chunk 2): the iteration was described wrongly.**
    The `Viscoelastic3D.hpp` file comment said "damped Picard here …
    Anderson mixing is the recorded fallback", while the code defaults
@@ -407,7 +410,7 @@ expensive.
    and the adjoint's reverse sweep). All three now call
    `OpenStep::Converge`.
 9. **Cost: unit responses re-solved.** `SolveAll`'s channel path
-   (`src/Viscoelastic3D.cpp:297`, used by `SolveElastic` and so
+   (`src/Viscoelastic3D.cpp:299`, used by `SolveElastic` and so
    `PrimeStrain` and an uncached `StartStep`) re-solves the two unit
    responses on every call. `AddChannels` caches them.
 10. **Cost: weight fields recomputed every step.** `StartStep` evaluates
@@ -440,3 +443,40 @@ expensive.
     were identical in a test. One-thread runs are reproducible.
     Agreement to round-off is all that is required (David, 17 Oct), so
     nothing is to change; bitwise regression checks use one thread.
+17. **Cost (negligible, deferred): unforced solid regions.** A solid
+    region separated by fluid and carrying no active rheology branch
+    (the elastic inner core, usually) has no memory force, so its
+    toroidal response is exactly zero: its block is solved for nothing
+    (and pinned at l = 1). Dropping such regions from the toroidal dof
+    map would be exact, but the graded truncation already excludes the
+    inner core above l ≈ 10, so the saving is about 1e-4 of a pass
+    (David, 17 Oct). A viscous inner core with lateral variation could
+    drive its own toroidal motion, so the rule would be "no active
+    branch", not "inner core".
+18. **Cost (agreed, next): stored states carry the strain.** A recorded
+    `State` holds the grid strain beside the internal variables, so with
+    one branch half of every 3D checkpoint is strain. As in pyslfp and
+    AdGIA, store only the internal variables and regenerate the strain
+    with one elastic solve under the recorded load and centrifugal
+    coefficients: the unrelaxed operator is laterally uniform, so no
+    iteration, and the end-of-step strain satisfies unrelaxed
+    equilibrium with the new memory (David, 17 Oct). Both adjoints read
+    stored strains today (`Adjoint.cpp`, `Adjoint3D.cpp` kernels).
+19. **Cost (planned): Gauss-point memory nodes** (`plan.md` §5.5). The
+    memory lives at the GLL nodes, doubled at shared element boundaries;
+    the N = ngll − 1 interior Gauss points match the GLL rule's exactness
+    for the memory-force integral with ~20% fewer points (and ~20% fewer
+    radial nodes in the transforms). A switchable option, GLL staying the
+    default for the pyslfp gates; τ, the step weights, their
+    h-derivatives and the kernel accumulators move together. To
+    implement (David, 17 Oct).
+20. **Cost (small tidy-up): the 1D internal variables span each
+    degree's whole subset**, from its first element to the surface, so
+    they are stored (as zeros) in the lithosphere and, at low degrees,
+    the core: ~10–12% of the 1D state overall, up to ~25–29% at low
+    degrees (PREM Maxwell body, lmax 64 and 128). The 3D path already
+    keeps only active elements (`GridCoupling` memory nodes: 1225 of
+    1725 mesh nodes at lmax 64).
+21. **Deferred: per-branch active sets.** With several branches, every
+    branch stores memory over the union of active elements; only worth
+    restricting once multi-branch rheologies are in use (David, 17 Oct).

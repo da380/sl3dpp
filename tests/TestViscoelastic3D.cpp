@@ -20,6 +20,7 @@
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/ToroidalOperator.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
@@ -290,4 +291,93 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
   compare(serial.toroidal, threaded.toroidal);
   EXPECT_GT(scale, 0.0);
   EXPECT_LE(diff, 1e-10 * scale);
+}
+
+TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
+  // Lateral viscosity drives degree-1 toroidal motion, whose rigid
+  // rotations are gauge (fixed by pinning one dof per solid region).
+  // Moving the pin must leave everything well defined unchanged (the
+  // strain, the memory, the spheroidal and l >= 2 toroidal solutions) and
+  // change the degree-1 toroidal solution only by rigid rotations
+  // (plan.md §4: don't measure things that are gauge).
+  auto body = Body::Make();
+  const double tau = body.rheology.MinRelaxationTime();
+  const auto delta = [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto run = [&](double pinFraction) {
+    Viscoelastic3D::Options options;
+    options.toroidal_pin_fraction = pinFraction;
+    Viscoelastic3D op(body.rheology, kLmax, delta, options);
+    auto state = op.ZeroState();
+    Viscoelastic3D::StepResult result;
+    for (int i = 0; i < 2; ++i) {
+      result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(result.info.converged);
+      state = result.state;
+    }
+    return result;
+  };
+  // Pinned at each region's top, and halfway down: in the mantle the
+  // latter sits in the viscous, forced layer, so the gauges differ.
+  const auto a = run(0.0);
+  const auto b = run(0.5);
+
+  double scale = 0.0, diff = 0.0;
+  auto compare = [&](const std::vector<Complex>& x,
+                     const std::vector<Complex>& y) {
+    ASSERT_EQ(x.size(), y.size());
+    for (std::size_t i = 0; i < x.size(); ++i) {
+      scale = std::max(scale, std::abs(x[i]));
+      diff = std::max(diff, std::abs(x[i] - y[i]));
+    }
+  };
+  for (const auto& [l, x] : a.solutions.spheroidal) {
+    compare(x, b.solutions.spheroidal.at(l));
+  }
+  for (const auto& [l, x] : a.solutions.toroidal) {
+    if (l >= 2) compare(x, b.solutions.toroidal.at(l));
+  }
+  for (auto c = 0; c < 2; ++c) {
+    std::vector<Complex> x(a.state.strain->c[c]), y(b.state.strain->c[c]);
+    compare(x, y);
+  }
+  EXPECT_GT(scale, 0.0);
+  EXPECT_LE(diff, 1e-9 * scale);
+
+  // The degree-1 toroidal response is alive, and the two gauges differ by
+  // a rigid rotation of each solid region, per column.
+  ToroidalOperator probe(body.material, 1);
+  const auto& wa = a.solutions.toroidal.at(1);
+  const auto& wb = b.solutions.toroidal.at(1);
+  const auto ndof = static_cast<std::size_t>(probe.DofCount());
+  ASSERT_EQ(wa.size(), 2 * ndof);
+  double size = 0.0, gaugeShift = 0.0;
+  for (auto v : wa) size = std::max(size, std::abs(v));
+  EXPECT_GT(size, 1e-8 * scale);
+  for (int k = 0; k < probe.RegionCount(); ++k) {
+    const auto rigid = probe.RigidRotation(k);
+    for (std::size_t column = 0; column < 2; ++column) {
+      Complex dr = 0.0;
+      double rr = 0.0;
+      for (std::size_t d = 0; d < ndof; ++d) {
+        dr += (wa[column * ndof + d] - wb[column * ndof + d]) * rigid[d];
+        rr += rigid[d] * rigid[d];
+      }
+      const auto alpha = dr / rr;
+      for (std::size_t d = 0; d < ndof; ++d) {
+        gaugeShift = std::max(gaugeShift, std::abs(alpha) * rigid[d]);
+      }
+      double off = 0.0;
+      for (std::size_t d = 0; d < ndof; ++d) {
+        if (rigid[d] == 0.0) continue;
+        off = std::max(off, std::abs(wa[column * ndof + d] -
+                                     wb[column * ndof + d] - alpha * rigid[d]));
+      }
+      EXPECT_LE(off, 1e-8 * size) << "region " << k << ", column " << column;
+    }
+  }
+  // Not vacuous: the two gauges really do differ by a rigid rotation.
+  EXPECT_GT(gaugeShift, 1e-3 * size);
 }

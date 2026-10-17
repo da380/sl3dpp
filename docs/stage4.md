@@ -92,9 +92,10 @@ rotations, which is also the condition for the adjoint equations to
 exist. The expectation first recorded here,
 dropping the l = 1 toroidal response into the angular-momentum bookkeeping
 of the rotation feedback, was wrong: differential degree-1 rotation
-carries strain through W − r∂rW, and lateral viscosity drives it. The
-code still follows the old expectation (`ToroidalForce` and the toroidal
-solves start at l = 2), and that is to be fixed. The Fortran factors the
+carries strain through W − r∂rW, and lateral viscosity drives it.
+Implemented 17 Oct 2026: `ToroidalOperator` accepts l = 1, pinning one
+dof per solid region (its top node by default), and the toroidal force,
+solves and strain recovery run from l = 1. The Fortran factors the
 unconstrained degree-1 form by banded LU (`aa_tor_1`) and fixes no frame,
 so it is no reference for this mode.
 
@@ -267,9 +268,8 @@ AdGIA's `RelaxationLaw` path.
 
 ## 8. Open questions (beyond plan §8)
 
-- l = 1 toroidal: INCLUDED (decided 17 Oct 2026, §4). The frame that
-  removes the rigid rotations is plan §8.9. The code still starts the
-  toroidal block at l = 2, to be fixed.
+- l = 1 toroidal: INCLUDED (decided and implemented 17 Oct 2026, §4),
+  with one pinned dof per solid region as the gauge (plan §8.9).
 - Whether the SLE needs toroidal surface channels: no first-order
   coupling to sea level or gravity (toroidal motion is divergence-free
   and radial-displacement-free at the surface), so the toroidal block

@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <numbers>
 #include <vector>
@@ -213,7 +214,70 @@ TEST(ToroidalOperator, FluidDecouplingAndDegreeGuard) {
   EXPECT_GT(surface, 0.0);
   EXPECT_LT(inner, 1e-12 * surface);
 
-  // Degrees without a toroidal problem are refused.
-  EXPECT_THROW(ToroidalOperator(material, 1), std::invalid_argument);
+  // Degree 0 has no toroidal problem and is refused.
   EXPECT_THROW(ToroidalOperator(material, 0), std::invalid_argument);
+}
+
+TEST(ToroidalOperator, DegreeOneRigidRotationsArePinned) {
+  // At l = 1 rigid rotation (W = r) carries no strain: one null vector per
+  // solid region (inner core, mantle). The gauge pins one dof per region;
+  // for a right-hand side in the operator's range (torque-free) the pinned
+  // solve satisfies every equation, pinned rows included, and the pin
+  // changes the solution only by rigid rotations (plan.md §4).
+  auto material = CoreMantleMaterial(8);
+  ToroidalOperator top(material, 1);
+  ToroidalOperator deeper(material, 1, {.pin_fraction = 0.5});
+  ASSERT_EQ(top.RegionCount(), 2);
+  EXPECT_EQ(top.PinnedDofs().size(), 2u);
+  const auto n = top.DofCount();
+  auto maxAbs = [](const std::vector<double>& v) {
+    double m = 0.0;
+    for (auto x : v) m = std::max(m, std::abs(x));
+    return m;
+  };
+
+  // The rigid rotations span the null space of the full operator.
+  std::vector<double> y(n);
+  for (int d = 0; d < n; ++d) {
+    y[d] = std::sin(1.3 * d + 0.4) + 0.3 * std::cos(2.9 * d);
+  }
+  const auto b = top.Apply(y);
+  const auto bScale = maxAbs(b) / maxAbs(y);
+  for (int k = 0; k < top.RegionCount(); ++k) {
+    const auto rigid = top.RigidRotation(k);
+    EXPECT_LT(maxAbs(top.Apply(rigid)), 1e-11 * bScale * maxAbs(rigid))
+        << "region " << k;
+  }
+
+  // b = A y is torque-free: the pinned solves solve A x = b in full ...
+  for (const auto* op : {&top, &deeper}) {
+    const auto x = op->Solve(b);
+    const auto residual = op->Apply(x);
+    double worst = 0.0;
+    for (int d = 0; d < n; ++d) {
+      worst = std::max(worst, std::abs(residual[d] - b[d]));
+    }
+    EXPECT_LT(worst, 1e-9 * maxAbs(b));
+    // ... and differ from y only by a rigid rotation of each region.
+    for (int k = 0; k < op->RegionCount(); ++k) {
+      const auto rigid = op->RigidRotation(k);
+      double ratioMin = 1e300, ratioMax = -1e300;
+      for (int d = 0; d < n; ++d) {
+        if (rigid[d] <= 0.0) continue;
+        const auto ratio = (x[d] - y[d]) / rigid[d];
+        ratioMin = std::min(ratioMin, ratio);
+        ratioMax = std::max(ratioMax, ratio);
+      }
+      EXPECT_LT(ratioMax - ratioMin, 1e-8 * maxAbs(y) / maxAbs(rigid))
+          << "region " << k;
+    }
+  }
+
+  // A pin fraction outside [0, 1) is refused (1 would be a region's
+  // bottom node, the centre for the inner core, where the rigid mode
+  // vanishes).
+  EXPECT_THROW(ToroidalOperator(material, 1, {.pin_fraction = 1.0}),
+               std::invalid_argument);
+  EXPECT_THROW(ToroidalOperator(material, 1, {.pin_fraction = -0.1}),
+               std::invalid_argument);
 }

@@ -298,11 +298,12 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
   const auto w = mesh.Weights();
-  // As SpheroidalForce: operators resolved first, one task per degree.
+  // As SpheroidalForce: operators resolved first, one task per degree,
+  // from degree 1 (whose rigid rotations the operator's gauge fixes).
   std::vector<const ToroidalOperator*> ops(lmax_ + 1, nullptr);
-  for (auto l = 2; l <= lmax_; ++l) ops[l] = &system(l);
+  for (auto l = 1; l <= lmax_; ++l) ops[l] = &system(l);
   std::vector<std::vector<Complex>> forces(lmax_ + 1);
-  detail::ParallelFor(std::max(lmax_ - 1, 0), options_.parallel, [&](int task) {
+  detail::ParallelFor(lmax_, options_.parallel, [&](int task) {
     const auto l = lmax_ - task;  // the largest degrees first
     const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
@@ -334,7 +335,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
     forces[l] = std::move(b);
   });
   std::map<int, std::vector<Complex>> out;
-  for (auto l = 2; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
+  for (auto l = 1; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
 

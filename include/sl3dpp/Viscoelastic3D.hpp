@@ -85,6 +85,11 @@ class Viscoelastic3D {
     double rtol = 1e-11;
     double damping = 1.0;
     int anderson_memory = 5;
+    /// The degree-1 toroidal gauge (ToroidalOperator::Options::
+    /// pin_fraction): where in each solid region the pinned dof sits.
+    /// Nothing well defined depends on it; it is here so that tests can
+    /// show that.
+    double toroidal_pin_fraction = 0.0;
   };
 
   /// The reference rheology is copied (shared, immutable); delta is
@@ -125,7 +130,9 @@ class Viscoelastic3D {
   [[nodiscard]] State ZeroState() const;
 
   /// Per-degree solutions: spheroidal complex m >= 0 columns
-  /// (ndof x (l + 1), column-major) and toroidal likewise (degrees >= 2).
+  /// (ndof x (l + 1), column-major) and toroidal likewise (degrees >= 1;
+  /// degree 1 in the operator's pinned gauge, its rigid rotations being
+  /// gauge).
   struct Solutions {
     std::map<int, std::vector<Complex>> spheroidal;
     std::map<int, std::vector<Complex>> toroidal;

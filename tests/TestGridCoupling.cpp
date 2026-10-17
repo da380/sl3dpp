@@ -212,7 +212,7 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
 
   // A purely spheroidal state exerts no toroidal force.
   std::map<int, ToroidalOperator> toroidal;
-  for (int l = 2; l <= lmax; ++l) {
+  for (int l = 1; l <= lmax; ++l) {
     toroidal.emplace(l, ToroidalOperator(material, l));
   }
   const auto torForces = coupling.ToroidalForce(
@@ -227,4 +227,68 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
     for (auto v : b) forceScale = std::max(forceScale, std::abs(v));
   }
   EXPECT_LT(torWorst, 1e-11 * forceScale);
+}
+
+TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
+  // The memory force of any real tensor is orthogonal to the degree-1
+  // rigid rotations (a symmetric stress does no work on a rigid motion):
+  // the discrete consistency condition that lets the pinned degree-1
+  // toroidal solve solve the full singular system.
+  constexpr int lmax = 4;
+  auto deck =
+      Deck::Read(
+          std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
+          DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+          .value();
+  auto model = EarthModel::FromDeck(deck).value();
+  auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
+  auto material = Material::Create(model, mesh).value();
+  const auto& scales = model.ModelScales();
+  std::map<std::size_t, RadialValue> viscosity;
+  const auto boundaries = model.DimensionlessView().Boundaries();
+  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    if (!model.IsFluid(i) && boundaries[i] >= 3.4799e6 / scales.Length() &&
+        boundaries[i + 1] <= 6.1511e6 / scales.Length()) {
+      viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
+    }
+  }
+  auto rheology = Rheology::Maxwell(material, viscosity).value();
+  GridCoupling coupling(rheology, lmax);
+
+  // An arbitrary real tensor: any stored spin -2 and -1 values, real spin 0.
+  auto field = coupling.ZeroTensor();
+  for (auto c = 0; c < 2; ++c) {
+    for (std::size_t i = 0; i < field.c[c].size(); ++i) {
+      field.c[c][i] = Complex(Noise(7 * i + c), Noise(11 * i + 3 * c + 1));
+    }
+  }
+  for (std::size_t i = 0; i < field.r.size(); ++i) field.r[i] = Noise(5 * i);
+  const auto analysed = coupling.Analyse(field);
+
+  std::map<int, ToroidalOperator> toroidal;
+  for (int l = 1; l <= lmax; ++l) {
+    toroidal.emplace(l, ToroidalOperator(material, l));
+  }
+  const auto forces = coupling.ToroidalForce(
+      analysed,
+      [&](int l) -> const ToroidalOperator& { return toroidal.at(l); });
+  const auto& degreeOne = toroidal.at(1);
+  const auto& b = forces.at(1);
+  const auto ndof = static_cast<std::size_t>(degreeOne.DofCount());
+  double scale = 0.0;
+  for (auto v : b) scale = std::max(scale, std::abs(v));
+  ASSERT_GT(scale, 0.0);
+  for (int k = 0; k < degreeOne.RegionCount(); ++k) {
+    const auto rigid = degreeOne.RigidRotation(k);
+    for (std::size_t column = 0; column < 2; ++column) {
+      Complex torque = 0.0;
+      double size = 0.0;
+      for (std::size_t d = 0; d < ndof; ++d) {
+        torque += b[column * ndof + d] * rigid[d];
+        size += std::abs(b[column * ndof + d]) * rigid[d];
+      }
+      EXPECT_LT(std::abs(torque), 1e-12 * std::max(size, scale))
+          << "region " << k << ", column " << column;
+    }
+  }
 }

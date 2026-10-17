@@ -148,11 +148,13 @@ const ToroidalOperator& Viscoelastic3D::Toroidal(int l) const {
   auto found = toroidal_.find(l);
   if (found == toroidal_.end()) {
     found = toroidal_
-                .emplace(l, std::make_unique<ToroidalOperator>(
-                                rheology_->BaseMaterial(), l,
-                                ToroidalOperator::Options{
-                                    .eps = options_.eps,
-                                    .truncation = options_.truncation}))
+                .emplace(
+                    l, std::make_unique<ToroidalOperator>(
+                           rheology_->BaseMaterial(), l,
+                           ToroidalOperator::Options{
+                               .eps = options_.eps,
+                               .truncation = options_.truncation,
+                               .pin_fraction = options_.toroidal_pin_fraction}))
                 .first;
   }
   return *found->second;
@@ -370,11 +372,13 @@ const ToroidalOperator& Viscoelastic3D::FlavourToroidal(Flavour& flavour,
   auto found = flavour.toroidal.find(l);
   if (found == flavour.toroidal.end()) {
     found = flavour.toroidal
-                .emplace(l, std::make_unique<ToroidalOperator>(
-                                *flavour.material, l,
-                                ToroidalOperator::Options{
-                                    .eps = options_.eps,
-                                    .truncation = options_.truncation}))
+                .emplace(
+                    l, std::make_unique<ToroidalOperator>(
+                           *flavour.material, l,
+                           ToroidalOperator::Options{
+                               .eps = options_.eps,
+                               .truncation = options_.truncation,
+                               .pin_fraction = options_.toroidal_pin_fraction}))
                 .first;
   }
   return *found->second;

@@ -651,3 +651,12 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   must be rotation-invariant. A first, stricter reading (only u + φ/g
   at degree 1, enforced in the adjoint solvers) was reverted the same
   day (§4, §8.10).
+- **17 Oct 2026** — Degree-1 toroidal implemented (performance chunk 5):
+  `ToroidalOperator` accepts l = 1, pinning one dof per solid region
+  (the top node by default; `pin_fraction` moves it), and the toroidal
+  force, solves and strain recovery run from l = 1. Gated: rigid
+  rotations are the null space; the memory force is torque-free; the
+  pinned solve solves the full system; moving the pin changes only the
+  degree-1 rigid rotation. Effect on the lateral example: 0.25% of the
+  lateral-minus-radial sea-level difference; the Fortran gate is
+  unchanged (its pattern cannot excite the mode, by symmetry).
