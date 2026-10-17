@@ -83,7 +83,10 @@ From `pyslfp/docs/theory/pyslfp_theory.tex` (the authoritative statement):
 
 - Gravity `g = ∂_r Φ > 0`; potential perturbation sign conventions as there.
 - Sea level `ξ = −u − (φ+ψ)/g + c`.
-- Centre-of-mass frame at degree 1.
+- Centre-of-mass frame at degree 1 (removes the spheroidal translations).
+- Degree-1 toroidal rigid rotations: removed by a frame convention still
+  to be chosen (`plan.md` §8.9). Any output of degree-1 toroidal
+  displacement must state its frame.
 - Love-number normalisations and the body triple (b, g, G) consistent with
   the radial model, per `pyslfp_theory.tex`.
 - Rotation: first-order quasi-static Liouville per pyslfp §7, ported

@@ -79,13 +79,24 @@ L = N = μ. Solid regions only — fluid carries no toroidal dof, so the solid
 sections decouple into independent blocks (one banded factorisation
 with absent fluid dofs covers them; the blocks are SPD separately).
 No gravity, no fluid terms, no DtN. At l = 1 the form is singular
-(rigid rotation W ∝ r: both terms vanish), to be handled as the
-Fortran does — check `get_depth`/`gvn_tor` use at l = 1 during
-implementation; the expected resolution is dropping l = 1 toroidal
-response into the angular-momentum bookkeeping of the rotation
-feedback. Verification: reciprocity/symmetry, an analytic homogeneous-
-sphere toroidal response, and the Fortran once the time-dependent
-cross-checks start.
+(rigid rotation W ∝ r: both terms vanish).
+
+**Degree 1 is included** (decided 17 Oct 2026, plan §4 and §9). The
+rigid rotations, one per order in each solid region that fluid separates
+(mantle, inner core), form a null space that is removed by convention.
+The right-hand side is torque-free, so the singular system is consistent.
+The frame is plan open question §8.9. The expectation first recorded here,
+dropping the l = 1 toroidal response into the angular-momentum bookkeeping
+of the rotation feedback, was wrong: differential degree-1 rotation
+carries strain through W − r∂rW, and lateral viscosity drives it. The
+code still follows the old expectation (`ToroidalForce` and the toroidal
+solves start at l = 2), and that is to be fixed. The Fortran factors the
+unconstrained degree-1 form by banded LU (`aa_tor_1`) and fixes no frame,
+so it is no reference for this mode.
+
+Verification: reciprocity/symmetry, an analytic homogeneous-sphere
+toroidal response, and the Fortran once the time-dependent cross-checks
+start (l ≥ 2).
 
 ## 5. The step with lateral viscosity
 
@@ -252,7 +263,9 @@ AdGIA's `RelaxationLaw` path.
 
 ## 8. Open questions (beyond plan §8)
 
-- l = 1 toroidal null space handling (§4).
+- l = 1 toroidal: INCLUDED (decided 17 Oct 2026, §4). The frame that
+  removes the rigid rotations is plan §8.9. The code still starts the
+  toroidal block at l = 2, to be fixed.
 - Whether the SLE needs toroidal surface channels: no first-order
   coupling to sea level or gravity (toroidal motion is divergence-free
   and radial-displacement-free at the surface), so the toroidal block

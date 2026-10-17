@@ -285,6 +285,33 @@ this works is itself a benchmark-paper result alongside the AdGIA comparison.
   spheroidal + toroidal, fluid regions, interface terms, DtN/Robin exterior
   and truncation conditions, proper l = 0 and l = 1 — following pyslfp's
   `DegreeSystem`, with LDLᵀ (LU fallback), never plain Cholesky.
+- **Degree-1 toroidal motion is part of the 3D problem** (decided 17 Oct
+  2026, §9). Lateral viscosity drives it: differential degree-1 rotation
+  carries strain through W − r∂rW. The toroidal block therefore runs over
+  l ≥ 1, not l ≥ 2. Its quasi-static operator is singular. Rigid rotation
+  (W ∝ r) carries no strain, which gives one null vector per order m in
+  each solid region that fluid separates from the rest (the mantle and the
+  inner core). These are removed by convention, as the centre-of-mass
+  frame removes the degree-1 spheroidal translations:
+  - The singular system is consistent. Memory stresses are symmetric and
+    do no work on a rigid rotation, and the surface loads and potentials
+    have no toroidal part, so the right-hand side is torque-free.
+  - The convention only picks the representative. Rigid rotation carries
+    no strain, so the memory evolution, every other degree and sea level
+    do not depend on it. Only the reported degree-1 toroidal displacement
+    does, and outputs of it must state their frame.
+  - The convention must agree with the frame the rotational feedback
+    assumes (the Liouville equation, pyslfp §7). Which one is open
+    question §8.9.
+  - Implementation that keeps the banded Cholesky: pin one dof per solid
+    region (the pinned matrix is SPD, and the pinned solve solves the
+    full consistent system), then add the rigid mode that satisfies the
+    convention's linear functional. The discrete adjoint transposes this
+    projection along with the solve.
+  - Gates: the right-hand side torque-free at round-off; the convention
+    satisfied; strain and every other output identical under two
+    different conventions; the zero-lateral gates unchanged (with no
+    lateral variation the toroidal block is not excited).
 - Internal-variable Maxwell/Prony rheology; exponential trapezoid default,
   BE and ETD1 variants; adaptive stepping optional. Implement ntau > 1
   properly (nearly free with the weight algebra).
@@ -484,6 +511,15 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
    `Rheology`/`StepWeights` interface must not preclude moduli-resolved
    branches. Whatever is settled here is intended to translate back to
    pyslfp/AdGIA.
+9. **The degree-1 toroidal frame** (raised 17 Oct 2026, §4). Which
+   convention fixes the rigid rotations. Candidates: zero net angular
+   momentum of the deformation (a mean-body, Tisserand-type frame: one
+   weighted radial integral of W per order); no net rotation of the
+   surface; the mantle's mean frame. The inner core needs a condition of
+   its own, because quasi-statically the fluid outer core transmits no
+   tangential traction, so its rigid rotation is free separately. Whatever
+   is chosen must match the frame the rotational feedback assumes, and
+   should be shared with AdGIA so the benchmark compares like with like.
 
 ## 9. Decision log
 
@@ -559,3 +595,13 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   `.clang-format` taken verbatim from AdGIA. AdGIA supplies naming/layering
   only: the idiom is modern C++23 (concepts, ranges, `std::expected`, value
   semantics), not AdGIA's MFEM-constrained style.
+- **17 Oct 2026** — Degree-1 toroidal motion is included in the 3D
+  problem (David): it is a physical mode that lateral viscosity drives,
+  and its rigid-rotation null space is removed by convention (§4; the
+  frame is open question §8.9). This reverses the expectation recorded in
+  `stage4.md` §4, which was to drop it, and which the code follows:
+  `GridCoupling::ToroidalForce` and the toroidal solves start at l = 2.
+  That omission is to be fixed before the AdGIA benchmark. The Fortran is
+  no reference for this mode: it factors the unconstrained, singular
+  degree-1 form by banded LU (`aa_tor_1`, `module_mat.f90:58-62`;
+  `amat_tor` applies no constraint), so it fixes no frame.
