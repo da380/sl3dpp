@@ -12,6 +12,7 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
+#include <limits>
 #include <map>
 #include <vector>
 
@@ -334,6 +335,84 @@ TEST(Stage4, FinishingAMovedStepTakesItsBuffers) {
   ASSERT_TRUE(copied.strain.has_value() && moved.strain.has_value());
   EXPECT_TRUE(same(*copied.strain, *moved.strain));
   EXPECT_EQ(copied.t, moved.t);
+}
+
+TEST(Stage4, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
+  // The within-step iteration is Picard until a pass contracts by less
+  // than anderson_rate. A weak contrast at a short step never gets there,
+  // so its step is bitwise plain Picard; a long step does, and Anderson
+  // then takes fewer passes than Picard and lands where Anderson from the
+  // first pass does.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto amplitude = 0.5 * std::log(3.0);  // a 3x contrast
+  const auto delta = [amplitude](double, double theta, double phi) {
+    return amplitude * std::sin(theta) * std::cos(phi);
+  };
+  auto second = [&](double h, int memory, double rate) {
+    Viscoelastic3D::Options options;
+    options.max_iterations = 200;
+    options.anderson_memory = memory;
+    options.anderson_rate = rate;
+    const auto op = Viscoelastic3D(body.rheology, kLmax, delta, options);
+    const auto first =
+        op.Step(op.ZeroState(), h * tau, Scheme::ExponentialTrapezoid, load);
+    EXPECT_TRUE(first.info.converged);
+    return op.Step(first.state, h * tau, Scheme::ExponentialTrapezoid, load);
+  };
+  auto gap = [](const Viscoelastic3D::Solutions& a,
+                const Viscoelastic3D::Solutions& b) {
+    auto scale = 0.0, diff = 0.0;
+    for (const auto& [l, x] : a.spheroidal) {
+      const auto& y = b.spheroidal.at(l);
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(y[i]));
+        diff = std::max(diff, std::abs(x[i] - y[i]));
+      }
+    }
+    return diff / scale;
+  };
+
+  const auto weak = second(0.5, 5, 0.5);
+  const auto weakPicard = second(0.5, 0, 0.5);
+  EXPECT_TRUE(weak.info.converged);
+  EXPECT_EQ(weak.info.mixedPasses, 0);
+  EXPECT_EQ(weak.info.iterations, weakPicard.info.iterations);
+  EXPECT_EQ(gap(weak.solutions, weakPicard.solutions), 0.0);
+
+  const auto slow = second(10.0, 5, 0.5);
+  const auto slowPicard = second(10.0, 0, 0.5);
+  const auto always = second(10.0, 5, 0.0);
+  EXPECT_TRUE(slow.info.converged);
+  EXPECT_GT(slow.info.mixedPasses, 0);
+  EXPECT_LT(slow.info.iterations, slowPicard.info.iterations);
+  EXPECT_LT(gap(slow.solutions, always.solutions), 1e-9);
+}
+
+TEST(Stage4, NonFinitePassEndsTheIteration) {
+  // The residual's maxima pass over NaNs, so a pass gone non-finite is
+  // caught apart: the iteration stops unconverged, with a NaN residual,
+  // on the last finite iterate (here the start), instead of reading an
+  // all-NaN iterate as a zero change.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto op = Viscoelastic3D(body.rheology, kLmax,
+                                 [](double, double, double) { return 0.0; });
+  const auto step =
+      op.StartStep(op.ZeroState(), tau, Scheme::ExponentialTrapezoid, load);
+  const auto& s0 = step.StartStrain();
+  const auto poisoned = [&](const GridCoupling::SpectralTensor& s) {
+    auto out = s;
+    out.r[0] = std::numeric_limits<double>::quiet_NaN();
+    return out;
+  };
+  const auto [last, stopped] = step.Converge(poisoned, {});
+  EXPECT_FALSE(stopped.converged);
+  EXPECT_EQ(stopped.iterations, 1);
+  EXPECT_TRUE(std::isnan(stopped.residual));
+  EXPECT_EQ(last.r, s0.r);
 }
 
 TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {

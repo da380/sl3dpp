@@ -220,8 +220,18 @@ an `IterationControl`.
   on the grid values; the two agree in what they accept to within the
   tolerance, and the results to round-off (§7).
 - Defaults (`Viscoelastic3D.hpp`, `Options`): rtol 1e-11, at most 40
-  passes, damping 1, Anderson memory 5. The sea-level loop and the
-  adjoint pass their own options, without damping.
+  passes, damping 1, Anderson memory 5, `anderson_rate` 0.5. The
+  sea-level loop and the adjoint pass their own options, without
+  damping.
+- Adaptive mixing (since chunk 9): each step starts as plain Picard, and
+  Anderson takes over for the rest of the step once a pass shrinks the
+  residual by less than `anderson_rate`. At weak contrasts the step is
+  then pure Picard, with no history kept (at lmax 64 a pass costs 0.62 s
+  against 0.87 s mixed, and 1.9 GB less at peak); at strong contrasts or
+  long steps Anderson takes as many passes as when it mixes from the
+  first, the switch costing a pass or two (`stage4.md` §5a, revisited).
+  `anderson_rate` 0 is the old iteration, Anderson from the first pass;
+  `StepInfo.mixedPasses` counts the mixed passes.
 - Mixing: `detail::AndersonMixer::UpdateInPlace` works directly on s's
   three coefficient blocks and overwrites s with the mixed iterate, with
   no copies and two sweeps over the data, both threaded (the Gram sums
@@ -235,7 +245,11 @@ an `IterationControl`.
   step for `StrainOf` to refill.
 - Not converging is not an error here. `StepInfo.converged = false` is
   returned and the step finishes with the last iterate. The adjoint
-  sweep throws instead.
+  sweep throws instead. A pass that goes non-finite stops the iteration
+  at once, unconverged, with a NaN residual, on the last finite iterate:
+  the residual's maxima pass over NaNs, so before chunk 9 an all-NaN
+  iterate read as no change and a diverged step could report itself
+  converged.
 
 ### 4.4 Finish (`:618`, `:632`)
 

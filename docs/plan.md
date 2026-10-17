@@ -765,3 +765,19 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   over memory nodes. At one thread every result is bitwise unchanged; at
   lmax 64 on 8 threads a pass is 0.76–0.79 s for 1.05 (Gauss), 0.94 for
   1.34 (GLL). `StartStep` (0.82 s a step) is now the largest overhead.
+- **17 Oct 2026** — Adaptive mixing in the 3D within-step iteration
+  (performance chunk 9). Each step starts as Picard; Anderson (depth 5)
+  takes over for the rest of the step once a pass shrinks the residual
+  by less than `IterationControl::anderson_rate` (0.5; also on
+  `Viscoelastic3D`, `SeaLevelEvolution3D` and `AdjointSolver3D`
+  options). Measured (`stage4.md` §5a, revisited): pure Picard wherever
+  Picard is quick, which at the benchmark's weak contrast saves 30% of
+  the pass time and 1.9 GB at lmax 64, and pass for pass Anderson where
+  it is not; `anderson_rate` 0 restores the old iteration bitwise. A
+  give-up-for-Picard safeguard was tried and dropped (it gave Anderson up
+  in its early lag, and Picard then diverged); the case that motivated it
+  was an artefact of a real bug, now fixed: the residual's maxima passed
+  over NaNs, so an all-NaN iterate read as converged. A non-finite pass
+  now ends the iteration unconverged. A resolution check (lmax 16/24/32,
+  contrasts to 1000x) shows the pass counts independent of lmax and the
+  low-degree response at lmax 16 good to 3e-8.

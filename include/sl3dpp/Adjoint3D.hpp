@@ -87,9 +87,11 @@ class AdjointSolver3D {
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// The within-step lateral fixed point of the reversed steps.
+    /// The within-step lateral fixed point of the reversed steps (mixing
+    /// as Viscoelastic3D::IterationControl).
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
+    double anderson_rate = 0.5;
   };
 
   explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution,

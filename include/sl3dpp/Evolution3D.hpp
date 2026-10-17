@@ -46,9 +46,12 @@ class SeaLevelEvolution3D {
     /// The SLE's own tolerance per pass.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// The combined (strain) fixed point.
+    /// The combined (strain) fixed point, Anderson-mixed once Picard
+    /// contracts by less than anderson_rate a pass (and the SLE's own
+    /// iteration, at the same memory; Viscoelastic3D::IterationControl).
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
+    double anderson_rate = 0.5;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
     /// coefficients are kept whenever the stride is set. (No 3D

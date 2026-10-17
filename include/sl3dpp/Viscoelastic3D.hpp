@@ -81,12 +81,14 @@ class Viscoelastic3D {
     /// (each thread plans its own FFTs, by FFTW_MEASURE).
     bool parallel = true;
     bool matrix_kernel = false;
-    /// The within-step iteration: Anderson-accelerated (0 = plain
-    /// Picard), with optional damping of the Picard part.
+    /// The within-step iteration (IterationControl): Picard, Anderson-
+    /// accelerated when it contracts too slowly (anderson_memory 0 = plain
+    /// Picard throughout), with optional damping of the Picard part.
     int max_iterations = 40;
     double rtol = 1e-11;
     double damping = 1.0;
     int anderson_memory = 5;
+    double anderson_rate = 0.5;
     /// The degree-1 toroidal gauge (ToroidalOperator::Options::
     /// pin_fraction): where in each solid region the pinned dof sits.
     /// Nothing well defined depends on it; it is here so that tests can
@@ -174,19 +176,31 @@ class Viscoelastic3D {
 
   struct StepInfo {
     int iterations = 0;
+    /// The last pass's residual; NaN when a pass went non-finite, which
+    /// ends the iteration unconverged on the last finite iterate.
     double residual = 0.0;
     bool converged = true;
+    /// The passes Anderson mixed.
+    int mixedPasses = 0;
   };
 
   /// The within-step fixed point's controls: at most max_iterations
   /// passes, converged when the relative sup-norm change of the strain's
-  /// coefficients is at most rtol; damping scales the Picard part, and
-  /// anderson_memory 0 means plain (damped) Picard.
+  /// coefficients is at most rtol; damping scales the Picard part.
+  ///
+  /// The iteration starts as Picard, which is enough when the lateral
+  /// term is weak and costs no history. Once a pass shrinks the residual
+  /// by less than anderson_rate (0.5 by default, about where Anderson's
+  /// fewer passes start to pay for its dearer ones), Anderson mixing with
+  /// anderson_memory differences takes over for the rest of the step
+  /// (stage4.md §5a). anderson_rate <= 0 mixes from the first pass;
+  /// anderson_memory 0 never mixes.
   struct IterationControl {
     int max_iterations = 40;
     double rtol = 1e-11;
     double damping = 1.0;
     int anderson_memory = 5;
+    double anderson_rate = 0.5;
   };
 
   /// One implicit step (ExponentialTrapezoid or BackwardEuler) under the

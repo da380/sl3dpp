@@ -410,7 +410,8 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
         },
         {.max_iterations = options_.max_coupled_iterations,
          .rtol = options_.coupled_rtol,
-         .anderson_memory = options_.anderson_memory});
+         .anderson_memory = options_.anderson_memory,
+         .anderson_rate = options_.anderson_rate});
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the reversed lateral fixed point at node {} did not converge",

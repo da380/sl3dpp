@@ -5,6 +5,8 @@
 #include <cmath>
 #include <format>
 #include <functional>
+#include <limits>
+#include <optional>
 #include <stdexcept>
 #include <utility>
 
@@ -651,7 +653,15 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
   auto s = s0_;
   StepInfo info;
   info.converged = false;
-  detail::AndersonMixer mixer(control.anderson_memory, parallel);
+  // Picard until a pass contracts too slowly, then Anderson for the rest
+  // of the step (IterationControl). Not adaptive: Anderson from the first
+  // pass (the iteration before 17 Oct, chunk 9).
+  const auto adaptive = control.anderson_rate > 0.0;
+  auto mixer = std::optional<detail::AndersonMixer>{};
+  if (control.anderson_memory > 0 && !adaptive) {
+    mixer.emplace(control.anderson_memory, parallel);
+  }
+  auto previous = 0.0;  // the last pass's residual
   for (auto iteration = 0; iteration < control.max_iterations; ++iteration) {
     auto sNext = pass(s);
     const auto next = Blocks(sNext);
@@ -659,19 +669,28 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
 
     // The relative sup-norm change of the coefficients, compared on
     // squared magnitudes (maxima: the same whatever the thread count).
+    // The maxima pass over NaNs, so a diverged pass is caught apart: it
+    // ends the iteration unconverged, on the last finite iterate.
     double scale = 0.0, diff = 0.0;
+    auto finite = true;
     for (std::size_t b = 0; b < next.size(); ++b) {
       const auto& n = *next[b];
       const auto& o = *now[b];
       const auto size = n.size();
-#pragma omp parallel for schedule(static) \
-    reduction(max : scale, diff) if (parallel)
+#pragma omp parallel for schedule(static) reduction(max : scale, diff) \
+    reduction(&& : finite) if (parallel)
       for (std::size_t i = 0; i < size; ++i) {
+        finite =
+            finite && std::isfinite(n[i].real()) && std::isfinite(n[i].imag());
         scale = std::max(scale, std::norm(n[i]));
         diff = std::max(diff, std::norm(n[i] - o[i]));
       }
     }
     info.iterations = iteration + 1;
+    if (!finite) {
+      info.residual = std::numeric_limits<double>::quiet_NaN();
+      break;
+    }
     info.residual = scale > 0.0 ? std::sqrt(diff) / std::sqrt(scale) : 0.0;
     if (info.residual <= control.rtol) {
       info.converged = true;
@@ -687,8 +706,15 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
         });
       }
     }
-    if (control.anderson_memory > 0) {
-      mixer.UpdateInPlace(RealSegments(s), RealSegments(std::as_const(sNext)));
+    const auto residual = info.residual;
+    if (adaptive && !mixer && control.anderson_memory > 0 && iteration > 0 &&
+        residual > control.anderson_rate * previous) {
+      mixer.emplace(control.anderson_memory, parallel);
+    }
+    previous = residual;
+    if (mixer) {
+      mixer->UpdateInPlace(RealSegments(s), RealSegments(std::as_const(sNext)));
+      ++info.mixedPasses;
     } else {
       std::swap(s, sNext);
     }
@@ -711,7 +737,8 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
       {.max_iterations = options_.max_iterations,
        .rtol = options_.rtol,
        .damping = options_.damping,
-       .anderson_memory = options_.anderson_memory});
+       .anderson_memory = options_.anderson_memory,
+       .anderson_rate = options_.anderson_rate});
   return {std::move(step).Finish(strain), std::move(solutions), info};
 }
 
