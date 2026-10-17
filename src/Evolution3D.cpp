@@ -6,7 +6,6 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
-#include "sl3dpp/detail/AndersonMixer.hpp"
 
 namespace sl3dpp {
 
@@ -165,81 +164,35 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     loadGrid = iceLoad(times[node]);
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto d = step.StartStrain();
-    detail::AndersonMixer mixer(options_.anderson_memory);
-    auto flatten = [&](const GridCoupling::TensorField& tensor) {
-      std::vector<double> flat;
-      flat.reserve(2 * 2 * tensor.c[0].size() + tensor.r.size());
-      for (auto c = 0; c < 2; ++c) {
-        for (const auto& v : tensor.c[c]) {
-          flat.push_back(v.real());
-          flat.push_back(v.imag());
-        }
-      }
-      for (auto v : tensor.r) flat.push_back(v);
-      return flat;
-    };
-    auto unflatten = [&](std::span<const double> flat) {
-      auto tensor = op.Coupling().ZeroTensor();
-      std::size_t at = 0;
-      for (auto c = 0; c < 2; ++c) {
-        for (auto& v : tensor.c[c]) {
-          v = {flat[at], flat[at + 1]};
-          at += 2;
-        }
-      }
-      for (auto& v : tensor.r) v = flat[at++];
-      return tensor;
-    };
-    int iterations = 0;
-    double residual = 0.0;
-    bool converged = false;
-    for (auto pass = 0; pass < options_.max_coupled_iterations; ++pass) {
-      auto responses = step.Respond(d);
-      SeaLevelSolver::GeneralisedForcing coupled;
-      coupled.directLoad = loadGrid;
-      coupled.displacementResponse =
-          Coefficients(op.Surface(responses, Component::U), toNdLength_);
-      coupled.potentialResponse =
-          Coefficients(op.Surface(responses, Component::Phi), toNdPotential_);
-      coupled.inertiaMomentChange = step.InertiaMoment(responses) * toNdMoment_;
-      coupled.rotation = options_.rotation;
-      response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-      sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-      psi = options_.rotation == RotationalFeedback::None
-                ? grid.ZeroCoefficients()
-                : solver.CentrifugalCoefficients(response.angularVelocity);
-      step.AddChannels(responses, Columns(sigma, toMatDensity_),
-                       Columns(psi, toMatPotential_));
-      auto dNext = step.StrainOf(responses);
-
-      double scale = 0.0, diff = 0.0;
-      for (auto c = 0; c < 2; ++c) {
-        for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
-          scale = std::max(scale, std::abs(dNext.c[c][i]));
-          diff = std::max(diff, std::abs(dNext.c[c][i] - d.c[c][i]));
-        }
-      }
-      for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-        scale = std::max(scale, std::abs(dNext.r[i]));
-        diff = std::max(diff, std::abs(dNext.r[i] - d.r[i]));
-      }
-      iterations = pass + 1;
-      residual = scale > 0.0 ? diff / scale : 0.0;
-      if (residual <= options_.coupled_rtol) {
-        converged = true;
-        d = std::move(dNext);
-        break;
-      }
-      if (options_.anderson_memory > 0) {
-        d = unflatten(mixer.Update(flatten(d), flatten(dNext)));
-      } else {
-        d = std::move(dNext);
-      }
-    }
+    auto [d, info] = step.Converge(
+        [&](const GridCoupling::TensorField& strain) {
+          auto responses = step.Respond(strain);
+          SeaLevelSolver::GeneralisedForcing coupled;
+          coupled.directLoad = loadGrid;
+          coupled.displacementResponse =
+              Coefficients(op.Surface(responses, Component::U), toNdLength_);
+          coupled.potentialResponse = Coefficients(
+              op.Surface(responses, Component::Phi), toNdPotential_);
+          coupled.inertiaMomentChange =
+              step.InertiaMoment(responses) * toNdMoment_;
+          coupled.rotation = options_.rotation;
+          response =
+              effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
+          sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+          psi = options_.rotation == RotationalFeedback::None
+                    ? grid.ZeroCoefficients()
+                    : solver.CentrifugalCoefficients(response.angularVelocity);
+          step.AddChannels(responses, Columns(sigma, toMatDensity_),
+                           Columns(psi, toMatPotential_));
+          return step.StrainOf(responses);
+        },
+        {.max_iterations = options_.max_coupled_iterations,
+         .rtol = options_.coupled_rtol,
+         .anderson_memory = options_.anderson_memory});
     vstate_ = step.Finish(std::move(d));
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
-    record(times[node], response, iterations, residual, converged, keep);
+    record(times[node], response, info.iterations, info.residual,
+           info.converged, keep);
   }
   return snapshots;
 }

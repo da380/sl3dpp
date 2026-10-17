@@ -1,13 +1,39 @@
 #include "sl3dpp/Viscoelastic3D.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 #include "sl3dpp/detail/AndersonMixer.hpp"
 
 namespace sl3dpp {
+
+namespace {
+
+// A tensor's stored components as real segments, in the order the mixer
+// has always taken them: spin -2 and spin -1 (each complex value as its
+// real-imaginary pair, the array layout std::complex guarantees), then
+// the real spin 0 component.
+std::array<std::span<double>, 3> RealSegments(GridCoupling::TensorField& t) {
+  auto pairs = [](std::vector<std::complex<double>>& v) {
+    return std::span<double>(reinterpret_cast<double*>(v.data()), 2 * v.size());
+  };
+  return {pairs(t.c[0]), pairs(t.c[1]), std::span<double>(t.r)};
+}
+
+std::array<std::span<const double>, 3> RealSegments(
+    const GridCoupling::TensorField& t) {
+  auto pairs = [](const std::vector<std::complex<double>>& v) {
+    return std::span<const double>(reinterpret_cast<const double*>(v.data()),
+                                   2 * v.size());
+  };
+  return {pairs(t.c[0]), pairs(t.c[1]), std::span<const double>(t.r)};
+}
+
+}  // namespace
 
 struct Viscoelastic3D::Flavour {
   std::unique_ptr<Material> material;  // the reference effective solid
@@ -495,79 +521,71 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
   return next;
 }
 
-Viscoelastic3D::StepResult Viscoelastic3D::Step(
-    const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
-    const LoadCallable3D& tide) const {
-  auto step = StartStep(state, dt, scheme, load, tide);
-  auto d = step.StartStrain();
-  Solutions solutions;
+std::pair<GridCoupling::TensorField, Viscoelastic3D::StepInfo>
+Viscoelastic3D::OpenStep::Converge(const Pass& pass,
+                                   const IterationControl& control) const {
+  auto d = d0_;
   StepInfo info;
   info.converged = false;
-  detail::AndersonMixer mixer(options_.anderson_memory);
-  auto flatten = [&](const GridCoupling::TensorField& tensor) {
-    std::vector<double> flat;
-    flat.reserve(2 * 2 * tensor.c[0].size() + tensor.r.size());
-    for (auto c = 0; c < 2; ++c) {
-      for (const auto& v : tensor.c[c]) {
-        flat.push_back(v.real());
-        flat.push_back(v.imag());
-      }
-    }
-    for (auto v : tensor.r) flat.push_back(v);
-    return flat;
-  };
-  auto unflatten = [&](std::span<const double> flat) {
-    auto tensor = coupling_.ZeroTensor();
-    std::size_t at = 0;
-    for (auto c = 0; c < 2; ++c) {
-      for (auto& v : tensor.c[c]) {
-        v = {flat[at], flat[at + 1]};
-        at += 2;
-      }
-    }
-    for (auto& v : tensor.r) v = flat[at++];
-    return tensor;
-  };
-  for (auto pass = 0; pass < options_.max_iterations; ++pass) {
-    solutions = step.Respond(d);
-    step.AddChannels(solutions, load, tide);
-    auto dNext = step.StrainOf(solutions);
+  detail::AndersonMixer mixer(control.anderson_memory);
+  for (auto iteration = 0; iteration < control.max_iterations; ++iteration) {
+    auto dNext = pass(d);
 
+    // The relative sup-norm change, compared on squared magnitudes.
     double scale = 0.0, diff = 0.0;
     for (auto c = 0; c < 2; ++c) {
       for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
-        scale = std::max(scale, std::abs(dNext.c[c][i]));
-        diff = std::max(diff, std::abs(dNext.c[c][i] - d.c[c][i]));
+        scale = std::max(scale, std::norm(dNext.c[c][i]));
+        diff = std::max(diff, std::norm(dNext.c[c][i] - d.c[c][i]));
       }
     }
     for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-      scale = std::max(scale, std::abs(dNext.r[i]));
-      diff = std::max(diff, std::abs(dNext.r[i] - d.r[i]));
+      const auto change = dNext.r[i] - d.r[i];
+      scale = std::max(scale, dNext.r[i] * dNext.r[i]);
+      diff = std::max(diff, change * change);
     }
-    info.iterations = pass + 1;
-    info.residual = scale > 0.0 ? diff / scale : 0.0;
-    if (info.residual <= options_.rtol) {
+    info.iterations = iteration + 1;
+    info.residual = scale > 0.0 ? std::sqrt(diff) / std::sqrt(scale) : 0.0;
+    if (info.residual <= control.rtol) {
       info.converged = true;
       d = std::move(dNext);
       break;
     }
-    if (options_.damping != 1.0) {
+    if (control.damping != 1.0) {
       for (auto c = 0; c < 2; ++c) {
         for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
           dNext.c[c][i] =
-              d.c[c][i] + options_.damping * (dNext.c[c][i] - d.c[c][i]);
+              d.c[c][i] + control.damping * (dNext.c[c][i] - d.c[c][i]);
         }
       }
       for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-        dNext.r[i] = d.r[i] + options_.damping * (dNext.r[i] - d.r[i]);
+        dNext.r[i] = d.r[i] + control.damping * (dNext.r[i] - d.r[i]);
       }
     }
-    if (options_.anderson_memory > 0) {
-      d = unflatten(mixer.Update(flatten(d), flatten(dNext)));
+    if (control.anderson_memory > 0) {
+      mixer.UpdateInPlace(RealSegments(d), RealSegments(std::as_const(dNext)));
     } else {
       d = std::move(dNext);
     }
   }
+  return {std::move(d), info};
+}
+
+Viscoelastic3D::StepResult Viscoelastic3D::Step(
+    const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
+    const LoadCallable3D& tide) const {
+  auto step = StartStep(state, dt, scheme, load, tide);
+  Solutions solutions;
+  auto [d, info] = step.Converge(
+      [&](const GridCoupling::TensorField& strain) {
+        solutions = step.Respond(strain);
+        step.AddChannels(solutions, load, tide);
+        return step.StrainOf(solutions);
+      },
+      {.max_iterations = options_.max_iterations,
+       .rtol = options_.rtol,
+       .damping = options_.damping,
+       .anderson_memory = options_.anderson_memory});
   return {step.Finish(std::move(d)), std::move(solutions), info};
 }
 

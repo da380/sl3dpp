@@ -28,9 +28,11 @@
  *
  * so each pass of the within-step iteration is one trip through the
  * (gated) GridCoupling pipeline plus the reference banded back-solves,
- * spheroidal and toroidal. The iteration is damped Picard here; its
- * convergence against viscosity contrast is the stage-4 research
- * measurement, and Anderson mixing is the recorded fallback (plan §3).
+ * spheroidal and toroidal. The iteration is Anderson-accelerated
+ * (memory 5 by default; 0 gives plain Picard, optionally damped), and
+ * one loop, OpenStep::Converge, serves this class's Step, the sea level
+ * coupling and the adjoint sweep. Its convergence against viscosity
+ * contrast is the stage-4 research measurement (stage4.md §5a).
  *
  * With delta = 0 the lateral term vanishes identically and a step
  * reproduces the 1D two-phase stepper exactly — the zero-lateral step
@@ -45,6 +47,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/GridCoupling.hpp"
@@ -141,6 +144,17 @@ class Viscoelastic3D {
     bool converged = true;
   };
 
+  /// The within-step fixed point's controls: at most max_iterations
+  /// passes, converged when the relative sup-norm change of the strain is
+  /// at most rtol; damping scales the Picard part, and anderson_memory 0
+  /// means plain (damped) Picard.
+  struct IterationControl {
+    int max_iterations = 40;
+    double rtol = 1e-11;
+    double damping = 1.0;
+    int anderson_memory = 5;
+  };
+
   /// One implicit step (ExponentialTrapezoid or BackwardEuler) under the
   /// load channels; returns the new state (with its strain cache), the
   /// end-time solutions, and the iteration diagnostics.
@@ -184,6 +198,19 @@ class Viscoelastic3D {
     /// The strain field of solutions, for the next pass.
     [[nodiscard]] GridCoupling::TensorField StrainOf(
         const Solutions& solutions) const;
+
+    /// One pass of a driver's within-step iteration: the strain the
+    /// step's solutions take for a given strain (Respond, the driver's own
+    /// load closure, AddChannels, StrainOf).
+    using Pass = std::function<GridCoupling::TensorField(
+        const GridCoupling::TensorField&)>;
+
+    /// The within-step fixed point d = pass(d) from the start strain,
+    /// Anderson-mixed in place: the converged (or, when the budget runs
+    /// out, the last) strain and the diagnostics. The pass runs once per
+    /// iteration, so whatever it records is from the final pass.
+    [[nodiscard]] std::pair<GridCoupling::TensorField, StepInfo> Converge(
+        const Pass& pass, const IterationControl& control) const;
 
     /// The inertia moment of the degree-0, m = 0 column of solutions.
     [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;

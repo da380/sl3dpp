@@ -7,7 +7,10 @@
  */
 
 #include <algorithm>
+#include <array>
+#include <format>
 #include <span>
+#include <stdexcept>
 #include <vector>
 
 // LAPACK: the small least-squares solve of the mixer.
@@ -31,41 +34,88 @@ class AndersonMixer {
 
   std::vector<double> Update(std::span<const double> x,
                              std::span<const double> gx) {
-    std::vector<double> next(gx.begin(), gx.end());
-    if (memory_ <= 0) return next;
-    const auto n = x.size();
-    std::vector<double> f(n);
-    for (std::size_t i = 0; i < n; ++i) f[i] = gx[i] - x[i];
+    std::vector<double> next(x.begin(), x.end());
+    const std::array<std::span<double>, 1> out{next};
+    const std::array<std::span<const double>, 1> g{gx};
+    UpdateInPlace(out, g);
+    return next;
+  }
+
+  /// The same update for a vector held as several contiguous segments,
+  /// taken in order (a tensor's component arrays, say), overwriting x with
+  /// the mixed iterate. Nothing is copied or allocated per call, and the
+  /// result is bitwise Update's on the concatenation: every sum runs over
+  /// the same terms in the same order.
+  void UpdateInPlace(std::span<const std::span<double>> x,
+                     std::span<const std::span<const double>> gx) {
+    if (x.size() != gx.size()) {
+      throw std::invalid_argument("the iterate and its image differ in shape");
+    }
+    std::size_t n = 0;
+    for (std::size_t s = 0; s < x.size(); ++s) {
+      if (x[s].size() != gx[s].size()) {
+        throw std::invalid_argument(
+            std::format("segment {} holds {} values, its image {}", s,
+                        x[s].size(), gx[s].size()));
+      }
+      n += x[s].size();
+    }
+    auto takeImage = [&] {
+      for (std::size_t s = 0; s < x.size(); ++s) {
+        std::ranges::copy(gx[s], x[s].begin());
+      }
+    };
+    if (memory_ <= 0) {
+      takeImage();
+      return;
+    }
 
     if (xPrev_.empty()) {
       dX_.assign(memory_, std::vector<double>(n));
       dF_.assign(memory_, std::vector<double>(n));
       gram_.assign(static_cast<std::size_t>(memory_) * memory_, 0.0);
-      xPrev_.assign(x.begin(), x.end());
-      fPrev_ = std::move(f);
-      return next;
+      xPrev_.resize(n);
+      fPrev_.resize(n);
+      std::size_t at = 0;
+      for (std::size_t s = 0; s < x.size(); ++s) {
+        for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
+          xPrev_[at] = x[s][j];
+          fPrev_[at] = gx[s][j] - x[s][j];
+        }
+      }
+      takeImage();
+      return;
     }
 
+    // One sweep forms the new differences, stores the iterate and its
+    // residual, and accumulates the new Gram column and the least-squares
+    // right-hand side; each sum takes its terms in index order.
     const int slot = slot_;
-    for (std::size_t i = 0; i < n; ++i) {
-      dX_[slot][i] = x[i] - xPrev_[i];
-      dF_[slot][i] = f[i] - fPrev_[i];
+    const int m = std::min(count_ + 1, memory_);
+    std::vector<double> column(m, 0.0), gamma(m, 0.0);
+    std::vector<const double*> dF(m);
+    for (int i = 0; i < m; ++i) dF[i] = dF_[i].data();
+    auto* dXs = dX_[slot].data();
+    auto* dFs = dF_[slot].data();
+    std::size_t at = 0;
+    for (std::size_t s = 0; s < x.size(); ++s) {
+      for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
+        const double f = gx[s][j] - x[s][j];
+        dXs[at] = x[s][j] - xPrev_[at];
+        dFs[at] = f - fPrev_[at];
+        xPrev_[at] = x[s][j];
+        fPrev_[at] = f;
+        for (int i = 0; i < m; ++i) {
+          column[i] += dF[i][at] * dFs[at];
+          gamma[i] += dF[i][at] * f;
+        }
+      }
     }
-    xPrev_.assign(x.begin(), x.end());
-    fPrev_ = f;
-    count_ = std::min(count_ + 1, memory_);
+    count_ = m;
     slot_ = (slot + 1) % memory_;
-    const int m = count_;
-
-    auto dot = [n](std::span<const double> a, std::span<const double> b) {
-      double sum = 0.0;
-      for (std::size_t i = 0; i < n; ++i) sum += a[i] * b[i];
-      return sum;
-    };
     for (int i = 0; i < m; ++i) {
-      const double value = dot(dF_[i], dF_[slot]);
-      gram_[static_cast<std::size_t>(slot) * memory_ + i] = value;
-      gram_[static_cast<std::size_t>(i) * memory_ + slot] = value;
+      gram_[static_cast<std::size_t>(slot) * memory_ + i] = column[i];
+      gram_[static_cast<std::size_t>(i) * memory_ + slot] = column[i];
     }
 
     // gamma = argmin |F gamma - f|, through the Gram system by LAPACK's
@@ -78,8 +128,6 @@ class AndersonMixer {
             gram_[static_cast<std::size_t>(i) * memory_ + j];
       }
     }
-    std::vector<double> gamma(m);
-    for (int i = 0; i < m; ++i) gamma[i] = dot(dF_[i], f);
     std::vector<double> singular(m);
     const double rcond = -1.0;
     int rank = 0, info = 0, nrhs = 1;
@@ -87,14 +135,24 @@ class AndersonMixer {
     std::vector<double> work(lwork);
     dgelss_(&m, &m, &nrhs, a.data(), &m, gamma.data(), &m, singular.data(),
             &rcond, &rank, work.data(), &lwork, &info);
-    if (info != 0) return next;  // fall back to the Picard step
+    if (info != 0) {  // fall back to the Picard step
+      takeImage();
+      return;
+    }
 
-    for (int i = 0; i < m; ++i) {
-      for (std::size_t j = 0; j < n; ++j) {
-        next[j] -= gamma[i] * (dX_[i][j] + dF_[i][j]);
+    // The mixed iterate; x is no longer read, so it takes the result.
+    std::vector<const double*> dX(m);
+    for (int i = 0; i < m; ++i) dX[i] = dX_[i].data();
+    at = 0;
+    for (std::size_t s = 0; s < x.size(); ++s) {
+      for (std::size_t j = 0; j < x[s].size(); ++j, ++at) {
+        double value = gx[s][j];
+        for (int i = 0; i < m; ++i) {
+          value -= gamma[i] * (dX[i][at] + dF[i][at]);
+        }
+        x[s][j] = value;
       }
     }
-    return next;
   }
 
  private:

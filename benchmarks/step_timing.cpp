@@ -18,7 +18,9 @@
 //
 // and then whole Viscoelastic3D::Step calls, whose per-pass time less
 // respond + channels + strainOf is the iteration's own overhead (the
-// residual, the copies and the mixing). Peak RSS closes the report.
+// residual, the copies and the mixing). A fingerprint of the final state
+// (equal before and after a pure refactor) and the peak RSS close the
+// report.
 //
 // Usage:
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix]
@@ -33,6 +35,7 @@
 #include <chrono>
 #include <cmath>
 #include <complex>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <functional>
@@ -78,6 +81,27 @@ double PeakRssGb() {
   rusage usage{};
   getrusage(RUSAGE_SELF, &usage);
   return static_cast<double>(usage.ru_maxrss) / (1024.0 * 1024.0);
+}
+
+// FNV-1a over the bytes of a state's tensors: equal fingerprints mean a
+// bitwise-identical state, which is what a pure refactor must leave.
+std::uint64_t Fingerprint(const Viscoelastic3D::State& state) {
+  std::uint64_t hash = 1469598103934665603ULL;
+  auto add = [&](const void* data, std::size_t bytes) {
+    const auto* p = static_cast<const unsigned char*>(data);
+    for (std::size_t i = 0; i < bytes; ++i) {
+      hash = (hash ^ p[i]) * 1099511628211ULL;
+    }
+  };
+  auto addTensor = [&](const GridCoupling::TensorField& tensor) {
+    for (const auto& component : tensor.c) {
+      add(component.data(), component.size() * sizeof(Complex));
+    }
+    add(tensor.r.data(), tensor.r.size() * sizeof(double));
+  };
+  for (const auto& m : state.m) addTensor(m);
+  if (state.strain) addTensor(*state.strain);
+  return hash;
 }
 
 }  // namespace
@@ -278,6 +302,8 @@ int main(int argc, char** argv) {
   std::printf("    %-11s %9.4f\n", "per pass", perPass);
   std::printf("    %-11s %9.4f  (per pass less respond, channels, strainOf)\n",
               "overhead", perPass - respond - channels - strainOf);
-  std::printf("\n  peak RSS %.2f GB\n", PeakRssGb());
+  std::printf("\n  state fingerprint %016llx (bitwise check; one thread)\n",
+              static_cast<unsigned long long>(Fingerprint(state)));
+  std::printf("  peak RSS %.2f GB\n", PeakRssGb());
   return 0;
 }

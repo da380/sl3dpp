@@ -64,7 +64,7 @@ complex in coefficients.
 
 ## 3. Construction: what is built when
 
-`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp:30-80`):
+`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp:56-106`):
 
 1. Builds the `GridCoupling`, on a shared `SurfaceGrid` if one is passed,
    otherwise a new one with spins to 2 and oversampling 1.5, and the 1D
@@ -77,12 +77,12 @@ complex in coefficients.
 Nothing is factorised here. The degree operators are built lazily on
 first use and cached in `mutable` maps:
 
-- `Spheroidal(l)` / `Toroidal(l)` (`:94`, `:108`): the UNRELAXED
+- `Spheroidal(l)` / `Toroidal(l)` (`:120`, `:134`): the UNRELAXED
   reference systems, used by `SolveElastic`.
-- `FlavourOf(scheme, dt)` (`:122`): a reference EFFECTIVE material,
+- `FlavourOf(scheme, dt)` (`:148`): a reference EFFECTIVE material,
   mu_inf + Σ_k (1 − beta_ref,k(r)) mu_k, keyed by the exact
   (scheme, dt) pair. Its per-degree operators (`FlavourSpheroidal` /
-  `FlavourToroidal`, `:266`, `:281`) and its unit load/tide responses
+  `FlavourToroidal`, `:292`, `:307`) and its unit load/tide responses
   (`flavour.units`) are built on first use too.
 
 The elastic moduli stay 1D. Lateral variation enters ONLY through the
@@ -91,23 +91,23 @@ banded system. The lateral part is moved to the right-hand side.
 
 ## 4. One step, phase by phase
 
-`Step` (`src/Viscoelastic3D.cpp:498`) is `StartStep`, then the
-iteration, then `Finish`. `OpenStep` exposes the same phases so the
-sea-level loop (§5) can close the step itself.
+`Step` (`src/Viscoelastic3D.cpp:574`) is `StartStep`, then the
+iteration (`OpenStep::Converge`), then `Finish`. `OpenStep` exposes the
+same phases so the sea-level loop (§5) can close the step itself.
 
-### 4.1 StartStep (`:305`)
+### 4.1 StartStep (`:331`)
 
 - **The start strain d0.** Taken from the state's strain cache if
-  present; otherwise from `SolveElastic` (`:237`): the memory force of
+  present; otherwise from `SolveElastic` (`:263`): the memory force of
   Σ_k mu_k m_k through the unrelaxed reference operators, plus the load
   channels. No iteration is needed there, because the unrelaxed operator
   is laterally uniform.
-- **The weight fields, per branch and grid point** (`:348`):
+- **The weight fields, per branch and grid point** (`:374`):
   h(x) = dt · itau(x) gives (e, alpha, beta) from `StepWeights.hpp`.
   The reference beta_ref uses the radial itau at that node. Stored:
   `beta_[k]` = beta(x) and `dbeta_[k]` = beta(x) − beta_ref(r), both
   (node × grid) real fields.
-- **The decayed memory** (`:365`): `memory_[k]` = m̃_k = e(x) m_k +
+- **The decayed memory** (`:391`): `memory_[k]` = m̃_k = e(x) m_k +
   alpha(x) d0, pointwise, a full `TensorField` per branch.
 
 ### 4.2 One pass of the within-step iteration
@@ -136,12 +136,12 @@ and a pass maps a strain field d to the next one.
                                                         r∂r; Scatter)
 ```
 
-**Respond** (`:375`):
+**Respond** (`:401`):
 
-1. *Pointwise combine* (`:390`). `combined = Σ_k mu_k (m̃_k + dbeta_k d)`
+1. *Pointwise combine* (`:416`). `combined = Σ_k mu_k (m̃_k + dbeta_k d)`
    over every node and grid point, into a freshly allocated
    `TensorField`.
-2. *Analyse* (`:400` → `src/GridCoupling.cpp:80`). Three batched
+2. *Analyse* (`:426` → `src/GridCoupling.cpp:80`). Three batched
    forward transforms (spins −2, −1, 0), each with ALL memory nodes as
    one contiguous batch.
 3. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp:242`;
@@ -152,17 +152,17 @@ and a pass maps a strain field d to the next one.
    degree's right-hand side at the node's own dofs (the pointwise rows,
    weight jac·w_q·r) and at every node of its element (the derivative
    rows, through D(q, j)).
-4. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:152`). Per degree, the
+4. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:178`). Per degree, the
    complex columns are split into real pairs and solved as 2(l+1) real
    right-hand sides through the FLAVOUR operator: `dpbtrs` (banded
-   Cholesky) or `dgbtrs` (the LU fallback), at `:175` and `:223`.
+   Cholesky) or `dgbtrs` (the LU fallback), at `:201` and `:249`.
    Toroidal runs from l = 2 (see §8, item 1).
 
-**AddChannels** (`:411`). The load and tide enter by linearity:
+**AddChannels** (`:437`). The load and tide enter by linearity:
 amplitude × the cached unit response of the flavour operator (solved
-once per degree per flavour, `:430`).
+once per degree per flavour, `:456`).
 
-**StrainOf → StrainField** (`:452` → `:135`). Per degree,
+**StrainOf → StrainField** (`:478` → `:161`). Per degree,
 `AddStrainOfSolution` (`src/GridCoupling.cpp:198`) gathers U, V, W at
 each node through the operators' dof maps and forms r∂r through the
 element's derivative matrix. `DeviatoricComponents` gives the five
@@ -175,22 +175,30 @@ a fresh grid `TensorField`.
 nodes therefore carry zero spectral content at high degrees. The
 transforms still run every node at full lmax.
 
-### 4.3 Convergence and mixing (`:531-566`)
+### 4.3 Convergence and mixing (`OpenStep::Converge`, `:524-572`)
+
+One loop serves all three drivers: `Step` here, the sea-level loop (§5)
+and the adjoint's reverse sweep (`src/Adjoint3D.cpp`). Each supplies its
+own pass (`Respond`, its own load closure, `AddChannels`, `StrainOf`) and
+an `IterationControl`.
 
 - Residual: max |d' − d| / max |d'| over every stored grid value at
-  every node (a relative sup-norm, `:548`), computed with `std::abs` on
-  complex values.
+  every node (a relative sup-norm, `:548`), compared on squared
+  magnitudes.
 - Defaults (`Viscoelastic3D.hpp`, `Options`): rtol 1e-11, at most 40
-  passes, damping 1, Anderson memory 5.
-- Mixing: d and d' are flattened into real vectors (copies), passed to
-  `detail::AndersonMixer::Update`, and the result is unflattened into a
-  new `TensorField` (`:566`). The mixer keeps ring buffers of 5 iterate
-  differences and 5 residual differences, plus the previous iterate and
-  residual: 12 grid-tensor-sized vectors.
-- Not converging is not an error. `StepInfo.converged = false` is
-  returned and the step finishes with the last iterate.
+  passes, damping 1, Anderson memory 5. The sea-level loop and the
+  adjoint pass their own options, without damping.
+- Mixing: `detail::AndersonMixer::UpdateInPlace` (`:566`) works directly
+  on d's three component arrays and overwrites d with the mixed iterate,
+  with no copies and two sweeps over the data. The mixer keeps ring
+  buffers of 5 iterate differences and 5 residual differences, plus the
+  previous iterate and residual: 12 grid-tensor-sized vectors, allocated
+  afresh for each step.
+- Not converging is not an error here. `StepInfo.converged = false` is
+  returned and the step finishes with the last iterate. The adjoint
+  sweep throws instead.
 
-### 4.4 Finish (`:478`)
+### 4.4 Finish (`:504`)
 
 m⁺_k = m̃_k + beta_k(x) d, pointwise. The final d is cached in the new
 state as its strain, so the next `StartStep` skips the elastic solve.
@@ -204,32 +212,32 @@ state as its strain, so the next `StartStep` skips the elastic solve.
 | `d0_`, `memory_` | 1 + K tensors | 0.9 GB each |
 | `beta_`, `dbeta_` | 2K real fields | 0.18 GB each |
 | d, d', Respond's `combined` | 3 tensors | 0.9 GB each |
-| flatten(d), flatten(d'), unflatten | ~3 tensor-sized | 0.9 GB each |
-| Anderson buffers + temporaries | ~14 tensor-sized | 0.9 GB each |
+| Anderson buffers | 12 tensor-sized | 0.9 GB each |
 
-That is about 20 GB. The 21 GB peak RSS measured on 17 October
-(`fortran_gate`, lmax 64, one branch) matches it. The mixer is more than
-half of it.
+That is about 18 GB, against a measured peak RSS of 19.6 GB
+(`step_timing`, lmax 64, one branch; 22.9 GB before the flatten copies
+and the mixer's temporaries went). The mixer's buffers are about
+two-thirds of it.
 
 ## 5. The coupled loop with sea level (`SeaLevelEvolution3D::Run`)
 
-`src/Evolution3D.cpp:64-246`. Per time step (`:159`):
+`src/Evolution3D.cpp:63-199`. Per time step (`:158`):
 
 1. `StartStep` under the previous step's total load σ and centrifugal
    potential ψ as channels.
-2. Outer passes (`:198-236`). `Respond(d)` gives the zero-channel
-   solutions. Their surface U and Φ per degree and the inertia moment
-   feed a full SLE solve, `SolveGeneralised` (`:207`), under the step's
-   effective Love numbers, and that solve runs its OWN inner Anderson
-   iteration. The new σ and ψ go back in through `AddChannels` (`:212`);
-   `StrainOf` gives d'; then the same residual and mixing as §4.3 are
-   re-implemented here (`:235`).
-3. `Finish` (`:240`).
+2. Outer passes, through `OpenStep::Converge` (`:167-191`). The pass:
+   `Respond(d)` gives the zero-channel solutions. Their surface U and Φ
+   per degree and the inertia moment feed a full SLE solve,
+   `SolveGeneralised` (`:180`), under the step's effective Love numbers,
+   and that solve runs its OWN inner Anderson iteration. The new σ and ψ
+   go back in through `AddChannels` (`:185`), and `StrainOf` gives d'.
+   Residual and mixing are §4.3's.
+3. `Finish` (`:192`).
 
 So strain, ocean load and rotation converge together in one outer fixed
 point, and each outer pass contains a complete inner SLE solve.
 Recording (`record_stride > 0`) stores the whole `Viscoelastic3D::State`
-(K + 1 grid tensors) in each kept snapshot (`:150`). The 3D adjoint
+(K + 1 grid tensors) in each kept snapshot (`:149`). The 3D adjoint
 needs every step kept (`ForwardTrajectory3D`, `Adjoint3D.hpp`).
 
 ## 6. What pins it down (the gates)
@@ -285,7 +293,12 @@ develop at 88c58b5, laptop: AMD Ryzen AI 7 PRO 350, one socket; lmax 64,
 
 Peak RSS 22.9 GB in both. Eight threads speed up only the transforms
 (2.3×), so the pass speeds up 1.25×, and the serial overhead grows from
-53% to 63% of it. Re-run with
+53% to 63% of it.
+
+After chunk 2 (one shared loop, the mixer in place): the overhead is
+1.14 s (1 thread) and 1.12 s (8 threads), the whole pass 3.30 s and
+2.52 s (1.41× and 1.48× faster), and the peak RSS 19.6 GB. The final
+state is bitwise unchanged. Re-run with
 `OMP_NUM_THREADS=N build/benchmarks/step_timing <deck> <lmax>` after
 each change.
 
@@ -309,10 +322,10 @@ expensive.
    follows an expectation recorded in `stage4.md` §4, since corrected.
    The Fortran gate compares l ≥ 2 only, and this enters other degrees
    only through the lateral coupling, so no gate would have caught it.
-2. **Discrepancy (comment): the iteration is described wrongly.** The
-   `Viscoelastic3D.hpp` file comment says "damped Picard here … Anderson
-   mixing is the recorded fallback". The code defaults to Anderson
-   memory 5.
+2. **Fixed (17 Oct, chunk 2): the iteration was described wrongly.**
+   The `Viscoelastic3D.hpp` file comment said "damped Picard here …
+   Anderson mixing is the recorded fallback", while the code defaults
+   to Anderson memory 5. The comment now matches the code.
 3. **Behaviour: nothing in the 3D step is threaded unless the caller
    asks.** `Options::parallel` defaults to false, and with it the
    transforms run sequentially. Only `benchmarks/fortran_gate` sets it;
@@ -324,9 +337,10 @@ expensive.
    fixed point can be iterated on the spectral strain (~4.5× smaller),
    with the grid strain formed only inside a pass and at `Finish`.
 5. **Cost: allocation every pass.** `Respond` (`combined`),
-   `Synthesise` (output), `Analyse` (`ZeroSpectral`), flatten ×2,
-   unflatten, and the mixer's `next` and `f` are all fresh allocations of
-   tensor size per pass.
+   `Synthesise` (output) and `Analyse` (`ZeroSpectral`) are fresh
+   allocations of tensor size per pass, and the mixer's buffers are
+   allocated afresh per step. (The flatten/unflatten copies and the
+   mixer's per-pass temporaries went in chunk 2.)
 6. **Cost: the fixed part is recombined every pass.** `Respond` re-forms
    and re-analyses Σ_k mu_k m̃_k each pass, though it is constant within
    the step. By linearity it could be analysed once, leaving one weight
@@ -337,12 +351,12 @@ expensive.
    `conventions.md` says const solve/apply methods must be safe in
    parallel loops; these are not. Any degree-parallel loop must build
    them first.
-8. **Cost: duplicated loop.** The residual/flatten/mixer block of
-   `Step` (`src/Viscoelastic3D.cpp:531-566`) is re-implemented in
-   `SeaLevelEvolution3D::Run` (`src/Evolution3D.cpp:198-236`). Any change
-   to the iteration variable has to be made twice.
+8. **Fixed (17 Oct, chunk 2): duplicated loop.** The residual and
+   mixing loop existed three times (`Step`, `SeaLevelEvolution3D::Run`
+   and the adjoint's reverse sweep). All three now call
+   `OpenStep::Converge`.
 9. **Cost: unit responses re-solved.** `SolveAll`'s channel path
-   (`src/Viscoelastic3D.cpp:191`, used by `SolveElastic` and so
+   (`src/Viscoelastic3D.cpp:217`, used by `SolveElastic` and so
    `PrimeStrain` and an uncached `StartStep`) re-solves the two unit
    responses on every call. `AddChannels` caches them.
 10. **Cost: weight fields recomputed every step.** `StartStep` evaluates
