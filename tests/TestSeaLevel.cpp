@@ -21,7 +21,7 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr double kPi = std::numbers::pi;
+constexpr auto kPi = std::numbers::pi;
 
 LoveNumbers TestTable() {
   static auto table =
@@ -35,7 +35,7 @@ LoveNumbers TestTable() {
 double Cap(double theta, double phi, double colat0, double lon0, double width) {
   const double c = std::cos(theta) * std::cos(colat0) +
                    std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
-  const double d = std::acos(std::clamp(c, -1.0, 1.0));
+  const auto d = std::acos(std::clamp(c, -1.0, 1.0));
   return std::exp(-0.5 * std::pow(d / width, 2));
 }
 
@@ -43,11 +43,11 @@ double Cap(double theta, double phi, double colat0, double lon0, double width) {
 /// fields in the reduced m >= 0 storage.
 double Pair(std::span<const std::complex<double>> a,
             std::span<const std::complex<double>> b, int lmax) {
-  double sum = 0.0;
-  for (int l = 0; l <= lmax; ++l) {
+  auto sum = 0.0;
+  for (auto l = 0; l <= lmax; ++l) {
     sum +=
         a[SurfaceGrid::Index(l, 0)].real() * b[SurfaceGrid::Index(l, 0)].real();
-    for (int m = 1; m <= l; ++m) {
+    for (auto m = 1; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       sum += 2.0 * (a[i] * std::conj(b[i])).real();
     }
@@ -67,7 +67,7 @@ TEST(ShConventions, RoundTripAndParseval) {
     // The pairing is preserved: a c + b d = 2 Re(f conj(g)) for m > 0.
     const RealPair other{-0.2, m == 0 ? 0.0 : 0.9};
     const auto g = ComplexFromRealPair(other, m);
-    const double realDot = pair.cos * other.cos + pair.sin * other.sin;
+    const auto realDot = pair.cos * other.cos + pair.sin * other.sin;
     const double complexDot =
         m == 0 ? (f * std::conj(g)).real() : 2.0 * (f * std::conj(g)).real();
     EXPECT_NEAR(realDot, complexDot, 1e-14);
@@ -90,21 +90,21 @@ TEST(SurfaceGrid, TransformsAndIntegrals) {
     return Cap(theta, phi, 0.4, 1.0, 0.7) - 0.5 * std::cos(theta);
   });
   auto g = grid.Synthesise(grid.Expand(f));
-  for (std::size_t i = 0; i < f.size(); i += 13) {
+  for (auto i = std::size_t{0}; i < f.size(); i += 13) {
     EXPECT_NEAR(f[i], g[i], 2e-6);
   }
   // An exactly band-limited field round-trips to machine precision.
   auto zonal = grid.FromFunction([](double theta, double) {
-    const double c = std::cos(theta);
+    const auto c = std::cos(theta);
     return 1.0 + c + (1.5 * c * c - 0.5);
   });
   auto back = grid.Synthesise(grid.Expand(zonal));
-  for (std::size_t i = 0; i < zonal.size(); i += 13) {
+  for (auto i = std::size_t{0}; i < zonal.size(); i += 13) {
     EXPECT_NEAR(zonal[i], back[i], 1e-13);
   }
   // Parseval: int f^2 dOmega = <f, f> in the reduced storage.
-  std::vector<double> f2(f.size());
-  for (std::size_t i = 0; i < f.size(); ++i) f2[i] = f[i] * f[i];
+  auto f2 = std::vector<double>(f.size());
+  for (auto i = std::size_t{0}; i < f.size(); ++i) f2[i] = f[i] * f[i];
   auto flm = grid.Expand(f);
   EXPECT_NEAR(grid.Integrate(f2), Pair(flm, flm, 16),
               1e-10 * Pair(flm, flm, 16));
@@ -130,13 +130,13 @@ TEST(SeaLevelSolver, RigidEarthEustaticLimit) {
   auto result = fingerprint.Solve(load, RotationalFeedback::None);
 
   // By hand: the SI eustatic value on the state's ocean.
-  const double a = table.radius;
+  const auto a = table.radius;
   std::vector<double> ocean(fingerprint.OceanFunction().begin(),
                             fingerprint.OceanFunction().end());
-  const double area = a * a * grid.Integrate(ocean);
-  const double mass = a * a * grid.Integrate(load);
-  const double eustatic = -mass / (1000.0 * area);
-  for (std::size_t i = 0; i < result.seaLevelChange.size(); i += 29) {
+  const auto area = a * a * grid.Integrate(ocean);
+  const auto mass = a * a * grid.Integrate(load);
+  const auto eustatic = -mass / (1000.0 * area);
+  for (auto i = std::size_t{0}; i < result.seaLevelChange.size(); i += 29) {
     EXPECT_NEAR(result.seaLevelChange[i], eustatic, 1e-9 * std::abs(eustatic));
   }
   EXPECT_NEAR(result.displacement[0], 0.0, 1e-15);
@@ -149,21 +149,22 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
 
   // Melt a fraction of the polar cap: a physically shaped forcing.
   auto ice = fingerprint.IceThickness();
-  std::vector<double> iceChange(ice.size());
-  for (std::size_t i = 0; i < ice.size(); ++i) iceChange[i] = -0.1 * ice[i];
+  auto iceChange = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < ice.size(); ++i)
+    iceChange[i] = -0.1 * ice[i];
   auto load = fingerprint.LoadFromIceThicknessChange(iceChange);
   auto result = fingerprint.SolveForIceChange(iceChange);
   EXPECT_TRUE(result.converged);
   EXPECT_LT(result.iterations, 40);
 
   // The ocean gains exactly the mass the load removed.
-  std::vector<double> oceanGain(load.size());
-  for (std::size_t i = 0; i < load.size(); ++i) {
+  auto oceanGain = std::vector<double>(load.size());
+  for (auto i = std::size_t{0}; i < load.size(); ++i) {
     oceanGain[i] =
         1000.0 * fingerprint.OceanFunction()[i] * result.seaLevelChange[i];
   }
-  const double gained = grid.Integrate(oceanGain);
-  const double removed = -grid.Integrate(load);
+  const auto gained = grid.Integrate(oceanGain);
+  const auto removed = -grid.Integrate(load);
   EXPECT_NEAR(gained, removed, 1e-8 * std::abs(removed));
 
   // Melting northern ice moves the pole measurably; melting at the pole
@@ -172,7 +173,7 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
             0.0);
 
   // Far-field sea level rises, near-field falls: the fingerprint shape.
-  double min = 1e300, max = -1e300;
+  auto min = 1e300, max = -1e300;
   for (auto v : result.seaLevelChange) {
     min = std::min(min, v);
     max = std::max(max, v);
@@ -185,14 +186,14 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
   // The generalised solve against its adjoint: the defining identity
   //   <g, outputs(inputs)> = <adjoint(g), inputs>
   // holds to solver tolerance for every channel at once.
-  const int lmax = 24;
+  const auto lmax = 24;
   auto table = TestTable();
   SeaLevelSolver solver(SurfaceGrid(lmax), table, SeaLevelParameters{});
   const auto& grid = solver.Grid();
-  const double a = solver.Radius();
+  const auto a = solver.Radius();
 
   // A smooth state (non-dimensional metres via the solver's scales).
-  const double length = solver.SolverScales().Length();
+  const auto length = solver.SolverScales().Length();
   auto state = solver.MakeState(
       grid.FromFunction([&](double theta, double phi) {
         return 2000.0 * Cap(theta, phi, 0.1, 0.0, 0.3) / length;
@@ -241,8 +242,8 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
     ASSERT_TRUE(adjoint.converged);
 
     auto surface = [&](std::span<const double> f, std::span<const double> g) {
-      std::vector<double> fg(f.size());
-      for (std::size_t i = 0; i < f.size(); ++i) fg[i] = f[i] * g[i];
+      auto fg = std::vector<double>(f.size());
+      for (auto i = std::size_t{0}; i < f.size(); ++i) fg[i] = f[i] * g[i];
       return a * a * grid.Integrate(fg);
     };
     const double lhs =
@@ -270,8 +271,9 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
   const auto& grid = fingerprint.Grid();
 
   auto ice = fingerprint.IceThickness();
-  std::vector<double> iceChange(ice.size());
-  for (std::size_t i = 0; i < ice.size(); ++i) iceChange[i] = -0.02 * ice[i];
+  auto iceChange = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < ice.size(); ++i)
+    iceChange[i] = -0.02 * ice[i];
 
   const auto nonlinear =
       fingerprint.SolveNonlinear(iceChange, RotationalFeedback::Full);
@@ -281,8 +283,8 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
 
   // A small perturbation: migration is second order, so the two solutions
   // agree to a fraction of a percent while not being identical.
-  double scale = 0.0, diff = 0.0;
-  for (std::size_t i = 0; i < linear.seaLevelChange.size(); ++i) {
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < linear.seaLevelChange.size(); ++i) {
     scale = std::max(scale, std::abs(linear.seaLevelChange[i]));
     diff = std::max(
         diff, std::abs(linear.seaLevelChange[i] - nonlinear.seaLevelChange[i]));
@@ -294,7 +296,7 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
   // through the migrating-shoreline solve. Checked at the solver level,
   // where the final state is visible.
   const auto& solver = fingerprint.Solver();
-  const double length = solver.SolverScales().Length();
+  const auto length = solver.SolverScales().Length();
   auto state = solver.MakeState(
       [&] {
         auto v = fingerprint.IceThickness();
@@ -308,7 +310,7 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
       }());
   SeaLevelSolver::NonlinearForcing forcing;
   forcing.iceThicknessChange.resize(iceChange.size());
-  for (std::size_t i = 0; i < iceChange.size(); ++i) {
+  for (auto i = std::size_t{0}; i < iceChange.size(); ++i) {
     forcing.iceThicknessChange[i] = iceChange[i] / length;
   }
   SeaLevelSolver::Options options;
@@ -318,13 +320,13 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
   ASSERT_TRUE(result.response.converged);
 
   auto budget = [&](const SeaLevelSolver::State& s) {
-    std::vector<double> total(s.seaLevel.size());
-    for (std::size_t i = 0; i < total.size(); ++i) {
+    auto total = std::vector<double>(s.seaLevel.size());
+    for (auto i = std::size_t{0}; i < total.size(); ++i) {
       total[i] =
           solver.WaterDensity() * s.oceanFunction[i] * s.seaLevel[i] +
           solver.IceDensity() * (1.0 - s.oceanFunction[i]) * s.iceThickness[i];
     }
-    const double a = solver.Radius();
+    const auto a = solver.Radius();
     return a * a * grid.Integrate(total);
   };
   // The forcing removed ice mass rho_i * (melted thickness over land at

@@ -13,7 +13,7 @@ std::expected<RadialMesh, MeshError> RadialMesh::Create(const EarthModel& model,
                                                         Options options) {
   // The SI options cross into the model's non-dimensional numbers here,
   // once; everything below is non-dimensional.
-  const double length = model.ModelScales().Length();
+  const auto length = model.ModelScales().Length();
   const auto nd = model.DimensionlessView();
   const auto b = nd.Boundaries();
   const double r0 =
@@ -25,9 +25,9 @@ std::expected<RadialMesh, MeshError> RadialMesh::Create(const EarthModel& model,
         "mesh range [{:g}, {:g}] m must lie within the model [{:g}, {:g}] m",
         r0 * length, r1 * length, b.front() * length, b.back() * length)});
   }
-  std::vector<double> breakpoints{r0};
-  std::vector<int> spanLayer;
-  for (std::size_t i = 0; i < b.size(); ++i) {
+  auto breakpoints = std::vector<double>{r0};
+  auto spanLayer = std::vector<int>{};
+  for (auto i = std::size_t{0}; i < b.size(); ++i) {
     if (b[i] > r0 && b[i] < r1) {
       spanLayer.push_back(static_cast<int>(nd.LayerOf(b[i], Side::Below)));
       breakpoints.push_back(b[i]);
@@ -35,7 +35,7 @@ std::expected<RadialMesh, MeshError> RadialMesh::Create(const EarthModel& model,
   }
   spanLayer.push_back(static_cast<int>(nd.LayerOf(r1, Side::Below)));
   breakpoints.push_back(r1);
-  Options inner = options;
+  auto inner = options;
   inner.rmin.reset();
   inner.rmax.reset();
   if (inner.drmax) *inner.drmax /= length;
@@ -49,7 +49,8 @@ std::expected<RadialMesh, MeshError> RadialMesh::Create(
         "explicit breakpoints already fix the range: rmin/rmax are for the "
         "model overload"});
   }
-  std::vector<int> spanLayer(breakpoints.empty() ? 0 : breakpoints.size() - 1);
+  auto spanLayer =
+      std::vector<int>(breakpoints.empty() ? 0 : breakpoints.size() - 1);
   std::iota(spanLayer.begin(), spanLayer.end(), 0);
   return Build(breakpoints, spanLayer, options);
 }
@@ -64,12 +65,12 @@ std::expected<RadialMesh, MeshError> RadialMesh::CreateGraded(
   }
   const auto nd = model.DimensionlessView();
   const auto b = nd.Boundaries();
-  const double a = b.back();
-  const double floor = 0.1 * a / (lmax + 1);
-  const double logEps = std::log(eps);
+  const auto a = b.back();
+  const auto floor = 0.1 * a / (lmax + 1);
+  const auto logEps = std::log(eps);
 
   auto width = [&](double r) {
-    const double depth = a - r;
+    const auto depth = a - r;
     if (depth <= 0.0) return floor;
     return std::max(floor, 0.1 * a * std::log1p(-depth / a) / logEps);
   };
@@ -77,15 +78,15 @@ std::expected<RadialMesh, MeshError> RadialMesh::CreateGraded(
   // Edges from the surface down, every model boundary pinned; the last
   // elements above a boundary shortened or split so none is wider than
   // the rule at its top.
-  std::vector<double> edges{a};
+  auto edges = std::vector<double>{a};
   for (std::size_t s = b.size() - 1; s-- > 0;) {
-    const double lo = b[s];
-    double r = edges.back();
+    const auto lo = b[s];
+    auto r = edges.back();
     while (true) {
-      const double w = width(r);
+      const auto w = width(r);
       if (r - lo <= 2.0 * w) {
-        const int n = r - lo <= w ? 1 : 2;
-        for (int k = 1; k <= n; ++k) {
+        const auto n = r - lo <= w ? 1 : 2;
+        for (auto k = 1; k <= n; ++k) {
           edges.push_back(std::lerp(r, lo, static_cast<double>(k) / n));
         }
         edges.back() = lo;  // exact
@@ -97,8 +98,8 @@ std::expected<RadialMesh, MeshError> RadialMesh::CreateGraded(
   }
   std::ranges::reverse(edges);
 
-  std::vector<int> spanLayer(edges.size() - 1);
-  for (std::size_t e = 0; e + 1 < edges.size(); ++e) {
+  auto spanLayer = std::vector<int>(edges.size() - 1);
+  for (auto e = std::size_t{0}; e + 1 < edges.size(); ++e) {
     spanLayer[e] = static_cast<int>(
         nd.LayerOf(0.5 * (edges[e] + edges[e + 1]), Side::Above));
   }
@@ -114,7 +115,7 @@ std::expected<RadialMesh, MeshError> RadialMesh::Build(
   if (breakpoints.size() < 2) {
     return std::unexpected(MeshError{"need at least two breakpoints"});
   }
-  for (std::size_t i = 1; i < breakpoints.size(); ++i) {
+  for (auto i = std::size_t{1}; i < breakpoints.size(); ++i) {
     if (!(breakpoints[i] > breakpoints[i - 1])) {
       return std::unexpected(MeshError{std::format(
           "breakpoints must be strictly increasing; {:g} follows {:g}",
@@ -146,13 +147,13 @@ std::expected<RadialMesh, MeshError> RadialMesh::Build(
   mesh.ngll_ = options.ngll;
 
   // Each span cut uniformly into elements no wider than step.
-  for (std::size_t s = 0; s + 1 < breakpoints.size(); ++s) {
-    const double lo = breakpoints[s];
-    const double hi = breakpoints[s + 1];
-    const int nel = std::max(1, static_cast<int>(std::ceil((hi - lo) / step)));
-    for (int e = 0; e < nel; ++e) {
+  for (auto s = std::size_t{0}; s + 1 < breakpoints.size(); ++s) {
+    const auto lo = breakpoints[s];
+    const auto hi = breakpoints[s + 1];
+    const auto nel = std::max(1, static_cast<int>(std::ceil((hi - lo) / step)));
+    for (auto e = 0; e < nel; ++e) {
       // The linspace form, so shared edges agree exactly between elements.
-      const double a = std::lerp(lo, hi, static_cast<double>(e) / nel);
+      const auto a = std::lerp(lo, hi, static_cast<double>(e) / nel);
       const double b =
           e + 1 == nel ? hi
                        : std::lerp(lo, hi, static_cast<double>(e + 1) / nel);
@@ -174,11 +175,11 @@ std::expected<RadialMesh, MeshError> RadialMesh::Build(
   const int n = options.ngll;
   const int N = n - 1;
   const auto legendre = GaussQuad::LegendrePolynomial<double>();
-  std::vector<double> P(n);
-  for (int i = 0; i < n; ++i) P[i] = legendre(N, mesh.xi_[i]);
+  auto P = std::vector<double>(n);
+  for (auto i = 0; i < n; ++i) P[i] = legendre(N, mesh.xi_[i]);
   mesh.deriv_.assign(static_cast<std::size_t>(n) * n, 0.0);
-  for (int k = 0; k < n; ++k) {
-    for (int i = 0; i < n; ++i) {
+  for (auto k = 0; k < n; ++k) {
+    for (auto i = 0; i < n; ++i) {
       if (k != i) {
         mesh.deriv_[static_cast<std::size_t>(k) * n + i] =
             P[k] / (P[i] * (mesh.xi_[k] - mesh.xi_[i]));
@@ -190,8 +191,8 @@ std::expected<RadialMesh, MeshError> RadialMesh::Build(
 
   // Node radii per element, endpoints exact so shared nodes agree.
   mesh.radius_.resize(mesh.left_.size() * static_cast<std::size_t>(n));
-  for (std::size_t e = 0; e < mesh.left_.size(); ++e) {
-    for (int i = 0; i < n; ++i) {
+  for (auto e = std::size_t{0}; e < mesh.left_.size(); ++e) {
+    for (auto i = 0; i < n; ++i) {
       mesh.radius_[e * n + i] =
           mesh.left_[e] + (mesh.xi_[i] + 1.0) * mesh.jac_[e];
     }
@@ -231,10 +232,10 @@ int RadialMesh::StartElement(int l, TruncationRule rule, double eps) const {
 std::vector<double> RadialMesh::Nodal(const EarthModel& model,
                                       const std::string& name, int nu) const {
   const auto nd = model.DimensionlessView();
-  std::vector<double> out(radius_.size());
-  for (std::size_t e = 0; e < left_.size(); ++e) {
+  auto out = std::vector<double>(radius_.size());
+  for (auto e = std::size_t{0}; e < left_.size(); ++e) {
     const auto layer = static_cast<std::size_t>(layer_[e]);
-    for (int i = 0; i < ngll_; ++i) {
+    for (auto i = 0; i < ngll_; ++i) {
       out[e * ngll_ + i] =
           nd.EvaluateInLayer(name, layer, radius_[e * ngll_ + i], nu);
     }
@@ -244,8 +245,8 @@ std::vector<double> RadialMesh::Nodal(const EarthModel& model,
 
 std::vector<double> RadialMesh::NodalGravity(const EarthModel& model) const {
   const auto nd = model.DimensionlessView();
-  std::vector<double> out(radius_.size());
-  for (std::size_t i = 0; i < radius_.size(); ++i) {
+  auto out = std::vector<double>(radius_.size());
+  for (auto i = std::size_t{0}; i < radius_.size(); ++i) {
     out[i] = nd.Gravity(radius_[i]);
   }
   return out;

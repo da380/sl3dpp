@@ -52,6 +52,7 @@ ELASTIC = DeckFormat(("rho", "vpv", "vsv", "vph", "vsh", "eta"),
                      name="elastic")
 SURFACE_DENSITY = units.DENSITY * units.LENGTH
 POTENTIAL = units.LENGTH**2 * units.TIME**-2
+VISCOSITY = units.MASS * units.LENGTH**-1 * units.TIME**-1
 
 
 def cap(theta, phi, colat0, lon0, width):
@@ -63,20 +64,26 @@ def cap(theta, phi, colat0, lon0, width):
 def main() -> None:
     deck = read_deck(DATA / "prem8.elastic.deck", ELASTIC)
     skeleton, layers = deck_layers(deck, kind="cubic")
-    model = Model(Geometry(skeleton), layers)
+    model_si = Model(Geometry(skeleton), layers)
+    table = LoveNumbers.from_model(
+        model_si, LMAX, mesh=RadialMesh(model_si, lmax=LMAX, ngll=5))
+    earth = EarthModel(LMAX, love_numbers=table, grid="GLQ", extend=False)
+    # The units cleanup (Oct 2026) demands one frame throughout: build
+    # the radial side in the earth model's scales.
+    model = model_si.converted(earth.parameters.scales)
     mesh = RadialMesh(model, lmax=LMAX, ngll=5)
     material = Material(mesh, model)
     b = skeleton.boundaries
+    length = earth.parameters.scales.factor(units.LENGTH)
     viscosity = {}
-    for i, layer in enumerate(model.layers):
+    for i, layer in enumerate(model_si.layers):
         fluid = np.all(np.asarray(layer["vsv"](np.linspace(*layer.interval, 3)))
                        == 0.0)
         if not fluid and b[i] >= 3.4799e6 and b[i + 1] <= 6.1511e6:
-            viscosity[i] = ETA
+            # eta in the material's (non-dimensional) frame
+            viscosity[i] = ETA / earth.parameters.scales.factor(VISCOSITY)
     rheology = Rheology.maxwell(material, viscosity)
     op = ViscoelasticOperator(rheology, LMAX)
-    table = LoveNumbers.from_model(model, LMAX, mesh=mesh)
-    earth = EarthModel(LMAX, love_numbers=table, grid="GLQ", extend=False)
     ice_model = AnalyticalIceModel(length_scale=earth.parameters.length_scale)
     ice, sl = ice_model.get_ice_thickness_and_sea_level(
         0.0, LMAX, grid=earth.grid_name, sampling=earth.sampling,
@@ -162,14 +169,9 @@ def main() -> None:
         f"code-invariant; scales here: length {length:.17g} m, time "
         f"{scales.factor(units.TIME):.17g} s",
     ]
-    # The continuous block carries NO itau kernel: pyslfp's continuous
-    # itau accumulation produces ~1e31-scale values in this layered
-    # Maxwell setting even for a single step (16 Oct 2026, under
-    # investigation on the pyslfp side); sl3dpp's own continuous kernel
-    # is gated internally against its exact discrete instead.
     for name, method, with_itau in (
             ("discrete", evolution.adjoint_ice_history, True),
-            ("continuous", evolution.continuous_adjoint_ice_history, False)):
+            ("continuous", evolution.continuous_adjoint_ice_history, True)):
         kernels = method(dates, measurement, internal_states=snapshots,
                          rtol=1e-12)
         lines.append(f"method {name}")

@@ -43,6 +43,12 @@ class SeaLevelEvolution {
     /// coefficients are kept whenever the stride is set, so a reverse
     /// sweep can reconstruct the gaps by exact backward steps.
     int record_stride = 0;
+    /// Whether a kept state also keeps its strain. By default (false)
+    /// only the internal variables are kept, and an adjoint regenerates
+    /// each node's strain by one elastic solve under its recorded loads;
+    /// true saves those solves at about twice the trajectory memory with
+    /// one branch.
+    bool record_strain = false;
   };
 
   /// One node of the history: fields in the SLE solver's units on its
@@ -54,6 +60,9 @@ class SeaLevelEvolution {
     std::vector<double> displacement;
     std::vector<double> potential;
     std::array<double, 3> angularVelocity{};
+    /// The internal variables, without the strain cache unless
+    /// Options::record_strain (one elastic solve under the recorded load
+    /// and centrifugal coefficients regenerates it).
     std::optional<ViscoelasticState> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;

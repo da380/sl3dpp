@@ -41,8 +41,8 @@ LoadCallable SeaLevelEvolution::Columns(
     double factor) const {
   return [coefficients, factor](int l,
                                 double) -> std::optional<std::vector<double>> {
-    std::vector<double> columns(2 * (l + 1));
-    for (int m = 0; m <= l; ++m) {
+    auto columns = std::vector<double>(2 * (l + 1));
+    for (auto m = 0; m <= l; ++m) {
       const auto c = coefficients[SurfaceGrid::Index(l, m)];
       columns[m] = factor * c.real();
       columns[l + 1 + m] = factor * c.imag();
@@ -55,7 +55,7 @@ std::vector<std::complex<double>> SeaLevelEvolution::Coefficients(
     const std::map<int, std::vector<double>>& perDegree, double factor) const {
   auto out = solver_->Grid().ZeroCoefficients();
   for (const auto& [l, columns] : perDegree) {
-    for (int m = 0; m <= l; ++m) {
+    for (auto m = 0; m <= l; ++m) {
       out[SurfaceGrid::Index(l, m)] =
           factor * std::complex<double>(columns[m], columns[l + 1 + m]);
     }
@@ -69,7 +69,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
-  for (std::size_t i = 1; i < times.size(); ++i) {
+  for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
       throw std::invalid_argument("times must be increasing");
     }
@@ -105,8 +105,8 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
 
   auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
                                    const std::vector<double>& slc) {
-    std::vector<double> total(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto total = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       total[i] = loadGrid[i] +
                  solver.WaterDensity() * state_.oceanFunction[i] * slc[i];
     }
@@ -116,7 +116,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
   // Solvers for the unrelaxed table and the per-dt effective tables, each
   // under the caller's parameters; the Love tables themselves are cached
   // by the operator, so a repeated dt costs a table conversion only.
-  std::map<double, SeaLevelSolver> flavours;
+  auto flavours = std::map<double, SeaLevelSolver>{};
   auto solverFor = [&](double dt) -> const SeaLevelSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
@@ -149,7 +149,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
                    Columns(psi, toMatPotential_));
   }
 
-  std::vector<Snapshot> snapshots;
+  auto snapshots = std::vector<Snapshot>{};
   auto record = [&](double t, SeaLevelSolver::Response& r, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
@@ -157,7 +157,17 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;
-    if (keepState) snapshot.internalState = vstate_;
+    // The internal variables, and the strain only on request: an adjoint
+    // otherwise regenerates it by one elastic solve under the recorded
+    // loads.
+    if (keepState && options_.record_strain) {
+      snapshot.internalState = vstate_;
+    } else if (keepState) {
+      ViscoelasticState kept;
+      kept.t = vstate_.t;
+      kept.m = vstate_.m;
+      snapshot.internalState = std::move(kept);
+    }
     if (stride > 0) {
       snapshot.loadCoefficients = sigma;
       snapshot.tideCoefficients = psi;
@@ -166,7 +176,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
   };
   record(times[0], response, stride > 0);
 
-  for (std::size_t node = 1; node < times.size(); ++node) {
+  for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme,
                              Columns(sigma, toMatDensity_),

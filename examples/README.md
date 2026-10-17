@@ -5,10 +5,10 @@ plotting script:
 
 | Driver | Feature | Plot |
 | --- | --- | --- |
-| `ExampleFingerprint` | elastic sea-level fingerprint (stage 2): a 10% Greenland melt on the real present-day Earth, lmax 256, one SLE solve, full rotation, SI in/out | `plot_fingerprint.py` |
-| `ExampleEvolution` | 1D viscoelastic GIA (stage 3): a West Antarctic melt ramp then hold, lmax 128, elastic jump + viscous creep, polar motion | `plot_evolution.py` |
-| `ExampleLateralViscosity` | 3D lateral viscosity (stage 4): a one-decade lateral pattern vs the radial twin, within-step iteration cost (kept small and analytic by design) | `plot_lateral.py` |
-| `ExampleIceKernels` | adjoint kernels (stage 5): a Greenland melt observed by a Fremantle tide gauge — ice-history duals, the quelled rate kernel, radial viscosity kernels by the continuous and discrete adjoints | `plot_kernels.py` |
+| `ExampleFingerprint` | elastic sea-level fingerprint: a 10% Greenland melt on the real present-day Earth, lmax 256, one SLE solve, full rotation, SI in/out | `plot_fingerprint.py` |
+| `ExampleEvolution` | 1D viscoelastic GIA: a West Antarctic melt ramp then hold, lmax 128, elastic jump + viscous creep, polar motion | `plot_evolution.py` |
+| `ExampleLateralViscosity` | 3D lateral viscosity: a one-decade lateral pattern vs the radial twin, within-step iteration cost (kept small and analytic by design) | `plot_lateral.py` |
+| `ExampleIceKernels` | adjoint kernels: a Greenland melt observed by a Fremantle tide gauge — ice-history duals, the quelled rate kernel, radial viscosity kernels by the continuous and discrete adjoints | `plot_kernels.py` |
 
 Inputs: the PREM-like test deck (copied from `tests/data`), and the
 present-day Earth state (ICE-7G ice and topography), which the build
@@ -39,8 +39,8 @@ cmake -B build && cmake --build build -j
 cd build/examples
 ./ExampleFingerprint        # ~a second (lmax 256)
 ./ExampleEvolution          # ~a minute (lmax 128, 31 steps)
-./ExampleLateralViscosity   # ~a minute (lmax 16, the 3D fixed point)
-./ExampleIceKernels         # ~seconds (lmax 32, two reverse sweeps)
+./ExampleLateralViscosity   # seconds (lmax 16, the 3D fixed point)
+./ExampleIceKernels        # ~a minute (lmax 128, two reverse sweeps)
 
 # 3. One-off: create the plotting environment HERE (not in the source).
 poetry install --no-root
@@ -54,6 +54,12 @@ poetry run python plot_kernels.py
 
 Notes:
 
+- The drivers run **threaded by default** (OpenMP; the library's
+  `parallel` options default on), on every core unless told otherwise:
+  set `OMP_NUM_THREADS=N` to choose the thread count, e.g.
+  `OMP_NUM_THREADS=8 ./ExampleLateralViscosity`, or 1 for a serial run.
+  For the 3D driver, `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` also asks for
+  huge pages for its large tensors (see the top-level README, Running).
 - **cartopy** provides the map projections and coastlines; its first use
   downloads the coastline data (one-off, needs network). If cartopy is
   not importable the scripts fall back to plain lat/lon maps, so any

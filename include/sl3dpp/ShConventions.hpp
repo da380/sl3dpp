@@ -38,7 +38,7 @@ struct RealPair {
 [[nodiscard]] inline std::complex<double> ComplexFromRealPair(RealPair pair,
                                                               int m) {
   if (m == 0) return pair.cos;
-  const double sign = m % 2 == 0 ? 1.0 : -1.0;
+  const auto sign = m % 2 == 0 ? 1.0 : -1.0;
   return sign * std::complex<double>(pair.cos, -pair.sin) / std::numbers::sqrt2;
 }
 
@@ -46,7 +46,7 @@ struct RealPair {
 [[nodiscard]] inline RealPair RealPairFromComplex(std::complex<double> f,
                                                   int m) {
   if (m == 0) return {f.real(), 0.0};
-  const double sign = m % 2 == 0 ? 1.0 : -1.0;
+  const auto sign = m % 2 == 0 ? 1.0 : -1.0;
   return {sign * std::numbers::sqrt2 * f.real(),
           -sign * std::numbers::sqrt2 * f.imag()};
 }

@@ -48,7 +48,7 @@ set(SL3DPP_INTERPOLATION_TAG "36a9539f4a94811f04d0d0c6f78bf15c72771b39"
     CACHE STRING "Interpolation commit")
 set(SL3DPP_FFTWPP_TAG "423558c0842b25f6031f2ae58dcab36d8f5f8874"
     CACHE STRING "FFTWpp commit")
-set(SL3DPP_GSHTRANS_TAG "c47b365bfa7f7cb6fdd1cc7e231a34b74247bb31"
+set(SL3DPP_GSHTRANS_TAG "8dd116df8df4222fe9b10a40c7213d34f2a274fb"
     CACHE STRING "GSHTrans commit")
 
 FetchContent_Declare(
@@ -97,6 +97,7 @@ pkg_check_modules(NETCDF REQUIRED IMPORTED_TARGET netcdf)
 # ---------------------------------------------------------------------------
 add_library(sl3dpp STATIC
   src/Adjoint.cpp
+  src/Adjoint3D.cpp
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp
@@ -106,6 +107,7 @@ add_library(sl3dpp STATIC
   src/GridCoupling.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
+  src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp
   src/SeaLevel.cpp

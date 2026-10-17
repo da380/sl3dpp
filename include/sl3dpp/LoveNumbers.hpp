@@ -33,6 +33,7 @@
 #include <vector>
 
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 
 namespace sl3dpp {
 
@@ -72,6 +73,11 @@ struct LoveNumbers {
 struct LoveNumberOptions {
   double eps = 1e-8;
   TruncationRule truncation = TruncationRule::Graded;
+  /// A shear modulus at the memory points every degree operator adds
+  /// (MemoryPoints.hpp): with the long-term material, the Love numbers of
+  /// the elastic or a step's effective solid with internal variables at
+  /// those points. Read during the computation only.
+  const PointShear* point_shear = nullptr;
 };
 
 /// The Love numbers of a material for every degree from 0 to lmax: each

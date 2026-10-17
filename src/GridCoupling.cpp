@@ -1,8 +1,11 @@
 #include "sl3dpp/GridCoupling.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <stdexcept>
+
+#include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
 
@@ -16,7 +19,12 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
                            const SurfaceGrid& grid, Options options)
-    : rheology_(&rheology), lmax_(lmax), options_(options), grid_(grid) {
+    : rheology_(&rheology),
+      lmax_(lmax),
+      options_(options),
+      grid_(grid),
+      points_(MemoryPoints::Of(options.memory_points,
+                               rheology.BaseMaterial().Mesh())) {
   if (grid.LMax() != lmax || grid.NMax() < 2) {
     throw std::invalid_argument(
         std::format("the shared grid is lmax {} with spin coverage {}; the "
@@ -32,8 +40,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
       active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
     }
     if (!active) continue;
-    for (auto i = 0; i < n; ++i) {
-      nodes_.push_back({e, i, mesh.Radius(e, i)});
+    for (auto p = 0; p < points_.count; ++p) {
+      nodes_.push_back({e, p, points_.RadiusAt(mesh, e, p)});
     }
   }
   if (nodes_.empty()) {
@@ -45,6 +53,12 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
     firstElementOf_[l] =
         l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   }
+}
+
+double GridCoupling::WeightOfNode(int node) const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  return points_.weight[nodes_[node].nodeInElement] *
+         mesh.Jacobian(nodes_[node].element);
 }
 
 GridCoupling::TensorField GridCoupling::ZeroTensor() const {
@@ -69,23 +83,35 @@ GridCoupling::SpectralTensor GridCoupling::ZeroSpectral() const {
 GridCoupling::TensorField GridCoupling::Synthesise(
     const SpectralTensor& spectral) const {
   auto field = ZeroTensor();
+  Synthesise(spectral, field);
+  return field;
+}
+
+void GridCoupling::Synthesise(const SpectralTensor& spectral,
+                              TensorField& field) const {
+  if (field.r.empty()) field = ZeroTensor();
   const auto count = static_cast<int>(nodes_.size());
   for (auto c = 0; c < 2; ++c) {
     grid_.SynthesiseSpinBatch(kSpins[c], spectral.c[c], count, field.c[c]);
   }
   grid_.SynthesiseBatch(spectral.r, count, field.r);
-  return field;
 }
 
 GridCoupling::SpectralTensor GridCoupling::Analyse(
     const TensorField& field) const {
   auto spectral = ZeroSpectral();
+  Analyse(field, spectral);
+  return spectral;
+}
+
+void GridCoupling::Analyse(const TensorField& field,
+                           SpectralTensor& spectral) const {
+  if (spectral.r.empty()) spectral = ZeroSpectral();
   const auto count = static_cast<int>(nodes_.size());
   for (auto c = 0; c < 2; ++c) {
     grid_.ExpandSpinBatch(kSpins[c], field.c[c], count, spectral.c[c]);
   }
   grid_.ExpandBatch(field.r, count, spectral.r);
-  return spectral;
 }
 
 void GridCoupling::Multiply(TensorField& field,
@@ -95,10 +121,11 @@ void GridCoupling::Multiply(TensorField& field,
     throw std::invalid_argument(std::format(
         "the weight field has {} values, the tensor {}", weight.size(), size));
   }
-  for (auto& component : field.c) {
-    for (std::size_t i = 0; i < size; ++i) component[i] *= weight[i];
-  }
-  for (std::size_t i = 0; i < size; ++i) field.r[i] *= weight[i];
+  detail::ParallelElements(size, options_.parallel, [&](std::size_t i) {
+    field.c[0][i] *= weight[i];
+    field.c[1][i] *= weight[i];
+    field.r[i] *= weight[i];
+  });
 }
 
 void GridCoupling::ScaleByNode(SpectralTensor& spectral,
@@ -106,24 +133,22 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
   if (factor.size() != nodes_.size()) {
     throw std::invalid_argument("one factor per radial node, please");
   }
-  for (auto c = 0; c < 2; ++c) {
-    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    for (std::size_t node = 0; node < nodes_.size(); ++node) {
-      for (std::size_t k = 0; k < size; ++k) {
-        spectral.c[c][node * size + k] *= factor[node];
-      }
-    }
-  }
-  const auto size = grid_.CoefficientSize();
-  for (std::size_t node = 0; node < nodes_.size(); ++node) {
-    for (std::size_t k = 0; k < size; ++k) {
-      spectral.r[node * size + k] *= factor[node];
-    }
-  }
+  const auto sizes =
+      std::array{grid_.SpinCoefficientSize(kSpins[0]),
+                 grid_.SpinCoefficientSize(kSpins[1]), grid_.CoefficientSize()};
+  const auto blocks = std::array{&spectral.c[0], &spectral.c[1], &spectral.r};
+  detail::ParallelElements(
+      nodes_.size(), options_.parallel, [&](std::size_t node) {
+        for (auto b = std::size_t{0}; b < blocks.size(); ++b) {
+          for (auto k = std::size_t{0}; k < sizes[b]; ++k) {
+            (*blocks[b])[node * sizes[b] + k] *= factor[node];
+          }
+        }
+      });
 }
 
 int GridCoupling::FirstNodeFor(int firstElement) const {
-  for (std::size_t node = 0; node < nodes_.size(); ++node) {
+  for (auto node = std::size_t{0}; node < nodes_.size(); ++node) {
     if (nodes_[node].element >= firstElement) return static_cast<int>(node);
   }
   return static_cast<int>(nodes_.size());
@@ -174,7 +199,7 @@ std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
     const SpectralTensor& spectral, int node, int l, int m) const {
   // The derived components by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}).
   const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
-  std::array<Complex, 5> A{};
+  auto A = std::array<Complex, 5>{};
   const auto real = [&](int mm) {
     return spectral
         .r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, mm)];
@@ -205,6 +230,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
   const auto columns = static_cast<std::size_t>(l + 1);
   const auto ndof = spheroidal.DofCount();
   const auto first = FirstNodeFor(spheroidal.FirstElement());
+  const auto gll = points_.set == MemoryPointSet::Gll;
 
   auto gatherS = [&](int e, int i, Component component,
                      std::size_t column) -> Complex {
@@ -222,16 +248,27 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
     const auto q = nodes_[node].nodeInElement;
     const auto r = nodes_[node].radius;
     const auto jac = mesh.Jacobian(e);
-    for (std::size_t column = 0; column < columns; ++column) {
+    for (auto column = std::size_t{0}; column < columns; ++column) {
       DegreeNodeValues values;
-      values.U = gatherS(e, q, Component::U, column);
-      values.V = gatherS(e, q, Component::V, column);
-      values.W = gatherT(e, q, column);
+      if (gll) {
+        values.U = gatherS(e, q, Component::U, column);
+        values.V = gatherS(e, q, Component::V, column);
+        values.W = gatherT(e, q, column);
+      }
       for (auto i = 0; i < n; ++i) {
-        const auto b = r * mesh.Derivative(q, i) / jac;
-        values.rdU += b * gatherS(e, i, Component::U, column);
-        values.rdV += b * gatherS(e, i, Component::V, column);
-        values.rdW += b * gatherT(e, i, column);
+        const auto U = gatherS(e, i, Component::U, column);
+        const auto V = gatherS(e, i, Component::V, column);
+        const auto W = gatherT(e, i, column);
+        if (!gll) {
+          const auto v = points_.Value(q, i);
+          values.U += v * U;
+          values.V += v * V;
+          values.W += v * W;
+        }
+        const auto b = r * points_.Derivative(q, i) / jac;
+        values.rdU += b * U;
+        values.rdV += b * V;
+        values.rdW += b * W;
       }
       const auto A = DeviatoricComponents(l, values, r);
       Scatter(spectral, node, l, static_cast<int>(column), A);
@@ -244,10 +281,16 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
     const std::function<const DegreeOperator&(int)>& system) const {
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  const auto w = mesh.Weights();
-  std::map<int, std::vector<Complex>> out;
-  for (auto l = 0; l <= lmax_; ++l) {
-    const auto& op = system(l);
+  const auto& w = points_.weight;
+  const auto gll = points_.set == MemoryPointSet::Gll;
+  // The operators are resolved first (any built lazily, serially), so the
+  // degree tasks below only read; each task writes only its own force.
+  auto ops = std::vector<const DegreeOperator*>(lmax_ + 1);
+  for (auto l = 0; l <= lmax_; ++l) ops[l] = &system(l);
+  auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
+  detail::ParallelFor(lmax_ + 1, options_.parallel, [&](int task) {
+    const auto l = lmax_ - task;  // the largest degrees first
+    const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
@@ -257,19 +300,30 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
       const auto q = nodes_[node].nodeInElement;
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
-      for (std::size_t column = 0; column < columns; ++column) {
+      for (auto column = std::size_t{0}; column < columns; ++column) {
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
-        // The pointwise rows at the quadrature node itself.
-        const auto iU = op.Dof(mesh.GlobalIndex(e, q), Component::U);
-        const auto iV = op.Dof(mesh.GlobalIndex(e, q), Component::V);
+        // The pointwise rows: at the quadrature node itself, or spread
+        // over the element's nodes by the Lagrange values at the point.
         const auto point = jac * w[q] * r;
-        if (iU >= 0) b[column * op.DofCount() + iU] += point * rows.u;
-        if (iV >= 0) b[column * op.DofCount() + iV] += point * rows.v;
+        if (gll) {
+          const auto iU = op.Dof(mesh.GlobalIndex(e, q), Component::U);
+          const auto iV = op.Dof(mesh.GlobalIndex(e, q), Component::V);
+          if (iU >= 0) b[column * op.DofCount() + iU] += point * rows.u;
+          if (iV >= 0) b[column * op.DofCount() + iV] += point * rows.v;
+        } else {
+          for (auto i = 0; i < n; ++i) {
+            const auto v = point * points_.Value(q, i);
+            const auto iU = op.Dof(mesh.GlobalIndex(e, i), Component::U);
+            const auto iV = op.Dof(mesh.GlobalIndex(e, i), Component::V);
+            if (iU >= 0) b[column * op.DofCount() + iU] += v * rows.u;
+            if (iV >= 0) b[column * op.DofCount() + iV] += v * rows.v;
+          }
+        }
         // The derivative rows against every node of the element.
         for (auto j = 0; j < n; ++j) {
-          const auto deriv = w[q] * mesh.Derivative(q, j) * r;
+          const auto deriv = w[q] * points_.Derivative(q, j) * r;
           const auto jU = op.Dof(mesh.GlobalIndex(e, j), Component::U);
           const auto jV = op.Dof(mesh.GlobalIndex(e, j), Component::V);
           if (jU >= 0) b[column * op.DofCount() + jU] += deriv * rows.du;
@@ -277,8 +331,10 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
         }
       }
     }
-    out.emplace(l, std::move(b));
-  }
+    forces[l] = std::move(b);
+  });
+  auto out = std::map<int, std::vector<Complex>>{};
+  for (auto l = 0; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
 
@@ -287,10 +343,16 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
     const std::function<const ToroidalOperator&(int)>& system) const {
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  const auto w = mesh.Weights();
-  std::map<int, std::vector<Complex>> out;
-  for (auto l = 2; l <= lmax_; ++l) {
-    const auto& op = system(l);
+  const auto& w = points_.weight;
+  const auto gll = points_.set == MemoryPointSet::Gll;
+  // As SpheroidalForce: operators resolved first, one task per degree,
+  // from degree 1 (whose rigid rotations the operator's gauge fixes).
+  auto ops = std::vector<const ToroidalOperator*>(lmax_ + 1, nullptr);
+  for (auto l = 1; l <= lmax_; ++l) ops[l] = &system(l);
+  auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
+  detail::ParallelFor(lmax_, options_.parallel, [&](int task) {
+    const auto l = lmax_ - task;  // the largest degrees first
+    const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
@@ -300,25 +362,37 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
       const auto q = nodes_[node].nodeInElement;
       const auto r = nodes_[node].radius;
       const auto jac = mesh.Jacobian(e);
-      for (std::size_t column = 0; column < columns; ++column) {
+      for (auto column = std::size_t{0}; column < columns; ++column) {
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
-        const auto iW = op.Dof(mesh.GlobalIndex(e, q));
-        if (iW >= 0) {
-          b[column * op.DofCount() + iW] += jac * w[q] * r * rows.w;
+        if (gll) {
+          const auto iW = op.Dof(mesh.GlobalIndex(e, q));
+          if (iW >= 0) {
+            b[column * op.DofCount() + iW] += jac * w[q] * r * rows.w;
+          }
+        } else {
+          for (auto i = 0; i < n; ++i) {
+            const auto iW = op.Dof(mesh.GlobalIndex(e, i));
+            if (iW >= 0) {
+              b[column * op.DofCount() + iW] +=
+                  jac * w[q] * r * points_.Value(q, i) * rows.w;
+            }
+          }
         }
         for (auto j = 0; j < n; ++j) {
           const auto jW = op.Dof(mesh.GlobalIndex(e, j));
           if (jW >= 0) {
             b[column * op.DofCount() + jW] +=
-                w[q] * mesh.Derivative(q, j) * r * rows.dw;
+                w[q] * points_.Derivative(q, j) * r * rows.dw;
           }
         }
       }
     }
-    out.emplace(l, std::move(b));
-  }
+    forces[l] = std::move(b);
+  });
+  auto out = std::map<int, std::vector<Complex>>{};
+  for (auto l = 1; l <= lmax_; ++l) out.emplace(l, std::move(forces[l]));
   return out;
 }
 

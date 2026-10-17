@@ -100,7 +100,10 @@ code; what follows fixes the sl3dpp mapping only.
   internal state every stride-th node and the per-node load/tide
   coefficients always; a `TrajectoryCursor` serves states strictly
   backwards, reconstructing gaps by `StepBack` under the recorded
-  loads. Roundoff grows as exp(Σh) across a gap — the stride buys
+  loads. *(17 Oct 2026: recordings keep the internal variables only, as
+  in pyslfp and AdGIA; the cursor regenerates each stored state's strain
+  by one elastic solve under that node's recorded loads, and the 3D
+  sweep does the same per node.)* Roundoff grows as exp(Σh) across a gap — the stride buys
   memory at the price of trailing digits (pyslfp `_TrajectoryCursor`).
 
 ## 4. Result type and views
@@ -156,12 +159,15 @@ dual by the dot product; densities/rates are per unit SLE time.
   machinery of Evolution3D — zero-load reversed stepping with the
   within-step lateral iteration intact, jumps at observations through
   the unrelaxed 3D solve, the lateral term entering the fixed point
-  exactly as forward. The viscosity kernel is then the pointwise grid
-  contraction μ s (d − m):(d† − m†) accumulated at the memory nodes
-  over the reversed nodes with the split trapezoid; the null-basis
-  metric signs (g(+,−) = −1 pairings across the component slots) come
-  from GSHTrans's tensor types, not hand-rolled weights (stage4.md
-  §8). The reality reduction gives the derived spins by sign·conj for
+  exactly as forward. The viscosity kernel is the 3D form of Yu et al.
+  2025's multiplier integral, as in pyslfp and the 1D sweep (not the
+  Fortran's rate-form kernel expression): per branch and memory point,
+  μ_k m†:(d − m)/itau, accumulated over the reversed nodes with the
+  split trapezoid. *(Corrected 17 Oct 2026: this paragraph first planned
+  the contraction μ s (d − m):(d† − m†) with metric signs from
+  GSHTrans's tensor types; as built, §6a, the contraction pairs the
+  adjoint memory with the forward d − m, and its metric on the reduced
+  storage is fixed by the 1D limit.)* The reality reduction gives the derived spins by sign·conj for
   free at the contraction, and the adjoint fields are real tensors too.
 - **Discrete option**: the exact transpose of the reduced pipeline —
   Scatter/batched-synthesis/pointwise-multiply/analysis/force-rows in
@@ -178,6 +184,111 @@ dual by the dot product; densities/rates are per unit SLE time.
   checks on the grid viscosity kernel; discrete-vs-continuous ladder
   over lateral contrast (the resolution diagnostic in action — a
   research measurement alongside stage 4's §5a table).
+
+## 6a. The 3D continuous sweep as built (16 Oct 2026)
+
+`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (continuous only; the discrete
+transpose remains 5e), `ForwardTrajectory3D` (full recording via
+`SeaLevelEvolution3D::Options::record_stride` — no 3D backward
+reconstruction yet, so the viscosity kernels demand stride 1; since 17
+Oct, performance chunk 10, the sweep rebuilds the gaps by forward steps
+from the kept states, so any stride serves), and
+`Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, an
+ANGULAR DENSITY over memory node × coupling grid, radial quadrature
+folded in), its angular integral `itauKernelSpherical` (the 1D bridge),
+and `logViscosityKernel3D` = −itau(x)·K (the operator's delta
+parameterisation).
+
+The pieces, each mirroring a gated 1D counterpart:
+- the observation JUMP is the 1D one (the unrelaxed problem is
+  laterally uniform): the elastic adjoint fingerprint's channels drive
+  the reference unit/split responses, the strain enters the pipeline
+  via `AddStrainOfSolution` + `Synthesise`, and
+  m† += itau(x)·d̃†(x) pointwise with the laterally varying itau;
+- between observations the reversed stepping is Evolution3D's coupled
+  pass loop verbatim with no ice load (`OpenStep::Respond` /
+  `AddChannels` / `StrainOf` / `Finish` under the Anderson mixer);
+- the kernel contraction's null-basis metric is FIXED by the 1D limit:
+  on the reduced storage, C(x) = r²·[12·A₀B₀ + 8 Re(A₋₁B̄₋₁) +
+  4 Re(A₋₂B̄₋₂)] — derived by requiring the angle-uniform Parseval
+  reduction to reproduce the force weights (4/3, k², k²(k²−2)) through
+  `ComponentsFromScalars`, and verified by the zero-lateral gate;
+- the covariant pairing ratio of the 1D sweep (the pyslfp
+  units-covariance fix) carries over unchanged.
+
+GATES (TestAdjoint3D): zero-lateral — ice kernels and the spherical
+reduction equal the 1D continuous sweep's at 1e-6 through the whole
+pipeline; lateral — the full 3D log-viscosity kernel against central
+differences of the coupled forward along an analytic direction, at the
+commute level (< 10%) in the resolved regime and improving under step
+refinement; and the canonical TAYLOR TEST (added 16 Oct 2026 at
+David's prompt): |J(δ+hp) − J| = O(h) and the gradient-corrected
+remainder |J(δ+hp) − J − h⟨K,p⟩| at second order on the
+curvature-dominated end of the h-sweep, monotone, and inside the
+commute floor (0.1·h·|⟨K,p⟩|) everywhere. The machine-grade Taylor
+test — second order to solver precision at every h — belongs to the
+discrete transpose (5e).
+
+## 6b. The discrete 3D transpose: design (16 Oct 2026, to implement)
+
+The step is LINEAR throughout, so its exact transpose is mechanical
+once the pairings are fixed. Write the forward within-step pass (the
+code of Evolution3D::Run and OpenStep) as d' = Exit K⁻¹ [Entry(m̃ +
+Δβ d) + units·closure(f, S K⁻¹ Entry(...))] with
+- Entry(T) = SpheroidalForce/ToroidalForce(Analyse(μ_k-scaled T)) — the
+  grid entry with branch moduli,
+- Exit(u) = Synthesise(AddStrainOfSolution(u)) — the strain exit,
+- K the reference effective systems (symmetric), S the surface reads,
+  closure the (linear) generalised SLE, Δβ = diag(β_k(x) − β_ref_k(r)).
+
+*Note (17 Oct 2026, performance chunk 3; `walkthrough-3d-step.md` §4).*
+The forward code now iterates on the strain's COEFFICIENTS s, not its
+grid values d. A pass is s' = AddStrainOfSolution(K⁻¹[fixed +
+Analyse(W · Synthesise(s)) + channels]), where fixed = Analyse(Σ_k μ_k
+m̃_k) is formed once per step and W = Σ_k μ_k Δβ_k(x) is a single weight
+field. The step map, and so everything in this section, is unchanged.
+Only the code's split has moved: Exit now stops at the coefficients,
+Synthesise opens the next pass, and Entry's constant part is applied
+once per step. A transposed iteration can likewise run on coefficient
+duals.
+
+**The load-bearing duality**: Entry = Exitᵀ under the ENERGY pairing
+⟨S, T⟩_W0 = Σ_node Wq(node) · r² [12 S₀T₀ + 8 Re(S₋₁T̄₋₁) +
+4 Re(S₋₂T̄₋₂)] on the reduced components against the REAL dof pairing
+with m ≥ 0 column weights (1, 2, 2, ...) — the SAME metric the
+continuous kernel contraction derived from the 1D force weights, and
+which the zero-lateral kernel gate already validated. With duals
+carried in this pairing, the transposed pass is the forward pass with
+the force/strain pair swapped and the SLE replaced by its stage-2
+adjoint:
+
+  passᵀ(y): x† = Entry-with-Δβμ-weights(y) … K⁻¹ (symmetric) …
+            unit-response contraction → SLE ADJOINT → surface-dual +
+            moment-row injections → K⁻¹ … Exit → Δβ-weighted tensor.
+
+The transposed step: w = d† + Σ_k β_k(x) m†_k; solve y = Mᵀy + w by the
+SAME Anderson-mixed iteration (the transpose of the converged fixed
+point is the transposed system's solution, as the SLE adjoint already
+does); then one application of the constant part's transpose yields
+m̃†_k (→ the e/α recursion closing m† and d†, pointwise fields) and the
+node's load dual; the measurement duals enter the forcing w through one
+SLE-adjoint chain per node, as in the 1D discrete sweep.
+
+**Implementation order, micro-gated** (each pinned by a randomized
+adjointness identity at lmax 4 with Hermitian data BEFORE the next
+layer — the reduced pipeline's ±m bookkeeping lives inside
+Scatter/Gather and must be verified, not trusted):
+  i.   ⟨Exit(x), y⟩_W0 = ⟨x, Entry(W0-images of y)⟩_dof — the
+       force/strain duality with every quadrature factor;
+  ii.  the pass transpose: ⟨dNext(d), y⟩_W0 = ⟨d, passᵀ(y)⟩_W0 with
+       the SLE closure in the loop (random smooth state);
+  iii. the single-step transpose: the dot-product identity of one
+       coupled Step against (m†, d†) duals;
+  iv.  the sweep: gradient identity at solver tolerance (the forward's
+       coupled_rtol is the floor), zero-lateral == the 1D DISCRETE
+       sweep, machine-grade Taylor test (second order at every h), and
+       the continuous-vs-discrete contrast ladder (the §5a-style
+       research measurement).
 
 ## 7. Implementation order and gates
 

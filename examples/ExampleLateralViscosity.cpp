@@ -28,10 +28,10 @@
 using namespace sl3dpp;
 
 int main() {
-  constexpr int lmax = 16;
-  constexpr double meltFraction = 0.1;
-  constexpr double tEnd = 10.0e3 * examples::kYear;
-  constexpr int nodes = 11;
+  constexpr auto lmax = 16;
+  constexpr auto meltFraction = 0.1;
+  constexpr auto tEnd = 10.0e3 * examples::kYear;
+  constexpr auto nodes = 11;
 
   const auto earth = examples::Earth::Make(lmax, 1e21);
   Viscoelastic3D lateral(earth.rheology, lmax,
@@ -50,7 +50,7 @@ int main() {
 
   Fingerprint fingerprint(lmax, lateral.ElasticLove());
   fingerprint.SetAnalyticTestState(0.0);
-  const double length = scales.Length();
+  const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
     return si;
@@ -60,14 +60,14 @@ int main() {
 
   // A held melt load switched on at t = 0 (the north-polar cap).
   const auto& C = state.oceanFunction;
-  std::vector<double> load(grid.FieldSize());
-  for (std::size_t i = 0; i < load.size(); ++i) {
+  auto load = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < load.size(); ++i) {
     load[i] = -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
               iceSi[i] / length;
   }
   auto iceLoad = [&](double) { return load; };
-  std::vector<double> times;
-  for (int n = 0; n < nodes; ++n) {
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
 
@@ -83,8 +83,8 @@ int main() {
   out.Grid(grid);
   out.Field("slc_lateral_m", with.back().seaLevelChange, length);
   out.Field("slc_radial_m", without.back().seaLevelChange, length);
-  std::vector<double> difference(grid.FieldSize());
-  for (std::size_t i = 0; i < difference.size(); ++i) {
+  auto difference = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < difference.size(); ++i) {
     difference[i] =
         with.back().seaLevelChange[i] - without.back().seaLevelChange[i];
   }
@@ -94,8 +94,8 @@ int main() {
             grid.FromFunction([](double theta, double phi) {
               return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
             }));
-  std::vector<std::vector<double>> rows;
-  for (std::size_t n = 0; n < with.size(); ++n) {
+  auto rows = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < with.size(); ++n) {
     rows.push_back({times[n] * scales.Time() / (1.0e3 * examples::kYear),
                     static_cast<double>(with[n].coupledIterations),
                     with[n].coupledResidual});

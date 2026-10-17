@@ -30,29 +30,29 @@ void Fingerprint::SetAnalyticTestState(double date) {
     const double cosDistance =
         std::cos(theta) * std::cos(colat0) +
         std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
-    const double distance = std::acos(std::clamp(cosDistance, -1.0, 1.0));
+    const auto distance = std::acos(std::clamp(cosDistance, -1.0, 1.0));
     return peak * std::exp(-0.5 * std::pow(distance / width, power));
   };
-  constexpr double kPi = std::numbers::pi;
+  constexpr auto kPi = std::numbers::pi;
   const auto& grid = solver_.Grid();
   auto seaLevel = grid.FromFunction([&](double theta, double phi) {
-    double sl = 4000.0;
+    auto sl = 4000.0;
     sl -= feature(theta, phi, 6000.0, 0.0, 0.0, 0.35, 6);
     sl -= feature(theta, phi, 5000.0, kPi / 2, kPi / 2, 0.45, 4);
     sl -= feature(theta, phi, 4050.0, 3 * kPi / 4, 3 * kPi / 2, 1.5, 4);
     return sl;
   });
   auto ice = grid.FromFunction([&](double theta, double phi) {
-    double thickness = feature(theta, phi, 3000.0, 0.0, 0.0, 0.2, 2);
+    auto thickness = feature(theta, phi, 3000.0, 0.0, 0.0, 0.2, 2);
     if (date > 0.0) {
-      const double factor = std::min(date / 21.0, 1.0);
+      const auto factor = std::min(date / 21.0, 1.0);
       thickness +=
           feature(theta, phi, 2500.0 * factor, kPi / 4, kPi / 2, 0.15, 2);
     }
     return thickness;
   });
-  for (std::size_t i = 0; i < ice.size(); ++i) {
-    const double landMask = 1.0 / (1.0 + std::exp(seaLevel[i] / 100.0));
+  for (auto i = std::size_t{0}; i < ice.size(); ++i) {
+    const auto landMask = 1.0 / (1.0 + std::exp(seaLevel[i] / 100.0));
     ice[i] *= landMask;
     if (ice[i] < 1e-3) ice[i] = 0.0;
   }
@@ -64,22 +64,22 @@ std::vector<double> Fingerprint::ToDimensionless(std::span<const double> field,
   if (field.size() != solver_.Grid().FieldSize()) {
     throw std::invalid_argument("the field does not live on the grid");
   }
-  const double factor = solver_.SolverScales().Factor(dimensions);
-  std::vector<double> out(field.begin(), field.end());
+  const auto factor = solver_.SolverScales().Factor(dimensions);
+  auto out = std::vector<double>(field.begin(), field.end());
   for (auto& v : out) v /= factor;
   return out;
 }
 
 std::vector<double> Fingerprint::IceThickness() const {
   std::vector<double> out = state_.iceThickness;
-  const double length = solver_.SolverScales().Length();
+  const auto length = solver_.SolverScales().Length();
   for (auto& v : out) v *= length;
   return out;
 }
 
 std::vector<double> Fingerprint::SeaLevel() const {
   std::vector<double> out = state_.seaLevel;
-  const double length = solver_.SolverScales().Length();
+  const auto length = solver_.SolverScales().Length();
   for (auto& v : out) v *= length;
   return out;
 }
@@ -92,9 +92,9 @@ std::vector<double> Fingerprint::LoadFromIceThicknessChange(
   const auto& scales = solver_.SolverScales();
   // Non-dimensional rho_ice (1 - C) Delta I, redimensionalised to kg m^-2.
   const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  const double length = scales.Length();
-  std::vector<double> out(iceThicknessChange.size());
-  for (std::size_t i = 0; i < out.size(); ++i) {
+  const auto length = scales.Length();
+  auto out = std::vector<double>(iceThicknessChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
     out[i] = solver_.IceDensity() * (1.0 - state_.oceanFunction[i]) *
              (iceThicknessChange[i] / length) * sigma;
   }
@@ -108,9 +108,9 @@ std::vector<double> Fingerprint::LoadFromSeaLevelChange(
   }
   const auto& scales = solver_.SolverScales();
   const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  const double length = scales.Length();
-  std::vector<double> out(seaLevelChange.size());
-  for (std::size_t i = 0; i < out.size(); ++i) {
+  const auto length = scales.Length();
+  auto out = std::vector<double>(seaLevelChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
     out[i] = solver_.WaterDensity() * state_.oceanFunction[i] *
              (seaLevelChange[i] / length) * sigma;
   }
@@ -120,8 +120,8 @@ std::vector<double> Fingerprint::LoadFromSeaLevelChange(
 Fingerprint::Result Fingerprint::FromResponse(
     SeaLevelSolver::Response response) const {
   const auto& scales = solver_.SolverScales();
-  const double length = scales.Length();
-  const double potential = scales.Factor(PotentialDimensions);
+  const auto length = scales.Length();
+  const auto potential = scales.Factor(PotentialDimensions);
   const double frequency = scales.Factor(Dimensions{.time = -1});
   Result out;
   out.seaLevelChange = std::move(response.seaLevelChange);
@@ -130,7 +130,7 @@ Fingerprint::Result Fingerprint::FromResponse(
   for (auto& v : out.seaLevelChange) v *= length;
   for (auto& v : out.displacement) v *= length;
   for (auto& v : out.potential) v *= potential;
-  for (int i = 0; i < 3; ++i) {
+  for (auto i = 0; i < 3; ++i) {
     out.angularVelocity[i] = response.angularVelocity[i] * frequency;
   }
   out.iterations = response.iterations;

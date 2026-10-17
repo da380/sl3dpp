@@ -12,7 +12,10 @@ function(sl3dpp_add_test name)
   target_link_libraries(${name} PRIVATE sl3dpp::sl3dpp GTest::gtest_main)
   target_compile_definitions(${name} PRIVATE
     SL3DPP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
-  gtest_discover_tests(${name})
+  # The library threads by default; each test runs on one thread, so
+  # that ctest -jN does not oversubscribe the machine (a test that needs
+  # threads sets its own count).
+  gtest_discover_tests(${name} PROPERTIES ENVIRONMENT "OMP_NUM_THREADS=1")
 endfunction()
 
 sl3dpp_add_test(TestToolkit)
@@ -24,8 +27,12 @@ sl3dpp_add_test(TestSeaLevel)
 sl3dpp_add_test(TestViscoelastic)
 sl3dpp_add_test(TestEvolution)
 sl3dpp_add_test(TestAdjoint)
+sl3dpp_add_test(TestAdjoint3D)
 sl3dpp_add_test(TestSpinMachinery)
 sl3dpp_add_test(TestGridCoupling)
 sl3dpp_add_test(TestViscoelastic3D)
 sl3dpp_add_test(TestEvolution3D)
 sl3dpp_add_test(TestFixtures)
+sl3dpp_add_test(TestMemoryPoints)
+sl3dpp_add_test(TestGaussMemory)
+sl3dpp_add_test(TestGaussMemory3D)

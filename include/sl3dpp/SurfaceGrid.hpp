@@ -41,8 +41,9 @@ class SurfaceGrid {
     /// Grid resolution headroom for pointwise products (1.5 = the 3/2
     /// dealiasing rule); 1 resolves the band exactly.
     double oversampling = 1.0;
-    /// Whether GSHTrans transforms run threaded.
-    bool parallel = false;
+    /// Whether GSHTrans transforms run threaded, on OpenMP's thread count
+    /// (OMP_NUM_THREADS); false forces them serial.
+    bool parallel = true;
     /// Use GSHTrans's BLAS matrix kernel for the transforms (its order
     /// loops run sequentially and the BLAS supplies the threading).
     bool matrix_kernel = false;
@@ -103,7 +104,7 @@ class SurfaceGrid {
   /// A field sampled from f(theta, phi) over the points, storage order.
   template <typename Function>
   [[nodiscard]] std::vector<double> FromFunction(Function&& f) const {
-    std::vector<double> out;
+    auto out = std::vector<double>{};
     out.reserve(FieldSize());
     for (auto theta : coLatitudes_) {
       for (auto phi : longitudes_) out.push_back(f(theta, phi));
@@ -137,7 +138,7 @@ class SurfaceGrid {
   }
   [[nodiscard]] std::vector<double> Synthesise(
       std::span<const std::complex<double>> coefficients) const {
-    std::vector<double> out(FieldSize());
+    auto out = std::vector<double>(FieldSize());
     Synthesise(coefficients, out);
     return out;
   }
@@ -190,7 +191,7 @@ class SurfaceGrid {
   }
   [[nodiscard]] std::vector<std::complex<double>> ExpandSpin(
       int N, std::span<const std::complex<double>> field) const {
-    std::vector<std::complex<double>> out(SpinCoefficientSize(N));
+    auto out = std::vector<std::complex<double>>(SpinCoefficientSize(N));
     ExpandSpin(N, field, out);
     return out;
   }
@@ -216,7 +217,7 @@ class SurfaceGrid {
   }
   [[nodiscard]] std::vector<std::complex<double>> SynthesiseSpin(
       int N, std::span<const std::complex<double>> coefficients) const {
-    std::vector<std::complex<double>> out(FieldSize());
+    auto out = std::vector<std::complex<double>>(FieldSize());
     SynthesiseSpin(N, coefficients, out);
     return out;
   }
@@ -240,10 +241,10 @@ class SurfaceGrid {
   [[nodiscard]] double Integrate(std::span<const double> field) const {
     const auto nphi = longitudes_.size();
     const double dphi = 2.0 * std::numbers::pi / static_cast<double>(nphi);
-    double sum = 0.0;
-    for (std::size_t i = 0; i < coLatitudes_.size(); ++i) {
-      double ring = 0.0;
-      for (std::size_t j = 0; j < nphi; ++j) ring += field[i * nphi + j];
+    auto sum = 0.0;
+    for (auto i = std::size_t{0}; i < coLatitudes_.size(); ++i) {
+      auto ring = 0.0;
+      for (auto j = std::size_t{0}; j < nphi; ++j) ring += field[i * nphi + j];
       sum += coLatitudeWeights_[i] * ring;
     }
     return sum * dphi;

@@ -39,11 +39,11 @@ GravityFixture ReadFixture(const std::filesystem::path& path) {
   std::ifstream file(path);
   EXPECT_TRUE(file.is_open()) << path;
   GravityFixture fixture;
-  bool inTable = false;
+  auto inTable = false;
   for (std::string line; std::getline(file, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
-    std::string head;
+    auto head = std::string{};
     if (!inTable) {
       row >> head;
       if (head == "mass") {
@@ -55,7 +55,7 @@ GravityFixture ReadFixture(const std::filesystem::path& path) {
       }
       continue;
     }
-    double r = 0, g = 0;
+    auto r = 0.0, g = 0.0;
     row >> r >> g;
     fixture.gravity.emplace_back(r, g);
   }
@@ -83,10 +83,10 @@ Stage2Fixture ReadStage2(const std::filesystem::path& path, int lmax) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (!std::isdigit(line.front())) {
-      std::string head;
+      auto head = std::string{};
       row >> head;
       if (head == "field") {
-        std::string name;
+        auto name = std::string{};
         row >> name;
         current = &fixture.fields[name];
         current->assign(size, 0.0);
@@ -101,8 +101,8 @@ Stage2Fixture ReadStage2(const std::filesystem::path& path, int lmax) {
       ADD_FAILURE() << "coefficient row outside a field block";
       continue;
     }
-    int l = 0, m = 0;
-    double a = 0, b = 0;
+    auto l = 0, m = 0;
+    auto a = 0.0, b = 0.0;
     row >> l >> m >> a >> b;
     (*current)[sl3dpp::SurfaceGrid::Index(l, m)] =
         sl3dpp::ComplexFromRealPair({a, b}, m);
@@ -114,8 +114,8 @@ Stage2Fixture ReadStage2(const std::filesystem::path& path, int lmax) {
 /// coefficient.
 double CoefficientError(std::span<const std::complex<double>> ours,
                         std::span<const std::complex<double>> theirs) {
-  double scale = 0.0, diff = 0.0;
-  for (std::size_t i = 0; i < ours.size(); ++i) {
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < ours.size(); ++i) {
     scale = std::max(scale, std::abs(theirs[i]));
     diff = std::max(diff, std::abs(ours[i] - theirs[i]));
   }
@@ -126,7 +126,7 @@ double CoefficientError(std::span<const std::complex<double>> ours,
 
 TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
-  constexpr int lmax = 32;
+  constexpr auto lmax = 32;
   auto table =
       sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
   sl3dpp::SeaLevelSolver solver(sl3dpp::SurfaceGrid(lmax), table,
@@ -159,7 +159,7 @@ TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
       coefInput("potential_response", sl3dpp::PotentialDimensions);
   forcing.inertiaMomentChange =
       fixture.scalars.at("inertia_moment")[0] / scales.Factor(kMoment);
-  for (int i = 0; i < 3; ++i) {
+  for (auto i = 0; i < 3; ++i) {
     forcing.angularMomentumChange[i] =
         fixture.scalars.at("angular_momentum")[i] /
         scales.Factor({.mass = 1, .length = 2, .time = -1});
@@ -180,7 +180,7 @@ TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
   };
   // The floor is the aliasing tail of near-lmax products, which differs
   // between grids; observed ~2e-9.
-  constexpr double tol = 5e-9;
+  constexpr auto tol = 5e-9;
   EXPECT_LT(CoefficientError(toSi(response.seaLevelChange, {.length = 1}),
                              fixture.fields.at("sea_level_change")),
             tol);
@@ -192,9 +192,9 @@ TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
                        fixture.fields.at("potential")),
       tol);
   const auto& omega = fixture.scalars.at("omega");
-  double omegaScale = 0.0;
+  auto omegaScale = 0.0;
   for (auto v : omega) omegaScale = std::max(omegaScale, std::abs(v));
-  for (int i = 0; i < 3; ++i) {
+  for (auto i = 0; i < 3; ++i) {
     EXPECT_NEAR(response.angularVelocity[i] * scales.Factor({.time = -1}),
                 omega[i], tol * omegaScale)
         << "omega component " << i;
@@ -207,7 +207,7 @@ TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
   // not by either implementation; the comparison is correspondingly
   // coarse (plan §6).
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
-  constexpr int lmax = 32;
+  constexpr auto lmax = 32;
   auto table =
       sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
   sl3dpp::Fingerprint fingerprint(lmax, table);
@@ -216,8 +216,9 @@ TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
   const auto fixture = ReadStage2(data / "stage2_fingerprint.txt", lmax);
 
   auto ice = fingerprint.IceThickness();
-  std::vector<double> iceChange(ice.size());
-  for (std::size_t i = 0; i < ice.size(); ++i) iceChange[i] = -0.1 * ice[i];
+  auto iceChange = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < ice.size(); ++i)
+    iceChange[i] = -0.1 * ice[i];
   const auto result = fingerprint.SolveForIceChange(
       iceChange, sl3dpp::RotationalFeedback::Full);
   ASSERT_TRUE(result.converged);
@@ -230,11 +231,11 @@ TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
   // by a factor of two), so it is not compared.
   std::vector<double> ocean(fingerprint.OceanFunction().begin(),
                             fingerprint.OceanFunction().end());
-  const double area = table.radius * table.radius * grid.Integrate(ocean);
+  const auto area = table.radius * table.radius * grid.Integrate(ocean);
   EXPECT_NEAR(area, fixture.scalars.at("ocean_area")[0], 1e-2 * area);
 
   auto toSi = [&](std::span<const double> field) { return grid.Expand(field); };
-  constexpr double tol = 8e-2;
+  constexpr auto tol = 8e-2;
   EXPECT_LT(CoefficientError(toSi(result.seaLevelChange),
                              fixture.fields.at("sea_level_change")),
             tol);
@@ -249,7 +250,7 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
   // The 1D Love-number history: grid-free, so the stepper is isolated
   // from the SLE and the agreement is near machine precision.
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
-  constexpr int lmax = 10;
+  constexpr auto lmax = 10;
   constexpr int kDegrees[3] = {2, 5, 10};
   auto deck = sl3dpp::Deck::Read(
                   data / "prem8.elastic.deck",
@@ -263,10 +264,10 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
 
   // The fixture's rheology rule: 1e21 Pa s on solid layers fully inside
   // [3480, 6151] km.
-  std::map<std::size_t, sl3dpp::RadialValue> viscosity;
+  auto viscosity = std::map<std::size_t, sl3dpp::RadialValue>{};
   const auto b = model.DimensionlessView().Boundaries();
-  const double etaNd = 1e21 / scales.Factor(sl3dpp::ViscosityDimensions);
-  for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+  const auto etaNd = 1e21 / scales.Factor(sl3dpp::ViscosityDimensions);
+  for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
     if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
         b[i + 1] <= 6.1511e6 / scales.Length()) {
       viscosity.emplace(i, etaNd);
@@ -280,31 +281,31 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
   const auto load = [&](int, double) {
     return std::vector<double>{1.0 / sigma};  // 1 kg m^-2
   };
-  const double length = scales.Length();
-  const double potential = scales.Factor(sl3dpp::PotentialDimensions);
-  const double dt = 3.15576e9 / scales.Time();
+  const auto length = scales.Length();
+  const auto potential = scales.Factor(sl3dpp::PotentialDimensions);
+  const auto dt = 3.15576e9 / scales.Time();
 
   // Parse and replay the fixture.
   std::ifstream file(data / "stage3_stepper.txt");
   ASSERT_TRUE(file.is_open());
-  constexpr double tol = 1e-9;
-  sl3dpp::Scheme scheme = sl3dpp::Scheme::ExponentialTrapezoid;
-  std::optional<sl3dpp::ViscoelasticState> state;
-  std::map<int, std::vector<double>> solutions;
-  bool inEffective = false;
-  double tauMin = 0.0;
+  constexpr auto tol = 1e-9;
+  auto scheme = sl3dpp::Scheme::ExponentialTrapezoid;
+  auto state = std::optional<sl3dpp::ViscoelasticState>{};
+  auto solutions = std::map<int, std::vector<double>>{};
+  auto inEffective = false;
+  auto tauMin = 0.0;
   for (std::string line; std::getline(file, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (!std::isdigit(line.front()) && line.front() != '-') {
-      std::string head;
+      auto head = std::string{};
       row >> head;
       if (head == "min_relaxation_time") {
         row >> tauMin;
         EXPECT_NEAR(rheology.MinRelaxationTime() * scales.Time(), tauMin,
                     1e-10 * tauMin);
       } else if (head == "scheme") {
-        std::string name;
+        auto name = std::string{};
         row >> name;
         scheme = name == "backward_euler"
                      ? sl3dpp::Scheme::BackwardEuler
@@ -317,15 +318,15 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
       continue;
     }
     if (inEffective) {
-      int l = 0;
-      double hU = 0, kU = 0, hT = 0, kT = 0;
+      auto l = 0;
+      auto hU = 0.0, kU = 0.0, hT = 0.0, kT = 0.0;
       row >> l >> hU >> kU >> hT >> kT;
       const auto& table =
           op.EffectiveLoveNumbers(sl3dpp::Scheme::ExponentialTrapezoid, dt);
       // Each value against its column's natural scale: a number that is
       // zero up to roundoff (k_u at l = 0, say) is compared absolutely.
-      const double hScale = std::max(std::abs(hU), std::abs(table.h_u[2]));
-      const double kScale = std::max(std::abs(kU), std::abs(table.k_u[2]));
+      const auto hScale = std::max(std::abs(hU), std::abs(table.h_u[2]));
+      const auto kScale = std::max(std::abs(kU), std::abs(table.k_u[2]));
       EXPECT_NEAR(table.h_u[l], hU, tol * hScale) << "l = " << l;
       EXPECT_NEAR(table.k_u[l], kU, tol * kScale) << "l = " << l;
       EXPECT_NEAR(table.h_t[l], hT, tol * std::max(std::abs(hT), hScale))
@@ -336,7 +337,7 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
     }
     // A history row: t then (U, phi) per compared degree, all SI.
     ASSERT_TRUE(state.has_value());
-    double t = 0.0;
+    auto t = 0.0;
     row >> t;
     if (t > 0.0) {
       auto [next, sols] = op.Step(*state, dt, scheme, load);
@@ -347,7 +348,7 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
     const auto U = op.Surface(solutions, sl3dpp::Component::U);
     const auto phi = op.Surface(solutions, sl3dpp::Component::Phi);
     for (int l : kDegrees) {
-      double uRef = 0, phiRef = 0;
+      auto uRef = 0.0, phiRef = 0.0;
       row >> uRef >> phiRef;
       EXPECT_NEAR(U.at(l)[0] * length, uRef, tol * std::abs(uRef))
           << "t = " << t << ", l = " << l;
@@ -366,7 +367,7 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
                       "elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
                   .value();
   auto model = sl3dpp::EarthModel::FromDeck(deck).value();
-  constexpr int lmax = 32;
+  constexpr auto lmax = 32;
   auto mesh = sl3dpp::RadialMesh::Create(model, {.lmax = lmax}).value();
   auto material = sl3dpp::Material::Create(model, mesh).value();
   auto ln = sl3dpp::ComputeLoveNumbers(material, lmax);
@@ -374,15 +375,15 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
   // Parse the pyslfp reference.
   std::ifstream file(data / "stage1_love_numbers.txt");
   ASSERT_TRUE(file.is_open());
-  double radius = 0, surfaceGravity = 0, fluidTidal = 0;
+  auto radius = 0.0, surfaceGravity = 0.0, fluidTidal = 0.0;
   double axial[5] = {};
-  std::vector<std::array<double, 13>> table;
-  bool inTable = false;
+  auto table = std::vector<std::array<double, 13>>{};
+  auto inTable = false;
   for (std::string line; std::getline(file, line);) {
     if (line.empty() || line.front() == '#') continue;
     std::istringstream row(line);
     if (!inTable) {
-      std::string head;
+      auto head = std::string{};
       row >> head;
       if (head == "radius") row >> radius;
       if (head == "surface_gravity") row >> surfaceGravity;
@@ -398,20 +399,20 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
   }
   ASSERT_EQ(table.size(), static_cast<std::size_t>(lmax + 1));
 
-  constexpr double tol = 1e-10;
+  constexpr auto tol = 1e-10;
   EXPECT_NEAR(ln.radius, radius, tol * radius);
   EXPECT_NEAR(ln.surface_gravity, surfaceGravity, tol * surfaceGravity);
   const std::vector<double>* columns[12] = {
       &ln.h_u, &ln.l_u, &ln.k_u, &ln.h_phi, &ln.l_phi, &ln.k_phi,
       &ln.h_v, &ln.l_v, &ln.k_v, &ln.h_t,   &ln.l_t,   &ln.k_t};
   for (const auto& entries : table) {
-    const int l = static_cast<int>(entries[0]);
+    const auto l = static_cast<int>(entries[0]);
     // One scale per degree: tiny channels (a removed dof's zeros) are
     // compared absolutely against the degree's magnitude.
-    double scale = 0.0;
-    for (int c = 0; c < 12; ++c)
+    auto scale = 0.0;
+    for (auto c = 0; c < 12; ++c)
       scale = std::max(scale, std::abs(entries[c + 1]));
-    for (int c = 0; c < 12; ++c) {
+    for (auto c = 0; c < 12; ++c) {
       EXPECT_NEAR((*columns[c])[l], entries[c + 1], tol * scale)
           << "l = " << l << ", column " << c;
     }
@@ -420,7 +421,7 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
   // round-off there (~1e-11 of m_u, uncorrelated): the floor is absolute,
   // on the natural scale m_u.
   const double values[5] = {ln.h_c, ln.k_c, ln.m_u, ln.m_phi, ln.m_c};
-  for (int i = 0; i < 5; ++i) {
+  for (auto i = 0; i < 5; ++i) {
     const double scale =
         std::max({std::abs(axial[i]), std::abs(values[i]), 1e-30});
     EXPECT_NEAR(values[i], axial[i],

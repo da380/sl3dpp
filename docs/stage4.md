@@ -79,13 +79,29 @@ L = N = μ. Solid regions only — fluid carries no toroidal dof, so the solid
 sections decouple into independent blocks (one banded factorisation
 with absent fluid dofs covers them; the blocks are SPD separately).
 No gravity, no fluid terms, no DtN. At l = 1 the form is singular
-(rigid rotation W ∝ r: both terms vanish), to be handled as the
-Fortran does — check `get_depth`/`gvn_tor` use at l = 1 during
-implementation; the expected resolution is dropping l = 1 toroidal
-response into the angular-momentum bookkeeping of the rotation
-feedback. Verification: reciprocity/symmetry, an analytic homogeneous-
-sphere toroidal response, and the Fortran once the time-dependent
-cross-checks start.
+(rigid rotation W ∝ r: both terms vanish).
+
+**Degree 1 is included** (decided 17 Oct 2026, plan §4 and §9). The
+rigid rotations, one per order in each solid region that fluid separates
+(mantle, inner core), form a null space that is removed by convention.
+The right-hand side is torque-free, so the singular system is consistent.
+Which frame does not matter, so a convenient gauge is used (one pinned
+dof per solid region; plan §4, §8.9). What matters is that measured,
+benchmarked and tested quantities are invariant under the rigid
+rotations, which is also the condition for the adjoint equations to
+exist. The expectation first recorded here,
+dropping the l = 1 toroidal response into the angular-momentum bookkeeping
+of the rotation feedback, was wrong: differential degree-1 rotation
+carries strain through W − r∂rW, and lateral viscosity drives it.
+Implemented 17 Oct 2026: `ToroidalOperator` accepts l = 1, pinning one
+dof per solid region (its top node by default), and the toroidal force,
+solves and strain recovery run from l = 1. The Fortran factors the
+unconstrained degree-1 form by banded LU (`aa_tor_1`) and fixes no frame,
+so it is no reference for this mode.
+
+Verification: reciprocity/symmetry, an analytic homogeneous-sphere
+toroidal response, and the Fortran once the time-dependent cross-checks
+start (l ≥ 2).
 
 ## 5. The step with lateral viscosity
 
@@ -203,6 +219,85 @@ explicit code's dt <= tau_min limit — converge in ~50 passes. At the
 saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
 iteration trivialises, as it should.
 
+**Revisited 17 Oct 2026 (performance chunk 9): history depth and adaptive
+mixing.** The same setup (the iterate now the strain's coefficients,
+internal variables at Gauss points), every step-1 result checked: `s1`
+marks a case whose first step failed, so the second is not reported.
+DIV is a residual above 1e-2 (or non-finite) at the 200-pass cap, cap a
+smaller one. "always" mixes from the first pass at the given depth;
+"adaptive" is the default iteration (below), with the passes it mixed.
+
+    contrast dt/tau | Picard | always m=1    2    3    5    8 | adaptive m=5 | adaptive m=8
+         3x    0.5  |   12   |          10   10   10   10   10 |   12 (0)     |   12 (0)
+         3x    2.0  |   21   |          19   17   17   16   15 |   21 (0)     |   21 (0)
+         3x   10.0  |   45   |          27   25   22   21   20 |   21 (11)    |   21 (11)
+        10x    0.5  |   20   |          15   15   14   14   14 |   20 (0)     |   20 (0)
+        10x    2.0  |   44   |          42   33   32   28   25 |   28 (17)    |   27 (16)
+        10x   10.0  |   s1   |          s1   71   68   50   43 |   50 (46)    |   43 (39)
+       100x    0.5  |   63   |          38   30   31   25   25 |   25 (22)    |   25 (22)
+       100x    2.0  |   s1   |         141  111   85   68   59 |   68 (66)    |   58 (56)
+       100x   10.0  |   s1   |          s1   s1   s1   s1   s1 |   s1         |   s1
+      1000x    0.5  |  193   |          91   68   72   48   48 |   48 (46)    |   48 (46)
+      1000x    2.0  |   s1   |          s1   s1   s1  147  127 |  147 (145)   |  125 (123)
+      1000x   10.0  |   s1   |          s1   s1   s1   s1   s1 |   s1         |   s1
+
+Depth 5 reproduces the October 15 numbers (68 at 100x, 2 tau); depth 2-3
+gets most of the gain in mild cases and falls well behind at 100x and
+above; depth 8 is somewhat better at the hard end for 18 history vectors
+against 12. Picard never converges where Anderson does not.
+
+What it costs (lmax 64, 8 threads, the laptop): at the benchmark's weak
+contrast (1.26x, 50 yr steps) every depth takes 7 passes a step, while
+a pass costs 0.62 s under Picard against 0.87 s under depth-5 Anderson
+(0.81 at depth 2), whose history also holds 1.9 GB more at peak. The
+mixer is memory-bound: an update moves ~3 GB. So Anderson pays only
+where it saves more than ~30% of the passes, which in the table is
+where Picard contracts by less than about half a pass.
+
+Hence the default iteration (`Viscoelastic3D::IterationControl`,
+`anderson_rate = 0.5`): Picard until a pass shrinks the residual by less
+than half, then Anderson (depth 5) for the rest of the step. It is plain
+Picard wherever Picard is quick, and pass for pass Anderson wherever it
+is not, the switch costing a pass or two. `anderson_rate = 0` is the
+previous iteration, Anderson from the first pass, bitwise. A first
+version also gave Anderson up for Picard when it fell behind Picard's
+early rate; it did harm (Anderson's early passes lag before it settles,
+and Picard then diverged) and was dropped.
+
+An earlier sweep that did not check step 1 showed Picard converging at
+1000x, 10 tau where every Anderson depth failed. That was an artefact:
+Picard's first step had diverged to non-finite values, and the residual,
+a maximum that passes over NaNs, read the all-NaN iterates of step 2 as
+no change. A non-finite pass now ends the iteration unconverged, with a
+NaN residual, on the last finite iterate.
+
+**Resolution of the strong contrasts.** Are the hard cases resolved at
+lmax 16, or is part of their difficulty truncation? The log-viscosity
+is degree 1, but the lateral weight beta(h e^-delta) - beta(h) it enters
+through has every degree. With the radial mesh fixed, loads on degrees
+<= 8 only, and lmax 16, 24 and 32 (default iteration):
+
+    contrast dt/tau | weight's amplitude above   | passes on step 2 | U (l <= 8) against lmax 32
+                    |   16      24      32       |  16   24   32    |   lmax 16   lmax 24
+        10x    0.5  | 9e-14   1e-14   1e-14      |  20   20   20    |   6e-16     5e-16
+        10x    2.0  | 2e-11   1e-14   1e-14      |  28   28   28    |   9e-14     2e-15
+       100x    0.5  | 4e-08   4e-12   1e-14      |  25   25   26    |   7e-12     1e-13
+       100x    2.0  | 7e-07   7e-10   4e-13      |  70   69   69    |   3e-10     7e-14
+      1000x    0.5  | 6e-06   3e-08   5e-11      |  48   49   49    |   1e-08     3e-13
+      1000x    2.0  | 3e-05   5e-07   5e-09      | 154  154  155    |   3e-08     1e-11
+
+The pass counts do not depend on lmax, so the hard cases are hard in
+the continuum (the lateral term against the radial reference), not by
+truncation; and the low-degree response at lmax 16 is good to 3e-8 even
+at 1000x. Nothing here can go negative for want of resolution: itau(x)
+is the reference times exp(-delta) and the step weights come from it
+pointwise on the grid, so the moduli stay positive whatever the
+truncation. What this smooth pattern does not test is a field with sharp
+lateral edges (cratons, slabs): its weight spectrum decays slowly, so
+the pseudospectral products alias and the solution needs a higher lmax,
+and a delta supplied as a truncated expansion overshoots (exaggerating
+the contrast, though exp keeps it positive).
+
 ## 5b. The Fortran gate (visco_test)
 
 The old code's `visco_test` is the weak-contrast external gate: PREM
@@ -252,7 +347,8 @@ AdGIA's `RelaxationLaw` path.
 
 ## 8. Open questions (beyond plan §8)
 
-- l = 1 toroidal null space handling (§4).
+- l = 1 toroidal: INCLUDED (decided and implemented 17 Oct 2026, §4),
+  with one pinned dof per solid region as the gauge (plan §8.9).
 - Whether the SLE needs toroidal surface channels: no first-order
   coupling to sea level or gravity (toroidal motion is divergence-free
   and radial-displacement-free at the surface), so the toroidal block

@@ -25,7 +25,7 @@ using namespace sl3dpp;
 
 namespace {
 
-constexpr int kLmax = 8;
+constexpr auto kLmax = 8;
 
 struct Setup {
   EarthModel model;
@@ -46,9 +46,9 @@ struct Setup {
     auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
-    std::map<std::size_t, RadialValue> viscosity;
+    auto viscosity = std::map<std::size_t, RadialValue>{};
     const auto b = model.DimensionlessView().Boundaries();
-    for (std::size_t i = 0; i < model.LayerCount(); ++i) {
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
         viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
@@ -72,8 +72,8 @@ struct Setup {
   }
 
   [[nodiscard]] std::vector<double> MeltLoad(double fraction) const {
-    std::vector<double> load(iceNd.size());
-    for (std::size_t i = 0; i < load.size(); ++i) {
+    auto load = std::vector<double>(iceNd.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
       load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
                 fraction * iceNd[i];
     }
@@ -87,7 +87,7 @@ TEST(Stage4Gate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   auto setup = Setup::Make();
   const auto& scales = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times{0.0, kyr, 2 * kyr, 4 * kyr};
+  auto times = std::vector<double>{0.0, kyr, 2 * kyr, 4 * kyr};
   auto load = setup.MeltLoad(-0.1);
   auto iceLoad = [&](double) { return load; };
 
@@ -104,17 +104,18 @@ TEST(Stage4Gate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   const auto coupled = evolution3.Run(times, iceLoad);
 
   ASSERT_EQ(coupled.size(), reference.size());
-  for (std::size_t node = 0; node < coupled.size(); ++node) {
+  for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
     EXPECT_TRUE(coupled[node].converged);
     if (node > 0) EXPECT_LE(coupled[node].coupledIterations, 4);
-    double scale = 0.0, diff = 0.0;
-    for (std::size_t i = 0; i < reference[node].seaLevelChange.size(); ++i) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < reference[node].seaLevelChange.size();
+         ++i) {
       scale = std::max(scale, std::abs(reference[node].seaLevelChange[i]));
       diff = std::max(diff, std::abs(coupled[node].seaLevelChange[i] -
                                      reference[node].seaLevelChange[i]));
     }
     EXPECT_LT(diff, 1e-8 * scale) << "node " << node;
-    for (int i = 0; i < 3; ++i) {
+    for (auto i = 0; i < 3; ++i) {
       EXPECT_NEAR(coupled[node].angularVelocity[i],
                   reference[node].angularVelocity[i],
                   1e-8 * std::abs(reference[node].angularVelocity[1]) + 1e-30)
@@ -128,7 +129,7 @@ TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
   const auto& scales = setup.solver.SolverScales();
   const auto& grid = setup.solver.Grid();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
-  std::vector<double> times{0.0, kyr, 2 * kyr, 3 * kyr};
+  auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3 * kyr};
   auto load = setup.MeltLoad(-0.1);
   auto iceLoad = [&](double) { return load; };
 
@@ -146,13 +147,13 @@ TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
   SeaLevelEvolution3D twin(flat, setup.solver, setup.state, {});
   const auto uniform = twin.Run(times, iceLoad);
 
-  double maxRelDiff = 0.0;
-  for (std::size_t node = 1; node < run.size(); ++node) {
+  auto maxRelDiff = 0.0;
+  for (auto node = std::size_t{1}; node < run.size(); ++node) {
     EXPECT_TRUE(run[node].converged) << "node " << node;
 
     // Exact ocean mass conservation per node, lateral viscosity or not.
-    std::vector<double> gain(grid.FieldSize());
-    for (std::size_t i = 0; i < gain.size(); ++i) {
+    auto gain = std::vector<double>(grid.FieldSize());
+    for (auto i = std::size_t{0}; i < gain.size(); ++i) {
       gain[i] = setup.solver.WaterDensity() * setup.state.oceanFunction[i] *
                 run[node].seaLevelChange[i];
     }
@@ -162,8 +163,8 @@ TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
     EXPECT_NEAR(gained, removed, 1e-7 * std::abs(removed)) << "node " << node;
 
     // The lateral viscosity changes the physics measurably.
-    double scale = 0.0, diff = 0.0;
-    for (std::size_t i = 0; i < run[node].seaLevelChange.size(); ++i) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < run[node].seaLevelChange.size(); ++i) {
       scale = std::max(scale, std::abs(uniform[node].seaLevelChange[i]));
       diff = std::max(diff, std::abs(run[node].seaLevelChange[i] -
                                      uniform[node].seaLevelChange[i]));

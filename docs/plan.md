@@ -285,6 +285,56 @@ this works is itself a benchmark-paper result alongside the AdGIA comparison.
   spheroidal + toroidal, fluid regions, interface terms, DtN/Robin exterior
   and truncation conditions, proper l = 0 and l = 1 — following pyslfp's
   `DegreeSystem`, with LDLᵀ (LU fallback), never plain Cholesky.
+- **Degree-1 toroidal motion is part of the 3D problem** (decided 17 Oct
+  2026, §9). Lateral viscosity drives it: differential degree-1 rotation
+  carries strain through W − r∂rW. The toroidal block therefore runs over
+  l ≥ 1, not l ≥ 2. Its quasi-static operator is singular. Rigid rotation
+  (W ∝ r) carries no strain, which gives one null vector per order m in
+  each solid region that fluid separates from the rest (the mantle and the
+  inner core). These are removed by convention, as the centre-of-mass
+  frame removes the degree-1 spheroidal translations:
+  - The singular system is consistent. Memory stresses are symmetric and
+    do no work on a rigid rotation, and the surface loads and potentials
+    have no toroidal part, so the right-hand side is torque-free.
+  - The convention only picks the representative. Rigid rotation carries
+    no strain, so the memory evolution, every other degree and sea level
+    do not depend on it. Only the degree-1 toroidal displacement itself
+    does.
+  - Which convention does not matter at all, so the convenient one is
+    used (decided 17 Oct 2026, §9): pin one W dof per solid region. The
+    pinned matrix is SPD, so the banded Cholesky stands, and since the
+    right-hand side is consistent the pinned solve solves the full
+    system. No projection is needed.
+  - **What matters is what is measured.** Only quantities invariant under
+    the null space are well defined, and this is a requirement, not a
+    nicety: it is the solvability condition of the adjoint equations
+    (the measurement's dual must annihilate the rigid modes, or the
+    singular adjoint system has no solution), and it is the rule for
+    benchmarks and tests. Relative distances are fine; relative
+    displacements are not. Sea level, radial displacement, the
+    potential and the rotation vector do not see the degree-1 toroidal
+    rigid rotations (no radial part, no mass moved), so the current
+    measurement set (`Measurement`, `Adjoint.hpp`) qualifies. A
+    horizontal displacement at a point does not; a horizontal observable
+    must be built to be invariant, such as a change in distance between
+    sites.
+  - The degree-1 spheroidal translations are different (David, 17 Oct
+    2026). They are fixed by the centre-of-mass frame: the surface
+    degree-1 potential dof is removed, so there is no external degree-1
+    field and the centre of mass of Earth and load stays at the origin.
+    That frame is physical, not arbitrary, so quantities relative to it
+    are well defined. The degree-1 radial displacement the code computes
+    is the displacement relative to the centre of mass (u − u_CM·r̂ is
+    translation-invariant, and u_CM = 0 in this frame), and likewise the
+    potential and sea level may be measured. The binding constraint is
+    on horizontals, which see the arbitrary rotation gauge. (A first,
+    stricter reading the same day, allowing only u + φ/g at degree 1 and
+    enforcing it in the adjoint solvers, was reverted.)
+  - Gates: the right-hand side torque-free at round-off; strain, sea
+    level and every other invariant output identical (to round-off)
+    whichever dof is pinned, while W itself changes only by the rigid
+    mode; the zero-lateral gates unchanged (with no lateral variation
+    the toroidal block is not excited).
 - Internal-variable Maxwell/Prony rheology; exponential trapezoid default,
   BE and ETD1 variants; adaptive stepping optional. Implement ntau > 1
   properly (nearly free with the weight algebra).
@@ -390,6 +440,34 @@ GB of viscous-element state.
   of the discretisation's self-consistency, not of the point set — the
   one discipline being that τ, the step weights, their h-derivatives and
   the kernel accumulators all migrate to the Gauss points together.
+  *(Added 17 Oct 2026.)* One more term must move with them: the implicit
+  step eliminates m⁺ = m̃ + β d(u) into equilibrium, giving
+  K_eff = K_U − Σ_k Dᵀ W (μ_k β_k) D at the memory points. At the GLL
+  nodes that is the relaxed-moduli assembly (the stiffness's own
+  quadrature points), which is how `EffectiveMaterial` builds it; at Gauss
+  points the relaxation term (degree 2N, exact in neither rule) must be
+  assembled at the Gauss points to keep the elimination exact. Done as
+  performance chunk 7a: `MemoryPoints` (GLL or Gauss reference geometry)
+  and a `Relaxation` term that `DegreeOperator`, `ToroidalOperator` and
+  `ComputeLoveNumbers` subtract; with GLL points it reproduces
+  `EffectiveMaterial`'s operators and Love numbers to round-off (the
+  gate), and the Gauss and GLL effective Love numbers differ by 8e-9 at
+  600 km elements, 1e-10 at 300 km, 4e-12 at 150 km.
+  *(Revised 17 Oct 2026, with Gauss points made the default.)* That
+  form is unstable for long steps: as a branch relaxes fully (β → 1) the
+  shear left in K_eff is the GLL quadrature of μ|ε|² less the Gauss
+  quadrature of the same energy, which has no definite sign, and a PREM
+  Maxwell mantle grew from round-off for h = dt/τ of a few hundred and
+  up. The cure is to split the energy as the continuum does,
+  ∫ μ_∞|ε|² + Σ_k ∫ μ_k |ε − m_k|²: the long-term part at the GLL nodes,
+  each branch's at the memory points where m_k lives. Then
+  K_eff = K(μ_∞) + Σ_k Dᵀ W (μ_k w_k) D, w_k = 1 − β_k the unrelaxed
+  fraction, positive term by term for any step, and the elastic operator
+  (w = 1) is K(μ_∞) + Σ_k Dᵀ W μ_k D. The term is now a `PointShear`
+  the operators add to the long-term material; at GLL points it is still
+  `EffectiveMaterial`'s assembly to round-off. The price: at Gauss points
+  the discrete elastic solid itself differs from the GLL one, at the
+  quadrature level (2e-10 in the surface sums at lmax 64).
 
 ## 6. Staging
 
@@ -484,6 +562,22 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
    `Rheology`/`StepWeights` interface must not preclude moduli-resolved
    branches. Whatever is settled here is intended to translate back to
    pyslfp/AdGIA.
+9. ~~**The degree-1 toroidal frame** (raised 17 Oct 2026, §4).~~
+   **Resolved** (17 Oct 2026, David): the choice does not matter at all,
+   so the convenient one is used (one pinned dof per solid region; the
+   inner core needs its own, because quasi-statically the fluid outer
+   core transmits no tangential traction). What matters instead is that
+   every measured, benchmarked or tested quantity is invariant under the
+   rigid rotations (§4).
+10. ~~**Gauge-dependent measurements in the existing tests**~~
+   **Withdrawn** (17 Oct 2026). The tests' displacement and potential
+   measurements have degree-1 content, but at degree 1 they are
+   relative to the centre of mass, a physical frame, so they are well
+   defined (§4). An enforcement briefly added the same day (rejecting
+   degree-1 displacement and potential duals not of the form u + φ/g,
+   with the tests and the stage-5 fixture changed to suit) was reverted.
+   A check belongs with any future horizontal-displacement measurement
+   type, which must be rotation-invariant (§4).
 
 ## 9. Decision log
 
@@ -559,3 +653,171 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   `.clang-format` taken verbatim from AdGIA. AdGIA supplies naming/layering
   only: the idiom is modern C++23 (concepts, ranges, `std::expected`, value
   semantics), not AdGIA's MFEM-constrained style.
+- **17 Oct 2026** — Degree-1 toroidal motion is included in the 3D
+  problem (David): it is a physical mode that lateral viscosity drives,
+  and its rigid-rotation null space is removed by convention (§4; the
+  frame is open question §8.9). This reverses the expectation recorded in
+  `stage4.md` §4, which was to drop it, and which the code follows:
+  `GridCoupling::ToroidalForce` and the toroidal solves start at l = 2.
+  That omission is to be fixed before the AdGIA benchmark. The Fortran is
+  no reference for this mode: it factors the unconstrained, singular
+  degree-1 form by banded LU (`aa_tor_1`, `module_mat.f90:58-62`;
+  `amat_tor` applies no constraint), so it fixes no frame.
+- **17 Oct 2026** — The degree-1 toroidal frame does not matter (David):
+  the convenient gauge is used, one pinned dof per solid region (§4,
+  §8.9). The real requirement is on measurements: only quantities
+  invariant under the rigid rotations are well defined. It is the
+  existence condition for the adjoint equations, and the rule for
+  benchmarks and tests (relative distances are fine, relative
+  displacements are not).
+- **17 Oct 2026** — The measurement rule at degree 1 (David): the
+  spheroidal translations are fixed by the centre-of-mass frame, a
+  physical frame, so quantities relative to the centre of mass (radial
+  displacement, potential, sea level) are well defined and may be
+  measured. The toroidal rotations are fixed by an arbitrary pin, so a
+  horizontal displacement at a point is gauge: horizontal observables
+  must be rotation-invariant. A first, stricter reading (only u + φ/g
+  at degree 1, enforced in the adjoint solvers) was reverted the same
+  day (§4, §8.10).
+- **17 Oct 2026** — Degree-1 toroidal implemented (performance chunk 5):
+  `ToroidalOperator` accepts l = 1, pinning one dof per solid region
+  (the top node by default; `pin_fraction` moves it), and the toroidal
+  force, solves and strain recovery run from l = 1. Gated: rigid
+  rotations are the null space; the memory force is torque-free; the
+  pinned solve solves the full system; moving the pin changes only the
+  degree-1 rigid rotation. Effect on the lateral example: 0.25% of the
+  lateral-minus-radial sea-level difference; the Fortran gate is
+  unchanged (its pattern cannot excite the mode, by symmetry).
+- **17 Oct 2026** — Recorded forward states keep the internal variables
+  only, as in pyslfp and AdGIA (David): the adjoints regenerate a node's
+  strain by one elastic solve under its recorded loads (performance
+  chunk 6). Halves the stored state with one branch; costs one elastic
+  solve per node per sweep.
+- **17 Oct 2026** — Save or recompute (David): `record_strain` on both
+  evolutions keeps the strain with the internal variables on request;
+  recompute (internal variables only) stays the default.
+- **17 Oct 2026** — Gauss-point memory in the 1D forward (performance
+  chunk 7b-i): `ViscoelasticOperator::Options::memory_points`, GLL the
+  default and bitwise unchanged. The step stays an exact elimination
+  (the regenerated strain matches the step's to 1e-11), the state holds
+  80% of the memory, and surface responses agree with GLL to 1.4e-8 at
+  600 km elements, 2.4e-10 at 300 km (a coupled sea level run, 5e-12).
+  The 1D adjoints refuse Gauss points until 7b-ii.
+- **17 Oct 2026** — Gauss-point memory in the 1D adjoints (performance
+  chunk 7b-ii): both sweeps index the memory points, and the itau
+  kernels, accumulated there, reach the nodal itau through the
+  interpolation's transpose (masked where the clamp at zero acts), so
+  `IceKernels::itauKernel` keeps its nodal layout and the viscosity map
+  is unchanged. The discrete gradient identity holds to 1e-8 at Gauss
+  points, FD/Richardson confirms the kernel under both schemes, and the
+  nodal kernels agree with GLL's to 1.1e-6 (discrete) and 7e-7
+  (continuous). The 3D evolution keeps the GLL reference until 7c.
+- **17 Oct 2026** — Gauss-point memory in the 3D path (performance chunk
+  7c): `Viscoelastic3D::Options::memory_points` sets the coupling's radial
+  memory nodes and the 1D reference alike. The strain is interpolated to
+  the points and the force rows spread back through the same Lagrange
+  values; the reference effective operators carry the relaxation term;
+  the 3D itau is the reference's point itau times exp(-delta) at the
+  point's radius. The zero-lateral gate holds at Gauss points to
+  round-off (8e-16 on the step, tighter than the 2-4e-12 that separates
+  the point sets, so the gate discriminates), coupled runs and their
+  continuous kernels included; with lateral structure the point sets
+  agree to 1e-11 and the log-viscosity kernel meets FD as at GLL. At lmax
+  64 on 8 threads: 20% fewer nodes, the pass 14% faster, peak RSS 9.55 GB
+  for 11.69. GLL stays the default (bitwise unchanged); whether to switch
+  is David's call.
+- **17 Oct 2026** — Gauss points become the default for the internal
+  variables (`memory_points` in ViscoelasticOperator, GridCoupling and
+  Viscoelastic3D; `step_timing` likewise), David's decision after 7c. The
+  displacement and every nodal field stay on the GLL nodes; only where
+  the internal variables live changes. GLL stays selectable, and the
+  tests that read the GLL layout directly or exercise the relaxed-moduli
+  identity pin it explicitly (the pyslfp and Fortran gates pass at Gauss
+  points within their tolerances, so they now check the default path).
+  Making it the default exposed an instability of the 7a/7b form at long
+  steps (§5.5, revised): fixed by the shear split, the effective
+  operators built on the long-term material plus a `PointShear` (the
+  renamed, sign-flipped `Relaxation`) of the branches' unrelaxed moduli
+  at the points, the elastic operators likewise. A regression test steps
+  h = 2000 400 times: Gauss stays within 1.7e-9 of GLL, where the old
+  form reached 0.5. The split also brought the point sets closer
+  elsewhere (1D surface gap 1.2e-9 at 600 km elements, 1.9e-11 at 300 km,
+  from 1.4e-8 and 2.4e-10; lateral 3D steps 5.5e-12 from 1.2e-11). Both
+  point sets grow alike near h = 1e4 over hundreds of steps on PREM: a
+  property of the model or the scheme there, not of the point set, and
+  not investigated further. The 1D operator now holds its points by
+  pointer, so the per-degree workspaces' references survive a move of
+  the operator (a latent dangling pointer since 7b-i).
+- **17 Oct 2026** — The 3D step's serial remainder threaded (performance
+  chunk 8). The step's own loops (weights and decay, the pointwise
+  weight, the fixed-force add, the residual, the damping, the memory
+  update, `SolveElastic`'s weighting) run element-wise threaded
+  (`detail::ParallelElements`, a static schedule), and the Anderson
+  mixer's two sweeps are threaded with per-thread partial sums added in
+  thread order (`AndersonMixer(memory, parallel)`; the 1D users keep the
+  serial default). The mixer stores dX + dF in place of dX, the one form
+  its update reads. The open step keeps its buffers (`Respond`'s grid
+  tensor and analysed force, the spent iterate `StrainOf` refills;
+  `GridCoupling` gained into-buffer `Synthesise`/`Analyse`), and
+  `std::move(step).Finish` turns them into the new state. `SolveAll` only
+  solves; `SolveElastic` adds channels through the cached path
+  `AddChannels` uses. The 3D adjoint's itau accumulation is threaded
+  over memory nodes. At one thread every result is bitwise unchanged; at
+  lmax 64 on 8 threads a pass is 0.76–0.79 s for 1.05 (Gauss), 0.94 for
+  1.34 (GLL). `StartStep` (0.82 s a step) is now the largest overhead.
+- **17 Oct 2026** — Adaptive mixing in the 3D within-step iteration
+  (performance chunk 9). Each step starts as Picard; Anderson (depth 5)
+  takes over for the rest of the step once a pass shrinks the residual
+  by less than `IterationControl::anderson_rate` (0.5; also on
+  `Viscoelastic3D`, `SeaLevelEvolution3D` and `AdjointSolver3D`
+  options). Measured (`stage4.md` §5a, revisited): pure Picard wherever
+  Picard is quick, which at the benchmark's weak contrast saves 30% of
+  the pass time and 1.9 GB at lmax 64, and pass for pass Anderson where
+  it is not; `anderson_rate` 0 restores the old iteration bitwise. A
+  give-up-for-Picard safeguard was tried and dropped (it gave Anderson up
+  in its early lag, and Picard then diverged); the case that motivated it
+  was an artefact of a real bug, now fixed: the residual's maxima passed
+  over NaNs, so an all-NaN iterate read as converged. A non-finite pass
+  now ends the iteration unconverged. A resolution check (lmax 16/24/32,
+  contrasts to 1000x) shows the pass counts independent of lmax and the
+  low-degree response at lmax 16 good to 3e-8.
+- **17 Oct 2026** — Checkpointed 3D trajectories and three small items
+  (performance chunk 10). (1) The 3D reverse sweep takes a recording at
+  any stride: the states between two kept ones are rebuilt by forward
+  steps from the lower under the recorded loads (the forward run's own
+  iteration), held, their strain as coefficients, while the sweep passes
+  through: N / stride + stride states. Fixed stride (David), not revolve.
+  Kernels agree with a full recording's to 1.5e-12; ice kernels bitwise.
+  At production sizes (one state 21 GB at lmax 256, 98 GB at 512; ~60
+  steps of 500 yr over 21-26 kyr) lmax 256 fits a large node, lmax 512
+  will want states on disk or a memory-budgeted schedule. The rebuild
+  steps forward, so no backward-integration stability limits the stride.
+  (2) `Viscoelastic3D::State` carries the converged strain coefficients
+  (`strainCoefficients`, `Invalidate()`), so a step starts without
+  analysing its grid strain; and `StartStep` forms the first pass's force
+  from the grid strain in hand, so the first `Respond` transforms
+  nothing: two transforms fewer a step, results changed at round-off.
+  (3) Cache robustness: the flavours are an LRU of four, open steps hold
+  their own, and the lazy caches fill under one lock, so const methods
+  may run concurrently. (4) Huge pages documented (README, Running) and
+  set in `run_fortran_gate.sh`. lmax 64, 8 threads: 0.59 s a pass for
+  0.70, 0.54 s with huge pages.
+- **17 Oct 2026** — Tidy-ups (performance chunk 11). The 1D internal
+  variables span each degree's memory window (`MemoryElements`: its
+  elements from the first to the last with a relaxing node), no longer
+  its whole subset: the 1D state 10-20% smaller (lmax 64-256), every
+  result bitwise unchanged. The 1D adjoint sweeps run their per-degree
+  loops threaded (the continuous sweep's kernels bitwise, the discrete
+  sweep's itau kernel at round-off: each degree's terms are summed before
+  joining the kernel, in degree order whatever the thread count); the
+  1D kernels example runs 31 s for 48 on 8 threads. The radial-major
+  force layout was considered and deferred (~9% of a pass). The AAA
+  sweep follows as its own change.
+- **17 Oct 2026** — The almost-always-auto sweep (conventions.md): 1375
+  explicitly typed locals and loop variables across src, include, tests,
+  examples and benchmarks rewritten to `auto`, each checked by the compiler
+  to deduce exactly the old type before the checks were removed; every
+  output byte-identical. Left explicit: struct members, initialisers of a
+  different type (a deliberate conversion), multi-line declarations, and
+  loops with non-literal starts.
+

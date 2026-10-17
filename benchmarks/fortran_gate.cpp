@@ -44,9 +44,9 @@ int main(int argc, char** argv) {
   }
   const std::string deckPath = argv[1];
   const std::string fixturePath = argv[2];
-  const int lmax = std::atoi(argv[3]);
-  const bool parallel = argc > 4 && std::atoi(argv[4]) > 1;
-  constexpr double year = 365.25 * 24.0 * 3600.0;  // the Fortran's
+  const auto lmax = std::atoi(argv[3]);
+  const auto parallel = argc > 4 && std::atoi(argv[4]) > 1;
+  constexpr auto year = 365.25 * 24.0 * 3600.0;  // the Fortran's
 
   auto deck = Deck::ReadLegacySl3d(deckPath).value();
   auto model =
@@ -58,7 +58,7 @@ int main(int argc, char** argv) {
 
   // The Fortran's lateral pattern; our delta is the log-viscosity
   // perturbation, hence the sign.
-  const double c22 = 0.25 * std::sqrt(15.0 / (2.0 * std::numbers::pi));
+  const auto c22 = 0.25 * std::sqrt(15.0 / (2.0 * std::numbers::pi));
   auto delta = [c22](double, double theta, double phi) {
     return -0.6 * c22 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
   };
@@ -70,28 +70,28 @@ int main(int argc, char** argv) {
   options.rtol = 1e-10;
   Viscoelastic3D op(rheology, lmax, delta, options);
 
-  const double sigmaFactor = scales.Factor({.mass = 1, .length = -2});
-  const double timeFactor = scales.Time();
-  std::vector<double> rate(lmax + 1, 0.0);
-  for (int l = 1; l <= lmax; ++l) {
+  const auto sigmaFactor = scales.Factor({.mass = 1, .length = -2});
+  const auto timeFactor = scales.Time();
+  auto rate = std::vector<double>(lmax + 1, 0.0);
+  for (auto l = 1; l <= lmax; ++l) {
     rate[l] = std::exp(-2.0 * std::numbers::pi * (l + 1) / 10.5) *
               std::sqrt((2.0 * l + 1) / (4.0 * std::numbers::pi)) * 5515.0 /
               (30.0 * year);
   }
   auto load = [&](int l, double t) -> std::optional<std::vector<Complex>> {
     if (l < 1) return std::nullopt;
-    std::vector<Complex> columns(l + 1, 0.0);
+    auto columns = std::vector<Complex>(l + 1, 0.0);
     columns[0] = rate[l] * (t * timeFactor) / sigmaFactor;  // m = 0
     return columns;
   };
 
-  const double dt = 50.0 * year / timeFactor;
-  const double lengthF = scales.Length();
-  const double potF = scales.Factor(PotentialDimensions);
+  const auto dt = 50.0 * year / timeFactor;
+  const auto lengthF = scales.Length();
+  const auto potF = scales.Factor(PotentialDimensions);
   auto state = op.ZeroState();
   std::map<int, std::map<std::pair<int, int>, Complex>> oursU, oursP;
-  int iout = 0;
-  for (int it = 2; it <= 101; ++it) {
+  auto iout = 0;
+  for (auto it = 2; it <= 101; ++it) {
     auto result = op.Step(state, dt, Scheme::ExponentialTrapezoid, load);
     if (!result.info.converged) {
       std::printf("step %d: NOT converged (residual %.2e)\n", it,
@@ -107,7 +107,7 @@ int main(int argc, char** argv) {
       // rows are compared against the Hermitian images.
       auto U = op.Surface(result.solutions, Component::U);
       auto P = op.Surface(result.solutions, Component::Phi);
-      for (int l = 0; l <= lmax; ++l) {
+      for (auto l = 0; l <= lmax; ++l) {
         for (int m = -l; m <= l; ++m) {
           const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
           const auto u = U.at(l)[std::abs(m)];
@@ -129,10 +129,10 @@ int main(int argc, char** argv) {
   // headline comparison is the frame-invariant content l >= 2; the l = 1
   // row is reported separately.
   std::map<int, double> worstU, worstP, scaleU, scaleP, u1ours, u1theirs;
-  std::string line;
+  auto line = std::string{};
   while (std::getline(file, line)) {
     std::istringstream row(line);
-    int io = 0, l = 0, m = 0;
+    auto io = 0, l = 0, m = 0;
     double ur, ui, pr, pi;
     row >> io >> l >> m >> ur >> ui >> pr >> pi;
     if (!row || io == 0 || l > lmax) continue;

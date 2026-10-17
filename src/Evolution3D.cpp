@@ -3,10 +3,10 @@
 #include <cmath>
 #include <format>
 #include <stdexcept>
+#include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
-#include "sl3dpp/detail/AndersonMixer.hpp"
 
 namespace sl3dpp {
 
@@ -42,8 +42,8 @@ Viscoelastic3D::LoadCallable3D SeaLevelEvolution3D::Columns(
     const std::vector<Complex>& coefficients, double factor) const {
   return [coefficients, factor](int l,
                                 double) -> std::optional<std::vector<Complex>> {
-    std::vector<Complex> columns(l + 1);
-    for (int m = 0; m <= l; ++m) {
+    auto columns = std::vector<Complex>(l + 1);
+    for (auto m = 0; m <= l; ++m) {
       columns[m] = factor * coefficients[SurfaceGrid::Index(l, m)];
     }
     return columns;
@@ -54,7 +54,7 @@ std::vector<SeaLevelEvolution3D::Complex> SeaLevelEvolution3D::Coefficients(
     const std::map<int, std::vector<Complex>>& perDegree, double factor) const {
   auto out = solver_->Grid().ZeroCoefficients();
   for (const auto& [l, columns] : perDegree) {
-    for (int m = 0; m <= l; ++m) {
+    for (auto m = 0; m <= l; ++m) {
       out[SurfaceGrid::Index(l, m)] = factor * columns[m];
     }
   }
@@ -67,7 +67,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
-  for (std::size_t i = 1; i < times.size(); ++i) {
+  for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
       throw std::invalid_argument("times must be increasing");
     }
@@ -93,7 +93,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
 
   // Flavour SLE solvers under the caller's parameters, keyed by the
   // (operator-cached, address-stable) Love table.
-  std::map<const LoveNumbers*, SeaLevelSolver> flavours;
+  auto flavours = std::map<const LoveNumbers*, SeaLevelSolver>{};
   auto solverFor = [&](const LoveNumbers& table) -> const SeaLevelSolver& {
     auto found = flavours.find(&table);
     if (found == flavours.end()) {
@@ -105,13 +105,15 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     return found->second;
   };
 
+  const auto stride = options_.record_stride;
+  const auto lastNode = times.size() - 1;
   vstate_ = op.ZeroState();
   vstate_.t = times[0] * toMatTime_;
 
   auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
                                    const std::vector<double>& slc) {
-    std::vector<double> total(fieldSize);
-    for (std::size_t i = 0; i < fieldSize; ++i) {
+    auto total = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       total[i] = loadGrid[i] +
                  solver.WaterDensity() * state_.oceanFunction[i] * slc[i];
     }
@@ -130,9 +132,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
                  ? grid.ZeroCoefficients()
                  : solver.CentrifugalCoefficients(response.angularVelocity);
 
-  std::vector<Snapshot> snapshots;
+  if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma, toMatDensity_),
+                                 Columns(psi, toMatPotential_));
+
+  auto snapshots = std::vector<Snapshot>{};
   auto record = [&](double t, SeaLevelSolver::Response& r, int iterations,
-                    double residual, bool converged) {
+                    double residual, bool converged, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
     snapshot.seaLevelChange = std::move(r.seaLevelChange);
@@ -142,11 +147,26 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     snapshot.coupledIterations = iterations;
     snapshot.coupledResidual = residual;
     snapshot.converged = converged;
+    // The internal variables, and the strain only on request: an adjoint
+    // otherwise regenerates it by one elastic solve under the recorded
+    // loads.
+    if (keepState && options_.record_strain) {
+      snapshot.internalState = vstate_;
+    } else if (keepState) {
+      Viscoelastic3D::State kept;
+      kept.t = vstate_.t;
+      kept.m = vstate_.m;
+      snapshot.internalState = std::move(kept);
+    }
+    if (stride > 0) {
+      snapshot.loadCoefficients = sigma;
+      snapshot.tideCoefficients = psi;
+    }
     snapshots.push_back(std::move(snapshot));
   };
-  record(times[0], response, 0, 0.0, true);
+  record(times[0], response, 0, 0.0, true, stride > 0);
 
-  for (std::size_t node = 1; node < times.size(); ++node) {
+  for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme,
                              Columns(sigma, toMatDensity_),
@@ -155,80 +175,36 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     loadGrid = iceLoad(times[node]);
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto d = step.StartStrain();
-    detail::AndersonMixer mixer(options_.anderson_memory);
-    auto flatten = [&](const GridCoupling::TensorField& tensor) {
-      std::vector<double> flat;
-      flat.reserve(2 * 2 * tensor.c[0].size() + tensor.r.size());
-      for (auto c = 0; c < 2; ++c) {
-        for (const auto& v : tensor.c[c]) {
-          flat.push_back(v.real());
-          flat.push_back(v.imag());
-        }
-      }
-      for (auto v : tensor.r) flat.push_back(v);
-      return flat;
-    };
-    auto unflatten = [&](std::span<const double> flat) {
-      auto tensor = op.Coupling().ZeroTensor();
-      std::size_t at = 0;
-      for (auto c = 0; c < 2; ++c) {
-        for (auto& v : tensor.c[c]) {
-          v = {flat[at], flat[at + 1]};
-          at += 2;
-        }
-      }
-      for (auto& v : tensor.r) v = flat[at++];
-      return tensor;
-    };
-    int iterations = 0;
-    double residual = 0.0;
-    bool converged = false;
-    for (auto pass = 0; pass < options_.max_coupled_iterations; ++pass) {
-      auto responses = step.Respond(d);
-      SeaLevelSolver::GeneralisedForcing coupled;
-      coupled.directLoad = loadGrid;
-      coupled.displacementResponse =
-          Coefficients(op.Surface(responses, Component::U), toNdLength_);
-      coupled.potentialResponse =
-          Coefficients(op.Surface(responses, Component::Phi), toNdPotential_);
-      coupled.inertiaMomentChange = step.InertiaMoment(responses) * toNdMoment_;
-      coupled.rotation = options_.rotation;
-      response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-      sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-      psi = options_.rotation == RotationalFeedback::None
-                ? grid.ZeroCoefficients()
-                : solver.CentrifugalCoefficients(response.angularVelocity);
-      step.AddChannels(responses, Columns(sigma, toMatDensity_),
-                       Columns(psi, toMatPotential_));
-      auto dNext = step.StrainOf(responses);
-
-      double scale = 0.0, diff = 0.0;
-      for (auto c = 0; c < 2; ++c) {
-        for (std::size_t i = 0; i < dNext.c[c].size(); ++i) {
-          scale = std::max(scale, std::abs(dNext.c[c][i]));
-          diff = std::max(diff, std::abs(dNext.c[c][i] - d.c[c][i]));
-        }
-      }
-      for (std::size_t i = 0; i < dNext.r.size(); ++i) {
-        scale = std::max(scale, std::abs(dNext.r[i]));
-        diff = std::max(diff, std::abs(dNext.r[i] - d.r[i]));
-      }
-      iterations = pass + 1;
-      residual = scale > 0.0 ? diff / scale : 0.0;
-      if (residual <= options_.coupled_rtol) {
-        converged = true;
-        d = std::move(dNext);
-        break;
-      }
-      if (options_.anderson_memory > 0) {
-        d = unflatten(mixer.Update(flatten(d), flatten(dNext)));
-      } else {
-        d = std::move(dNext);
-      }
-    }
-    vstate_ = step.Finish(std::move(d));
-    record(times[node], response, iterations, residual, converged);
+    auto [strain, info] = step.Converge(
+        [&](const GridCoupling::SpectralTensor& s) {
+          auto responses = step.Respond(s);
+          SeaLevelSolver::GeneralisedForcing coupled;
+          coupled.directLoad = loadGrid;
+          coupled.displacementResponse =
+              Coefficients(op.Surface(responses, Component::U), toNdLength_);
+          coupled.potentialResponse = Coefficients(
+              op.Surface(responses, Component::Phi), toNdPotential_);
+          coupled.inertiaMomentChange =
+              step.InertiaMoment(responses) * toNdMoment_;
+          coupled.rotation = options_.rotation;
+          response =
+              effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
+          sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+          psi = options_.rotation == RotationalFeedback::None
+                    ? grid.ZeroCoefficients()
+                    : solver.CentrifugalCoefficients(response.angularVelocity);
+          step.AddChannels(responses, Columns(sigma, toMatDensity_),
+                           Columns(psi, toMatPotential_));
+          return step.StrainOf(responses);
+        },
+        {.max_iterations = options_.max_coupled_iterations,
+         .rtol = options_.coupled_rtol,
+         .anderson_memory = options_.anderson_memory,
+         .anderson_rate = options_.anderson_rate});
+    vstate_ = std::move(step).Finish(std::move(strain));
+    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
+    record(times[node], response, info.iterations, info.residual,
+           info.converged, keep);
   }
   return snapshots;
 }

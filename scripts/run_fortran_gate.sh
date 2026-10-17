@@ -17,6 +17,9 @@ set -euo pipefail
 
 LMAX="${1:-32}"
 THREADS="${2:-$(nproc)}"
+# Huge pages for the large 3D tensors where they are on request only (the
+# top-level README, Running); harmless elsewhere. An existing setting wins.
+export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.malloc.hugetlb=1}"
 SL3D_DIR="${SL3D_DIR:-$HOME/dev/sl3d}"
 SL3DPP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-$SL3DPP_DIR/benchmarks/runs/fortran_gate_lmax${LMAX}}"
@@ -24,6 +27,7 @@ WORK="${WORK:-$SL3DPP_DIR/benchmarks/runs/fortran_gate_lmax${LMAX}}"
 echo "== sl3d:   $SL3D_DIR"
 echo "== sl3dpp: $SL3DPP_DIR"
 echo "== lmax $LMAX, $THREADS threads, workdir $WORK"
+echo "== GLIBC_TUNABLES=$GLIBC_TUNABLES"
 mkdir -p "$WORK"
 
 # --- the Fortran side -------------------------------------------------------

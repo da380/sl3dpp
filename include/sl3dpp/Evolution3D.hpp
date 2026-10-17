@@ -46,9 +46,24 @@ class SeaLevelEvolution3D {
     /// The SLE's own tolerance per pass.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// The combined (strain) fixed point.
+    /// The combined (strain) fixed point, Anderson-mixed once Picard
+    /// contracts by less than anderson_rate a pass (and the SLE's own
+    /// iteration, at the same memory; Viscoelastic3D::IterationControl).
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
+    double anderson_rate = 0.5;
+    /// Keep every stride-th node's internal state on its snapshot (and
+    /// the last; 0 keeps none); the per-node load and centrifugal
+    /// coefficients are kept whenever the stride is set. A reverse sweep
+    /// rebuilds the states between by forward steps (ForwardTrajectory3D):
+    /// a stride near sqrt(nodes) holds the fewest states.
+    int record_stride = 0;
+    /// Whether a kept state also keeps its strain. By default (false)
+    /// only the internal variables are kept, and an adjoint regenerates
+    /// each node's strain by one elastic solve under its recorded loads;
+    /// true saves those solves at about twice the trajectory memory with
+    /// one branch.
+    bool record_strain = false;
   };
 
   struct Snapshot {
@@ -60,6 +75,12 @@ class SeaLevelEvolution3D {
     int coupledIterations = 0;
     double coupledResidual = 0.0;
     bool converged = true;
+    /// The internal variables, without the strain cache unless
+    /// Options::record_strain (one elastic solve under the recorded load
+    /// and centrifugal coefficients regenerates it).
+    std::optional<Viscoelastic3D::State> internalState;
+    std::vector<std::complex<double>> loadCoefficients;
+    std::vector<std::complex<double>> tideCoefficients;
   };
 
   /// The operator and solver are borrowed for the evolution's lifetime;
@@ -81,6 +102,8 @@ class SeaLevelEvolution3D {
   }
 
  private:
+  friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
+
   using Complex = std::complex<double>;
 
   /// A degree-column callable over m >= 0 coefficients, the negative

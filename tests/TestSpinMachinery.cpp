@@ -30,10 +30,10 @@ double Noise(std::size_t k) {
 }  // namespace
 
 TEST(SpinMachinery, SpinTransformRoundTrips) {
-  constexpr int lmax = 12;
+  constexpr auto lmax = 12;
   SurfaceGrid grid(lmax, {.nmax = 2});
   for (int N : {-2, -1, 0, 1, 2}) {
-    std::vector<Complex> coefficients(grid.SpinCoefficientSize(N));
+    auto coefficients = std::vector<Complex>(grid.SpinCoefficientSize(N));
     for (int l = std::abs(N); l <= lmax; ++l) {
       for (int m = -l; m <= l; ++m) {
         const auto k = SurfaceGrid::SpinIndex(N, l, m);
@@ -42,8 +42,8 @@ TEST(SpinMachinery, SpinTransformRoundTrips) {
     }
     const auto field = grid.SynthesiseSpin(N, coefficients);
     const auto back = grid.ExpandSpin(N, field);
-    double scale = 0.0, diff = 0.0;
-    for (std::size_t k = 0; k < coefficients.size(); ++k) {
+    auto scale = 0.0, diff = 0.0;
+    for (auto k = std::size_t{0}; k < coefficients.size(); ++k) {
       scale = std::max(scale, std::abs(coefficients[k]));
       diff = std::max(diff, std::abs(back[k] - coefficients[k]));
     }
@@ -60,9 +60,9 @@ TEST(SpinMachinery, ReductionToTheDegreeBasisMemoryForce) {
   // cS = k^2 mu Wq e_S. Checked per node: the pointwise row against
   // (-cR + cS | ...) and the derivative row against the B pairing.
   for (int l : {0, 1, 2, 5, 9}) {
-    const double k2 = l * (l + 1.0);
-    const double r = 0.83;
-    const double mu = 1.7, Wq = 0.31, jac = 0.21;
+    const auto k2 = l * (l + 1.0);
+    const auto r = 0.83;
+    const auto mu = 1.7, Wq = 0.31, jac = 0.21;
     DegreeNodeValues v;
     v.U = Complex(0.37, -0.81);
     v.rdU = Complex(-1.21, 0.44);
@@ -109,9 +109,9 @@ TEST(SpinMachinery, RealTensorsHaveConjugateComponentFields) {
   // so the grid components satisfy A(++) = conj(A(--)),
   // A(0+) = -conj(A(-0)) (the spin-1 pair ANTI-conjugates) and real
   // A(-+), pointwise.
-  constexpr int lmax = 8;
+  constexpr auto lmax = 8;
   SurfaceGrid grid(lmax, {.nmax = 2});
-  const double r = 1.0;
+  const auto r = 1.0;
 
   // Hermitian per-(l, m) columns: f_{l,-m} = (-1)^m conj(f_{lm}).
   auto hermitian = [&](std::size_t seed, int l, int m) {
@@ -123,12 +123,12 @@ TEST(SpinMachinery, RealTensorsHaveConjugateComponentFields) {
     return (std::abs(m) % 2 == 0 ? 1.0 : -1.0) * std::conj(base);
   };
 
-  std::array<std::vector<Complex>, 5> componentCoefficients;
+  auto componentCoefficients = std::array<std::vector<Complex>, 5>{};
   const int spins[5] = {-2, -1, 0, 1, 2};
-  for (int c = 0; c < 5; ++c) {
+  for (auto c = 0; c < 5; ++c) {
     componentCoefficients[c].assign(grid.SpinCoefficientSize(spins[c]), 0.0);
   }
-  for (int l = 0; l <= lmax; ++l) {
+  for (auto l = 0; l <= lmax; ++l) {
     for (int m = -l; m <= l; ++m) {
       DegreeNodeValues v;
       v.U = hermitian(1, l, m);
@@ -140,21 +140,21 @@ TEST(SpinMachinery, RealTensorsHaveConjugateComponentFields) {
         v.rdW = hermitian(6, l, m);
       }
       const auto A = DeviatoricComponents(l, v, r);
-      for (int c = 0; c < 5; ++c) {
+      for (auto c = 0; c < 5; ++c) {
         if (l < std::abs(spins[c])) continue;
         componentCoefficients[c][SurfaceGrid::SpinIndex(spins[c], l, m)] = A[c];
       }
     }
   }
-  std::array<std::vector<Complex>, 5> fields;
-  for (int c = 0; c < 5; ++c) {
+  auto fields = std::array<std::vector<Complex>, 5>{};
+  for (auto c = 0; c < 5; ++c) {
     fields[c] = grid.SynthesiseSpin(spins[c], componentCoefficients[c]);
   }
-  double scale = 0.0;
+  auto scale = 0.0;
   for (const auto& f : fields) {
     for (auto value : f) scale = std::max(scale, std::abs(value));
   }
-  for (std::size_t k = 0; k < fields[0].size(); k += 5) {
+  for (auto k = std::size_t{0}; k < fields[0].size(); k += 5) {
     EXPECT_LT(std::abs(fields[4][k] - std::conj(fields[0][k])), 1e-11 * scale);
     EXPECT_LT(std::abs(fields[3][k] + std::conj(fields[1][k])), 1e-11 * scale);
     EXPECT_LT(std::abs(fields[2][k].imag()), 1e-11 * scale);

@@ -28,11 +28,11 @@
 using namespace sl3dpp;
 
 int main() {
-  constexpr int lmax = 128;
-  constexpr double meltFraction = 0.2;
-  constexpr double meltEnd = 5.0e3 * examples::kYear;  // s
-  constexpr double tEnd = 15.0e3 * examples::kYear;
-  constexpr int nodes = 31;
+  constexpr auto lmax = 128;
+  constexpr auto meltFraction = 0.2;
+  constexpr auto meltEnd = 5.0e3 * examples::kYear;  // s
+  constexpr auto tEnd = 15.0e3 * examples::kYear;
+  constexpr auto nodes = 31;
 
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
@@ -43,7 +43,7 @@ int main() {
 
   // The present-day background state, rebuilt in the solver's units.
   const auto earthState = examples::LoadEarthState(grid);
-  const double length = scales.Length();
+  const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
     return si;
@@ -62,20 +62,21 @@ int main() {
                          0.18);
   });
   const auto& C = state.oceanFunction;
-  std::vector<double> unitLoad(grid.FieldSize());
-  for (std::size_t i = 0; i < unitLoad.size(); ++i) {
+  auto unitLoad = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < unitLoad.size(); ++i) {
     unitLoad[i] = -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
                   mask[i] * iceSi[i] / length;
   }
-  std::vector<double> times;
-  for (int n = 0; n < nodes; ++n) {
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
-  const double rampEnd = meltEnd / scales.Time();
+  const auto rampEnd = meltEnd / scales.Time();
   auto iceLoad = [&](double t) {
-    const double ramp = std::min(t / rampEnd, 1.0);
-    std::vector<double> load(unitLoad.size());
-    for (std::size_t i = 0; i < load.size(); ++i) load[i] = ramp * unitLoad[i];
+    const auto ramp = std::min(t / rampEnd, 1.0);
+    auto load = std::vector<double>(unitLoad.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i)
+      load[i] = ramp * unitLoad[i];
     return load;
   };
 
@@ -94,10 +95,10 @@ int main() {
     const auto lons = grid.Longitudes();
     const double theta = site.CoLatitude(), phi = site.Longitude();
     std::size_t bi = 0, bj = 0;
-    for (std::size_t i = 1; i < colats.size(); ++i) {
+    for (auto i = std::size_t{1}; i < colats.size(); ++i) {
       if (std::abs(colats[i] - theta) < std::abs(colats[bi] - theta)) bi = i;
     }
-    for (std::size_t j = 1; j < lons.size(); ++j) {
+    for (auto j = std::size_t{1}; j < lons.size(); ++j) {
       if (std::abs(lons[j] - phi) < std::abs(lons[bj] - phi)) bj = j;
     }
     return field[bi * lons.size() + bj];
@@ -108,9 +109,9 @@ int main() {
       "1D viscoelastic GIA: 20% West Antarctic melt over 5 kyr, held to "
       "15 kyr; ICE-7G state (SI)");
   out.Grid(grid);
-  const double omegaSi = 1.0 / scales.Time();
-  std::vector<std::vector<double>> rows;
-  for (std::size_t n = 0; n < snapshots.size(); ++n) {
+  const auto omegaSi = 1.0 / scales.Time();
+  auto rows = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < snapshots.size(); ++n) {
     const auto& s = snapshots[n];
     rows.push_back({times[n] * scales.Time() / (1.0e3 * examples::kYear),
                     sample(s.seaLevelChange, sites[0]) * length,
@@ -124,7 +125,7 @@ int main() {
              {"t_kyr", "slc_near_m", "slc_mid_m", "slc_far_m", "omega_x",
               "omega_y", "omega_z"},
              rows);
-  const std::size_t meltNode = 10;  // t = 5 kyr on this grid
+  const auto meltNode = std::size_t{10};  // t = 5 kyr on this grid
   out.Series("sites", {"lat", "lon"},
              {{sites[0].latitude, sites[0].longitude},
               {sites[1].latitude, sites[1].longitude},

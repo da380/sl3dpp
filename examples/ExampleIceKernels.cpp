@@ -32,10 +32,10 @@
 using namespace sl3dpp;
 
 int main() {
-  constexpr int lmax = 128;
-  constexpr double meltFraction = 0.2;
-  constexpr double tEnd = 10.0e3 * examples::kYear;
-  constexpr int nodes = 11;
+  constexpr auto lmax = 128;
+  constexpr auto meltFraction = 0.2;
+  constexpr auto tEnd = 10.0e3 * examples::kYear;
+  constexpr auto nodes = 11;
 
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
@@ -45,7 +45,7 @@ int main() {
   const auto& scales = solver.SolverScales();
 
   const auto earthState = examples::LoadEarthState(grid);
-  const double length = scales.Length();
+  const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
     return si;
@@ -63,19 +63,20 @@ int main() {
                          greenland.Longitude(), 0.28);
   });
   const auto& C = state.oceanFunction;
-  std::vector<double> unitLoad(grid.FieldSize());
-  for (std::size_t i = 0; i < unitLoad.size(); ++i) {
+  auto unitLoad = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < unitLoad.size(); ++i) {
     unitLoad[i] = -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
                   mask[i] * iceSi[i] / length;
   }
-  std::vector<double> times;
-  for (int n = 0; n < nodes; ++n) {
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
   auto iceLoad = [&](double t) {
-    const double ramp = t / times.back();
-    std::vector<double> load(unitLoad.size());
-    for (std::size_t i = 0; i < load.size(); ++i) load[i] = ramp * unitLoad[i];
+    const auto ramp = t / times.back();
+    auto load = std::vector<double>(unitLoad.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i)
+      load[i] = ramp * unitLoad[i];
     return load;
   };
   SeaLevelEvolution evolution(op, solver, state, {.record_stride = 1});
@@ -90,11 +91,11 @@ int main() {
     return examples::Cap(theta, phi, gauge.CoLatitude(), gauge.Longitude(),
                          0.15);
   });
-  const double a = solver.Radius();
-  std::vector<double> siteArea(site.size());
-  for (std::size_t i = 0; i < site.size(); ++i) siteArea[i] = site[i];
-  const double norm = a * a * grid.Integrate(siteArea);
-  std::map<std::size_t, Measurement> measurements;
+  const auto a = solver.Radius();
+  auto siteArea = std::vector<double>(site.size());
+  for (auto i = std::size_t{0}; i < site.size(); ++i) siteArea[i] = site[i];
+  const auto norm = a * a * grid.Integrate(siteArea);
+  auto measurements = std::map<std::size_t, Measurement>{};
   measurements[nodes - 1].seaLevelDual = site;
   for (auto& v : measurements[nodes - 1].seaLevelDual) v /= norm;
 
@@ -115,7 +116,7 @@ int main() {
   const auto& matScales = earth.material.ModelScales();
   const auto w = mesh.Weights();
   for (auto method : {AdjointMethod::Continuous, AdjointMethod::Discrete}) {
-    const bool continuous = method == AdjointMethod::Continuous;
+    const auto continuous = method == AdjointMethod::Continuous;
     const std::string tag = continuous ? "continuous" : "discrete";
     AdjointSolver adjoint(evolution, {.method = method});
     const auto kernels =
@@ -127,14 +128,14 @@ int main() {
     // band-limited field's ringing over bare land), and the unprojected duals
     // are dominated by the (irrelevant) loading sensitivity right at the
     // gauge. J is a length, ice a length: K_SI = K_nd / L^2.
-    const double thicknessSi = 1.0 / (length * length);
-    std::vector<double> grounded(iceSi.size());
-    for (std::size_t i = 0; i < grounded.size(); ++i) {
+    const auto thicknessSi = 1.0 / (length * length);
+    auto grounded = std::vector<double>(iceSi.size());
+    for (auto i = std::size_t{0}; i < grounded.size(); ++i) {
       grounded[i] = iceSi[i] > 100.0 && C[i] < 0.5 ? 1.0 : 0.0;
     }
     auto projected = [&](const std::vector<double>& dual) {
-      std::vector<double> masked(dual.size());
-      for (std::size_t i = 0; i < masked.size(); ++i) {
+      auto masked = std::vector<double>(dual.size());
+      for (auto i = std::size_t{0}; i < masked.size(); ++i) {
         masked[i] = grounded[i] * dual[i];
       }
       return masked;
@@ -157,13 +158,13 @@ int main() {
     // nodal values by their quadrature weight w jac, convert eta and
     // radius to SI. dJ = int K(r) d eta(r) dr.
     const auto eta = kernels.Viscosity(earth.rheology);
-    const double etaSi = matScales.Factor(ViscosityDimensions);
-    const double rSi = matScales.Length();
-    std::vector<std::vector<double>> rows;
-    for (int e = 0; e < mesh.ElementCount(); ++e) {
-      const double jac = mesh.Jacobian(e);
-      for (int q = 0; q < mesh.NGll(); ++q) {
-        const std::size_t i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+    const auto etaSi = matScales.Factor(ViscosityDimensions);
+    const auto rSi = matScales.Length();
+    auto rows = std::vector<std::vector<double>>{};
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      const auto jac = mesh.Jacobian(e);
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
         if (earth.rheology.BranchAt(0).itau[i] <= 0.0) continue;
         rows.push_back({mesh.Radius(e, q) * rSi / 1.0e3,  // km
                         eta[0][i] / (w[q] * jac) / (etaSi * rSi)});

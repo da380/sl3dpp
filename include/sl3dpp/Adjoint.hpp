@@ -107,7 +107,9 @@ struct IceKernels {
   /// material's full mesh, itau in MATERIAL units; empty unless the
   /// sweep was given the forward trajectory. Discrete: the exact
   /// sensitivity through the scheme-weight derivatives. Continuous: the
-  /// multiplier integral int W_k m-dagger / itau (d - m) dt.
+  /// multiplier integral int W_k m-dagger / itau (d - m) dt. With the
+  /// internal variables at Gauss points both accumulate there and reach
+  /// the nodal itau through the interpolation's transpose.
   std::vector<std::vector<double>> itauKernel;
 
   /// The viscosity kernels dJ / d eta(r) per branch from the itau
@@ -119,6 +121,18 @@ struct IceKernels {
 };
 
 enum class AdjointMethod { Continuous, Discrete };
+
+namespace detail {
+/// The grounded views and the distributional/quelled assembly shared by
+/// the 1D and 3D sweeps: loadDuals complete (lumps folded in), density
+/// the continuous part per unit time, lumps the delta amplitudes
+/// (load-dual space, by node).
+[[nodiscard]] IceKernels AssembleIceViews(
+    std::span<const double> oceanFunction, double iceDensity,
+    std::span<const double> times, std::vector<std::vector<double>> loadDuals,
+    std::vector<std::vector<double>> density,
+    std::map<std::size_t, std::vector<double>> lumps);
+}  // namespace detail
 
 /**
  * @brief The reverse sweeps over a coupled evolution's setup.
