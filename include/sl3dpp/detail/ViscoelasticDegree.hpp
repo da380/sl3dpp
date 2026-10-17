@@ -8,6 +8,7 @@
  * their transposes). Array layouts are Viscoelastic.hpp's.
  */
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <map>
@@ -36,6 +37,10 @@ namespace detail {
 struct ViscoelasticOperator::Degree {
   int l;
   double k2;
+  /// The memory window: the degree's elements from the first to the last
+  /// with a relaxing node (the internal variables vanish outside it, in
+  /// the elastic lithosphere and the core), at least one element; every
+  /// memory and strain array spans it. The system's subset may be wider.
   int e0, ne, ngll, ndof;
   /// The memory points per element (MemoryPoints.hpp): ngll - 1 at the
   /// Gauss points (the default), ngll at the GLL nodes. Every memory and
@@ -70,9 +75,24 @@ struct ViscoelasticOperator::Degree {
                 .point_shear = elasticShear}),
         points(&memoryPoints) {
     const auto& mesh = rheology.BaseMaterial().Mesh();
-    e0 = system.FirstElement();
-    ne = mesh.ElementCount() - e0;
+    const auto subset = system.FirstElement();
     ngll = mesh.NGll();
+    auto first = mesh.ElementCount(), last = subset;
+    for (auto e = subset; e < mesh.ElementCount(); ++e) {
+      for (auto i = 0; i < ngll; ++i) {
+        if (rheology.IsActive(static_cast<std::size_t>(e) * ngll + i)) {
+          first = std::min(first, e);
+          last = e + 1;
+          break;
+        }
+      }
+    }
+    if (first >= last) {
+      first = subset;
+      last = subset + 1;
+    }
+    e0 = first;
+    ne = last - first;
     np = memoryPoints.count;
     gll = memoryPoints.set == MemoryPointSet::Gll;
     ndof = system.DofCount();
@@ -114,22 +134,23 @@ struct ViscoelasticOperator::Degree {
     loadVec = system.Load();
     tideVec = system.Tide(l == 0 ? 2 : -1);
     if (l == 0) {
-      // The inertia moment is a displacement integral: the nodes' own
-      // quadrature, whatever the memory points.
+      // The inertia moment is a displacement integral over the whole
+      // subset (not the memory window): the nodes' own quadrature,
+      // whatever the memory points.
       const auto& material = rheology.BaseMaterial();
       const auto rho = material.Rho();
       const auto w = mesh.Weights();
       momentRow.assign(ndof, 0.0);
       const auto root = std::sqrt(4.0 * std::numbers::pi);
-      for (auto e = 0; e < ne; ++e) {
+      for (auto e = subset; e < mesh.ElementCount(); ++e) {
         for (auto q = 0; q < ngll; ++q) {
-          const auto dof = Udof[static_cast<std::size_t>(e) * ngll + q];
+          const auto dof = system.Dof(mesh.GlobalIndex(e, q), Component::U);
           if (dof < 0) continue;
-          const auto r = mesh.Radius(e0 + e, q);
-          const auto wq = w[q] * mesh.Jacobian(e0 + e);
+          const auto r = mesh.Radius(e, q);
+          const auto wq = w[q] * mesh.Jacobian(e);
           momentRow[dof] += root * wq *
-                            rho[static_cast<std::size_t>(e0 + e) * ngll + q] *
-                            r * r * r;
+                            rho[static_cast<std::size_t>(e) * ngll + q] * r *
+                            r * r;
         }
       }
     }

@@ -802,3 +802,14 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   may run concurrently. (4) Huge pages documented (README, Running) and
   set in `run_fortran_gate.sh`. lmax 64, 8 threads: 0.59 s a pass for
   0.70, 0.54 s with huge pages.
+- **17 Oct 2026** — Tidy-ups (performance chunk 11). The 1D internal
+  variables span each degree's memory window (`MemoryElements`: its
+  elements from the first to the last with a relaxing node), no longer
+  its whole subset: the 1D state 10-20% smaller (lmax 64-256), every
+  result bitwise unchanged. The 1D adjoint sweeps run their per-degree
+  loops threaded (the continuous sweep's kernels bitwise, the discrete
+  sweep's itau kernel at round-off: each degree's terms are summed before
+  joining the kernel, in degree order whatever the thread count); the
+  1D kernels example runs 31 s for 48 on 8 threads. The radial-major
+  force layout was considered and deferred (~9% of a pass). The AAA
+  sweep follows as its own change.

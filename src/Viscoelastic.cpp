@@ -88,6 +88,11 @@ ViscoelasticOperator::ViscoelasticOperator(ViscoelasticOperator&&) noexcept =
 ViscoelasticOperator& ViscoelasticOperator::operator=(
     ViscoelasticOperator&&) noexcept = default;
 
+std::pair<int, int> ViscoelasticOperator::MemoryElements(int l) const {
+  const auto& deg = Deg(l);
+  return {deg.e0, deg.ne};
+}
+
 ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
   auto found = degrees_.find(l);
   if (found == degrees_.end()) {

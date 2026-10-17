@@ -7,6 +7,7 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/ParallelFor.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -341,15 +342,31 @@ IceKernels AdjointSolver::DiscreteSweep(
 
     // The duals of the end-of-step solve, through the strain transpose,
     // and their contraction with the unit responses: the duals of the
-    // step's load and tide coefficients.
-    std::map<int, std::vector<double>> xd;
-    std::map<int, std::vector<double>> sigCols, psiCols;
-    for (int l = 0; l <= lmax; ++l) {
-      const auto& deg = op.Deg(l);
+    // step's load and tide coefficients. One task per degree, largest
+    // first, the workspaces, systems and unit responses resolved serially
+    // first (the caches fill lazily); each writes only its own degree's.
+    auto degs = std::vector<const ViscoelasticOperator::Degree*>(lmax + 1);
+    auto unitsOf = std::vector<const std::vector<double>*>(lmax + 1);
+    auto systems = std::vector<const DegreeOperator*>(lmax + 1);
+    auto mds = std::vector<std::vector<double>*>(lmax + 1);
+    auto dds = std::vector<std::vector<double>*>(lmax + 1);
+    for (auto l = 0; l <= lmax; ++l) {
+      degs[l] = &op.Deg(l);
+      unitsOf[l] = &op.UnitResponses(&flavour, l);
+      systems[l] = &op.EffectiveSystem(flavour, l);
+      mds[l] = &mdual.at(l);
+      dds[l] = &ddual.at(l);
+    }
+    auto xd = std::vector<std::vector<double>>(lmax + 1);
+    auto sigByDegree = std::vector<std::vector<double>>(lmax + 1);
+    auto psiByDegree = std::vector<std::vector<double>>(lmax + 1);
+    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+      const auto l = lmax - i;
+      const auto& deg = *degs[l];
       const int ncols = 2 * (l + 1);
       const std::size_t block = deg.NodalSize(ncols);
-      auto summed = ddual[l];
-      const auto& md = mdual[l];
+      auto summed = *dds[l];
+      const auto& md = *mds[l];
       for (std::size_t k = 0; k < K; ++k) {
         const auto& w = weights[k];
         for (int s = 0; s < 3; ++s) {
@@ -369,7 +386,7 @@ IceKernels AdjointSolver::DiscreteSweep(
         }
       }
       auto x = deg.DualFromScalars(summed, ncols);
-      const auto& units = op.UnitResponses(&flavour, l);
+      const auto& units = *unitsOf[l];
       std::vector<double> sc(ncols, 0.0), pc(ncols, 0.0);
       for (int c = 0; c < ncols; ++c) {
         double s = 0.0, p = 0.0;
@@ -381,9 +398,14 @@ IceKernels AdjointSolver::DiscreteSweep(
         sc[c] = s;
         pc[c] = p;
       }
-      sigCols.emplace(l, std::move(sc));
-      psiCols.emplace(l, std::move(pc));
-      xd.emplace(l, std::move(x));
+      sigByDegree[l] = std::move(sc);
+      psiByDegree[l] = std::move(pc);
+      xd[l] = std::move(x);
+    });
+    std::map<int, std::vector<double>> sigCols, psiCols;
+    for (auto l = 0; l <= lmax; ++l) {
+      sigCols.emplace(l, std::move(sigByDegree[l]));
+      psiCols.emplace(l, std::move(psiByDegree[l]));
     }
     const auto sigmaDual =
         CoefficientDualFromColumnDuals(grid, sigCols, ev.toMatDensity_);
@@ -414,9 +436,15 @@ IceKernels AdjointSolver::DiscreteSweep(
     }
 
     // The transposed radial update: one symmetric effective solve per
-    // degree, then the weight recursion closing m-dagger and d-dagger.
-    for (int l = 0; l <= lmax; ++l) {
-      const auto& deg = op.Deg(l);
+    // degree, then the weight recursion closing m-dagger and d-dagger;
+    // one task per degree again. The itau kernel's terms meet at the same
+    // points from every degree, so each degree sums its own, added to
+    // the kernel in degree order after the loop.
+    auto kernelTerms =
+        std::vector<std::vector<double>>(dweights != nullptr ? lmax + 1 : 0);
+    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+      const auto l = lmax - i;
+      const auto& deg = *degs[l];
       const int ncols = 2 * (l + 1);
       const std::size_t block = deg.NodalSize(ncols);
       auto rhs = std::move(xd[l]);
@@ -436,7 +464,7 @@ IceKernels AdjointSolver::DiscreteSweep(
         const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
         for (int d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
       }
-      const auto y = op.EffectiveSystem(flavour, l).Solve(rhs, ncols);
+      const auto y = systems[l]->Solve(rhs, ncols);
       const auto sy = deg.Strain(y, ncols);
       const auto wsy = deg.ApplyWeights(sy, ncols);
       // The forward pairings of this degree's itau sensitivity.
@@ -450,9 +478,13 @@ IceKernels AdjointSolver::DiscreteSweep(
         d1 = &fwdN->strain.at(l);
         wd1 = deg.ApplyWeights(*d1, ncols);
       }
-      auto& md = mdual[l];
-      auto& dd = ddual[l];
+      auto& md = *mds[l];
+      auto& dd = *dds[l];
       std::ranges::fill(dd, 0.0);
+      auto* terms = dweights != nullptr ? &kernelTerms[l] : nullptr;
+      if (terms != nullptr) {
+        terms->assign(K * static_cast<std::size_t>(deg.ne) * deg.np, 0.0);
+      }
       for (std::size_t k = 0; k < K; ++k) {
         const auto& w = weights[k];
         for (int s = 0; s < 3; ++s) {
@@ -480,7 +512,7 @@ IceKernels AdjointSolver::DiscreteSweep(
                                       dw.alpha[full] * (*d0)[sn]) +
                                 (mdOld * (*d1)[sn] + wd1[at + c] * sy[sn]) *
                                     dw.beta[full];
-                  itauKernel[k][full] += dt * g;
+                  (*terms)[(k * deg.ne + e) * deg.np + q] += dt * g;
                 }
                 // backward Euler stores its weight 1/(1 + h) in e
                 md[at + c] = w.e[full] * mtilde;
@@ -489,6 +521,17 @@ IceKernels AdjointSolver::DiscreteSweep(
                 }
               }
             }
+          }
+        }
+      }
+    });
+    for (auto l = 0; l < static_cast<int>(kernelTerms.size()); ++l) {
+      const auto& deg = *degs[l];
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.np + q] +=
+                kernelTerms[l][(k * deg.ne + e) * deg.np + q];
           }
         }
       }
@@ -694,8 +737,38 @@ IceKernels AdjointSolver::ContinuousSweep(
         j.zu.empty() ? LoadCallable{} : ev.Columns(j.zu, ev.toMatDensity_);
     const auto zphiCols =
         j.zphi.empty() ? LoadCallable{} : ev.Columns(j.zphi, ev.toMatDensity_);
+    // One task per degree, largest first; the workspaces, unit responses
+    // and channel columns resolved serially first.
+    struct Task {
+      int l = 0;
+      std::vector<double>* m = nullptr;
+      const ViscoelasticOperator::Degree* deg = nullptr;
+      const std::vector<double>* units = nullptr;
+      const std::vector<double>* split = nullptr;
+      std::optional<std::vector<double>> lam, psi, zu, zphi;
+    };
+    auto tasks = std::vector<Task>{};
     for (auto& [l, m] : vstate.m) {
-      const auto& deg = op.Deg(l);
+      auto task = Task{};
+      task.l = l;
+      task.m = &m;
+      task.deg = &op.Deg(l);
+      task.units = &op.UnitResponses(nullptr, l);
+      task.lam = lamCols(l, 0.0);
+      task.psi = psiCols(l, 0.0);
+      if (zuCols || zphiCols) {
+        task.split = &op.SplitUnitResponses(nullptr, l);
+        if (zuCols) task.zu = zuCols(l, 0.0);
+        if (zphiCols) task.zphi = zphiCols(l, 0.0);
+      }
+      tasks.push_back(std::move(task));
+    }
+    const auto count = static_cast<int>(tasks.size());
+    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+      const auto& task = tasks[count - 1 - i];
+      const auto l = task.l;
+      auto& m = *task.m;
+      const auto& deg = *task.deg;
       const int ncols = 2 * (l + 1);
       const std::size_t block = deg.NodalSize(ncols);
       std::vector<double> x(static_cast<std::size_t>(deg.ndof) * ncols, 0.0);
@@ -706,14 +779,10 @@ IceKernels AdjointSolver::ContinuousSweep(
           }
         }
       };
-      const auto& units = op.UnitResponses(nullptr, l);
-      add(units.data(), *lamCols(l, 0.0));
-      add(units.data() + deg.ndof, *psiCols(l, 0.0));
-      if (zuCols || zphiCols) {
-        const auto& split = op.SplitUnitResponses(nullptr, l);
-        if (zuCols) add(split.data(), *zuCols(l, 0.0));
-        if (zphiCols) add(split.data() + deg.ndof, *zphiCols(l, 0.0));
-      }
+      add(task.units->data(), *task.lam);
+      add(task.units->data() + deg.ndof, *task.psi);
+      if (task.zu) add(task.split->data(), *task.zu);
+      if (task.zphi) add(task.split->data() + deg.ndof, *task.zphi);
       const auto dTilde = deg.Strain(x, ncols);
       for (std::size_t k = 0; k < K; ++k) {
         for (int s = 0; s < 3; ++s) {
@@ -732,7 +801,7 @@ IceKernels AdjointSolver::ContinuousSweep(
           }
         }
       }
-    }
+    });
     vstate.Invalidate();
   };
 
@@ -826,13 +895,29 @@ IceKernels AdjointSolver::ContinuousSweep(
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (!cursor.has_value() || weight == 0.0) return;
     const auto& fwd = cursor->State(node);
+    // One task per degree, largest first, each forming its own term per
+    // point; the terms are added to the kernel in degree order after, as
+    // the serial sweep added them.
+    auto tasks = std::vector<std::pair<int, const std::vector<double>*>>{};
+    auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
     for (const auto& [l, mdual] : vstate.m) {
-      const auto& deg = op.Deg(l);
+      tasks.emplace_back(l, &mdual);
+      degs.push_back(&op.Deg(l));
+    }
+    auto terms = std::vector<std::vector<double>>(tasks.size());
+    const auto count = static_cast<int>(tasks.size());
+    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+      const auto j = static_cast<std::size_t>(count - 1 - i);
+      const auto l = tasks[j].first;
+      const auto& mdual = *tasks[j].second;
+      const auto& deg = *degs[j];
       const int ncols = 2 * (l + 1);
       const std::size_t block = deg.NodalSize(ncols);
       const auto& dFwd = fwd.strain.at(l);
       const auto& mFwd = fwd.m.at(l);
       const auto weighted = deg.ApplyWeights(mdual, ncols);
+      auto& term = terms[j];
+      term.assign(K * static_cast<std::size_t>(deg.ne) * deg.np, 0.0);
       for (std::size_t k = 0; k < K; ++k) {
         for (int e = 0; e < deg.ne; ++e) {
           for (int q = 0; q < deg.np; ++q) {
@@ -856,8 +941,20 @@ IceKernels AdjointSolver::ContinuousSweep(
                 sum += cw * weighted[at + c] * (dFwd[sn + c] - mFwd[at + c]);
               }
             }
+            term[(k * deg.ne + e) * deg.np + q] = pairing * weight * sum / itau;
+          }
+        }
+      }
+    });
+    for (auto j = std::size_t{0}; j < tasks.size(); ++j) {
+      const auto& deg = *degs[j];
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto at = static_cast<std::size_t>(e) * deg.np + q;
+            if (deg.itau[k][at] <= 0.0) continue;
             itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.np + q] +=
-                pairing * weight * sum / itau;
+                terms[j][k * deg.ne * deg.np + at];
           }
         }
       }

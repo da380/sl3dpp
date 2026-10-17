@@ -224,14 +224,15 @@ TEST(GaussMemory3D, FewerNodesAndTheZeroLateralStepGate) {
       const auto columns = static_cast<std::size_t>(l + 1);
       auto M = std::vector<Complex>(coupling.NodeCount() * columns, 0.0);
       auto R = M, S = M;
-      const auto e0 =
-          l > 0 ? mesh.StartElement(l, TruncationRule::Graded, 1e-8) : 0;
-      const auto ne = mesh.ElementCount() - e0;
+      // The 1D state spans the degree's memory window.
+      const auto window = op1.MemoryElements(l);
+      const auto e0 = window.first;
+      const auto ne = window.second;
       const auto& m1 = s1.m.at(l);
       const auto ncols = 2 * columns;
       for (auto node = 0; node < coupling.NodeCount(); ++node) {
         const auto e = coupling.ElementOfNode(node);
-        if (e < e0) continue;
+        if (e < e0 || e >= e0 + ne) continue;
         const auto p = coupling.NodeInElementOf(node);
         for (auto c = std::size_t{0}; c < columns; ++c) {
           auto scalar = [&](int s) {

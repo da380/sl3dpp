@@ -37,9 +37,11 @@
  * zero harmlessly.
  *
  * Array layouts (all row-major unless stated): a state's per-degree
- * internal variables have shape (K, 3, ne, ngll, ncols) over the degree's
- * element subset; strains (3, ne, ngll, ncols); degree solutions are
- * column-major (ndof, ncols) as DegreeOperator::Solve returns them.
+ * internal variables have shape (K, 3, ne, np, ncols) over the degree's
+ * memory window (MemoryElements: its elements from the first to the last
+ * with a relaxing node) and its np memory points per element; strains
+ * (3, ne, np, ncols); degree solutions are column-major (ndof, ncols) as
+ * DegreeOperator::Solve returns them.
  */
 
 #include <complex>
@@ -217,6 +219,12 @@ class ViscoelasticOperator {
   /// The memory points the internal variables live on.
   [[nodiscard]] const MemoryPoints& Points() const { return *points_; }
 
+  /// Degree l's memory window: the first element and the number of
+  /// elements its internal-variable and strain arrays span, (K, 3,
+  /// count, Points().count, columns) — the degree's elements from the
+  /// first to the last with a relaxing node, at least one.
+  [[nodiscard]] std::pair<int, int> MemoryElements(int l) const;
+
   /// Branch k's modulus and inverse relaxation time at the memory points,
   /// (element, point) over the whole mesh: the nodal arrays at the GLL
   /// points, interpolated (and clamped at zero) at Gauss points.
@@ -259,9 +267,9 @@ class ViscoelasticOperator {
   friend class AdjointSolver;    // the sweeps transpose these internals
   friend class AdjointSolver3D;  // and the 3D continuous sweep's jump
 
-  /// Per-degree workspace: the unrelaxed system, strain operators and
-  /// branch data restricted to the degree's element subset
-  /// (detail/ViscoelasticDegree.hpp).
+  /// Per-degree workspace: the unrelaxed system over the degree's element
+  /// subset, and the strain operators and branch data over its memory
+  /// window (detail/ViscoelasticDegree.hpp).
   struct Degree;
   /// A (scheme, dt) flavour: its effective material, factorised systems
   /// and cached unit responses.

@@ -200,15 +200,15 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
       std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
       std::vector<Complex> R = M, S = M;
       auto& m1d = vstate.m.at(l);
-      // The 1D subset bookkeeping, reproduced from the operator's rule.
-      const auto e0 =
-          l > 0 ? mesh.StartElement(l, TruncationRule::Graded, 1e-8) : 0;
-      const auto ne = mesh.ElementCount() - e0;
+      // The 1D state spans the degree's memory window.
+      const auto window = op.MemoryElements(l);
+      const auto e0 = window.first;
+      const auto ne = window.second;
       const auto ncols1d = 2 * columns;
       const auto block = static_cast<std::size_t>(ne) * np * ncols1d;
       for (int node = 0; node < coupling.NodeCount(); ++node) {
         const auto e = coupling.ElementOfNode(node);
-        if (e < e0) continue;
+        if (e < e0 || e >= e0 + ne) continue;
         const auto q = coupling.NodeInElementOf(node);
         // Random m >= 0 columns of a real field (m = 0 real), fed
         // identically to both paths.

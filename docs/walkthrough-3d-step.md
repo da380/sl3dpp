@@ -529,11 +529,15 @@ expensive.
     steps a stride of 8 holds ~15 states: ~320 GB at lmax 256, ~1.5 TB
     at 512, where states on disk or a memory-budgeted schedule (revolve)
     would be next; both would reuse the rebuild.
-13. **Cost: force-assembly access pattern.** For each degree, the
-    force loop walks node by node through the node-major spectral
+13. **Cost (deferred): force-assembly access pattern.** For each degree,
+    the force loop walks node by node through the node-major spectral
     layout, jumping one coefficient block per node, and the strain
-    recovery scatters back the same way. GSHTrans's `Layered/RadialMajor.hpp`
-    provides the transposed layout meant for per-(l, m) radial work.
+    recovery scatters back the same way. GSHTrans's
+    `Layered/RadialMajor.hpp` provides the transposed layout meant for
+    per-(l, m) radial work. Considered at chunk 11 and left: the two
+    phases are now ~9% of a pass (lmax 64, 8 threads), and the layout
+    would change the spectral tensors everywhere they are read; worth
+    measuring at lmax 256 on the target first.
 14. **Choice: the stopping norm.** A relative sup-norm over all grid
     values is dominated by the largest strains, usually near the
     surface. It is a reasonable choice, but it is a choice.
@@ -604,13 +608,13 @@ expensive.
     a few hundred and up), fixed by splitting the shear energy: the
     long-term part at the nodes, each branch's at the points, so every
     term of the effective operator stays positive (plan.md §5.5).
-20. **Cost (small tidy-up): the 1D internal variables span each
-    degree's whole subset**, from its first element to the surface, so
-    they are stored (as zeros) in the lithosphere and, at low degrees,
-    the core: ~10–12% of the 1D state overall, up to ~25–29% at low
-    degrees (PREM Maxwell body, lmax 64 and 128). The 3D path already
-    keeps only active elements (`GridCoupling` memory nodes: 1225 of
-    1725 mesh nodes at lmax 64).
+20. **Fixed (17 Oct, chunk 11): the 1D internal variables spanned each
+    degree's whole subset**, storing zeros in the lithosphere and, at low
+    degrees, the core. They now span the degree's memory window, its
+    elements from the first to the last with a relaxing node
+    (`ViscoelasticOperator::MemoryElements`), as the 3D memory nodes
+    already did: the 1D state is 10% smaller at lmax 64, 12% at 128 and
+    20% at 256 (up to 29% at one degree), every result bitwise unchanged.
 21. **Deferred: per-branch active sets.** With several branches, every
     branch stores memory over the union of active elements; only worth
     restricting once multi-branch rheologies are in use (David, 17 Oct).
