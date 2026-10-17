@@ -60,6 +60,12 @@ struct MemoryPoints {
   /// point), through each element's Lagrange basis.
   [[nodiscard]] std::vector<double> Interpolate(
       std::span<const double> nodal) const;
+
+  /// The transpose of Interpolate: point values (element, point) to nodal
+  /// (element, gll), sum_p l_i(xi_p) v_p. What maps a sensitivity to the
+  /// point values onto the nodal values they interpolate.
+  [[nodiscard]] std::vector<double> InterpolateTranspose(
+      std::span<const double> atPoints) const;
 };
 
 /// A relaxation term an operator subtracts from its assembly: per element

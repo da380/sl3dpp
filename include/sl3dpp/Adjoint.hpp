@@ -107,7 +107,9 @@ struct IceKernels {
   /// material's full mesh, itau in MATERIAL units; empty unless the
   /// sweep was given the forward trajectory. Discrete: the exact
   /// sensitivity through the scheme-weight derivatives. Continuous: the
-  /// multiplier integral int W_k m-dagger / itau (d - m) dt.
+  /// multiplier integral int W_k m-dagger / itau (d - m) dt. With the
+  /// internal variables at Gauss points both accumulate there and reach
+  /// the nodal itau through the interpolation's transpose.
   std::vector<std::vector<double>> itauKernel;
 
   /// The viscosity kernels dJ / d eta(r) per branch from the itau

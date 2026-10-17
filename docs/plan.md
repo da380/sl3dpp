@@ -688,3 +688,12 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   80% of the memory, and surface responses agree with GLL to 1.4e-8 at
   600 km elements, 2.4e-10 at 300 km (a coupled sea level run, 5e-12).
   The 1D adjoints refuse Gauss points until 7b-ii.
+- **17 Oct 2026** — Gauss-point memory in the 1D adjoints (performance
+  chunk 7b-ii): both sweeps index the memory points, and the itau
+  kernels, accumulated there, reach the nodal itau through the
+  interpolation's transpose (masked where the clamp at zero acts), so
+  `IceKernels::itauKernel` keeps its nodal layout and the viscosity map
+  is unchanged. The discrete gradient identity holds to 1e-8 at Gauss
+  points, FD/Richardson confirms the kernel under both schemes, and the
+  nodal kernels agree with GLL's to 1.1e-6 (discrete) and 7e-7
+  (continuous). The 3D evolution keeps the GLL reference until 7c.

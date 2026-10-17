@@ -171,13 +171,7 @@ std::vector<std::vector<double>> IceKernels::Viscosity(
 
 AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
                              Options options)
-    : evolution_(&evolution), options_(options) {
-  if (evolution.op_->options_.memory_points != MemoryPointSet::Gll) {
-    throw std::invalid_argument(
-        "the 1D adjoint sweeps take internal variables at the GLL nodes "
-        "only, so far (Gauss-point kernels are performance chunk 7b-ii)");
-  }
-}
+    : evolution_(&evolution), options_(options) {}
 
 IceKernels AdjointSolver::IceHistoryKernels(
     std::span<const double> times,
@@ -304,7 +298,8 @@ IceKernels AdjointSolver::DiscreteSweep(
         [&ev](const std::vector<Complex>& c) {
           return ev.Columns(c, ev.toMatPotential_);
         });
-    const auto meshSize = op.GetRheology().BranchAt(0).itau.size();
+    // Accumulated at the memory points, mapped to the nodes at the end.
+    const auto meshSize = op.pointItau_[0].size();
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
 
@@ -359,12 +354,12 @@ IceKernels AdjointSolver::DiscreteSweep(
         const auto& w = weights[k];
         for (int s = 0; s < 3; ++s) {
           for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.ngll; ++q) {
+            for (int q = 0; q < deg.np; ++q) {
               const std::size_t full =
-                  static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+                  static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const double b = implicit ? 1.0 - w.e[full] : w.beta[full];
               const std::size_t node =
-                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                  (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
               for (int c = 0; c < ncols; ++c) {
                 summed[s * block + node + c] += b * md[at + c];
@@ -462,11 +457,11 @@ IceKernels AdjointSolver::DiscreteSweep(
         const auto& w = weights[k];
         for (int s = 0; s < 3; ++s) {
           for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.ngll; ++q) {
+            for (int q = 0; q < deg.np; ++q) {
               const std::size_t full =
-                  static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+                  static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const std::size_t node =
-                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                  (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
               for (int c = 0; c < ncols; ++c) {
                 const double mdOld = md[at + c];
@@ -571,7 +566,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps));
-  out.itauKernel = std::move(itauKernel);
+  out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   return out;
 }
 
@@ -723,12 +718,12 @@ IceKernels AdjointSolver::ContinuousSweep(
       for (std::size_t k = 0; k < K; ++k) {
         for (int s = 0; s < 3; ++s) {
           for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.ngll; ++q) {
+            for (int q = 0; q < deg.np; ++q) {
               const double itau =
-                  deg.itau[k][static_cast<std::size_t>(e) * deg.ngll + q];
+                  deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
               if (itau == 0.0) continue;
               const std::size_t node =
-                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                  (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
               for (int c = 0; c < ncols; ++c) {
                 m[at + c] += itau * dTilde[s * block + node + c];
@@ -810,7 +805,8 @@ IceKernels AdjointSolver::ContinuousSweep(
         [&ev](const std::vector<Complex>& c) {
           return ev.Columns(c, ev.toMatPotential_);
         });
-    const auto meshSize = op.GetRheology().BranchAt(0).itau.size();
+    // Accumulated at the memory points, mapped to the nodes at the end.
+    const auto meshSize = op.pointItau_[0].size();
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
   // The self-adjoint channel mapping poses the adjoint in the sea level
@@ -839,12 +835,12 @@ IceKernels AdjointSolver::ContinuousSweep(
       const auto weighted = deg.ApplyWeights(mdual, ncols);
       for (std::size_t k = 0; k < K; ++k) {
         for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.ngll; ++q) {
+          for (int q = 0; q < deg.np; ++q) {
             const double itau =
-                deg.itau[k][static_cast<std::size_t>(e) * deg.ngll + q];
+                deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
             if (itau <= 0.0) continue;
             const std::size_t gridNode =
-                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             double sum = 0.0;
             for (int s = 0; s < 3; ++s) {
               const std::size_t at = (k * 3 + s) * block + gridNode;
@@ -860,8 +856,8 @@ IceKernels AdjointSolver::ContinuousSweep(
                 sum += cw * weighted[at + c] * (dFwd[sn + c] - mFwd[at + c]);
               }
             }
-            itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.ngll +
-                          q] += pairing * weight * sum / itau;
+            itauKernel[k][static_cast<std::size_t>(deg.e0 + e) * deg.np + q] +=
+                pairing * weight * sum / itau;
           }
         }
       }
@@ -945,7 +941,7 @@ IceKernels AdjointSolver::ContinuousSweep(
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps));
-  out.itauKernel = std::move(itauKernel);
+  out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   return out;
 }
 

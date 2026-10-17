@@ -72,4 +72,24 @@ std::vector<double> MemoryPoints::Interpolate(
   return out;
 }
 
+std::vector<double> MemoryPoints::InterpolateTranspose(
+    std::span<const double> atPoints) const {
+  if (atPoints.size() % count != 0) {
+    throw std::invalid_argument(
+        std::format("{} point values are not whole elements of {}",
+                    atPoints.size(), count));
+  }
+  const auto elements = atPoints.size() / count;
+  auto out = std::vector<double>(elements * ngll, 0.0);
+  for (auto e = std::size_t{0}; e < elements; ++e) {
+    for (auto i = 0; i < ngll; ++i) {
+      auto sum = 0.0;
+      for (auto p = 0; p < count; ++p)
+        sum += Value(p, i) * atPoints[e * count + p];
+      out[e * ngll + i] = sum;
+    }
+  }
+  return out;
+}
+
 }  // namespace sl3dpp

@@ -257,6 +257,12 @@ class ViscoelasticOperator {
   /// viscosity sensitivity pairs them with dh = dt d(itau).
   [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightDerivativesOf(
       Scheme scheme, double dt) const;
+  /// Kernels accumulated at the memory points, (element, point) per
+  /// branch, as kernels against the nodal itau the points interpolate:
+  /// the transpose of the interpolation, zero where the clamp at zero
+  /// acted. At the GLL points they are already nodal.
+  [[nodiscard]] std::vector<std::vector<double>> ItauKernelsAtNodes(
+      std::vector<std::vector<double>> atPoints) const;
 
   std::shared_ptr<const Rheology> rheology_;  ///< owned, immutable
   int lmax_;

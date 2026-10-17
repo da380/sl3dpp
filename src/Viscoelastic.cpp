@@ -148,6 +148,23 @@ ViscoelasticOperator::SchemeWeightDerivativesOf(Scheme scheme,
   return found->second;
 }
 
+std::vector<std::vector<double>> ViscoelasticOperator::ItauKernelsAtNodes(
+    std::vector<std::vector<double>> atPoints) const {
+  if (options_.memory_points == MemoryPointSet::Gll) return atPoints;
+  auto out = std::vector<std::vector<double>>{};
+  for (auto k = std::size_t{0}; k < atPoints.size(); ++k) {
+    // itau at a point is max(interpolant, 0): the chain rule is the
+    // interpolation's transpose where the interpolant is positive.
+    const auto raw = points_.Interpolate(rheology_->BranchAt(k).itau);
+    auto masked = std::move(atPoints[k]);
+    for (auto i = std::size_t{0}; i < masked.size(); ++i) {
+      if (raw[i] < 0.0) masked[i] = 0.0;
+    }
+    out.push_back(points_.InterpolateTranspose(masked));
+  }
+  return out;
+}
+
 Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
                                                  double dt) const {
   if (scheme == Scheme::ExponentialEuler) {

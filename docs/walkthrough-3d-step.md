@@ -485,8 +485,10 @@ expensive.
     exact elimination at Gauss points; `MemoryPoints.hpp`); 7b-i, done,
     moves the 1D forward (`ViscoelasticOperator::Options::memory_points`):
     80% of the memory, an exact elimination still, and surface responses
-    within 1.4e-8 of GLL at 600 km elements, 2.4e-10 at 300 km; 7b-ii
-    moves the 1D adjoints and kernels, 7c the 3D.
+    within 1.4e-8 of GLL at 600 km elements, 2.4e-10 at 300 km; 7b-ii,
+    done, moves the 1D adjoints (kernels accumulate at the points and
+    reach the nodal itau through the interpolation's transpose; nodal
+    kernels within 1e-6 of GLL's); 7c moves the 3D.
 20. **Cost (small tidy-up): the 1D internal variables span each
     degree's whole subset**, from its first element to the surface, so
     they are stored (as zeros) in the lithosphere and, at low degrees,
