@@ -8,8 +8,11 @@
  * the assembly of the memory force onto the spheroidal and toroidal
  * degree systems.
  *
- * The radial memory nodes are the GLL nodes of the elements where any
- * rheology branch is active, kept per (element, node) so a shared mesh
+ * The radial memory nodes are the memory points (MemoryPoints.hpp) of the
+ * elements where any rheology branch is active: by default their
+ * interior Gauss points, where the strain is interpolated from the nodes
+ * and the force rows spread back through the same Lagrange values; or
+ * their GLL nodes, ~25% more, kept per (element, node) so a shared mesh
  * node carries its two one-sided values, exactly as the nodal fields do.
  * A TensorField holds the five canonical components (SpinComponents.hpp)
  * as complex grid fields per radial node; a SpectralTensor holds their
@@ -53,6 +56,7 @@
 #include <vector>
 
 #include "sl3dpp/DegreeOperator.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SpinComponents.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -74,6 +78,9 @@ class GridCoupling {
     bool parallel = true;
     /// GSHTrans's BLAS matrix kernel for the batched transforms.
     bool matrix_kernel = false;
+    /// Where the radial memory nodes sit within each element (the
+    /// default matches ViscoelasticOperator's).
+    MemoryPointSet memory_points = MemoryPointSet::Gauss;
   };
 
   /// The rheology is borrowed and must outlive the coupling.
@@ -91,6 +98,7 @@ class GridCoupling {
   // -- the radial memory nodes
   // -------------------------------------------------
 
+  [[nodiscard]] const MemoryPoints& Points() const { return points_; }
   [[nodiscard]] int NodeCount() const {
     return static_cast<int>(nodes_.size());
   }
@@ -100,9 +108,13 @@ class GridCoupling {
   [[nodiscard]] double RadiusOfNode(int node) const {
     return nodes_[node].radius;
   }
+  /// The node's point index within its element (its GLL node index at the
+  /// GLL points).
   [[nodiscard]] int NodeInElementOf(int node) const {
     return nodes_[node].nodeInElement;
   }
+  /// The node's radial quadrature weight, w_p times the element Jacobian.
+  [[nodiscard]] double WeightOfNode(int node) const;
 
   // -- tensors, grid and spectral
   // ----------------------------------------------
@@ -154,9 +166,9 @@ class GridCoupling {
   /// Adds the deviatoric strain of degree solutions to a spectral tensor:
   /// per degree, complex m >= 0 columns over the spheroidal system's dofs
   /// (column-major, l + 1 columns) and, optionally, the toroidal
-  /// system's. The nodal values and their r d_r derivatives are gathered
-  /// through the operators' dof maps and the mesh's differentiation
-  /// matrix, then mapped by DeviatoricComponents.
+  /// system's. The values and their r d_r derivatives at the memory nodes
+  /// are gathered through the operators' dof maps and the element's
+  /// Lagrange basis, then mapped by DeviatoricComponents.
   void AddStrainOfSolution(SpectralTensor& spectral, int l,
                            const DegreeOperator& spheroidal,
                            std::span<const Complex> x,
@@ -202,6 +214,7 @@ class GridCoupling {
   int lmax_;
   Options options_;
   SurfaceGrid grid_;
+  MemoryPoints points_;
   std::vector<Node> nodes_;
   std::map<int, int> firstElementOf_;  // per degree, the truncation
 };

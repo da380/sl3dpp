@@ -3,22 +3,34 @@
 /**
  * @file MemoryPoints.hpp
  * @brief Where the internal variables live within each radial element, and
- * the relaxation term an operator subtracts so that the implicit step's
- * elimination of the new internal variables stays exact (plan.md §5.5).
+ * the shear term an operator integrates there so that the discrete energy
+ * stays a sum of squares and the implicit step's elimination of the new
+ * internal variables exact (plan.md §5.5).
  *
- * The internal variables live at the element's GLL nodes by default (the
- * displacement's own nodes; pyslfp's and the Fortran's choice), or at its
- * N = ngll - 1 interior Gauss-Legendre points: the same 2N - 1 exactness
- * for the memory-force integral, no doubling at shared element boundaries,
- * ~20% fewer points.
+ * The internal variables live at the element's N = ngll - 1 interior
+ * Gauss-Legendre points by default: the same 2N - 1 exactness for the
+ * memory-force integral, no doubling at shared element boundaries, ~20%
+ * fewer points. The displacement stays at the GLL nodes either way. The
+ * alternative is the GLL nodes themselves (pyslfp's and the Fortran's
+ * choice), kept for like-for-like comparisons with those codes.
  *
+ * The shear energy splits as int mu_inf |d|^2 + sum_k int mu_k |d - m_k|^2,
+ * the long-term part at the GLL nodes (the stiffness assembly's own
+ * quadrature) and each branch's at the memory points, where m_k lives.
  * The step eliminates m+ = m~ + beta d(u) into equilibrium, leaving the
- * effective operator K_U - sum_k D^T W (mu_k beta_k) D, with D the strain
- * at the memory points and W their quadrature. At the GLL nodes that is
- * the operator assembled with relaxed moduli (the stiffness assembly's own
- * quadrature points); at Gauss points it is not, so the operators accept
- * the relaxation term explicitly (Relaxation), and with GLL points that
- * reproduces the relaxed-moduli assembly to round-off.
+ * effective operator K_inf + sum_k D^T W (mu_k w_k) D, with D the strain at
+ * the memory points, W their quadrature and w_k = 1 - beta_k the branch's
+ * unrelaxed fraction: positive semi-definite term by term for any step.
+ * At the GLL nodes that is the operator assembled with relaxed moduli;
+ * at Gauss points it is not, so the operators accept the point term
+ * explicitly (PointShear), and with GLL points that reproduces the
+ * relaxed-moduli assembly to round-off.
+ *
+ * The split matters. Integrating the unrelaxed shear at the nodes and
+ * subtracting sum_k D^T W (mu_k beta_k) D at the points leaves, as a
+ * Maxwell branch relaxes fully (beta -> 1, h = dt / tau large), the
+ * difference of two quadratures of the same energy: of no definite sign,
+ * and the step goes unstable (h of a few hundred, PREM Maxwell mantle).
  */
 
 #include <span>
@@ -56,6 +68,10 @@ struct MemoryPoints {
     return derivative[static_cast<std::size_t>(p) * ngll + i];
   }
 
+  /// The radius of point p of element e: the node's own at the GLL points,
+  /// else the element's (affine) radius interpolated there.
+  [[nodiscard]] double RadiusAt(const RadialMesh& mesh, int e, int p) const;
+
   /// Nodal (element, gll) values interpolated to the points, (element,
   /// point), through each element's Lagrange basis.
   [[nodiscard]] std::vector<double> Interpolate(
@@ -68,14 +84,15 @@ struct MemoryPoints {
       std::span<const double> atPoints) const;
 };
 
-/// A relaxation term an operator subtracts from its assembly: per element
-/// and memory point, the coefficient c = sum_k mu_k beta_k (the relaxed
-/// part of the shear modulus), and the term is sum_p jac w_p c_p times the
-/// deviatoric form at the point. Read during the operator's construction
-/// only.
-struct Relaxation {
+/// A shear modulus that lives at the memory points, which an operator
+/// integrates with their quadrature and adds to its material's assembly:
+/// per element and point the modulus s (the branches' sum_k mu_k w_k), and
+/// the term is sum_p jac w_p s_p times the deviatoric form at the point.
+/// With GLL points it is exactly the material's shear modulus raised by s.
+/// Read during the operator's construction only.
+struct PointShear {
   const MemoryPoints* points = nullptr;
-  std::span<const double> coefficient;  ///< (ElementCount, points->count)
+  std::span<const double> modulus;  ///< (ElementCount, points->count)
 };
 
 }  // namespace sl3dpp

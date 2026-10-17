@@ -36,9 +36,11 @@
  *
  * With delta = 0 the lateral term vanishes identically and a step
  * reproduces the 1D two-phase stepper exactly — the zero-lateral step
- * gate. Load channels are prescribed here (complex m >= 0 columns of real
- * fields); the sea-level coupling drives this class through the same
- * channels.
+ * gate. The memory nodes are the Gauss points of the viscous elements or,
+ * with Options::memory_points, their GLL nodes (MemoryPoints.hpp);
+ * the 1D reference takes the same set, so the gate holds for either. Load
+ * channels are prescribed here (complex m >= 0 columns of real fields); the
+ * sea-level coupling drives this class through the same channels.
  */
 
 #include <complex>
@@ -90,6 +92,11 @@ class Viscoelastic3D {
     /// Nothing well defined depends on it; it is here so that tests can
     /// show that.
     double toroidal_pin_fraction = 0.0;
+    /// Where the internal variables sit within each radial element:
+    /// Gauss points (the default; ~20% fewer memory nodes and transforms,
+    /// the step an exact elimination still; MemoryPoints.hpp), or GLL
+    /// nodes.
+    MemoryPointSet memory_points = MemoryPointSet::Gauss;
   };
 
   /// The reference rheology is copied (shared, immutable); delta is
@@ -114,6 +121,10 @@ class Viscoelastic3D {
   [[nodiscard]] int LMax() const { return lmax_; }
   [[nodiscard]] const Rheology& GetRheology() const { return *rheology_; }
   [[nodiscard]] const Options& GetOptions() const { return options_; }
+  /// The radial reference: the 1D operator on the same memory points.
+  [[nodiscard]] const ViscoelasticOperator& Reference() const {
+    return reference_;
+  }
 
   /// The unrelaxed solid's Love numbers (SI), cached.
   [[nodiscard]] const LoveNumbers& ElasticLove() const {
@@ -315,6 +326,7 @@ class Viscoelastic3D {
   ViscoelasticOperator reference_;         // the radial machinery and tables
   std::vector<std::vector<double>> itau_;  // per branch, (node x grid)
   std::vector<std::vector<double>> muBranch_;  // per branch, per node
+  std::vector<std::vector<double>> itauRef_;   // per branch, per node
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;
   mutable std::map<int, std::unique_ptr<ToroidalOperator>> toroidal_;
   mutable std::map<std::pair<int, double>, std::unique_ptr<Flavour>> flavours_;

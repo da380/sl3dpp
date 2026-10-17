@@ -51,19 +51,34 @@ ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
     : rheology_(std::make_shared<const Rheology>(rheology)),
       lmax_(lmax),
       options_(options),
-      points_(MemoryPoints::Of(options.memory_points,
-                               rheology.BaseMaterial().Mesh())) {
+      points_(std::make_unique<const MemoryPoints>(MemoryPoints::Of(
+          options.memory_points, rheology.BaseMaterial().Mesh()))) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
   const auto gll = options.memory_points == MemoryPointSet::Gll;
   auto sample = [&](const std::vector<double>& nodal) {
     if (gll) return nodal;
-    auto out = points_.Interpolate(nodal);
+    auto out = points_->Interpolate(nodal);
     for (auto& v : out) v = std::max(v, 0.0);
     return out;
   };
   for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
     pointMu_.push_back(sample(rheology_->BranchAt(k).mu));
     pointItau_.push_back(sample(rheology_->BranchAt(k).itau));
+  }
+  if (!gll) {
+    // The shear energy splits into the long-term part at the nodes and
+    // the branches' at the points (MemoryPoints.hpp).
+    nodalMaterial_ =
+        std::make_unique<const Material>(rheology_->LongTermMaterial());
+    elasticShear_.assign(static_cast<std::size_t>(
+                             rheology.BaseMaterial().Mesh().ElementCount()) *
+                             points_->count,
+                         0.0);
+    for (const auto& mu : pointMu_) {
+      for (auto i = std::size_t{0}; i < mu.size(); ++i)
+        elasticShear_[i] += mu[i];
+    }
+    elasticPointShear_ = {points_.get(), elasticShear_};
   }
 }
 
@@ -76,11 +91,12 @@ ViscoelasticOperator& ViscoelasticOperator::operator=(
 ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
   auto found = degrees_.find(l);
   if (found == degrees_.end()) {
-    found =
-        degrees_
-            .emplace(l, std::make_unique<Degree>(*rheology_, l, options_,
-                                                 points_, pointMu_, pointItau_))
-            .first;
+    found = degrees_
+                .emplace(
+                    l, std::make_unique<Degree>(
+                           *rheology_, l, options_, NodalMaterial(),
+                           ElasticPointShear(), *points_, pointMu_, pointItau_))
+                .first;
   }
   return *found->second;
 }
@@ -148,6 +164,24 @@ ViscoelasticOperator::SchemeWeightDerivativesOf(Scheme scheme,
   return found->second;
 }
 
+std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
+                                                            double dt) const {
+  const auto& weights = SchemeWeightsOf(scheme, dt);
+  auto s = std::vector<double>(
+      static_cast<std::size_t>(BaseMaterial().Mesh().ElementCount()) *
+          points_->count,
+      0.0);
+  for (auto k = std::size_t{0}; k < weights.size(); ++k) {
+    for (auto i = std::size_t{0}; i < s.size(); ++i) {
+      const auto unrelaxed = scheme == Scheme::BackwardEuler
+                                 ? weights[k].e[i]
+                                 : 1.0 - weights[k].beta[i];
+      s[i] += pointMu_[k][i] * unrelaxed;
+    }
+  }
+  return s;
+}
+
 std::vector<std::vector<double>> ViscoelasticOperator::ItauKernelsAtNodes(
     std::vector<std::vector<double>> atPoints) const {
   if (options_.memory_points == MemoryPointSet::Gll) return atPoints;
@@ -155,12 +189,12 @@ std::vector<std::vector<double>> ViscoelasticOperator::ItauKernelsAtNodes(
   for (auto k = std::size_t{0}; k < atPoints.size(); ++k) {
     // itau at a point is max(interpolant, 0): the chain rule is the
     // interpolation's transpose where the interpolant is positive.
-    const auto raw = points_.Interpolate(rheology_->BranchAt(k).itau);
+    const auto raw = points_->Interpolate(rheology_->BranchAt(k).itau);
     auto masked = std::move(atPoints[k]);
     for (auto i = std::size_t{0}; i < masked.size(); ++i) {
       if (raw[i] < 0.0) masked[i] = 0.0;
     }
-    out.push_back(points_.InterpolateTranspose(masked));
+    out.push_back(points_->InterpolateTranspose(masked));
   }
   return out;
 }
@@ -172,9 +206,9 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
   }
   if (options_.memory_points != MemoryPointSet::Gll) {
     throw std::logic_error(
-        "with internal variables away from the GLL nodes the step's "
-        "effective solid is the unrelaxed material less a relaxation term "
-        "(MemoryPoints.hpp), not a material");
+        "with internal variables away from the GLL nodes a step's "
+        "effective solid is the long-term material plus a shear at the "
+        "memory points (MemoryPoints.hpp), not a material");
   }
   const auto& weights = SchemeWeightsOf(scheme, dt);
   std::vector<std::vector<double>> w;
@@ -208,22 +242,11 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
     flavour->material =
         std::make_unique<Material>(EffectiveMaterial(scheme, dt));
   } else {
-    // The unrelaxed material less the relaxation term at the points: the
-    // coefficient sum_k mu_k (1 - w_k), w_k the effective-modulus weight
-    // (1/(1 + h) for backward Euler, 1 - beta for the trapezoid).
-    flavour->material = std::make_unique<Material>(BaseMaterial());
-    const auto& weights = SchemeWeightsOf(scheme, dt);
-    auto& c = flavour->relaxationCoefficient;
-    c.assign(pointMu_.empty() ? 0 : pointMu_[0].size(), 0.0);
-    for (auto k = std::size_t{0}; k < weights.size(); ++k) {
-      for (auto i = std::size_t{0}; i < c.size(); ++i) {
-        const auto relaxed = scheme == Scheme::BackwardEuler
-                                 ? 1.0 - weights[k].e[i]
-                                 : weights[k].beta[i];
-        c[i] += pointMu_[k][i] * relaxed;
-      }
-    }
-    flavour->relaxation = {&points_, c};
+    // The long-term material plus the branches' unrelaxed share at the
+    // points.
+    flavour->material = std::make_unique<Material>(NodalMaterial());
+    flavour->pointShearModulus = PointShearModulus(scheme, dt);
+    flavour->pointShear = {points_.get(), flavour->pointShearModulus};
   }
   flavours_.emplace_front(key, std::move(flavour));
   return *flavours_.front().second;
@@ -239,9 +262,9 @@ const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
                             *flavour.material, l,
                             {.eps = options_.eps,
                              .truncation = options_.truncation,
-                             .relaxation = flavour.relaxation.points != nullptr
-                                               ? &flavour.relaxation
-                                               : nullptr}))
+                             .point_shear = flavour.pointShear.points != nullptr
+                                                ? &flavour.pointShear
+                                                : nullptr}))
             .first;
   }
   return found->second;
@@ -810,10 +833,10 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
       const auto& flavour = FlavourOf(scheme, dt);
       found = effectiveLove_
                   .emplace(key, ComputeLoveNumbers(
-                                    BaseMaterial(), lmax_,
+                                    NodalMaterial(), lmax_,
                                     {.eps = options_.eps,
                                      .truncation = options_.truncation,
-                                     .relaxation = &flavour.relaxation}))
+                                     .point_shear = &flavour.pointShear}))
                   .first;
     }
   }
@@ -826,9 +849,10 @@ const LoveNumbers& ViscoelasticOperator::ElasticLoveNumbers() const {
   if (found == effectiveLove_.end()) {
     found = effectiveLove_
                 .emplace(key, ComputeLoveNumbers(
-                                  BaseMaterial(), lmax_,
+                                  NodalMaterial(), lmax_,
                                   {.eps = options_.eps,
-                                   .truncation = options_.truncation}))
+                                   .truncation = options_.truncation,
+                                   .point_shear = ElasticPointShear()}))
                 .first;
   }
   return found->second;

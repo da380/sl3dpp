@@ -128,8 +128,10 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
 
-  // The 1D continuous sweep.
-  ViscoelasticOperator op1(scene.rheology, kLmax);
+  // The 1D continuous sweep. At the GLL nodes, where the 3D memory nodes
+  // are the 1D kernel's own; TestGaussMemory3D is the Gauss-point gate.
+  ViscoelasticOperator op1(scene.rheology, kLmax,
+                           {.memory_points = MemoryPointSet::Gll});
   SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
                                {.rtol = 1e-12, .record_stride = 1});
   auto snapshots1 = evolution1.Run(times, iceLoad);
@@ -141,7 +143,8 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
 
   // The 3D continuous sweep with delta = 0.
   Viscoelastic3D op3(scene.rheology, kLmax,
-                     [](double, double, double) { return 0.0; });
+                     [](double, double, double) { return 0.0; },
+                     {.memory_points = MemoryPointSet::Gll});
   SeaLevelEvolution3D evolution3(
       op3, scene.solver, scene.state,
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});

@@ -109,7 +109,7 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
-                       .relaxation = options.relaxation});
+                       .point_shear = options.point_shear});
     const int n = op.DofCount();
     const int nrhs = l == 0 ? 5 : 4;
     std::vector<double> rhs(static_cast<std::size_t>(n) * nrhs);

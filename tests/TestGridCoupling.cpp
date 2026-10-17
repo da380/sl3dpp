@@ -105,128 +105,138 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   }
   auto rheology = Rheology::Maxwell(material, viscosity).value();
 
-  ViscoelasticOperator op(rheology, lmax);
-  GridCoupling coupling(rheology, lmax);
-  const auto n = mesh.NGll();
-  const auto& branch = rheology.BranchAt(0);
+  // Both memory point sets: the memory nodes (element, point), the 1D
+  // state's layout alike, and the unrelaxed solves the operator's own.
+  for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
+    SCOPED_TRACE(set == MemoryPointSet::Gll ? "GLL points" : "Gauss points");
+    const auto op =
+        ViscoelasticOperator(rheology, lmax, {.memory_points = set});
+    const auto coupling = GridCoupling(rheology, lmax, {.memory_points = set});
+    const auto np = coupling.Points().count;
 
-  // The same deterministic random scalars feed both paths. The 1D state
-  // carries 2(2l+1) real columns (Re then Im blocks of the m-columns);
-  // the grid path takes the complex columns directly.
-  auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
-  auto spectral = coupling.ZeroSpectral();
-  for (int l = 0; l <= lmax; ++l) {
-    const auto columns = static_cast<std::size_t>(l + 1);
-    std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
-    std::vector<Complex> R = M, S = M;
-    auto& m1d = vstate.m.at(l);
-    // The 1D subset bookkeeping, reproduced from the operator's rule.
-    const auto e0 =
-        l > 0 ? mesh.StartElement(l, TruncationRule::Graded, 1e-8) : 0;
-    const auto ne = mesh.ElementCount() - e0;
-    const auto ncols1d = 2 * columns;
-    const auto block = static_cast<std::size_t>(ne) * n * ncols1d;
+    // The same deterministic random scalars feed both paths. The 1D state
+    // carries 2(2l+1) real columns (Re then Im blocks of the m-columns);
+    // the grid path takes the complex columns directly.
+    auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
+    auto spectral = coupling.ZeroSpectral();
+    for (int l = 0; l <= lmax; ++l) {
+      const auto columns = static_cast<std::size_t>(l + 1);
+      std::vector<Complex> M(coupling.NodeCount() * columns, 0.0);
+      std::vector<Complex> R = M, S = M;
+      auto& m1d = vstate.m.at(l);
+      // The 1D subset bookkeeping, reproduced from the operator's rule.
+      const auto e0 =
+          l > 0 ? mesh.StartElement(l, TruncationRule::Graded, 1e-8) : 0;
+      const auto ne = mesh.ElementCount() - e0;
+      const auto ncols1d = 2 * columns;
+      const auto block = static_cast<std::size_t>(ne) * np * ncols1d;
+      for (int node = 0; node < coupling.NodeCount(); ++node) {
+        const auto e = coupling.ElementOfNode(node);
+        if (e < e0) continue;
+        const auto q = coupling.NodeInElementOf(node);
+        // Random m >= 0 columns of a real field (m = 0 real), fed
+        // identically to both paths.
+        for (int m = 0; m <= l; ++m) {
+          const auto seed = 1000 * l + 31 * m + 7 * node;
+          Complex values[3] = {
+              l >= 2 ? Complex(Noise(seed), Noise(seed + 1)) : 0.0,
+              Complex(Noise(seed + 2), Noise(seed + 3)),
+              l >= 1 ? Complex(Noise(seed + 4), Noise(seed + 5)) : 0.0};
+          if (m == 0) {
+            for (auto& v : values) v = v.real();
+          }
+          const auto eL = e - e0;
+          for (int s = 0; s < 3; ++s) {
+            auto& scalars = s == 0 ? M : (s == 1 ? R : S);
+            scalars[node * columns + m] = values[s];
+            const auto at =
+                ((static_cast<std::size_t>(s) * ne + eL) * np + q) * ncols1d;
+            m1d[at + m] = values[s].real();
+            m1d[at + columns + m] = values[s].imag();
+          }
+          (void)block;
+        }
+      }
+      coupling.AddScalarState(spectral, l, M, R, S);
+    }
+
+    // The 1D reference: the slaved elastic solves of the state.
+    const auto reference = op.SolveElastic(vstate);
+
+    // The grid path: synthesis, a pointwise multiply by one (exercising the
+    // product stage), analysis, the radial branch-modulus scaling, the
+    // force assembly, and the same unrelaxed degree solves.
+    auto field = coupling.Synthesise(spectral);
+    const std::vector<double> ones(
+        static_cast<std::size_t>(coupling.NodeCount()) *
+            coupling.Grid().FieldSize(),
+        1.0);
+    coupling.Multiply(field, ones);
+    auto analysed = coupling.Analyse(field);
+    std::vector<double> mu(coupling.NodeCount());
     for (int node = 0; node < coupling.NodeCount(); ++node) {
       const auto e = coupling.ElementOfNode(node);
-      if (e < e0) continue;
-      const auto q = node - (node / n) * n;  // nodes are (element, node)
-      // Random m >= 0 columns of a real field (m = 0 real), fed
-      // identically to both paths.
-      for (int m = 0; m <= l; ++m) {
-        const auto seed = 1000 * l + 31 * m + 7 * node;
-        Complex values[3] = {
-            l >= 2 ? Complex(Noise(seed), Noise(seed + 1)) : 0.0,
-            Complex(Noise(seed + 2), Noise(seed + 3)),
-            l >= 1 ? Complex(Noise(seed + 4), Noise(seed + 5)) : 0.0};
-        if (m == 0) {
-          for (auto& v : values) v = v.real();
+      const auto q = coupling.NodeInElementOf(node);
+      mu[node] = op.PointMu(0)[static_cast<std::size_t>(e) * np + q];
+    }
+    coupling.ScaleByNode(analysed, mu);
+
+    std::map<int, DegreeOperator> systems;
+    for (int l = 0; l <= lmax; ++l) {
+      systems.emplace(l,
+                      DegreeOperator(op.NodalMaterial(), l,
+                                     {.point_shear = op.ElasticPointShear()}));
+    }
+    const auto forces = coupling.SpheroidalForce(
+        analysed,
+        [&](int l) -> const DegreeOperator& { return systems.at(l); });
+
+    double worst = 0.0, scale = 0.0;
+    for (int l = 0; l <= lmax; ++l) {
+      const auto& system = systems.at(l);
+      const auto ndof = system.DofCount();
+      const auto columns = l + 1;
+      // Complex force columns -> interleaved real solves.
+      std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
+      const auto& bc = forces.at(l);
+      for (int c = 0; c < columns; ++c) {
+        for (int d = 0; d < ndof; ++d) {
+          rhs[static_cast<std::size_t>(c) * ndof + d] =
+              bc[static_cast<std::size_t>(c) * ndof + d].real();
+          rhs[static_cast<std::size_t>(columns + c) * ndof + d] =
+              bc[static_cast<std::size_t>(c) * ndof + d].imag();
         }
-        const auto eL = e - e0;
-        for (int s = 0; s < 3; ++s) {
-          auto& scalars = s == 0 ? M : (s == 1 ? R : S);
-          scalars[node * columns + m] = values[s];
-          const auto at =
-              ((static_cast<std::size_t>(s) * ne + eL) * n + q) * ncols1d;
-          m1d[at + m] = values[s].real();
-          m1d[at + columns + m] = values[s].imag();
-        }
-        (void)block;
+      }
+      const auto x = system.Solve(rhs, 2 * columns);
+      const auto& ref = reference.at(l);
+      for (std::size_t i = 0; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(ref[i]));
+        worst = std::max(worst, std::abs(x[i] - ref[i]));
       }
     }
-    coupling.AddScalarState(spectral, l, M, R, S);
-  }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(worst, 1e-11 * scale);
 
-  // The 1D reference: the slaved elastic solves of the state.
-  const auto reference = op.SolveElastic(vstate);
-
-  // The grid path: synthesis, a pointwise multiply by one (exercising the
-  // product stage), analysis, the radial branch-modulus scaling, the
-  // force assembly, and the same unrelaxed degree solves.
-  auto field = coupling.Synthesise(spectral);
-  const std::vector<double> ones(
-      static_cast<std::size_t>(coupling.NodeCount()) *
-          coupling.Grid().FieldSize(),
-      1.0);
-  coupling.Multiply(field, ones);
-  auto analysed = coupling.Analyse(field);
-  std::vector<double> mu(coupling.NodeCount());
-  for (int node = 0; node < coupling.NodeCount(); ++node) {
-    const auto e = coupling.ElementOfNode(node);
-    const auto q = node - (node / n) * n;
-    mu[node] = branch.mu[static_cast<std::size_t>(e) * n + q];
-  }
-  coupling.ScaleByNode(analysed, mu);
-
-  std::map<int, DegreeOperator> systems;
-  for (int l = 0; l <= lmax; ++l) {
-    systems.emplace(l, DegreeOperator(material, l));
-  }
-  const auto forces = coupling.SpheroidalForce(
-      analysed, [&](int l) -> const DegreeOperator& { return systems.at(l); });
-
-  double worst = 0.0, scale = 0.0;
-  for (int l = 0; l <= lmax; ++l) {
-    const auto& system = systems.at(l);
-    const auto ndof = system.DofCount();
-    const auto columns = l + 1;
-    // Complex force columns -> interleaved real solves.
-    std::vector<double> rhs(static_cast<std::size_t>(ndof) * 2 * columns);
-    const auto& bc = forces.at(l);
-    for (int c = 0; c < columns; ++c) {
-      for (int d = 0; d < ndof; ++d) {
-        rhs[static_cast<std::size_t>(c) * ndof + d] =
-            bc[static_cast<std::size_t>(c) * ndof + d].real();
-        rhs[static_cast<std::size_t>(columns + c) * ndof + d] =
-            bc[static_cast<std::size_t>(c) * ndof + d].imag();
-      }
+    // A purely spheroidal state exerts no toroidal force.
+    std::map<int, ToroidalOperator> toroidal;
+    for (int l = 1; l <= lmax; ++l) {
+      toroidal.emplace(
+          l, ToroidalOperator(op.NodalMaterial(), l,
+                              {.point_shear = op.ElasticPointShear()}));
     }
-    const auto x = system.Solve(rhs, 2 * columns);
-    const auto& ref = reference.at(l);
-    for (std::size_t i = 0; i < x.size(); ++i) {
-      scale = std::max(scale, std::abs(ref[i]));
-      worst = std::max(worst, std::abs(x[i] - ref[i]));
+    const auto torForces = coupling.ToroidalForce(
+        analysed,
+        [&](int l) -> const ToroidalOperator& { return toroidal.at(l); });
+    double torWorst = 0.0;
+    for (const auto& [l, b] : torForces) {
+      for (auto v : b) torWorst = std::max(torWorst, std::abs(v));
     }
+    double forceScale = 0.0;
+    for (const auto& [l, b] : forces) {
+      for (auto v : b) forceScale = std::max(forceScale, std::abs(v));
+    }
+    EXPECT_LT(torWorst, 1e-11 * forceScale);
   }
-  EXPECT_GT(scale, 0.0);
-  EXPECT_LT(worst, 1e-11 * scale);
-
-  // A purely spheroidal state exerts no toroidal force.
-  std::map<int, ToroidalOperator> toroidal;
-  for (int l = 1; l <= lmax; ++l) {
-    toroidal.emplace(l, ToroidalOperator(material, l));
-  }
-  const auto torForces = coupling.ToroidalForce(
-      analysed,
-      [&](int l) -> const ToroidalOperator& { return toroidal.at(l); });
-  double torWorst = 0.0;
-  for (const auto& [l, b] : torForces) {
-    for (auto v : b) torWorst = std::max(torWorst, std::abs(v));
-  }
-  double forceScale = 0.0;
-  for (const auto& [l, b] : forces) {
-    for (auto v : b) forceScale = std::max(forceScale, std::abs(v));
-  }
-  EXPECT_LT(torWorst, 1e-11 * forceScale);
 }
 
 TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {

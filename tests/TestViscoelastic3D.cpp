@@ -85,9 +85,13 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   const auto& mesh = body.material.Mesh();
   const auto n = mesh.NGll();
 
-  ViscoelasticOperator op1(body.rheology, kLmax);
+  // At the GLL nodes, whose (element, node) layout the grid-state check
+  // below reads directly; TestGaussMemory3D is the Gauss-point gate.
+  ViscoelasticOperator op1(body.rheology, kLmax,
+                           {.memory_points = MemoryPointSet::Gll});
   Viscoelastic3D op3(body.rheology, kLmax,
-                     [](double, double, double) { return 0.0; });
+                     [](double, double, double) { return 0.0; },
+                     {.memory_points = MemoryPointSet::Gll});
   const auto& coupling = op3.Coupling();
 
   const auto load3 = [](int l, double) { return LoadColumns(l); };

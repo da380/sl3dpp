@@ -453,6 +453,21 @@ GB of viscous-element state.
   `EffectiveMaterial`'s operators and Love numbers to round-off (the
   gate), and the Gauss and GLL effective Love numbers differ by 8e-9 at
   600 km elements, 1e-10 at 300 km, 4e-12 at 150 km.
+  *(Revised 17 Oct 2026, with Gauss points made the default.)* That
+  form is unstable for long steps: as a branch relaxes fully (β → 1) the
+  shear left in K_eff is the GLL quadrature of μ|ε|² less the Gauss
+  quadrature of the same energy, which has no definite sign, and a PREM
+  Maxwell mantle grew from round-off for h = dt/τ of a few hundred and
+  up. The cure is to split the energy as the continuum does,
+  ∫ μ_∞|ε|² + Σ_k ∫ μ_k |ε − m_k|²: the long-term part at the GLL nodes,
+  each branch's at the memory points where m_k lives. Then
+  K_eff = K(μ_∞) + Σ_k Dᵀ W (μ_k w_k) D, w_k = 1 − β_k the unrelaxed
+  fraction, positive term by term for any step, and the elastic operator
+  (w = 1) is K(μ_∞) + Σ_k Dᵀ W μ_k D. The term is now a `PointShear`
+  the operators add to the long-term material; at GLL points it is still
+  `EffectiveMaterial`'s assembly to round-off. The price: at Gauss points
+  the discrete elastic solid itself differs from the GLL one, at the
+  quadrature level (2e-10 in the surface sums at lmax 64).
 
 ## 6. Staging
 
@@ -697,3 +712,39 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   points, FD/Richardson confirms the kernel under both schemes, and the
   nodal kernels agree with GLL's to 1.1e-6 (discrete) and 7e-7
   (continuous). The 3D evolution keeps the GLL reference until 7c.
+- **17 Oct 2026** — Gauss-point memory in the 3D path (performance chunk
+  7c): `Viscoelastic3D::Options::memory_points` sets the coupling's radial
+  memory nodes and the 1D reference alike. The strain is interpolated to
+  the points and the force rows spread back through the same Lagrange
+  values; the reference effective operators carry the relaxation term;
+  the 3D itau is the reference's point itau times exp(-delta) at the
+  point's radius. The zero-lateral gate holds at Gauss points to
+  round-off (8e-16 on the step, tighter than the 2-4e-12 that separates
+  the point sets, so the gate discriminates), coupled runs and their
+  continuous kernels included; with lateral structure the point sets
+  agree to 1e-11 and the log-viscosity kernel meets FD as at GLL. At lmax
+  64 on 8 threads: 20% fewer nodes, the pass 14% faster, peak RSS 9.55 GB
+  for 11.69. GLL stays the default (bitwise unchanged); whether to switch
+  is David's call.
+- **17 Oct 2026** — Gauss points become the default for the internal
+  variables (`memory_points` in ViscoelasticOperator, GridCoupling and
+  Viscoelastic3D; `step_timing` likewise), David's decision after 7c. The
+  displacement and every nodal field stay on the GLL nodes; only where
+  the internal variables live changes. GLL stays selectable, and the
+  tests that read the GLL layout directly or exercise the relaxed-moduli
+  identity pin it explicitly (the pyslfp and Fortran gates pass at Gauss
+  points within their tolerances, so they now check the default path).
+  Making it the default exposed an instability of the 7a/7b form at long
+  steps (§5.5, revised): fixed by the shear split, the effective
+  operators built on the long-term material plus a `PointShear` (the
+  renamed, sign-flipped `Relaxation`) of the branches' unrelaxed moduli
+  at the points, the elastic operators likewise. A regression test steps
+  h = 2000 400 times: Gauss stays within 1.7e-9 of GLL, where the old
+  form reached 0.5. The split also brought the point sets closer
+  elsewhere (1D surface gap 1.2e-9 at 600 km elements, 1.9e-11 at 300 km,
+  from 1.4e-8 and 2.4e-10; lateral 3D steps 5.5e-12 from 1.2e-11). Both
+  point sets grow alike near h = 1e4 over hundreds of steps on PREM: a
+  property of the model or the scheme there, not of the point set, and
+  not investigated further. The 1D operator now holds its points by
+  pointer, so the per-degree workspaces' references survive a move of
+  the operator (a latent dangling pointer since 7b-i).

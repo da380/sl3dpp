@@ -19,7 +19,12 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
                            const SurfaceGrid& grid, Options options)
-    : rheology_(&rheology), lmax_(lmax), options_(options), grid_(grid) {
+    : rheology_(&rheology),
+      lmax_(lmax),
+      options_(options),
+      grid_(grid),
+      points_(MemoryPoints::Of(options.memory_points,
+                               rheology.BaseMaterial().Mesh())) {
   if (grid.LMax() != lmax || grid.NMax() < 2) {
     throw std::invalid_argument(
         std::format("the shared grid is lmax {} with spin coverage {}; the "
@@ -35,8 +40,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
       active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
     }
     if (!active) continue;
-    for (auto i = 0; i < n; ++i) {
-      nodes_.push_back({e, i, mesh.Radius(e, i)});
+    for (auto p = 0; p < points_.count; ++p) {
+      nodes_.push_back({e, p, points_.RadiusAt(mesh, e, p)});
     }
   }
   if (nodes_.empty()) {
@@ -48,6 +53,12 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
     firstElementOf_[l] =
         l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   }
+}
+
+double GridCoupling::WeightOfNode(int node) const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  return points_.weight[nodes_[node].nodeInElement] *
+         mesh.Jacobian(nodes_[node].element);
 }
 
 GridCoupling::TensorField GridCoupling::ZeroTensor() const {
@@ -208,6 +219,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
   const auto columns = static_cast<std::size_t>(l + 1);
   const auto ndof = spheroidal.DofCount();
   const auto first = FirstNodeFor(spheroidal.FirstElement());
+  const auto gll = points_.set == MemoryPointSet::Gll;
 
   auto gatherS = [&](int e, int i, Component component,
                      std::size_t column) -> Complex {
@@ -227,14 +239,25 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
     const auto jac = mesh.Jacobian(e);
     for (std::size_t column = 0; column < columns; ++column) {
       DegreeNodeValues values;
-      values.U = gatherS(e, q, Component::U, column);
-      values.V = gatherS(e, q, Component::V, column);
-      values.W = gatherT(e, q, column);
+      if (gll) {
+        values.U = gatherS(e, q, Component::U, column);
+        values.V = gatherS(e, q, Component::V, column);
+        values.W = gatherT(e, q, column);
+      }
       for (auto i = 0; i < n; ++i) {
-        const auto b = r * mesh.Derivative(q, i) / jac;
-        values.rdU += b * gatherS(e, i, Component::U, column);
-        values.rdV += b * gatherS(e, i, Component::V, column);
-        values.rdW += b * gatherT(e, i, column);
+        const auto U = gatherS(e, i, Component::U, column);
+        const auto V = gatherS(e, i, Component::V, column);
+        const auto W = gatherT(e, i, column);
+        if (!gll) {
+          const auto v = points_.Value(q, i);
+          values.U += v * U;
+          values.V += v * V;
+          values.W += v * W;
+        }
+        const auto b = r * points_.Derivative(q, i) / jac;
+        values.rdU += b * U;
+        values.rdV += b * V;
+        values.rdW += b * W;
       }
       const auto A = DeviatoricComponents(l, values, r);
       Scatter(spectral, node, l, static_cast<int>(column), A);
@@ -247,7 +270,8 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
     const std::function<const DegreeOperator&(int)>& system) const {
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  const auto w = mesh.Weights();
+  const auto& w = points_.weight;
+  const auto gll = points_.set == MemoryPointSet::Gll;
   // The operators are resolved first (any built lazily, serially), so the
   // degree tasks below only read; each task writes only its own force.
   std::vector<const DegreeOperator*> ops(lmax_ + 1);
@@ -269,15 +293,26 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
-        // The pointwise rows at the quadrature node itself.
-        const auto iU = op.Dof(mesh.GlobalIndex(e, q), Component::U);
-        const auto iV = op.Dof(mesh.GlobalIndex(e, q), Component::V);
+        // The pointwise rows: at the quadrature node itself, or spread
+        // over the element's nodes by the Lagrange values at the point.
         const auto point = jac * w[q] * r;
-        if (iU >= 0) b[column * op.DofCount() + iU] += point * rows.u;
-        if (iV >= 0) b[column * op.DofCount() + iV] += point * rows.v;
+        if (gll) {
+          const auto iU = op.Dof(mesh.GlobalIndex(e, q), Component::U);
+          const auto iV = op.Dof(mesh.GlobalIndex(e, q), Component::V);
+          if (iU >= 0) b[column * op.DofCount() + iU] += point * rows.u;
+          if (iV >= 0) b[column * op.DofCount() + iV] += point * rows.v;
+        } else {
+          for (auto i = 0; i < n; ++i) {
+            const auto v = point * points_.Value(q, i);
+            const auto iU = op.Dof(mesh.GlobalIndex(e, i), Component::U);
+            const auto iV = op.Dof(mesh.GlobalIndex(e, i), Component::V);
+            if (iU >= 0) b[column * op.DofCount() + iU] += v * rows.u;
+            if (iV >= 0) b[column * op.DofCount() + iV] += v * rows.v;
+          }
+        }
         // The derivative rows against every node of the element.
         for (auto j = 0; j < n; ++j) {
-          const auto deriv = w[q] * mesh.Derivative(q, j) * r;
+          const auto deriv = w[q] * points_.Derivative(q, j) * r;
           const auto jU = op.Dof(mesh.GlobalIndex(e, j), Component::U);
           const auto jV = op.Dof(mesh.GlobalIndex(e, j), Component::V);
           if (jU >= 0) b[column * op.DofCount() + jU] += deriv * rows.du;
@@ -297,7 +332,8 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
     const std::function<const ToroidalOperator&(int)>& system) const {
   const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto n = mesh.NGll();
-  const auto w = mesh.Weights();
+  const auto& w = points_.weight;
+  const auto gll = points_.set == MemoryPointSet::Gll;
   // As SpheroidalForce: operators resolved first, one task per degree,
   // from degree 1 (whose rigid rotations the operator's gauge fixes).
   std::vector<const ToroidalOperator*> ops(lmax_ + 1, nullptr);
@@ -319,15 +355,25 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
         const auto m = static_cast<int>(column);
         const auto A = Gather(weighted, node, l, m);
         const auto rows = ForceRowsFromComponents(l, A, r);
-        const auto iW = op.Dof(mesh.GlobalIndex(e, q));
-        if (iW >= 0) {
-          b[column * op.DofCount() + iW] += jac * w[q] * r * rows.w;
+        if (gll) {
+          const auto iW = op.Dof(mesh.GlobalIndex(e, q));
+          if (iW >= 0) {
+            b[column * op.DofCount() + iW] += jac * w[q] * r * rows.w;
+          }
+        } else {
+          for (auto i = 0; i < n; ++i) {
+            const auto iW = op.Dof(mesh.GlobalIndex(e, i));
+            if (iW >= 0) {
+              b[column * op.DofCount() + iW] +=
+                  jac * w[q] * r * points_.Value(q, i) * rows.w;
+            }
+          }
         }
         for (auto j = 0; j < n; ++j) {
           const auto jW = op.Dof(mesh.GlobalIndex(e, j));
           if (jW >= 0) {
             b[column * op.DofCount() + jW] +=
-                w[q] * mesh.Derivative(q, j) * r * rows.dw;
+                w[q] * points_.Derivative(q, j) * r * rows.dw;
           }
         }
       }

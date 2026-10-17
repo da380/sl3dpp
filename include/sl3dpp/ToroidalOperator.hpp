@@ -55,10 +55,11 @@ class ToroidalOperator {
     /// top). Below 1, so never a region's bottom node (the centre, for the
     /// inner core, where the rigid mode vanishes).
     double pin_fraction = 0.0;
-    /// A relaxation term to subtract (MemoryPoints.hpp): the effective
-    /// operator of a step with internal variables at the given points.
-    /// Read during construction only.
-    const Relaxation* relaxation = nullptr;
+    /// A shear modulus at the memory points to add (MemoryPoints.hpp):
+    /// with the long-term material, the elastic or a step's effective
+    /// operator with internal variables at those points. Read during
+    /// construction only.
+    const PointShear* point_shear = nullptr;
   };
 
   /// Assemble and factorise (Cholesky; at l = 1 with one dof per solid
@@ -109,7 +110,7 @@ class ToroidalOperator {
 
  private:
   void BuildDofMap();
-  void Assemble(const Relaxation* relaxation);
+  void Assemble(const PointShear* pointShear);
   void Factorise();
 
   [[nodiscard]] double& Band(int i, int j) {

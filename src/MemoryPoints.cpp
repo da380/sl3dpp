@@ -54,6 +54,13 @@ MemoryPoints MemoryPoints::Of(MemoryPointSet set, const RadialMesh& mesh) {
   return out;
 }
 
+double MemoryPoints::RadiusAt(const RadialMesh& mesh, int e, int p) const {
+  if (set == MemoryPointSet::Gll) return mesh.Radius(e, p);
+  auto r = 0.0;
+  for (auto i = 0; i < ngll; ++i) r += Value(p, i) * mesh.Radius(e, i);
+  return r;
+}
+
 std::vector<double> MemoryPoints::Interpolate(
     std::span<const double> nodal) const {
   if (nodal.size() % ngll != 0) {

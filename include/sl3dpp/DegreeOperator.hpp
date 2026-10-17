@@ -59,10 +59,11 @@ class DegreeOperator {
     double eps = 1e-8;
     /// The truncation-radius rule (plan §5.3, open question 3).
     TruncationRule truncation = TruncationRule::Graded;
-    /// A relaxation term to subtract (MemoryPoints.hpp): the effective
-    /// operator of a step with internal variables at the given points.
-    /// Read during construction only.
-    const Relaxation* relaxation = nullptr;
+    /// A shear modulus at the memory points to add (MemoryPoints.hpp):
+    /// with the long-term material, the elastic or a step's effective
+    /// operator with internal variables at those points. Read during
+    /// construction only.
+    const PointShear* point_shear = nullptr;
   };
 
   /// Assemble and factorise the degree-l system. The material is
@@ -136,7 +137,7 @@ class DegreeOperator {
 
  private:
   void BuildDofMap();
-  void Assemble(const Relaxation* relaxation);
+  void Assemble(const PointShear* pointShear);
   void Factorise();
 
   [[nodiscard]] double& Band(int i, int j) {

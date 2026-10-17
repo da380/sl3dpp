@@ -29,7 +29,7 @@ ToroidalOperator::ToroidalOperator(const Material& material, int l,
   firstElement_ = mesh.StartElement(l, options.truncation, options.eps);
   kd_ = mesh.NGll() - 1;
   BuildDofMap();
-  Assemble(options.relaxation);
+  Assemble(options.point_shear);
   Factorise();
 }
 
@@ -75,7 +75,7 @@ void ToroidalOperator::BuildDofMap() {
   }
 }
 
-void ToroidalOperator::Assemble(const Relaxation* relaxation) {
+void ToroidalOperator::Assemble(const PointShear* pointShear) {
   const auto& mesh = material_->Mesh();
   const auto n = mesh.NGll();
   const auto k2 = l_ * (l_ + 1.0);
@@ -111,24 +111,23 @@ void ToroidalOperator::Assemble(const Relaxation* relaxation) {
     }
   }
 
-  // The relaxation term (MemoryPoints.hpp): at each memory point, minus
-  // jac w_p c_p (k^2 t^2 + k^2 (k^2 - 2) w^2) with t = r d_r W - W and
+  // The point shear (MemoryPoints.hpp): at each memory point,
+  // jac w_p s_p (k^2 t^2 + k^2 (k^2 - 2) w^2) with t = r d_r W - W and
   // w = W there, which with GLL points is exactly the assembly above with
-  // L and N lowered by c.
-  if (relaxation != nullptr) {
-    const auto& points = *relaxation->points;
+  // L and N raised by s.
+  if (pointShear != nullptr) {
+    const auto& points = *pointShear->points;
     for (auto e = firstElement_; e < mesh.ElementCount(); ++e) {
       if (material_->IsFluid(e)) continue;
       const auto jac = mesh.Jacobian(e);
       for (auto p = 0; p < points.count; ++p) {
-        const auto c =
-            relaxation
-                ->coefficient[static_cast<std::size_t>(e) * points.count + p];
-        if (c == 0.0) continue;
+        const auto s =
+            pointShear->modulus[static_cast<std::size_t>(e) * points.count + p];
+        if (s == 0.0) continue;
         auto rp = 0.0;
         for (auto i = 0; i < n; ++i)
           rp += points.Value(p, i) * mesh.Radius(e, i);
-        const auto weight = points.weight[p] * jac * c;
+        const auto weight = points.weight[p] * jac * s;
         for (auto i = 0; i < n; ++i) {
           const auto gi = dof_[mesh.GlobalIndex(e, i)];
           const auto ti =
@@ -143,7 +142,7 @@ void ToroidalOperator::Assemble(const Relaxation* relaxation) {
                 weight * (k2 * ti * tj + k2 * (k2 - 2.0) * wi * wj);
             if (value == 0.0) continue;
             const auto [lo, hi] = std::minmax(gi, gj);
-            Band(lo, hi) -= value;
+            Band(lo, hi) += value;
           }
         }
       }

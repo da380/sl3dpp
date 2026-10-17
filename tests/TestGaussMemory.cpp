@@ -1,7 +1,8 @@
 // Internal variables at the Gauss points (plan.md §5.5, performance chunk
 // 7b): 20% fewer memory points than at the GLL nodes; the implicit step
-// stays an exact elimination of the new internal variables (the effective
-// operator carries the relaxation term at the points, MemoryPoints.hpp);
+// stays an exact elimination of the new internal variables (the long-term
+// shear at the nodes, the branches' at the points, MemoryPoints.hpp), and
+// stable however far a step outruns the relaxation;
 // the forward agrees with the GLL discretisation to its own accuracy,
 // converging with it under mesh refinement; and the adjoint sweeps, which
 // accumulate the itau kernels at the points and carry them to the nodal
@@ -252,9 +253,42 @@ TEST(GaussMemory, AgreesWithGllAndConverges) {
   EXPECT_LT(fine, 0.25 * coarse);
 }
 
+TEST(GaussMemory, StableAtLargeSteps) {
+  // Steps far beyond the Maxwell time (h = dt / tau = 2000), the branch
+  // relaxing almost fully within each: with the shear split every term of
+  // the effective operator stays positive (MemoryPoints.hpp), and the
+  // Gauss run stays with the GLL one (gap 1.7e-9). Integrating the
+  // unrelaxed shear at the nodes and subtracting the relaxed share at the
+  // points instead left a quadrature difference of no definite sign: the
+  // run grew from round-off to a gap of 0.5 here. (Much further out, near
+  // h = 1e4 over hundreds of steps, both point sets grow, and alike: that
+  // growth does not depend on where the internal variables live.)
+  auto body = Body::Make({.lmax = kLmax});
+  const auto dt = 2000.0 * body.rheology.MinRelaxationTime();
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    auto surfaces = std::vector<std::vector<double>>{};
+    for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
+      const auto op = Operator(body.rheology, set);
+      auto state = op.ZeroState();
+      auto solutions = std::map<int, std::vector<double>>{};
+      for (auto i = 0; i < 400; ++i) {
+        auto [next, sols] = op.Step(state, dt, scheme, UnitLoad());
+        state = std::move(next);
+        solutions = std::move(sols);
+      }
+      auto& out = surfaces.emplace_back();
+      for (const auto& [l, u] : op.Surface(solutions, Component::U)) {
+        out.push_back(u[0]);
+      }
+    }
+    EXPECT_LT(RelativeGap(surfaces[1], surfaces[0]), 1e-7)
+        << "scheme " << static_cast<int>(scheme);
+  }
+}
+
 TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
   // The coupled sea level loop with Gauss-point memory: its effective
-  // Love numbers come through the relaxation term. Against the GLL run,
+  // Love numbers come through the point shear. Against the GLL run,
   // agreement at discretisation level.
   auto body = Body::Make({.lmax = kLmax});
   const ViscoelasticOperator elastic(body.rheology, kLmax);

@@ -42,7 +42,7 @@ DegreeOperator::DegreeOperator(const Material& material, int l, Options options)
       l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   kd_ = 3 * (mesh.NGll() - 1) + 2;
   BuildDofMap();
-  Assemble(options.relaxation);
+  Assemble(options.point_shear);
   Factorise();
 }
 
@@ -129,7 +129,7 @@ std::vector<DegreeOperator::Interface> DegreeOperator::Interfaces() const {
   return out;
 }
 
-void DegreeOperator::Assemble(const Relaxation* relaxation) {
+void DegreeOperator::Assemble(const PointShear* pointShear) {
   const auto& mesh = material_->Mesh();
   const int n = mesh.NGll();
   const int n3 = 3 * n;
@@ -244,18 +244,17 @@ void DegreeOperator::Assemble(const Relaxation* relaxation) {
       }
     }
 
-    // The relaxation term (MemoryPoints.hpp): at each memory point, minus
-    // jac w_p c_p (k^2 (k^2 - 2) dM^2 + 4/3 dR^2 + k^2 dS^2) in the
+    // The point shear (MemoryPoints.hpp): at each memory point,
+    // jac w_p s_p (k^2 (k^2 - 2) dM^2 + 4/3 dR^2 + k^2 dS^2) in the
     // deviatoric scalars dM = V, dR = r d_r U - U + k^2 V / 2 and
     // dS = U + r d_r V - V, which with GLL points is exactly the elastic
-    // block with the shear modulus lowered by c.
-    if (relaxation != nullptr && !fluid) {
-      const auto& points = *relaxation->points;
+    // block with the shear modulus raised by s.
+    if (pointShear != nullptr && !fluid) {
+      const auto& points = *pointShear->points;
       for (auto p = 0; p < points.count; ++p) {
-        const auto c =
-            relaxation
-                ->coefficient[static_cast<std::size_t>(e) * points.count + p];
-        if (c == 0.0) continue;
+        const auto s =
+            pointShear->modulus[static_cast<std::size_t>(e) * points.count + p];
+        if (s == 0.0) continue;
         auto rp = 0.0;
         for (auto i = 0; i < n; ++i)
           rp += points.Value(p, i) * mesh.Radius(e, i);
@@ -271,11 +270,11 @@ void DegreeOperator::Assemble(const Relaxation* relaxation) {
           dS[3 * i + 1] = b - v;
           dM[3 * i + 1] = v;
         }
-        const auto weight = points.weight[p] * jac * c;
+        const auto weight = points.weight[p] * jac * s;
         for (auto a = 0; a < n3; ++a) {
           if (dM[a] == 0.0 && dR[a] == 0.0 && dS[a] == 0.0) continue;
           for (auto b = 0; b < n3; ++b) {
-            at(local, a, b) -=
+            at(local, a, b) +=
                 weight * (k2 * (k2 - 2.0) * dM[a] * dM[b] +
                           (4.0 / 3.0) * dR[a] * dR[b] + k2 * dS[a] * dS[b]);
           }

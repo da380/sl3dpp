@@ -1,9 +1,10 @@
-// Memory points and the relaxation term (plan.md §5.5): the GLL set is the
+// Memory points and the point shear (plan.md §5.5): the GLL set is the
 // nodes themselves and the Gauss set interpolates and integrates exactly to
-// its polynomial degrees; with GLL points the relaxation term reproduces the
-// operators assembled with relaxed moduli (the step's exact elimination of
-// the new internal variables), and with Gauss points it converges to them
-// under mesh refinement.
+// its polynomial degrees; with GLL points the long-term material plus the
+// branches' unrelaxed shear at the points reproduces the operators
+// assembled with relaxed moduli (the step's exact elimination of the new
+// internal variables), and with Gauss points it converges to them under
+// mesh refinement.
 
 #include <gtest/gtest.h>
 
@@ -58,21 +59,21 @@ double EffectiveWeight(Scheme scheme, double h) {
              : 1.0 - ExponentialTrapezoidWeights(h).beta;
 }
 
-// The relaxation coefficient c = sum_k mu_k (1 - w_k) at the points, from
-// the branch arrays interpolated there (the GLL set takes them as they are).
-std::vector<double> Coefficient(const Rheology& rheology,
-                                const MemoryPoints& points, Scheme scheme,
-                                double dt) {
-  auto c = std::vector<double>{};
+// The branches' unrelaxed shear s = sum_k mu_k w_k at the points, from the
+// branch arrays interpolated there (the GLL set takes them as they are).
+std::vector<double> UnrelaxedShear(const Rheology& rheology,
+                                   const MemoryPoints& points, Scheme scheme,
+                                   double dt) {
+  auto s = std::vector<double>{};
   for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
     const auto mu = points.Interpolate(rheology.BranchAt(k).mu);
     const auto itau = points.Interpolate(rheology.BranchAt(k).itau);
-    c.resize(mu.size(), 0.0);
+    s.resize(mu.size(), 0.0);
     for (auto i = std::size_t{0}; i < mu.size(); ++i) {
-      c[i] += mu[i] * (1.0 - EffectiveWeight(scheme, dt * itau[i]));
+      s[i] += mu[i] * EffectiveWeight(scheme, dt * itau[i]);
     }
   }
-  return c;
+  return s;
 }
 
 double MaxAbs(const std::vector<double>& v) {
@@ -148,26 +149,28 @@ TEST(MemoryPoints, GllIsTheNodesAndGaussInterpolatesExactly) {
   }
 }
 
-TEST(Relaxation, GllReproducesTheRelaxedModuli) {
+TEST(PointShear, GllReproducesTheRelaxedModuli) {
   // The decisive gate: with internal variables at the GLL nodes the
-  // relaxation term is the relaxed-moduli assembly, so the effective
-  // operators agree to round-off, spheroidal (by their solves) and
-  // toroidal (by their matrices).
+  // long-term material plus the point shear is the relaxed-moduli
+  // assembly, so the effective operators agree to round-off, spheroidal
+  // (by their solves) and toroidal (by their matrices).
   const auto model = Model();
   const auto mesh = RadialMesh::Create(model, {.lmax = 8}).value();
   const auto material = Material::Create(model, mesh).value();
   const auto rheology = Maxwell(model, material);
-  const ViscoelasticOperator op(rheology, 8);
+  const auto longTerm = rheology.LongTermMaterial();
+  const auto op =
+      ViscoelasticOperator(rheology, 8, {.memory_points = MemoryPointSet::Gll});
   const auto points = MemoryPoints::Of(MemoryPointSet::Gll, mesh);
   const auto dt = 2.0 * rheology.MinRelaxationTime();
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     const auto relaxed = op.EffectiveMaterial(scheme, dt);
-    const auto c = Coefficient(rheology, points, scheme, dt);
-    const Relaxation relaxation{&points, c};
+    const auto s = UnrelaxedShear(rheology, points, scheme, dt);
+    const auto shear = PointShear{&points, s};
 
     for (auto l : {0, 1, 2, 5, 8}) {
-      const DegreeOperator viaTerm(material, l, {.relaxation = &relaxation});
+      const DegreeOperator viaTerm(longTerm, l, {.point_shear = &shear});
       const DegreeOperator viaModuli(relaxed, l);
       ASSERT_EQ(viaTerm.DofCount(), viaModuli.DofCount());
       for (const auto& rhs : {viaModuli.Load(), viaModuli.Tide()}) {
@@ -178,7 +181,7 @@ TEST(Relaxation, GllReproducesTheRelaxedModuli) {
       }
     }
     for (auto l : {1, 2, 5}) {
-      const ToroidalOperator viaTerm(material, l, {.relaxation = &relaxation});
+      const ToroidalOperator viaTerm(longTerm, l, {.point_shear = &shear});
       const ToroidalOperator viaModuli(relaxed, l);
       auto y = std::vector<double>(viaTerm.DofCount());
       for (auto d = std::size_t{0}; d < y.size(); ++d) {
@@ -192,22 +195,23 @@ TEST(Relaxation, GllReproducesTheRelaxedModuli) {
   }
 }
 
-TEST(Relaxation, LoveNumbersFromTheRelaxedOperators) {
+TEST(PointShear, LoveNumbersFromTheRelaxedOperators) {
   // The step's effective Love numbers (what the sea level solver uses)
-  // computed through the relaxation term equal the relaxed material's.
+  // computed through the point shear equal the relaxed material's.
   const auto model = Model();
   const auto mesh = RadialMesh::Create(model, {.lmax = 8}).value();
   const auto material = Material::Create(model, mesh).value();
   const auto rheology = Maxwell(model, material);
-  const ViscoelasticOperator op(rheology, 8);
+  const auto op =
+      ViscoelasticOperator(rheology, 8, {.memory_points = MemoryPointSet::Gll});
   const auto points = MemoryPoints::Of(MemoryPointSet::Gll, mesh);
   const auto dt = 2.0 * rheology.MinRelaxationTime();
   const auto scheme = Scheme::ExponentialTrapezoid;
 
-  const auto c = Coefficient(rheology, points, scheme, dt);
-  const Relaxation relaxation{&points, c};
-  const auto viaTerm =
-      ComputeLoveNumbers(material, 8, {.relaxation = &relaxation});
+  const auto s = UnrelaxedShear(rheology, points, scheme, dt);
+  const auto shear = PointShear{&points, s};
+  const auto viaTerm = ComputeLoveNumbers(rheology.LongTermMaterial(), 8,
+                                          {.point_shear = &shear});
   const auto viaModuli =
       ComputeLoveNumbers(op.EffectiveMaterial(scheme, dt), 8);
   for (const auto pair :
@@ -218,8 +222,8 @@ TEST(Relaxation, LoveNumbersFromTheRelaxedOperators) {
   }
 }
 
-TEST(Relaxation, GaussConvergesToGllUnderRefinement) {
-  // The two point sets integrate the relaxation term with different
+TEST(PointShear, GaussConvergesToGllUnderRefinement) {
+  // The two point sets integrate the branches' shear with different
   // quadrature errors, so their effective solids differ, but by an amount
   // that falls quickly under mesh refinement.
   const auto model = Model();
@@ -233,10 +237,10 @@ TEST(Relaxation, GaussConvergesToGllUnderRefinement) {
     std::vector<LoveNumbers> love;
     for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
       const auto points = MemoryPoints::Of(set, mesh);
-      const auto c = Coefficient(rheology, points, scheme, dt);
-      const Relaxation relaxation{&points, c};
-      love.push_back(
-          ComputeLoveNumbers(material, 8, {.relaxation = &relaxation}));
+      const auto s = UnrelaxedShear(rheology, points, scheme, dt);
+      const auto shear = PointShear{&points, s};
+      love.push_back(ComputeLoveNumbers(rheology.LongTermMaterial(), 8,
+                                        {.point_shear = &shear}));
     }
     for (auto l = 2; l <= 8; ++l) {
       worst = std::max(worst, std::abs(love[1].h_u[l] - love[0].h_u[l]) /

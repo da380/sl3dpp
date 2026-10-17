@@ -50,6 +50,10 @@ std::array<const std::vector<std::complex<double>>*, 3> Blocks(
 
 struct Viscoelastic3D::Flavour {
   std::unique_ptr<Material> material;  // the reference effective solid
+  // At Gauss points the material is the long-term one and the operators
+  // add the branches' unrelaxed shear at the points (MemoryPoints.hpp).
+  std::vector<double> pointShearModulus;
+  PointShear pointShear;
   std::map<int, std::unique_ptr<DegreeOperator>> spheroidal;
   std::map<int, std::unique_ptr<ToroidalOperator>> toroidal;
   std::map<int, std::vector<double>> units;  // (ndof x 2): load, tide
@@ -77,15 +81,18 @@ Viscoelastic3D::Viscoelastic3D(
                  .truncation = options.truncation,
                  .oversampling = options.oversampling,
                  .parallel = options.parallel,
-                 .matrix_kernel = options.matrix_kernel}),
+                 .matrix_kernel = options.matrix_kernel,
+                 .memory_points = options.memory_points}),
       reference_(*rheology_, lmax,
-                 {.eps = options.eps, .truncation = options.truncation}) {
+                 {.eps = options.eps,
+                  .truncation = options.truncation,
+                  .memory_points = options.memory_points}) {
   // Sample exp(-delta) once and scale every branch's inverse times; the
-  // reference profile is the unperturbed radial rheology itself.
+  // reference profile is the unperturbed radial rheology itself, at the
+  // memory points as the 1D reference holds it.
   const auto& sampling = coupling_.Grid();
-  const auto& mesh = rheology_->BaseMaterial().Mesh();
   const auto fieldSize = sampling.FieldSize();
-  const auto n = mesh.NGll();
+  const auto np = coupling_.Points().count;
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   std::vector<double> factor(nodes * fieldSize);
   const auto thetas = sampling.CoLatitudes();
@@ -99,22 +106,26 @@ Viscoelastic3D::Viscoelastic3D(
       }
     }
   }
-  for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
-    const auto& branch = rheology_->BranchAt(k);
-    std::vector<double> itau(nodes * fieldSize);
-    std::vector<double> mu(nodes);
-    for (std::size_t node = 0; node < nodes; ++node) {
+  for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
+    const auto pointMu = reference_.PointMu(k);
+    const auto pointItau = reference_.PointItau(k);
+    auto itau = std::vector<double>(nodes * fieldSize);
+    auto mu = std::vector<double>(nodes);
+    auto itauRef = std::vector<double>(nodes);
+    for (auto node = std::size_t{0}; node < nodes; ++node) {
       const auto e = coupling_.ElementOfNode(static_cast<int>(node));
-      const auto q = static_cast<int>(node) % n;
-      const auto at = static_cast<std::size_t>(e) * n + q;
-      mu[node] = branch.mu[at];
-      for (std::size_t x = 0; x < fieldSize; ++x) {
+      const auto p = coupling_.NodeInElementOf(static_cast<int>(node));
+      const auto at = static_cast<std::size_t>(e) * np + p;
+      mu[node] = pointMu[at];
+      itauRef[node] = pointItau[at];
+      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
         itau[node * fieldSize + x] =
-            branch.itau[at] * factor[node * fieldSize + x];
+            pointItau[at] * factor[node * fieldSize + x];
       }
     }
     itau_.push_back(std::move(itau));
     muBranch_.push_back(std::move(mu));
+    itauRef_.push_back(std::move(itauRef));
   }
 }
 
@@ -133,13 +144,15 @@ Viscoelastic3D::State Viscoelastic3D::ZeroState() const {
 const DegreeOperator& Viscoelastic3D::Spheroidal(int l) const {
   auto found = spheroidal_.find(l);
   if (found == spheroidal_.end()) {
-    found = spheroidal_
-                .emplace(l, std::make_unique<DegreeOperator>(
-                                rheology_->BaseMaterial(), l,
-                                DegreeOperator::Options{
-                                    .eps = options_.eps,
-                                    .truncation = options_.truncation}))
-                .first;
+    found =
+        spheroidal_
+            .emplace(l, std::make_unique<DegreeOperator>(
+                            reference_.NodalMaterial(), l,
+                            DegreeOperator::Options{
+                                .eps = options_.eps,
+                                .truncation = options_.truncation,
+                                .point_shear = reference_.ElasticPointShear()}))
+            .first;
   }
   return *found->second;
 }
@@ -147,15 +160,16 @@ const DegreeOperator& Viscoelastic3D::Spheroidal(int l) const {
 const ToroidalOperator& Viscoelastic3D::Toroidal(int l) const {
   auto found = toroidal_.find(l);
   if (found == toroidal_.end()) {
-    found = toroidal_
-                .emplace(
-                    l, std::make_unique<ToroidalOperator>(
-                           rheology_->BaseMaterial(), l,
-                           ToroidalOperator::Options{
-                               .eps = options_.eps,
-                               .truncation = options_.truncation,
-                               .pin_fraction = options_.toroidal_pin_fraction}))
-                .first;
+    found =
+        toroidal_
+            .emplace(l, std::make_unique<ToroidalOperator>(
+                            reference_.NodalMaterial(), l,
+                            ToroidalOperator::Options{
+                                .eps = options_.eps,
+                                .truncation = options_.truncation,
+                                .pin_fraction = options_.toroidal_pin_fraction,
+                                .point_shear = reference_.ElasticPointShear()}))
+            .first;
   }
   return *found->second;
 }
@@ -166,8 +180,15 @@ Viscoelastic3D::Flavour& Viscoelastic3D::FlavourOf(Scheme scheme,
   auto found = flavours_.find(key);
   if (found == flavours_.end()) {
     auto flavour = std::make_unique<Flavour>();
-    flavour->material =
-        std::make_unique<Material>(reference_.EffectiveMaterial(scheme, dt));
+    if (options_.memory_points == MemoryPointSet::Gll) {
+      flavour->material =
+          std::make_unique<Material>(reference_.EffectiveMaterial(scheme, dt));
+    } else {
+      flavour->material =
+          std::make_unique<Material>(reference_.NodalMaterial());
+      flavour->pointShearModulus = reference_.PointShearModulus(scheme, dt);
+      flavour->pointShear = {&reference_.Points(), flavour->pointShearModulus};
+    }
     found = flavours_.emplace(key, std::move(flavour)).first;
   }
   return *found->second;
@@ -356,13 +377,18 @@ const DegreeOperator& Viscoelastic3D::FlavourSpheroidal(Flavour& flavour,
                                                         int l) const {
   auto found = flavour.spheroidal.find(l);
   if (found == flavour.spheroidal.end()) {
-    found = flavour.spheroidal
-                .emplace(l, std::make_unique<DegreeOperator>(
-                                *flavour.material, l,
-                                DegreeOperator::Options{
-                                    .eps = options_.eps,
-                                    .truncation = options_.truncation}))
-                .first;
+    found =
+        flavour.spheroidal
+            .emplace(l,
+                     std::make_unique<DegreeOperator>(
+                         *flavour.material, l,
+                         DegreeOperator::Options{
+                             .eps = options_.eps,
+                             .truncation = options_.truncation,
+                             .point_shear = flavour.pointShear.points != nullptr
+                                                ? &flavour.pointShear
+                                                : nullptr}))
+            .first;
   }
   return *found->second;
 }
@@ -371,15 +397,19 @@ const ToroidalOperator& Viscoelastic3D::FlavourToroidal(Flavour& flavour,
                                                         int l) const {
   auto found = flavour.toroidal.find(l);
   if (found == flavour.toroidal.end()) {
-    found = flavour.toroidal
-                .emplace(
-                    l, std::make_unique<ToroidalOperator>(
-                           *flavour.material, l,
-                           ToroidalOperator::Options{
-                               .eps = options_.eps,
-                               .truncation = options_.truncation,
-                               .pin_fraction = options_.toroidal_pin_fraction}))
-                .first;
+    found =
+        flavour.toroidal
+            .emplace(l,
+                     std::make_unique<ToroidalOperator>(
+                         *flavour.material, l,
+                         ToroidalOperator::Options{
+                             .eps = options_.eps,
+                             .truncation = options_.truncation,
+                             .pin_fraction = options_.toroidal_pin_fraction,
+                             .point_shear = flavour.pointShear.points != nullptr
+                                                ? &flavour.pointShear
+                                                : nullptr}))
+            .first;
   }
   return *found->second;
 }
@@ -434,20 +464,14 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   // Per branch and grid point the step weights, the decayed memory m~_k
   // and its beta_k for Finish; summed over branches, the lateral weight
   // and the fixed memory force sum_k mu_k m~_k, analysed once here.
-  const auto& branches = *rheology_;
-  const auto& mesh = branches.BaseMaterial().Mesh();
-  const auto n = mesh.NGll();
   step.beta_.resize(K);
   step.weight_.assign(nodes * fieldSize, 0.0);
   auto fixed = coupling_.ZeroTensor();
   for (std::size_t k = 0; k < K; ++k) {
     step.memory_.push_back(coupling_.ZeroTensor());
     step.beta_[k].assign(nodes * fieldSize, 0.0);
-    const auto& branch = branches.BranchAt(k);
     for (std::size_t node = 0; node < nodes; ++node) {
-      const auto e = coupling_.ElementOfNode(static_cast<int>(node));
-      const auto q = static_cast<int>(node) % n;
-      const auto itauRef = branch.itau[static_cast<std::size_t>(e) * n + q];
+      const auto itauRef = itauRef_[k][node];
       const auto refBeta = scheme == Scheme::BackwardEuler
                                ? 1.0 - BackwardEulerWeight(dt * itauRef)
                                : ExponentialTrapezoidWeights(dt * itauRef).beta;

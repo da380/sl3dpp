@@ -349,8 +349,21 @@ residual, the per-step pointwise loops and transforms), degree loop
 transforms serial and the degree loops on 8 threads, every run
 reproduces the one-thread state.
 
+After chunk 7 (internal variables at the Gauss points, `step_timing ...
+loop gauss`; 17 Oct 2026, 8 threads, lmax 64): 980 memory nodes for
+1225, one TensorField 0.74 GB for 0.93; per pass 1.14 s for 1.34 (analyse
+0.21 for 0.24, synthesise 0.31 for 0.36, solves 0.070 for 0.089, strain
+recovery 0.044 for 0.053, overhead 0.42 for 0.51; the force assembly
+unchanged at 0.028, its point rows now spread over the element's
+nodes); peak RSS 9.55 GB for 11.69. Surface sums agree with the GLL run
+to 8e-13 (U) and 3e-11 (phi); since the shear split, which changes the
+discrete elastic solid at Gauss points at the quadrature level, to 2e-10
+(U) and 5e-11 (phi), at the same cost. Gauss points are now the default;
+with GLL points selected every result is bitwise as before chunk 7.
+
 Re-run with `OMP_NUM_THREADS=N build/benchmarks/step_timing <deck>
-<lmax>` after each change.
+<lmax> [steps] [repeats] [loop|matrix] [gauss|gll]` after each change
+(Gauss points by default).
 
 ## 8. Things to check against your intent
 
@@ -481,14 +494,22 @@ expensive.
     default for the pyslfp gates; τ, the step weights, their
     h-derivatives and the kernel accumulators move together. In
     progress (David, 17 Oct): 7a, done, makes the effective operators
-    take an explicit relaxation term at the memory points (needed for an
+    take an explicit shear term at the memory points (needed for an
     exact elimination at Gauss points; `MemoryPoints.hpp`); 7b-i, done,
     moves the 1D forward (`ViscoelasticOperator::Options::memory_points`):
     80% of the memory, an exact elimination still, and surface responses
     within 1.4e-8 of GLL at 600 km elements, 2.4e-10 at 300 km; 7b-ii,
     done, moves the 1D adjoints (kernels accumulate at the points and
     reach the nodal itau through the interpolation's transpose; nodal
-    kernels within 1e-6 of GLL's); 7c moves the 3D.
+    kernels within 1e-6 of GLL's); 7c, done, moves the 3D
+    (`Viscoelastic3D::Options::memory_points`; at lmax 64 on 8 threads
+    20% fewer memory nodes, a 14% faster pass, 18% less peak memory).
+    Gauss points are now the default, 1D and 3D; GLL stays selectable
+    for like-for-like comparisons with the Fortran and pyslfp. Switching
+    exposed an instability of the first form at long steps (h = dt/tau of
+    a few hundred and up), fixed by splitting the shear energy: the
+    long-term part at the nodes, each branch's at the points, so every
+    term of the effective operator stays positive (plan.md §5.5).
 20. **Cost (small tidy-up): the 1D internal variables span each
     degree's whole subset**, from its first element to the surface, so
     they are stored (as zeros) in the lithosphere and, at low degrees,

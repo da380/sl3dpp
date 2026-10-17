@@ -25,7 +25,10 @@
 // after a pure refactor) and the peak RSS close the report.
 //
 // Usage:
-//   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix]
+//   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
+//
+// The last argument places the internal variables (Options::
+// memory_points): at the Gauss points, the default, or at the GLL nodes.
 //
 // Options::parallel is set when OMP_NUM_THREADS > 1, as in fortran_gate:
 // the transforms and the per-degree loops (force, solves, strain) then run
@@ -114,7 +117,8 @@ std::uint64_t Fingerprint(const Viscoelastic3D::State& state) {
 int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
-                 "usage: %s <deck> <lmax> [steps] [repeats] [loop|matrix]\n",
+                 "usage: %s <deck> <lmax> [steps] [repeats] [loop|matrix] "
+                 "[gauss|gll]\n",
                  argv[0]);
     return 1;
   }
@@ -123,6 +127,7 @@ int main(int argc, char** argv) {
   const int steps = argc > 3 ? std::atoi(argv[3]) : 3;
   const int repeats = argc > 4 ? std::atoi(argv[4]) : 3;
   const bool matrix = argc > 5 && std::string(argv[5]) == "matrix";
+  const auto gauss = argc <= 6 || std::string(argv[6]) != "gll";
   const int threads = omp_get_max_threads();
   constexpr double year = 365.25 * 24.0 * 3600.0;
 
@@ -142,6 +147,7 @@ int main(int argc, char** argv) {
   options.parallel = threads > 1;
   options.matrix_kernel = matrix;
   options.rtol = 1e-10;
+  options.memory_points = gauss ? MemoryPointSet::Gauss : MemoryPointSet::Gll;
 
   auto start = std::chrono::steady_clock::now();
   Viscoelastic3D op(rheology, lmax, delta, options);
@@ -169,8 +175,9 @@ int main(int argc, char** argv) {
   const auto nodes = coupling.NodeCount();
   const double tensorGb = static_cast<double>(nodes) *
                           static_cast<double>(grid.FieldSize()) * 40.0 / 1e9;
-  std::printf("step_timing: lmax %d, %d thread%s, %s kernel\n", lmax, threads,
-              threads == 1 ? "" : "s", matrix ? "matrix" : "loop");
+  std::printf("step_timing: lmax %d, %d thread%s, %s kernel, %s points\n", lmax,
+              threads, threads == 1 ? "" : "s", matrix ? "matrix" : "loop",
+              gauss ? "Gauss" : "GLL");
   std::printf("  memory nodes %d, grid %d x %d, one TensorField %.2f GB\n",
               nodes, grid.NumberOfCoLatitudes(), grid.NumberOfLongitudes(),
               tensorGb);
@@ -198,7 +205,7 @@ int main(int argc, char** argv) {
   std::map<int, std::unique_ptr<ToroidalOperator>> tor;
   for (int l = 0; l <= lmax; ++l) {
     sph.emplace(l, std::make_unique<DegreeOperator>(base, l));
-    if (l >= 2) tor.emplace(l, std::make_unique<ToroidalOperator>(base, l));
+    if (l >= 1) tor.emplace(l, std::make_unique<ToroidalOperator>(base, l));
   }
   auto sphOf = [&](int l) -> const DegreeOperator& { return *sph.at(l); };
   auto torOf = [&](int l) -> const ToroidalOperator& { return *tor.at(l); };

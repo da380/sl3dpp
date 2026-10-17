@@ -37,8 +37,8 @@ struct ViscoelasticOperator::Degree {
   int l;
   double k2;
   int e0, ne, ngll, ndof;
-  /// The memory points per element (MemoryPoints.hpp): ngll at the GLL
-  /// nodes (the default), ngll - 1 at the Gauss points. Every memory and
+  /// The memory points per element (MemoryPoints.hpp): ngll - 1 at the
+  /// Gauss points (the default), ngll at the GLL nodes. Every memory and
   /// strain array is (ne, np) per scalar and column; the dof maps and
   /// gathered displacements stay on the nodes, (ne, ngll).
   int np;
@@ -53,16 +53,21 @@ struct ViscoelasticOperator::Degree {
   std::vector<double> momentRow;  // degree 0 only
 
   /// pointMu and pointItau are the branch arrays at the memory points
-  /// over the whole mesh, (element, p), as the operator samples them.
+  /// over the whole mesh, (element, p), as the operator samples them; the
+  /// unrelaxed system is nodalMaterial's plus elasticShear (null at the
+  /// GLL points; both outlive the workspace).
   Degree(const Rheology& rheology, int degree,
          const ViscoelasticOperator::Options& options,
+         const Material& nodalMaterial, const PointShear* elasticShear,
          const MemoryPoints& memoryPoints,
          const std::vector<std::vector<double>>& pointMu,
          const std::vector<std::vector<double>>& pointItau)
       : l(degree),
         k2(degree * (degree + 1.0)),
-        system(rheology.BaseMaterial(), degree,
-               {.eps = options.eps, .truncation = options.truncation}),
+        system(nodalMaterial, degree,
+               {.eps = options.eps,
+                .truncation = options.truncation,
+                .point_shear = elasticShear}),
         points(&memoryPoints) {
     const auto& mesh = rheology.BaseMaterial().Mesh();
     e0 = system.FirstElement();
@@ -79,14 +84,7 @@ struct ViscoelasticOperator::Degree {
       const auto jac = mesh.Jacobian(e0 + e);
       for (auto p = 0; p < np; ++p) {
         Wq[static_cast<std::size_t>(e) * np + p] = memoryPoints.weight[p] * jac;
-        auto rp = 0.0;
-        if (gll) {
-          rp = mesh.Radius(e0 + e, p);
-        } else {
-          for (auto i = 0; i < ngll; ++i) {
-            rp += memoryPoints.Value(p, i) * mesh.Radius(e0 + e, i);
-          }
-        }
+        const auto rp = memoryPoints.RadiusAt(mesh, e0 + e, p);
         for (auto i = 0; i < ngll; ++i) {
           B[(static_cast<std::size_t>(e) * np + p) * ngll + i] =
               rp * memoryPoints.Derivative(p, i) / jac;
@@ -318,12 +316,12 @@ struct ViscoelasticOperator::Degree {
 
 struct ViscoelasticOperator::Flavour {
   std::unique_ptr<Material> material;
-  /// Away from the GLL points the effective systems are the unrelaxed
-  /// material less the relaxation term at the memory points
-  /// (MemoryPoints.hpp), whose coefficient sum_k mu_k (1 - w_k) lives
-  /// here; at the GLL points `material` is relaxed and this stays empty.
-  std::vector<double> relaxationCoefficient;
-  Relaxation relaxation;
+  /// Away from the GLL points the effective systems are the long-term
+  /// material plus the branches' unrelaxed shear at the memory points
+  /// (MemoryPoints.hpp), whose modulus sum_k mu_k w_k lives here; at the
+  /// GLL points `material` is relaxed and this stays empty.
+  std::vector<double> pointShearModulus;
+  PointShear pointShear;
   std::map<int, DegreeOperator> systems;
   std::map<int, std::vector<double>> units;  // (ndof x 2): load, tide
   /// (ndof x 2): the traction-only and attraction-only pieces of the

@@ -88,9 +88,10 @@ class ViscoelasticOperator {
     /// false forces serial. Results do not depend on it.
     bool parallel = true;
     /// Where the internal variables live within each element
-    /// (MemoryPoints.hpp): the GLL nodes (the default, pyslfp's) or the
-    /// interior Gauss points (~20% fewer, plan.md §5.5).
-    MemoryPointSet memory_points = MemoryPointSet::Gll;
+    /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
+    /// fewer, plan.md §5.5) or the GLL nodes (pyslfp's and the Fortran's,
+    /// for like-for-like comparisons).
+    MemoryPointSet memory_points = MemoryPointSet::Gauss;
   };
 
   /// The rheology is copied into immutable shared storage, so the
@@ -105,6 +106,13 @@ class ViscoelasticOperator {
   [[nodiscard]] const Rheology& GetRheology() const { return *rheology_; }
   [[nodiscard]] const Material& BaseMaterial() const {
     return rheology_->BaseMaterial();
+  }
+  /// The material the operators assemble at the GLL nodes: the unrelaxed
+  /// one with the internal variables there; else the long-term one, the
+  /// branch moduli then entering at the memory points (PointShearModulus,
+  /// MemoryPoints.hpp).
+  [[nodiscard]] const Material& NodalMaterial() const {
+    return nodalMaterial_ ? *nodalMaterial_ : rheology_->BaseMaterial();
   }
   [[nodiscard]] int LMax() const { return lmax_; }
 
@@ -207,7 +215,39 @@ class ViscoelasticOperator {
   }
 
   /// The memory points the internal variables live on.
-  [[nodiscard]] const MemoryPoints& Points() const { return points_; }
+  [[nodiscard]] const MemoryPoints& Points() const { return *points_; }
+
+  /// Branch k's modulus and inverse relaxation time at the memory points,
+  /// (element, point) over the whole mesh: the nodal arrays at the GLL
+  /// points, interpolated (and clamped at zero) at Gauss points.
+  [[nodiscard]] std::span<const double> PointMu(std::size_t k) const {
+    return pointMu_.at(k);
+  }
+  [[nodiscard]] std::span<const double> PointItau(std::size_t k) const {
+    return pointItau_.at(k);
+  }
+
+  /// The branches' shear modulus at the memory points that a step's
+  /// effective operators integrate there, sum_k mu_k w_k with w_k the
+  /// branch's unrelaxed fraction (1/(1 + h) for backward Euler, 1 - beta
+  /// for the trapezoid), (element, point) over the whole mesh. Away from
+  /// the GLL nodes the effective operators are NodalMaterial's plus this
+  /// term (PointShear); at the GLL points that is EffectiveMaterial's
+  /// assembly.
+  [[nodiscard]] std::vector<double> PointShearModulus(Scheme scheme,
+                                                      double dt) const;
+  /// The elastic operators' point shear, sum_k mu_k at the points; null
+  /// with the internal variables at the GLL nodes.
+  [[nodiscard]] const PointShear* ElasticPointShear() const {
+    return elasticPointShear_.points != nullptr ? &elasticPointShear_ : nullptr;
+  }
+
+  /// Kernels accumulated at the memory points, (element, point) per
+  /// branch, as kernels against the nodal itau the points interpolate:
+  /// the transpose of the interpolation, zero where the clamp at zero
+  /// acted. At the GLL points they are already nodal.
+  [[nodiscard]] std::vector<std::vector<double>> ItauKernelsAtNodes(
+      std::vector<std::vector<double>> atPoints) const;
 
   /// The inertia moment sqrt(4 pi) int rho U r^3 dr of a degree-0
   /// solution array, per column.
@@ -257,17 +297,18 @@ class ViscoelasticOperator {
   /// viscosity sensitivity pairs them with dh = dt d(itau).
   [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightDerivativesOf(
       Scheme scheme, double dt) const;
-  /// Kernels accumulated at the memory points, (element, point) per
-  /// branch, as kernels against the nodal itau the points interpolate:
-  /// the transpose of the interpolation, zero where the clamp at zero
-  /// acted. At the GLL points they are already nodal.
-  [[nodiscard]] std::vector<std::vector<double>> ItauKernelsAtNodes(
-      std::vector<std::vector<double>> atPoints) const;
 
   std::shared_ptr<const Rheology> rheology_;  ///< owned, immutable
   int lmax_;
   Options options_;
-  MemoryPoints points_;
+  /// Held by pointer so that the workspaces' and flavours' references
+  /// survive a move of the operator.
+  std::unique_ptr<const MemoryPoints> points_;
+  /// Away from the GLL nodes: the long-term material, and the elastic
+  /// operators' point shear (MemoryPoints.hpp).
+  std::unique_ptr<const Material> nodalMaterial_;
+  std::vector<double> elasticShear_;
+  PointShear elasticPointShear_;
   /// The branch moduli and inverse relaxation times at the memory points,
   /// (element, point) over the whole mesh: interpolated from the nodal
   /// arrays (clamped at zero against overshoot), the nodal arrays

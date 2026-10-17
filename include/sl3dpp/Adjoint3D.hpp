@@ -64,7 +64,11 @@ struct ForwardTrajectory3D {
  * units. `itauKernelSpherical[k][node]` is its angular integral — it
  * pairs with angle-uniform perturbations exactly as the 1D
  * AdjointSolver's nodal kernel does at that (element, gll) node, which
- * is the zero-lateral bridge between the two. `logViscosityKernel3D` is
+ * is the zero-lateral bridge between the two. With the memory nodes at
+ * Gauss points the kernels live at the points (the itau the step
+ * samples); laid out over the mesh's points, the reference's
+ * ItauKernelsAtNodes carries the spherical reduction to the nodal itau
+ * as the 1D sweep carries its own. `logViscosityKernel3D` is
  * dJ / d delta(x) for the operator's log-viscosity perturbation
  * (eta = eta_ref exp(delta), so itau = itau_ref exp(-delta)):
  * -itau(x) itauKernel3D(x), same layout. All empty unless a trajectory

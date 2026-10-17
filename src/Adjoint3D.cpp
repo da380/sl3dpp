@@ -292,9 +292,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   const auto gridF = coupling.Grid().FieldSize();
   const auto nodeCount = static_cast<std::size_t>(coupling.NodeCount());
   std::vector<std::vector<double>> itauKernel;
-  const auto& mesh = op.GetRheology().BaseMaterial().Mesh();
-  const auto meshW = mesh.Weights();
-  const auto& matMesh = mesh;
+  const auto& matMesh = op.GetRheology().BaseMaterial().Mesh();
   const double aMat =
       matMesh.Radius(matMesh.ElementCount() - 1, matMesh.NGll() - 1);
   const double pairing =
@@ -332,10 +330,8 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       const auto& mF = fwd.m[k];
       for (std::size_t rn = 0; rn < nodeCount; ++rn) {
         if (mu[rn] <= 0.0) continue;
-        const int e = coupling.ElementOfNode(static_cast<int>(rn));
-        const int q = coupling.NodeInElementOf(static_cast<int>(rn));
         const double r = coupling.RadiusOfNode(static_cast<int>(rn));
-        const double wq = meshW[q] * mesh.Jacobian(e);
+        const double wq = coupling.WeightOfNode(static_cast<int>(rn));
         const double factor = pairing * weight * mu[rn] * wq * r * r;
         const std::size_t base = rn * gridF;
         for (std::size_t x = 0; x < gridF; ++x) {
