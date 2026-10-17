@@ -53,6 +53,7 @@
 
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/StepWeights.hpp"
 
@@ -86,6 +87,10 @@ class ViscoelasticOperator {
     /// updates) run threaded, on OpenMP's thread count (OMP_NUM_THREADS);
     /// false forces serial. Results do not depend on it.
     bool parallel = true;
+    /// Where the internal variables live within each element
+    /// (MemoryPoints.hpp): the GLL nodes (the default, pyslfp's) or the
+    /// interior Gauss points (~20% fewer, plan.md §5.5).
+    MemoryPointSet memory_points = MemoryPointSet::Gll;
   };
 
   /// The rheology is copied into immutable shared storage, so the
@@ -201,6 +206,9 @@ class ViscoelasticOperator {
     return rheology_->MinRelaxationTime();
   }
 
+  /// The memory points the internal variables live on.
+  [[nodiscard]] const MemoryPoints& Points() const { return points_; }
+
   /// The inertia moment sqrt(4 pi) int rho U r^3 dr of a degree-0
   /// solution array, per column.
   [[nodiscard]] std::vector<double> InertiaMoment(
@@ -253,6 +261,12 @@ class ViscoelasticOperator {
   std::shared_ptr<const Rheology> rheology_;  ///< owned, immutable
   int lmax_;
   Options options_;
+  MemoryPoints points_;
+  /// The branch moduli and inverse relaxation times at the memory points,
+  /// (element, point) over the whole mesh: interpolated from the nodal
+  /// arrays (clamped at zero against overshoot), the nodal arrays
+  /// themselves at the GLL points.
+  std::vector<std::vector<double>> pointMu_, pointItau_;
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;
   mutable std::list<std::pair<std::pair<int, double>, std::unique_ptr<Flavour>>>
       flavours_;  // LRU, most recent at front

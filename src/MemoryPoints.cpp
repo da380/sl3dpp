@@ -40,7 +40,7 @@ MemoryPoints MemoryPoints::Of(MemoryPointSet set, const RadialMesh& mesh) {
   for (auto p = 0; p < out.count; ++p) {
     const auto x = out.xi[p];
     for (auto i = 0; i < n; ++i) {
-      double value = 1.0, slope = 0.0;
+      auto value = 1.0, slope = 0.0;
       for (auto j = 0; j < n; ++j) {
         if (j == i) continue;
         const auto scale = 1.0 / (nodes[i] - nodes[j]);
@@ -61,10 +61,10 @@ std::vector<double> MemoryPoints::Interpolate(
         "{} nodal values are not whole elements of {}", nodal.size(), ngll));
   }
   const auto elements = nodal.size() / ngll;
-  std::vector<double> out(elements * count, 0.0);
-  for (std::size_t e = 0; e < elements; ++e) {
+  auto out = std::vector<double>(elements * count, 0.0);
+  for (auto e = std::size_t{0}; e < elements; ++e) {
     for (auto p = 0; p < count; ++p) {
-      double sum = 0.0;
+      auto sum = 0.0;
       for (auto i = 0; i < ngll; ++i) sum += Value(p, i) * nodal[e * ngll + i];
       out[e * count + p] = sum;
     }

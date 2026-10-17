@@ -251,30 +251,30 @@ void DegreeOperator::Assemble(const Relaxation* relaxation) {
     // block with the shear modulus lowered by c.
     if (relaxation != nullptr && !fluid) {
       const auto& points = *relaxation->points;
-      for (int p = 0; p < points.count; ++p) {
-        const double c =
+      for (auto p = 0; p < points.count; ++p) {
+        const auto c =
             relaxation
                 ->coefficient[static_cast<std::size_t>(e) * points.count + p];
         if (c == 0.0) continue;
-        double rp = 0.0;
-        for (int i = 0; i < n; ++i)
+        auto rp = 0.0;
+        for (auto i = 0; i < n; ++i)
           rp += points.Value(p, i) * mesh.Radius(e, i);
         std::ranges::fill(dM, 0.0);
         std::ranges::fill(dR, 0.0);
         std::ranges::fill(dS, 0.0);
-        for (int i = 0; i < n; ++i) {
-          const double v = points.Value(p, i);
-          const double b = rp * points.Derivative(p, i) / jac;
+        for (auto i = 0; i < n; ++i) {
+          const auto v = points.Value(p, i);
+          const auto b = rp * points.Derivative(p, i) / jac;
           dR[3 * i] = b - v;
           dR[3 * i + 1] = 0.5 * k2 * v;
           dS[3 * i] = v;
           dS[3 * i + 1] = b - v;
           dM[3 * i + 1] = v;
         }
-        const double weight = points.weight[p] * jac * c;
-        for (int a = 0; a < n3; ++a) {
+        const auto weight = points.weight[p] * jac * c;
+        for (auto a = 0; a < n3; ++a) {
           if (dM[a] == 0.0 && dR[a] == 0.0 && dS[a] == 0.0) continue;
-          for (int b = 0; b < n3; ++b) {
+          for (auto b = 0; b < n3; ++b) {
             at(local, a, b) -=
                 weight * (k2 * (k2 - 2.0) * dM[a] * dM[b] +
                           (4.0 / 3.0) * dR[a] * dR[b] + k2 * dS[a] * dS[b]);

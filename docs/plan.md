@@ -681,3 +681,10 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
 - **17 Oct 2026** — Save or recompute (David): `record_strain` on both
   evolutions keeps the strain with the internal variables on request;
   recompute (internal variables only) stays the default.
+- **17 Oct 2026** — Gauss-point memory in the 1D forward (performance
+  chunk 7b-i): `ViscoelasticOperator::Options::memory_points`, GLL the
+  default and bitwise unchanged. The step stays an exact elimination
+  (the regenerated strain matches the step's to 1e-11), the state holds
+  80% of the memory, and surface responses agree with GLL to 1.4e-8 at
+  600 km elements, 2.4e-10 at 300 km (a coupled sea level run, 5e-12).
+  The 1D adjoints refuse Gauss points until 7b-ii.

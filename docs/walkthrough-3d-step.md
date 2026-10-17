@@ -482,8 +482,11 @@ expensive.
     h-derivatives and the kernel accumulators move together. In
     progress (David, 17 Oct): 7a, done, makes the effective operators
     take an explicit relaxation term at the memory points (needed for an
-    exact elimination at Gauss points; `MemoryPoints.hpp`); 7b moves the
-    1D memory, 7c the 3D.
+    exact elimination at Gauss points; `MemoryPoints.hpp`); 7b-i, done,
+    moves the 1D forward (`ViscoelasticOperator::Options::memory_points`):
+    80% of the memory, an exact elimination still, and surface responses
+    within 1.4e-8 of GLL at 600 km elements, 2.4e-10 at 300 km; 7b-ii
+    moves the 1D adjoints and kernels, 7c the 3D.
 20. **Cost (small tidy-up): the 1D internal variables span each
     degree's whole subset**, from its first element to the surface, so
     they are stored (as zeros) in the lithosphere and, at low degrees,

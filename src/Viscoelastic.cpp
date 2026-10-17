@@ -31,10 +31,10 @@ std::optional<std::vector<double>> FetchColumns(const LoadCallable& channel,
 void AddColumns(std::vector<double>& x, const std::vector<double>& units,
                 int unit, int ndof, const std::vector<double>& columns,
                 int ncols) {
-  for (int c = 0; c < ncols; ++c) {
-    const double amplitude = columns[c];
+  for (auto c = 0; c < ncols; ++c) {
+    const auto amplitude = columns[c];
     if (amplitude == 0.0) continue;
-    for (int d = 0; d < ndof; ++d) {
+    for (auto d = 0; d < ndof; ++d) {
       x[static_cast<std::size_t>(c) * ndof + d] +=
           units[static_cast<std::size_t>(unit) * ndof + d] * amplitude;
     }
@@ -46,13 +46,25 @@ void AddColumns(std::vector<double>& x, const std::vector<double>& units,
 // The per-degree workspace and the flavour struct live in
 // detail/ViscoelasticDegree.hpp, shared with the adjoint sweeps.
 
-
 ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
                                            Options options)
     : rheology_(std::make_shared<const Rheology>(rheology)),
       lmax_(lmax),
-      options_(options) {
+      options_(options),
+      points_(MemoryPoints::Of(options.memory_points,
+                               rheology.BaseMaterial().Mesh())) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
+  const auto gll = options.memory_points == MemoryPointSet::Gll;
+  auto sample = [&](const std::vector<double>& nodal) {
+    if (gll) return nodal;
+    auto out = points_.Interpolate(nodal);
+    for (auto& v : out) v = std::max(v, 0.0);
+    return out;
+  };
+  for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
+    pointMu_.push_back(sample(rheology_->BranchAt(k).mu));
+    pointItau_.push_back(sample(rheology_->BranchAt(k).itau));
+  }
 }
 
 ViscoelasticOperator::~ViscoelasticOperator() = default;
@@ -65,7 +77,9 @@ ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
   auto found = degrees_.find(l);
   if (found == degrees_.end()) {
     found =
-        degrees_.emplace(l, std::make_unique<Degree>(*rheology_, l, options_))
+        degrees_
+            .emplace(l, std::make_unique<Degree>(*rheology_, l, options_,
+                                                 points_, pointMu_, pointItau_))
             .first;
   }
   return *found->second;
@@ -78,7 +92,7 @@ ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
   if (found == weights_.end()) {
     std::vector<BranchWeights> out;
     for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
-      const auto& itau = rheology_->BranchAt(k).itau;
+      const auto& itau = pointItau_[k];
       BranchWeights w;
       w.e.resize(itau.size());
       if (scheme == Scheme::BackwardEuler) {
@@ -110,7 +124,7 @@ ViscoelasticOperator::SchemeWeightDerivativesOf(Scheme scheme,
   if (found == weightDerivatives_.end()) {
     std::vector<BranchWeights> out;
     for (std::size_t k = 0; k < rheology_->BranchCount(); ++k) {
-      const auto& itau = rheology_->BranchAt(k).itau;
+      const auto& itau = pointItau_[k];
       BranchWeights w;
       w.e.resize(itau.size());
       if (scheme == Scheme::BackwardEuler) {
@@ -138,6 +152,12 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
                                                  double dt) const {
   if (scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument("no effective operator for ExponentialEuler");
+  }
+  if (options_.memory_points != MemoryPointSet::Gll) {
+    throw std::logic_error(
+        "with internal variables away from the GLL nodes the step's "
+        "effective solid is the unrelaxed material less a relaxation term "
+        "(MemoryPoints.hpp), not a material");
   }
   const auto& weights = SchemeWeightsOf(scheme, dt);
   std::vector<std::vector<double>> w;
@@ -167,7 +187,27 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
   constexpr std::size_t kFlavourCache = 4;
   while (flavours_.size() >= kFlavourCache) flavours_.pop_back();
   auto flavour = std::make_unique<Flavour>();
-  flavour->material = std::make_unique<Material>(EffectiveMaterial(scheme, dt));
+  if (options_.memory_points == MemoryPointSet::Gll) {
+    flavour->material =
+        std::make_unique<Material>(EffectiveMaterial(scheme, dt));
+  } else {
+    // The unrelaxed material less the relaxation term at the points: the
+    // coefficient sum_k mu_k (1 - w_k), w_k the effective-modulus weight
+    // (1/(1 + h) for backward Euler, 1 - beta for the trapezoid).
+    flavour->material = std::make_unique<Material>(BaseMaterial());
+    const auto& weights = SchemeWeightsOf(scheme, dt);
+    auto& c = flavour->relaxationCoefficient;
+    c.assign(pointMu_.empty() ? 0 : pointMu_[0].size(), 0.0);
+    for (auto k = std::size_t{0}; k < weights.size(); ++k) {
+      for (auto i = std::size_t{0}; i < c.size(); ++i) {
+        const auto relaxed = scheme == Scheme::BackwardEuler
+                                 ? 1.0 - weights[k].e[i]
+                                 : weights[k].beta[i];
+        c[i] += pointMu_[k][i] * relaxed;
+      }
+    }
+    flavour->relaxation = {&points_, c};
+  }
   flavours_.emplace_front(key, std::move(flavour));
   return *flavours_.front().second;
 }
@@ -176,11 +216,16 @@ const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
                                                             int l) const {
   auto found = flavour.systems.find(l);
   if (found == flavour.systems.end()) {
-    found = flavour.systems
-                .emplace(l, DegreeOperator(*flavour.material, l,
-                                           {.eps = options_.eps,
-                                            .truncation = options_.truncation}))
-                .first;
+    found =
+        flavour.systems
+            .emplace(l, DegreeOperator(
+                            *flavour.material, l,
+                            {.eps = options_.eps,
+                             .truncation = options_.truncation,
+                             .relaxation = flavour.relaxation.points != nullptr
+                                               ? &flavour.relaxation
+                                               : nullptr}))
+            .first;
   }
   return found->second;
 }
@@ -270,7 +315,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     task.m = &m;
     task.deg = &Deg(l);
     task.ncols =
-        static_cast<int>(m.size() / (K * 3 * task.deg->ne * task.deg->ngll));
+        static_cast<int>(m.size() / (K * 3 * task.deg->ne * task.deg->np));
     if (load || tide) {
       task.units = &UnitResponses(nullptr, l);
       task.load = FetchColumns(load, l, state.t, task.ncols);
@@ -312,7 +357,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::Strain(
     strains[j] = degs[j]->Strain(x, static_cast<int>(x.size() / degs[j]->ndof));
   });
   std::map<int, std::vector<double>> out;
-  for (std::size_t j = 0; j < inputs.size(); ++j) {
+  for (auto j = std::size_t{0}; j < inputs.size(); ++j) {
     out.emplace(inputs[j].first, std::move(strains[j]));
   }
   return out;
@@ -388,7 +433,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
   std::vector<const ViscoelasticOperator::Degree*> degs;
   for (const auto& [l, m] : state.m) {
     const auto& deg = op.Deg(l);
-    ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
+    ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     inputs.emplace_back(l, &m);
     degs.push_back(&deg);
   }
@@ -399,20 +444,19 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
     const auto l = inputs[j].first;
     const auto& m = *inputs[j].second;
     const auto& deg = *degs[j];
-    const int ncols = ncols_.at(l);
-    const std::size_t block = deg.NodalSize(ncols);
+    const auto ncols = ncols_.at(l);
+    const auto block = deg.NodalSize(ncols);
     std::vector<double> mem(m.size());
-    for (std::size_t k = 0; k < K; ++k) {
+    for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
-      for (int s = 0; s < 3; ++s) {
-        for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.ngll; ++q) {
-            const std::size_t full =
-                static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
-            const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
-            const std::size_t at = (k * 3 + s) * block + node;
-            for (int c = 0; c < ncols; ++c) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto node =
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto at = (k * 3 + s) * block + node;
+            for (auto c = 0; c < ncols; ++c) {
               if (scheme == Scheme::BackwardEuler) {
                 mem[at + c] = w.e[full] * m[at + c];
               } else {
@@ -427,7 +471,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
     }
     decayed[j] = std::move(mem);
   });
-  for (std::size_t j = 0; j < inputs.size(); ++j) {
+  for (auto j = std::size_t{0}; j < inputs.size(); ++j) {
     mem_.emplace(inputs[j].first, std::move(decayed[j]));
   }
 }
@@ -450,11 +494,11 @@ const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     const auto count = static_cast<int>(inputs.size());
     detail::ParallelFor(count, op_->options_.parallel, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
-      const int ncols = ncols_.at(inputs[j].first);
+      const auto ncols = ncols_.at(inputs[j].first);
       solved[j] = systems[j]->Solve(
           degs[j]->MemoryForce(*inputs[j].second, ncols), ncols);
     });
-    for (std::size_t j = 0; j < inputs.size(); ++j) {
+    for (auto j = std::size_t{0}; j < inputs.size(); ++j) {
       memorySolutions_.emplace(inputs[j].first, std::move(solved[j]));
     }
   }
@@ -518,27 +562,26 @@ ViscoelasticStep::Finish(const LoadCallable& load,
   detail::ParallelFor(count, op.options_.parallel, [&](int i) {
     auto& task = tasks[count - 1 - i];  // the largest degrees first
     const auto& deg = *task.deg;
-    const int ncols = task.ncols;
+    const auto ncols = task.ncols;
     auto x = memory.at(task.l);
     if (task.load) AddColumns(x, *task.units, 0, deg.ndof, *task.load, ncols);
     if (task.tide) AddColumns(x, *task.units, 1, deg.ndof, *task.tide, ncols);
     auto d1 = deg.Strain(x, ncols);
-    const std::size_t block = deg.NodalSize(ncols);
+    const auto block = deg.NodalSize(ncols);
     std::vector<double> mNew = *task.mem;
-    for (std::size_t k = 0; k < K; ++k) {
+    for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
-      for (int s = 0; s < 3; ++s) {
-        for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.ngll; ++q) {
-            const std::size_t full =
-                static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
-            const double factor = scheme_ == Scheme::BackwardEuler
-                                      ? 1.0 - w.e[full]
-                                      : w.beta[full];
-            const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
-            const std::size_t at = (k * 3 + s) * block + node;
-            for (int c = 0; c < ncols; ++c) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto factor = scheme_ == Scheme::BackwardEuler
+                                    ? 1.0 - w.e[full]
+                                    : w.beta[full];
+            const auto node =
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto at = (k * 3 + s) * block + node;
+            for (auto c = 0; c < ncols; ++c) {
               mNew[at + c] += factor * d1[s * block + node + c];
             }
           }
@@ -586,19 +629,18 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
     out.t = state.t + dt;
     for (const auto& [l, m] : state.m) {
       const auto& deg = Deg(l);
-      const int ncols =
-          static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
+      const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
       const std::size_t block = deg.NodalSize(ncols);
       std::vector<double> mNew(m.size());
       for (std::size_t k = 0; k < K; ++k) {
         const auto& w = weights[k];
         for (int s = 0; s < 3; ++s) {
           for (int e = 0; e < deg.ne; ++e) {
-            for (int q = 0; q < deg.ngll; ++q) {
+            for (int q = 0; q < deg.np; ++q) {
               const std::size_t full =
-                  static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+                  static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
               const std::size_t node =
-                  (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                  (static_cast<std::size_t>(e) * deg.np + q) * ncols;
               const std::size_t at = (k * 3 + s) * block + node;
               for (int c = 0; c < ncols; ++c) {
                 mNew[at + c] =
@@ -643,18 +685,18 @@ ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
   prev.t = state.t - dt;
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
+    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     const std::size_t block = deg.NodalSize(ncols);
     const auto& d1 = state.strain.at(l);
     std::vector<double> mPrev(m.size());
     for (std::size_t k = 0; k < K; ++k) {
       for (int s = 0; s < 3; ++s) {
         for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.ngll; ++q) {
+          for (int q = 0; q < deg.np; ++q) {
             const double h =
-                dt * deg.itau[k][static_cast<std::size_t>(e) * deg.ngll + q];
+                dt * deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
             const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             const std::size_t at = (k * 3 + s) * block + node;
             for (int c = 0; c < ncols; ++c) {
               mPrev[at + c] =
@@ -691,18 +733,18 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
   std::size_t count = 0;
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.ngll));
+    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
     const std::size_t block = deg.NodalSize(ncols);
     const auto& mNew = newState.m.at(l);
     for (std::size_t k = 0; k < K; ++k) {
       const auto& w = weights[k];
       for (int s = 0; s < 3; ++s) {
         for (int e = 0; e < deg.ne; ++e) {
-          for (int q = 0; q < deg.ngll; ++q) {
+          for (int q = 0; q < deg.np; ++q) {
             const std::size_t full =
-                static_cast<std::size_t>(deg.e0 + e) * deg.ngll + q;
+                static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
             const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.ngll + q) * ncols;
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             const std::size_t at = (k * 3 + s) * block + node;
             for (int c = 0; c < ncols; ++c) {
               const double companion =
@@ -739,13 +781,24 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {
-    const auto material = EffectiveMaterial(scheme, dt);
-    found = effectiveLove_
-                .emplace(key, ComputeLoveNumbers(
-                                  material, lmax_,
-                                  {.eps = options_.eps,
-                                   .truncation = options_.truncation}))
-                .first;
+    if (options_.memory_points == MemoryPointSet::Gll) {
+      const auto material = EffectiveMaterial(scheme, dt);
+      found = effectiveLove_
+                  .emplace(key, ComputeLoveNumbers(
+                                    material, lmax_,
+                                    {.eps = options_.eps,
+                                     .truncation = options_.truncation}))
+                  .first;
+    } else {
+      const auto& flavour = FlavourOf(scheme, dt);
+      found = effectiveLove_
+                  .emplace(key, ComputeLoveNumbers(
+                                    BaseMaterial(), lmax_,
+                                    {.eps = options_.eps,
+                                     .truncation = options_.truncation,
+                                     .relaxation = &flavour.relaxation}))
+                  .first;
+    }
   }
   return found->second;
 }

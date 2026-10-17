@@ -171,7 +171,13 @@ std::vector<std::vector<double>> IceKernels::Viscosity(
 
 AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
                              Options options)
-    : evolution_(&evolution), options_(options) {}
+    : evolution_(&evolution), options_(options) {
+  if (evolution.op_->options_.memory_points != MemoryPointSet::Gll) {
+    throw std::invalid_argument(
+        "the 1D adjoint sweeps take internal variables at the GLL nodes "
+        "only, so far (Gauss-point kernels are performance chunk 7b-ii)");
+  }
+}
 
 IceKernels AdjointSolver::IceHistoryKernels(
     std::span<const double> times,
