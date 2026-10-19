@@ -7,7 +7,7 @@ varying viscosity (3D). It succeeds the Fortran codes
 [sl3d](https://github.com/da380/sl3d) and [gia1d](https://github.com/da380/sl3d) , written by Ophelia Crawford
 and David Al-Attar with contributions from Andrew Lloyd and Frank Syvret.
 
-Developed as part of the grant NE/V010433/1, NSFGEO-NERC: Adjoint tomography
+Developed partially funded by the grant NE/V010433/1, NSFGEO-NERC: Adjoint tomography
 of mantle viscosity using deglacial sea level observations.
 
 ## What it computes
