@@ -4,7 +4,7 @@ A C++23 library for forward and adjoint modelling of glacial isostatic
 adjustment (GIA) and sea-level change on a self-gravitating, rotating,
 compressible viscoelastic Earth: spherically symmetric (1D) or with laterally
 varying viscosity (3D). It succeeds the Fortran codes
-[sl3d](https://github.com/da380/sl3d) and gia1d, written by Ophelia Crawford
+[sl3d](https://github.com/da380/sl3d) and [gia1d](https://github.com/da380/sl3d) , written by Ophelia Crawford
 and David Al-Attar with contributions from Andrew Lloyd and Frank Syvret.
 
 Developed as part of the grant NE/V010433/1, NSFGEO-NERC: Adjoint tomography
