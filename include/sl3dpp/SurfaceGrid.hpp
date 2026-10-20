@@ -85,6 +85,11 @@ class SurfaceGrid {
   [[nodiscard]] std::span<const double> Longitudes() const {
     return longitudes_;
   }
+  /// The Gauss-Legendre quadrature weights, one per colatitude (the
+  /// longitudes are uniform; Integrate() folds in their 2 pi / n).
+  [[nodiscard]] std::span<const double> CoLatitudeWeights() const {
+    return coLatitudeWeights_;
+  }
 
   /// The number of grid values of a field (colatitude-major).
   [[nodiscard]] std::size_t FieldSize() const {

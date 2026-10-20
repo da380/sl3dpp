@@ -46,13 +46,9 @@
 #include <string>
 
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/io/Error.hpp"
 
 namespace sl3dpp::io {
-
-/// Why a model file could not be read into sl3dpp's terms.
-struct IoError {
-  std::string message;
-};
 
 /// The radial reference a 3D viscosity is split against.
 enum class ViscosityReference { GeometricMean, FileRadial };

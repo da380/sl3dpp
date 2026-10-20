@@ -35,5 +35,9 @@ sl3dpp_add_test(TestEvolution3D)
 sl3dpp_add_test(TestFixtures)
 sl3dpp_add_test(TestMemoryPoints)
 sl3dpp_add_test(TestModelViscosity)
+sl3dpp_add_test(TestKernelWriter)
+# This test deliberately reads the written file back with planetmodel's
+# own reader, which the library links privately.
+target_link_libraries(TestKernelWriter PRIVATE planetmodel::planetmodel)
 sl3dpp_add_test(TestGaussMemory)
 sl3dpp_add_test(TestGaussMemory3D)

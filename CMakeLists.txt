@@ -118,6 +118,7 @@ add_library(sl3dpp STATIC
   src/Evolution3D.cpp
   src/Fingerprint.cpp
   src/GridCoupling.cpp
+  src/io/KernelWriter.cpp
   src/io/ModelViscosity.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
