@@ -4,13 +4,11 @@
  * a planetmodel model file and read back.
  *
  * The gates read the file back at the memory nodes and grid points,
- * where the writing is exact to rounding for a kernel of continuous
- * volume density — a real kernel's shape, and all the file can hold,
- * since its duplicated element-edge nodes carry one value per radius.
- * The angle is deterministic noise, the hardest case for any lateral
- * smoothing; the radial profile is arbitrary continuous at GLL memory
- * points (values pass as they are) and an element polynomial at the
- * Gauss default. The pairing
+ * where the writing is exact to rounding for ARBITRARY values — the
+ * file stores a shared element-edge radius once per side, so piecewise
+ * fields pass as they are; deterministic noise is the hardest case for
+ * any smoothing. A plain Value() read resolves a shared radius to the
+ * element above, which the round trip accounts for. The pairing
  * dJ = sum_node int K p dOmega computed from the file's content then
  * matches the in-memory pairing to rounding; that in-memory pairing is
  * the directional derivative by TestAdjoint3D's Taylor gate, which
@@ -148,27 +146,13 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
     const auto fieldSize = grid.FieldSize();
     const auto count = static_cast<std::size_t>(coupling.NodeCount());
 
-    // The file holds one value per shared radius, so the exact case is
-    // a kernel whose VOLUME density K / (w r^2) is continuous in r — a
-    // real kernel's shape (the one-sided angular densities differ only
-    // by their quadrature weights, which the writer divides out). At
-    // GLL memory points the values then pass as they are, any
-    // continuous radial profile; at the Gauss default the file's nodes
-    // take the element's polynomial through the Gauss values, so the
-    // profile must be one such polynomial. The angle is noise, the
-    // hardest case for any lateral smoothing, exact at the grid's own
-    // points under the bilinear rule.
+    // Arbitrary values: the file stores one value per node with a
+    // shared element-edge radius held once per side, so a piecewise
+    // field passes as it is; noise is the hardest case for any
+    // smoothing, radial or lateral.
     auto values = std::vector<double>(count * fieldSize);
-    for (auto node = 0; node < coupling.NodeCount(); ++node) {
-      const auto r = coupling.RadiusOfNode(node);
-      const auto profile = set == MemoryPointSet::Gll
-                               ? 2.0 + std::sin(20.0 * r)
-                               : 0.5 + r + 2.0 * r * r;
-      const auto radial = coupling.WeightOfNode(node) * r * r * profile;
-      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        values[static_cast<std::size_t>(node) * fieldSize + x] =
-            radial * Noise(x);
-      }
+    for (auto i = std::size_t{0}; i < values.size(); ++i) {
+      values[i] = Noise(i);
     }
     const auto path = std::filesystem::temp_directory_path() /
                       (set == MemoryPointSet::Gauss
@@ -197,15 +181,29 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
       }
       const auto& field = fields.at(layer);
       const auto r = coupling.RadiusOfNode(node);
-      const auto back =
-          coupling.WeightOfNode(node) * r * r * length * length * length;
+      // Value() reads a shared element-edge radius right-continuously
+      // within a layer (both one-sided values are in the file; the
+      // element above answers), so a GLL node at its element's top
+      // expects the next element's bottom copy — unless that edge is a
+      // layer boundary, where each layer's own field answers with its
+      // own side.
+      auto expected = node;
+      if (node + 1 < coupling.NodeCount() &&
+          coupling.RadiusOfNode(node + 1) == r &&
+          mesh.LayerOf(coupling.ElementOfNode(node + 1)) == layer) {
+        expected = node + 1;
+      }
       auto x = std::size_t{0};
       for (const auto theta : grid.CoLatitudes()) {
         for (const auto phi : grid.Longitudes()) {
           const auto wrote =
-              values[static_cast<std::size_t>(node) * fieldSize + x];
-          const auto read = field.Value(r * length, theta, phi) * back;
-          worst = std::max(worst, std::abs(read - wrote));
+              values[static_cast<std::size_t>(expected) * fieldSize + x];
+          const auto scaled =
+              field.Value(r * length, theta, phi) *
+              coupling.WeightOfNode(expected) *
+              coupling.RadiusOfNode(expected) *
+              coupling.RadiusOfNode(expected) * length * length * length;
+          worst = std::max(worst, std::abs(scaled - wrote));
           scale = std::max(scale, std::abs(wrote));
           ++x;
         }
@@ -213,7 +211,11 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
     }
     EXPECT_LT(worst, 1e-11 * scale);
 
-    // The pairing against a perturbation survives the file.
+    // The pairing against a perturbation survives the file. The nodal
+    // quadrature reads each node's own side, so this gate runs on the
+    // Gauss set, whose memory radii are strictly interior; the GLL
+    // data's integrity is the round trip above (a side-aware quadrature
+    // pairs it the same way).
     const auto p = grid.FromFunction(Direction);
     auto inMemory = 0.0;
     auto product = std::vector<double>(fieldSize);
@@ -226,9 +228,11 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
       }
       inMemory += grid.Integrate(product);
     }
-    const auto fromFile =
-        FilePairing(file, "log_viscosity_kernel", coupling, mesh, length, p);
-    EXPECT_NEAR(fromFile, inMemory, 1e-11 * std::abs(inMemory));
+    if (set == MemoryPointSet::Gauss) {
+      const auto fromFile = FilePairing(file, "log_viscosity_kernel",
+                                        coupling, mesh, length, p);
+      EXPECT_NEAR(fromFile, inMemory, 1e-11 * std::abs(inMemory));
+    }
 
     // The file's shape: the model's skeleton, the viscous layers held.
     const auto& skeleton = file.GetSkeleton().Boundaries();

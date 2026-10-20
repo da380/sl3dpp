@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <planetmodel/gll.hpp>
 #include <planetmodel/modelfile.hpp>
 #include <utility>
 #include <vector>
@@ -35,45 +36,6 @@ std::vector<Run> RunsOf(const GridCoupling& coupling, const RadialMesh& mesh) {
   }
   return runs;
 }
-
-/// One kernel as the file reads it: a lateral interpolant of the SI
-/// volume density per memory node, read radially through each element's
-/// memory points by their own polynomial.
-struct Sampler {
-  const GridCoupling* coupling = nullptr;
-  const std::vector<Run>* runs = nullptr;
-  std::vector<planetmodel::LateralInterpolant> nodes;
-  double length = 1.0;  ///< the model's length scale, metres
-
-  double operator()(double rSI, double theta, double phi) const {
-    const auto r = rSI / length;
-    // the run holding r, then its element, right-continuously
-    const auto& runs = *this->runs;
-    auto run = runs.begin();
-    while (run + 1 != runs.end() && (run + 1)->lefts.front() <= r) ++run;
-    const auto clamped = std::clamp(r, run->lefts.front(), run->right);
-    const auto i =
-        std::upper_bound(run->lefts.begin(), run->lefts.end(), clamped) -
-        run->lefts.begin() - 1;
-    const auto np = coupling->Points().count;
-    const auto base =
-        run->firstNode + static_cast<int>(i) * np;
-    // the element's own polynomial through its memory points
-    auto value = 0.0;
-    for (auto p = 0; p < np; ++p) {
-      auto cardinal = 1.0;
-      const auto rp = coupling->RadiusOfNode(base + p);
-      for (auto q = 0; q < np; ++q) {
-        if (q == p) continue;
-        const auto rq = coupling->RadiusOfNode(base + q);
-        cardinal *= (clamped - rq) / (rp - rq);
-      }
-      value += cardinal * nodes[static_cast<std::size_t>(base + p)]
-                              .Value(theta, phi);
-    }
-    return value;
-  }
-};
 
 }  // namespace
 
@@ -171,33 +133,76 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
     file.AddField("rho", rho);
 
     for (const auto& kernel : kernels) {
-      // The SI volume density at each memory node: the angular density
-      // over the node's radial weight and r^2, re-dimensionalised. The
-      // grid has no poles; each pole takes its nearest ring's mean.
+      // Per layer, the values at the layer's own points: every file node
+      // of every element, element by element — a shared edge radius
+      // appears once per side and keeps each element's own value, which
+      // is how the format holds a piecewise field — then the poles,
+      // which the grid lacks, each the nearest ring's mean. Each value
+      // is the SI volume density: the element's own polynomial through
+      // its memory points of the angular density over the radial weight
+      // and r^2, re-dimensionalised.
       const auto factor =
           scales.Factor(kernel.objective) / (length * length * length);
-      auto sampler = Sampler{&coupling, &runs, {}, length};
-      sampler.nodes.reserve(static_cast<std::size_t>(nodeCount));
       const auto nphi = grid.Longitudes().size();
-      auto row = std::vector<double>(fieldSize);
-      for (auto node = 0; node < nodeCount; ++node) {
-        const auto r = coupling.RadiusOfNode(node);
-        const auto scale = factor / (coupling.WeightOfNode(node) * r * r);
-        const auto at = kernel.values.subspan(
-            static_cast<std::size_t>(node) * fieldSize, fieldSize);
-        for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-          row[x] = at[x] * scale;
+      auto sources = std::map<int, planetmodel::LayerSource>{};
+      for (const auto& run : runs) {
+        for (auto layer = mesh.LayerOf(run.firstElement);
+             layer <= mesh.LayerOf(run.lastElement); ++layer) {
+          auto rows = std::vector<double>{};
+          auto poles = std::vector<double>{};
+          auto row = std::vector<double>(fieldSize);
+          auto density = std::vector<double>(
+              static_cast<std::size_t>(np) * fieldSize);
+          for (auto e = run.firstElement; e <= run.lastElement; ++e) {
+            if (mesh.LayerOf(e) != layer) continue;
+            const auto base =
+                run.firstNode + (e - run.firstElement) * np;
+            for (auto p = 0; p < np; ++p) {
+              const auto r = coupling.RadiusOfNode(base + p);
+              const auto scale =
+                  factor / (coupling.WeightOfNode(base + p) * r * r);
+              const auto at = kernel.values.subspan(
+                  static_cast<std::size_t>(base + p) * fieldSize, fieldSize);
+              for (auto x = std::size_t{0}; x < fieldSize; ++x) {
+                density[static_cast<std::size_t>(p) * fieldSize + x] =
+                    at[x] * scale;
+              }
+            }
+            const auto nodes = planetmodel::GllNodes(
+                mesh.Left(e) * length, mesh.Right(e) * length,
+                static_cast<std::size_t>(np));
+            for (const auto rFile : nodes) {
+              std::ranges::fill(row, 0.0);
+              for (auto p = 0; p < np; ++p) {
+                auto cardinal = 1.0;
+                const auto rp = coupling.RadiusOfNode(base + p) * length;
+                for (auto q = 0; q < np; ++q) {
+                  if (q == p) continue;
+                  const auto rq = coupling.RadiusOfNode(base + q) * length;
+                  cardinal *= (rFile - rq) / (rp - rq);
+                }
+                for (auto x = std::size_t{0}; x < fieldSize; ++x) {
+                  row[x] +=
+                      cardinal *
+                      density[static_cast<std::size_t>(p) * fieldSize + x];
+                }
+              }
+              rows.insert(rows.end(), row.begin(), row.end());
+              auto north = 0.0;
+              auto south = 0.0;
+              for (auto j = std::size_t{0}; j < nphi; ++j) {
+                north += row[j];
+                south += row[fieldSize - nphi + j];
+              }
+              poles.push_back(north / static_cast<double>(nphi));
+              poles.push_back(south / static_cast<double>(nphi));
+            }
+          }
+          rows.insert(rows.end(), poles.begin(), poles.end());
+          sources.emplace(layer,
+                          planetmodel::LayerSource::LateralValues(
+                              std::move(rows), planetmodel::Frame::Spherical));
         }
-        auto poles = std::array<double, 2>{0.0, 0.0};
-        for (auto j = std::size_t{0}; j < nphi; ++j) {
-          poles[0] += row[j];
-          poles[1] += row[fieldSize - nphi + j];
-        }
-        poles[0] /= static_cast<double>(nphi);
-        poles[1] /= static_cast<double>(nphi);
-        sampler.nodes.emplace_back(fileGrid, row, poles,
-                                   planetmodel::LateralRule::Linear,
-                                   kernel.name);
       }
 
       const auto spec = planetmodel::FieldSpec{
@@ -207,14 +212,6 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
                                       .length = kernel.objective.length - 3,
                                       .time = kernel.objective.time},
           .meaning = kernel.meaning};
-      auto sources = std::map<int, planetmodel::LayerSource>{};
-      for (const auto layer : layers) {
-        sources.emplace(layer, planetmodel::LayerSource::Lateral(
-                                   [sampler](double r, double theta,
-                                             double phi) {
-                                     return sampler(r, theta, phi);
-                                   }));
-      }
       file.AddField(kernel.name, spec, sources,
                     {.lateral = planetmodel::LateralRule::Linear});
     }

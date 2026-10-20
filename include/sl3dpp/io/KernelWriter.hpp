@@ -19,17 +19,16 @@
  * Layout: one part per contiguous run of viscous elements, its edges
  * the mesh's own (RadialMesh::Left/Right), its nodes the GLL points of
  * each element, written on the coupling's grid with the BILINEAR
- * lateral rule (a peaked field; the bicubic rings). The file's
- * duplicated element-edge nodes hold one value per radius, so what is
- * stored is the kernel's continuous volume density — which a kernel
- * is, its one-sided angular densities differing only by the quadrature
- * weights divided out here. With GLL memory points the file's nodes
- * are the memory nodes and the values pass as they are; with Gauss
- * memory points (the default) the file's nodes take each element's own
- * polynomial through the Gauss values. Either way a read at a memory
- * node and a grid point returns the written value to rounding for a
- * continuous density (radially polynomial, for the Gauss set), and to
- * the kernel's own smoothness otherwise. The grid has no poles,
+ * lateral rule (a peaked field; the bicubic rings). The file
+ * stores one value per node with a shared element-edge radius held
+ * once per side, so the field is piecewise: with GLL memory points the
+ * file's nodes are the memory nodes and the values pass as they are;
+ * with Gauss memory points (the default) each element's nodes take its
+ * own polynomial through its Gauss values. A read at a memory node and
+ * a grid point returns the written value to rounding, with one reading
+ * convention to know: planetmodel resolves a shared radius to the
+ * element above within a layer, and at a LAYER boundary each side is
+ * read through its own layer's field. The grid has no poles,
  * so each pole's stored value is the nearest colatitude ring's mean.
  * The model's density rides along as the radial reference.
  */
