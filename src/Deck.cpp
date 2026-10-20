@@ -4,174 +4,81 @@
 #include <cmath>
 #include <format>
 #include <fstream>
-#include <sstream>
+#include <limits>
+#include <planetmodel/deck.hpp>
+#include <utility>
 
 namespace sl3dpp {
 
 namespace {
 
-/// The whitespace-separated doubles of a line ("nan" included), or an error
-/// naming the offending token.
-std::expected<std::vector<double>, DeckError> ParseRow(
-    const std::string& line) {
-  auto row = std::vector<double>{};
-  std::istringstream stream(line);
-  auto token = std::string{};
-  while (stream >> token) {
-    try {
-      auto used = std::size_t{0};
-      auto value = std::stod(token, &used);
-      if (used != token.size()) throw std::invalid_argument(token);
-      row.push_back(value);
-    } catch (const std::exception&) {
-      return std::unexpected(
-          DeckError{std::format("not a number: {:.40}", token)});
-    }
-  }
-  return row;
+/// sl3dpp's format handed to planetmodel's reader: the same columns and
+/// header count, the header kept verbatim — sl3dpp formats state no
+/// header contract, so planetmodel's own header checks are not wired in.
+planetmodel::DeckFormat Translated(const DeckFormat& format) {
+  return {.name = format.name,
+          .columns = format.columns,
+          .header_lines = format.header_lines};
 }
 
 }  // namespace
 
 DeckFormat MineosFormat() {
-  return DeckFormat::ByWidth(
-      "mineos",
-      {{8, {"rho", "vpv", "vsv", "qkappa", "qmu", "vph", "vsh", "eta"}},
-       {5, {"rho", "vp", "vs", "qkappa", "qmu"}}},
-      3);
+  return DeckFormat::ByWidth("mineos",
+                             {{8, planetmodel::MINEOS_COLUMNS},
+                              {5, planetmodel::MINEOS_ISOTROPIC_COLUMNS}},
+                             3);
 }
 
 DeckFormat GiaFormat() {
-  return DeckFormat("gia",
-                    {"rho", "vpv", "vsv", "vph", "vsh", "eta", "viscosity"}, 2);
+  return DeckFormat("gia", planetmodel::GIA_COLUMNS, 2);
 }
 
 std::expected<Deck, DeckError> Deck::Create(
     std::vector<double> radius,
     std::vector<std::pair<std::string, std::vector<double>>> columns,
     std::vector<std::string> header) {
-  if (radius.size() < 2) {
-    return std::unexpected(DeckError{"a deck needs at least two knot radii"});
-  }
-  for (auto i = std::size_t{1}; i < radius.size(); ++i) {
-    if (radius[i] < radius[i - 1]) {
-      return std::unexpected(DeckError{std::format(
-          "knot radii must be non-decreasing; knot {} (r = {:g}) is below "
-          "knot {} (r = {:g})",
-          i, radius[i], i - 1, radius[i - 1])});
-    }
-  }
-
   Deck deck;
-  for (auto& [name, values] : columns) {
-    if (values.size() != radius.size()) {
-      return std::unexpected(
-          DeckError{std::format("column '{}' has {} values, the radii {}", name,
-                                values.size(), radius.size())});
-    }
+  for (const auto& [name, values] : columns) {
     if (std::ranges::find(deck.names_, name) != deck.names_.end()) {
       return std::unexpected(
           DeckError{std::format("column '{}' appears twice", name)});
     }
     deck.names_.push_back(name);
-    deck.values_.push_back(std::move(values));
   }
-
-  // The layering: one layer per span between repeated radii.
-  auto start = std::size_t{0};
-  deck.boundaries_.push_back(radius.front());
-  for (auto i = std::size_t{1}; i < radius.size(); ++i) {
-    if (radius[i] == radius[i - 1]) {
-      if (i + 1 < radius.size() && radius[i + 1] == radius[i]) {
-        return std::unexpected(DeckError{std::format(
-            "the radius {:g} repeats more than twice: a layer of no "
-            "thickness",
-            radius[i])});
-      }
-      deck.layers_.emplace_back(start, i);
-      deck.boundaries_.push_back(radius[i]);
-      start = i;
+  try {
+    // planetmodel's Deck is the one validator (stage 11 WP4): the radii,
+    // the column sizes, the layering and its refusals.
+    const auto read = planetmodel::Deck(std::move(radius), std::move(columns),
+                                        std::move(header));
+    deck.radius_ = read.Radius();
+    deck.header_ = read.Header();
+    deck.layers_ = read.Layers();
+    deck.boundaries_ = read.Boundaries();
+    for (const auto& name : deck.names_) {
+      deck.values_.push_back(read.Column(name));
     }
+    return deck;
+  } catch (const planetmodel::Error& error) {
+    return std::unexpected(DeckError{error.what()});
   }
-  deck.layers_.emplace_back(start, radius.size());
-  deck.boundaries_.push_back(radius.back());
-
-  for (auto [first, last] : deck.layers_) {
-    if (last - first < 2) {
-      return std::unexpected(DeckError{std::format(
-          "the layer starting at r = {:g} has one knot; every layer needs "
-          "at least two",
-          radius[first])});
-    }
-  }
-
-  deck.radius_ = std::move(radius);
-  deck.header_ = std::move(header);
-  return deck;
 }
 
 std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
                                           const DeckFormat& format) {
-  std::ifstream file(path);
-  if (!file) {
-    return std::unexpected(
-        DeckError{std::format("cannot open {}", path.string())});
-  }
-  auto lines = std::vector<std::string>{};
-  for (std::string line; std::getline(file, line);) lines.push_back(line);
-
-  if (lines.size() < format.header_lines) {
-    return std::unexpected(DeckError{std::format(
-        "{}: {} lines, fewer than the {} header lines of a {} deck",
-        path.string(), lines.size(), format.header_lines, format.name)});
-  }
-  std::vector<std::string> header(lines.begin(),
-                                  lines.begin() + format.header_lines);
-
-  auto radius = std::vector<double>{};
-  auto table = std::vector<std::vector<double>>{};  // one vector per column
-  const std::vector<std::string>* names = nullptr;
-  for (std::size_t i = format.header_lines; i < lines.size(); ++i) {
-    auto row = ParseRow(lines[i]);
-    if (!row) {
-      return std::unexpected(DeckError{
-          std::format("{}:{}: {}", path.string(), i + 1, row.error().message)});
+  try {
+    // planetmodel's reader is the one parser (stage 11 WP4): deck.py's
+    // own semantics — blank lines and `#` comments skipped, `nan` and a
+    // leading `+` read as Python reads them.
+    const auto read = planetmodel::ReadDeck(path, Translated(format));
+    auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
+    for (const auto& name : read.Names()) {
+      columns.emplace_back(name, read.Column(name));
     }
-    if (row->empty()) continue;  // blank line
-    const auto width = row->size() - 1;
-    if (names == nullptr) {
-      auto found = format.columns.find(width);
-      if (found == format.columns.end()) {
-        return std::unexpected(DeckError{std::format(
-            "{}:{}: a {} deck does not admit {} columns after the radius",
-            path.string(), i + 1, format.name, width)});
-      }
-      names = &found->second;
-      table.resize(width);
-    } else if (width != names->size()) {
-      return std::unexpected(DeckError{std::format(
-          "{}:{}: {} columns after the radius, previous rows had {}",
-          path.string(), i + 1, width, names->size())});
-    }
-    radius.push_back((*row)[0]);
-    for (auto j = std::size_t{0}; j < width; ++j)
-      table[j].push_back((*row)[j + 1]);
+    return Create(read.Radius(), std::move(columns), read.Header());
+  } catch (const planetmodel::Error& error) {
+    return std::unexpected(DeckError{error.what()});
   }
-  if (names == nullptr) {
-    return std::unexpected(
-        DeckError{std::format("{}: no knots after the header", path.string())});
-  }
-
-  auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
-  for (auto j = std::size_t{0}; j < names->size(); ++j) {
-    columns.emplace_back((*names)[j], std::move(table[j]));
-  }
-  auto deck = Create(std::move(radius), std::move(columns), std::move(header));
-  if (!deck) {
-    return std::unexpected(
-        DeckError{std::format("{}: {}", path.string(), deck.error().message)});
-  }
-  return deck;
 }
 
 std::expected<Deck, DeckError> Deck::ReadLegacySl3d(
