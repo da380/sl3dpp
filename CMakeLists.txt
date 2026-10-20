@@ -23,9 +23,11 @@ option(SL3DPP_BUILD_EXAMPLES "Build the example drivers" ON)
 # Dependencies.
 #
 # The sibling header-only libraries are pinned by commit.  Declaration order
-# matters: the first declaration of a name wins, so declaring all five here
+# matters: the first declaration of a name wins, so declaring them all here
 # keeps GSHTrans's own (unpinned, main-tracking) declarations from taking
-# over, and the whole dependency set moves only when these tags are edited.
+# over — and planetmodel's Interpolation requirement (>= v1.1.2) is met by
+# this file's own pin — so the whole dependency set moves only when these
+# tags are edited.
 #
 # For local development against working copies, point FetchContent at them:
 #
@@ -34,7 +36,8 @@ option(SL3DPP_BUILD_EXAMPLES "Build the example drivers" ON)
 #     -DFETCHCONTENT_SOURCE_DIR_GAUSSQUAD=~/dev/GaussQuad \
 #     -DFETCHCONTENT_SOURCE_DIR_INTERPOLATION=~/dev/Interpolation \
 #     -DFETCHCONTENT_SOURCE_DIR_FFTWPP=~/dev/FFTWpp \
-#     -DFETCHCONTENT_SOURCE_DIR_GSHTRANS=~/dev/GSHTrans
+#     -DFETCHCONTENT_SOURCE_DIR_GSHTRANS=~/dev/GSHTrans \
+#     -DFETCHCONTENT_SOURCE_DIR_PLANETMODEL=~/dev/planetmodel
 #
 # An installed copy is preferred when present (FIND_PACKAGE_ARGS).
 # ---------------------------------------------------------------------------
@@ -50,6 +53,8 @@ set(SL3DPP_FFTWPP_TAG "423558c0842b25f6031f2ae58dcab36d8f5f8874"
     CACHE STRING "FFTWpp commit")
 set(SL3DPP_GSHTRANS_TAG "8dd116df8df4222fe9b10a40c7213d34f2a274fb"
     CACHE STRING "GSHTrans commit")
+set(SL3DPP_PLANETMODEL_TAG "35be4ee54b3d84df1483e647878c5446a886c90b"
+    CACHE STRING "planetmodel commit (v1.3.0)")
 
 FetchContent_Declare(
   NumericConcepts
@@ -81,8 +86,16 @@ FetchContent_Declare(
   GIT_TAG ${SL3DPP_GSHTRANS_TAG}
   FIND_PACKAGE_ARGS)
 
+# The whole repository is fetched (SOURCE_SUBDIR, no shallow clone of cpp/
+# alone): cpp/CMakeLists.txt reads the version from ../pyproject.toml.
+FetchContent_Declare(
+  planetmodel
+  GIT_REPOSITORY https://github.com/da380/planetmodel.git
+  GIT_TAG ${SL3DPP_PLANETMODEL_TAG}
+  SOURCE_SUBDIR cpp)
+
 FetchContent_MakeAvailable(NumericConcepts GaussQuad Interpolation FFTWpp
-                           GSHTrans)
+                           GSHTrans planetmodel)
 
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(BLAS REQUIRED)
@@ -130,6 +143,10 @@ target_link_libraries(sl3dpp PUBLIC
   LAPACK::LAPACK
   BLAS::BLAS
   PkgConfig::NETCDF)
+
+# Private: planetmodel's types stay behind the io/ boundary (stage 11);
+# sl3dpp's public headers never include its headers.
+target_link_libraries(sl3dpp PRIVATE planetmodel::planetmodel)
 
 target_compile_options(sl3dpp PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)
