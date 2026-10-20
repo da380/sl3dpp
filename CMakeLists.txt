@@ -101,9 +101,9 @@ find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(BLAS REQUIRED)
 find_package(LAPACK REQUIRED)
 
-# netCDF-C, for the 3D model files and the ice histories.
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(NETCDF REQUIRED IMPORTED_TARGET netcdf)
+# netCDF-C comes in through planetmodel, which finds it itself (CONFIG
+# first, then pkg-config) and makes the netCDF::netcdf target global for
+# any future direct use (the ice histories, say).
 
 # ---------------------------------------------------------------------------
 # The library.
@@ -118,6 +118,7 @@ add_library(sl3dpp STATIC
   src/Evolution3D.cpp
   src/Fingerprint.cpp
   src/GridCoupling.cpp
+  src/io/ModelViscosity.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
   src/MemoryPoints.cpp
@@ -141,8 +142,7 @@ target_link_libraries(sl3dpp PUBLIC
   GaussQuad::GaussQuad
   OpenMP::OpenMP_CXX
   LAPACK::LAPACK
-  BLAS::BLAS
-  PkgConfig::NETCDF)
+  BLAS::BLAS)
 
 # Private: planetmodel's types stay behind the io/ boundary (stage 11);
 # sl3dpp's public headers never include its headers.
