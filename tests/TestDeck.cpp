@@ -74,7 +74,8 @@ TEST(Deck, RefusesWrongWidth) {
                         "1000.0  4000.0  7.0\n");
   auto result = Deck::Read(path, DeckFormat("test", {"rho"}, 0));
   ASSERT_FALSE(result.has_value());
-  EXPECT_NE(result.error().message.find("columns"), std::string::npos);
+  // planetmodel's reader words the width mismatch in values per row.
+  EXPECT_NE(result.error().message.find("values"), std::string::npos);
 }
 
 TEST(Deck, MineosFormatAdmitsBothWidths) {

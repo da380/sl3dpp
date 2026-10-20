@@ -12,10 +12,13 @@
  * layer (the way a fluid layer holds no viscosity), while NaN on part of a
  * layer is refused downstream.
  *
- * The semantics mirror planetmodel's `deck.py`, whose files are the
- * interchange format this reader targets. A deck is numbers and a header,
- * nothing else: values are kept exactly as the file gives them (SI for
- * planetmodel decks), and non-dimensionalisation belongs to EarthModel.
+ * The parsing and validation are planetmodel's own C++ deck reader
+ * (stage 11 WP4), so the semantics are `deck.py`'s exactly: blank lines
+ * and `#` comments in the table are skipped, `nan` and a leading `+`
+ * read as Python reads them. Only the legacy sl3d format below is
+ * parsed here. A deck is numbers and a header, nothing else: values are
+ * kept exactly as the file gives them (SI for planetmodel decks), and
+ * non-dimensionalisation belongs to EarthModel.
  */
 
 #include <cstddef>
