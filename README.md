@@ -158,7 +158,7 @@ The build type defaults to `Release`. The build produces the static library
 | `CMAKE_BUILD_TYPE` | `Release` | The standard CMake build types |
 | `SL3DPP_BUILD_TESTS` | `ON` | The test suite |
 | `SL3DPP_BUILD_EXAMPLES` | `ON` | The example drivers |
-| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and `traction_numbers` |
+| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `traction_numbers` and `love_numbers` |
 | `SL3DPP_PYSLFP_DIR` | a sibling `pyslfp` | A pyslfp checkout, from which the build extracts the examples' present-day Earth state (needed by the fingerprint, evolution and kernel examples) |
 
 To build against local checkouts of the header-only dependencies rather than
@@ -222,6 +222,9 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
 - `traction_numbers <deck> <lmax> <out.txt> [nongrav|grav]` writes the E1
   traction numbers of a deck as a cross-code exchange file, for the
   benchmark harness in AdGIA's `benchmarks/elastic/nongrav/`.
+- `love_numbers <deck> <lmax> <out.txt>` writes the E2 conventional Love
+  numbers (load primed, geodetic tidal) the same way, for
+  `benchmarks/elastic/grav/`.
 
 ## Documentation
 
