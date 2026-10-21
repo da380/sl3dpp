@@ -23,3 +23,8 @@ add_executable(love_numbers love_numbers.cpp)
 target_link_libraries(love_numbers PRIVATE sl3dpp::sl3dpp)
 target_compile_definitions(love_numbers PRIVATE
   SL3DPP_GIT_COMMIT="${SL3DPP_GIT_COMMIT}")
+
+add_executable(love_histories love_histories.cpp)
+target_link_libraries(love_histories PRIVATE sl3dpp::sl3dpp)
+target_compile_definitions(love_histories PRIVATE
+  SL3DPP_GIT_COMMIT="${SL3DPP_GIT_COMMIT}")
