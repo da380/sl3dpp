@@ -821,3 +821,18 @@ format, tomography ingestion, viscosity scaling chain (§2.5).
   different type (a deliberate conversion), multi-line declarations, and
   loops with non-literal starts.
 
+- **21 Oct 2026** — The E1 tier of the cross-code benchmark hierarchy
+  (planned in `~/dev/planning/benchmark-plan.md`, orchestrated from
+  `AdGIA/benchmarks/`): `DegreeOperator` gains `gravitating = false`,
+  dropping the gravity and potential terms and the phi dofs (U, V alone;
+  U at l = 0), on a solid model, l != 1 excluded (a surface traction
+  there has a net force against the rigid translations); the unit
+  tractions `Traction()` / `TractionTangential()` (`Load(Force)` is g
+  times `Traction()` on the full problem); and
+  `ComputeTractionNumbers(material, lmax, gravitating)` returning the
+  SI surface response per unit traction, mirroring pyslfp's
+  `traction_numbers` exactly. Gated by `TestTractionNumbers`: identical
+  discrete problem against pyslfp fixtures at 1e-10
+  (`make_e1_fixtures.py`, homogeneous and two-solid decks from AdGIA's
+  ladder), the degree-0 closed form -a/(3 kappa), reciprocity
+  h_v = l(l+1) l_u, and the g-tie to `ComputeLoveNumbers`.

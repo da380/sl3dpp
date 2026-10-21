@@ -4,6 +4,7 @@
 #include <cmath>
 #include <format>
 #include <fstream>
+#include <limits>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
@@ -248,6 +249,65 @@ std::expected<LoveNumbers, ModelError> LoveNumbers::FromFile(
         "{}: not a Love-number table (needs radius, surface_gravity and a "
         "table)",
         path.string())});
+  }
+  return out;
+}
+
+double TractionNumbers::ReciprocityResidual() const {
+  auto worst = 0.0;
+  for (auto i = std::size_t{0}; i < degrees.size(); ++i) {
+    if (std::isnan(h_v[i]) || std::isnan(l_u[i])) continue;
+    const double k2 = degrees[i] * (degrees[i] + 1.0);
+    const auto scale = std::max(std::abs(h_v[i]), std::abs(k2 * l_u[i]));
+    if (scale == 0.0) continue;
+    worst = std::max(worst, std::abs(h_v[i] - k2 * l_u[i]) / scale);
+  }
+  return worst;
+}
+
+TractionNumbers ComputeTractionNumbers(const Material& material, int lmax,
+                                       bool gravitating,
+                                       LoveNumberOptions options) {
+  if (lmax < 0) {
+    throw std::invalid_argument("lmax must be non-negative");
+  }
+  // Displacement per unit traction, SI.
+  constexpr Dimensions kHPerTraction{.mass = -1, .length = 2, .time = 2};
+  const auto& scales = material.ModelScales();
+  const auto hFactor = scales.Factor(kHPerTraction);
+
+  TractionNumbers out;
+  out.gravitating = gravitating;
+  out.radius = material.Radius() * scales.Length();
+  out.degrees.resize(lmax + 1);
+  for (auto l = 0; l <= lmax; ++l) out.degrees[l] = l;
+  constexpr auto kNaN = std::numeric_limits<double>::quiet_NaN();
+  for (auto* v : {&out.h_u, &out.l_u, &out.h_v, &out.l_v}) {
+    v->assign(lmax + 1, kNaN);
+  }
+
+#pragma omp parallel for schedule(dynamic)
+  for (auto l = 0; l <= lmax; ++l) {
+    if (l == 1 && !gravitating) continue;
+    DegreeOperator op(material, l,
+                      {.eps = options.eps,
+                       .truncation = options.truncation,
+                       .point_shear = options.point_shear,
+                       .gravitating = gravitating});
+    const auto n = op.DofCount();
+    auto rhs = std::vector<double>(static_cast<std::size_t>(n) * 2);
+    std::ranges::copy(op.Traction(), rhs.begin());
+    std::ranges::copy(op.TractionTangential(), rhs.begin() + n);
+    const auto x = op.Solve(rhs, 2);
+    const auto iU = op.SurfaceDof(Component::U);
+    const auto iV = op.SurfaceDof(Component::V);
+    auto value = [&](int dof, int column) {
+      return dof >= 0 ? x[static_cast<std::size_t>(column) * n + dof] : 0.0;
+    };
+    out.h_u[l] = value(iU, 0) * hFactor;
+    out.l_u[l] = value(iV, 0) * hFactor;
+    out.h_v[l] = value(iU, 1) * hFactor;
+    out.l_v[l] = value(iV, 1) * hFactor;
   }
   return out;
 }
