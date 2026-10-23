@@ -33,6 +33,15 @@
  * by its diagonal and factorised on construction: banded Cholesky, falling
  * back to banded LU (the fluid limit's semi-definite elastic block, say).
  * Solves take one or several right-hand sides.
+ *
+ * With `gravitating = false` the same discretisation solves the
+ * non-gravitating problem of the cross-code benchmark hierarchy: the
+ * gravity and potential terms are dropped, the unknowns are U and V alone
+ * (U alone at l = 0), and the natural forcings are the unit tractions. It
+ * takes a solid model -- a fluid region has no restoring force without
+ * gravity -- and excludes degree 1, where a surface traction has a net
+ * force against the rigid translations. This mirrors pyslfp's
+ * `DegreeSystem(..., gravitating=False)` exactly.
  */
 
 #include <span>
@@ -64,6 +73,9 @@ class DegreeOperator {
     /// operator with internal variables at those points. Read during
     /// construction only.
     const PointShear* point_shear = nullptr;
+    /// false drops the gravity and potential terms and the phi dofs: the
+    /// non-gravitating problem, on a solid model, l != 1 (see above).
+    bool gravitating = true;
   };
 
   /// Assemble and factorise the degree-l system. The material is
@@ -99,6 +111,18 @@ class DegreeOperator {
   /// takes -g a^2 l(l + 1). Zero at l = 0, where there is no tangential
   /// dof.
   [[nodiscard]] std::vector<double> Tangential() const;
+
+  /// The force of a unit normal traction pressing on the surface, -Y_lm
+  /// r_hat per unit amplitude: -a^2 on U'(a). It is the traction piece of
+  /// `Load` per unit of traction rather than of surface density --
+  /// `Load(LoadPart::Force)` is g times this -- and the natural forcing of
+  /// the non-gravitating problem, where no g sets the scale.
+  [[nodiscard]] std::vector<double> Traction() const;
+
+  /// The force of a unit tangential traction, -grad_1 Y_lm per unit
+  /// amplitude: -a^2 l(l + 1) on V'(a); `Tangential` is g times this. Zero
+  /// at l = 0, where there is no tangential dof.
+  [[nodiscard]] std::vector<double> TractionTangential() const;
 
   /// The force of a unit external potential psi = (r/a)^power, the power
   /// defaulting to l (the harmonic tide): the known psi moved to the
@@ -156,6 +180,7 @@ class DegreeOperator {
 
   const Material* material_;
   int l_;
+  bool gravitating_ = true;
   int firstElement_ = 0;
   int kd_ = 0;
   int ndof_ = 0;

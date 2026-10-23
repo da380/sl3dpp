@@ -33,14 +33,29 @@ double Stratification(double r, double drho, double g) {
 }  // namespace
 
 DegreeOperator::DegreeOperator(const Material& material, int l, Options options)
-    : material_(&material), l_(l) {
+    : material_(&material), l_(l), gravitating_(options.gravitating) {
   if (l < 0) {
     throw std::invalid_argument("degree must be non-negative");
   }
   const auto& mesh = material.Mesh();
+  if (!gravitating_) {
+    if (l == 1) {
+      throw std::invalid_argument(
+          "the non-gravitating problem excludes degree 1: a surface "
+          "traction there has a net force against the rigid translations");
+    }
+    for (int e = 0; e < mesh.ElementCount(); ++e) {
+      if (material.IsFluid(e)) {
+        throw std::invalid_argument(
+            "the non-gravitating problem takes a solid model: a fluid "
+            "region has no restoring force without gravity");
+      }
+    }
+  }
   firstElement_ =
       l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
-  kd_ = 3 * (mesh.NGll() - 1) + 2;
+  const auto ncomp = gravitating_ ? 3 : (l == 0 ? 1 : 2);
+  kd_ = ncomp * (mesh.NGll() - 1) + ncomp - 1;
   BuildDofMap();
   Assemble(options.point_shear);
   Factorise();
@@ -65,9 +80,13 @@ void DegreeOperator::BuildDofMap() {
   ndof_ = 0;
   static constexpr int kAll[] = {0, 1, 2};
   static constexpr int kNoTangential[] = {0, 2};  // l = 0
+  static constexpr int kDisplacement[] = {0, 1};  // non-gravitating
+  static constexpr int kRadial[] = {0};           // non-gravitating l = 0
   const std::span<const int> components =
-      l_ == 0 ? std::span<const int>(kNoTangential)
-              : std::span<const int>(kAll);
+      gravitating_ ? (l_ == 0 ? std::span<const int>(kNoTangential)
+                              : std::span<const int>(kAll))
+                   : (l_ == 0 ? std::span<const int>(kRadial)
+                              : std::span<const int>(kDisplacement));
   for (int gn = g0; gn < nglob; ++gn) {
     if (solid[gn]) {
       for (int c : components) {
@@ -167,21 +186,26 @@ void DegreeOperator::Assemble(const PointShear* pointShear) {
     }
 
     // phi'phi' stiffness, no jac: int r^2 phi' psi' dr.
-    for (auto i = 0; i < n; ++i) {
-      for (auto j = 0; j < n; ++j) {
-        auto kp = 0.0;
-        for (auto q = 0; q < n; ++q) {
-          const auto rq = mesh.Radius(e, q);
-          kp += mesh.Derivative(q, i) * w[q] * rq * rq * mesh.Derivative(q, j);
+    if (gravitating_) {
+      for (auto i = 0; i < n; ++i) {
+        for (auto j = 0; j < n; ++j) {
+          auto kp = 0.0;
+          for (auto q = 0; q < n; ++q) {
+            const auto rq = mesh.Radius(e, q);
+            kp +=
+                mesh.Derivative(q, i) * w[q] * rq * rq * mesh.Derivative(q, j);
+          }
+          at(local, 3 * i + 2, 3 * j + 2) += ifpg * kp / jac;
         }
-        at(local, 3 * i + 2, 3 * j + 2) += ifpg * kp / jac;
       }
     }
 
     for (auto q = 0; q < n; ++q) {
       const auto Wq = w[q] * jac;
       const auto rq = mesh.Radius(e, q);
-      at(local, 3 * q + 2, 3 * q + 2) += ifpg * k2 * Wq;
+      if (gravitating_) {
+        at(local, 3 * q + 2, 3 * q + 2) += ifpg * k2 * Wq;
+      }
       if (fluid) {
         at(local, 3 * q + 2, 3 * q + 2) +=
             Stratification(rq, drho[base + q], g[base + q]) * Wq;
@@ -219,6 +243,7 @@ void DegreeOperator::Assemble(const PointShear* pointShear) {
       // Pointwise couplings at the node q.
       at(local, 3 * q + 1, 3 * q + 1) +=
           k2 * (k2 - 2.0) * moduli.N[base + q] * Wq;
+      if (!gravitating_) continue;
       at(local, 3 * q, 3 * q) += 4.0 * rho[base + q] *
                                  (kPi * G * rho[base + q] * rq - g[base + q]) *
                                  rq * Wq;
@@ -230,7 +255,7 @@ void DegreeOperator::Assemble(const PointShear* pointShear) {
       at(local, 3 * q + 2, 3 * q + 1) += cVP;
     }
 
-    if (!fluid) {
+    if (!fluid && gravitating_) {
       // The U-phi gradient coupling int rho r^2 (U phi' + phi U') dr,
       // whose jac cancels against the derivative's.
       for (auto i = 0; i < n; ++i) {
@@ -304,6 +329,7 @@ void DegreeOperator::Assemble(const PointShear* pointShear) {
   }
 
   // Dirichlet-to-Neumann closures.
+  if (!gravitating_) return;
   const auto& mesh2 = material_->Mesh();
   const auto top = mesh2.GlobalIndex(mesh2.ElementCount() - 1, n - 1);
   if (l_ != 1) {
@@ -432,6 +458,23 @@ std::vector<double> DegreeOperator::Tangential() const {
   if (i >= 0) {
     const auto a = material_->Radius();
     b[i] = -material_->SurfaceGravity() * a * a * l_ * (l_ + 1.0);
+  }
+  return b;
+}
+
+std::vector<double> DegreeOperator::Traction() const {
+  auto b = std::vector<double>(ndof_, 0.0);
+  const auto a = material_->Radius();
+  b[SurfaceDof(Component::U)] = -a * a;
+  return b;
+}
+
+std::vector<double> DegreeOperator::TractionTangential() const {
+  auto b = std::vector<double>(ndof_, 0.0);
+  const auto i = SurfaceDof(Component::V);
+  if (i >= 0) {
+    const auto a = material_->Radius();
+    b[i] = -a * a * l_ * (l_ + 1.0);
   }
   return b;
 }

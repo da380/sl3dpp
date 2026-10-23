@@ -94,4 +94,33 @@ struct LoveNumberOptions {
 [[nodiscard]] double FluidTidalNumber(const Material& material, int l = 2,
                                       LoveNumberOptions options = {});
 
+/// Surface response per unit surface traction by degree, SI: h and l are
+/// metres per unit traction (Pa), the traction channels of the
+/// generalised Love numbers per unit of traction rather than of surface
+/// density. `gravitating` records which problem was solved; on the
+/// non-gravitating one (the E1 tier of the cross-code benchmarks) degree 1
+/// is excluded and its entries are NaN. Self-adjointness gives
+/// h_v = l(l + 1) l_u, which `ReciprocityResidual` measures.
+struct TractionNumbers {
+  std::vector<int> degrees;
+  std::vector<double> h_u, l_u;  ///< U(a), V(a) per unit normal traction
+  std::vector<double> h_v, l_v;  ///< the same per unit tangential traction
+  double radius = 0;             ///< the surface radius, m
+  bool gravitating = false;
+
+  /// The worst relative violation of h_v = l(l + 1) l_u across the
+  /// degrees (excluded degrees skipped).
+  [[nodiscard]] double ReciprocityResidual() const;
+};
+
+/// The surface response per unit normal and tangential traction for every
+/// degree from 0 to lmax, on the non-gravitating problem by default or on
+/// the full problem with `gravitating = true` -- the same forcing on both,
+/// so the pair isolates the effect of gravity. The non-gravitating problem
+/// takes a solid material, and its degree 1 is NaN. Degrees in parallel
+/// under OpenMP. Mirrors pyslfp's `traction_numbers`.
+[[nodiscard]] TractionNumbers ComputeTractionNumbers(
+    const Material& material, int lmax, bool gravitating = false,
+    LoveNumberOptions options = {});
+
 }  // namespace sl3dpp
