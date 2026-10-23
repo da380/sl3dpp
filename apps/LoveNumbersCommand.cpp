@@ -14,7 +14,15 @@
 namespace sl3dpp::app {
 
 DeckFormat FormatOf(ModelFormat format) {
-  return format == ModelFormat::Gia ? GiaFormat() : MineosFormat();
+  switch (format) {
+    case ModelFormat::Gia:
+      return GiaFormat();
+    case ModelFormat::Mineos:
+      return MineosFormat();
+    case ModelFormat::Elastic:
+      break;
+  }
+  return DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0);
 }
 
 namespace {
@@ -24,7 +32,8 @@ ModelFormat ReadFormat(const Json& top) {
   if (!Has(top, "model_format")) return ModelFormat::Gia;
   return Choice<ModelFormat>(top.At("model_format"),
                              {{"gia", ModelFormat::Gia},
-                              {"mineos", ModelFormat::Mineos}});
+                              {"mineos", ModelFormat::Mineos},
+                              {"elastic", ModelFormat::Elastic}});
 }
 
 int ReadLmax(const Json& top) {

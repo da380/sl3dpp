@@ -174,7 +174,8 @@ common capabilities from JSON configs, without writing C++:
 ```
 sl3d love-numbers run.json     # the SI Love-number table of a radial model
 sl3d fingerprint run.json      # an elastic fingerprint on a present-day state
-sl3d evolve1d run.json         # a 1D GIA run under an ice history, restartable
+sl3d evolve run.json           # a 3D (lateral-viscosity) GIA run, restartable
+sl3d evolve1d run.json         # its 1D counterpart
 ```
 
 Configs are strict JSON read with planetmodel's reader: an unknown or

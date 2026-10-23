@@ -15,13 +15,16 @@
 #include "Input.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Evolution.hpp"
+#include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
+#include "sl3dpp/Viscoelastic3D.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
+#include "sl3dpp/io/ModelViscosity.hpp"
 
 namespace sl3dpp::app {
 
@@ -48,6 +51,8 @@ struct WalltimeReached {
 // -- the checkpoint files: private scratch of a run, machine-local ----------
 
 constexpr auto kMagic = std::uint64_t{0x534c3344434b5031};  // "SL3DCKP1"
+constexpr auto kKind1D = std::uint64_t{1};
+constexpr auto kKind3D = std::uint64_t{2};
 
 /// FNV-1a of the config's text: a restart with another config is refused.
 std::uint64_t HashOf(const std::filesystem::path& config) {
@@ -103,12 +108,72 @@ std::vector<std::complex<double>> GetComplex(std::ifstream& in) {
   return values;
 }
 
+// The two recurrences, each with its format kind.
+
+constexpr std::uint64_t KindOf(const SeaLevelEvolution::Checkpoint&) {
+  return kKind1D;
+}
+constexpr std::uint64_t KindOf(const SeaLevelEvolution3D::Checkpoint&) {
+  return kKind3D;
+}
+
+void PutState(std::ofstream& out, const SeaLevelEvolution::Checkpoint& cp) {
+  for (const auto* held : {&cp.m, &cp.strain}) {
+    PutOne(out, static_cast<std::uint64_t>(held->size()));
+    for (const auto& [degree, values] : *held) {
+      PutOne(out, static_cast<std::int64_t>(degree));
+      PutVector(out, values);
+    }
+  }
+}
+
+void GetState(std::ifstream& in, SeaLevelEvolution::Checkpoint& cp) {
+  for (auto* held : {&cp.m, &cp.strain}) {
+    const auto degrees = GetOne<std::uint64_t>(in);
+    for (auto k = std::uint64_t{0}; k < degrees; ++k) {
+      const auto degree = GetOne<std::int64_t>(in);
+      held->emplace(static_cast<int>(degree), GetVector(in));
+    }
+  }
+}
+
+void PutState(std::ofstream& out, const SeaLevelEvolution3D::Checkpoint& cp) {
+  PutOne(out, static_cast<std::uint64_t>(cp.m.size()));
+  for (const auto& tensor : cp.m) {
+    PutComplex(out, tensor.c[0]);
+    PutComplex(out, tensor.c[1]);
+    PutVector(out, tensor.r);
+  }
+  PutOne(out, static_cast<std::uint64_t>(cp.strainCoefficients ? 1 : 0));
+  if (cp.strainCoefficients) {
+    PutComplex(out, cp.strainCoefficients->c[0]);
+    PutComplex(out, cp.strainCoefficients->c[1]);
+    PutComplex(out, cp.strainCoefficients->r);
+  }
+}
+
+void GetState(std::ifstream& in, SeaLevelEvolution3D::Checkpoint& cp) {
+  cp.m.resize(GetOne<std::uint64_t>(in));
+  for (auto& tensor : cp.m) {
+    tensor.c[0] = GetComplex(in);
+    tensor.c[1] = GetComplex(in);
+    tensor.r = GetVector(in);
+  }
+  if (GetOne<std::uint64_t>(in) != 0) {
+    auto spectral = GridCoupling::SpectralTensor{};
+    spectral.c[0] = GetComplex(in);
+    spectral.c[1] = GetComplex(in);
+    spectral.r = GetComplex(in);
+    cp.strainCoefficients = std::move(spectral);
+  }
+}
+
 /// Writes a checkpoint whole (a temporary renamed into place) and keeps
 /// the newest two in the directory.
+template <class CheckpointT>
 void WriteCheckpoint(const std::filesystem::path& directory,
                      std::uint64_t hash, std::size_t node,
-                     const SeaLevelEvolution::Checkpoint& cp,
-                     const std::vector<Node>& history) {
+                     const CheckpointT& cp, const std::vector<Node>& history) {
   std::filesystem::create_directories(directory);
   const auto path = directory / std::format("node_{:06}.ckpt", node);
   const auto partial = directory / std::format(".node_{:06}.partial", node);
@@ -120,15 +185,10 @@ void WriteCheckpoint(const std::filesystem::path& directory,
     }
     PutOne(out, kMagic);
     PutOne(out, hash);
+    PutOne(out, KindOf(cp));
     PutOne(out, static_cast<std::uint64_t>(node));
     PutOne(out, cp.t);
-    for (const auto* held : {&cp.m, &cp.strain}) {
-      PutOne(out, static_cast<std::uint64_t>(held->size()));
-      for (const auto& [degree, values] : *held) {
-        PutOne(out, static_cast<std::int64_t>(degree));
-        PutVector(out, values);
-      }
-    }
+    PutState(out, cp);
     PutComplex(out, cp.loadCoefficients);
     PutComplex(out, cp.tideCoefficients);
     PutOne(out, static_cast<std::uint64_t>(history.size()));
@@ -157,15 +217,17 @@ void WriteCheckpoint(const std::filesystem::path& directory,
   }
 }
 
+template <class CheckpointT>
 struct ReadBack {
   std::size_t node = 0;
-  SeaLevelEvolution::Checkpoint checkpoint;
+  CheckpointT checkpoint;
   std::vector<Node> history;
 };
 
 /// The newest checkpoint of this config in the directory, or nothing.
-std::optional<ReadBack> ReadCheckpoint(const std::filesystem::path& directory,
-                                       std::uint64_t hash) {
+template <class CheckpointT>
+std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
+    const std::filesystem::path& directory, std::uint64_t hash) {
   if (!std::filesystem::is_directory(directory)) return std::nullopt;
   auto candidates = std::vector<std::filesystem::path>{};
   for (const auto& entry : std::filesystem::directory_iterator(directory)) {
@@ -181,16 +243,15 @@ std::optional<ReadBack> ReadCheckpoint(const std::filesystem::path& directory,
           "point checkpoint.directory elsewhere",
           path.string()));
     }
-    auto out = ReadBack{};
+    auto out = ReadBack<CheckpointT>{};
+    if (GetOne<std::uint64_t>(in) != KindOf(out.checkpoint)) {
+      throw std::runtime_error(std::format(
+          "{} holds the other command's recurrence; move it aside",
+          path.string()));
+    }
     out.node = GetOne<std::uint64_t>(in);
     out.checkpoint.t = GetOne<double>(in);
-    for (auto* held : {&out.checkpoint.m, &out.checkpoint.strain}) {
-      const auto degrees = GetOne<std::uint64_t>(in);
-      for (auto k = std::uint64_t{0}; k < degrees; ++k) {
-        const auto degree = GetOne<std::int64_t>(in);
-        held->emplace(static_cast<int>(degree), GetVector(in));
-      }
-    }
+    GetState(in, out.checkpoint);
     out.checkpoint.loadCoefficients = GetComplex(in);
     out.checkpoint.tideCoefficients = GetComplex(in);
     const auto nodes = GetOne<std::uint64_t>(in);
@@ -209,23 +270,191 @@ std::optional<ReadBack> ReadCheckpoint(const std::filesystem::path& directory,
   return std::nullopt;
 }
 
+// -- the scaffold both runners share -----------------------------------------
+
+struct BuiltEarth {
+  EarthModel model;
+  Material material;
+};
+
+BuiltEarth BuildEarth(const EvolveInput& input, const Json& top) {
+  const auto deck = Deck::Read(input.model, FormatOf(input.format));
+  if (!deck) Fail(top.At("model"), deck.error().message);
+  auto model = EarthModel::FromDeck(*deck);
+  if (!model) Fail(top.At("model"), model.error().message);
+  auto mesh_options = RadialMesh::Options{};
+  mesh_options.lmax = input.lmax;
+  const auto mesh = RadialMesh::Create(*model, mesh_options);
+  if (!mesh) Fail(top.At("model"), mesh.error().message);
+  auto material = Material::Create(*model, *mesh);
+  if (!material) Fail(top.At("model"), material.error().message);
+  return {std::move(*model), std::move(*material)};
+}
+
+SeaLevelParameters ParametersOf(const EvolveInput& input,
+                                const Material& material) {
+  auto parameters = SeaLevelParameters{};
+  if (input.hydrostatic_moments) {
+    parameters =
+        WithHydrostaticMoments(parameters, FluidTidalNumber(material, 2));
+  }
+  return parameters;
+}
+
+struct Loaded {
+  io::FieldHistory state;
+  io::FieldHistory ice;
+  std::vector<double> ice0;  ///< the start's ice thickness, SI
+  SeaLevelSolver::State background;
+};
+
+Loaded LoadWorld(const EvolveInput& input, const Json& top,
+                 const SeaLevelSolver& solver) {
+  const auto& grid = solver.Grid();
+  const auto fieldSize = grid.FieldSize();
+  const auto length = solver.SolverScales().Length();
+  auto state_history = io::FieldHistory::Read(input.state, grid);
+  if (!state_history) {
+    Fail(top.At("state").At("file"), state_history.error().message);
+  }
+  auto ice_history = io::FieldHistory::Read(input.ice_history, grid);
+  if (!ice_history) {
+    Fail(top.At("ice_history").At("file"), ice_history.error().message);
+  }
+  for (const auto name : {"ice_thickness", "topography"}) {
+    if (!state_history->Has(name)) {
+      Fail(top.At("state").At("file"), std::format("holds no field {}", name));
+    }
+  }
+  if (!ice_history->Has("ice_thickness")) {
+    Fail(top.At("ice_history").At("file"), "holds no field ice_thickness");
+  }
+  const auto start_si = -input.start_kyr_bp * KYR;
+  auto ice0 = state_history->Values("ice_thickness", start_si);
+  const auto topo0 = state_history->Values("topography", start_si);
+  const auto parameters = solver.Parameters();
+  const auto flotation = parameters.ice_density / parameters.water_density;
+  auto ice_nd = std::vector<double>(fieldSize);
+  auto sl_nd = std::vector<double>(fieldSize);
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    auto sl = topo0[i] < 0.0 ? -topo0[i] : -topo0[i] + ice0[i];
+    if (topo0[i] < 0.0 && ice0[i] > 0.0) sl += flotation * ice0[i];
+    ice_nd[i] = ice0[i] / length;
+    sl_nd[i] = sl / length;
+  }
+  auto background = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
+  return {std::move(*state_history), std::move(*ice_history), std::move(ice0),
+          std::move(background)};
+}
+
+std::vector<double> MakeTimes(const EvolveInput& input, const Scales& scales) {
+  auto times = std::vector<double>{};
+  const auto span_s = (input.start_kyr_bp - input.end_kyr_bp) * KYR;
+  for (auto n = 0; n < input.nodes; ++n) {
+    times.push_back(span_s * n / (input.nodes - 1) / scales.Time());
+  }
+  return times;
+}
+
+/// The histories as one surface file: SI node fields on a time axis in
+/// seconds relative to the present (negative past).
+void WriteHistoryFile(const EvolveInput& input,
+                      const std::filesystem::path& config,
+                      const SurfaceGrid& grid, const std::vector<Node>& history,
+                      std::string_view command) {
+  namespace pm = planetmodel;
+  auto file = pm::SurfaceFile{};
+  file.grid = pm::AngularGrid(
+      std::vector<double>(grid.CoLatitudes().begin(), grid.CoLatitudes().end()),
+      std::vector<double>(grid.Longitudes().begin(), grid.Longitudes().end()),
+      "gauss_legendre", input.lmax,
+      std::vector<double>(grid.CoLatitudeWeights().begin(),
+                          grid.CoLatitudeWeights().end()));
+  file.source = std::format("sl3d {} (sl3dpp {})", command, Version());
+  file.title = "viscoelastic GIA histories";
+  auto axis = std::vector<double>{};
+  auto dates = std::vector<double>{};
+  auto omega = std::array<std::vector<double>, 3>{};
+  for (const auto& kept : history) {
+    axis.push_back(-kept.date_kyr_bp * KYR);
+    dates.push_back(kept.date_kyr_bp);
+    for (auto k = 0; k < 3; ++k) omega[k].push_back(kept.angularVelocity[k]);
+  }
+  file.time = axis;
+  file.meta.emplace("config", config.string());
+  file.meta.emplace("model", input.model.string());
+  file.meta.emplace("ice_history", input.ice_history.string());
+  file.meta.emplace("time",
+                    std::string{"seconds relative to the present, negative "
+                                "in the past; dates_kyr_bp lists the nodes"});
+  file.meta.emplace("dates_kyr_bp", dates);
+  file.meta.emplace("omega_x_rad_s", omega[0]);
+  file.meta.emplace("omega_y_rad_s", omega[1]);
+  file.meta.emplace("omega_z_rad_s", omega[2]);
+  if (!input.viscosity.empty()) {
+    file.meta.emplace("viscosity", input.viscosity.string());
+  }
+  const auto fieldSize = grid.FieldSize();
+  const auto potential = pm::Dimensions{.length = 2, .time = -2};
+  auto gather = [&](auto member) {
+    auto values = std::vector<double>{};
+    values.reserve(history.size() * fieldSize);
+    for (const auto& kept : history) {
+      const auto& field = kept.*member;
+      values.insert(values.end(), field.begin(), field.end());
+    }
+    return values;
+  };
+  auto put = [&file](std::string name, std::vector<double> values,
+                     std::optional<pm::Dimensions> dims, std::string meaning) {
+    auto options = pm::SurfaceFieldOptions{};
+    options.support = "node";
+    options.time_interpolation = "linear";
+    options.dimensions = dims;
+    options.meaning = std::move(meaning);
+    file.variables.emplace(
+        name, pm::SurfaceField(name, std::move(values), options));
+  };
+  put("sea_level_change", gather(&Node::seaLevelChange), pm::units::LENGTH,
+      "sea-level change from the window's start");
+  put("displacement", gather(&Node::displacement), pm::units::LENGTH,
+      "radial surface displacement");
+  put("potential", gather(&Node::potential), potential,
+      "gravitational potential perturbation at the surface");
+  if (const auto parent = input.output.parent_path(); !parent.empty()) {
+    std::filesystem::create_directories(parent);
+  }
+  pm::WriteSurfaceFile(input.output, file);
+}
+
 }  // namespace
 
 EvolveInput ReadEvolveInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  Allow(top, {"model", "model_format", "lmax", "state", "ice_history",
-              "times", "scheme", "rotation", "moments", "rtol", "checkpoint",
-              "restart", "output"});
+  Allow(top, {"model", "model_format", "lmax", "viscosity", "state",
+              "ice_history", "times", "scheme", "rotation", "moments", "rtol",
+              "coupled", "checkpoint", "restart", "output"});
   const auto directory = config.parent_path();
   auto out = EvolveInput{};
   out.model = PathOf(top, "model", directory);
   if (Has(top, "model_format")) {
     out.format = Choice<ModelFormat>(top.At("model_format"),
                                      {{"gia", ModelFormat::Gia},
-                                      {"mineos", ModelFormat::Mineos}});
+                                      {"mineos", ModelFormat::Mineos},
+                                      {"elastic", ModelFormat::Elastic}});
   }
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
+  if (Has(top, "viscosity")) {
+    const auto& viscosity = top.At("viscosity");
+    Allow(viscosity, {"file", "reference"});
+    out.viscosity = PathOf(viscosity, "file", directory);
+    if (Has(viscosity, "reference")) {
+      out.viscosity_file_radial =
+          Choice<bool>(viscosity.At("reference"),
+                       {{"geometric_mean", false}, {"file_radial", true}});
+    }
+  }
   const auto& state = top.At("state");
   Allow(state, {"file"});
   out.state = PathOf(state, "file", directory);
@@ -258,6 +487,12 @@ EvolveInput ReadEvolveInput(const std::filesystem::path& config) {
                                          {"hydrostatic", true}});
   }
   out.rtol = Number(top, "rtol", 1e-9);
+  if (Has(top, "coupled")) {
+    const auto& coupled = top.At("coupled");
+    Allow(coupled, {"rtol", "max_iterations"});
+    out.coupled_rtol = Number(coupled, "rtol", 1e-9);
+    out.max_coupled_iterations = Integer(coupled, "max_iterations", 60);
+  }
   if (Has(top, "checkpoint")) {
     const auto& checkpoint = top.At("checkpoint");
     Allow(checkpoint, {"directory", "every", "max_walltime_min"});
@@ -273,100 +508,47 @@ EvolveInput ReadEvolveInput(const std::filesystem::path& config) {
   return out;
 }
 
-std::string RunEvolve(const std::filesystem::path& config) {
-  namespace pm = planetmodel;
+namespace {
+
+/// The run both commands share, over either evolution. `make` builds
+/// the evolution from the solver, the background state and the options;
+/// `check` inspects each snapshot (the 3D one refuses an unconverged
+/// node).
+template <class Evolution>
+std::string RunWith(
+    const std::filesystem::path& config, const EvolveInput& input,
+    const Json& /*top*/, const SeaLevelSolver& solver, Loaded& world,
+    std::string_view command,
+    const std::function<Evolution(typename Evolution::Options)>& make,
+    const std::function<void(const typename Evolution::Snapshot&)>& check) {
   const auto started = std::chrono::steady_clock::now();
-  const auto top = pm::ReadJsonFile(config);
-  const auto input = ReadEvolveInput(config);
-
-  const auto deck = Deck::Read(input.model, FormatOf(input.format));
-  if (!deck) Fail(top.At("model"), deck.error().message);
-  const auto model = EarthModel::FromDeck(*deck);
-  if (!model) Fail(top.At("model"), model.error().message);
-  auto mesh_options = RadialMesh::Options{};
-  mesh_options.lmax = input.lmax;
-  const auto mesh = RadialMesh::Create(*model, mesh_options);
-  if (!mesh) Fail(top.At("model"), mesh.error().message);
-  const auto material = Material::Create(*model, *mesh);
-  if (!material) Fail(top.At("model"), material.error().message);
-  const auto rheology = Rheology::FromModel(*material, *model);
-  if (!rheology) Fail(top.At("model"), rheology.error().message);
-
-  ViscoelasticOperator op(*rheology, input.lmax);
-  auto parameters = SeaLevelParameters{};
-  if (input.hydrostatic_moments) {
-    parameters =
-        WithHydrostaticMoments(parameters, FluidTidalNumber(*material, 2));
-  }
-  SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLoveNumbers(),
-                        parameters);
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto fieldSize = grid.FieldSize();
-
-  // the background state at the window's start, from the surface file
-  const auto state_history = io::FieldHistory::Read(input.state, grid);
-  if (!state_history) Fail(top.At("state").At("file"),
-                           state_history.error().message);
-  const auto ice_history = io::FieldHistory::Read(input.ice_history, grid);
-  if (!ice_history) Fail(top.At("ice_history").At("file"),
-                         ice_history.error().message);
-  for (const auto* held : {&*state_history, &*ice_history}) {
-    for (const auto name : {"ice_thickness", "topography"}) {
-      if (held == &*state_history && !held->Has(name)) {
-        Fail(top.At("state").At("file"),
-             std::format("holds no field {}", name));
-      }
-    }
-  }
-  if (!ice_history->Has("ice_thickness")) {
-    Fail(top.At("ice_history").At("file"), "holds no field ice_thickness");
-  }
   const auto start_si = -input.start_kyr_bp * KYR;
-  const auto ice0 = state_history->Values("ice_thickness", start_si);
-  const auto topo0 = state_history->Values("topography", start_si);
-  auto ice_nd = std::vector<double>(fieldSize);
-  auto sl_nd = std::vector<double>(fieldSize);
-  const auto flotation = parameters.ice_density / parameters.water_density;
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    auto sl = topo0[i] < 0.0 ? -topo0[i] : -topo0[i] + ice0[i];
-    if (topo0[i] < 0.0 && ice0[i] > 0.0) sl += flotation * ice0[i];
-    ice_nd[i] = ice0[i] / length;
-    sl_nd[i] = sl / length;
-  }
-  auto state = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
+  const auto times = MakeTimes(input, scales);
 
-  // the time grid (solver units, zero at the window's start) and the
-  // grounded ice load relative to the start
-  auto times = std::vector<double>{};
-  const auto span_s = (input.start_kyr_bp - input.end_kyr_bp) * KYR;
-  for (auto n = 0; n < input.nodes; ++n) {
-    times.push_back(span_s * n / (input.nodes - 1) / scales.Time());
-  }
-  const auto& C = state.oceanFunction;
+  const auto& C = world.background.oceanFunction;
+  const auto& ice0 = world.ice0;
   const auto rho_ice = solver.IceDensity();
   auto iceLoad = [&](double t) {
     const auto thickness =
-        ice_history->Values("ice_thickness", start_si + t * scales.Time());
+        world.ice.Values("ice_thickness", start_si + t * scales.Time());
     auto load = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      load[i] =
-          rho_ice * (1.0 - C[i]) * (thickness[i] - ice0[i]) / length;
+      load[i] = rho_ice * (1.0 - C[i]) * (thickness[i] - ice0[i]) / length;
     }
     return load;
   };
 
-  // units out: SI fields, dates in kyr before present
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toOmega = 1.0 / scales.Time();
-  auto date_of = [&](double t) {
-    return input.start_kyr_bp - t * scales.Time() / KYR;
-  };
   auto history = std::vector<Node>{};
-  auto keep = [&](const SeaLevelEvolution::Snapshot& snapshot) {
+  auto keep = [&](const typename Evolution::Snapshot& snapshot) {
+    check(snapshot);
     auto kept = Node{};
-    kept.date_kyr_bp = date_of(snapshot.t);
+    kept.date_kyr_bp = input.start_kyr_bp - snapshot.t * scales.Time() / KYR;
     kept.seaLevelChange = snapshot.seaLevelChange;
     kept.displacement = snapshot.displacement;
     kept.potential = snapshot.potential;
@@ -379,29 +561,30 @@ std::string RunEvolve(const std::filesystem::path& config) {
     history.push_back(std::move(kept));
   };
 
-  // checkpointing, and an existing checkpoint to resume from
   const auto checkpointing = !input.checkpoint_directory.empty();
   const auto hash = HashOf(config);
-  auto resumed = std::optional<ReadBack>{};
+  auto resumed = std::optional<ReadBack<typename Evolution::Checkpoint>>{};
   if (checkpointing && input.restart) {
-    resumed = ReadCheckpoint(input.checkpoint_directory, hash);
+    resumed = ReadCheckpoint<typename Evolution::Checkpoint>(
+        input.checkpoint_directory, hash);
   }
-  auto options = SeaLevelEvolution::Options{};
+  auto options = typename Evolution::Options{};
   options.scheme = input.scheme;
   options.rotation = input.rotation;
   options.rtol = input.rtol;
-  options.on_snapshot = [&](std::size_t, const SeaLevelEvolution::Snapshot& s) {
+  options.on_snapshot = [&](std::size_t,
+                            const typename Evolution::Snapshot& s) {
     keep(s);
   };
   const auto base_node = resumed ? resumed->node : std::size_t{0};
   if (checkpointing) {
     options.checkpoint_stride = input.checkpoint_every;
     options.on_checkpoint = [&](std::size_t node,
-                                const SeaLevelEvolution::Checkpoint& cp) {
+                                const typename Evolution::Checkpoint& cp) {
       WriteCheckpoint(input.checkpoint_directory, hash, base_node + node, cp,
                       history);
-      const auto done = base_node + node + 1 >=
-                        static_cast<std::size_t>(input.nodes);
+      const auto done =
+          base_node + node + 1 >= static_cast<std::size_t>(input.nodes);
       if (input.max_walltime_min > 0.0 && !done) {
         const auto minutes = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
@@ -414,7 +597,7 @@ std::string RunEvolve(const std::filesystem::path& config) {
     };
   }
 
-  SeaLevelEvolution evolution(op, solver, state, options);
+  auto evolution = make(std::move(options));
   try {
     if (resumed) {
       history = std::move(resumed->history);
@@ -435,70 +618,80 @@ std::string RunEvolve(const std::filesystem::path& config) {
         at.node, input.nodes - 1, input.checkpoint_directory.string());
   }
 
-  // the histories as one surface file: SI node fields on a time axis in
-  // seconds relative to the present (negative past)
-  auto file = pm::SurfaceFile{};
-  file.grid = pm::AngularGrid(
-      std::vector<double>(grid.CoLatitudes().begin(), grid.CoLatitudes().end()),
-      std::vector<double>(grid.Longitudes().begin(), grid.Longitudes().end()),
-      "gauss_legendre", input.lmax,
-      std::vector<double>(grid.CoLatitudeWeights().begin(),
-                          grid.CoLatitudeWeights().end()));
-  file.source = std::format("sl3d evolve1d (sl3dpp {})", Version());
-  file.title = "1D viscoelastic GIA histories";
-  auto axis = std::vector<double>{};
-  auto dates = std::vector<double>{};
-  auto omega = std::array<std::vector<double>, 3>{};
-  for (const auto& kept : history) {
-    axis.push_back(-kept.date_kyr_bp * KYR);
-    dates.push_back(kept.date_kyr_bp);
-    for (auto k = 0; k < 3; ++k) omega[k].push_back(kept.angularVelocity[k]);
-  }
-  file.time = axis;
-  file.meta.emplace("config", config.string());
-  file.meta.emplace("model", input.model.string());
-  file.meta.emplace("ice_history", input.ice_history.string());
-  file.meta.emplace("time",
-                    std::string{"seconds relative to the present, negative "
-                                "in the past; dates_kyr_bp lists the nodes"});
-  file.meta.emplace("dates_kyr_bp", dates);
-  file.meta.emplace("omega_x_rad_s", omega[0]);
-  file.meta.emplace("omega_y_rad_s", omega[1]);
-  file.meta.emplace("omega_z_rad_s", omega[2]);
-  const auto potential = pm::Dimensions{.length = 2, .time = -2};
-  auto gather = [&](auto member) {
-    auto values = std::vector<double>{};
-    values.reserve(history.size() * fieldSize);
-    for (const auto& kept : history) {
-      const auto& field = kept.*member;
-      values.insert(values.end(), field.begin(), field.end());
-    }
-    return values;
-  };
-  auto put = [&file](std::string name, std::vector<double> values,
-                     std::optional<pm::Dimensions> dims, std::string meaning) {
-    auto options = pm::SurfaceFieldOptions{};
-    options.support = "node";
-    options.time_interpolation = "linear";
-    options.dimensions = dims;
-    options.meaning = std::move(meaning);
-    file.variables.emplace(
-        name, pm::SurfaceField(name, std::move(values), options));
-  };
-  put("sea_level_change", gather(&Node::seaLevelChange), pm::units::LENGTH,
-      "sea-level change from the window's start");
-  put("displacement", gather(&Node::displacement), pm::units::LENGTH,
-      "radial surface displacement");
-  put("potential", gather(&Node::potential), potential,
-      "gravitational potential perturbation at the surface");
-  if (const auto parent = input.output.parent_path(); !parent.empty()) {
-    std::filesystem::create_directories(parent);
-  }
-  pm::WriteSurfaceFile(input.output, file);
+  WriteHistoryFile(input, config, grid, history, command);
   return std::format("wrote {} ({} nodes, {} to {} kyr BP{})",
                      input.output.string(), history.size(),
                      input.start_kyr_bp, input.end_kyr_bp,
                      resumed ? ", resumed" : "");
+}
+
+}  // namespace
+
+std::string RunEvolve(const std::filesystem::path& config) {
+  const auto top = planetmodel::ReadJsonFile(config);
+  const auto input = ReadEvolveInput(config);
+  if (!input.viscosity.empty()) {
+    Fail(top.At("viscosity"),
+         "names a 3D viscosity; evolve1d takes the model's own column — "
+         "use `sl3d evolve`");
+  }
+  auto earth = BuildEarth(input, top);
+  const auto rheology = Rheology::FromModel(earth.material, earth.model);
+  if (!rheology) Fail(top.At("model"), rheology.error().message);
+  ViscoelasticOperator op(*rheology, input.lmax);
+  SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLoveNumbers(),
+                        ParametersOf(input, earth.material));
+  auto world = LoadWorld(input, top, solver);
+  return RunWith<SeaLevelEvolution>(
+      config, input, top, solver, world, "evolve1d",
+      [&](SeaLevelEvolution::Options options) {
+        return SeaLevelEvolution(op, solver, world.background,
+                                 std::move(options));
+      },
+      [](const SeaLevelEvolution::Snapshot&) {});
+}
+
+std::string RunEvolve3D(const std::filesystem::path& config) {
+  const auto top = planetmodel::ReadJsonFile(config);
+  const auto input = ReadEvolveInput(config);
+  if (input.viscosity.empty()) {
+    Fail(top, "needs a viscosity section: a planetmodel model file whose "
+              "viscosity drives the 3D run");
+  }
+  auto earth = BuildEarth(input, top);
+  auto mv_options = io::ModelViscosityOptions{};
+  mv_options.reference = input.viscosity_file_radial
+                             ? io::ViscosityReference::FileRadial
+                             : io::ViscosityReference::GeometricMean;
+  const auto viscosity =
+      io::ModelViscosity::Read(input.viscosity, earth.model, mv_options);
+  if (!viscosity) Fail(top.At("viscosity").At("file"),
+                       viscosity.error().message);
+  const auto rheology =
+      Rheology::Maxwell(earth.material, viscosity->Viscosity());
+  if (!rheology) Fail(top.At("viscosity").At("file"),
+                      rheology.error().message);
+  Viscoelastic3D op(*rheology, input.lmax, viscosity->Delta());
+  SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLove(),
+                        ParametersOf(input, earth.material));
+  auto world = LoadWorld(input, top, solver);
+  return RunWith<SeaLevelEvolution3D>(
+      config, input, top, solver, world, "evolve",
+      [&](SeaLevelEvolution3D::Options options) {
+        options.coupled_rtol = input.coupled_rtol;
+        options.max_coupled_iterations = input.max_coupled_iterations;
+        return SeaLevelEvolution3D(op, solver, world.background,
+                                   std::move(options));
+      },
+      [](const SeaLevelEvolution3D::Snapshot& snapshot) {
+        if (!snapshot.converged) {
+          throw std::runtime_error(std::format(
+              "the coupled fixed point did not converge at t = {} (residual "
+              "{:.3g} after {} iterations)",
+              snapshot.t, snapshot.coupledResidual,
+              snapshot.coupledIterations));
+        }
+      });
 }
 
 }  // namespace sl3dpp::app

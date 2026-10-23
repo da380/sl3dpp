@@ -275,6 +275,55 @@ TEST_F(AppsTest, EvolveRunsAndARestartedRunMatchesAnUninterruptedOne) {
   EXPECT_THROW(static_cast<void>(app::RunEvolve(other)), std::runtime_error);
 }
 
+TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc");
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto body = std::string{R"(
+    "model": ")"} + data + R"(/prem8.elastic.deck",
+    "model_format": "elastic",
+    "lmax": 8,
+    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+    "rotation": "full")";
+  const auto whole = Write(
+      "whole3d.json", "{" + body + R"(, "output": "out/whole.nc"})");
+  auto summary = app::RunEvolve3D(whole);
+  EXPECT_NE(summary.find("wrote"), std::string::npos);
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
+  ASSERT_TRUE(reference.time);
+  EXPECT_EQ(reference.time->size(), 4u);
+  EXPECT_EQ(reference.meta.at("viscosity"),
+            pm::netcdf::Attribute{data + "/stage11_viscosity_log.nc"});
+
+  const auto pieces = Write(
+      "pieces3d.json",
+      "{" + body +
+          R"(, "checkpoint": {"directory": "ckpt3d", "every": 1,
+                              "max_walltime_min": 1e-9},
+              "output": "out/pieces.nc"})");
+  auto attempts = 0;
+  for (; attempts < 8; ++attempts) {
+    summary = app::RunEvolve3D(pieces);
+    if (summary.find("wrote") != std::string::npos) break;
+    EXPECT_NE(summary.find("checkpointed"), std::string::npos) << summary;
+  }
+  EXPECT_GE(attempts, 1);
+  const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
+  for (const auto name : {"sea_level_change", "displacement", "potential"}) {
+    EXPECT_EQ(rebuilt.variables.at(name).values,
+              reference.variables.at(name).values)
+        << name;
+  }
+  EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"),
+            reference.meta.at("omega_z_rad_s"));
+
+  // the 1D command refuses a 3D config
+  EXPECT_THROW(static_cast<void>(app::RunEvolve(whole)), planetmodel::Error);
+}
+
 TEST_F(AppsTest, FingerprintRefusesAStateWithoutTheFields) {
   namespace pm = planetmodel;
   static_cast<void>(Deck());

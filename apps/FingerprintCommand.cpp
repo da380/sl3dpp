@@ -79,7 +79,8 @@ FingerprintInput ReadFingerprintInput(const std::filesystem::path& config) {
   if (Has(top, "model_format")) {
     out.format = Choice<ModelFormat>(top.At("model_format"),
                                      {{"gia", ModelFormat::Gia},
-                                      {"mineos", ModelFormat::Mineos}});
+                                      {"mineos", ModelFormat::Mineos},
+                                      {"elastic", ModelFormat::Elastic}});
   }
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");

@@ -33,8 +33,9 @@ constexpr auto kUsage =
     "  love-numbers   the SI Love-number table of a radial model\n"
     "  fingerprint    an elastic sea-level fingerprint on a present-day\n"
     "                 state read from a planetmodel surface file\n"
-    "  evolve1d       a 1D viscoelastic GIA run under an ice history,\n"
-    "                 restartable from disk checkpoints\n"
+    "  evolve         a 3D (lateral-viscosity) GIA run under an ice\n"
+    "                 history, restartable from disk checkpoints\n"
+    "  evolve1d       its 1D counterpart, on the deck's own viscosity\n"
     "\n"
     "sl3d --version prints the library versions; a config's members are\n"
     "documented with the command in apps/Commands.hpp and the manual.\n";
@@ -47,6 +48,7 @@ struct Command {
 constexpr auto kCommands = std::array{
     Command{"love-numbers", sl3dpp::app::RunLoveNumbers},
     Command{"fingerprint", sl3dpp::app::RunFingerprint},
+    Command{"evolve", sl3dpp::app::RunEvolve3D},
     Command{"evolve1d", sl3dpp::app::RunEvolve},
 };
 
