@@ -119,9 +119,11 @@ add_library(sl3dpp STATIC
   src/Fingerprint.cpp
   src/GridCoupling.cpp
   src/io/KernelWriter.cpp
+  src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
+  src/Measurements.cpp
   src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp
