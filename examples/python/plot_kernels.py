@@ -6,7 +6,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plotutil import Example, map_axes, mark_sites, plot_field
+from plotutil import Example, world_map, mark_sites, plot_field
 
 ex = Example("kernels.txt")
 fig = plt.figure(figsize=(12, 7))
@@ -19,7 +19,7 @@ gauge = [(ex.scalars["gauge_lat"], ex.scalars["gauge_lon"])]
 # (in metres). Shown peak-normalised; its 1/area units carry no insight.
 ex.fields["averaging_function"] = (
     ex.fields["site_dual"] / ex.fields["site_dual"].max())
-ax = map_axes(fig, 2, 3, 1)
+ax = world_map(fig, 2, 3, 1, state=ex)
 mesh = plot_field(ax, ex, "averaging_function", cmap="Greens",
                   symmetric=False,
                   title="averaging function $g$ of the measurement\n"
@@ -32,7 +32,7 @@ for i, (name, title) in enumerate((
         ("thickness_dual_6kyr", "ice kernel at 6 kyr"),
         ("thickness_dual_10kyr", "ice kernel at 10 kyr"),
         ("rate_kernel_first_interval", "quelled rate kernel"))):
-    ax = map_axes(fig, 2, 3, 2 + i)
+    ax = world_map(fig, 2, 3, 2 + i, state=ex)
     mesh = plot_field(ax, ex, name, title=title)
     mark_sites(ax, gauge, ["C3"])
     fig.colorbar(mesh, ax=ax, shrink=0.7)

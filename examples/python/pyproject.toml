@@ -1,0 +1,25 @@
+# The Python environment of the sl3dpp examples: the plotting scripts, the
+# ICE-7G download (get_ice7g.py, through pyslfp) and the reading of the sl3d
+# outputs (planetmodel). This file is copied into build/examples at
+# configure time: create the environment THERE (poetry keeps its lock and
+# venv beside this file or in its cache), so the source tree stays
+# untouched. See examples/README.md.
+
+[tool.poetry]
+name = "sl3dpp-examples"
+version = "0.1.0"
+description = "Python environment for the sl3dpp examples"
+authors = ["sl3dpp"]
+package-mode = false
+
+[tool.poetry.dependencies]
+python = ">=3.12"
+numpy = ">=2.0"
+matplotlib = ">=3.9"
+cartopy = ">=0.24"
+pyslfp = ">=2.2.2,<3"
+planetmodel = {version = ">=1.3.2,<2", extras = ["netcdf", "plot"]}
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

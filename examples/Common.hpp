@@ -2,14 +2,15 @@
 
 /**
  * @file examples/Common.hpp
- * @brief Shared scaffolding for the example drivers: the PREM-deck model
- * and mantle Maxwell rheology, simple text writers for the plotting
- * scripts, and smooth analytic shapes.
+ * @brief Shared scaffolding for the example drivers: the command line, the
+ * PREM-deck model and mantle Maxwell rheology, the Earth's state from a
+ * surface file, simple text writers for the plotting scripts, and smooth
+ * analytic shapes.
  *
  * Examples run FROM THE BUILD TREE: the deck is copied next to the
  * executables at configure time, and every output lands in the working
  * directory (never the source tree). File format, consumed by
- * plots/plotutil.py: '# comment' lines, 'grid nlat nlon' followed by the
+ * python/plotutil.py: '# comment' lines, 'grid nlat nlon' followed by the
  * colatitude and longitude rows, then named blocks — 'field <name>' with
  * nlat rows of nlon values, 'series <name> <n>' with n rows, or
  * 'scalar <name> <value>'.
@@ -17,13 +18,16 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <span>
-#include <sstream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -31,8 +35,9 @@
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
-#include "sl3dpp/ShConventions.hpp"
+#include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/io/FieldHistory.hpp"
 
 namespace examples {
 
@@ -70,53 +75,73 @@ struct Earth {
   }
 };
 
-/// The present-day Earth state — ICE-7G ice thickness and sea level
-/// (minus the topography over land), SI metres — synthesised on the
-/// grid from the coefficient file the build extracted from pyslfp
-/// (earth_state_l256.txt beside the executables), truncated to the
-/// grid's lmax.
+/// What every example takes on its command line: the degree (each has
+/// its own default, sized for a laptop; CI passes small ones) and the
+/// surface file of the Earth's state (the synthetic Earth the build
+/// writes, or an ICE-7G file from python/get_ice7g.py).
+struct Options {
+  int lmax = 0;
+  std::filesystem::path state = "synthetic_earth.nc";
+};
+
+/// Reads `[--lmax N] [--state FILE]`; prints the usage and exits on
+/// --help or anything else.
+inline Options ParseOptions(int argc, char** argv, int defaultLmax) {
+  auto options = Options{.lmax = defaultLmax};
+  const auto usage = [&](int status) {
+    std::cerr << "usage: " << argv[0] << " [--lmax N] [--state FILE]\n"
+              << "  --lmax N      the degree (default " << defaultLmax << ")\n"
+              << "  --state FILE  the Earth's state: a planetmodel surface "
+                 "file holding\n"
+              << "                ice_thickness and topography (default "
+                 "synthetic_earth.nc)\n";
+    std::exit(status);
+  };
+  for (auto k = 1; k < argc; ++k) {
+    const auto arg = std::string_view{argv[k]};
+    if (arg == "--help" || arg == "-h") usage(0);
+    if (k + 1 >= argc) usage(2);
+    if (arg == "--lmax") {
+      options.lmax = std::stoi(argv[++k]);
+    } else if (arg == "--state") {
+      options.state = argv[++k];
+    } else {
+      usage(2);
+    }
+  }
+  if (options.lmax < 2) usage(2);
+  return options;
+}
+
+/// The Earth's state at a date: ice thickness, topography and the sea
+/// level built from them (SeaLevelFromTopography), SI metres on the grid.
 struct EarthState {
   std::vector<double> iceThickness;
+  std::vector<double> topography;
   std::vector<double> seaLevel;
 };
 
-inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid) {
-  std::ifstream in("earth_state_l256.txt");
-  if (!in.is_open()) {
-    throw std::runtime_error(
-        "earth_state_l256.txt not found: configure with a pyslfp checkout "
-        "(SL3DPP_PYSLFP_DIR) so the build extracts it, and run from "
-        "build/examples");
+/// Reads the state from a surface file holding `ice_thickness` and
+/// `topography` (the synthetic Earth, or pyslfp's export of ICE-xG) at a
+/// date in kyr before present, resampled onto the grid.
+inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid,
+                                 const std::filesystem::path& path,
+                                 double dateKyrBp = 0.0) {
+  if (!std::filesystem::exists(path)) {
+    throw std::runtime_error(std::format(
+        "{} not found: run the examples from build/examples, where the "
+        "build writes synthetic_earth.nc (python/get_ice7g.py writes "
+        "ice7g.nc)",
+        path.string()));
   }
-  const auto lmax = grid.LMax();
-  auto fileLmax = 0;
-  auto iceLm = grid.ZeroCoefficients();
-  auto slLm = grid.ZeroCoefficients();
-  for (std::string line; std::getline(in, line);) {
-    if (line.empty() || line.front() == '#') continue;
-    std::istringstream row(line);
-    if (line.starts_with("lmax")) {
-      auto head = std::string{};
-      row >> head >> fileLmax;
-      if (fileLmax < lmax) {
-        throw std::runtime_error(
-            std::format("the Earth state reaches degree {}, the example "
-                        "wants {}",
-                        fileLmax, lmax));
-      }
-      continue;
-    }
-    auto l = 0, m = 0;
-    auto ia = 0.0, ib = 0.0, sa = 0.0, sb = 0.0;
-    row >> l >> m >> ia >> ib >> sa >> sb;
-    if (l > lmax) break;  // rows ascend in degree
-    const auto i = sl3dpp::SurfaceGrid::Index(l, m);
-    iceLm[i] = sl3dpp::ComplexFromRealPair({ia, ib}, m);
-    slLm[i] = sl3dpp::ComplexFromRealPair({sa, sb}, m);
-  }
-  EarthState out{grid.Synthesise(iceLm), grid.Synthesise(slLm)};
-  // Band-limitation rings slightly negative over ice-free ground.
-  for (auto& v : out.iceThickness) v = std::max(v, 0.0);
+  const auto history = sl3dpp::io::FieldHistory::Read(path, grid);
+  if (!history) throw std::runtime_error(history.error().message);
+  const auto time = -dateKyrBp * 1.0e3 * kYear;
+  auto out = EarthState{};
+  out.iceThickness = history->Values("ice_thickness", time);
+  out.topography = history->Values("topography", time);
+  out.seaLevel =
+      sl3dpp::SeaLevelFromTopography(out.topography, out.iceThickness);
   return out;
 }
 

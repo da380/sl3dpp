@@ -16,7 +16,9 @@
  *   path) and the exact discrete transpose: their agreement is the
  *   resolution diagnostic (docs/dev/adjoints.md §1).
  *
- * Run from the build tree; plot with plots/plot_kernels.py.
+ *   ExampleIceKernels [--lmax N] [--state FILE]
+ *
+ * Run from the build tree; plot with python/plot_kernels.py.
  */
 
 #include <iostream>
@@ -31,8 +33,9 @@
 
 using namespace sl3dpp;
 
-int main() {
-  constexpr auto lmax = 128;
+int main(int argc, char** argv) {
+  const auto options = examples::ParseOptions(argc, argv, 128);
+  const auto lmax = options.lmax;
   constexpr auto meltFraction = 0.2;
   constexpr auto tEnd = 10.0e3 * examples::kYear;
   constexpr auto nodes = 11;
@@ -44,7 +47,7 @@ int main() {
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
 
-  const auto earthState = examples::LoadEarthState(grid);
+  const auto earthState = examples::LoadEarthState(grid, options.state);
   const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
@@ -100,6 +103,7 @@ int main() {
   for (auto& v : measurements[nodes - 1].seaLevelDual) v /= norm;
 
   examples::Writer out("kernels.txt");
+  out.Comment("state " + options.state.string());
   out.Comment(
       "adjoint kernels of the site-mean sea level at 10 kyr under a "
       "linear Greenland melt; Fremantle gauge");

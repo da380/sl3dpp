@@ -9,6 +9,7 @@
 #include <complex>
 #include <filesystem>
 #include <numbers>
+#include <stdexcept>
 #include <vector>
 
 #include "sl3dpp/Fingerprint.hpp"
@@ -108,6 +109,23 @@ TEST(SurfaceGrid, TransformsAndIntegrals) {
   auto flm = grid.Expand(f);
   EXPECT_NEAR(grid.Integrate(f2), Pair(flm, flm, 16),
               1e-10 * Pair(flm, flm, 16));
+}
+
+// The sea level of a state from topography and ice, pyslfp's construction:
+// ocean, land, grounded ice, and ice standing on the ocean floor.
+TEST(SeaLevel, FromTopography) {
+  const auto parameters = SeaLevelParameters{};
+  const auto flotation = parameters.ice_density / parameters.water_density;
+  const auto topography = std::vector<double>{-4000.0, 500.0, 2500.0, -300.0};
+  const auto ice = std::vector<double>{0.0, 0.0, 2000.0, 400.0};
+  const auto sl = SeaLevelFromTopography(topography, ice, parameters);
+  EXPECT_DOUBLE_EQ(sl[0], 4000.0);
+  EXPECT_DOUBLE_EQ(sl[1], -500.0);
+  EXPECT_DOUBLE_EQ(sl[2], -500.0);
+  EXPECT_DOUBLE_EQ(sl[3], 300.0 + flotation * 400.0);
+  EXPECT_THROW(static_cast<void>(SeaLevelFromTopography(
+                   topography, std::vector<double>{0.0}, parameters)),
+               std::invalid_argument);
 }
 
 TEST(SeaLevelSolver, RigidEarthEustaticLimit) {

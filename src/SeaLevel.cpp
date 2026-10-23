@@ -72,6 +72,25 @@ std::vector<std::complex<double>> FromReal(std::span<const double> v) {
 
 }  // namespace
 
+std::vector<double> SeaLevelFromTopography(
+    std::span<const double> topography, std::span<const double> iceThickness,
+    const SeaLevelParameters& parameters) {
+  if (topography.size() != iceThickness.size()) {
+    throw std::invalid_argument(std::format(
+        "SeaLevelFromTopography: {} topography values for {} ice thicknesses",
+        topography.size(), iceThickness.size()));
+  }
+  const auto flotation = parameters.ice_density / parameters.water_density;
+  auto seaLevel = std::vector<double>(topography.size());
+  for (auto i = std::size_t{0}; i < topography.size(); ++i) {
+    const auto t = topography[i];
+    const auto ice = iceThickness[i];
+    seaLevel[i] = t < 0.0 ? -t : -t + ice;
+    if (t < 0.0 && ice > 0.0) seaLevel[i] += flotation * ice;
+  }
+  return seaLevel;
+}
+
 SeaLevelParameters WithHydrostaticMoments(SeaLevelParameters parameters,
                                           double fluid_tidal_number,
                                           double non_hydrostatic_fraction) {

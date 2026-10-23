@@ -4,16 +4,20 @@
  * melting ice cap — exponential-trapezoid stepping, the
  * generalised SLE closing each step, full rotational feedback.
  *
- * 20% of the West Antarctic ice (the real ICE-7G state, extracted from
- * pyslfp by the build) melts linearly over the first 5 kyr and the load
+ * 20% of the West Antarctic ice of the present-day state (the synthetic
+ * Earth, or ICE-7G with `--state ice7g.nc`) melts linearly over the first
+ * 5 kyr and the load
  * is then held for another 10 kyr: the elastic response appears
  * instantly, the viscous mantle keeps relaxing long after the melting
  * stops. A PREM-like deck with a 1e21 Pa s Maxwell mantle.
  *
  * Outputs (SI): a time series of the sea-level change at three sites and
  * the polar/rotational response, and maps at the end of melting and the
- * end of the run. Run from the build tree; plot with
- * plots/plot_evolution.py.
+ * end of the run.
+ *
+ *   ExampleEvolution [--lmax N] [--state FILE]
+ *
+ * Run from the build tree; plot with python/plot_evolution.py.
  */
 
 #include <iostream>
@@ -27,8 +31,9 @@
 
 using namespace sl3dpp;
 
-int main() {
-  constexpr auto lmax = 128;
+int main(int argc, char** argv) {
+  const auto options = examples::ParseOptions(argc, argv, 128);
+  const auto lmax = options.lmax;
   constexpr auto meltFraction = 0.2;
   constexpr auto meltEnd = 5.0e3 * examples::kYear;  // s
   constexpr auto tEnd = 15.0e3 * examples::kYear;
@@ -42,7 +47,7 @@ int main() {
   const auto& scales = solver.SolverScales();
 
   // The present-day background state, rebuilt in the solver's units.
-  const auto earthState = examples::LoadEarthState(grid);
+  const auto earthState = examples::LoadEarthState(grid, options.state);
   const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
@@ -105,6 +110,7 @@ int main() {
   };
 
   examples::Writer out("evolution.txt");
+  out.Comment("state " + options.state.string());
   out.Comment(
       "1D viscoelastic GIA: 20% West Antarctic melt over 5 kyr, held to "
       "15 kyr; ICE-7G state (SI)");

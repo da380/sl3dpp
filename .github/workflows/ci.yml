@@ -111,6 +111,53 @@ jobs:
           ctest --test-dir build-package --output-on-failure
           "$GITHUB_WORKSPACE/prefix/bin/sl3d" --version
 
+  # The examples and the sl3d configs, on the synthetic Earth the build
+  # writes, each at a small degree: this checks that they run, not what they
+  # show (examples/README.md has the full-size runs and the plots).
+  examples:
+    name: examples
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev
+
+      - name: Build the examples and the sl3d program
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSL3DPP_BUILD_TESTS=OFF
+          cmake --build build --parallel
+
+      - name: Run the library examples
+        working-directory: build/examples
+        env:
+          OMP_NUM_THREADS: 4
+        run: |
+          set -e
+          for run in "ExampleLoveNumbers --lmax 16" \
+                     "ExampleFingerprint --lmax 32" \
+                     "ExampleEvolution --lmax 16" \
+                     "ExampleLateralViscosity --lmax 8" \
+                     "ExampleModelViscosity --lmax 8" \
+                     "ExampleIceKernels --lmax 16" \
+                     "ExampleViscosityKernels3D --lmax 8"; do
+            echo "::group::$run"
+            ./$run
+            echo "::endgroup::"
+          done
+
+      - name: Run the sl3d configs
+        working-directory: build/examples/app
+        env:
+          OMP_NUM_THREADS: 4
+        run: ./run_all.sh
+
   # The reference builds, and its warnings are shown; they do not fail the job
   # yet. Publishing is docs.yml's, from main only.
   docs:

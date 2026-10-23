@@ -1,0 +1,13 @@
+{
+  "model": "prem8.gia.deck",
+  "lmax": 16,
+  "viscosity": {"file": "../viscosity_log.nc",
+                "reference": "geometric_mean"},
+  "state": {"file": "../synthetic_earth.nc"},
+  "ice_history": {"file": "../synthetic_earth.nc"},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "coupled": {"rtol": 1e-8, "max_iterations": 80},
+  "output": "out/evolve.nc"
+}

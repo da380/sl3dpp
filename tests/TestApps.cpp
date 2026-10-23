@@ -449,6 +449,23 @@ TEST_F(AppsTest, KernelsMatchFiniteDifferencesOfTheForwardValue) {
   }
   const auto rebound = value_of(out, "rebound");
   EXPECT_GT(rebound, 0.0);  // a decay time, seconds
+  // the decay row's fit: tau in kyr (the value's), then the amplitude and
+  // offset in metres -- of the order of the toy history's sea level, not
+  // a length scale too large
+  {
+    auto in = std::ifstream(out / "measurements.txt");
+    auto line = std::string{};
+    while (std::getline(in, line) && !line.starts_with("rebound ")) {
+    }
+    auto words = std::istringstream(line);
+    auto label = std::string{}, type = std::string{};
+    auto value = 0.0, tau_kyr = 0.0, amplitude = 0.0, offset = 0.0;
+    words >> label >> type >> value >> tau_kyr >> amplitude >> offset;
+    EXPECT_NEAR(tau_kyr * 1.0e3 * 365.25 * 86400.0, value, 1e-9 * value);
+    EXPECT_GT(std::abs(amplitude), 0.0);
+    EXPECT_LT(std::abs(amplitude), 1.0e3);
+    EXPECT_LT(std::abs(offset), 1.0e3);
+  }
 
   // the finite-difference gate: the site value's change under an ice
   // bump at the final date equals the thickness duals' prediction

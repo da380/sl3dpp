@@ -168,7 +168,6 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_PYSLFP_DIR` | a sibling `pyslfp` | A pyslfp checkout, from which the build extracts the examples' present-day Earth state (needed by the fingerprint, evolution and kernel examples) |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.
@@ -241,18 +240,27 @@ leaves the program out.
 
 ## Examples
 
-Four drivers, each with a plotting script, are built into `build/examples`
-and run from there:
+The examples are built into `build/examples` and run from there. They need
+no data: the build writes a synthetic Earth (`synthetic_earth.nc`, a toy
+planet over a glacial cycle from 21 ka) for them, and each driver also runs
+on ICE-7G, which a script in the examples' Python environment fetches
+through pyslfp (`--state ice7g.nc`). Each driver has a plotting script.
 
-| Driver | What it computes |
+| Driver | What it shows |
 | --- | --- |
-| `ExampleFingerprint` | The elastic fingerprint of a Greenland melt (lmax 256) |
-| `ExampleEvolution` | 1D GIA under a West Antarctic melt and hold (lmax 128) |
-| `ExampleLateralViscosity` | A 3D run with lateral viscosity against its radial counterpart |
-| `ExampleIceKernels` | Ice-history and viscosity kernels of a tide-gauge measurement |
+| `ExampleLoveNumbers` | Load and tidal Love numbers of a radial model |
+| `ExampleFingerprint` | The elastic sea-level fingerprint of a Greenland melt |
+| `ExampleEvolution` | 1D GIA under a West Antarctic melt and hold |
+| `ExampleLateralViscosity` | A 3D run with lateral viscosity against its radial twin |
+| `ExampleModelViscosity` | The deglaciation on a 3D viscosity read from a planetmodel model file |
+| `ExampleIceKernels` | Ice-history and viscosity kernels of a tide-gauge measurement (1D) |
+| `ExampleViscosityKernels3D` | 3D log-viscosity kernels of a sea-level and a decay-time measurement, written as a model file |
 
-See [examples/README.md](examples/README.md) for the inputs, the plotting
-environment and the outputs.
+The `sl3d` program has an example config for every command in
+`examples/app`, run together by `run_all.sh`. See
+[examples/README.md](examples/README.md) for the inputs, the Python
+environment, the ICE-7G route and the outputs, and
+[examples/app/README.md](examples/app/README.md) for the configs.
 
 ## Running
 

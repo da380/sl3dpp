@@ -446,9 +446,10 @@ std::string RunKernelsWith(
     values << spec.name << ' ' << items[k].At("type").AsString() << ' '
            << std::format("{:.17g}", built.factor * built.value_nd);
     if (built.fit) {
+      // the fit ran on the series in SI metres (BuildMeasurement), so its
+      // amplitude and offset are metres already
       values << std::format(" {:.17g} {:.17g} {:.17g}", built.fit->decay_time,
-                            built.fit->amplitude * solver.SolverScales().Length(),
-                            built.fit->offset * solver.SolverScales().Length());
+                            built.fit->amplitude, built.fit->offset);
     }
     values << '\n';
   }

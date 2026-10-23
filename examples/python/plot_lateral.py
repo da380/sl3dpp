@@ -5,22 +5,22 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, map_axes, plot_field
+from plotutil import Example, world_map, plot_field
 
 ex = Example("lateral.txt")
 fig = plt.figure(figsize=(11, 7))
 
-ax = map_axes(fig, 2, 2, 1)
+ax = world_map(fig, 2, 2, 1, state=ex)
 mesh = plot_field(ax, ex, "delta_log_viscosity", cmap="PuOr",
                   title=r"lateral $\delta\ln\eta$ (one decade peak to peak)")
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 
-ax = map_axes(fig, 2, 2, 2)
+ax = world_map(fig, 2, 2, 2, state=ex)
 mesh = plot_field(ax, ex, "slc_radial_m",
                   title="sea level change, radial mantle (m)")
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 
-ax = map_axes(fig, 2, 2, 3)
+ax = world_map(fig, 2, 2, 3, state=ex)
 mesh = plot_field(ax, ex, "slc_difference_m",
                   title="lateral minus radial (m)")
 fig.colorbar(mesh, ax=ax, shrink=0.7)

@@ -1,0 +1,10 @@
+{
+  "model": "../prem8.elastic.deck",
+  "model_format": "elastic",
+  "lmax": 128,
+  "state": {"file": "../synthetic_earth.nc", "date_kyr_bp": 0.0},
+  "change": {"type": "cap_fraction", "latitude": 72, "longitude": 318,
+             "width_deg": 8, "fraction": -0.1},
+  "rotation": "full",
+  "output": "out/fingerprint.nc"
+}

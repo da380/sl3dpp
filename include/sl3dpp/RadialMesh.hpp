@@ -56,14 +56,14 @@ class RadialMesh {
     int ngll = 5;
     /// Maximum element width, metres (raw for the breakpoints overload).
     /// Exactly one of drmax and lmax.
-    std::optional<double> drmax;
+    std::optional<double> drmax{};
     /// Sizes the mesh for degrees up to lmax: drmax = 0.1 rmax / (lmax + 1),
     /// planetmodel's rule.
-    std::optional<int> lmax;
+    std::optional<int> lmax{};
     /// Mesh range in metres, defaulting to the whole model; must lie
     /// within it. Only for the model overload.
-    std::optional<double> rmin;
-    std::optional<double> rmax;
+    std::optional<double> rmin{};
+    std::optional<double> rmax{};
   };
 
   /// A mesh over (part of) a model: every model boundary strictly inside

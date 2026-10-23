@@ -1,0 +1,24 @@
+{
+  "model": "prem8.gia.deck",
+  "lmax": 24,
+  "state": {"file": "../synthetic_earth.nc"},
+  "ice_history": {"file": "../synthetic_earth.nc"},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "record_stride": 6,
+  "adjoint": "continuous",
+  "measurements": [
+    {"type": "sea_level_cap", "name": "hudson_bay_sea_level",
+     "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 0},
+    {"type": "sea_level_point", "name": "far_field_sea_level",
+     "latitude": -17.5, "longitude": 210.5, "date_kyr_bp": 10},
+    {"type": "rotation", "name": "length_of_day", "component": "z"},
+    {"type": "stokes_coefficient", "name": "j2", "degree": 2, "order": 0},
+    {"type": "decay_time", "name": "hudson_bay_decay",
+     "latitude": 60, "longitude": 275, "width_deg": 4,
+     "window_start_kyr_bp": 7, "window_end_kyr_bp": 0,
+     "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0}
+  ],
+  "output": "out/kernels1d"
+}

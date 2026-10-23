@@ -5,7 +5,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, map_axes, mark_sites, plot_field
+from plotutil import Example, world_map, mark_sites, plot_field
 
 ex = Example("evolution.txt")
 fig = plt.figure(figsize=(11, 7))
@@ -36,13 +36,13 @@ ax.set_title("rotational response", fontsize=10)
 sites = ex.series["sites"]
 site_colors = ["C0", "C1", "C2"]  # match the history lines
 
-ax = map_axes(fig, 2, 2, 3)
+ax = world_map(fig, 2, 2, 3, state=ex)
 mesh = plot_field(ax, ex, "slc_end_of_melt_m",
                   title="sea level change at 5 kyr (m)")
 mark_sites(ax, sites, site_colors)
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 
-ax = map_axes(fig, 2, 2, 4)
+ax = world_map(fig, 2, 2, 4, state=ex)
 mesh = plot_field(ax, ex, "slc_final_m",
                   title="sea level change at 15 kyr (m)")
 mark_sites(ax, sites, site_colors)
