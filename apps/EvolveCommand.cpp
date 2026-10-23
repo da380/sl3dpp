@@ -12,26 +12,19 @@
 #include <vector>
 
 #include "Commands.hpp"
+#include "Common.hpp"
 #include "Input.hpp"
-#include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
-#include "sl3dpp/LoveNumbers.hpp"
-#include "sl3dpp/Material.hpp"
-#include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
-#include "sl3dpp/io/FieldHistory.hpp"
 #include "sl3dpp/io/ModelViscosity.hpp"
 
 namespace sl3dpp::app {
 
 namespace {
-
-/// Seconds in a kiloyear of Julian years, as pyslfp counts them.
-constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
 
 /// One node of the accumulated history, SI, kept across restarts.
 struct Node {
@@ -270,92 +263,6 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
   return std::nullopt;
 }
 
-// -- the scaffold both runners share -----------------------------------------
-
-struct BuiltEarth {
-  EarthModel model;
-  Material material;
-};
-
-BuiltEarth BuildEarth(const EvolveInput& input, const Json& top) {
-  const auto deck = Deck::Read(input.model, FormatOf(input.format));
-  if (!deck) Fail(top.At("model"), deck.error().message);
-  auto model = EarthModel::FromDeck(*deck);
-  if (!model) Fail(top.At("model"), model.error().message);
-  auto mesh_options = RadialMesh::Options{};
-  mesh_options.lmax = input.lmax;
-  const auto mesh = RadialMesh::Create(*model, mesh_options);
-  if (!mesh) Fail(top.At("model"), mesh.error().message);
-  auto material = Material::Create(*model, *mesh);
-  if (!material) Fail(top.At("model"), material.error().message);
-  return {std::move(*model), std::move(*material)};
-}
-
-SeaLevelParameters ParametersOf(const EvolveInput& input,
-                                const Material& material) {
-  auto parameters = SeaLevelParameters{};
-  if (input.hydrostatic_moments) {
-    parameters =
-        WithHydrostaticMoments(parameters, FluidTidalNumber(material, 2));
-  }
-  return parameters;
-}
-
-struct Loaded {
-  io::FieldHistory state;
-  io::FieldHistory ice;
-  std::vector<double> ice0;  ///< the start's ice thickness, SI
-  SeaLevelSolver::State background;
-};
-
-Loaded LoadWorld(const EvolveInput& input, const Json& top,
-                 const SeaLevelSolver& solver) {
-  const auto& grid = solver.Grid();
-  const auto fieldSize = grid.FieldSize();
-  const auto length = solver.SolverScales().Length();
-  auto state_history = io::FieldHistory::Read(input.state, grid);
-  if (!state_history) {
-    Fail(top.At("state").At("file"), state_history.error().message);
-  }
-  auto ice_history = io::FieldHistory::Read(input.ice_history, grid);
-  if (!ice_history) {
-    Fail(top.At("ice_history").At("file"), ice_history.error().message);
-  }
-  for (const auto name : {"ice_thickness", "topography"}) {
-    if (!state_history->Has(name)) {
-      Fail(top.At("state").At("file"), std::format("holds no field {}", name));
-    }
-  }
-  if (!ice_history->Has("ice_thickness")) {
-    Fail(top.At("ice_history").At("file"), "holds no field ice_thickness");
-  }
-  const auto start_si = -input.start_kyr_bp * KYR;
-  auto ice0 = state_history->Values("ice_thickness", start_si);
-  const auto topo0 = state_history->Values("topography", start_si);
-  const auto parameters = solver.Parameters();
-  const auto flotation = parameters.ice_density / parameters.water_density;
-  auto ice_nd = std::vector<double>(fieldSize);
-  auto sl_nd = std::vector<double>(fieldSize);
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    auto sl = topo0[i] < 0.0 ? -topo0[i] : -topo0[i] + ice0[i];
-    if (topo0[i] < 0.0 && ice0[i] > 0.0) sl += flotation * ice0[i];
-    ice_nd[i] = ice0[i] / length;
-    sl_nd[i] = sl / length;
-  }
-  auto background = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
-  return {std::move(*state_history), std::move(*ice_history), std::move(ice0),
-          std::move(background)};
-}
-
-std::vector<double> MakeTimes(const EvolveInput& input, const Scales& scales) {
-  auto times = std::vector<double>{};
-  const auto span_s = (input.start_kyr_bp - input.end_kyr_bp) * KYR;
-  for (auto n = 0; n < input.nodes; ++n) {
-    times.push_back(span_s * n / (input.nodes - 1) / scales.Time());
-  }
-  return times;
-}
-
 /// The histories as one surface file: SI node fields on a time axis in
 /// seconds relative to the present (negative past).
 void WriteHistoryFile(const EvolveInput& input,
@@ -427,120 +334,21 @@ void WriteHistoryFile(const EvolveInput& input,
   pm::WriteSurfaceFile(input.output, file);
 }
 
-}  // namespace
-
-EvolveInput ReadEvolveInput(const std::filesystem::path& config) {
-  const auto top = planetmodel::ReadJsonFile(config);
-  Allow(top, {"model", "model_format", "lmax", "viscosity", "state",
-              "ice_history", "times", "scheme", "rotation", "moments", "rtol",
-              "coupled", "checkpoint", "restart", "output"});
-  const auto directory = config.parent_path();
-  auto out = EvolveInput{};
-  out.model = PathOf(top, "model", directory);
-  if (Has(top, "model_format")) {
-    out.format = Choice<ModelFormat>(top.At("model_format"),
-                                     {{"gia", ModelFormat::Gia},
-                                      {"mineos", ModelFormat::Mineos},
-                                      {"elastic", ModelFormat::Elastic}});
-  }
-  out.lmax = Integer(top, "lmax");
-  if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
-  if (Has(top, "viscosity")) {
-    const auto& viscosity = top.At("viscosity");
-    Allow(viscosity, {"file", "reference"});
-    out.viscosity = PathOf(viscosity, "file", directory);
-    if (Has(viscosity, "reference")) {
-      out.viscosity_file_radial =
-          Choice<bool>(viscosity.At("reference"),
-                       {{"geometric_mean", false}, {"file_radial", true}});
-    }
-  }
-  const auto& state = top.At("state");
-  Allow(state, {"file"});
-  out.state = PathOf(state, "file", directory);
-  const auto& history = top.At("ice_history");
-  Allow(history, {"file"});
-  out.ice_history = PathOf(history, "file", directory);
-  const auto& times = top.At("times");
-  Allow(times, {"start_kyr_bp", "end_kyr_bp", "nodes"});
-  out.start_kyr_bp = Number(times, "start_kyr_bp");
-  out.end_kyr_bp = Number(times, "end_kyr_bp", 0.0);
-  out.nodes = Integer(times, "nodes");
-  if (!(out.start_kyr_bp > out.end_kyr_bp)) {
-    Fail(times, "runs forward in time: start_kyr_bp exceeds end_kyr_bp");
-  }
-  if (out.nodes < 2) Fail(times.At("nodes"), "is fewer than two nodes");
-  if (Has(top, "scheme")) {
-    out.scheme = Choice<Scheme>(
-        top.At("scheme"), {{"exponential_trapezoid", Scheme::ExponentialTrapezoid},
-                           {"backward_euler", Scheme::BackwardEuler}});
-  }
-  if (Has(top, "rotation")) {
-    out.rotation = Choice<RotationalFeedback>(
-        top.At("rotation"), {{"none", RotationalFeedback::None},
-                             {"axial", RotationalFeedback::Axial},
-                             {"full", RotationalFeedback::Full}});
-  }
-  if (Has(top, "moments")) {
-    out.hydrostatic_moments =
-        Choice<bool>(top.At("moments"), {{"input", false},
-                                         {"hydrostatic", true}});
-  }
-  out.rtol = Number(top, "rtol", 1e-9);
-  if (Has(top, "coupled")) {
-    const auto& coupled = top.At("coupled");
-    Allow(coupled, {"rtol", "max_iterations"});
-    out.coupled_rtol = Number(coupled, "rtol", 1e-9);
-    out.max_coupled_iterations = Integer(coupled, "max_iterations", 60);
-  }
-  if (Has(top, "checkpoint")) {
-    const auto& checkpoint = top.At("checkpoint");
-    Allow(checkpoint, {"directory", "every", "max_walltime_min"});
-    out.checkpoint_directory = PathOf(checkpoint, "directory", directory);
-    out.checkpoint_every = Integer(checkpoint, "every");
-    if (out.checkpoint_every < 1) {
-      Fail(checkpoint.At("every"), "is not a positive stride");
-    }
-    out.max_walltime_min = Number(checkpoint, "max_walltime_min", 0.0);
-  }
-  if (Has(top, "restart")) out.restart = top.At("restart").AsBool();
-  out.output = PathOf(top, "output", directory);
-  return out;
-}
-
-namespace {
-
 /// The run both commands share, over either evolution. `make` builds
-/// the evolution from the solver, the background state and the options;
-/// `check` inspects each snapshot (the 3D one refuses an unconverged
-/// node).
+/// the evolution from its options; `check` inspects each snapshot (the
+/// 3D one refuses an unconverged node).
 template <class Evolution>
 std::string RunWith(
     const std::filesystem::path& config, const EvolveInput& input,
-    const Json& /*top*/, const SeaLevelSolver& solver, Loaded& world,
-    std::string_view command,
+    const SeaLevelSolver& solver, Loaded& world, std::string_view command,
     const std::function<Evolution(typename Evolution::Options)>& make,
     const std::function<void(const typename Evolution::Snapshot&)>& check) {
   const auto started = std::chrono::steady_clock::now();
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
-  const auto fieldSize = grid.FieldSize();
-  const auto start_si = -input.start_kyr_bp * KYR;
   const auto times = MakeTimes(input, scales);
-
-  const auto& C = world.background.oceanFunction;
-  const auto& ice0 = world.ice0;
-  const auto rho_ice = solver.IceDensity();
-  auto iceLoad = [&](double t) {
-    const auto thickness =
-        world.ice.Values("ice_thickness", start_si + t * scales.Time());
-    auto load = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      load[i] = rho_ice * (1.0 - C[i]) * (thickness[i] - ice0[i]) / length;
-    }
-    return load;
-  };
+  const auto iceLoad = IceLoadOf(input, solver, world);
 
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toOmega = 1.0 / scales.Time();
@@ -627,6 +435,31 @@ std::string RunWith(
 
 }  // namespace
 
+EvolveInput ReadEvolveInput(const std::filesystem::path& config) {
+  const auto top = planetmodel::ReadJsonFile(config);
+  auto allowed = RunMemberNames();
+  for (const auto name : {"checkpoint", "restart", "output"}) {
+    allowed.push_back(name);
+  }
+  Allow(top, std::span(allowed));
+  const auto directory = config.parent_path();
+  auto out = EvolveInput{};
+  ReadRunMembers(top, directory, out);
+  if (Has(top, "checkpoint")) {
+    const auto& checkpoint = top.At("checkpoint");
+    Allow(checkpoint, {"directory", "every", "max_walltime_min"});
+    out.checkpoint_directory = PathOf(checkpoint, "directory", directory);
+    out.checkpoint_every = Integer(checkpoint, "every");
+    if (out.checkpoint_every < 1) {
+      Fail(checkpoint.At("every"), "is not a positive stride");
+    }
+    out.max_walltime_min = Number(checkpoint, "max_walltime_min", 0.0);
+  }
+  if (Has(top, "restart")) out.restart = top.At("restart").AsBool();
+  out.output = PathOf(top, "output", directory);
+  return out;
+}
+
 std::string RunEvolve(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   const auto input = ReadEvolveInput(config);
@@ -643,7 +476,7 @@ std::string RunEvolve(const std::filesystem::path& config) {
                         ParametersOf(input, earth.material));
   auto world = LoadWorld(input, top, solver);
   return RunWith<SeaLevelEvolution>(
-      config, input, top, solver, world, "evolve1d",
+      config, input, solver, world, "evolve1d",
       [&](SeaLevelEvolution::Options options) {
         return SeaLevelEvolution(op, solver, world.background,
                                  std::move(options));
@@ -676,7 +509,7 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
                         ParametersOf(input, earth.material));
   auto world = LoadWorld(input, top, solver);
   return RunWith<SeaLevelEvolution3D>(
-      config, input, top, solver, world, "evolve",
+      config, input, solver, world, "evolve",
       [&](SeaLevelEvolution3D::Options options) {
         options.coupled_rtol = input.coupled_rtol;
         options.max_coupled_iterations = input.max_coupled_iterations;

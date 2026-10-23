@@ -12,6 +12,7 @@
 #include <format>
 #include <initializer_list>
 #include <planetmodel/json.hpp>
+#include <span>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -25,6 +26,7 @@ using planetmodel::Json;
 
 /// Refuses any member of an object not among those named, so that a
 /// misspelt member is not silently ignored.
+void Allow(const Json& json, std::span<const std::string_view> names);
 void Allow(const Json& json, std::initializer_list<std::string_view> names);
 
 /// Whether an object has a member, which `At` would otherwise refuse.

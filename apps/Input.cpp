@@ -11,12 +11,16 @@ void Fail(const Json& json, std::string_view message) {
   throw planetmodel::Error(json.Source(), json.Path(), message);
 }
 
-void Allow(const Json& json, std::initializer_list<std::string_view> names) {
+void Allow(const Json& json, std::span<const std::string_view> names) {
   for (const auto& [key, value] : json.AsObject()) {
     if (std::ranges::find(names, key) == names.end()) {
       Fail(value, "is not a recognised member");
     }
   }
+}
+
+void Allow(const Json& json, std::initializer_list<std::string_view> names) {
+  Allow(json, std::span(names.begin(), names.size()));
 }
 
 bool Has(const Json& object, std::string_view key) {

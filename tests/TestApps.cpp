@@ -16,6 +16,8 @@
 #include <vector>
 
 #include "Commands.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/io/FieldHistory.hpp"
 
 namespace {
 
@@ -180,7 +182,9 @@ TEST_F(AppsTest, FingerprintRunsAToyStateEndToEnd) {
 
 /// A toy world for the evolution: land north, ocean south, a polar ice
 /// cap shrinking linearly over the window (2 kyr BP to the present).
-void WriteToyHistory(const fs::path& path) {
+/// `bump_last` adds a smooth mid-latitude patch to the final date's ice
+/// alone, for finite differences of the kernels.
+void WriteToyHistory(const fs::path& path, double bump_last = 0.0) {
   namespace pm = planetmodel;
   constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
   const auto grid = pm::Equiangular(19, 36);
@@ -189,15 +193,20 @@ void WriteToyHistory(const fs::path& path) {
   for (const auto d : dates) time.push_back(-d * kyr);
   auto ice = std::vector<double>{};
   auto topo = std::vector<double>{};
+  // melt from 2 to 1 kyr BP, then hold: the hold is the decay window
+  const auto fractions = std::vector<double>{1.0, 0.7, 0.7};
   for (auto k = std::size_t{0}; k < dates.size(); ++k) {
-    const auto fraction = 1.0 - 0.3 * static_cast<double>(k) /
-                                    static_cast<double>(dates.size() - 1);
+    const auto fraction = fractions[k];
+    const auto bump = k + 1 == dates.size() ? bump_last : 0.0;
     for (const auto theta : grid.Colatitudes()) {
       for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
         topo.push_back(3000.0 * std::cos(theta));
-        ice.push_back(theta < 0.45 ? fraction * 1500.0 *
-                                         std::exp(-std::pow(theta / 0.3, 2))
-                                   : 0.0);
+        auto thickness = theta < 0.45 ? fraction * 1500.0 *
+                                            std::exp(-std::pow(theta / 0.3, 2))
+                                      : 0.0;
+        // the bump sits on grounded northern land, where ice may change
+        thickness += bump * std::exp(-std::pow((theta - 0.6) / 0.2, 2));
+        ice.push_back(thickness);
       }
     }
   }
@@ -322,6 +331,139 @@ TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
 
   // the 1D command refuses a 3D config
   EXPECT_THROW(static_cast<void>(app::RunEvolve(whole)), planetmodel::Error);
+}
+
+TEST_F(AppsTest, KernelsMatchFiniteDifferencesOfTheForwardValue) {
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "state.nc");
+  WriteToyHistory(dir_ / "plus.nc", 20.0);
+  WriteToyHistory(dir_ / "minus.nc", -20.0);
+  auto config_with = [&](const std::string& history, const std::string& name,
+                         const std::string& extra) {
+    return Write(name, std::string{R"({
+      "model": "ball.deck",
+      "lmax": 8,
+      "state": {"file": "state.nc"},
+      "ice_history": {"file": ")"} + history + R"("},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 9},
+      "rotation": "full", "moments": "hydrostatic",
+      "adjoint": "discrete",
+      "measurements": [
+        {"type": "sea_level_cap", "name": "site", "latitude": -30.0,
+         "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0},
+        {"type": "stokes_coefficient", "name": "j2", "degree": 2,
+         "order": 0, "date_kyr_bp": 0.0},
+        {"type": "rotation", "name": "lod", "component": "z",
+         "date_kyr_bp": 0.0},
+        {"type": "decay_time", "name": "rebound", "latitude": 80.0,
+         "longitude": 0.0, "width_deg": 15.0, "window_start_kyr_bp": 1.0,
+         "window_end_kyr_bp": 0.0, "time_uncertainty_kyr": 0.0,
+         "value_uncertainty_m": 0.1}],
+      "output": ")" + extra + R"("})");
+  };
+
+  auto value_of = [&](const fs::path& output, const std::string& name) {
+    auto in = std::ifstream(output / "measurements.txt");
+    auto line = std::string{};
+    while (std::getline(in, line)) {
+      if (line.starts_with(name + ' ')) {
+        auto words = std::istringstream(line);
+        auto label = std::string{}, type = std::string{};
+        auto value = 0.0;
+        words >> label >> type >> value;
+        return value;
+      }
+    }
+    throw std::runtime_error(name + " is not in measurements.txt");
+  };
+
+  auto summary = app::RunKernel1D(
+      config_with("state.nc", "kernels.json", "out_kernels"));
+  EXPECT_NE(summary.find("4 measurement(s)"), std::string::npos);
+  const auto out = dir_ / "out_kernels";
+  for (const auto name :
+       {"site_ice_kernels.nc", "j2_ice_kernels.nc", "lod_ice_kernels.nc",
+        "rebound_ice_kernels.nc", "site_viscosity_kernel.txt",
+        "measurements.txt"}) {
+    EXPECT_TRUE(fs::exists(out / name)) << name;
+  }
+  const auto rebound = value_of(out, "rebound");
+  EXPECT_GT(rebound, 0.0);  // a decay time, seconds
+
+  // the finite-difference gate: the site value's change under an ice
+  // bump at the final date equals the thickness duals' prediction
+  static_cast<void>(
+      app::RunKernel1D(config_with("plus.nc", "plus.json", "out_plus")));
+  static_cast<void>(
+      app::RunKernel1D(config_with("minus.nc", "minus.json", "out_minus")));
+  const auto difference = (value_of(dir_ / "out_plus", "site") -
+                           value_of(dir_ / "out_minus", "site")) /
+                          2.0;
+
+  const auto kernels = pm::ReadSurfaceFile(out / "site_ice_kernels.nc");
+  const auto& grid = *kernels.grid;
+  const auto& thickness = kernels.variables.at("thickness_dual").values;
+  const auto nphi = grid.NPhi();
+  const auto ntheta = grid.NTheta();
+  const auto a = 6371000.0;  // the pairing's radius: the deck's surface
+  const auto weights = *grid.Weights();
+  // the perturbation exactly as the runs saw it: the bumped histories
+  // through the same resampling, at each run node
+  const auto solver_grid = SurfaceGrid(8);
+  const auto plus = *io::FieldHistory::Read(dir_ / "plus.nc", solver_grid);
+  const auto minus = *io::FieldHistory::Read(dir_ / "minus.nc", solver_grid);
+  constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
+  auto predicted = 0.0;
+  for (auto n = std::size_t{0}; n < 9; ++n) {
+    const auto date = 2.0 - 0.25 * static_cast<double>(n);
+    const auto up = plus.Values("ice_thickness", -date * kyr);
+    const auto down = minus.Values("ice_thickness", -date * kyr);
+    for (auto it = std::size_t{0}; it < ntheta; ++it) {
+      auto ring = 0.0;
+      for (auto j = std::size_t{0}; j < nphi; ++j) {
+        ring += thickness[(n * ntheta + it) * nphi + j] *
+                0.5 * (up[it * nphi + j] - down[it * nphi + j]);
+      }
+      predicted += weights[it] * ring;
+    }
+  }
+  predicted *= 2.0 * std::numbers::pi / static_cast<double>(nphi) * a * a;
+  EXPECT_NEAR(predicted, difference,
+              1e-5 * std::max(std::abs(difference), 1e-12))
+      << "predicted " << predicted << " measured " << difference;
+}
+
+TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc");
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto config = Write("kernel3d.json", std::string{R"({
+    "model": ")"} + data + R"(/prem8.elastic.deck",
+    "model_format": "elastic",
+    "lmax": 8,
+    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+    "rotation": "full",
+    "measurements": [
+      {"type": "sea_level_cap", "name": "site", "latitude": -30.0,
+       "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}],
+    "output": "out_kernel3d"})");
+  const auto summary = app::RunKernel3D(config);
+  EXPECT_NE(summary.find("1 measurement(s)"), std::string::npos);
+  const auto out = dir_ / "out_kernel3d";
+  const auto ice = pm::ReadSurfaceFile(out / "site_ice_kernels.nc");
+  EXPECT_TRUE(ice.variables.contains("thickness_dual"));
+  EXPECT_TRUE(ice.variables.contains("rate_dual"));
+  const auto viscosity =
+      pm::ReadModelFile(out / "site_viscosity_kernels.nc");
+  auto held = false;
+  for (const auto& part : viscosity.Parts()) {
+    held = held || part.variables.contains("K_ln_eta_0");
+  }
+  EXPECT_TRUE(held);
 }
 
 TEST_F(AppsTest, FingerprintRefusesAStateWithoutTheFields) {

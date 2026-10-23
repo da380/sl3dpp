@@ -36,6 +36,9 @@ constexpr auto kUsage =
     "  evolve         a 3D (lateral-viscosity) GIA run under an ice\n"
     "                 history, restartable from disk checkpoints\n"
     "  evolve1d       its 1D counterpart, on the deck's own viscosity\n"
+    "  kernel         adjoint sensitivity kernels of configured\n"
+    "                 measurements, 3D lateral viscosity\n"
+    "  kernel1d       its 1D counterpart\n"
     "\n"
     "sl3d --version prints the library versions; a config's members are\n"
     "documented with the command in apps/Commands.hpp and the manual.\n";
@@ -50,6 +53,8 @@ constexpr auto kCommands = std::array{
     Command{"fingerprint", sl3dpp::app::RunFingerprint},
     Command{"evolve", sl3dpp::app::RunEvolve3D},
     Command{"evolve1d", sl3dpp::app::RunEvolve},
+    Command{"kernel", sl3dpp::app::RunKernel3D},
+    Command{"kernel1d", sl3dpp::app::RunKernel1D},
 };
 
 }  // namespace

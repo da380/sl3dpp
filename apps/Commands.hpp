@@ -22,9 +22,12 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
+#include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/Geography.hpp"
+#include "sl3dpp/Measurements.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
@@ -128,5 +131,56 @@ struct EvolveInput {
 
 /// Runs (or resumes) a 3D (lateral-viscosity) evolve config.
 [[nodiscard]] std::string RunEvolve3D(const std::filesystem::path& config);
+
+/// One measurement of a kernel config: a named linear functional of one
+/// time node's outputs, or the decay time of a site's series over a
+/// window of nodes. Every date must be a node of the config's times.
+struct MeasurementSpec {
+  enum class Type {
+    SeaLevelCap,
+    SeaLevelPoint,
+    DisplacementCap,
+    DisplacementPoint,
+    PotentialCap,
+    PotentialPoint,
+    StokesCoefficient,
+    Rotation,
+    DecayTime
+  };
+  Type type = Type::SeaLevelCap;
+  std::string name;
+  GeographicPoint site{};  ///< caps, points and the decay time's site
+  double width = 0.0;      ///< a cap's Gaussian width, radians
+  int degree = 0;          ///< a coefficient's degree and order (m < 0
+  int order = 0;           ///< the sine term)
+  AngularVelocityComponent component = AngularVelocityComponent::Z;
+  double date_kyr_bp = 0.0;  ///< a single-date measurement's node
+  /// The decay time's window of nodes and the estimator's uncertainties
+  /// (Measurements.hpp): the fit runs over every node of the window.
+  double window_start_kyr_bp = 0.0;
+  double window_end_kyr_bp = 0.0;
+  double time_uncertainty_kyr = 0.0;
+  double value_uncertainty_m = 0.0;
+};
+
+/// The config of `sl3d kernel1d` and `sl3d kernel`: the evolve commands'
+/// run members, a recording stride, and the measurements — one adjoint
+/// sweep, and one set of kernel files, per measurement.
+struct KernelInput {
+  EvolveInput run;
+  int record_stride = 1;
+  AdjointMethod method = AdjointMethod::Continuous;  ///< kernel1d alone
+  std::vector<MeasurementSpec> measurements;
+  std::filesystem::path output;  ///< the directory the files land in
+};
+
+/// Reads a kernel config, relative paths against its directory.
+[[nodiscard]] KernelInput ReadKernelInput(const std::filesystem::path& config);
+
+/// Runs a 1D kernel config and returns the summary line.
+[[nodiscard]] std::string RunKernel1D(const std::filesystem::path& config);
+
+/// Runs a 3D (lateral-viscosity) kernel config.
+[[nodiscard]] std::string RunKernel3D(const std::filesystem::path& config);
 
 }  // namespace sl3dpp::app
