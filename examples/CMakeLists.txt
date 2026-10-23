@@ -14,7 +14,7 @@ sl3dpp_add_example(ExampleEvolution)
 sl3dpp_add_example(ExampleLateralViscosity)
 sl3dpp_add_example(ExampleIceKernels)
 
-configure_file(${CMAKE_SOURCE_DIR}/tests/data/prem8.elastic.deck
+configure_file(${PROJECT_SOURCE_DIR}/tests/data/prem8.elastic.deck
                prem8.elastic.deck COPYONLY)
 
 # The present-day Earth state (ICE-7G ice + topography coefficients) is
@@ -32,10 +32,10 @@ if(SL3DPP_PYSLFP_DIR AND SL3DPP_POETRY)
   add_custom_command(
     OUTPUT ${SL3DPP_EARTH_STATE}
     COMMAND ${SL3DPP_POETRY} run python
-            ${CMAKE_SOURCE_DIR}/scripts/make_example_earth_state.py
+            ${PROJECT_SOURCE_DIR}/scripts/make_example_earth_state.py
             --out ${SL3DPP_EARTH_STATE}
     WORKING_DIRECTORY ${SL3DPP_PYSLFP_DIR}
-    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/make_example_earth_state.py
+    DEPENDS ${PROJECT_SOURCE_DIR}/scripts/make_example_earth_state.py
     COMMENT "Extracting the present-day ICE-7G Earth state from pyslfp")
   add_custom_target(ExampleEarthState ALL DEPENDS ${SL3DPP_EARTH_STATE})
 else()
@@ -44,7 +44,7 @@ else()
       "examples need earth_state_l256.txt beside them (set "
       "SL3DPP_PYSLFP_DIR to extract it during the build)")
 endif()
-configure_file(${CMAKE_SOURCE_DIR}/examples/README.md README.md COPYONLY)
+configure_file(${PROJECT_SOURCE_DIR}/examples/README.md README.md COPYONLY)
 file(GLOB SL3DPP_EXAMPLE_PLOTS ${CMAKE_CURRENT_SOURCE_DIR}/plots/*)
 foreach(plot_file ${SL3DPP_EXAMPLE_PLOTS})
   get_filename_component(plot_name ${plot_file} NAME)

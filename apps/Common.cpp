@@ -159,8 +159,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
   const auto time = scales.Time();
   const auto start_si = -input.start_kyr_bp * KYR;
   const auto rho_ice = solver.IceDensity();
-  return [&world, &solver, fieldSize, length, time, start_si,
-          rho_ice](double t) {
+  return [&world, fieldSize, length, time, start_si, rho_ice](double t) {
     const auto thickness =
         world.ice.Values("ice_thickness", start_si + t * time);
     const auto& C = world.background.oceanFunction;

@@ -7,7 +7,9 @@
 #include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
+#include <span>
 #include <stdexcept>
+#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -55,16 +57,120 @@ constexpr std::uint64_t KindOf(const SeaLevelEvolution3D::Checkpoint&) {
   return kKind3D;
 }
 
-/// FNV-1a of the config's text: a restart with another config is refused.
-std::uint64_t HashOf(const std::filesystem::path& config) {
-  auto in = std::ifstream(config, std::ios::binary);
-  auto hash = std::uint64_t{14695981039346656037ull};
-  char c = 0;
-  while (in.get(c)) {
-    hash ^= static_cast<unsigned char>(c);
-    hash *= 1099511628211ull;
+/// FNV-1a, folded over whatever is added to it.
+class Fnv1a {
+ public:
+  void Add(std::span<const std::byte> bytes) {
+    for (const auto b : bytes) {
+      hash_ ^= static_cast<std::uint64_t>(b);
+      hash_ *= 1099511628211ull;
+    }
   }
-  return hash;
+  template <class T>
+  void AddValue(const T& value) {
+    Add(std::as_bytes(std::span(&value, 1)));
+  }
+  /// A file's contents, read in blocks.
+  void AddFile(const std::filesystem::path& path) {
+    auto in = std::ifstream(path, std::ios::binary);
+    if (!in) {
+      throw std::runtime_error(std::format("cannot read {}", path.string()));
+    }
+    auto block = std::vector<char>(std::size_t{1} << 20);
+    while (in) {
+      in.read(block.data(), static_cast<std::streamsize>(block.size()));
+      Add(std::as_bytes(
+          std::span(block.data(), static_cast<std::size_t>(in.gcount()))));
+    }
+  }
+  [[nodiscard]] std::uint64_t Value() const { return hash_; }
+
+ private:
+  std::uint64_t hash_ = 14695981039346656037ull;
+};
+
+/// What a run's checkpoints belong to: the members that decide the
+/// computation, and the contents of its input files, so that a restart
+/// with another run's checkpoints -- another config, or the same config
+/// over changed inputs -- is refused. The members that only steer the run
+/// (the checkpoint stride and directory, the wall-time limit, restart, the
+/// output) are left out, and so are the paths themselves, so that these can
+/// change between a run and its resumption and a run directory can move.
+std::uint64_t FingerprintOf(const EvolveInput& input) {
+  auto hash = Fnv1a{};
+  hash.AddFile(input.model);
+  hash.AddValue(input.format);
+  hash.AddValue(input.lmax);
+  if (!input.viscosity.empty()) hash.AddFile(input.viscosity);
+  hash.AddValue(input.viscosity_file_radial);
+  hash.AddFile(input.state);
+  hash.AddFile(input.ice_history);
+  hash.AddValue(input.start_kyr_bp);
+  hash.AddValue(input.end_kyr_bp);
+  hash.AddValue(input.nodes);
+  hash.AddValue(input.scheme);
+  hash.AddValue(input.rotation);
+  hash.AddValue(input.coupled_rtol);
+  hash.AddValue(input.max_coupled_iterations);
+  hash.AddValue(input.hydrostatic_moments);
+  hash.AddValue(input.rtol);
+  return hash.Value();
+}
+
+/// Whether a file name is one this program writes into a checkpoint
+/// directory (node_NNNNNN.ckpt, or the .node_NNNNNN.partial it renames):
+/// only those are read, pruned or cleared, whatever else is there.
+bool IsCheckpointName(std::string_view name) {
+  const auto digits = [](std::string_view text) {
+    return text.size() == 6 &&
+           text.find_first_not_of("0123456789") == std::string_view::npos;
+  };
+  for (const auto& [prefix, suffix] :
+       {std::pair{std::string_view{"node_"}, std::string_view{".ckpt"}},
+        std::pair{std::string_view{".node_"}, std::string_view{".partial"}}}) {
+    if (name.starts_with(prefix) && name.ends_with(suffix) &&
+        name.size() == prefix.size() + 6 + suffix.size() &&
+        digits(name.substr(prefix.size(), 6))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/// The finished checkpoints in a directory, oldest (lowest node) first.
+std::vector<std::filesystem::path> CheckpointsIn(
+    const std::filesystem::path& directory) {
+  auto found = std::vector<std::filesystem::path>{};
+  if (!std::filesystem::is_directory(directory)) return found;
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    const auto name = entry.path().filename().string();
+    if (IsCheckpointName(name) && name.ends_with(".ckpt")) {
+      found.push_back(entry.path());
+    }
+  }
+  std::sort(found.begin(), found.end());
+  return found;
+}
+
+/// Removes the checkpoint files an earlier run left in the directory, for
+/// a run that starts over: its own checkpoints would otherwise be pruned
+/// against the earlier run's by name, and a later resumption could pick
+/// one of those. Returns how many were removed.
+std::size_t ClearCheckpoints(const std::filesystem::path& directory) {
+  auto removed = std::size_t{0};
+  if (!std::filesystem::is_directory(directory)) return removed;
+  auto doomed = std::vector<std::filesystem::path>{};
+  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
+    if (IsCheckpointName(entry.path().filename().string())) {
+      doomed.push_back(entry.path());
+    }
+  }
+  for (const auto& path : doomed) {
+    if (std::filesystem::remove(path) && path.extension() == ".ckpt") {
+      ++removed;
+    }
+  }
+  return removed;
 }
 
 /// Writes a checkpoint whole (a temporary renamed into place) and keeps
@@ -105,11 +211,7 @@ void WriteCheckpoint(const std::filesystem::path& directory,
   }
   std::filesystem::rename(partial, path);
   // keep the newest two
-  auto kept = std::vector<std::filesystem::path>{};
-  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-    if (entry.path().extension() == ".ckpt") kept.push_back(entry.path());
-  }
-  std::sort(kept.begin(), kept.end());
+  auto kept = CheckpointsIn(directory);
   while (kept.size() > 2) {
     std::filesystem::remove(kept.front());
     kept.erase(kept.begin());
@@ -123,23 +225,20 @@ struct ReadBack {
   std::vector<Node> history;
 };
 
-/// The newest checkpoint of this config in the directory, or nothing.
+/// The newest checkpoint of this run in the directory, or nothing.
 template <class CheckpointT>
 std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
     const std::filesystem::path& directory, std::uint64_t hash) {
-  if (!std::filesystem::is_directory(directory)) return std::nullopt;
-  auto candidates = std::vector<std::filesystem::path>{};
-  for (const auto& entry : std::filesystem::directory_iterator(directory)) {
-    if (entry.path().extension() == ".ckpt") candidates.push_back(entry.path());
-  }
-  std::sort(candidates.rbegin(), candidates.rend());
+  auto candidates = CheckpointsIn(directory);
+  std::reverse(candidates.begin(), candidates.end());
   for (const auto& path : candidates) {
     auto in = std::ifstream(path, std::ios::binary);
     if (!in || GetOne<std::uint64_t>(in) != kMagic) continue;
     if (GetOne<std::uint64_t>(in) != hash) {
       throw std::runtime_error(std::format(
-          "{} was checkpointed by a different config; move it aside or "
-          "point checkpoint.directory elsewhere",
+          "{} was checkpointed by a different run (another config, or "
+          "changed input files); set \"restart\": false to start over, "
+          "or point checkpoint.directory elsewhere",
           path.string()));
     }
     auto out = ReadBack<CheckpointT>{};
@@ -276,12 +375,18 @@ std::string RunWith(
   };
 
   const auto checkpointing = !input.checkpoint_directory.empty();
-  const auto hash = HashOf(config);
+  const auto hash = checkpointing ? FingerprintOf(input) : std::uint64_t{0};
   auto resumed = std::optional<ReadBack<typename Evolution::Checkpoint>>{};
+  auto cleared = std::size_t{0};
   if (checkpointing && input.restart) {
     resumed = ReadCheckpoint<typename Evolution::Checkpoint>(
         input.checkpoint_directory, hash);
+  } else if (checkpointing) {
+    cleared = ClearCheckpoints(input.checkpoint_directory);
   }
+  const auto replaced =
+      cleared > 0 ? std::format(", replacing {} earlier checkpoint(s)", cleared)
+                  : std::string{};
   auto options = typename Evolution::Options{};
   options.scheme = input.scheme;
   options.rotation = input.rotation;
@@ -326,17 +431,18 @@ std::string RunWith(
       static_cast<void>(evolution.Run(times, iceLoad));
     }
   } catch (const WalltimeReached& at) {
+    // with restart false, the same config would start over again
     return std::format(
-        "checkpointed node {} of {} to {} at the wall-time limit; rerun "
-        "the same config to resume",
-        at.node, input.nodes - 1, input.checkpoint_directory.string());
+        "checkpointed node {} of {} to {} at the wall-time limit{}; {}",
+        at.node, input.nodes - 1, input.checkpoint_directory.string(), replaced,
+        input.restart ? "rerun the same config to resume"
+                      : "set \"restart\": true (the default) to resume");
   }
 
   WriteHistoryFile(input, config, grid, history, command);
-  return std::format("wrote {} ({} nodes, {} to {} kyr BP{})",
-                     input.output.string(), history.size(),
-                     input.start_kyr_bp, input.end_kyr_bp,
-                     resumed ? ", resumed" : "");
+  return std::format("wrote {} ({} nodes, {} to {} kyr BP{}{})",
+                     input.output.string(), history.size(), input.start_kyr_bp,
+                     input.end_kyr_bp, resumed ? ", resumed" : "", replaced);
 }
 
 }  // namespace

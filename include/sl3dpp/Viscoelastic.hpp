@@ -3,7 +3,7 @@
 /**
  * @file Viscoelastic.hpp
  * @brief The radial viscoelastic core: state, slaved degree solves,
- * steppers. A port of pyslfp's `viscoelastic.operator`, non-dimensional
+ * steppers. A port of pyslfp's `viscoelastic/operator.py`, non-dimensional
  * throughout.
  *
  * The state is the internal variables alone; the displacement is slaved

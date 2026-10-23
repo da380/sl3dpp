@@ -10,7 +10,7 @@ add_library(sl3d_app STATIC
   LoveNumbersCommand.cpp
   FingerprintCommand.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_link_libraries(sl3d_app PUBLIC sl3dpp::sl3dpp planetmodel::planetmodel)
+target_link_libraries(sl3d_app PUBLIC sl3dpp::sl3dpp)
 
 add_executable(sl3d sl3d.cpp)
 target_link_libraries(sl3d PRIVATE sl3d_app)

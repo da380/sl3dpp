@@ -98,10 +98,11 @@ std::expected<FieldHistory, IoError> FieldHistory::Read(
       if (!rule) return std::unexpected(rule.error());
       const auto factor = FactorOf(var, file.scales);
       const auto rows = var.values.size() / src_size;
-      const auto* poles_var = [&]() -> const pm::FileVariable* {
-        const auto it = file.variables.find(name + "_poles");
-        return it == file.variables.end() ? nullptr : &it->second;
-      }();
+      // Not a lambda: Clang 18 refuses to capture a structured binding
+      // (name) when OpenMP is on.
+      const auto poles_it = file.variables.find(name + "_poles");
+      const auto* poles_var =
+          poles_it == file.variables.end() ? nullptr : &poles_it->second;
       auto values = std::vector<double>{};
       values.reserve(rows * ntheta * nphi);
       for (auto k = std::size_t{0}; k < rows; ++k) {

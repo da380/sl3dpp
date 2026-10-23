@@ -1,0 +1,59 @@
+# The API reference and the user pages, configured by CMake
+# (SL3DPP_BUILD_DOCS) and built with
+#
+#   cmake --build build --target sl3dpp_docs
+#
+# into build/docs/html; CI publishes the same output to GitHub Pages
+# (.github/workflows/docs.yml). Only the settings that differ from Doxygen's
+# defaults are here.
+#
+# The reference is complete rather than curated (EXTRACT_ALL), so warnings
+# are about broken documentation -- unknown commands, references and
+# parameters -- not about what is undocumented. They are logged, not fatal.
+
+PROJECT_NAME           = "sl3dpp"
+PROJECT_NUMBER         = @PROJECT_VERSION@
+PROJECT_BRIEF          = "Forward and adjoint GIA modelling in 1D and 3D \
+viscosity earth models"
+OUTPUT_DIRECTORY       = @SL3DPP_DOCS_OUTPUT@
+
+# The README is the main page; the other pages are the user documentation.
+INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
+                         @PROJECT_SOURCE_DIR@/include/sl3dpp \
+                         @PROJECT_SOURCE_DIR@/docs/sl3d-configs.md \
+                         @PROJECT_SOURCE_DIR@/docs/conventions.md \
+                         @PROJECT_SOURCE_DIR@/docs/walkthrough-3d-step.md \
+                         @PROJECT_SOURCE_DIR@/examples/README.md
+USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/README.md
+RECURSIVE              = YES
+FILE_PATTERNS          = *.hpp *.md
+STRIP_FROM_PATH        = @PROJECT_SOURCE_DIR@
+STRIP_FROM_INC_PATH    = @PROJECT_SOURCE_DIR@/include
+
+# The implementation details stay out: detail/ is not part of the API.
+EXCLUDE                = @PROJECT_SOURCE_DIR@/include/sl3dpp/detail
+EXCLUDE_SYMBOLS        = sl3dpp::detail sl3dpp::detail::*
+
+EXTRACT_ALL            = YES
+EXTRACT_STATIC         = YES
+EXTRACT_PRIVATE        = NO
+JAVADOC_AUTOBRIEF      = YES
+BUILTIN_STL_SUPPORT    = YES
+SORT_MEMBER_DOCS       = NO
+
+QUIET                  = YES
+WARNINGS               = YES
+WARN_IF_UNDOCUMENTED   = NO
+WARN_IF_DOC_ERROR      = YES
+WARN_NO_PARAMDOC       = NO
+WARN_LOGFILE           = @SL3DPP_DOCS_OUTPUT@/doxygen-warnings.log
+
+HAVE_DOT               = NO
+GENERATE_HTML          = YES
+GENERATE_LATEX         = NO
+GENERATE_TREEVIEW      = YES
+FULL_SIDEBAR           = NO
+HTML_COLORSTYLE        = TOGGLE
+USE_MATHJAX            = YES
+MATHJAX_VERSION        = MathJax_3
+MATHJAX_RELPATH        = https://cdn.jsdelivr.net/npm/mathjax@3

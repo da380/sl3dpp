@@ -275,13 +275,70 @@ TEST_F(AppsTest, EvolveRunsAndARestartedRunMatchesAnUninterruptedOne) {
   }
   EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"), reference.meta.at("omega_z_rad_s"));
 
-  // a different config must not adopt this run's checkpoints
-  const auto other = Write(
-      "other.json",
-      "{" + body +
-          R"(, "checkpoint": {"directory": "ckpt", "every": 2},
-              "output": "out/other.nc"})");
-  EXPECT_THROW(static_cast<void>(app::RunEvolve(other)), std::runtime_error);
+  // the checkpoints belong to the run, not to the config's text: the same
+  // run with another output, no wall-time limit and other spacing adopts
+  // them...
+  const auto same = Write("same.json", "{\n" + body +
+                                           R"(,
+              "checkpoint": {"directory": "ckpt", "every": 2},
+              "output": "out/same.nc"
+          })");
+  summary = app::RunEvolve(same);
+  EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
+  EXPECT_EQ(pm::ReadSurfaceFile(dir_ / "out" / "same.nc")
+                .variables.at("sea_level_change")
+                .values,
+            reference.variables.at("sea_level_change").values);
+
+  // ...while another computation, or the same config over a changed input
+  // file, is refused
+  const auto refused = [](const fs::path& config) {
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(app::RunEvolve(config));
+          } catch (const std::runtime_error& error) {
+            EXPECT_NE(std::string{error.what()}.find("different run"),
+                      std::string::npos)
+                << error.what();
+            throw;
+          }
+        },
+        std::runtime_error)
+        << config;
+  };
+  refused(Write("tighter.json", "{" + body +
+                                    R"(, "rtol": 1e-11,
+                        "checkpoint": {"directory": "ckpt", "every": 2},
+                        "output": "out/tighter.nc"})"));
+  WriteToyHistory(dir_ / "history.nc", 1.0);
+  refused(same);
+
+  // starting over replaces the earlier run's checkpoints: a shorter run's
+  // own would otherwise be pruned against the earlier run's later nodes,
+  // which a resumption would then pick. Other files are left alone.
+  ASSERT_TRUE(fs::exists(dir_ / "ckpt" / "node_000004.ckpt"));
+  static_cast<void>(Write("ckpt/notes.ckpt", "not a checkpoint"));
+  auto shorter = body;
+  shorter.replace(shorter.find(R"("nodes": 5)"), 10, R"("nodes": 3)");
+  const auto over = Write("over.json", "{" + shorter +
+                                           R"(, "restart": false,
+              "checkpoint": {"directory": "ckpt", "every": 1},
+              "output": "out/over.nc"})");
+  summary = app::RunEvolve(over);
+  EXPECT_NE(summary.find("replacing 2 earlier checkpoint(s)"),
+            std::string::npos)
+      << summary;
+  EXPECT_FALSE(fs::exists(dir_ / "ckpt" / "node_000004.ckpt"));
+  EXPECT_TRUE(fs::exists(dir_ / "ckpt" / "node_000002.ckpt"));
+  EXPECT_TRUE(fs::exists(dir_ / "ckpt" / "notes.ckpt"));
+  // and the same run, restarting, adopts the new checkpoints
+  const auto again = Write(
+      "again.json", "{" + shorter +
+                        R"(, "checkpoint": {"directory": "ckpt", "every": 1},
+              "output": "out/again.nc"})");
+  summary = app::RunEvolve(again);
+  EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
 }
 
 TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
@@ -521,6 +578,57 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
       EXPECT_EQ(var.values, held_disk.at(name).values) << name;
     }
   }
+}
+
+// A measurement is held to the run when the config is read: a date off the
+// times grid, a coefficient beyond the band or a decay window too short for
+// the fit costs a read, not the forward run before the sweeps.
+TEST_F(AppsTest, KernelMeasurementsAreCheckedWhenTheConfigIsRead) {
+  const auto config = [&](const std::string& measurement) {
+    return Write("kernel_check.json", R"({
+      "model": "ball.deck", "lmax": 8,
+      "state": {"file": "history.nc"},
+      "ice_history": {"file": "history.nc"},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
+      "measurements": [)" + measurement + R"(],
+      "output": "out"})");
+  };
+  const auto refuse = [&](const std::string& measurement,
+                          const std::string& what) {
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(app::ReadKernelInput(config(measurement)));
+          } catch (const planetmodel::Error& error) {
+            EXPECT_NE(std::string{error.what()}.find(what), std::string::npos)
+                << error.what();
+            throw;
+          }
+        },
+        planetmodel::Error)
+        << measurement;
+  };
+  // the nodes are 2, 1.5, 1, 0.5 and 0 kyr BP
+  refuse(R"({"type": "sea_level_point", "latitude": 10, "longitude": 20,
+             "date_kyr_bp": 0.3})",
+         "date_kyr_bp: 0.3 kyr BP is not a node");
+  refuse(R"({"type": "rotation", "component": "z", "date_kyr_bp": 2.5})",
+         "is not a node");
+  refuse(R"({"type": "stokes_coefficient", "degree": 9, "order": 0})",
+         "(9, 0) is not a degree and order at lmax 8");
+  refuse(R"({"type": "stokes_coefficient", "degree": 2, "order": -3})",
+         "(2, -3) is not a degree and order");
+  refuse(R"({"type": "decay_time", "latitude": 80, "longitude": 0,
+             "width_deg": 15, "window_start_kyr_bp": 1.0,
+             "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})",
+         "holds 3 nodes");
+  const auto input = app::ReadKernelInput(config(
+      R"({"type": "stokes_coefficient", "degree": 2, "order": -2,
+          "date_kyr_bp": 0.5},
+         {"type": "decay_time", "latitude": 80, "longitude": 0,
+          "width_deg": 15, "window_start_kyr_bp": 1.5,
+          "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0})"));
+  EXPECT_EQ(input.measurements.size(), 2u);
 }
 
 TEST_F(AppsTest, Kernel1DRefusesASpilledTrajectory) {

@@ -136,10 +136,15 @@ LAPACK, and netCDF-C. On Debian or Ubuntu 24.04, for example:
 sudo apt install g++ cmake pkg-config libfftw3-dev libopenblas-dev liblapack-dev libnetcdf-dev
 ```
 
-The header-only dependencies (GSHTrans, GaussQuad, Interpolation, FFTWpp,
-NumericConcepts) and, for the tests, GoogleTest are downloaded from GitHub
-at pinned commits when the build is first configured, unless an installed
-copy is found; the first configure therefore needs network access.
+The sibling libraries (GSHTrans, GaussQuad, Interpolation, FFTWpp,
+NumericConcepts and planetmodel) and, for the tests, GoogleTest are
+downloaded from GitHub when the build is first configured, unless an
+installed copy is found; the first configure therefore needs network
+access. Each sibling is pinned to a commit (`SL3DPP_<NAME>_TAG`), so a
+commit of sl3dpp always builds against the same sources;
+`scripts/bump_dependencies.py` moves the pins, and CI builds against the
+libraries' current `main` weekly. One build can move a pin from outside, as
+`-DSL3DPP_GSHTRANS_TAG=main`, say.
 
 ### Configure, build and test
 
@@ -157,14 +162,41 @@ The build type defaults to `Release`. The build produces the static library
 | CMake option | Default | Effect |
 | --- | --- | --- |
 | `CMAKE_BUILD_TYPE` | `Release` | The standard CMake build types |
-| `SL3DPP_BUILD_TESTS` | `ON` | The test suite |
-| `SL3DPP_BUILD_EXAMPLES` | `ON` | The example drivers |
+| `SL3DPP_BUILD_TESTS` | on at top level | The test suite |
+| `SL3DPP_BUILD_APPS` | on at top level | The `sl3d` program |
+| `SL3DPP_BUILD_EXAMPLES` | on at top level | The example drivers |
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
+| `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
+| `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
 | `SL3DPP_PYSLFP_DIR` | a sibling `pyslfp` | A pyslfp checkout, from which the build extracts the examples' present-day Earth state (needed by the fingerprint, evolution and kernel examples) |
 
-To build against local checkouts of the header-only dependencies rather than
-the pinned downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the
-comment at the top of `CMakeLists.txt` lists them).
+"At top level" means when sl3dpp is the project being built rather than a
+dependency of another, which then gets only the library.
+
+To build against local checkouts of the sibling libraries rather than the
+downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the comment at the
+top of `CMakeLists.txt` lists them).
+
+### Installing, and using it from CMake
+
+`cmake --install build --prefix <prefix>` installs the library, its headers,
+the `sl3d` program and a CMake package, with the sibling libraries' own
+packages beside it. A code then links the one target either way:
+
+```cmake
+find_package(sl3dpp REQUIRED)      # an installed copy, on CMAKE_PREFIX_PATH
+# or
+include(FetchContent)
+FetchContent_Declare(sl3dpp
+  GIT_REPOSITORY https://github.com/da380/sl3dpp.git
+  GIT_TAG        <release tag or commit>)
+FetchContent_MakeAvailable(sl3dpp)
+
+target_link_libraries(my_code PRIVATE sl3dpp::sl3dpp)
+```
+
+The target carries the C++23 requirement and its dependencies, planetmodel
+among them, so a code can read and write planetmodel files beside it.
 
 ## The sl3d program
 
@@ -203,8 +235,9 @@ metadata. For example:
 }
 ```
 
-The config members are documented with each command in
-`apps/Commands.hpp`; `-DSL3DPP_BUILD_APPS=OFF` leaves the program out.
+Every command's config is documented in
+[docs/sl3d-configs.md](docs/sl3d-configs.md); `-DSL3DPP_BUILD_APPS=OFF`
+leaves the program out.
 
 ## Examples
 
@@ -273,6 +306,12 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
 
 ## Documentation
 
+The API reference and these pages are published at
+<https://da380.github.io/sl3dpp/>, built from `main` by Doxygen
+(`-DSL3DPP_BUILD_DOCS=ON`, target `sl3dpp_docs`, builds them locally).
+
+- [docs/sl3d-configs.md](docs/sl3d-configs.md): the `sl3d` program's
+  configs, command by command.
 - [docs/conventions.md](docs/conventions.md): units, signs, harmonic
   conventions and code style.
 - [docs/walkthrough-3d-step.md](docs/walkthrough-3d-step.md): how a 3D step
@@ -280,6 +319,10 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
 - [The 3D coupling](docs/stage4.md) and [the adjoints](docs/stage5.md):
   their formulations, with convergence measurements.
 - [docs/plan.md](docs/plan.md): design notes and the record of decisions.
+
+## Licence
+
+BSD 3-Clause; see [LICENSE](LICENSE).
 
 ## References
 
