@@ -63,9 +63,9 @@ std::vector<std::complex<double>> SeaLevelEvolution::Coefficients(
   return out;
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
-    std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad) {
+namespace {
+
+void CheckTimes(std::span<const double> times) {
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
@@ -74,6 +74,37 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
       throw std::invalid_argument("times must be increasing");
     }
   }
+}
+
+}  // namespace
+
+std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad) {
+  CheckTimes(times);
+  return March(times, iceLoad, false);
+}
+
+std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Resume(
+    const Checkpoint& from, std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad) {
+  CheckTimes(times);
+  if (times[0] != from.t) {
+    throw std::invalid_argument(
+        "the first time of a resumed run is the checkpoint's own node");
+  }
+  vstate_ = op_->ZeroState([](int l) { return 2 * (l + 1); });
+  vstate_.t = from.t * toMatTime_;
+  vstate_.m = from.m;
+  vstate_.strain = from.strain;
+  sigma_ = from.loadCoefficients;
+  psi_ = from.tideCoefficients;
+  return March(times, iceLoad, true);
+}
+
+std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad, bool resumed) {
   const auto& op = *op_;
   const auto& solver = *solver_;
   const auto& grid = solver.Grid();
@@ -100,8 +131,10 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
 
-  vstate_ = op.ZeroState([](int l) { return 2 * (l + 1); });
-  vstate_.t = times[0] * toMatTime_;
+  if (!resumed) {
+    vstate_ = op.ZeroState([](int l) { return 2 * (l + 1); });
+    vstate_.t = times[0] * toMatTime_;
+  }
 
   auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
                                    const std::vector<double>& slc) {
@@ -132,21 +165,39 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
     return found->second;
   };
 
-  // The instantaneous elastic response at the start: the right limit, so
-  // a load switched on at times[0] is stepped at full order.
-  auto loadGrid = iceLoad(times[0]);
-  const auto& elasticSolver = solverFor(0.0);
-  SeaLevelSolver::GeneralisedForcing forcing;
-  forcing.directLoad = loadGrid;
-  forcing.rotation = options_.rotation;
-  auto response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
-  auto sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-  auto psi = options_.rotation == RotationalFeedback::None
-                 ? grid.ZeroCoefficients()
-                 : solver.CentrifugalCoefficients(response.angularVelocity);
+  auto checkpoint = [&](std::size_t node) {
+    const auto every = options_.checkpoint_stride;
+    if (every <= 0 || !options_.on_checkpoint) return;
+    if (node % static_cast<std::size_t>(every) != 0 && node != lastNode) {
+      return;
+    }
+    options_.on_checkpoint(
+        node, Checkpoint{.t = times[node],
+                         .m = vstate_.m,
+                         .strain = vstate_.strain,
+                         .loadCoefficients = sigma_,
+                         .tideCoefficients = psi_});
+  };
+
+  auto loadGrid = std::vector<double>{};
+  auto response = SeaLevelSolver::Response{};
+  if (!resumed) {
+    // The instantaneous elastic response at the start: the right limit,
+    // so a load switched on at times[0] is stepped at full order.
+    loadGrid = iceLoad(times[0]);
+    const auto& elasticSolver = solverFor(0.0);
+    SeaLevelSolver::GeneralisedForcing forcing;
+    forcing.directLoad = loadGrid;
+    forcing.rotation = options_.rotation;
+    response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
+    sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+    psi_ = options_.rotation == RotationalFeedback::None
+               ? grid.ZeroCoefficients()
+               : solver.CentrifugalCoefficients(response.angularVelocity);
+  }
   if (stride > 0) {
-    op.PrimeStrain(vstate_, Columns(sigma, toMatDensity_),
-                   Columns(psi, toMatPotential_));
+    op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
+                   Columns(psi_, toMatPotential_));
   }
 
   auto snapshots = std::vector<Snapshot>{};
@@ -169,18 +220,25 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
       snapshot.internalState = std::move(kept);
     }
     if (stride > 0) {
-      snapshot.loadCoefficients = sigma;
-      snapshot.tideCoefficients = psi;
+      snapshot.loadCoefficients = sigma_;
+      snapshot.tideCoefficients = psi_;
     }
     snapshots.push_back(std::move(snapshot));
+    if (options_.on_snapshot) {
+      options_.on_snapshot(snapshots.size() - (resumed ? 0 : 1),
+                           snapshots.back());
+    }
   };
-  record(times[0], response, stride > 0);
+  if (!resumed) {
+    record(times[0], response, stride > 0);
+    checkpoint(0);
+  }
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme,
-                             Columns(sigma, toMatDensity_),
-                             Columns(psi, toMatPotential_));
+                             Columns(sigma_, toMatDensity_),
+                             Columns(psi_, toMatPotential_));
     const auto& effectiveSolver = solverFor(dt);
     SeaLevelSolver::GeneralisedForcing coupled;
     loadGrid = iceLoad(times[node]);
@@ -192,15 +250,16 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
     coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
     coupled.rotation = options_.rotation;
     response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-    sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-    psi = options_.rotation == RotationalFeedback::None
-              ? grid.ZeroCoefficients()
-              : solver.CentrifugalCoefficients(response.angularVelocity);
-    auto [next, solutions] = step.Finish(Columns(sigma, toMatDensity_),
-                                         Columns(psi, toMatPotential_));
+    sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+    psi_ = options_.rotation == RotationalFeedback::None
+               ? grid.ZeroCoefficients()
+               : solver.CentrifugalCoefficients(response.angularVelocity);
+    auto [next, solutions] = step.Finish(Columns(sigma_, toMatDensity_),
+                                         Columns(psi_, toMatPotential_));
     vstate_ = std::move(next);
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, keep);
+    checkpoint(node);
   }
   return snapshots;
 }

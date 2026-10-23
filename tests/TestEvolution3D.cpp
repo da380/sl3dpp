@@ -174,3 +174,43 @@ TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
   EXPECT_GT(maxRelDiff, 1e-3);
   EXPECT_LT(maxRelDiff, 0.5);
 }
+
+TEST(Stage4, AResumedCoupledRunIsTheUninterruptedOne) {
+  auto setup = Setup::Make();
+  const auto& scales = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3 * kyr};
+  auto load = setup.MeltLoad(-0.1);
+  auto iceLoad = [&](double) { return load; };
+  Viscoelastic3D op(
+      setup.rheology, kLmax, [](double, double theta, double phi) {
+        return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+
+  auto checkpoints =
+      std::map<std::size_t, SeaLevelEvolution3D::Checkpoint>{};
+  auto options = SeaLevelEvolution3D::Options{};
+  options.checkpoint_stride = 1;
+  options.on_checkpoint = [&](std::size_t node,
+                              const SeaLevelEvolution3D::Checkpoint& cp) {
+    checkpoints.emplace(node, cp);
+  };
+  SeaLevelEvolution3D whole(op, setup.solver, setup.state, options);
+  const auto full = whole.Run(times, iceLoad);
+  ASSERT_EQ(checkpoints.size(), times.size());
+
+  SeaLevelEvolution3D resumed(op, setup.solver, setup.state, {});
+  const auto tail = resumed.Resume(
+      checkpoints.at(1),
+      std::vector<double>(times.begin() + 1, times.end()), iceLoad);
+  ASSERT_EQ(tail.size(), times.size() - 2);
+  for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+    const auto& a = full[2 + k];
+    const auto& b = tail[k];
+    EXPECT_EQ(a.seaLevelChange, b.seaLevelChange) << "node " << 2 + k;
+    EXPECT_EQ(a.displacement, b.displacement) << "node " << 2 + k;
+    EXPECT_EQ(a.potential, b.potential) << "node " << 2 + k;
+    EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 2 + k;
+    EXPECT_EQ(a.coupledIterations, b.coupledIterations) << "node " << 2 + k;
+  }
+}

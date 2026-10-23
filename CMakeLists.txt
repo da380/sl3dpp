@@ -16,6 +16,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
 endif()
 
 option(SL3DPP_BUILD_TESTS "Build the test suite" ON)
+option(SL3DPP_BUILD_APPS "Build the sl3d program" ON)
 option(SL3DPP_BUILD_BENCHMARKS "Build the cross-code benchmark drivers" OFF)
 option(SL3DPP_BUILD_EXAMPLES "Build the example drivers" ON)
 
@@ -53,8 +54,8 @@ set(SL3DPP_FFTWPP_TAG "423558c0842b25f6031f2ae58dcab36d8f5f8874"
     CACHE STRING "FFTWpp commit")
 set(SL3DPP_GSHTRANS_TAG "8dd116df8df4222fe9b10a40c7213d34f2a274fb"
     CACHE STRING "GSHTrans commit")
-set(SL3DPP_PLANETMODEL_TAG "35be4ee54b3d84df1483e647878c5446a886c90b"
-    CACHE STRING "planetmodel commit (v1.3.0)")
+set(SL3DPP_PLANETMODEL_TAG "v1.3.1"
+    CACHE STRING "planetmodel release tag")
 
 FetchContent_Declare(
   NumericConcepts
@@ -119,9 +120,11 @@ add_library(sl3dpp STATIC
   src/Fingerprint.cpp
   src/GridCoupling.cpp
   src/io/KernelWriter.cpp
+  src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
+  src/Measurements.cpp
   src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp
@@ -163,6 +166,10 @@ if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
 endif()
 
 # ---------------------------------------------------------------------------
+if(SL3DPP_BUILD_APPS)
+  add_subdirectory(apps)
+endif()
+
 # Tests.
 # ---------------------------------------------------------------------------
 if(SL3DPP_BUILD_TESTS)

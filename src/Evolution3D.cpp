@@ -61,9 +61,9 @@ std::vector<SeaLevelEvolution3D::Complex> SeaLevelEvolution3D::Coefficients(
   return out;
 }
 
-std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
-    std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad) {
+namespace {
+
+void CheckTimes(std::span<const double> times) {
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
@@ -72,6 +72,38 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
       throw std::invalid_argument("times must be increasing");
     }
   }
+}
+
+}  // namespace
+
+std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad) {
+  CheckTimes(times);
+  return March(times, iceLoad, false);
+}
+
+std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Resume(
+    const Checkpoint& from, std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad) {
+  CheckTimes(times);
+  if (times[0] != from.t) {
+    throw std::invalid_argument(
+        "the first time of a resumed run is the checkpoint's own node");
+  }
+  vstate_ = op_->ZeroState();
+  vstate_.t = from.t * toMatTime_;
+  vstate_.m = from.m;
+  vstate_.strain.reset();
+  vstate_.strainCoefficients = from.strainCoefficients;
+  sigma_ = from.loadCoefficients;
+  psi_ = from.tideCoefficients;
+  return March(times, iceLoad, true);
+}
+
+std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceLoad, bool resumed) {
   const auto& op = *op_;
   const auto& solver = *solver_;
   const auto& grid = solver.Grid();
@@ -107,8 +139,24 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
 
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
-  vstate_ = op.ZeroState();
-  vstate_.t = times[0] * toMatTime_;
+  if (!resumed) {
+    vstate_ = op.ZeroState();
+    vstate_.t = times[0] * toMatTime_;
+  }
+
+  auto checkpoint = [&](std::size_t node) {
+    const auto every = options_.checkpoint_stride;
+    if (every <= 0 || !options_.on_checkpoint) return;
+    if (node % static_cast<std::size_t>(every) != 0 && node != lastNode) {
+      return;
+    }
+    options_.on_checkpoint(
+        node, Checkpoint{.t = times[node],
+                         .m = vstate_.m,
+                         .strainCoefficients = vstate_.strainCoefficients,
+                         .loadCoefficients = sigma_,
+                         .tideCoefficients = psi_});
+  };
 
   auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
                                    const std::vector<double>& slc) {
@@ -120,20 +168,23 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     return grid.Expand(total);
   };
 
-  // The instantaneous elastic response at the start.
-  auto loadGrid = iceLoad(times[0]);
-  const auto& elastic = solverFor(op.ElasticLove());
-  SeaLevelSolver::GeneralisedForcing forcing;
-  forcing.directLoad = loadGrid;
-  forcing.rotation = options_.rotation;
-  auto response = elastic.SolveGeneralised(state_, forcing, sleOptions);
-  auto sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-  auto psi = options_.rotation == RotationalFeedback::None
-                 ? grid.ZeroCoefficients()
-                 : solver.CentrifugalCoefficients(response.angularVelocity);
-
-  if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma, toMatDensity_),
-                                 Columns(psi, toMatPotential_));
+  auto loadGrid = std::vector<double>{};
+  auto response = SeaLevelSolver::Response{};
+  if (!resumed) {
+    // The instantaneous elastic response at the start.
+    loadGrid = iceLoad(times[0]);
+    const auto& elastic = solverFor(op.ElasticLove());
+    SeaLevelSolver::GeneralisedForcing forcing;
+    forcing.directLoad = loadGrid;
+    forcing.rotation = options_.rotation;
+    response = elastic.SolveGeneralised(state_, forcing, sleOptions);
+    sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+    psi_ = options_.rotation == RotationalFeedback::None
+               ? grid.ZeroCoefficients()
+               : solver.CentrifugalCoefficients(response.angularVelocity);
+  }
+  if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
+                                 Columns(psi_, toMatPotential_));
 
   auto snapshots = std::vector<Snapshot>{};
   auto record = [&](double t, SeaLevelSolver::Response& r, int iterations,
@@ -149,28 +200,36 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     snapshot.converged = converged;
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
-    // loads.
+    // loads. With on_state, the kept state is handed out instead.
+    auto kept = std::optional<Viscoelastic3D::State>{};
     if (keepState && options_.record_strain) {
-      snapshot.internalState = vstate_;
+      kept = vstate_;
     } else if (keepState) {
-      Viscoelastic3D::State kept;
-      kept.t = vstate_.t;
-      kept.m = vstate_.m;
-      snapshot.internalState = std::move(kept);
+      auto trimmed = Viscoelastic3D::State{};
+      trimmed.t = vstate_.t;
+      trimmed.m = vstate_.m;
+      kept = std::move(trimmed);
     }
+    if (kept && !options_.on_state) snapshot.internalState = std::move(kept);
     if (stride > 0) {
-      snapshot.loadCoefficients = sigma;
-      snapshot.tideCoefficients = psi;
+      snapshot.loadCoefficients = sigma_;
+      snapshot.tideCoefficients = psi_;
     }
     snapshots.push_back(std::move(snapshot));
+    const auto node = snapshots.size() - (resumed ? 0 : 1);
+    if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
+    if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
-  record(times[0], response, 0, 0.0, true, stride > 0);
+  if (!resumed) {
+    record(times[0], response, 0, 0.0, true, stride > 0);
+    checkpoint(0);
+  }
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme,
-                             Columns(sigma, toMatDensity_),
-                             Columns(psi, toMatPotential_));
+                             Columns(sigma_, toMatDensity_),
+                             Columns(psi_, toMatPotential_));
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
     loadGrid = iceLoad(times[node]);
 
@@ -189,12 +248,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
           coupled.rotation = options_.rotation;
           response =
               effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-          sigma = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-          psi = options_.rotation == RotationalFeedback::None
-                    ? grid.ZeroCoefficients()
-                    : solver.CentrifugalCoefficients(response.angularVelocity);
-          step.AddChannels(responses, Columns(sigma, toMatDensity_),
-                           Columns(psi, toMatPotential_));
+          sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+          psi_ = options_.rotation == RotationalFeedback::None
+                     ? grid.ZeroCoefficients()
+                     : solver.CentrifugalCoefficients(response.angularVelocity);
+          step.AddChannels(responses, Columns(sigma_, toMatDensity_),
+                           Columns(psi_, toMatPotential_));
           return step.StrainOf(responses);
         },
         {.max_iterations = options_.max_coupled_iterations,
@@ -205,6 +264,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);
+    checkpoint(node);
   }
   return snapshots;
 }

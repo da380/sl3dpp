@@ -54,6 +54,7 @@ of mantle viscosity using deglacial sea level observations.
 | `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution |
 | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution |
 | `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D |
+| `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |
 
 ## Using the library
 
@@ -164,6 +165,46 @@ The build type defaults to `Release`. The build produces the static library
 To build against local checkouts of the header-only dependencies rather than
 the pinned downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the
 comment at the top of `CMakeLists.txt` lists them).
+
+## The sl3d program
+
+`build/apps/sl3d` (installed by `cmake --install`) runs the library's
+common capabilities from JSON configs, without writing C++:
+
+```
+sl3d love-numbers run.json     # the SI Love-number table of a radial model
+sl3d fingerprint run.json      # an elastic fingerprint on a present-day state
+sl3d evolve run.json           # a 3D (lateral-viscosity) GIA run, restartable
+sl3d evolve1d run.json         # its 1D counterpart
+sl3d kernel run.json           # adjoint kernels of configured measurements
+                               #   ("trajectory": {"directory": ...} spills
+                               #    the recorded states to disk for large lmax)
+sl3d kernel1d run.json         # its 1D counterpart
+```
+
+Configs are strict JSON read with planetmodel's reader: an unknown or
+misspelt member is refused naming the file, the member and the fault,
+and relative paths resolve against the config's directory. A
+fingerprint's present-day state is a planetmodel surface file holding
+`ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
+one from ICE-5G/6G/7G), and the fingerprint comes back as a surface
+file of SI fields with the angular-velocity perturbation in its
+metadata. For example:
+
+```json
+{
+  "model": "earth.deck",
+  "lmax": 256,
+  "state": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
+  "change": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
+             "width_deg": 16, "fraction": -0.1},
+  "rotation": "full",
+  "output": "fingerprint.nc"
+}
+```
+
+The config members are documented with each command in
+`apps/Commands.hpp`; `-DSL3DPP_BUILD_APPS=OFF` leaves the program out.
 
 ## Examples
 
