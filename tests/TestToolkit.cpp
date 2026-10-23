@@ -22,7 +22,7 @@ TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.1.0"); }
 
 // The pin in the top-level CMakeLists.txt; moves with it.
 TEST(Toolkit, PlanetModelVersion) {
-  EXPECT_EQ(sl3dpp::PlanetModelVersion(), "1.3.0");
+  EXPECT_EQ(sl3dpp::PlanetModelVersion(), "1.3.1");
 }
 
 // GLL quadrature integrates a low-degree polynomial exactly.
