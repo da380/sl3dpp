@@ -1,4 +1,4 @@
-// The stage-4 spin machinery: spin-N transforms on the surface grid, the
+// The spin machinery: spin-N transforms on the surface grid, the
 // degree <-> component maps, their reduction to the 1D memory-force
 // algebra (the zero-lateral identity, checked constant by constant), and
 // the reality symmetry of the component fields.

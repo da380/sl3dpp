@@ -1,4 +1,4 @@
-# stage-11 WP2 probes of stage11_viscosity_full3d.nc: the Python's own reading, SI
+# probes of viscosity_full3d.nc: the Python's own reading, SI
 # ETA 1.00000000000000000e+21 A 4.00000000000000022e-01 C0 2.99999999999999989e-01 R 6.36800000000000000e+06
 # r theta phi eta
 4.67405079037158098e+06 6.63376139894486738e-01 4.26630532939752949e-01 1.05519842437052668e+21

@@ -3,13 +3,16 @@ topography (sea level), dumped as real spherical-harmonic coefficients to
 lmax 256 so the example drivers can synthesise them on their own grids at
 any resolution up to that.
 
-Run from the pyslfp checkout (the ICE-7G and ETOPO data are pyslfp's,
-cached under ~/.pyslfp_data); the examples' CMakeLists runs this as part
-of the build when a pyslfp checkout is available, writing INTO THE BUILD
-TREE:
+The ICE-7G and ETOPO data are pyslfp's: it downloads them from Zenodo on
+first use and caches them (under ~/.pyslfp_data unless PYSLFP_DATA says
+otherwise). Run in this directory's environment (pyproject.toml):
 
-    cd ~/dev/pyslfp && poetry run python \
-        ~/dev/sl3dpp/scripts/make_example_earth_state.py --out <path>
+    cd scripts && poetry install --no-root
+    poetry run python make_example_earth_state.py --out <path>
+
+examples/CMakeLists.txt also runs it as part of the build, writing into the
+build tree, in the environment of a pyslfp checkout when it finds one
+(SL3DPP_PYSLFP_DIR).
 """
 from __future__ import annotations
 

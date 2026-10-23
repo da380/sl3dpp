@@ -18,7 +18,7 @@
  * itau_k = 0 is an infinite relaxation time. Bulk relaxation is not
  * modelled, and the material must be isotropic where any branch is active
  * (the degree-basis internal variables of A&T 2014 App. D assume isotropic
- * shear relaxation; the TI generalisation is plan open question 7).
+ * shear relaxation; the TI generalisation is not built; docs/design.md §14).
  */
 
 #include <expected>

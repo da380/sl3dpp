@@ -2,3 +2,6 @@ build*/
 .cache/
 compile_commands.json
 benchmarks/runs/
+__pycache__/
+.venv/
+poetry.lock

@@ -1,9 +1,9 @@
 /**
  * @file TestUnitsParity.cpp
- * @brief Scales.hpp mirrors planetmodel::units exactly (stage 11 WP4,
- * "alias or replace Scales"): planetmodel is a private dependency, so
- * the public header cannot alias its types — this parity gate holds the
- * mirror instead, constant by constant and factor by factor.
+ * @brief Scales.hpp mirrors planetmodel::units exactly: the library keeps
+ * its own copy of the constants and factors rather than aliasing
+ * planetmodel's, and this parity gate holds the copy to them, constant by
+ * constant and factor by factor.
  */
 
 #include <gtest/gtest.h>

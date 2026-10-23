@@ -2,7 +2,7 @@
 // the grid machinery equals the 1D two-phase stepper at machine
 // precision), the onset of spheroidal-toroidal coupling under lateral
 // viscosity, and the dt self-convergence of the laterally varying step —
-// the first research-grade measurements of stage 4 — and the threaded step
+// measurements in docs/dev/lateral-coupling.md — and the threaded step
 // against the serial one.
 
 #include <gtest/gtest.h>
@@ -82,7 +82,7 @@ std::vector<Complex> LoadColumns(int l) {
 
 }  // namespace
 
-TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
+TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   const auto& mesh = body.material.Mesh();
@@ -190,7 +190,7 @@ TEST(Stage4Gate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   }
 }
 
-TEST(Stage4, LateralViscosityCouplesAndConverges) {
+TEST(Lateral, LateralViscosityCouplesAndConverges) {
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   // A strong smooth lateral pattern: one decade peak to peak.
@@ -221,7 +221,7 @@ TEST(Stage4, LateralViscosityCouplesAndConverges) {
   EXPECT_LT(toroidal, spheroidal);
 }
 
-TEST(Stage4, LateralStepSelfConvergesAtSecondOrder) {
+TEST(Lateral, LateralStepSelfConvergesAtSecondOrder) {
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   Viscoelastic3D op(body.rheology, kLmax, [](double, double theta, double phi) {
@@ -250,7 +250,7 @@ TEST(Stage4, LateralStepSelfConvergesAtSecondOrder) {
   EXPECT_NEAR(ratio, 4.0, 1.5);  // the trapezoid's order two
 }
 
-TEST(Stage4, ThreadedStepMatchesSerial) {
+TEST(Lateral, ThreadedStepMatchesSerial) {
   // Options::parallel threads the transforms, the per-degree loops (force
   // assembly, solves, strain recovery) and the step's own loops (weights
   // and decay, the residual, the mixing, the memory update). The degree
@@ -303,7 +303,7 @@ TEST(Stage4, ThreadedStepMatchesSerial) {
   EXPECT_LE(diff, 1e-10 * scale);
 }
 
-TEST(Stage4, FinishingAMovedStepTakesItsBuffers) {
+TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
   // A step that is done with finishes into its own buffers (the grid
   // workspace becomes the strain, the decayed memory advances in place);
   // the state is bitwise the copying Finish's.
@@ -340,7 +340,7 @@ TEST(Stage4, FinishingAMovedStepTakesItsBuffers) {
   EXPECT_EQ(copied.t, moved.t);
 }
 
-TEST(Stage4, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
+TEST(Lateral, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
   // The within-step iteration is Picard until a pass contracts by less
   // than anderson_rate. A weak contrast at a short step never gets there,
   // so its step is bitwise plain Picard; a long step does, and Anderson
@@ -393,7 +393,7 @@ TEST(Stage4, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
   EXPECT_LT(gap(slow.solutions, always.solutions), 1e-9);
 }
 
-TEST(Stage4, NonFinitePassEndsTheIteration) {
+TEST(Lateral, NonFinitePassEndsTheIteration) {
   // The residual's maxima pass over NaNs, so a pass gone non-finite is
   // caught apart: the iteration stops unconverged, with a NaN residual,
   // on the last finite iterate (here the start), instead of reading an
@@ -418,7 +418,7 @@ TEST(Stage4, NonFinitePassEndsTheIteration) {
   EXPECT_EQ(last.r, s0.r);
 }
 
-TEST(Stage4, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
+TEST(Lateral, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
   // The operator keeps the effective systems of its four most recently
   // used (scheme, dt); an open step holds its own, so it finishes as a
   // fresh step would however many others have been opened since. And the
@@ -485,13 +485,13 @@ TEST(Stage4, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
   }
 }
 
-TEST(Stage4, DegreeOneToroidalIsDrivenAndGaugeFree) {
+TEST(Lateral, DegreeOneToroidalIsDrivenAndGaugeFree) {
   // Lateral viscosity drives degree-1 toroidal motion, whose rigid
   // rotations are gauge (fixed by pinning one dof per solid region).
   // Moving the pin must leave everything well defined unchanged (the
   // strain, the memory, the spheroidal and l >= 2 toroidal solutions) and
   // change the degree-1 toroidal solution only by rigid rotations
-  // (plan.md §4: don't measure things that are gauge).
+  // (docs/design.md §8: don't measure things that are gauge).
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {

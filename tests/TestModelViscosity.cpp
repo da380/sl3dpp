@@ -1,9 +1,9 @@
 /**
  * @file TestModelViscosity.cpp
- * @brief The io/ boundary (stage 11 WP2): planetmodel model files read
+ * @brief The io/ boundary: planetmodel model files read
  * back as a radial reference and a delta.
  *
- * The fixtures (scripts/make_stage11_fixtures.py) write the
+ * The fixtures (scripts/make_model_viscosity_fixtures.py) write the
  * TestViscoelastic3D body — prem8 deck, 1e21 Pa s on the mantle — as
  * model files: a zero-mean log perturbation delta = A g(r) sin^2(theta)
  * cos(2 phi) with g = (r / R)^2 (the happy path), the same with a
@@ -134,8 +134,8 @@ TEST(ModelViscosity, LogFileMatchesThePythonReading) {
   const auto etaNd = kEtaSI / scales.Factor(ViscosityDimensions);
   for (const auto reference :
        {ViscosityReference::GeometricMean, ViscosityReference::FileRadial}) {
-    const auto read = ModelViscosity::Read(
-        DataPath("stage11_viscosity_log.nc"), body.model, {reference});
+    const auto read = ModelViscosity::Read(DataPath("viscosity_log.nc"),
+                                           body.model, {reference});
     ASSERT_TRUE(read) << read.error().message;
     EXPECT_FALSE(read->IsRadial());
 
@@ -146,7 +146,7 @@ TEST(ModelViscosity, LogFileMatchesThePythonReading) {
     }
 
     const auto delta = read->Delta();
-    for (const auto& probe : ReadProbes(DataPath("stage11_probes_log.txt"))) {
+    for (const auto& probe : ReadProbes(DataPath("viscosity_probes_log.txt"))) {
       const auto r = probe.r / length;
       const auto expected = std::log(probe.eta / kEtaSI);
       EXPECT_NEAR(delta(r, probe.theta, probe.phi), expected,
@@ -163,16 +163,16 @@ TEST(ModelViscosity, LogFileMatchesThePythonReading) {
 TEST(ModelViscosity, ReferencesCoincideOnAZeroMeanPerturbation) {
   const auto body = Body::Make();
   const auto length = body.model.ModelScales().Length();
-  const auto mean = ModelViscosity::Read(
-      DataPath("stage11_viscosity_log.nc"), body.model,
-      {ViscosityReference::GeometricMean});
-  const auto file = ModelViscosity::Read(
-      DataPath("stage11_viscosity_log.nc"), body.model,
-      {ViscosityReference::FileRadial});
+  const auto mean =
+      ModelViscosity::Read(DataPath("viscosity_log.nc"), body.model,
+                           {ViscosityReference::GeometricMean});
+  const auto file =
+      ModelViscosity::Read(DataPath("viscosity_log.nc"), body.model,
+                           {ViscosityReference::FileRadial});
   ASSERT_TRUE(mean && file);
   const auto dMean = mean->Delta();
   const auto dFile = file->Delta();
-  for (const auto& probe : ReadProbes(DataPath("stage11_probes_log.txt"))) {
+  for (const auto& probe : ReadProbes(DataPath("viscosity_probes_log.txt"))) {
     const auto r = probe.r / length;
     EXPECT_NEAR(dMean(r, probe.theta, probe.phi),
                 dFile(r, probe.theta, probe.phi), 1e-12);
@@ -191,16 +191,16 @@ TEST(ModelViscosity, ANonZeroMeanSplitsTheReferences) {
   const auto& scales = body.model.ModelScales();
   const auto length = scales.Length();
   const auto etaNd = kEtaSI / scales.Factor(ViscosityDimensions);
-  const auto mean = ModelViscosity::Read(
-      DataPath("stage11_viscosity_mean.nc"), body.model,
-      {ViscosityReference::GeometricMean});
-  const auto file = ModelViscosity::Read(
-      DataPath("stage11_viscosity_mean.nc"), body.model,
-      {ViscosityReference::FileRadial});
+  const auto mean =
+      ModelViscosity::Read(DataPath("viscosity_mean.nc"), body.model,
+                           {ViscosityReference::GeometricMean});
+  const auto file =
+      ModelViscosity::Read(DataPath("viscosity_mean.nc"), body.model,
+                           {ViscosityReference::FileRadial});
   ASSERT_TRUE(mean && file);
   const auto dMean = mean->Delta();
   const auto dFile = file->Delta();
-  for (const auto& probe : ReadProbes(DataPath("stage11_probes_mean.txt"))) {
+  for (const auto& probe : ReadProbes(DataPath("viscosity_probes_mean.txt"))) {
     const auto r = probe.r / length;
     const auto layer = body.model.LayerOf(probe.r);
     const auto vFile = MapValue(file->Viscosity(), layer, r);
@@ -227,19 +227,20 @@ TEST(ModelViscosity, AFullyThreeDimensionalViscosity) {
   const auto length = scales.Length();
   const auto etaNd = kEtaSI / scales.Factor(ViscosityDimensions);
 
-  const auto refused = ModelViscosity::Read(
-      DataPath("stage11_viscosity_full3d.nc"), body.model,
-      {ViscosityReference::FileRadial});
+  const auto refused =
+      ModelViscosity::Read(DataPath("viscosity_full3d.nc"), body.model,
+                           {ViscosityReference::FileRadial});
   ASSERT_FALSE(refused);
   EXPECT_NE(refused.error().message.find("GeometricMean"), std::string::npos)
       << refused.error().message;
 
-  const auto read = ModelViscosity::Read(
-      DataPath("stage11_viscosity_full3d.nc"), body.model,
-      {ViscosityReference::GeometricMean});
+  const auto read =
+      ModelViscosity::Read(DataPath("viscosity_full3d.nc"), body.model,
+                           {ViscosityReference::GeometricMean});
   ASSERT_TRUE(read) << read.error().message;
   const auto delta = read->Delta();
-  for (const auto& probe : ReadProbes(DataPath("stage11_probes_full3d.txt"))) {
+  for (const auto& probe :
+       ReadProbes(DataPath("viscosity_probes_full3d.txt"))) {
     const auto r = probe.r / length;
     const auto expected = std::log(probe.eta / kEtaSI);
     EXPECT_NEAR(delta(r, probe.theta, probe.phi), expected,
@@ -254,8 +255,8 @@ TEST(ModelViscosity, ARadialFileNeedsNoDelta) {
   const auto body = Body::Make();
   const auto& scales = body.model.ModelScales();
   const auto etaNd = kEtaSI / scales.Factor(ViscosityDimensions);
-  const auto read = ModelViscosity::Read(
-      DataPath("stage11_viscosity_radial.nc"), body.model);
+  const auto read =
+      ModelViscosity::Read(DataPath("viscosity_radial.nc"), body.model);
   ASSERT_TRUE(read) << read.error().message;
   EXPECT_TRUE(read->IsRadial());
   const auto delta = read->Delta();
@@ -274,15 +275,15 @@ TEST(ModelViscosity, AMissingFileIsRefused) {
   EXPECT_FALSE(read);
 }
 
-// The WP2 gate: a run under the file-backed delta reproduces the run
+// The operator gate: a run under the file-backed delta reproduces the run
 // under the analytic lambda the file was written from. The deltas agree
 // to the file's lateral sampling (band 32, bicubic, a degree-2 field:
 // measured 1.7e-6), and the surface responses follow (measured 1.8e-8
 // of the largest column).
 TEST(ModelViscosity, AStepMatchesTheAnalyticLambda) {
   const auto body = Body::Make();
-  const auto read = ModelViscosity::Read(DataPath("stage11_viscosity_log.nc"),
-                                         body.model);
+  const auto read =
+      ModelViscosity::Read(DataPath("viscosity_log.nc"), body.model);
   ASSERT_TRUE(read) << read.error().message;
   const auto rheology =
       Rheology::Maxwell(body.material, read->Viscosity()).value();
@@ -342,14 +343,14 @@ TEST(ModelViscosity, AStepMatchesTheAnalyticLambda) {
   }
 }
 
-// The WP2 done line's file: the viscosity3d mini-app's pipeline (S40RTS,
+// A realistic file: the viscosity3d mini-app's pipeline (S40RTS,
 // the sl3d conversion, band 96, bicubic, 50 km elements) run on this
-// suite's prem8 body — scripts/make_stage11_fixtures.py --miniapp <out>.
-// Too large to commit (~90 MB), so the gate runs only when
-// SL3DPP_STAGE11_MINIAPP names it, and skips otherwise.
+// suite's prem8 body — scripts/make_model_viscosity_fixtures.py --miniapp
+// <out>. Too large to commit (~90 MB), so the gate runs only when
+// SL3DPP_VISCOSITY3D_FILE names it, and skips otherwise.
 TEST(ModelViscosity, TheMiniAppFileWhenPresent) {
-  const auto* given = std::getenv("SL3DPP_STAGE11_MINIAPP");
-  if (!given) GTEST_SKIP() << "SL3DPP_STAGE11_MINIAPP is not set";
+  const auto* given = std::getenv("SL3DPP_VISCOSITY3D_FILE");
+  if (!given) GTEST_SKIP() << "SL3DPP_VISCOSITY3D_FILE is not set";
   const auto path = std::filesystem::path(given);
   auto probesPath = path;
   probesPath.replace_extension(".probes.txt");

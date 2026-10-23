@@ -134,7 +134,10 @@ std::expected<Rheology, RheologyError> Rheology::Maxwell(
   auto perLayer = std::map<std::size_t, RadialValue>{};
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     if (!material.IsFluid(e)) {
-      perLayer.emplace(static_cast<std::size_t>(mesh.LayerOf(e)), viscosity);
+      // Assigned rather than emplaced (the same value for every layer):
+      // GCC 14 warns spuriously when a variant holding a std::function is
+      // emplaced into a map.
+      perLayer[static_cast<std::size_t>(mesh.LayerOf(e))] = viscosity;
     }
   }
   return Maxwell(material, perLayer);

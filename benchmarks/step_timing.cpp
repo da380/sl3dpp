@@ -1,5 +1,5 @@
 // Phase timings of the 3D lateral-viscosity step: the baseline for the
-// performance work (docs/walkthrough-3d-step.md §4 and §7), to be run
+// performance work (docs/dev/walkthrough-3d-step.md §4 and §7), to be run
 // before and after each change and on the target machine.
 //
 // The physical setup is fortran_gate's (PREM, the Y_{2,+-2} log-viscosity

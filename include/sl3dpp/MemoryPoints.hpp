@@ -5,7 +5,7 @@
  * @brief Where the internal variables live within each radial element, and
  * the shear term an operator integrates there so that the discrete energy
  * stays a sum of squares and the implicit step's elimination of the new
- * internal variables exact (plan.md §5.5).
+ * internal variables exact (docs/design.md §5).
  *
  * The internal variables live at the element's N = ngll - 1 interior
  * Gauss-Legendre points by default: the same 2N - 1 exactness for the

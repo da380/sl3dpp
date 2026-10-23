@@ -2,7 +2,7 @@
 
 *Written 17 October 2026 against commit 88c58b5 (develop). This is a map
 of what the code DOES, with file:line pointers, so it can be checked
-against intent. The algebra and its derivation are in `stage4.md`; this
+against intent. The algebra and its derivation are in `lateral-coupling.md`; this
 document does not repeat them. Where the code and the docs disagree, or
 where something is correct but costly, it is flagged in §8.*
 
@@ -48,7 +48,7 @@ at lmax 64 and 193 × 390 at lmax 128.
   columns per degree, column-major `ndof × (l + 1)`. The m < 0 columns
   are implied by reality and never exist as data.
 
-**Sizes** (memory-node counts from `stage4.md` §6, PREM graded mesh):
+**Sizes** (memory-node counts from `lateral-coupling.md` §6, PREM graded mesh):
 
 | | lmax 64 | lmax 128 |
 |---|---|---|
@@ -237,7 +237,7 @@ an `IterationControl`.
   then pure Picard, with no history kept (at lmax 64 a pass costs 0.62 s
   against 0.87 s mixed, and 1.9 GB less at peak); at strong contrasts or
   long steps Anderson takes as many passes as when it mixes from the
-  first, the switch costing a pass or two (`stage4.md` §5a, revisited).
+  first, the switch costing a pass or two (`lateral-coupling.md` §5a, revisited).
   `anderson_rate` 0 is the old iteration, Anderson from the first pass;
   `StepInfo.mixedPasses` counts the mixed passes.
 - Mixing: `detail::AndersonMixer::UpdateInPlace` works directly on s's
@@ -322,17 +322,17 @@ item 12).
   constant by constant.
 - `SpinMachinery.RealTensorsHaveConjugateComponentFields`: the
   reality relations the reduced storage rests on.
-- `Stage4Gate.ZeroLateralPipelineMatchesTheDegreeBasisStepper`
+- `LateralGate.ZeroLateralPipelineMatchesTheDegreeBasisStepper`
   (`TestGridCoupling.cpp`) and
-  `Stage4Gate.ZeroLateralStepMatchesTheDegreeBasisStepper`
+  `LateralGate.ZeroLateralStepMatchesTheDegreeBasisStepper`
   (`TestViscoelastic3D.cpp`): delta = 0 reproduces the 1D stepper at
   machine precision.
-- `Stage4.LateralStepSelfConvergesAtSecondOrder`: dt self-convergence
+- `Lateral.LateralStepSelfConvergesAtSecondOrder`: dt self-convergence
   with lateral viscosity on.
-- `Stage4Gate.ZeroLateralCoupledEvolutionMatchesThe1DLoop` and
-  `Stage4.CoupledLateralEvolutionRunsAndConservesMass`
+- `LateralGate.ZeroLateralCoupledEvolutionMatchesThe1DLoop` and
+  `Lateral.CoupledLateralEvolutionRunsAndConservesMass`
   (`TestEvolution3D.cpp`): the coupled loop.
-- External: the Fortran `visco_test` gate (`stage4.md` §5b), degrees
+- External: the Fortran `visco_test` gate (`lateral-coupling.md` §5b), degrees
   l ≥ 2 only, at lmax 8.
 
 Any restructuring of §4 (iteration variable, chunking, threading) must
@@ -446,7 +446,7 @@ expensive.
    rotation (W ∝ r) is strain-free: differential degree-1 toroidal
    motion carries strain through the twist term W − r∂rW in A(−0) and
    A(0+) (`DeviatoricComponents`), and lateral viscosity drives it (the
-   omission followed an expectation in `stage4.md` §4, since corrected).
+   omission followed an expectation in `lateral-coupling.md` §4, since corrected).
    Now `ToroidalOperator` accepts l = 1 and fixes the gauge by pinning
    one dof per solid region (the region's top node by default;
    `Options::pin_fraction`), and the three loops run from l = 1. Tests:
@@ -542,7 +542,7 @@ expensive.
     values is dominated by the largest strains, usually near the
     surface. It is a reasonable choice, but it is a choice.
 15. **Choice (recorded): full lmax at every node.** Depth-variable lmax
-    was considered and declined (`stage4.md` §8); deep nodes run full
+    was considered and declined (`lateral-coupling.md` §8); deep nodes run full
     transforms for content that is truncated to zero there.
 16. **Behaviour (accepted): threaded runs are not bitwise
     reproducible.** With more than one thread, the step's results vary
@@ -584,7 +584,7 @@ expensive.
     `Options::record_strain` (both evolutions, default false) keeps the
     strain as well, trading memory back for the regeneration solves;
     tests show the kernels agree either way.
-19. **Cost (planned): Gauss-point memory nodes** (`plan.md` §5.5). The
+19. **Built: Gauss-point memory nodes** ([design.md](../design.md) §5). The
     memory lives at the GLL nodes, doubled at shared element boundaries;
     the N = ngll − 1 interior Gauss points match the GLL rule's exactness
     for the memory-force integral with ~20% fewer points (and ~20% fewer
@@ -607,7 +607,7 @@ expensive.
     exposed an instability of the first form at long steps (h = dt/tau of
     a few hundred and up), fixed by splitting the shear energy: the
     long-term part at the nodes, each branch's at the points, so every
-    term of the effective operator stays positive (plan.md §5.5).
+    term of the effective operator stays positive ([design.md](../design.md) §5).
 20. **Fixed (17 Oct, chunk 11): the 1D internal variables spanned each
     degree's whole subset**, storing zeros in the lithosphere and, at low
     degrees, the core. They now span the degree's memory window, its

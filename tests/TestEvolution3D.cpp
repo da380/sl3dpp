@@ -83,7 +83,7 @@ struct Setup {
 
 }  // namespace
 
-TEST(Stage4Gate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
+TEST(LateralGate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   auto setup = Setup::Make();
   const auto& scales = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
@@ -124,7 +124,7 @@ TEST(Stage4Gate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   }
 }
 
-TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
+TEST(Lateral, CoupledLateralEvolutionRunsAndConservesMass) {
   auto setup = Setup::Make();
   const auto& scales = setup.solver.SolverScales();
   const auto& grid = setup.solver.Grid();
@@ -175,7 +175,7 @@ TEST(Stage4, CoupledLateralEvolutionRunsAndConservesMass) {
   EXPECT_LT(maxRelDiff, 0.5);
 }
 
-TEST(Stage4, AResumedCoupledRunIsTheUninterruptedOne) {
+TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
   auto setup = Setup::Make();
   const auto& scales = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();

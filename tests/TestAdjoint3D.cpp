@@ -1,4 +1,4 @@
-// The 3D continuous adjoint (stage 5d): the zero-lateral gate — with
+// The 3D continuous adjoint: the zero-lateral gate — with
 // delta = 0 the 3D sweep's ice kernels and spherically reduced viscosity
 // kernels must reproduce the 1D continuous sweep's — and the
 // finite-difference check of the full 3D log-viscosity kernel with

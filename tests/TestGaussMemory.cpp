@@ -1,11 +1,10 @@
-// Internal variables at the Gauss points (plan.md §5.5, performance chunk
-// 7b): 20% fewer memory points than at the GLL nodes; the implicit step
-// stays an exact elimination of the new internal variables (the long-term
-// shear at the nodes, the branches' at the points, MemoryPoints.hpp), and
-// stable however far a step outruns the relaxation;
-// the forward agrees with the GLL discretisation to its own accuracy,
-// converging with it under mesh refinement; and the adjoint sweeps, which
-// accumulate the itau kernels at the points and carry them to the nodal
+// Internal variables at the Gauss points (docs/design.md §5): 20% fewer memory
+// points than at the GLL nodes; the implicit step stays an exact elimination of
+// the new internal variables (the long-term shear at the nodes, the branches'
+// at the points, MemoryPoints.hpp), and stable however far a step outruns the
+// relaxation; the forward agrees with the GLL discretisation to its own
+// accuracy, converging with it under mesh refinement; and the adjoint sweeps,
+// which accumulate the itau kernels at the points and carry them to the nodal
 // itau through the interpolation's transpose, keep the discrete gradient
 // identity and agree with the GLL kernels.
 

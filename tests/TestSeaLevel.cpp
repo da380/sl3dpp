@@ -26,7 +26,7 @@ constexpr auto kPi = std::numbers::pi;
 LoveNumbers TestTable() {
   static auto table =
       LoveNumbers::FromFile(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
-                            "stage1_love_numbers.txt")
+                            "pyslfp_love_numbers.txt")
           .value();
   return table;
 }

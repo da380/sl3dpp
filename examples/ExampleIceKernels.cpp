@@ -1,6 +1,6 @@
 /**
  * @file ExampleIceKernels.cpp
- * @brief Adjoint sensitivity kernels (stage 5): what a single sea-level
+ * @brief Adjoint sensitivity kernels: what a single sea-level
  * observation knows about the ice history and the mantle viscosity.
  *
  * The objective is the cap-averaged sea-level change at a "tide gauge"
@@ -14,7 +14,7 @@
  * - the radial viscosity kernels dJ / d eta(r), from the recorded
  *   forward trajectory, by BOTH the continuous adjoint (the preferred
  *   path) and the exact discrete transpose: their agreement is the
- *   resolution diagnostic (stage5.md §1).
+ *   resolution diagnostic (docs/dev/adjoints.md §1).
  *
  * Run from the build tree; plot with plots/plot_kernels.py.
  */

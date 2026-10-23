@@ -1,7 +1,7 @@
-// The stage-0 verification gate (plan §6): reference gravity against
-// planetmodel on the identical deck file, read by both codes with the same
-// (not-a-knot) interpolation, so agreement is expected near machine
-// precision.
+// The fixture gates: sl3dpp against planetmodel and pyslfp on the committed
+// fixtures (tests/data). The reference gravity is held to planetmodel on the
+// identical deck file, read by both codes with the same (not-a-knot)
+// interpolation, so agreement is expected near machine precision.
 
 #include <gtest/gtest.h>
 
@@ -66,15 +66,16 @@ GravityFixture ReadFixture(const std::filesystem::path& path) {
 
 namespace {
 
-/// A stage-2 fixture: named coefficient blocks (converted into GSHTrans's
+/// A sea-level fixture: named coefficient blocks (converted into GSHTrans's
 /// basis on read) and named scalar rows.
-struct Stage2Fixture {
+struct SeaLevelFixture {
   std::map<std::string, std::vector<std::complex<double>>> fields;
   std::map<std::string, std::vector<double>> scalars;
 };
 
-Stage2Fixture ReadStage2(const std::filesystem::path& path, int lmax) {
-  Stage2Fixture fixture;
+SeaLevelFixture ReadSeaLevelFixture(const std::filesystem::path& path,
+                                    int lmax) {
+  SeaLevelFixture fixture;
   std::ifstream file(path);
   EXPECT_TRUE(file.is_open()) << path;
   std::vector<std::complex<double>>* current = nullptr;
@@ -124,16 +125,17 @@ double CoefficientError(std::span<const std::complex<double>> ours,
 
 }  // namespace
 
-TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
+TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   constexpr auto lmax = 32;
   auto table =
-      sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
+      sl3dpp::LoveNumbers::FromFile(data / "pyslfp_love_numbers.txt").value();
   sl3dpp::SeaLevelSolver solver(sl3dpp::SurfaceGrid(lmax), table,
                                 sl3dpp::SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
-  const auto fixture = ReadStage2(data / "stage2_generalised.txt", lmax);
+  const auto fixture =
+      ReadSeaLevelFixture(data / "pyslfp_generalised_sea_level.txt", lmax);
 
   constexpr sl3dpp::Dimensions kSigma{.mass = 1, .length = -2};
   constexpr sl3dpp::Dimensions kMoment{.mass = 1, .length = 2};
@@ -201,19 +203,20 @@ TEST(Stage2Gate, GeneralisedSolveMatchesPyslfp) {
   }
 }
 
-TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
+TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
   // The true flotation ocean function is a step function sampled on each
   // code's own grid, so agreement is limited by the coastline quadrature,
   // not by either implementation; the comparison is correspondingly
-  // coarse (plan §6).
+  // coarse (docs/design.md §10).
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   constexpr auto lmax = 32;
   auto table =
-      sl3dpp::LoveNumbers::FromFile(data / "stage1_love_numbers.txt").value();
+      sl3dpp::LoveNumbers::FromFile(data / "pyslfp_love_numbers.txt").value();
   sl3dpp::Fingerprint fingerprint(lmax, table);
   fingerprint.SetAnalyticTestState(0.0);
   const auto& grid = fingerprint.Grid();
-  const auto fixture = ReadStage2(data / "stage2_fingerprint.txt", lmax);
+  const auto fixture =
+      ReadSeaLevelFixture(data / "pyslfp_fingerprint.txt", lmax);
 
   auto ice = fingerprint.IceThickness();
   auto iceChange = std::vector<double>(ice.size());
@@ -246,7 +249,7 @@ TEST(Stage2Gate, SharpOceanFingerprintNearPyslfp) {
   EXPECT_NEAR(result.angularVelocity[2], omega[2], 0.1 * std::abs(omega[2]));
 }
 
-TEST(Stage3Gate, StepperMatchesPyslfp) {
+TEST(EvolutionGate, StepperMatchesPyslfp) {
   // The 1D Love-number history: grid-free, so the stepper is isolated
   // from the SLE and the agreement is near machine precision.
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
@@ -286,7 +289,7 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
   const auto dt = 3.15576e9 / scales.Time();
 
   // Parse and replay the fixture.
-  std::ifstream file(data / "stage3_stepper.txt");
+  std::ifstream file(data / "pyslfp_stepper.txt");
   ASSERT_TRUE(file.is_open());
   constexpr auto tol = 1e-9;
   auto scheme = sl3dpp::Scheme::ExponentialTrapezoid;
@@ -359,7 +362,7 @@ TEST(Stage3Gate, StepperMatchesPyslfp) {
   EXPECT_GT(tauMin, 0.0);
 }
 
-TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
+TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   auto deck = sl3dpp::Deck::Read(
                   data / "prem8.elastic.deck",
@@ -373,7 +376,7 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
   auto ln = sl3dpp::ComputeLoveNumbers(material, lmax);
 
   // Parse the pyslfp reference.
-  std::ifstream file(data / "stage1_love_numbers.txt");
+  std::ifstream file(data / "pyslfp_love_numbers.txt");
   ASSERT_TRUE(file.is_open());
   auto radius = 0.0, surfaceGravity = 0.0, fluidTidal = 0.0;
   double axial[5] = {};
@@ -432,13 +435,13 @@ TEST(Stage1Gate, LoveNumbersMatchPyslfp) {
               tol * fluidTidal);
 }
 
-TEST(Stage0Gate, GravityMatchesPlanetmodel) {
+TEST(GravityGate, GravityMatchesPlanetmodel) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   auto deck = sl3dpp::Deck::Read(data / "prem8.rho.deck",
                                  sl3dpp::DeckFormat("rho-only", {"rho"}, 0))
                   .value();
   auto model = sl3dpp::EarthModel::FromDeck(deck).value();
-  const auto fixture = ReadFixture(data / "stage0_gravity.txt");
+  const auto fixture = ReadFixture(data / "planetmodel_gravity.txt");
   ASSERT_GT(fixture.gravity.size(), 10u);
 
   EXPECT_NEAR(model.Mass(), fixture.mass, 1e-13 * fixture.mass);

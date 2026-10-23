@@ -1,16 +1,16 @@
-# Stage 4 design: 3D viscosity — the pseudospectral lateral coupling
+# 3D viscosity: the pseudospectral lateral coupling
 
 *Drafted 15 October 2026 from the old Fortran (`sl3d/src/module_gia.f90`,
-`module_mat.f90`), plan §3 and pyslfp's `gia_notes.md`. This records the
+`module_mat.f90`) and pyslfp's `gia_notes.md`. This records the
 algebra before it is implemented; equation references are Al-Attar &
 Tromp (2014, GJI) Appendix D. The within-step lateral iteration is the
-research content of the project (plan §3, open question 1).*
+research content of the project ([design.md](../design.md) §6).*
 
-## 1. Scope and gates (plan §6, stage 4)
+## 1. Scope and gates
 
 GSHTrans spin-2 machinery; grid-held memory variables; pointwise weight
-fields; the within-step lateral iteration; the netCDF 3D model reader
-(blocked on the planetmodel format work, §2.5 of the plan). Gates: the
+fields; the within-step lateral iteration; the 3D model reader
+(`io::ModelViscosity`, over planetmodel's model file). Gates: the
 zero-lateral limit against the 1D stepper at machine precision; the old
 sl3d (`visco_test`, `sea_level_3d`) in the explicit/weak-contrast limit;
 Δt self-convergence; AdGIA on a common model — the headline benchmark.
@@ -63,10 +63,10 @@ This is the same dual-from-scalars structure as the 1D `Degree`
 workspace, extended to the toroidal block and to complex coefficient
 columns.
 
-## 4. The toroidal degree operator (a stage-1 gap, needed here)
+## 4. The toroidal degree operator
 
 Lateral viscosity couples spheroidal and toroidal motion (the W-row
-above), so stage 4 adds the toroidal per-degree system, in its
+above), so the 3D problem needs the toroidal per-degree system, in its
 transversely isotropic form (Myhill & Al-Attar; verified against the
 DSpecM1D assembly, whose two base matrices expand to exactly this):
 
@@ -81,12 +81,12 @@ with absent fluid dofs covers them; the blocks are SPD separately).
 No gravity, no fluid terms, no DtN. At l = 1 the form is singular
 (rigid rotation W ∝ r: both terms vanish).
 
-**Degree 1 is included** (decided 17 Oct 2026, plan §4 and §9). The
+**Degree 1 is included** (decided 17 Oct 2026; [design.md](../design.md) §8). The
 rigid rotations, one per order in each solid region that fluid separates
 (mantle, inner core), form a null space that is removed by convention.
 The right-hand side is torque-free, so the singular system is consistent.
 Which frame does not matter, so a convenient gauge is used (one pinned
-dof per solid region; plan §4, §8.9). What matters is that measured,
+dof per solid region). What matters is that measured,
 benchmarked and tested quantities are invariant under the rigid
 rotations, which is also the condition for the adjoint equations to
 exist. The expectation first recorded here,
@@ -106,12 +106,13 @@ start (l ≥ 2).
 ## 5. The step with lateral viscosity
 
 Viscosity η(x) = η̄(r) exp(δ(x)) with δ the (band-limited) log
-perturbation (plan §2.5: the file stores log viscosity). Per branch,
+perturbation (formed from a planetmodel model file's viscosity by
+`io::ModelViscosity`). Per branch,
 itau(x) nodal on the grid; per (scheme, Δt) the weight FIELDS
 e(x), α(x), β(x) from h(x) = Δt·itau(x) — StepWeights pointwise, exactly
 as the 1D code does per node.
 
-Split (plan §3): μ_eff(x) = μ̄_eff(r) + δμ_eff(x), with μ̄_eff built from
+Split ([design.md](../design.md) §6): μ_eff(x) = μ̄_eff(r) + δμ_eff(x), with μ̄_eff built from
 the reference τ̄(r) (laterally averaged η̄ by default) and factorised per
 degree by the existing flavour machinery. The within-step iteration, one
 combined fixed point under the SLE's existing Anderson mixer:
@@ -131,19 +132,19 @@ m⁺ = m̃ + β(x) d^{n+1} pointwise.
 The ocean-load and rotation fixed points fold in as today (the SLE's
 load iteration), so the combined iteration costs one banded back-solve
 per degree plus a bounded number of spin transforms per pass.
-Fallbacks if contraction fails under strong contrasts (plan §3): damped
-Picard, a better reference profile (per-degree or worst-case), IMEX.
+Fallbacks if contraction fails under strong contrasts: damped Picard
+(built), a better reference profile (per-degree or worst-case) and IMEX
+(neither built; [design.md](../design.md) §14).
 
 ## 6. Data layout, dealiasing, memory
 
 - Memory state: per branch, 5 complex component fields over (viscous
-  radial memory nodes × angular grid). Radial memory nodes are the GLL
-  nodes of viscous elements (the Gauss-point reduction of plan §5.5 is
-  the planned ~20% saving and an independent-discretisation benchmark
-  axis, added after the GLL path is gated).
+  radial memory nodes × angular grid). Radial memory nodes are the Gauss
+  points of viscous elements by default, ~20% fewer than the GLL nodes,
+  which remain selectable ([design.md](../design.md) §5).
 - Grid: one `SurfaceGrid` with nMax = 2 and `ForBand` oversampling 1.5
   (the 3/2 rule) for the pointwise products — an improvement over the
-  Fortran, which never dealiased (plan §2.1).
+  Fortran, which never dealiased.
 - Transforms are issued **batched** (one call per spin component, the
   radial nodes as the batch — GSHTrans guarantees exact equality with the
   per-field calls) with the BLAS matrix kernel and threaded execution as
@@ -172,7 +173,7 @@ Picard, a better reference profile (per-degree or worst-case), IMEX.
   only**: m is band-limited at lmax, stored as coefficients or on the
   unoversampled grid (257 × 515 ≈ 4.8 GB complex per branch), with
   synthesis to the big grid per step. Final layout to be settled against
-  measurements; the Wigner table adds 2.6–5.2 GB (plan §2.4).
+  measurements; the Wigner table adds 2.6–5.2 GB.
 
 ## 7. Implementation order and gates
 
@@ -191,7 +192,7 @@ c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
    in the weak-contrast limit (tolerances set by its explicit stepping
    and lack of dealiasing); contraction diagnostics over a contrast
    ladder (the research measurements).
-d. **AdGIA on a common model** — the headline benchmark (plan §1).
+d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
 
 ## 5a. Measured within-step convergence (15 Oct 2026, first numbers)
 
@@ -212,7 +213,7 @@ degrees, trapezoid steps; iterations to 1e-11 on the second step:
 (*) the Anderson failures are slow grinds (residual 1e-3..1e-9 at the
 200-iteration cap), not divergence — unlike Picard's oscillation at
 residual ~1.8 — so a larger budget, a better reference profile
-(per-degree or worst-case, plan §3) or IMEX would extend the envelope.
+(per-degree or worst-case) or IMEX would extend the envelope.
 Headline: Anderson mixing roughly squares the practical contrast ceiling
 at fixed dt, and one-decade contrasts at dt = 10 tau — far beyond the old
 explicit code's dt <= tau_min limit — converge in ~50 passes. At the
@@ -307,7 +308,7 @@ log-viscosity perturbation), a constant zonal load RATE
 sigma_dot_l = exp(-2 pi (l+1)/10.5) sqrt((2l+1)/4 pi) x 5515 / 30 yr
 (SI), explicit RK2 at dt = 50 yr against our trapezoid at the same dt.
 The driver was patched (I/O only: an lmax argument and coefficient
-output, `tests/data/stage4_fortran_visco.txt` at lmax 32); the physics
+output, `tests/data/fortran_visco_test.txt` at lmax 32); the physics
 is untouched, so the comparison pits the two codes' discretisations —
 rate-form explicit stepping on a coarse uniform mesh against implicit
 stepping on the graded mesh — against each other at physical accuracy.
@@ -333,7 +334,7 @@ must be committed in that repo for the kit to work from a fresh clone.
 
 Stress-dependent relaxation times — AdGIA's `RelaxationLaw`
 (τ_k = τ_k0(x) F_k(state), Crawford et al. 2017 Appendix A) — fit this
-stage's machinery with almost no new structure: τ already varies
+machinery with almost no new structure: τ already varies
 pointwise on the grid, the local deviatoric stress invariant is
 computable from the (d − m) component fields the pipeline already
 synthesises, and re-evaluating the weight fields e(x), α(x), β(x) from
@@ -345,10 +346,10 @@ Planned as an option on `Rheology` (a per-branch law hook), implemented
 once the linear lateral iteration is gated, and benchmarked against
 AdGIA's `RelaxationLaw` path.
 
-## 8. Open questions (beyond plan §8)
+## 8. Open questions
 
 - l = 1 toroidal: INCLUDED (decided and implemented 17 Oct 2026, §4),
-  with one pinned dof per solid region as the gauge (plan §8.9).
+  with one pinned dof per solid region as the gauge ([design.md](../design.md) §8).
 - Whether the SLE needs toroidal surface channels: no first-order
   coupling to sea level or gravity (toroidal motion is divergence-free
   and radial-displacement-free at the surface), so the toroidal block
@@ -393,9 +394,8 @@ AdGIA's `RelaxationLaw` path.
   Viscoelastic3D accept an existing grid. One grid per resolution: the
   sea level machinery's band-exact scalar grid and the coupling's
   oversampled spin-2 grid are deliberately different samplings.
-- GSHTrans's field algebra (noted 15 Oct 2026): not needed for the
-  stepping pipeline (plain batched transforms + hand loops), but the
-  stage-5 kernel accumulation is a pointwise tensor contraction
-  mu s (d - m):(d^+ - m^+) whose null-basis metric signs (the g(+,-) = -1
-  pairings across the component slots) the library's tensor types encode
-  — use them there rather than hand-rolling the contraction weights.
+- GSHTrans's field algebra is not used: the stepping pipeline needs only
+  batched transforms and hand loops, and the 3D viscosity kernel's
+  contraction μ_k m†:(d − m)/itau carries its metric on the reduced
+  storage fixed by the 1D limit (`adjoints.md` §6a), not taken from the
+  library's tensor types.

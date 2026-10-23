@@ -3,11 +3,11 @@
 /**
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
- * evolution by the CONTINUOUS adjoint — the preferred path (stage5.md
- * §1, §6): ice-history kernels, and the full 3D inverse-relaxation-time
- * kernel on the (memory node × angular grid) together with its
- * spherical reduction. The discrete transpose of the reduced pipeline
- * is stage 5e, to follow.
+ * evolution by the CONTINUOUS adjoint — the preferred path
+ * (docs/dev/adjoints.md §1, §6): ice-history kernels, and the full 3D
+ * inverse-relaxation-time kernel on the (memory node × angular grid) together
+ * with its spherical reduction. The discrete transpose of the reduced pipeline
+ * is not built: in 3D the continuous adjoint is the only sweep.
  *
  * The continuous adjoint equations have the forward problem's form, so
  * between observations the adjoint state is stepped by the SAME coupled

@@ -1,4 +1,4 @@
-// The adjoint sweeps (stage 5): the discrete gradient identity at solver
+// The adjoint sweeps: the discrete gradient identity at solver
 // tolerance for a full measurement set, the thickness-view identity with
 // the baseline, the continuous adjoint's agreement with the discrete and
 // its convergence under step refinement, and the cross-validation of the
@@ -35,7 +35,7 @@ namespace {
 
 constexpr auto kLmax = 16;
 
-/// The smooth cap of the solver tests (TestSeaLevel.cpp), the stage-5
+/// The smooth cap of the solver tests (TestSeaLevel.cpp), the kernel
 /// fixture's measurement formula.
 double Cap(double theta, double phi, double colat0, double lon0,
            double width) {
@@ -275,7 +275,7 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
 }
 
 TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
-  // The deliverable of the comparison (stage5.md §1): the discrete
+  // The deliverable of the comparison (docs/dev/adjoints.md §1): the discrete
   // transpose is exact at any step; the continuous adjoint carries the
   // discretise/transpose commute error — at the per-cent level or better
   // once the steps resolve the relaxation, falling under refinement.
@@ -624,7 +624,7 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
       std::invalid_argument);
 }
 
-TEST(Stage5Gate, KernelsMatchPyslfp) {
+TEST(AdjointGate, KernelsMatchPyslfp) {
   // The reference is pyslfp's adjoint kernels on its GLQ grid (which
   // coincides with ours at this lmax, isolating implementation error):
   // load duals per node and the branch-0 itau kernel, each method gating
@@ -641,7 +641,7 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
   // The fixture's setting: 6 nodes over 10 kyr, linear melt, duals at
   // nodes 3 and 5 (the Cap formulas of the generating script).
   std::ifstream file(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
-                     "stage5_kernels.txt");
+                     "pyslfp_kernels.txt");
   ASSERT_TRUE(file.is_open());
 
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
@@ -650,7 +650,7 @@ TEST(Stage5Gate, KernelsMatchPyslfp) {
   // The potential and angular-velocity duals are SI-anchored (the
   // generating script's PHI_ANCHOR / OMEGA_ANCHOR): pyslfp's EarthModel
   // scales differ from planetmodel/sl3dpp geophysical (phi_nd ~ T^2, a
-  // factor 4 pi / 3 — plan.md decision log, 16 Oct 2026), so each code
+  // factor 4 pi / 3 — docs/design.md §9), so each code
   // multiplies its dual by ITS OWN factor against the shared anchor and
   // the objective is code-invariant. Lengths need no anchor.
   const double potConv =

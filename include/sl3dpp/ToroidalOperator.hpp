@@ -4,7 +4,8 @@
  * @file ToroidalOperator.hpp
  * @brief The degree-l toroidal system: the W block of the loading problem,
  * needed once lateral viscosity couples spheroidal and toroidal motion
- * (docs/stage4.md §4). Non-dimensional, like every internal component.
+ * (docs/dev/lateral-coupling.md §4). Non-dimensional, like every internal
+ * component.
  *
  * For one degree l >= 1, with k^2 = l(l + 1), the unknown is the toroidal
  * radial scalar W on solid nodes; the bilinear form, in its transversely
@@ -21,14 +22,14 @@
  *
  * At l = 1 the form is singular: rigid rotation (W proportional to r)
  * carries no strain, one null vector per solid region. Lateral viscosity
- * drives degree-1 toroidal motion, so the degree is included (plan.md
- * §4), with the gauge fixed in the most convenient way: one dof per
- * region is pinned to zero in the factorisation (the region's top node by
+ * drives degree-1 toroidal motion, so the degree is included
+ * (docs/design.md §8), with the gauge fixed in the most convenient way: one dof
+ * per region is pinned to zero in the factorisation (the region's top node by
  * default; not the centre, where the rigid mode vanishes). Which dof is
  * pinned does not matter: the memory force is torque-free, so the pinned
  * solve solves the full system, and the pin changes the solution only by
  * rigid rotations, which nothing well defined sees (a horizontal
- * displacement at a point does; plan.md §4). Apply is the full, unpinned
+ * displacement at a point does; docs/design.md §8). Apply is the full, unpinned
  * operator.
  *
  * Truncation follows the spheroidal operator: the element subset of the

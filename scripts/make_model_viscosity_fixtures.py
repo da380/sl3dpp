@@ -1,32 +1,36 @@
-"""Stage-11 WP2 fixtures: planetmodel 3D model files and their readings.
+"""3D viscosity model files from planetmodel, and their readings.
 
 The TestViscoelastic3D body (prem8 elastic deck, 1e21 Pa s on the solid
 layers within [3.4799e6, 6.1511e6] m) written as model files the io/
 adapter reads back:
 
-  stage11_viscosity_log.nc     the happy path: the radial viscosity with
-                               an analytic zero-mean log perturbation
-                               delta = A g(r) sin^2(theta) cos(2 phi),
-                               g(r) = (r / R)^2 (what conversion writes);
-  stage11_viscosity_mean.nc    the same with a nonzero lateral mean,
-                               delta = (C0 + A sin^2 cos 2phi) g(r), which
-                               splits the two reference choices;
-  stage11_viscosity_full3d.nc  the viscosity stored fully 3D (no
-                               perturbation): eta = ETA exp(delta);
-  stage11_viscosity_radial.nc  the radial viscosity alone.
+  viscosity_log.nc     the happy path: the radial viscosity with an
+                       analytic zero-mean log perturbation
+                       delta = A g(r) sin^2(theta) cos(2 phi),
+                       g(r) = (r / R)^2 (what conversion writes);
+  viscosity_mean.nc    the same with a nonzero lateral mean,
+                       delta = (C0 + A sin^2 cos 2phi) g(r), which splits
+                       the two reference choices;
+  viscosity_full3d.nc  the viscosity stored fully 3D (no perturbation):
+                       eta = ETA exp(delta);
+  viscosity_radial.nc  the radial viscosity alone.
 
 Beside each laterally varying file, a probe table of the PYTHON's own
 reading at deterministic off-grid points (SI): the C++ reading must
 match it to rounding, both ends interpolating the same stored numbers
-by the same stated rules.
+by the same stated rules. tests/TestModelViscosity.cpp holds the C++ to
+them.
 
-Run from the planetmodel checkout:
+Run in this directory's environment (pyproject.toml):
 
-    cd ~/dev/planetmodel && poetry run python \
-        ~/dev/sl3dpp/scripts/make_stage11_fixtures.py
+    cd scripts && poetry install --no-root
+    poetry run python make_model_viscosity_fixtures.py [--data-dir DIR]
 
-Output (committed): tests/data/stage11_viscosity_*.nc and
-tests/data/stage11_probes_*.txt
+Output (committed): tests/data/viscosity_*.nc and
+tests/data/viscosity_probes_*.txt
+
+With --miniapp OUT it writes instead the large file the optional
+TheMiniAppFileWhenPresent test reads (see miniapp below).
 """
 from __future__ import annotations
 
@@ -38,7 +42,8 @@ from planetmodel import (AnalyticField, DeckFormat, Geometry, Model,
                         gauss_legendre, perturbed, read_deck)
 from planetmodel.modelfile import read_model, write_model
 
-DATA = pathlib.Path(__file__).resolve().parent.parent / "tests" / "data"
+from fixture_tools import parser
+
 ELASTIC = DeckFormat(("rho", "vpv", "vsv", "vph", "vsh", "eta"),
                      name="elastic")
 FIELDS = ["rho", "vpv", "vph", "vsv", "vsh", "eta", "viscosity"]
@@ -64,9 +69,9 @@ def delta_with_mean(r, theta, phi):
     return (C0 + A * np.sin(theta) ** 2 * np.cos(2.0 * phi)) * g(r)
 
 
-def base_model() -> tuple[Model, list[int]]:
+def base_model(data: pathlib.Path) -> tuple[Model, list[int]]:
     """The TestViscoelastic3D body: prem8, 1e21 Pa s on the mantle."""
-    deck = read_deck(DATA / "prem8.elastic.deck", ELASTIC)
+    deck = read_deck(data / "prem8.elastic.deck", ELASTIC)
     skeleton, layers = deck_layers(deck, kind="cubic")
     model = Model(Geometry(skeleton), layers)
     chosen = []
@@ -100,8 +105,7 @@ def probes(model: Model, chosen: list[int], seed: int) -> np.ndarray:
 def dump(path: pathlib.Path, back: Model, chosen: list[int],
          points: np.ndarray, source: str) -> None:
     with open(path, "w", encoding="utf-8") as out:
-        out.write(f"# stage-11 WP2 probes of {source}: the Python's own "
-                  "reading, SI\n")
+        out.write(f"# probes of {source}: the Python's own reading, SI\n")
         out.write(f"# ETA {ETA:.17e} A {A:.17e} C0 {C0:.17e} R {R:.17e}\n")
         out.write("# r theta phi eta\n")
         for r, theta, phi in points:
@@ -111,16 +115,17 @@ def dump(path: pathlib.Path, back: Model, chosen: list[int],
             out.write(f"{r:.17e} {theta:.17e} {phi:.17e} {eta:.17e}\n")
 
 
-def miniapp(out: pathlib.Path) -> None:
+def miniapp(data: pathlib.Path, out: pathlib.Path) -> None:
     """The viscosity3d mini-app's pipeline on the prem8 body: S40RTS on
     the viscous layers, the sl3d conversion, the viscosity written as a
     log perturbation of the radial one at band 96 on 50 km elements,
-    bicubic — the file WP2's done line names, kept out of the suite for
-    its size (~40 MB; the gate skips without it)."""
+    bicubic. Kept out of the suite for its size: TestModelViscosity's
+    TheMiniAppFileWhenPresent reads it when SL3DPP_VISCOSITY3D_FILE names
+    it, and skips otherwise."""
     from planetmodel import datasets
     from planetmodel.conversion import building, parameters
 
-    model, chosen = base_model()
+    model, chosen = base_model(data)
     model = datasets.transplanted(model, "S40RTS", remove_mean=True,
                                   layers=chosen)
     dt = building.temperature_anomaly(
@@ -138,11 +143,16 @@ def miniapp(out: pathlib.Path) -> None:
 
 
 def main() -> None:
-    import sys
-    if len(sys.argv) > 2 and sys.argv[1] == "--miniapp":
-        miniapp(pathlib.Path(sys.argv[2]))
+    arguments = parser(__doc__)
+    arguments.add_argument("--miniapp", type=pathlib.Path, metavar="OUT",
+                           help="write the mini-app file to OUT instead")
+    options = arguments.parse_args()
+    data = options.data_dir
+    if options.miniapp is not None:
+        miniapp(data, options.miniapp)
         return
-    model, chosen = base_model()
+    data.mkdir(parents=True, exist_ok=True)
+    model, chosen = base_model(data)
     span = (model.layer(chosen[0]).interval[0],
             model.layer(chosen[-1]).interval[1])
     print("viscous layers:", chosen, "on", span)
@@ -153,10 +163,10 @@ def main() -> None:
     log_model = perturbed(
         model, "viscosity", AnalyticField(span, delta_zero_mean),
         kind="log", layers=chosen)
-    path = DATA / "stage11_viscosity_log.nc"
+    path = data / "viscosity_log.nc"
     write_model(path, log_model, grid=gauss_legendre(32), radial=radial,
                 fields=FIELDS, interpolation=rules)
-    dump(DATA / "stage11_probes_log.txt", read_model(path), chosen,
+    dump(data / "viscosity_probes_log.txt", read_model(path), chosen,
          probes(model, chosen, seed=11), path.name)
     print(f"wrote {path.name} ({path.stat().st_size / 1e6:.2f} MB)")
 
@@ -164,11 +174,11 @@ def main() -> None:
     mean_model = perturbed(
         model, "viscosity", AnalyticField(span, delta_with_mean),
         kind="log", layers=chosen)
-    path = DATA / "stage11_viscosity_mean.nc"
+    path = data / "viscosity_mean.nc"
     write_model(path, mean_model, grid=gauss_legendre(16),
                 radial=RadialMesh(model.geometry, drmax=800e3, ngll=5),
                 fields=FIELDS, interpolation=rules)
-    dump(DATA / "stage11_probes_mean.txt", read_model(path), chosen,
+    dump(data / "viscosity_probes_mean.txt", read_model(path), chosen,
          probes(model, chosen, seed=13), path.name)
     print(f"wrote {path.name} ({path.stat().st_size / 1e6:.2f} MB)")
 
@@ -179,15 +189,15 @@ def main() -> None:
             full.layer(i).interval,
             lambda r, theta, phi: ETA * np.exp(delta_zero_mean(r, theta, phi)),
             name="viscosity"), replace=True)
-    path = DATA / "stage11_viscosity_full3d.nc"
+    path = data / "viscosity_full3d.nc"
     write_model(path, full, grid=gauss_legendre(32), radial=radial,
                 fields=FIELDS, interpolation=rules)
-    dump(DATA / "stage11_probes_full3d.txt", read_model(path), chosen,
+    dump(data / "viscosity_probes_full3d.txt", read_model(path), chosen,
          probes(model, chosen, seed=17), path.name)
     print(f"wrote {path.name} ({path.stat().st_size / 1e6:.2f} MB)")
 
     # The radial viscosity alone.
-    path = DATA / "stage11_viscosity_radial.nc"
+    path = data / "viscosity_radial.nc"
     write_model(path, model, grid=gauss_legendre(8),
                 radial=RadialMesh(model.geometry, drmax=800e3, ngll=5),
                 fields=FIELDS)

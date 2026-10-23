@@ -91,7 +91,7 @@ class ViscoelasticOperator {
     bool parallel = true;
     /// Where the internal variables live within each element
     /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
-    /// fewer, plan.md §5.5) or the GLL nodes (pyslfp's and the Fortran's,
+    /// fewer, docs/design.md §5) or the GLL nodes (pyslfp's and the Fortran's,
     /// for like-for-like comparisons).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
   };

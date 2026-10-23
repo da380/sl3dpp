@@ -1,6 +1,6 @@
 /**
  * @file TestKernelWriter.cpp
- * @brief Kernels out (stage 11 WP3): Kernels3D-layout values written as
+ * @brief Kernels out: Kernels3D-layout values written as
  * a planetmodel model file and read back.
  *
  * The gates read the file back at the memory nodes and grid points,
@@ -12,12 +12,12 @@
  * dJ = sum_node int K p dOmega computed from the file's content then
  * matches the in-memory pairing to rounding; that in-memory pairing is
  * the directional derivative by TestAdjoint3D's Taylor gate, which
- * closes WP3's loop. Both memory point sets are written, the Gauss
+ * closes the loop. Both memory point sets are written, the Gauss
  * default and GLL.
  *
- * With SL3DPP_STAGE11_KERNEL_OUT set, a smooth kernel is also written
+ * With SL3DPP_KERNEL_FILE_OUT set, a smooth kernel is also written
  * to that path with its pairing in the meta, for the Python's own
- * reading (scripts/check_stage11_kernel.py) and pictures.
+ * reading (scripts/check_kernel_file.py) and pictures.
  */
 
 #include <gtest/gtest.h>
@@ -154,10 +154,10 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
     for (auto i = std::size_t{0}; i < values.size(); ++i) {
       values[i] = Noise(i);
     }
-    const auto path = std::filesystem::temp_directory_path() /
-                      (set == MemoryPointSet::Gauss
-                           ? "sl3dpp_stage11_kernel_gauss.nc"
-                           : "sl3dpp_stage11_kernel_gll.nc");
+    const auto path =
+        std::filesystem::temp_directory_path() /
+        (set == MemoryPointSet::Gauss ? "sl3dpp_kernel_writer_gauss.nc"
+                                      : "sl3dpp_kernel_writer_gll.nc");
     const auto written = WriteKernels(
         path, op, body.model,
         {{.name = "log_viscosity_kernel",
@@ -252,8 +252,8 @@ TEST(KernelWriter, MalformedKernelsAreRefused) {
   const auto body = Body::Make();
   Viscoelastic3D op(body.rheology, kLmax,
                     [](double, double, double) { return 0.0; });
-  const auto path =
-      std::filesystem::temp_directory_path() / "sl3dpp_stage11_refused.nc";
+  const auto path = std::filesystem::temp_directory_path() /
+                    "sl3dpp_kernel_writer_refused.nc";
   auto values = std::vector<double>(7);
   const auto wrong = WriteKernels(
       path, op, body.model, {{.name = "k", .meaning = "", .values = values}});
@@ -265,12 +265,12 @@ TEST(KernelWriter, MalformedKernelsAreRefused) {
   EXPECT_FALSE(std::filesystem::exists(path));
 }
 
-// With SL3DPP_STAGE11_KERNEL_OUT set, a smooth kernel goes to that path
+// With SL3DPP_KERNEL_FILE_OUT set, a smooth kernel goes to that path
 // with its pairing and the perturbation's parameters in the meta, for
-// scripts/check_stage11_kernel.py and the pictures; otherwise skipped.
+// scripts/check_kernel_file.py and the pictures; otherwise skipped.
 TEST(KernelWriter, ASmoothKernelForThePythonWhenAsked) {
-  const auto* given = std::getenv("SL3DPP_STAGE11_KERNEL_OUT");
-  if (!given) GTEST_SKIP() << "SL3DPP_STAGE11_KERNEL_OUT is not set";
+  const auto* given = std::getenv("SL3DPP_KERNEL_FILE_OUT");
+  if (!given) GTEST_SKIP() << "SL3DPP_KERNEL_FILE_OUT is not set";
   const auto body = Body::Make();
   Viscoelastic3D op(body.rheology, kLmax,
                     [](double, double, double) { return 0.0; });
@@ -282,7 +282,7 @@ TEST(KernelWriter, ASmoothKernelForThePythonWhenAsked) {
   // write_kernel.cpp's shape, as the angular density K = w r^2 F of a
   // volume density F whose radial profile is quadratic, so the pairing
   // survives the file to rounding and the Python's own quadrature
-  // recovers it exactly (scripts/check_stage11_kernel.py).
+  // recovers it exactly (scripts/check_kernel_file.py).
   const auto smooth = [](double r, double theta, double phi) {
     const auto delta = std::acos(
         std::clamp(std::cos(theta) * 0.5 +
@@ -322,7 +322,7 @@ TEST(KernelWriter, ASmoothKernelForThePythonWhenAsked) {
         .meaning = "derivative of the test objective with respect to the "
                    "log viscosity, per unit volume",
         .values = values}},
-      {.name = "stage-11 WP3 smooth test kernel",
+      {.name = "sl3dpp smooth test kernel",
        .meta = {{"pairing", pairing},
                 {"length_scale", body.model.ModelScales().Length()}}});
   ASSERT_TRUE(written) << written.error().message;

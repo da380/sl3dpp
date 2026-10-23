@@ -2,8 +2,8 @@
 
 /**
  * @file ModelViscosity.hpp
- * @brief The io/ boundary for a planetmodel 3D model file's viscosity
- * (stage 11 WP2): eta(x) = eta_bar(r) exp(delta(x)), with the radial
+ * @brief The io/ boundary for a planetmodel 3D model file's viscosity:
+ * eta(x) = eta_bar(r) exp(delta(x)), with the radial
  * reference as Rheology::Maxwell's per-layer map and delta as the
  * functor Viscoelastic3D takes.
  *
@@ -19,7 +19,7 @@
  *    under the file grid's weights, taken at the layer's radial nodes
  *    and read between them by the field's own radial rule, so delta
  *    has zero lateral mean at the nodes — the within-step iteration's
- *    preference (plan.md §3). Works for any viscosity, perturbed or
+ *    preference (docs/design.md §6). Works for any viscosity, perturbed or
  *    fully 3D; needs the file's grid to carry weights.
  *  - FileRadial: the file's own radial reference, for a viscosity
  *    stored as a perturbation of one (what planetmodel's conversion
@@ -34,8 +34,8 @@
  * they throw planetmodel::Error (a functor cannot return expected).
  * At a layer boundary they read the layer above (planetmodel's
  * right-continuous rule); the supported memory points are the Gauss
- * set, which is interior — a layer-aware delta overload is the
- * stage-11 follow-up if GLL memory nodes on boundaries are wanted.
+ * set, which is interior. GLL memory nodes on layer boundaries would need
+ * a layer-aware delta overload, which is not built.
  */
 
 #include <expected>

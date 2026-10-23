@@ -3,8 +3,8 @@
 A C++23 library for forward and adjoint modelling of glacial isostatic
 adjustment (GIA) and sea-level change on a self-gravitating, rotating,
 compressible viscoelastic Earth: spherically symmetric (1D) or with laterally
-varying viscosity (3D). It succeeds the Fortran codes
-[sl3d](https://github.com/da380/sl3d) and [gia1d](https://github.com/da380/sl3d) , written by Ophelia Crawford
+varying viscosity (3D). It succeeds the Fortran codes sl3d and gia1d (both
+in [da380/sl3d](https://github.com/da380/sl3d)), written by Ophelia Crawford
 and David Al-Attar with contributions from Andrew Lloyd and Frank Syvret.
 
 Developed partially funded by the grant NE/V010433/1, NSFGEO-NERC: Adjoint tomography
@@ -312,13 +312,18 @@ The API reference and these pages are published at
 
 - [docs/sl3d-configs.md](docs/sl3d-configs.md): the `sl3d` program's
   configs, command by command.
+- [docs/design.md](docs/design.md): what sl3dpp is built on and how it
+  works: formulation, discretisation, the adjoints, units, the comparison
+  rules for cross-code work, validation and known limitations.
 - [docs/conventions.md](docs/conventions.md): units, signs, harmonic
   conventions and code style.
-- [docs/walkthrough-3d-step.md](docs/walkthrough-3d-step.md): how a 3D step
-  is computed, with pointers into the code and its costs.
-- [The 3D coupling](docs/stage4.md) and [the adjoints](docs/stage5.md):
-  their formulations, with convergence measurements.
-- [docs/plan.md](docs/plan.md): design notes and the record of decisions.
+
+The developer notes in [docs/dev](https://github.com/da380/sl3dpp/blob/main/docs/dev) are dated records kept from
+the code's development, not maintained as reference: the derivations and
+convergence measurements of [the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md)
+and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md), and a
+[walkthrough of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md) with pointers
+into the code and its costs.
 
 ## Licence
 

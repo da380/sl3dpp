@@ -670,9 +670,9 @@ IceKernels AdjointSolver::ContinuousSweep(
   };
 
   // The instantaneous adjoint fingerprint of a measurement, through the
-  // forward channel mapping of the elastic adjoint (stage5.md §3): its
-  // sea level (the delta amplitude), and the converged channel
-  // coefficients that drive the radial jump.
+  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md §3):
+  // its sea level (the delta amplitude), and the converged channel coefficients
+  // that drive the radial jump.
   struct Jump {
     std::vector<double> xiA;
     std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent

@@ -1,7 +1,7 @@
 /**
  * @file ExampleEvolution.cpp
  * @brief 1D viscoelastic GIA: the coupled sea-level evolution under a
- * melting ice cap (stage 3) — exponential-trapezoid stepping, the
+ * melting ice cap — exponential-trapezoid stepping, the
  * generalised SLE closing each step, full rotational feedback.
  *
  * 20% of the West Antarctic ice (the real ICE-7G state, extracted from

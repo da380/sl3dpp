@@ -23,7 +23,7 @@ using namespace sl3dpp;
 
 namespace {
 
-/// The PREM-like elastic model from the stage-1 deck, with a 1e21 Pa s
+/// The PREM-like elastic model from prem8.elastic.deck, with a 1e21 Pa s
 /// Maxwell mantle: solid layers fully inside [3480, 6151] km. The same
 /// rule selects the layers in the pyslfp fixture script.
 struct TestBody {

@@ -1,11 +1,11 @@
 /**
  * @file ExampleLateralViscosity.cpp
- * @brief 3D viscosity (stage 4): the coupled evolution with a laterally
+ * @brief 3D viscosity: the coupled evolution with a laterally
  * varying mantle, against its radially averaged twin.
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)) with a degree-2-like
  * log perturbation of one decade peak to peak; the within-step lateral
- * iteration (the research content of plan §3) converges each implicit
+ * iteration (design.md §6) converges each implicit
  * step under the same Anderson-mixed fixed point as the ocean load and
  * rotation. The zero-lateral twin isolates what the lateral structure
  * does to the predictions.

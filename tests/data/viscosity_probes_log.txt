@@ -1,4 +1,4 @@
-# stage-11 WP2 probes of stage11_viscosity_log.nc: the Python's own reading, SI
+# probes of viscosity_log.nc: the Python's own reading, SI
 # ETA 1.00000000000000000e+21 A 4.00000000000000022e-01 C0 2.99999999999999989e-01 R 6.36800000000000000e+06
 # r theta phi eta
 3.78157318743019458e+06 2.05533639591995021e+00 1.21966442267687225e+00 9.19139492995057975e+20

@@ -1,19 +1,20 @@
-"""Stage-11 WP3: the Python's side of the kernel round trip.
+"""The Python's side of the kernel-file round trip.
 
 Reads a kernel model file written by sl3dpp's io/KernelWriter — the
-TestKernelWriter smooth kernel, written when SL3DPP_STAGE11_KERNEL_OUT
+TestKernelWriter smooth kernel, written when SL3DPP_KERNEL_FILE_OUT
 is set:
 
-    SL3DPP_STAGE11_KERNEL_OUT=/tmp/kernel.nc build/tests/TestKernelWriter
+    SL3DPP_KERNEL_FILE_OUT=/tmp/kernel.nc build/tests/TestKernelWriter
 
 — integrates the kernel against the test perturbation
 p = 0.3 + sin^2(theta) cos(2 phi) - 0.5 cos(theta) by its own
 quadrature (Gauss-Legendre per file element in r, the file grid's
 weights in angle), and compares with the in-memory pairing the C++
 stored as meta_pairing. With --plot, draws the kernel at mid-mantle.
+Run in this directory's environment (pyproject.toml):
 
-    cd ~/dev/planetmodel && poetry run python \
-        ~/dev/sl3dpp/scripts/check_stage11_kernel.py /tmp/kernel.nc [--plot out.png]
+    cd scripts && poetry install --no-root
+    poetry run python check_kernel_file.py /tmp/kernel.nc [--plot out.png]
 """
 from __future__ import annotations
 

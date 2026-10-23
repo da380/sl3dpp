@@ -1,7 +1,7 @@
 /**
  * @file ExampleFingerprint.cpp
- * @brief Elastic sea-level fingerprint of a 10% Greenland melt — the
- * stage-2 public capability (plan §1), at full resolution (lmax 256) on
+ * @brief Elastic sea-level fingerprint of a 10% Greenland melt, at full
+ * resolution (lmax 256) on
  * the real present-day Earth (ICE-7G ice and topography, extracted from
  * pyslfp by the build).
  *

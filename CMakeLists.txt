@@ -54,12 +54,12 @@ option(SL3DPP_INSTALL "Generate the install and export rules" ON)
 # For local development against working copies, point FetchContent at them:
 #
 #   cmake -B build \
-#     -DFETCHCONTENT_SOURCE_DIR_NUMERICCONCEPTS=~/dev/NumericConcepts \
-#     -DFETCHCONTENT_SOURCE_DIR_GAUSSQUAD=~/dev/GaussQuad \
-#     -DFETCHCONTENT_SOURCE_DIR_INTERPOLATION=~/dev/Interpolation \
-#     -DFETCHCONTENT_SOURCE_DIR_FFTWPP=~/dev/FFTWpp \
-#     -DFETCHCONTENT_SOURCE_DIR_GSHTRANS=~/dev/GSHTrans \
-#     -DFETCHCONTENT_SOURCE_DIR_PLANETMODEL=~/dev/planetmodel
+#     -DFETCHCONTENT_SOURCE_DIR_NUMERICCONCEPTS=<checkouts>/NumericConcepts \
+#     -DFETCHCONTENT_SOURCE_DIR_GAUSSQUAD=<checkouts>/GaussQuad \
+#     -DFETCHCONTENT_SOURCE_DIR_INTERPOLATION=<checkouts>/Interpolation \
+#     -DFETCHCONTENT_SOURCE_DIR_FFTWPP=<checkouts>/FFTWpp \
+#     -DFETCHCONTENT_SOURCE_DIR_GSHTRANS=<checkouts>/GSHTrans \
+#     -DFETCHCONTENT_SOURCE_DIR_PLANETMODEL=<checkouts>/planetmodel
 #
 # An installed copy is preferred when present (FIND_PACKAGE_ARGS).
 # ---------------------------------------------------------------------------
@@ -73,7 +73,7 @@ set(SL3DPP_INTERPOLATION_TAG "43619e2627fe302e244d321c994d5b5cc717cd74"
     CACHE STRING "Interpolation commit")
 set(SL3DPP_FFTWPP_TAG "b3af30eaf3f06760cd1d97df4386af1a0c75dd76"
     CACHE STRING "FFTWpp commit")
-set(SL3DPP_GSHTRANS_TAG "8dd116df8df4222fe9b10a40c7213d34f2a274fb"
+set(SL3DPP_GSHTRANS_TAG "991dd1eaba2d0c47e4200356a0329c51dfe5fb5e"
     CACHE STRING "GSHTrans commit")
 set(SL3DPP_PLANETMODEL_TAG "d0c55e23dac7610802496768402de2bc001b3259"
     CACHE STRING "planetmodel commit (v1.3.2)")

@@ -1,11 +1,12 @@
-# Stage 5 design: adjoints — discrete and continuous
+# Adjoints: discrete and continuous
 
 *Drafted 16 October 2026 from pyslfp's recent adjoint work
 (`viscoelastic/evolution.py`, commits `d215e3f`..`5479ce9`: discrete and
 continuous adjoints, quelling, 1D viscous kernels, checkpointing) and
 Yu et al. 2025 (equation references below are to that paper). pyslfp is
-the porting template for the 1D path; the 3D path is this stage's new
-content. This records the design before implementation.*
+the porting template for the 1D path; the 3D path is sl3dpp's own.
+Sections 6a and 6b record what is built in 3D and what is designed but
+not built.*
 
 ## 1. Both formulations, continuous preferred (decided 16 Oct 2026)
 
@@ -41,21 +42,22 @@ one interface and one result type so every gate runs on both alike.
    inverse-relaxation-time (itau) kernels, both ways, with the
    viscosity mapping; checkpointing (record stride + exact backward
    steps); the kernel views of §4.
-2. **3D kernels** (new): the continuous adjoint of the coupled 3D
-   evolution and the grid viscosity kernel μ s (d−m):(d†−m†); the
-   discrete transpose of the reduced pipeline as the option.
+2. **3D kernels**: the continuous adjoint of the coupled 3D
+   evolution and the grid viscosity kernel μ_k m†:(d − m)/itau (§6,
+   §6a); the discrete transpose of the reduced pipeline is designed
+   (§6b) but not built.
    **Both kernel granularities are deliverables** (David, 16 Oct 2026):
    the full 3D viscosity kernel on the (memory nodes × angular grid),
    AND the spherically averaged 1D radial kernel as pyslfp provides —
    the latter both from the 1D sweeps directly and as the spherical
    average of the 3D kernel, whose agreement in the zero-lateral limit
    is a free consistency gate between the two pipelines.
-3. Deferred within the stage: linearisation about a migrating-shoreline
+3. Not built: linearisation about a migrating-shoreline
    trajectory (pyslfp's `ocean_functions`) waits until sl3dpp's forward
    evolution grows migration (the SLE's nonlinear solve exists; the
-   driver doesn't use it yet); decay-time functionals
-   (pyslfp `functionals.py`) are a front end over Measurement and port
-   separately if needed.
+   driver doesn't use it yet). Decay-time functionals (pyslfp
+   `functionals.py`), a front end over Measurement, were ported later
+   (`DecayTimeMeasurements` in `Measurements.hpp`).
 
 ## 3. The 1D sweeps (pyslfp's algebra, verbatim)
 
@@ -68,7 +70,7 @@ code; what follows fixes the sl3dpp mapping only.
   plain transpose of `Degree::Strain` under the nodal pairing); the
   unit load/tide responses contract them to load/tide coefficient
   duals; those join the measurement duals through the engine adjoint
-  (`SeaLevelSolver::SolveAdjoint`, the stage-2 transpose); its channel
+  (`SeaLevelSolver::SolveAdjoint`, the sea-level solver's transpose); its channel
   duals force one symmetric effective solve per degree; the weight
   recursion closes m† and d†. The start is the transposed
   instantaneous elastic solve. Yu et al. §3; pyslfp lines 1554–1663.
@@ -183,12 +185,12 @@ dual by the dot product; densities/rates are per unit SLE time.
   continuous); dot-product identity for the discrete 3D transpose; FD
   checks on the grid viscosity kernel; discrete-vs-continuous ladder
   over lateral contrast (the resolution diagnostic in action — a
-  research measurement alongside stage 4's §5a table).
+  research measurement alongside `lateral-coupling.md` §5a).
 
-## 6a. The 3D continuous sweep as built (16 Oct 2026)
+## 6a. The 3D continuous sweep as built
 
 `Adjoint3D.hpp/cpp`: `AdjointSolver3D` (continuous only; the discrete
-transpose remains 5e), `ForwardTrajectory3D` (full recording via
+transpose is not built, §6b), `ForwardTrajectory3D` (full recording via
 `SeaLevelEvolution3D::Options::record_stride` — no 3D backward
 reconstruction yet, so the viscosity kernels demand stride 1; since 17
 Oct, performance chunk 10, the sweep rebuilds the gaps by forward steps
@@ -227,9 +229,9 @@ remainder |J(δ+hp) − J − h⟨K,p⟩| at second order on the
 curvature-dominated end of the h-sweep, monotone, and inside the
 commute floor (0.1·h·|⟨K,p⟩|) everywhere. The machine-grade Taylor
 test — second order to solver precision at every h — belongs to the
-discrete transpose (5e).
+discrete transpose (§6b).
 
-## 6b. The discrete 3D transpose: design (16 Oct 2026, to implement)
+## 6b. The discrete 3D transpose: design (not built)
 
 The step is LINEAR throughout, so its exact transpose is mechanical
 once the pairings are fixed. Write the forward within-step pass (the
@@ -259,7 +261,7 @@ with m ≥ 0 column weights (1, 2, 2, ...) — the SAME metric the
 continuous kernel contraction derived from the 1D force weights, and
 which the zero-lateral kernel gate already validated. With duals
 carried in this pairing, the transposed pass is the forward pass with
-the force/strain pair swapped and the SLE replaced by its stage-2
+the force/strain pair swapped and the SLE replaced by its
 adjoint:
 
   passᵀ(y): x† = Entry-with-Δβμ-weights(y) … K⁻¹ (symmetric) …
@@ -308,5 +310,5 @@ d. **3D continuous sweep + grid viscosity kernel** (§6). GATES:
 e. **3D discrete transpose**. GATES: dot-product at machine precision;
    zero-lateral == 1D discrete; the contrast-ladder diagnostic.
 
-Fixtures: `scripts/make_stage5_fixtures.py` driving pyslfp, committed
-under `tests/data/` with provenance headers, per the stage-0 mechanics.
+Fixtures: `scripts/make_kernel_fixtures.py` driving pyslfp, committed
+under `tests/data/` with provenance headers, like the other fixtures.

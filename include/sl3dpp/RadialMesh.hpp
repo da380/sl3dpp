@@ -3,7 +3,7 @@
 /**
  * @file RadialMesh.hpp
  * @brief The single global GLL mesh every degree and every grid field
- * shares (plan §5.3), following planetmodel's `Mesh1D`/`RadialMesh`.
+ * shares (docs/design.md §3), following planetmodel's `Mesh1D`/`RadialMesh`.
  *
  * The mesh is pure geometry: breakpoints pinned at every model boundary
  * inside the range, each span subdivided uniformly into elements no wider
@@ -20,8 +20,8 @@
  *
  * Degree-dependent truncation is a per-degree element subset of this one
  * mesh — never a separate sub-mesh, since the pseudospectral coupling needs
- * a single radial node set. Two truncation-radius rules are offered (open
- * question 3 of the plan): the graded rule r = rmax eps^(1/(l+1)) of
+ * a single radial node set. Two truncation-radius rules are offered
+ * (docs/design.md §3): the graded rule r = rmax eps^(1/(l+1)) of
  * pyslfp, and the old Fortran's r = rmax (1 - 20/(l+0.5)).
  */
 

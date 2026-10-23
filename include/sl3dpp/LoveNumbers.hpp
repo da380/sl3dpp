@@ -63,9 +63,10 @@ struct LoveNumbers {
   /// (the sea level solver) works with. The table itself stays SI.
   [[nodiscard]] LoveNumbers ConvertedTo(const Scales& scales) const;
 
-  /// A table from a fixture-style file as `scripts/make_stage1_fixtures.py`
-  /// writes one (SI): the `radius`, `surface_gravity`, `axial` and `table`
-  /// records. Also the interchange route from pyslfp.
+  /// A table from a fixture-style file as
+  /// `scripts/make_love_number_fixtures.py` writes one (SI): the `radius`,
+  /// `surface_gravity`, `axial` and `table` records. Also the interchange route
+  /// from pyslfp.
   [[nodiscard]] static std::expected<LoveNumbers, ModelError> FromFile(
       const std::filesystem::path& path);
 };

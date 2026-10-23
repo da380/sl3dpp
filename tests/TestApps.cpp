@@ -346,10 +346,12 @@ TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   WriteToyHistory(dir_ / "history.nc");
   const auto data = std::string{SL3DPP_TEST_DATA_DIR};
   const auto body = std::string{R"(
-    "model": ")"} + data + R"(/prem8.elastic.deck",
+    "model": ")"} + data +
+                    R"(/prem8.elastic.deck",
     "model_format": "elastic",
     "lmax": 8,
-    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "viscosity": {"file": ")" +
+                    data + R"(/viscosity_log.nc"},
     "state": {"file": "history.nc"},
     "ice_history": {"file": "history.nc"},
     "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
@@ -362,7 +364,7 @@ TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   ASSERT_TRUE(reference.time);
   EXPECT_EQ(reference.time->size(), 4u);
   EXPECT_EQ(reference.meta.at("viscosity"),
-            pm::netcdf::Attribute{data + "/stage11_viscosity_log.nc"});
+            pm::netcdf::Attribute{data + "/viscosity_log.nc"});
 
   const auto pieces = Write(
       "pieces3d.json",
@@ -499,7 +501,7 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
     "model": ")"} + data + R"(/prem8.elastic.deck",
     "model_format": "elastic",
     "lmax": 8,
-    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "viscosity": {"file": ")" + data + R"(/viscosity_log.nc"},
     "state": {"file": "history.nc"},
     "ice_history": {"file": "history.nc"},
     "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
@@ -528,7 +530,7 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
     "model": ")"} + data + R"(/prem8.elastic.deck",
     "model_format": "elastic",
     "lmax": 8,
-    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "viscosity": {"file": ")" + data + R"(/viscosity_log.nc"},
     "state": {"file": "history.nc"},
     "ice_history": {"file": "history.nc"},
     "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
@@ -543,7 +545,7 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
     "model": ")"} + data + R"(/prem8.elastic.deck",
     "model_format": "elastic",
     "lmax": 8,
-    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "viscosity": {"file": ")" + data + R"(/viscosity_log.nc"},
     "state": {"file": "history.nc"},
     "ice_history": {"file": "history.nc"},
     "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},

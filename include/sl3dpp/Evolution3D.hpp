@@ -2,8 +2,8 @@
 
 /**
  * @file Evolution3D.hpp
- * @brief Forward GIA with lateral viscosity: the coupled loop of plan §3 —
- * one combined within-step fixed point over the ocean load, the rotational
+ * @brief Forward GIA with lateral viscosity: the coupled loop of docs/design.md
+ * §6 — one combined within-step fixed point over the ocean load, the rotational
  * feedback and the lateral viscosity term, under one Anderson mixer.
  *
  * Per step, the opened 3D step (Viscoelastic3D::OpenStep) holds the

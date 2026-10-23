@@ -21,8 +21,8 @@ OUTPUT_DIRECTORY       = @SL3DPP_DOCS_OUTPUT@
 INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/include/sl3dpp \
                          @PROJECT_SOURCE_DIR@/docs/sl3d-configs.md \
+                         @PROJECT_SOURCE_DIR@/docs/design.md \
                          @PROJECT_SOURCE_DIR@/docs/conventions.md \
-                         @PROJECT_SOURCE_DIR@/docs/walkthrough-3d-step.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md
 USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/README.md
 RECURSIVE              = YES

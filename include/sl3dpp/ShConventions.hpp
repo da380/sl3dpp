@@ -4,7 +4,7 @@
  * @file ShConventions.hpp
  * @brief Conversions between GSHTrans's native spherical-harmonic basis and
  * the real orthonormal basis of pyshtools (planetmodel/pyslfp), used only
- * at the IO and benchmark boundary (plan §2.5, §5.5).
+ * at the IO and benchmark boundary (docs/design.md §4).
  *
  * GSHTrans: complex, orthonormal, Condon-Shortley phase,
  * Y_lm = (-1)^m K_lm P_lm e^{i m phi}, with the real-field symmetry
@@ -20,7 +20,7 @@
  *   a_lm = (-1)^m sqrt(2) Re f_lm,   b_lm = -(-1)^m sqrt(2) Im f_lm,
  *
  * and f_l0 = a_l0 (real). These identities are verified against pyshtools
- * numerically by the stage-2 fixtures.
+ * numerically by the sea-level fixtures (SeaLevelGate).
  */
 
 #include <complex>
