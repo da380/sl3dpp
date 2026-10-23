@@ -54,8 +54,8 @@ set(SL3DPP_FFTWPP_TAG "423558c0842b25f6031f2ae58dcab36d8f5f8874"
     CACHE STRING "FFTWpp commit")
 set(SL3DPP_GSHTRANS_TAG "8dd116df8df4222fe9b10a40c7213d34f2a274fb"
     CACHE STRING "GSHTrans commit")
-set(SL3DPP_PLANETMODEL_TAG "2e7cee22d8545916151dec8a77025dc7d7c3eecf"
-    CACHE STRING "planetmodel commit (v1.3.1, pre-tag)")
+set(SL3DPP_PLANETMODEL_TAG "v1.3.1"
+    CACHE STRING "planetmodel release tag")
 
 FetchContent_Declare(
   NumericConcepts

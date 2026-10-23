@@ -100,6 +100,13 @@ class SeaLevelEvolution3D {
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
     std::function<void(std::size_t node, const Snapshot&)> on_snapshot;
+    /// With record_stride set, hand each kept node's internal state to
+    /// on_state (after its on_snapshot) INSTEAD of keeping it on the
+    /// snapshot: the recording then lives where the callback puts it (a
+    /// disk store, say), the snapshots keep the loads alone, and a
+    /// reverse sweep reads the states back through
+    /// ForwardTrajectory3D's fetch.
+    std::function<void(std::size_t node, Viscoelastic3D::State&&)> on_state;
     /// Hand every checkpoint_stride-th node's recurrence, and the last
     /// node's, to on_checkpoint (0 hands none), after that node's
     /// on_snapshot. Strides count within the call, for `Run` and

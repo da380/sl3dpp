@@ -200,24 +200,25 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     snapshot.converged = converged;
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
-    // loads.
+    // loads. With on_state, the kept state is handed out instead.
+    auto kept = std::optional<Viscoelastic3D::State>{};
     if (keepState && options_.record_strain) {
-      snapshot.internalState = vstate_;
+      kept = vstate_;
     } else if (keepState) {
-      Viscoelastic3D::State kept;
-      kept.t = vstate_.t;
-      kept.m = vstate_.m;
-      snapshot.internalState = std::move(kept);
+      auto trimmed = Viscoelastic3D::State{};
+      trimmed.t = vstate_.t;
+      trimmed.m = vstate_.m;
+      kept = std::move(trimmed);
     }
+    if (kept && !options_.on_state) snapshot.internalState = std::move(kept);
     if (stride > 0) {
       snapshot.loadCoefficients = sigma_;
       snapshot.tideCoefficients = psi_;
     }
     snapshots.push_back(std::move(snapshot));
-    if (options_.on_snapshot) {
-      options_.on_snapshot(snapshots.size() - (resumed ? 0 : 1),
-                           snapshots.back());
-    }
+    const auto node = snapshots.size() - (resumed ? 0 : 1);
+    if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
+    if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
   if (!resumed) {
     record(times[0], response, 0, 0.0, true, stride > 0);

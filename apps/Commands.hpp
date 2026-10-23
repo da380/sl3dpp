@@ -170,6 +170,11 @@ struct KernelInput {
   EvolveInput run;
   int record_stride = 1;
   AdjointMethod method = AdjointMethod::Continuous;  ///< kernel1d alone
+  /// `sl3d kernel` alone: with a directory given, the recorded states
+  /// are spilled there during the forward run and read back one at a
+  /// time by the sweep, so the trajectory's N / stride states live on
+  /// disk instead of in memory — the lever for large lmax.
+  std::filesystem::path trajectory_directory;
   std::vector<MeasurementSpec> measurements;
   std::filesystem::path output;  ///< the directory the files land in
 };

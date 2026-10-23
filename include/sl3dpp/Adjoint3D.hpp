@@ -29,6 +29,7 @@
  * integral; itau in MATERIAL units.
  */
 
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -54,6 +55,21 @@ struct ForwardTrajectory3D {
   std::vector<std::optional<Viscoelastic3D::State>> states;
   std::vector<std::vector<std::complex<double>>> loads;
   std::vector<std::vector<std::complex<double>>> tides;
+
+  /// A spilled recording (a run with Options::on_state): `fetch(node)`
+  /// supplies a kept node's state from wherever the callback put it, for
+  /// the nodes `stored` marks, in place of `states` entries. The sweep
+  /// holds a fetched state only while it passes through, so the
+  /// recording's memory lives on disk rather than in the N / stride
+  /// kept states.
+  std::vector<bool> stored;
+  std::function<Viscoelastic3D::State(std::size_t)> fetch;
+
+  /// Whether a node's state is kept, in memory or through `fetch`.
+  [[nodiscard]] bool Kept(std::size_t node) const {
+    return (node < states.size() && states[node].has_value()) ||
+           (fetch && node < stored.size() && stored[node]);
+  }
 
   [[nodiscard]] static ForwardTrajectory3D FromSnapshots(
       std::span<const SeaLevelEvolution3D::Snapshot> snapshots);

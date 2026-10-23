@@ -14,6 +14,7 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Input.hpp"
+#include "Serialize.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/Rheology.hpp"
@@ -47,6 +48,13 @@ constexpr auto kMagic = std::uint64_t{0x534c3344434b5031};  // "SL3DCKP1"
 constexpr auto kKind1D = std::uint64_t{1};
 constexpr auto kKind3D = std::uint64_t{2};
 
+constexpr std::uint64_t KindOf(const SeaLevelEvolution::Checkpoint&) {
+  return kKind1D;
+}
+constexpr std::uint64_t KindOf(const SeaLevelEvolution3D::Checkpoint&) {
+  return kKind3D;
+}
+
 /// FNV-1a of the config's text: a restart with another config is refused.
 std::uint64_t HashOf(const std::filesystem::path& config) {
   auto in = std::ifstream(config, std::ios::binary);
@@ -57,108 +65,6 @@ std::uint64_t HashOf(const std::filesystem::path& config) {
     hash *= 1099511628211ull;
   }
   return hash;
-}
-
-void Put(std::ofstream& out, const void* data, std::size_t bytes) {
-  out.write(static_cast<const char*>(data), static_cast<std::streamsize>(bytes));
-}
-
-template <class T>
-void PutOne(std::ofstream& out, T value) {
-  Put(out, &value, sizeof(T));
-}
-
-void PutVector(std::ofstream& out, const std::vector<double>& values) {
-  PutOne(out, static_cast<std::uint64_t>(values.size()));
-  Put(out, values.data(), values.size() * sizeof(double));
-}
-
-void PutComplex(std::ofstream& out,
-                const std::vector<std::complex<double>>& values) {
-  PutOne(out, static_cast<std::uint64_t>(values.size()));
-  Put(out, values.data(), values.size() * sizeof(std::complex<double>));
-}
-
-template <class T>
-T GetOne(std::ifstream& in) {
-  T value{};
-  in.read(reinterpret_cast<char*>(&value), sizeof(T));
-  return value;
-}
-
-std::vector<double> GetVector(std::ifstream& in) {
-  auto values = std::vector<double>(GetOne<std::uint64_t>(in));
-  in.read(reinterpret_cast<char*>(values.data()),
-          static_cast<std::streamsize>(values.size() * sizeof(double)));
-  return values;
-}
-
-std::vector<std::complex<double>> GetComplex(std::ifstream& in) {
-  auto values = std::vector<std::complex<double>>(GetOne<std::uint64_t>(in));
-  in.read(
-      reinterpret_cast<char*>(values.data()),
-      static_cast<std::streamsize>(values.size() * sizeof(std::complex<double>)));
-  return values;
-}
-
-// The two recurrences, each with its format kind.
-
-constexpr std::uint64_t KindOf(const SeaLevelEvolution::Checkpoint&) {
-  return kKind1D;
-}
-constexpr std::uint64_t KindOf(const SeaLevelEvolution3D::Checkpoint&) {
-  return kKind3D;
-}
-
-void PutState(std::ofstream& out, const SeaLevelEvolution::Checkpoint& cp) {
-  for (const auto* held : {&cp.m, &cp.strain}) {
-    PutOne(out, static_cast<std::uint64_t>(held->size()));
-    for (const auto& [degree, values] : *held) {
-      PutOne(out, static_cast<std::int64_t>(degree));
-      PutVector(out, values);
-    }
-  }
-}
-
-void GetState(std::ifstream& in, SeaLevelEvolution::Checkpoint& cp) {
-  for (auto* held : {&cp.m, &cp.strain}) {
-    const auto degrees = GetOne<std::uint64_t>(in);
-    for (auto k = std::uint64_t{0}; k < degrees; ++k) {
-      const auto degree = GetOne<std::int64_t>(in);
-      held->emplace(static_cast<int>(degree), GetVector(in));
-    }
-  }
-}
-
-void PutState(std::ofstream& out, const SeaLevelEvolution3D::Checkpoint& cp) {
-  PutOne(out, static_cast<std::uint64_t>(cp.m.size()));
-  for (const auto& tensor : cp.m) {
-    PutComplex(out, tensor.c[0]);
-    PutComplex(out, tensor.c[1]);
-    PutVector(out, tensor.r);
-  }
-  PutOne(out, static_cast<std::uint64_t>(cp.strainCoefficients ? 1 : 0));
-  if (cp.strainCoefficients) {
-    PutComplex(out, cp.strainCoefficients->c[0]);
-    PutComplex(out, cp.strainCoefficients->c[1]);
-    PutComplex(out, cp.strainCoefficients->r);
-  }
-}
-
-void GetState(std::ifstream& in, SeaLevelEvolution3D::Checkpoint& cp) {
-  cp.m.resize(GetOne<std::uint64_t>(in));
-  for (auto& tensor : cp.m) {
-    tensor.c[0] = GetComplex(in);
-    tensor.c[1] = GetComplex(in);
-    tensor.r = GetVector(in);
-  }
-  if (GetOne<std::uint64_t>(in) != 0) {
-    auto spectral = GridCoupling::SpectralTensor{};
-    spectral.c[0] = GetComplex(in);
-    spectral.c[1] = GetComplex(in);
-    spectral.r = GetComplex(in);
-    cp.strainCoefficients = std::move(spectral);
-  }
 }
 
 /// Writes a checkpoint whole (a temporary renamed into place) and keeps

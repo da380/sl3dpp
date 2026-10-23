@@ -11,6 +11,7 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Input.hpp"
+#include "Serialize.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Evolution.hpp"
@@ -329,8 +330,8 @@ void WriteIceKernels(const std::filesystem::path& path,
 KernelInput ReadKernelInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   auto allowed = RunMemberNames();
-  for (const auto name : {"record_stride", "adjoint", "measurements",
-                          "output"}) {
+  for (const auto name : {"record_stride", "adjoint", "trajectory",
+                          "measurements", "output"}) {
     allowed.push_back(name);
   }
   Allow(top, std::span(allowed));
@@ -340,6 +341,11 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
   out.record_stride = Integer(top, "record_stride", 1);
   if (out.record_stride < 1) {
     Fail(top.At("record_stride"), "is not a positive stride");
+  }
+  if (Has(top, "trajectory")) {
+    const auto& trajectory = top.At("trajectory");
+    Allow(trajectory, {"directory"});
+    out.trajectory_directory = PathOf(trajectory, "directory", directory);
   }
   if (Has(top, "adjoint")) {
     out.method = Choice<AdjointMethod>(
@@ -410,6 +416,10 @@ std::string RunKernel1D(const std::filesystem::path& config) {
     Fail(top.At("viscosity"),
          "names a 3D viscosity; kernel1d takes the model's own column — "
          "use `sl3d kernel`");
+  }
+  if (!input.trajectory_directory.empty()) {
+    Fail(top.At("trajectory"),
+         "spills a 3D recording; the 1D trajectory fits in memory");
   }
   auto earth = BuildEarth(input.run, top);
   const auto rheology = Rheology::FromModel(earth.material, earth.model);
@@ -507,6 +517,26 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   options.coupled_rtol = input.run.coupled_rtol;
   options.max_coupled_iterations = input.run.max_coupled_iterations;
   options.record_stride = input.record_stride;
+  // with a trajectory directory, the recorded states spill to disk as
+  // the run passes them, and the sweep fetches them back one at a time
+  const auto spilling = !input.trajectory_directory.empty();
+  auto spilled = std::vector<bool>(static_cast<std::size_t>(input.run.nodes),
+                                   false);
+  auto state_path = [&](std::size_t node) {
+    return input.trajectory_directory / std::format("node_{:06}.traj", node);
+  };
+  if (spilling) {
+    std::filesystem::create_directories(input.trajectory_directory);
+    options.on_state = [&](std::size_t node, Viscoelastic3D::State&& state) {
+      auto out = std::ofstream(state_path(node), std::ios::binary);
+      PutState3D(out, state);
+      if (!out) {
+        throw std::runtime_error(
+            std::format("cannot write {}", state_path(node).string()));
+      }
+      spilled[node] = true;
+    };
+  }
   SeaLevelEvolution3D evolution(op, solver, world.background, options);
   const auto snapshots = evolution.Run(times, iceLoad);
   for (const auto& snapshot : snapshots) {
@@ -515,7 +545,18 @@ std::string RunKernel3D(const std::filesystem::path& config) {
           "the coupled fixed point did not converge at t = {}", snapshot.t));
     }
   }
-  const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+  auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+  if (spilling) {
+    trajectory.stored = spilled;
+    trajectory.fetch = [state_path](std::size_t node) {
+      auto in = std::ifstream(state_path(node), std::ios::binary);
+      if (!in) {
+        throw std::runtime_error(
+            std::format("cannot read {}", state_path(node).string()));
+      }
+      return GetState3D(in);
+    };
+  }
 
   const auto& matScales = earth.material.ModelScales();
   AdjointSolver3D adjoint(evolution, {.rtol = input.run.rtol});

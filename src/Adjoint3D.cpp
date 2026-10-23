@@ -82,7 +82,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       throw std::invalid_argument(
           "the trajectory must give one entry per time node");
     }
-    if (!trajectory->states.front().has_value()) {
+    if (!trajectory->Kept(0)) {
       throw std::invalid_argument(
           "the trajectory must keep the first node's state (a run with "
           "record_stride set keeps it): the states between kept ones are "
@@ -336,9 +336,16 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       return found->second;
     }
     rebuilt.clear();
+    // a spilled kept node is fetched into the cache and dropped, like a
+    // rebuilt one, once the sweep has passed below it
+    if (trajectory->Kept(node)) {
+      return rebuilt[node] = trajectory->fetch(node);
+    }
     auto start = node;
-    while (!trajectory->states[start].has_value()) --start;
-    const auto* previous = &*trajectory->states[start];
+    while (!trajectory->Kept(start)) --start;
+    const auto* previous = trajectory->states[start].has_value()
+                               ? &*trajectory->states[start]
+                               : &(rebuilt[start] = trajectory->fetch(start));
     for (auto j = start + 1; j <= node; ++j) {
       const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
       auto step =

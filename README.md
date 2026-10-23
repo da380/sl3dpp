@@ -177,6 +177,8 @@ sl3d fingerprint run.json      # an elastic fingerprint on a present-day state
 sl3d evolve run.json           # a 3D (lateral-viscosity) GIA run, restartable
 sl3d evolve1d run.json         # its 1D counterpart
 sl3d kernel run.json           # adjoint kernels of configured measurements
+                               #   ("trajectory": {"directory": ...} spills
+                               #    the recorded states to disk for large lmax)
 sl3d kernel1d run.json         # its 1D counterpart
 ```
 

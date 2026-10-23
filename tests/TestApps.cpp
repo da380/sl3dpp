@@ -464,6 +464,89 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
     held = held || part.variables.contains("K_ln_eta_0");
   }
   EXPECT_TRUE(held);
+
+  // the disk-backed trajectory: the recorded states spilled during the
+  // run and fetched back by the sweep give the same kernels exactly
+  const auto spilled_config = Write("kernel3d_spill.json", std::string{R"({
+    "model": ")"} + data + R"(/prem8.elastic.deck",
+    "model_format": "elastic",
+    "lmax": 8,
+    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+    "rotation": "full",
+    "record_stride": 2,
+    "trajectory": {"directory": "spill"},
+    "measurements": [
+      {"type": "sea_level_cap", "name": "site", "latitude": -30.0,
+       "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}],
+    "output": "out_kernel3d_spill"})");
+  const auto in_memory_config = Write("kernel3d_mem.json", std::string{R"({
+    "model": ")"} + data + R"(/prem8.elastic.deck",
+    "model_format": "elastic",
+    "lmax": 8,
+    "viscosity": {"file": ")" + data + R"(/stage11_viscosity_log.nc"},
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+    "rotation": "full",
+    "record_stride": 2,
+    "measurements": [
+      {"type": "sea_level_cap", "name": "site", "latitude": -30.0,
+       "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}],
+    "output": "out_kernel3d_mem"})");
+  static_cast<void>(app::RunKernel3D(in_memory_config));
+  static_cast<void>(app::RunKernel3D(spilled_config));
+  EXPECT_TRUE(fs::exists(dir_ / "spill" / "node_000000.traj"));
+  EXPECT_TRUE(fs::exists(dir_ / "spill" / "node_000002.traj"));
+  const auto memory =
+      pm::ReadSurfaceFile(dir_ / "out_kernel3d_mem" / "site_ice_kernels.nc");
+  const auto disk =
+      pm::ReadSurfaceFile(dir_ / "out_kernel3d_spill" / "site_ice_kernels.nc");
+  for (const auto name : {"thickness_dual", "rate_dual"}) {
+    EXPECT_EQ(memory.variables.at(name).values, disk.variables.at(name).values)
+        << name;
+  }
+  const auto k_memory =
+      pm::ReadModelFile(dir_ / "out_kernel3d_mem" / "site_viscosity_kernels.nc");
+  const auto k_disk = pm::ReadModelFile(dir_ / "out_kernel3d_spill" /
+                                        "site_viscosity_kernels.nc");
+  ASSERT_EQ(k_memory.Parts().size(), k_disk.Parts().size());
+  for (auto p = std::size_t{0}; p < k_memory.Parts().size(); ++p) {
+    const auto& held_memory = k_memory.Parts()[p].variables;
+    const auto& held_disk = k_disk.Parts()[p].variables;
+    for (const auto& [name, var] : held_memory) {
+      if (!name.starts_with("K_ln_eta")) continue;
+      EXPECT_EQ(var.values, held_disk.at(name).values) << name;
+    }
+  }
+}
+
+TEST_F(AppsTest, Kernel1DRefusesASpilledTrajectory) {
+  const auto config = Write("kernel1d_spill.json", R"({
+    "model": "ball.deck", "lmax": 4,
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 3},
+    "trajectory": {"directory": "spill"},
+    "measurements": [
+      {"type": "rotation", "name": "lod", "component": "z",
+       "date_kyr_bp": 0.0}],
+    "output": "out"})");
+  EXPECT_THROW(
+      {
+        try {
+          static_cast<void>(app::RunKernel1D(config));
+        } catch (const planetmodel::Error& error) {
+          EXPECT_NE(
+              std::string{error.what()}.find("fits in memory"),
+              std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      planetmodel::Error);
 }
 
 TEST_F(AppsTest, FingerprintRefusesAStateWithoutTheFields) {
