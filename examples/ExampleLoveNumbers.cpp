@@ -26,6 +26,7 @@
  */
 
 #include <cmath>
+#include <format>
 #include <iostream>
 #include <limits>
 #include <numbers>
@@ -38,6 +39,9 @@ using namespace sl3dpp;
 int main(int argc, char** argv) {
   const auto options = examples::ParseOptions(argc, argv, 256);
   const auto lmax = options.lmax;
+  examples::Say(std::format(
+      "ExampleLoveNumbers: the per-degree systems of the deck to degree {}",
+      lmax));
   const auto earth = examples::Earth::Make(lmax, 1e21);  // viscosity unused
   const auto love = ComputeLoveNumbers(earth.material, lmax);
 

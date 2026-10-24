@@ -51,11 +51,16 @@ foreach(python_file IN LISTS SL3DPP_EXAMPLE_PYTHON)
   configure_file(${python_file} ${python_name} COPYONLY)
 endforeach()
 
-# The sl3d configs, copied into build/examples/app: their relative paths
-# resolve against that directory, so they reach the inputs above as ../.
+# The sl3d configs, copied into build/examples/configs when they are not there
+# yet, and never overwritten: they are there to be edited and experimented
+# with. Deleting one (or the directory) and reconfiguring restores the
+# original. Their relative paths resolve against that directory, so they
+# reach the inputs above as ../.
 file(GLOB SL3DPP_EXAMPLE_CONFIGS LIST_DIRECTORIES false CONFIGURE_DEPENDS
-     ${CMAKE_CURRENT_SOURCE_DIR}/app/*)
+     ${CMAKE_CURRENT_SOURCE_DIR}/configs/*)
 foreach(config_file IN LISTS SL3DPP_EXAMPLE_CONFIGS)
   get_filename_component(config_name ${config_file} NAME)
-  configure_file(${config_file} app/${config_name} COPYONLY)
+  if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/configs/${config_name})
+    file(COPY ${config_file} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/configs)
+  endif()
 endforeach()

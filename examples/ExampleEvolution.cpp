@@ -20,6 +20,7 @@
  * Run from the build tree; plot with python/plot_evolution.py.
  */
 
+#include <format>
 #include <iostream>
 #include <numbers>
 
@@ -32,13 +33,16 @@
 using namespace sl3dpp;
 
 int main(int argc, char** argv) {
-  const auto options = examples::ParseOptions(argc, argv, 128);
+  const auto options = examples::ParseOptions(argc, argv, 192);
   const auto lmax = options.lmax;
   constexpr auto meltFraction = 0.2;
   constexpr auto meltEnd = 5.0e3 * examples::kYear;  // s
   constexpr auto tEnd = 15.0e3 * examples::kYear;
   constexpr auto nodes = 31;
 
+  examples::Say(std::format("ExampleEvolution: 1D GIA at lmax {}, state {}",
+                            lmax, options.state.string()));
+  examples::Say("building the model, the operator and the sea level solver");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
   SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
@@ -85,7 +89,11 @@ int main(int argc, char** argv) {
     return load;
   };
 
-  SeaLevelEvolution evolution(op, solver, state, {});
+  examples::Say(std::format("the forward run, {} steps:", nodes - 1));
+  SeaLevelEvolution evolution(
+      op, solver, state,
+      {.on_snapshot = examples::NodeReporter<SeaLevelEvolution::Snapshot>(
+           nodes - 1, scales.Time())});
   const auto snapshots = evolution.Run(times, iceLoad);
 
   // Three sites, geographic degrees: near field (Amundsen Sea, inside

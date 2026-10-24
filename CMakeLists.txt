@@ -39,11 +39,15 @@ option(SL3DPP_INSTALL "Generate the install and export rules" ON)
 # names a state that can be rebuilt: the same sources, and so the same
 # numbers, whenever it is built. The libraries track each other's main
 # between their releases; sl3dpp, which produces results, does not. The pins
-# move only when edited, and scripts/bump_dependencies.sh moves them all to
+# move only when edited, and scripts/bump_dependencies.py moves them all to
 # the libraries' current main. The Upstream workflow
 # (.github/workflows/upstream.yml) builds and tests against every main each
 # week, so a pin that falls behind something breaking is seen before the bump.
-# They are cache variables, so one build can move any of them from outside:
+#
+# The pins are plain variables, so an existing build tree follows them when
+# they move (a cache variable would keep the first value it saw). One build
+# tree can override any of them with the matching cache variable, and an
+# empty override returns it to the pin:
 #
 #   cmake -B build -DSL3DPP_GSHTRANS_TAG=main ...
 #
@@ -65,21 +69,30 @@ option(SL3DPP_INSTALL "Generate the install and export rules" ON)
 # ---------------------------------------------------------------------------
 include(FetchContent)
 
-set(SL3DPP_NUMERICCONCEPTS_TAG "e5ec506ab510b0790f94dded6196ab4df8979259"
-    CACHE STRING "NumericConcepts commit")
-set(SL3DPP_GAUSSQUAD_TAG "c95bac5339e47ee6d8722dd15f1ab7cb031382bd"
-    CACHE STRING "GaussQuad commit")
-set(SL3DPP_INTERPOLATION_TAG "43619e2627fe302e244d321c994d5b5cc717cd74"
-    CACHE STRING "Interpolation commit")
-set(SL3DPP_FFTWPP_TAG "b3af30eaf3f06760cd1d97df4386af1a0c75dd76"
-    CACHE STRING "FFTWpp commit")
-set(SL3DPP_GSHTRANS_TAG "991dd1eaba2d0c47e4200356a0329c51dfe5fb5e"
-    CACHE STRING "GSHTrans commit")
-set(SL3DPP_PLANETMODEL_TAG "d0c55e23dac7610802496768402de2bc001b3259"
-    CACHE STRING "planetmodel commit (v1.3.2)")
-mark_as_advanced(SL3DPP_NUMERICCONCEPTS_TAG SL3DPP_GAUSSQUAD_TAG
-                 SL3DPP_INTERPOLATION_TAG SL3DPP_FFTWPP_TAG
-                 SL3DPP_GSHTRANS_TAG SL3DPP_PLANETMODEL_TAG)
+set(SL3DPP_NUMERICCONCEPTS_PIN "e5ec506ab510b0790f94dded6196ab4df8979259")
+set(SL3DPP_GAUSSQUAD_PIN "c95bac5339e47ee6d8722dd15f1ab7cb031382bd")
+set(SL3DPP_INTERPOLATION_PIN "43619e2627fe302e244d321c994d5b5cc717cd74")
+set(SL3DPP_FFTWPP_PIN "b3af30eaf3f06760cd1d97df4386af1a0c75dd76")
+set(SL3DPP_GSHTRANS_PIN "991dd1eaba2d0c47e4200356a0329c51dfe5fb5e")
+set(SL3DPP_PLANETMODEL_PIN "d0c55e23dac7610802496768402de2bc001b3259")  # v1.3.2
+
+# The revision each library is fetched at: the override when one is set,
+# else the pin.
+foreach(_sl3dpp_lib IN ITEMS NUMERICCONCEPTS GAUSSQUAD INTERPOLATION FFTWPP
+                             GSHTRANS PLANETMODEL)
+  set(SL3DPP_${_sl3dpp_lib}_TAG "" CACHE STRING
+      "Override of the pinned ${_sl3dpp_lib} revision (empty: the pin)")
+  mark_as_advanced(SL3DPP_${_sl3dpp_lib}_TAG)
+  if(SL3DPP_${_sl3dpp_lib}_TAG)
+    set(SL3DPP_${_sl3dpp_lib}_REVISION ${SL3DPP_${_sl3dpp_lib}_TAG})
+    if(NOT SL3DPP_${_sl3dpp_lib}_TAG STREQUAL SL3DPP_${_sl3dpp_lib}_PIN)
+      message(STATUS "sl3dpp: ${_sl3dpp_lib} at ${SL3DPP_${_sl3dpp_lib}_TAG} "
+                     "(overriding the pin)")
+    endif()
+  else()
+    set(SL3DPP_${_sl3dpp_lib}_REVISION ${SL3DPP_${_sl3dpp_lib}_PIN})
+  endif()
+endforeach()
 
 # GSHTrans and FFTWpp generate their install rules only as the top-level
 # project; this library's package refers to GSHTrans's, and GSHTrans's to
@@ -95,31 +108,31 @@ endif()
 FetchContent_Declare(
   NumericConcepts
   GIT_REPOSITORY https://github.com/da380/NumericConcepts.git
-  GIT_TAG ${SL3DPP_NUMERICCONCEPTS_TAG}
+  GIT_TAG ${SL3DPP_NUMERICCONCEPTS_REVISION}
   FIND_PACKAGE_ARGS)
 
 FetchContent_Declare(
   GaussQuad
   GIT_REPOSITORY https://github.com/da380/GaussQuad.git
-  GIT_TAG ${SL3DPP_GAUSSQUAD_TAG}
+  GIT_TAG ${SL3DPP_GAUSSQUAD_REVISION}
   FIND_PACKAGE_ARGS)
 
 FetchContent_Declare(
   Interpolation
   GIT_REPOSITORY https://github.com/da380/Interpolation.git
-  GIT_TAG ${SL3DPP_INTERPOLATION_TAG}
+  GIT_TAG ${SL3DPP_INTERPOLATION_REVISION}
   FIND_PACKAGE_ARGS)
 
 FetchContent_Declare(
   FFTWpp
   GIT_REPOSITORY https://github.com/da380/FFTWpp.git
-  GIT_TAG ${SL3DPP_FFTWPP_TAG}
+  GIT_TAG ${SL3DPP_FFTWPP_REVISION}
   FIND_PACKAGE_ARGS)
 
 FetchContent_Declare(
   GSHTrans
   GIT_REPOSITORY https://github.com/da380/GSHTrans.git
-  GIT_TAG ${SL3DPP_GSHTRANS_TAG}
+  GIT_TAG ${SL3DPP_GSHTRANS_REVISION}
   FIND_PACKAGE_ARGS)
 
 # The whole repository is fetched (SOURCE_SUBDIR, no shallow clone of cpp/
@@ -127,7 +140,7 @@ FetchContent_Declare(
 FetchContent_Declare(
   planetmodel
   GIT_REPOSITORY https://github.com/da380/planetmodel.git
-  GIT_TAG ${SL3DPP_PLANETMODEL_TAG}
+  GIT_TAG ${SL3DPP_PLANETMODEL_REVISION}
   SOURCE_SUBDIR cpp
   FIND_PACKAGE_ARGS)
 
@@ -222,7 +235,7 @@ target_compile_options(sl3dpp PUBLIC
 # ---------------------------------------------------------------------------
 if(SL3DPP_INSTALL AND TARGET planetmodel AND NOT PLANETMODEL_INSTALL)
   message(WARNING
-    "sl3dpp: this planetmodel (${SL3DPP_PLANETMODEL_TAG}) has no install "
+    "sl3dpp: this planetmodel (${SL3DPP_PLANETMODEL_REVISION}) has no install "
     "rules, so the library cannot be exported; only the sl3d program will be "
     "installed. Use a planetmodel with PLANETMODEL_INSTALL.")
 elseif(SL3DPP_INSTALL)

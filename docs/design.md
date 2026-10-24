@@ -383,7 +383,7 @@ Beyond the fixtures:
 | netCDF-C | through planetmodel |
 
 - **Pins.** The sibling libraries are pinned to exact commits
-  (`SL3DPP_<NAME>_TAG` in `CMakeLists.txt`), so every commit of sl3dpp
+  (`SL3DPP_<NAME>_PIN` in `CMakeLists.txt`), so every commit of sl3dpp
   builds against the same sources; `scripts/bump_dependencies.py` moves the
   pins, and a weekly CI workflow builds against the libraries' current
   `main`. The libraries themselves track each other's `main` between

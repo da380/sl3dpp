@@ -1,6 +1,6 @@
 """Move sl3dpp's pins on its sibling libraries.
 
-The SL3DPP_<NAME>_TAG defaults in CMakeLists.txt pin each library to a
+The SL3DPP_<NAME>_PIN variables in CMakeLists.txt pin each library to a
 commit. This moves them, every library to its current main by default, or
 the ones named to a branch, tag or commit:
 
@@ -8,7 +8,7 @@ the ones named to a branch, tag or commit:
     python3 scripts/bump_dependencies.py planetmodel=v1.3.2 GSHTrans=main
 
 and prints what moved. The pin is always the full commit hash; a tag is
-recorded beside it, in the cache variable's description. Build and test
+recorded beside it, in a comment. Build and test
 against the result (or let CI do so) before committing it.
 """
 
@@ -63,16 +63,21 @@ def main(arguments: list[str]) -> None:
     for library, revision in wanted.items():
         commit, tag = resolve(library, revision)
         pattern = re.compile(
-            rf'(set\(SL3DPP_{library.upper()}_TAG ")([0-9a-f]{{40}})("\s*'
-            rf'CACHE STRING ")([^"]*)(")')
+            rf'(set\(SL3DPP_{library.upper()}_PIN ")([0-9a-f]{{40}})("\))'
+            rf'([ \t]*#[^\n]*)?')
         match = pattern.search(text)
         if not match:
-            sys.exit(f"{library}: no SL3DPP_{library.upper()}_TAG pin found "
+            sys.exit(f"{library}: no SL3DPP_{library.upper()}_PIN found "
                      f"in {CMAKELISTS}")
-        description = f"{library} commit" + (f" ({tag})" if tag else "")
-        text = (text[:match.start()]
-                + match.expand(rf"\g<1>{commit}\g<3>{description}\g<5>")
-                + text[match.end():])
+        # a tag names the commit; an unmoved pin keeps the note it had
+        if tag:
+            comment = f"  # {tag}"
+        elif match.group(2) == commit:
+            comment = match.group(4) or ""
+        else:
+            comment = ""
+        text = (text[:match.start()] + match.group(1) + commit
+                + match.group(3) + comment + text[match.end():])
         moved = "unchanged" if match.group(2) == commit else \
             f"{match.group(2)[:7]} -> {commit[:7]}"
         print(f"{library:16} {revision:12} {moved}")

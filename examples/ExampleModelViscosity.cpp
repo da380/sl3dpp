@@ -29,6 +29,7 @@
  */
 
 #include <cmath>
+#include <format>
 #include <iostream>
 
 #include "Common.hpp"
@@ -43,7 +44,7 @@
 using namespace sl3dpp;
 
 int main(int argc, char** argv) {
-  const auto options = examples::ParseOptions(argc, argv, 24);
+  const auto options = examples::ParseOptions(argc, argv, 32);
   const auto lmax = options.lmax;
   constexpr auto startKyr = 21.0;  // the window, kyr before present
   constexpr auto nodes = 22;       // one per kyr
@@ -51,6 +52,11 @@ int main(int argc, char** argv) {
 
   // The model file's viscosity on the deck's body: its reference profile
   // as the Maxwell rheology, its lateral perturbation as delta.
+  examples::Say(std::format(
+      "ExampleModelViscosity: a model file's 3D viscosity at lmax {}, state "
+      "{}",
+      lmax, options.state.string()));
+  examples::Say("reading viscosity_log.nc; building the 3D operators");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   const auto viscosity =
       io::ModelViscosity::Read("viscosity_log.nc", earth.model);
@@ -98,9 +104,14 @@ int main(int argc, char** argv) {
     times.push_back(startKyr * kyr * n / (nodes - 1) / scales.Time());
   }
 
-  SeaLevelEvolution3D run3(lateral, solver, state, {});
+  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+      nodes - 1, scales.Time());
+  examples::Say(
+      std::format("the run on the file's viscosity, {} steps:", nodes - 1));
+  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
   const auto with = run3.Run(times, iceLoad);
-  SeaLevelEvolution3D run1(radial, solver, state, {});
+  examples::Say("its radial twin:");
+  SeaLevelEvolution3D run1(radial, solver, state, {.on_snapshot = report});
   const auto without = run1.Run(times, iceLoad);
   for (const auto& snapshot : with) {
     if (!snapshot.converged) {

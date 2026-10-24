@@ -2,9 +2,9 @@
 # package, and build the API reference: on every push to main or develop and
 # every pull request.
 #
-# The sibling libraries are fetched from GitHub at the commits the
-# SL3DPP_*_TAG cache variables pin (the top-level CMakeLists.txt), so a run
-# tests exactly what the commit names. Their current mains are tested weekly
+# The sibling libraries are fetched from GitHub at the commits pinned in the
+# top-level CMakeLists.txt (SL3DPP_*_PIN), so a run tests exactly what the
+# commit names. Their current mains are tested weekly
 # by upstream.yml instead.
 name: CI
 
@@ -153,7 +153,7 @@ jobs:
           done
 
       - name: Run the sl3d configs
-        working-directory: build/examples/app
+        working-directory: build/examples/configs
         env:
           OMP_NUM_THREADS: 4
         run: ./run_all.sh

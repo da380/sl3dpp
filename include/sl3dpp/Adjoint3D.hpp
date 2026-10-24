@@ -114,6 +114,11 @@ class AdjointSolver3D {
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
+    /// Called at the start of each step of the reversed sweep, with the
+    /// node it steps back from (the last node first, down to 1): a hook for
+    /// progress reports, since a sweep can take as long as the forward run.
+    /// Empty by default.
+    std::function<void(std::size_t node)> on_node{};
   };
 
   explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution,

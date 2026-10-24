@@ -8,7 +8,7 @@ dataset's own grid, in metres, at the stored dates alone. That is the form the s
 anything run on synthetic_earth.nc runs on ice7g.nc:
 
     ExampleFingerprint --state ice7g.nc
-    sl3d fingerprint app/fingerprint_ice7g.json
+    sl3d fingerprint configs/fingerprint_ice7g.json
 
 Run from build/examples, in the examples' environment:
 

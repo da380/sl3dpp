@@ -4,13 +4,19 @@
  * observation knows about the ice history and the mantle viscosity.
  *
  * The objective is the cap-averaged sea-level change at a "tide gauge"
- * site at the end of a 10 kyr melt history, so J is in metres. One
+ * off south-east Greenland at the end of a 10 kyr melt of the Greenland
+ * ice, so J is in metres. The gauge is in the near field, where the solid
+ * Earth's response to the ice lost (the elastic fall, then the viscous
+ * one) outweighs the eustatic share, so what the observation sees of the
+ * ice history depends on when the ice was lost. One
  * reverse sweep per method gives, with no forward run needed for the ice
  * kernels (the frozen problem is linear in the load):
  *
- * - the ice-thickness duals: metres of site sea level per metre of ice
- *   change, per unit area — mapped at three epochs;
- * - the quelled rate kernel (pairs with dI/dt, bounded, no deltas);
+ * - the quelled rate kernels at four intervals of the history: metres of
+ *   site sea level per metre of ice lost during the interval, per unit
+ *   area. Ice lost then stays lost until the observation, so each is the
+ *   tail sum of the later node-wise thickness duals: bounded, and free of
+ *   the delta those carry at the observation;
  * - the radial viscosity kernels dJ / d eta(r), from the recorded
  *   forward trajectory, by BOTH the continuous adjoint (the preferred
  *   path) and the exact discrete transpose: their agreement is the
@@ -21,6 +27,7 @@
  * Run from the build tree; plot with python/plot_kernels.py.
  */
 
+#include <format>
 #include <iostream>
 #include <numbers>
 
@@ -40,6 +47,10 @@ int main(int argc, char** argv) {
   constexpr auto tEnd = 10.0e3 * examples::kYear;
   constexpr auto nodes = 11;
 
+  examples::Say(
+      std::format("ExampleIceKernels: 1D kernels at lmax {}, state {}", lmax,
+                  options.state.string()));
+  examples::Say("building the model, the operator and the sea level solver");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
   SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
@@ -82,17 +93,32 @@ int main(int argc, char** argv) {
       load[i] = ramp * unitLoad[i];
     return load;
   };
-  SeaLevelEvolution evolution(op, solver, state, {.record_stride = 1});
+  // Checkpointed: every other state is kept, and each sweep rebuilds the
+  // one between by an exact backward step (ViscoelasticOperator::
+  // StepBack). A backward step runs the dissipation the other way, so it
+  // amplifies the forward solves' error by exp(h) per step, h = dt / tau;
+  // here h is about 2, so one step per gap rather than the sqrt(N) of
+  // examples::CheckpointStride (which suits the 3D sweep, whose rebuilt
+  // steps go forward).
+  constexpr auto stride = 2;
+  examples::Say(std::format(
+      "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
+  SeaLevelEvolution evolution(
+      op, solver, state,
+      {.record_stride = stride,
+       .on_snapshot = examples::NodeReporter<SeaLevelEvolution::Snapshot>(
+           nodes - 1, scales.Time())});
   const auto snapshots = evolution.Run(times, iceLoad);
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
 
-  // The objective: the cap-weighted mean sea-level change at a mid-
-  // latitude site at the final node — J in metres, since the dual is
-  // normalised to unit area integral.
-  const GeographicPoint gauge{-32.05, 115.74};  // Fremantle
+  // The objective: the cap-weighted mean sea-level change at a site off
+  // south-east Greenland at the final node — J in metres, since the dual
+  // is normalised to unit area integral. The cap (about 3 degrees) keeps
+  // the measurement local.
+  const GeographicPoint gauge{65.0, 330.0};
   auto site = grid.FromFunction([&](double theta, double phi) {
     return examples::Cap(theta, phi, gauge.CoLatitude(), gauge.Longitude(),
-                         0.15);
+                         0.05);
   });
   const auto a = solver.Radius();
   auto siteArea = std::vector<double>(site.size());
@@ -106,7 +132,7 @@ int main(int argc, char** argv) {
   out.Comment("state " + options.state.string());
   out.Comment(
       "adjoint kernels of the site-mean sea level at 10 kyr under a "
-      "linear Greenland melt; Fremantle gauge");
+      "linear Greenland melt; gauge off south-east Greenland");
   out.Comment(
       "thickness duals in (site metres) per metre of ice per m^2; "
       "viscosity kernels in (site metres) per (Pa s) per metre of radius");
@@ -122,12 +148,15 @@ int main(int argc, char** argv) {
   for (auto method : {AdjointMethod::Continuous, AdjointMethod::Discrete}) {
     const auto continuous = method == AdjointMethod::Continuous;
     const std::string tag = continuous ? "continuous" : "discrete";
-    AdjointSolver adjoint(evolution, {.method = method});
+    examples::Say(std::format("the {} adjoint sweep:", tag));
+    AdjointSolver adjoint(
+        evolution,
+        {.method = method, .on_node = examples::SweepReporter(nodes - 1)});
     const auto kernels =
         adjoint.IceHistoryKernels(times, measurements, &trajectory);
 
-    // Thickness duals at three epochs and the first interval's rate
-    // kernel, PROJECTED onto the grounded present-day ice: only
+    // The rate kernels of four intervals, PROJECTED onto the grounded
+    // present-day ice: only
     // ice-covered ground can change thickness (the 100 m floor rejects the
     // band-limited field's ringing over bare land), and the unprojected duals
     // are dominated by the (irrelevant) loading sensitivity right at the
@@ -146,16 +175,18 @@ int main(int argc, char** argv) {
     };
     if (continuous) {
       out.Field("ice_sheets", grounded);
-      out.Field("thickness_dual_2kyr", projected(kernels.thickness[2]),
-                thicknessSi);
-      out.Field("thickness_dual_6kyr", projected(kernels.thickness[6]),
-                thicknessSi);
-      out.Field("thickness_dual_10kyr", projected(kernels.thickness[10]),
-                thicknessSi);
-      // The quelled kernel pairs with h (dI/dt) — a thickness — so it
-      // converts exactly as the thickness duals do.
-      out.Field("rate_kernel_first_interval", projected(kernels.rate[0]),
-                thicknessSi);
+      // rate[k - 1] is interval k, from node k - 1 to node k. It pairs
+      // with the interval's thickness change, so it converts as a
+      // thickness dual does.
+      out.Scalar("interval_kyr",
+                 tEnd / (nodes - 1) / (1.0e3 * examples::kYear));
+      out.Scalar("history_kyr", tEnd / (1.0e3 * examples::kYear));
+      for (const auto interval : {1, 4, 7, 10}) {
+        out.Field(
+            std::format("rate_kernel_{}", interval),
+            projected(kernels.rate[static_cast<std::size_t>(interval - 1)]),
+            thicknessSi);
+      }
     }
 
     // The radial viscosity kernel as a density in radius: divide the

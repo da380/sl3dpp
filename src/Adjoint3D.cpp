@@ -444,6 +444,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   observe(N);
   accumulateItau(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
+    if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
     auto step =
         op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),

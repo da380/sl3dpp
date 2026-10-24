@@ -29,6 +29,7 @@
  */
 
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -150,6 +151,11 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
+    /// Called at the start of each step of the reversed sweep, with the
+    /// node it steps back from (the last node first, down to 1): a hook for
+    /// progress reports, since a sweep can take as long as the forward run.
+    /// Empty by default.
+    std::function<void(std::size_t node)> on_node{};
   };
 
   explicit AdjointSolver(const SeaLevelEvolution& evolution, Options options);

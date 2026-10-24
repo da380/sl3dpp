@@ -51,14 +51,18 @@
 using namespace sl3dpp;
 
 int main(int argc, char** argv) {
-  const auto options = examples::ParseOptions(argc, argv, 16);
+  const auto options = examples::ParseOptions(argc, argv, 24);
   const auto lmax = options.lmax;
   constexpr auto startKyr = 21.0;  // the window, kyr before present
   constexpr auto nodes = 22;       // one per kyr
   constexpr auto decayFromKyr = 7.0;
   const auto kyr = 1.0e3 * examples::kYear;
 
+  examples::Say(
+      std::format("ExampleViscosityKernels3D: 3D kernels at lmax {}, state {}",
+                  lmax, options.state.string()));
   // The forward problem, as ExampleModelViscosity sets it up.
+  examples::Say("reading viscosity_log.nc; building the 3D operator");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   const auto viscosity =
       io::ModelViscosity::Read("viscosity_log.nc", earth.model);
@@ -100,10 +104,17 @@ int main(int argc, char** argv) {
     times.push_back(startKyr * kyr * n / (nodes - 1) / scales.Time());
   }
 
-  // Every node recorded: the viscosity kernels pair the adjoint state with
-  // the forward one (a larger stride trades memory for rebuilt steps).
+  // Checkpointed: the viscosity kernels pair the adjoint state with the
+  // forward one, so every stride-th forward state is kept and each sweep
+  // rebuilds the ones between by forward steps from the last one kept.
+  const auto stride = examples::CheckpointStride(nodes);
   auto evolutionOptions = SeaLevelEvolution3D::Options{};
-  evolutionOptions.record_stride = 1;
+  evolutionOptions.record_stride = stride;
+  evolutionOptions.on_snapshot =
+      examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(nodes - 1,
+                                                            scales.Time());
+  examples::Say(std::format(
+      "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
   SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
   const auto snapshots = evolution.Run(times, iceLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
@@ -135,9 +146,12 @@ int main(int argc, char** argv) {
       {.time_uncertainty = 0.0, .value_uncertainty = 1.0 / length}, &fit);
 
   // One reverse sweep per observation.
-  AdjointSolver3D adjoint(evolution);
+  AdjointSolver3D adjoint(evolution,
+                          {.on_node = examples::SweepReporter(nodes - 1)});
+  examples::Say("adjoint sweep 1 of 2, the sea-level change:");
   const auto seaLevelKernels =
       adjoint.IceHistoryKernels(times, seaLevel, &trajectory);
+  examples::Say("adjoint sweep 2 of 2, the decay time:");
   const auto decayKernels =
       adjoint.IceHistoryKernels(times, decay, &trajectory);
 
@@ -177,6 +191,7 @@ int main(int argc, char** argv) {
                       .objective = objectives[k].dimensions,
                       .values = scaled[k]});
   }
+  examples::Say("writing viscosity_kernels.nc and kernels_3d.txt");
   const auto written =
       io::WriteKernels("viscosity_kernels.nc", op, earth.model, fields,
                        {.name = "sl3dpp example kernels"});

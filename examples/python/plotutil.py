@@ -114,17 +114,23 @@ def is_synthetic(state) -> bool:
     return state is None or Path(state).name == "synthetic_earth.nc"
 
 
-def world_map(fig, rows, cols, index, state=None, central_longitude=0.0):
+def world_map(fig, rows, cols, index, state=None, central_longitude=0.0,
+              extent=None):
     """A map axes with the coastline that belongs to the data: for the
     synthetic Earth, its own present-day coastline (where its topography
     crosses sea level, read from synthetic_earth.nc in the current
     directory); for any other state, the real one. `state` is a state file
-    name, or an Example, whose '# state' comment is used."""
+    name, or an Example, whose '# state' comment is used. `extent`, as
+    (west, east, south, north) in degrees, shows a region instead of the
+    globe."""
     if isinstance(state, Example):
         state = state.state
     if not is_synthetic(state):
-        return map_axes(fig, rows, cols, index, central_longitude)
+        ax = map_axes(fig, rows, cols, index, central_longitude)
+        _show_region(ax, extent)
+        return ax
     ax = map_axes(fig, rows, cols, index, central_longitude, coastlines=False)
+    _show_region(ax, extent)
     try:
         from planetmodel.surfacefile import read_surface_file
 
@@ -140,9 +146,23 @@ def world_map(fig, rows, cols, index, state=None, central_longitude=0.0):
     return ax
 
 
+def _show_region(ax, extent):
+    """Narrows a map axes to a region, given as (west, east, south, north)
+    in degrees; the globe when None."""
+    if extent is None:
+        return
+    if HAVE_CARTOPY:
+        ax.set_extent(extent, crs=ccrs.PlateCarree())
+    else:
+        ax.set_xlim(extent[0] % 360.0, extent[1] % 360.0)
+        ax.set_ylim(extent[2], extent[3])
+
+
 def plot_field(ax, example: Example, name: str, *, cmap="RdBu_r",
-               symmetric=True, title=None):
-    """The field as a filled map; returns the mesh for a colorbar."""
+               symmetric=True, title=None, limit=None):
+    """The field as a filled map; returns the mesh for a colorbar. A
+    symmetric scale runs to the field's largest magnitude, or to `limit`
+    when given (one scale across several panels)."""
     field = example.fields[name]
     lons, lats = example.lons, example.lats
     # close the longitude seam for a tidy global plot
@@ -150,7 +170,7 @@ def plot_field(ax, example: Example, name: str, *, cmap="RdBu_r",
     lons = np.append(lons, lons[0] + 360.0)
     kwargs = {"cmap": cmap, "shading": "auto"}
     if symmetric:
-        top = np.max(np.abs(field))
+        top = limit if limit is not None else np.max(np.abs(field))
         kwargs["vmin"], kwargs["vmax"] = -top, top
     if HAVE_CARTOPY:
         kwargs["transform"] = ccrs.PlateCarree()

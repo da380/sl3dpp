@@ -14,6 +14,7 @@
  * Run from the build tree; plot with python/plot_fingerprint.py.
  */
 
+#include <format>
 #include <iostream>
 #include <numbers>
 
@@ -27,9 +28,14 @@ using namespace sl3dpp;
 int main(int argc, char** argv) {
   const auto options = examples::ParseOptions(argc, argv, 256);
   const auto lmax = options.lmax;
+  examples::Say(std::format(
+      "ExampleFingerprint: an elastic fingerprint at lmax {}, state {}", lmax,
+      options.state.string()));
+  examples::Say("the Love numbers");
   const auto earth = examples::Earth::Make(lmax, 1e21);  // viscosity unused
   const auto love = ComputeLoveNumbers(earth.material, lmax);
 
+  examples::Say("reading the state; solving the sea level equation");
   Fingerprint fingerprint(lmax, love);
   const auto& grid = fingerprint.Grid();
   const auto state = examples::LoadEarthState(grid, options.state);

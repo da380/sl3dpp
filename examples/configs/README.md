@@ -2,13 +2,16 @@
 
 One config per `sl3d` command, each a working example of the program's
 JSON input (the members are documented in `docs/sl3d-configs.md`). The
-build copies this directory to `build/examples/app`; run the configs from
-there, where their relative paths reach the inputs beside the example
+build copies this directory to `build/examples/configs` when the files are
+missing and never overwrites them, so the copies there are yours to edit
+and experiment with; delete one (or the directory) and reconfigure to
+restore the original. Run the configs from there, where their relative
+paths reach the inputs beside the example
 programs (`../synthetic_earth.nc`, written by the build, `../prem8.elastic.deck`
 and `../viscosity_log.nc`) and their outputs land in `out/`:
 
 ```sh
-cd build/examples/app
+cd build/examples/configs
 ./run_all.sh                       # every config, stopping at a failure
 ../../apps/sl3d evolve1d evolve1d.json   # or one at a time
 ```

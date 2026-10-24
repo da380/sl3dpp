@@ -27,13 +27,32 @@ mesh = plot_field(ax, ex, "averaging_function", cmap="Greens",
 mark_sites(ax, gauge, ["C3"])
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 
-for i, (name, title) in enumerate((
-        ("thickness_dual_2kyr", "ice kernel at 2 kyr"),
-        ("thickness_dual_6kyr", "ice kernel at 6 kyr"),
-        ("thickness_dual_10kyr", "ice kernel at 10 kyr"),
-        ("rate_kernel_first_interval", "quelled rate kernel"))):
-    ax = world_map(fig, 2, 3, 2 + i, state=ex)
-    mesh = plot_field(ax, ex, name, title=title)
+# The rate kernels: the observation's response to ice lost during an
+# interval of the history (interval k from node k - 1 to node k). The
+# kernel is the response to ice ADDED, so it is negated here: positive
+# means the gauge's sea level rises when ice is lost there. One colour
+# scale for all four, so that their sizes compare. The gauge is in the near
+# field, where the solid Earth's response (the elastic fall at once, the
+# viscous one over the millennia after) outweighs the eustatic share, so the
+# kernels change with the interval.
+step = ex.scalars["interval_kyr"]
+history = ex.scalars["history_kyr"]
+names = []
+for k in (1, 4, 7, 10):
+    name = f"response_to_loss_{k}"
+    ex.fields[name] = -ex.fields[f"rate_kernel_{k}"]
+    names.append((k, name))
+limit = max(np.max(np.abs(ex.fields[name])) for _, name in names)
+# The sensitivity sits on the ice nearest the gauge: a regional view.
+region = (280.0, 355.0, 55.0, 85.0)  # west, east, south, north
+for i, (k, name) in enumerate(names):
+    before = history - (k - 1) * step, history - k * step
+    ax = world_map(fig, 2, 3, 2 + i, state=ex, central_longitude=-40.0,
+                   extent=region)
+    mesh = plot_field(ax, ex, name, limit=limit,
+                      title=f"ice lost {before[0]:g}–{before[1]:g} kyr before "
+                            "the observation\n(m of sea level per m of ice, "
+                            "per m$^2$)")
     mark_sites(ax, gauge, ["C3"])
     fig.colorbar(mesh, ax=ax, shrink=0.7)
 

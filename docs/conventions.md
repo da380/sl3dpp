@@ -155,7 +155,8 @@ is all that is required; the test harness runs each test on one thread
 ## Dependencies
 
 All six sibling libraries (header-only) are pinned by commit in the
-top-level `CMakeLists.txt` (`SL3DPP_<NAME>_TAG`); local development via
+top-level `CMakeLists.txt` (`SL3DPP_<NAME>_PIN`; a build tree overrides one
+with `SL3DPP_<NAME>_TAG`); local development via
 `FETCHCONTENT_SOURCE_DIR_<NAME>`. Moving a pin is a deliberate, reviewed
 change, made with `scripts/bump_dependencies.py`; the libraries themselves
 track each other's `main`, and the Upstream workflow builds sl3dpp against

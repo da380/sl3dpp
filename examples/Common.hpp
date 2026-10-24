@@ -22,6 +22,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <iostream>
 #include <map>
 #include <span>
@@ -42,6 +43,42 @@
 namespace examples {
 
 constexpr auto kYear = 3.15576e7;  // s
+
+/// Prints a line at once — flushed, since a redirected stdout would hold it
+/// back — so that a long run shows it is running.
+inline void Say(const std::string& line) { std::cout << line << std::endl; }
+
+/// An evolution's on_snapshot reporting each node as the run reaches it:
+/// the node, the time since the run's start, and for a 3D run the
+/// iterations of its coupled fixed point (the number to watch when a step
+/// is slow). `timeScale` converts the solver's time to seconds.
+template <class Snapshot>
+std::function<void(std::size_t, const Snapshot&)> NodeReporter(
+    std::size_t lastNode, double timeScale) {
+  return [lastNode, timeScale](std::size_t node, const Snapshot& snapshot) {
+    auto line = std::format("  node {}/{}, t = {:.2f} kyr", node, lastNode,
+                            snapshot.t * timeScale / (1.0e3 * kYear));
+    if constexpr (requires { snapshot.coupledIterations; }) {
+      line +=
+          std::format(" ({} coupled iterations)", snapshot.coupledIterations);
+    }
+    Say(line);
+  };
+}
+
+/// The recording stride for a kernel run: keeping every n-th of N forward
+/// states, a reverse sweep holds about N/n + n of them (the kept ones and the
+/// segment it rebuilds between two), fewest near n = sqrt(N).
+inline int CheckpointStride(int nodes) {
+  return std::max(1, static_cast<int>(std::lround(std::sqrt(nodes))));
+}
+
+/// An adjoint solver's on_node reporting each step of a reversed sweep.
+inline std::function<void(std::size_t)> SweepReporter(std::size_t lastNode) {
+  return [lastNode](std::size_t node) {
+    Say(std::format("  back from node {}/{}", node, lastNode));
+  };
+}
 
 /// The PREM-like deck copied beside the executables, its mesh, material
 /// and a mantle Maxwell rheology (viscous between 3480 and 6151 km).

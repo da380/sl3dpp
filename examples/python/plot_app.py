@@ -1,7 +1,7 @@
-"""Figures of the sl3d example configs' outputs: run app/run_all.sh first
+"""Figures of the sl3d example configs' outputs: run configs/run_all.sh first
 (and, for the ICE-7G figures, get_ice7g.py, which makes run_all.sh run the
 ICE-7G configs too), then `poetry run python plot_app.py` from
-build/examples. The outputs in app/out/ are read with planetmodel's own
+build/examples. The outputs in configs/out/ are read with planetmodel's own
 readers, and one figure per command is written beside this script:
 app_love_numbers.png, app_fingerprint.png, app_evolve.png,
 app_kernels1d.png and app_kernels3d.png, plus app_fingerprint_ice7g.png
@@ -23,7 +23,7 @@ from planetmodel.surfacefile import read_surface_file
 from plotutil import Example, mark_sites, plot_field, world_map
 
 
-OUT = Path("app/out")
+OUT = Path("configs/out")
 KYR = 1.0e3 * 365.25 * 86400.0  # s
 G = 6.6743e-11  # m^3 kg^-1 s^-2
 

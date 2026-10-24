@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Runs every example config through sl3d, from build/examples/app (where the
+# Runs every example config through sl3d, from build/examples/configs (where the
 # build copies this directory), and stops at the first failure. The
 # synthetic Earth configs always run; the ICE-7G ones run only once
 # ../ice7g.nc exists (python get_ice7g.py, from build/examples, writes it).
 # CI calls this.
 #
-#   cd build/examples/app && ./run_all.sh
+#   cd build/examples/configs && ./run_all.sh
 #
 # SL3D names the program (default ../../apps/sl3d); OMP_NUM_THREADS sets
 # its threads. Outputs land in out/.

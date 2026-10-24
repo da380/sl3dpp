@@ -22,6 +22,7 @@
  */
 
 #include <cmath>
+#include <format>
 #include <iostream>
 #include <numbers>
 
@@ -33,12 +34,16 @@
 using namespace sl3dpp;
 
 int main(int argc, char** argv) {
-  const auto options = examples::ParseOptions(argc, argv, 16);
+  const auto options = examples::ParseOptions(argc, argv, 48);
   const auto lmax = options.lmax;
   constexpr auto meltFraction = 0.1;
   constexpr auto tEnd = 10.0e3 * examples::kYear;
   constexpr auto nodes = 11;
 
+  examples::Say(
+      std::format("ExampleLateralViscosity: 3D viscosity at lmax {}, state {}",
+                  lmax, options.state.string()));
+  examples::Say("building the model and the 3D operators");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   Viscoelastic3D lateral(earth.rheology, lmax,
                          [](double, double theta, double phi) {
@@ -79,9 +84,14 @@ int main(int argc, char** argv) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
 
-  SeaLevelEvolution3D run3(lateral, solver, state, {});
+  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+      nodes - 1, scales.Time());
+  examples::Say(
+      std::format("the run with lateral viscosity, {} steps:", nodes - 1));
+  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
   const auto with = run3.Run(times, iceLoad);
-  SeaLevelEvolution3D run1(flat, solver, state, {});
+  examples::Say("its radial twin:");
+  SeaLevelEvolution3D run1(flat, solver, state, {.on_snapshot = report});
   const auto without = run1.Run(times, iceLoad);
 
   examples::Writer out("lateral.txt");

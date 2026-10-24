@@ -24,7 +24,7 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/docs/design.md \
                          @PROJECT_SOURCE_DIR@/docs/conventions.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md \
-                         @PROJECT_SOURCE_DIR@/examples/app/README.md
+                         @PROJECT_SOURCE_DIR@/examples/configs/README.md
 USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/README.md
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.md
