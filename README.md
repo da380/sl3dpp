@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/da380/sl3dpp/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/da380/sl3dpp/actions/workflows/ci.yml)
 [![Docs](https://img.shields.io/badge/docs-da380.github.io%2Fsl3dpp-blue)](https://da380.github.io/sl3dpp/)
-[![Licence: BSD-3-Clause](https://img.shields.io/badge/licence-BSD--3--Clause-blue)](LICENSE)
+[![Licence: BSD-3-Clause](https://img.shields.io/badge/licence-BSD--3--Clause-blue)](https://github.com/da380/sl3dpp/blob/main/LICENSE)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://en.cppreference.com/w/cpp/23)
 
 sl3dpp models glacial isostatic adjustment (GIA) and sea-level change on a
@@ -227,6 +227,10 @@ environment has them.
 - **Threads.** The library runs threaded by default (OpenMP); set
   `OMP_NUM_THREADS`. One-thread runs are bitwise reproducible; threaded runs
   agree to round-off.
+- **BLAS.** Any BLAS works on any number of cores, OpenBLAS's pthread and
+  OpenMP builds alike, with no environment variables to set: the library's
+  threaded loops make no BLAS calls (the per-degree banded solves are its
+  own).
 - **Memory.** In 3D each relaxing branch holds its internal variables on a
   grid at every radial memory node: one such tensor is 0.7 GB at lmax 64,
   4 GB at 128, 21 GB at 256 and 98 GB at 512, and a step holds several.
@@ -472,7 +476,7 @@ into the code and its costs.
 
 ## Licence
 
-BSD 3-Clause; see [LICENSE](LICENSE).
+BSD 3-Clause; see [LICENSE](https://github.com/da380/sl3dpp/blob/main/LICENSE).
 
 ## References
 

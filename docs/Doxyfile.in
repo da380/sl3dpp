@@ -26,6 +26,9 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md \
                          @PROJECT_SOURCE_DIR@/examples/configs/README.md
 USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/README.md
+# The README's heading is the project's name, which Doxygen already shows
+# above every page; the main page is titled Overview instead.
+FILTER_PATTERNS        = "*README.md=sed -e '1s/^# sl3dpp$/# Overview/'"
 RECURSIVE              = YES
 FILE_PATTERNS          = *.hpp *.md
 STRIP_FROM_PATH        = @PROJECT_SOURCE_DIR@

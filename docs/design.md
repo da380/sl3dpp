@@ -361,6 +361,15 @@ Beyond the fixtures:
   element and latitude loops for pointwise grid work, and GSHTrans's
   threaded transforms. The Anderson mixer threads its sweeps with
   per-thread partial sums added in thread order.
+- **No BLAS inside the threads.** The banded factorisations and solves
+  are the library's own (`detail/BandSolvers.hpp`, LAPACK's unblocked
+  algorithms with LAPACK's storage and pivoting), because a BLAS called
+  from every thread of a degree loop at once fails: OpenBLAS's pthread
+  build runs out of its fixed table of memory buffers and crashes on
+  many-core nodes, and its OpenMP build livelocks when nested. LAPACK
+  remains for small serial solves (the decay fit, Anderson mixing), and
+  GSHTrans's matrix kernel calls BLAS only from outside its own threads,
+  so any BLAS works, with no environment variables to set.
 - **Reproducibility.** One-thread runs are bitwise reproducible; threaded
   runs agree with them to round-off.
 - **No distributed memory.** A production 3D problem (lmax 256) fits one
@@ -379,7 +388,7 @@ Beyond the fixtures:
 | Interpolation | the per-layer splines of `EarthModel` |
 | FFTWpp, NumericConcepts | through GSHTrans |
 | planetmodel | decks, model files, surface files, units, JSON configs |
-| LAPACK, BLAS | the banded factorisations and solves |
+| LAPACK, BLAS | small serial solves: the decay fit and Anderson mixing |
 | netCDF-C | through planetmodel |
 
 - **Pins.** The sibling libraries are pinned to exact commits

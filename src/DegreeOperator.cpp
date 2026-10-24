@@ -7,19 +7,7 @@
 #include <numbers>
 #include <stdexcept>
 
-// LAPACK: banded Cholesky and banded LU, double precision.
-extern "C" {
-void dpbtrf_(const char* uplo, const int* n, const int* kd, double* ab,
-             const int* ldab, int* info);
-void dpbtrs_(const char* uplo, const int* n, const int* kd, const int* nrhs,
-             const double* ab, const int* ldab, double* b, const int* ldb,
-             int* info);
-void dgbtrf_(const int* m, const int* n, const int* kl, const int* ku,
-             double* ab, const int* ldab, int* ipiv, int* info);
-void dgbtrs_(const char* trans, const int* n, const int* kl, const int* ku,
-             const int* nrhs, const double* ab, const int* ldab,
-             const int* ipiv, double* b, const int* ldb, int* info);
-}
+#include "sl3dpp/detail/BandSolvers.hpp"
 
 namespace sl3dpp {
 
@@ -373,9 +361,7 @@ void DegreeOperator::Factorise() {
             scaled(i, j);
       }
     }
-    auto info = 0;
-    dpbtrf_("U", &n, &kd, factor_.data(), &ldab, &info);
-    if (info == 0) return;
+    if (detail::BandCholeskyFactor(factor_, n, kd) == 0) return;
     choleskyFailed_ = true;
   } else {
     choleskyFailed_ = true;
@@ -391,8 +377,7 @@ void DegreeOperator::Factorise() {
     }
   }
   pivots_.resize(n);
-  auto info = 0;
-  dgbtrf_(&n, &n, &kd, &kd, factor_.data(), &ldlu, pivots_.data(), &info);
+  const auto info = detail::BandLuFactor(factor_, n, kd, kd, pivots_);
   if (info != 0) {
     throw std::runtime_error(std::format(
         "degree {}: the banded LU factorisation failed (info = {})", l_, info));
@@ -411,18 +396,10 @@ std::vector<double> DegreeOperator::Solve(std::span<const double> b,
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
-  auto info = 0;
   if (!choleskyFailed_) {
-    const int ldab = kd_ + 1;
-    dpbtrs_("U", &n, &kd_, &nrhs, factor_.data(), &ldab, x.data(), &n, &info);
+    detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
   } else {
-    const int ldlu = 3 * kd_ + 1;
-    dgbtrs_("N", &n, &kd_, &kd_, &nrhs, factor_.data(), &ldlu, pivots_.data(),
-            x.data(), &n, &info);
-  }
-  if (info != 0) {
-    throw std::runtime_error(std::format(
-        "degree {}: the banded solve failed (info = {})", l_, info));
+    detail::BandLuSolve(factor_, n, kd_, kd_, pivots_, x, nrhs);
   }
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j)

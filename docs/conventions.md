@@ -38,7 +38,7 @@ model to copy. Items marked **(provisional)** await confirmation.
 - `enum class` always; `[[nodiscard]]` on factories, solves and queries;
   `constexpr`/`static constexpr` wherever meaningful.
 - **Not a template library, and double throughout**:
-  the banded solves live on LAPACK's d-routines, so precision templating
+  the banded solves follow LAPACK's d-routines, so precision templating
   would buy nothing real; `double` is the honest choice. Templates are for
   constraints and small utilities, not a precision axis.
 - **Almost-always-auto**: `auto` is the default for locals and loop
