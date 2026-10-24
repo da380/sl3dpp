@@ -5,15 +5,10 @@
 #include <format>
 #include <stdexcept>
 
-// LAPACK banded Cholesky (the toroidal blocks are SPD at l >= 2, and at
-// l = 1 once one dof per solid region is pinned).
-extern "C" {
-void dpbtrf_(const char* uplo, const int* n, const int* kd, double* ab,
-             const int* ldab, int* info);
-void dpbtrs_(const char* uplo, const int* n, const int* kd, const int* nrhs,
-             const double* ab, const int* ldab, double* b, const int* ldb,
-             int* info);
-}
+#include "sl3dpp/detail/BandSolvers.hpp"
+
+// Banded Cholesky: the toroidal blocks are SPD at l >= 2, and at l = 1 once
+// one dof per solid region is pinned.
 
 namespace sl3dpp {
 
@@ -178,8 +173,7 @@ void ToroidalOperator::Factorise() {
           i == k ? 1.0 : 0.0;
     }
   }
-  auto info = 0;
-  dpbtrf_("U", &n, &kd_, factor_.data(), &ldab, &info);
+  const auto info = detail::BandCholeskyFactor(factor_, n, kd_);
   if (info != 0) {
     throw std::runtime_error(std::format(
         "toroidal degree {}: Cholesky failed (info = {})", l_, info));
@@ -200,13 +194,7 @@ std::vector<double> ToroidalOperator::Solve(std::span<const double> b,
     }
     for (const auto p : pinned_) x[static_cast<std::size_t>(k) * n + p] = 0.0;
   }
-  const auto ldab = kd_ + 1;
-  auto info = 0;
-  dpbtrs_("U", &n, &kd_, &nrhs, factor_.data(), &ldab, x.data(), &n, &info);
-  if (info != 0) {
-    throw std::runtime_error(
-        std::format("toroidal degree {}: solve failed (info = {})", l_, info));
-  }
+  detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j) {
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];

@@ -19,6 +19,7 @@ function(sl3dpp_add_test name)
 endfunction()
 
 sl3dpp_add_test(TestToolkit)
+sl3dpp_add_test(TestBandSolvers)
 sl3dpp_add_test(TestDeck)
 sl3dpp_add_test(TestEarthModel)
 sl3dpp_add_test(TestRadialMesh)

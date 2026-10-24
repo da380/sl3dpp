@@ -161,6 +161,7 @@ find_package(LAPACK REQUIRED)
 add_library(sl3dpp STATIC
   src/Adjoint.cpp
   src/Adjoint3D.cpp
+  src/BandSolvers.cpp
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp
