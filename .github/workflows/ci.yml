@@ -1,6 +1,10 @@
 # Build sl3dpp and run its tests, install it and consume the installed
-# package, and build the API reference: on every push to main or develop and
-# every pull request.
+# package, and build the API reference: on every pull request and every push
+# to main. A pull request is the check before merging (it tests the branch
+# merged into main, a contributor's fork included); the run on main follows
+# the merge and is what the README's badge reports. Pushing a branch without
+# a pull request runs nothing: start a run from the Actions tab
+# (workflow_dispatch) for that.
 #
 # The sibling libraries are fetched from GitHub at the commits pinned in the
 # top-level CMakeLists.txt (SL3DPP_*_PIN), so a run tests exactly what the
@@ -10,7 +14,7 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
