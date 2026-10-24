@@ -224,14 +224,75 @@ environment has them.
 
 ## Running
 
-- **Threads.** The library runs threaded by default (OpenMP); set
-  `OMP_NUM_THREADS`. One-thread runs are bitwise reproducible; threaded runs
-  agree to round-off.
+### Threads and where they run
+
+sl3dpp is threaded with OpenMP throughout, and how the threads are placed
+matters as much as how many there are. `lscpu` (on Linux) gives a
+machine's layout: its sockets, cores per socket, threads per core and NUMA
+nodes.
+
+- **One thread per physical core.** OpenMP starts one thread per logical
+  CPU by default, which on a machine with simultaneous multithreading
+  (hyperthreading: two logical CPUs to a core) is two threads per core. The
+  two share the core's floating-point units, so for sl3dpp the second
+  gains little and adds to every synchronisation. Set `OMP_NUM_THREADS` to
+  the number of physical cores, or fewer.
+- **Pin the threads.** Unpinned threads are moved between cores by the
+  operating system, and on a machine with several sockets (NUMA nodes)
+  away from the memory they first touched, which then crosses between
+  sockets on every access. Pinning keeps each thread on one core:
+
+  ```
+  export OMP_NUM_THREADS=<physical cores> OMP_PLACES=cores OMP_PROC_BIND=close
+  ```
+
+  On a two-socket node this made an 8-thread 3D run 2.7 times faster. The
+  variables apply to every OpenMP program started from that shell, so set
+  them per run, or in a job script, where other codes want other settings.
+- **One NUMA node per run.** `close` puts threads on neighbouring cores,
+  filling one socket before the next; `spread` divides them between the
+  sockets. sl3dpp's large arrays live in the memory of whichever socket
+  first touched them, so threads on another socket reach across for them,
+  and at present a 3D run is fastest on the cores of one NUMA node (`lscpu`
+  lists them; usually one socket). On a two-socket node with 32 cores per
+  socket, a 3D step at lmax 128 ran 1.4 times faster on one socket's 32
+  cores (`close`) than on all 64, and `close` beat `spread` at 16 and 32
+  threads. To use a whole node, run one job per NUMA node, each with its
+  memory kept there too (when the job fits in that node's memory):
+
+  ```
+  export OMP_NUM_THREADS=<cores per NUMA node> OMP_PLACES=cores OMP_PROC_BIND=close
+  numactl --cpunodebind=0 --membind=0 sl3d evolve first.json &
+  numactl --cpunodebind=1 --membind=1 sl3d evolve second.json &
+  ```
+- **Small problems want fewer threads.** The parallel loops run over
+  degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
+  degree of a few dozen there is too little work to share among the cores
+  of a large node: more threads then make a run slower, not faster.
+- **Measuring.** `step_timing` (built with `-DSL3DPP_BUILD_BENCHMARKS=ON`)
+  times each phase of a 3D step and reports the peak memory. Run it at the
+  production degree over a few thread counts and both bindings, and take
+  the fastest per-pass time (it needs about 34 GB at lmax 128):
+
+  ```
+  for bind in close spread; do for threads in 16 32 64; do
+    OMP_NUM_THREADS=$threads OMP_PLACES=cores OMP_PROC_BIND=$bind \
+      build/benchmarks/step_timing tests/data/prem.simp.vm1 128 2 2 \
+      > step_${bind}_${threads}.txt
+  done; done
+  grep -H "per pass" step_*.txt
+  ```
+
+- **Reproducibility.** One-thread runs are bitwise reproducible; threaded
+  runs agree with them to round-off.
 - **BLAS.** Any BLAS works on any number of cores, OpenBLAS's pthread and
   OpenMP builds alike, with no environment variables to set: the library's
   threaded loops make no BLAS calls (the per-degree banded solves are its
   own).
-- **Memory.** In 3D each relaxing branch holds its internal variables on a
+
+### Memory
+
+- **Size.** In 3D each relaxing branch holds its internal variables on a
   grid at every radial memory node: one such tensor is 0.7 GB at lmax 64,
   4 GB at 128, 21 GB at 256 and 98 GB at 512, and a step holds several.
   Viscosity kernels need the forward states: recording every `n`-th of `N`
@@ -472,7 +533,9 @@ the code's development, not maintained as reference: the derivations and
 convergence measurements of [the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md)
 and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md), and a
 [walkthrough of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md) with pointers
-into the code and its costs.
+into the code and its costs, and the first
+[multicore scaling measurements](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) with the
+plans that follow from them.
 
 ## Licence
 

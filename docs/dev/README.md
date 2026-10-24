@@ -14,3 +14,6 @@ account of how sl3dpp works, and the code is the authority.
   built).
 - [walkthrough-3d-step.md](walkthrough-3d-step.md): a map of one 3D step
   through the code, its costs, and the performance work on it.
+- [multicore-scaling.md](multicore-scaling.md): the first measurements on
+  a two-socket node (thread placement, the 3D step's phases by thread
+  count, why `StartStep` does not scale) and the plans that follow.

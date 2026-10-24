@@ -442,6 +442,17 @@ What is not built, or holds only within limits:
   truncated expansion overshoots.
 - **The truncation-radius rule** (§3) defaults to the graded rule; the
   choice between the two rules has not been measured.
+- **Scaling past one socket.** On a two-socket node a 3D step at lmax 128
+  is fastest on one socket's cores, and 32 threads were only 1.3 times
+  faster than 16. The transforms (analyse and synthesise, three quarters
+  of a pass) stop scaling first: GSHTrans threads the colatitude rows of
+  each chunk and sums per-thread accumulators, and the analysis gets
+  slower beyond 32 threads. The large arrays are not placed socket by
+  socket (first touch in the threads that use them), and the once-per-step
+  start (`StartStep`, about a fifth of a step) does not scale. README,
+  *Running*, has the advice that follows;
+  [dev/multicore-scaling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) has the
+  measurements and the plans.
 - **Memory at lmax 512.** A 3D run there needs the recorded states on disk
   (the `on_state` store) and a large node.
 - **Inversion.** There are no inversion drivers or optimiser interface: the
