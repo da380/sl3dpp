@@ -17,3 +17,7 @@ account of how sl3dpp works, and the code is the authority.
 - [multicore-scaling.md](multicore-scaling.md): the first measurements on
   a two-socket node (thread placement, the 3D step's phases by thread
   count, why `StartStep` does not scale) and the plans that follow.
+- [pygeoinf-integration.md](pygeoinf-integration.md): a plan (not built)
+  for posing and solving inverse problems through pygeoinf v2: spaces,
+  operators, what sl3dpp and pygeoinf would each need, and the order of
+  work.
