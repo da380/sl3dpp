@@ -47,7 +47,7 @@ std::expected<Deck, DeckError> Deck::Create(
     deck.names_.push_back(name);
   }
   try {
-    // planetmodel's Deck is the one validator (stage 11 WP4): the radii,
+    // planetmodel's Deck is the one validator: the radii,
     // the column sizes, the layering and its refusals.
     const auto read = planetmodel::Deck(std::move(radius), std::move(columns),
                                         std::move(header));
@@ -67,7 +67,7 @@ std::expected<Deck, DeckError> Deck::Create(
 std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
                                           const DeckFormat& format) {
   try {
-    // planetmodel's reader is the one parser (stage 11 WP4): deck.py's
+    // planetmodel's reader is the one parser: deck.py's
     // own semantics — blank lines and `#` comments skipped, `nan` and a
     // leading `+` read as Python reads them.
     const auto read = planetmodel::ReadDeck(path, Translated(format));

@@ -4,8 +4,7 @@
  * @file Viscoelastic3D.hpp
  * @brief The 3D-viscosity stepper: grid-held internal variables, pointwise
  * step weights from laterally varying relaxation times, and the
- * within-step lateral iteration (docs/stage4.md §5 — the research content
- * of the project, plan §3).
+ * within-step lateral iteration (docs/dev/lateral-coupling.md §5).
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)): the base (radial)
  * Rheology is the REFERENCE, whose per-(scheme, dt) effective operators
@@ -32,7 +31,7 @@
  * (memory 5 by default; 0 gives plain Picard, optionally damped), and
  * one loop, OpenStep::Converge, serves this class's Step, the sea level
  * coupling and the adjoint sweep. Its convergence against viscosity
- * contrast is the stage-4 research measurement (stage4.md §5a).
+ * contrast is measured in docs/dev/lateral-coupling.md §5a.
  *
  * With delta = 0 the lateral term vanishes identically and a step
  * reproduces the 1D two-phase stepper exactly — the zero-lateral step
@@ -205,8 +204,8 @@ class Viscoelastic3D {
   /// by less than anderson_rate (0.5 by default, about where Anderson's
   /// fewer passes start to pay for its dearer ones), Anderson mixing with
   /// anderson_memory differences takes over for the rest of the step
-  /// (stage4.md §5a). anderson_rate <= 0 mixes from the first pass;
-  /// anderson_memory 0 never mixes.
+  /// (docs/dev/lateral-coupling.md §5a). anderson_rate <= 0 mixes from the
+  /// first pass; anderson_memory 0 never mixes.
   struct IterationControl {
     int max_iterations = 40;
     double rtol = 1e-11;

@@ -1,6 +1,6 @@
 # sl3dpp conventions
 
-Companion to [plan.md](plan.md) §5. AdGIA supplies the *naming and layering*
+Companion to [design.md](design.md). AdGIA supplies the *naming and layering*
 conventions and pyslfp the formulation; the C++ itself is modern C++23
 throughout — AdGIA's sometimes old-fashioned idiom is MFEM's doing, not a
 model to copy. Items marked **(provisional)** await confirmation.
@@ -37,7 +37,7 @@ model to copy. Items marked **(provisional)** await confirmation.
   `Solver(mesh, {.tol = 1e-10, .max_iterations = 50})`.
 - `enum class` always; `[[nodiscard]]` on factories, solves and queries;
   `constexpr`/`static constexpr` wherever meaningful.
-- **Not a template library, and double throughout** (decided 15 Oct 2026):
+- **Not a template library, and double throughout**:
   the banded solves live on LAPACK's d-routines, so precision templating
   would buy nothing real; `double` is the honest choice. Templates are for
   constraints and small utilities, not a precision axis.
@@ -85,11 +85,11 @@ From `pyslfp/docs/theory/pyslfp_theory.tex` (the authoritative statement):
 - Sea level `ξ = −u − (φ+ψ)/g + c`.
 - Centre-of-mass frame at degree 1 (removes the spheroidal translations).
 - Degree-1 toroidal rigid rotations: removed by a convenient gauge (one
-  pinned dof per solid region); which one does not matter (`plan.md` §4,
-  §8.9).
+  pinned dof per solid region); which one does not matter (`design.md`
+  §8).
 - Don't measure things that are gauge: measured, benchmarked and tested
   quantities must be well defined, which is also the existence condition
-  for the adjoint equations (`plan.md` §4). At degree 1 the spheroidal
+  for the adjoint equations (`design.md` §8). At degree 1 the spheroidal
   translations are fixed by the centre-of-mass frame, a physical frame,
   so quantities relative to it are well defined: radial displacement,
   potential and sea level as the code computes them. The degree-1
@@ -107,8 +107,8 @@ From `pyslfp/docs/theory/pyslfp_theory.tex` (the authoritative statement):
 GSHTrans's native basis **everywhere inside the library**: complex, fully
 normalised, Condon–Shortley phase,
 `Y^N_lm = √((2l+1)/4π) d^l_{Nm} e^{imφ}`, forward transform
-`∫ conj(Y) f dΩ` — identical to the old Fortran's, which makes stage-by-stage
-comparison direct. The real orthonormal no-CS-phase (pyshtools) convention
+`∫ conj(Y) f dΩ` — identical to the old Fortran's, which makes comparing
+intermediate quantities direct. The real orthonormal no-CS-phase (pyshtools) convention
 used by planetmodel/pyslfp exists only in `io/` converters at the file and
 benchmark boundary. Real scalar fields use `RealValued` at N = 0; tensor
 components are complex with Hermitian symmetry. Products are dealiased via
@@ -119,7 +119,7 @@ components are complex with Hermitian symmetry. Products are dealiased via
 One global GLL mesh (default ngll = 5) shared by all degrees and all grid
 fields. Per-degree systems act on a contiguous DOF subset, truncation radius
 snapped to an element boundary; the radius heuristic is an `Options` choice
-(plan §5.3, open question 3). Memory variables are stored only over viscous
+(`design.md` §3). Memory variables are stored only over viscous
 elements.
 
 ## Testing
@@ -145,7 +145,7 @@ latitude loops (pointwise grid operations), and GSHTrans's own
 unless documented, but `const` solve/apply methods must be safe to call from
 parallel loops.
 
-Threaded by default (decided 17 Oct 2026): the `parallel` options default
+Threaded by default: the `parallel` options default
 on, and the thread count is OpenMP's (`OMP_NUM_THREADS`; 1 for a serial
 run). `parallel = false` forces serial, for a caller already inside its own
 parallel region. Threaded runs agree with serial ones to round-off, which
@@ -154,10 +154,13 @@ is all that is required; the test harness runs each test on one thread
 
 ## Dependencies
 
-All five sibling header-only libraries pinned by commit in the top-level
-`CMakeLists.txt` (`SL3DPP_<NAME>_TAG`); local development via
+All six sibling libraries (header-only) are pinned by commit in the
+top-level `CMakeLists.txt` (`SL3DPP_<NAME>_PIN`; a build tree overrides one
+with `SL3DPP_<NAME>_TAG`); local development via
 `FETCHCONTENT_SOURCE_DIR_<NAME>`. Moving a pin is a deliberate, reviewed
-change.
+change, made with `scripts/bump_dependencies.py`; the libraries themselves
+track each other's `main`, and the Upstream workflow builds sl3dpp against
+those weekly.
 
 ## Test cost
 

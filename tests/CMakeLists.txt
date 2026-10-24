@@ -42,14 +42,8 @@ if(TARGET sl3d_app)
   target_link_libraries(TestApps PRIVATE sl3d_app)
 endif()
 sl3dpp_add_test(TestFieldHistory)
-target_link_libraries(TestFieldHistory PRIVATE planetmodel::planetmodel)
 sl3dpp_add_test(TestModelViscosity)
 sl3dpp_add_test(TestKernelWriter)
-# These tests deliberately use planetmodel directly — reading a written
-# file back with its own reader, and holding Scales.hpp to its units —
-# which the library links privately.
-target_link_libraries(TestKernelWriter PRIVATE planetmodel::planetmodel)
 sl3dpp_add_test(TestUnitsParity)
-target_link_libraries(TestUnitsParity PRIVATE planetmodel::planetmodel)
 sl3dpp_add_test(TestGaussMemory)
 sl3dpp_add_test(TestGaussMemory3D)

@@ -72,6 +72,17 @@ struct SeaLevelParameters {
     SeaLevelParameters parameters, double fluid_tidal_number,
     double non_hydrostatic_fraction = 0.008);
 
+/// The sea level of a state from its topography T and ice thickness I, by
+/// pyslfp's construction, which the sl3d program applies to the states it
+/// reads: -T over the ocean floor (T < 0) and -T + I over land, raised by
+/// the floating fraction (ice density / water density) of any ice standing
+/// on the ocean floor. T and I as pyslfp's `export_ice_history` writes them
+/// from ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the
+/// solver's for SeaLevelSolver::MakeState). Refused when the sizes differ.
+[[nodiscard]] std::vector<double> SeaLevelFromTopography(
+    std::span<const double> topography, std::span<const double> iceThickness,
+    const SeaLevelParameters& parameters = {});
+
 /// Which parts of the rotational feedback are solved. The transverse fixed
 /// point requires moments of inertia sustaining more oblateness than the
 /// tidal response (see WithHydrostaticMoments); Axial keeps only the

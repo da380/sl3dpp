@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
-# The stage-4 cross-code benchmark (docs/stage4.md §5b): builds the
-# original Fortran sl3d and this repo side by side, runs visco_test at a
-# chosen lmax, replays the same setup through sl3dpp, and prints the
-# coefficient-space comparison. Intended for a server; lmax 32 takes
-# minutes, lmax 128 (the code's original scale) considerably longer on
-# the Fortran side.
+# The cross-code benchmark against the Fortran sl3d
+# (docs/dev/lateral-coupling.md §5b): builds the original Fortran code and this
+# repo side by side, runs visco_test at a chosen lmax, replays the same
+# setup through sl3dpp, and prints the coefficient-space comparison.
+# Intended for a server; lmax 32 takes minutes, lmax 128 (the code's
+# original scale) considerably longer on the Fortran side.
 #
 # Usage:
-#   SL3D_DIR=~/dev/sl3d ./scripts/run_fortran_gate.sh [lmax] [threads]
+#   SL3D_DIR=/path/to/sl3d ./scripts/run_fortran_gate.sh [lmax] [threads]
 #
 # Requirements: the sl3d checkout must carry the benchmark-output driver
 # patch to visco_test (an lmax argument and `visccoefs.out`); gfortran,
@@ -20,7 +20,10 @@ THREADS="${2:-$(nproc)}"
 # Huge pages for the large 3D tensors where they are on request only (the
 # top-level README, Running); harmless elsewhere. An existing setting wins.
 export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.malloc.hugetlb=1}"
-SL3D_DIR="${SL3D_DIR:-$HOME/dev/sl3d}"
+if [ -z "${SL3D_DIR:-}" ]; then
+  echo "set SL3D_DIR to a checkout of da380/sl3d (the Fortran code)" >&2
+  exit 2
+fi
 SL3DPP_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 WORK="${WORK:-$SL3DPP_DIR/benchmarks/runs/fortran_gate_lmax${LMAX}}"
 

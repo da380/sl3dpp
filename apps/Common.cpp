@@ -125,15 +125,11 @@ Loaded LoadWorld(const EvolveInput& input, const Json& top,
   const auto start_si = -input.start_kyr_bp * KYR;
   auto ice0 = state_history->Values("ice_thickness", start_si);
   const auto topo0 = state_history->Values("topography", start_si);
-  const auto parameters = solver.Parameters();
-  const auto flotation = parameters.ice_density / parameters.water_density;
+  auto sl_nd = SeaLevelFromTopography(topo0, ice0, solver.Parameters());
   auto ice_nd = std::vector<double>(fieldSize);
-  auto sl_nd = std::vector<double>(fieldSize);
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    auto sl = topo0[i] < 0.0 ? -topo0[i] : -topo0[i] + ice0[i];
-    if (topo0[i] < 0.0 && ice0[i] > 0.0) sl += flotation * ice0[i];
     ice_nd[i] = ice0[i] / length;
-    sl_nd[i] = sl / length;
+    sl_nd[i] /= length;
   }
   auto background = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
   return {std::move(*state_history), std::move(*ice_history), std::move(ice0),
@@ -159,8 +155,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
   const auto time = scales.Time();
   const auto start_si = -input.start_kyr_bp * KYR;
   const auto rho_ice = solver.IceDensity();
-  return [&world, &solver, fieldSize, length, time, start_si,
-          rho_ice](double t) {
+  return [&world, fieldSize, length, time, start_si, rho_ice](double t) {
     const auto thickness =
         world.ice.Values("ice_thickness", start_si + t * time);
     const auto& C = world.background.oceanFunction;

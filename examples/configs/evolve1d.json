@@ -1,0 +1,11 @@
+{
+  "model": "prem8.gia.deck",
+  "lmax": 32,
+  "state": {"file": "../synthetic_earth.nc"},
+  "ice_history": {"file": "../synthetic_earth.nc"},
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 85},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "checkpoint": {"directory": "out/checkpoints_evolve1d", "every": 6},
+  "output": "out/evolve1d.nc"
+}

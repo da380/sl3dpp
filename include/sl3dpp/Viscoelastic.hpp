@@ -3,7 +3,7 @@
 /**
  * @file Viscoelastic.hpp
  * @brief The radial viscoelastic core: state, slaved degree solves,
- * steppers. A port of pyslfp's `viscoelastic.operator`, non-dimensional
+ * steppers. A port of pyslfp's `viscoelastic/operator.py`, non-dimensional
  * throughout.
  *
  * The state is the internal variables alone; the displacement is slaved
@@ -91,7 +91,7 @@ class ViscoelasticOperator {
     bool parallel = true;
     /// Where the internal variables live within each element
     /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
-    /// fewer, plan.md §5.5) or the GLL nodes (pyslfp's and the Fortran's,
+    /// fewer, docs/design.md §5) or the GLL nodes (pyslfp's and the Fortran's,
     /// for like-for-like comparisons).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
   };

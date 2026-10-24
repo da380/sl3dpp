@@ -1,52 +1,66 @@
-# The example drivers. Everything here runs FROM THE BUILD TREE: the
-# deck, the plotting scripts and the poetry file are copied beside the
-# executables at configure time, and all outputs (data files, figures,
-# the poetry environment) land in build/examples — the source tree is
+# The examples. Everything here runs FROM THE BUILD TREE: the inputs, the
+# sl3d configs, the Python scripts and their poetry file are copied beside
+# the executables at configure time, the synthetic Earth is written there by
+# the build, and every output (data files, figures, the poetry environment,
+# a downloaded ICE-7G file) lands in build/examples — the source tree is
 # never written to. See examples/README.md.
 
+# Held to the warnings the library is, as code meant to be copied.
 function(sl3dpp_add_example name)
   add_executable(${name} ${name}.cpp)
   target_link_libraries(${name} PRIVATE sl3dpp::sl3dpp)
+  target_compile_options(${name} PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)
 endfunction()
 
+sl3dpp_add_example(ExampleLoveNumbers)
 sl3dpp_add_example(ExampleFingerprint)
 sl3dpp_add_example(ExampleEvolution)
 sl3dpp_add_example(ExampleLateralViscosity)
+sl3dpp_add_example(ExampleModelViscosity)
 sl3dpp_add_example(ExampleIceKernels)
+sl3dpp_add_example(ExampleViscosityKernels3D)
 
-configure_file(${CMAKE_SOURCE_DIR}/tests/data/prem8.elastic.deck
+# The synthetic Earth (an ice history and topography over a toy glacial
+# cycle), written by the build so that the examples and the sl3d configs
+# run with no data to fetch.
+sl3dpp_add_example(MakeSyntheticEarth)
+add_custom_command(
+  OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/synthetic_earth.nc
+  COMMAND MakeSyntheticEarth synthetic_earth.nc
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  DEPENDS MakeSyntheticEarth
+  COMMENT "Writing the examples' synthetic Earth")
+add_custom_target(sl3dpp_synthetic_earth ALL
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/synthetic_earth.nc)
+
+# The inputs: the PREM-like deck, and a planetmodel model file of a 3D
+# viscosity on the same body (one of the test fixtures).
+configure_file(${PROJECT_SOURCE_DIR}/tests/data/prem8.elastic.deck
                prem8.elastic.deck COPYONLY)
+configure_file(${PROJECT_SOURCE_DIR}/tests/data/viscosity_log.nc
+               viscosity_log.nc COPYONLY)
+configure_file(${CMAKE_CURRENT_SOURCE_DIR}/README.md README.md COPYONLY)
 
-# The present-day Earth state (ICE-7G ice + topography coefficients) is
-# EXTRACTED FROM PYSLFP AS PART OF THE BUILD when a checkout is found —
-# straight into the build tree, nothing written to the source. Point
-# SL3DPP_PYSLFP_DIR elsewhere to override the default sibling checkout.
-set(SL3DPP_PYSLFP_DIR "" CACHE PATH
-    "pyslfp checkout used to extract the examples' ICE-7G Earth state")
-if(NOT SL3DPP_PYSLFP_DIR AND EXISTS "$ENV{HOME}/dev/pyslfp")
-  set(SL3DPP_PYSLFP_DIR "$ENV{HOME}/dev/pyslfp")
-endif()
-find_program(SL3DPP_POETRY poetry)
-set(SL3DPP_EARTH_STATE ${CMAKE_CURRENT_BINARY_DIR}/earth_state_l256.txt)
-if(SL3DPP_PYSLFP_DIR AND SL3DPP_POETRY)
-  add_custom_command(
-    OUTPUT ${SL3DPP_EARTH_STATE}
-    COMMAND ${SL3DPP_POETRY} run python
-            ${CMAKE_SOURCE_DIR}/scripts/make_example_earth_state.py
-            --out ${SL3DPP_EARTH_STATE}
-    WORKING_DIRECTORY ${SL3DPP_PYSLFP_DIR}
-    DEPENDS ${CMAKE_SOURCE_DIR}/scripts/make_example_earth_state.py
-    COMMENT "Extracting the present-day ICE-7G Earth state from pyslfp")
-  add_custom_target(ExampleEarthState ALL DEPENDS ${SL3DPP_EARTH_STATE})
-else()
-  message(STATUS
-      "sl3dpp examples: no pyslfp checkout + poetry found; the earth-state "
-      "examples need earth_state_l256.txt beside them (set "
-      "SL3DPP_PYSLFP_DIR to extract it during the build)")
-endif()
-configure_file(${CMAKE_SOURCE_DIR}/examples/README.md README.md COPYONLY)
-file(GLOB SL3DPP_EXAMPLE_PLOTS ${CMAKE_CURRENT_SOURCE_DIR}/plots/*)
-foreach(plot_file ${SL3DPP_EXAMPLE_PLOTS})
-  get_filename_component(plot_name ${plot_file} NAME)
-  configure_file(${plot_file} ${plot_name} COPYONLY)
+# The Python side, copied flat beside the executables: the plotting scripts,
+# the ICE-7G download, and the poetry file of their environment.
+file(GLOB SL3DPP_EXAMPLE_PYTHON LIST_DIRECTORIES false CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/python/*)
+foreach(python_file IN LISTS SL3DPP_EXAMPLE_PYTHON)
+  get_filename_component(python_name ${python_file} NAME)
+  configure_file(${python_file} ${python_name} COPYONLY)
+endforeach()
+
+# The sl3d configs, copied into build/examples/configs when they are not there
+# yet, and never overwritten: they are there to be edited and experimented
+# with. Deleting one (or the directory) and reconfiguring restores the
+# original. Their relative paths resolve against that directory, so they
+# reach the inputs above as ../.
+file(GLOB SL3DPP_EXAMPLE_CONFIGS LIST_DIRECTORIES false CONFIGURE_DEPENDS
+     ${CMAKE_CURRENT_SOURCE_DIR}/configs/*)
+foreach(config_file IN LISTS SL3DPP_EXAMPLE_CONFIGS)
+  get_filename_component(config_name ${config_file} NAME)
+  if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/configs/${config_name})
+    file(COPY ${config_file} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/configs)
+  endif()
 endforeach()

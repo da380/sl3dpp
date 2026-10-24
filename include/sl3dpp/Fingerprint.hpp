@@ -3,7 +3,7 @@
 /**
  * @file Fingerprint.hpp
  * @brief Elastic sea-level fingerprints: the public, SI face of the sea
- * level engine, pyslfp-shaped (plan §1) so that sl3dpp can one day serve
+ * level engine, pyslfp-shaped so that sl3dpp can one day serve
  * as a faster backend for pyslfp.
  *
  * An elastic earth responds instantaneously, so a fingerprint is one

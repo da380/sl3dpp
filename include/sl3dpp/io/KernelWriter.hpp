@@ -2,8 +2,8 @@
 
 /**
  * @file KernelWriter.hpp
- * @brief Kernels out (stage 11 WP3): the 3D sensitivity kernels of
- * Kernels3D written as a planetmodel model file, for the Python to read
+ * @brief Kernels out: the 3D sensitivity kernels of Kernels3D written
+ * as a planetmodel model file, for the Python to read
  * back, draw and integrate.
  *
  * A kernel arrives as Kernels3D holds it: an angular density on the

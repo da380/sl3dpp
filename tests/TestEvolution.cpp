@@ -156,7 +156,7 @@ TEST(Evolution, ViscousMantleKeepsRelaxing) {
   EXPECT_GT(peaks.back(), 1.2 * peaks.front());
 }
 
-TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
+TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
   // The reference is pyslfp on its GLQ grid, which coincides with ours at
   // this lmax, so the comparison isolates the implementation; the sharp
   // coastline makes the solution itself grid-determined at the ~19%
@@ -182,7 +182,7 @@ TEST(Stage3Gate, CoupledEvolutionMatchesPyslfp) {
 
   // Parse the fixture and compare, SI, in coefficient space.
   std::ifstream file(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
-                     "stage3_evolution.txt");
+                     "pyslfp_evolution.txt");
   ASSERT_TRUE(file.is_open());
   const auto length = scales.Length();
   const auto frequency = scales.Factor(Dimensions{.time = -1});

@@ -1,38 +1,49 @@
 /**
  * @file ExampleLateralViscosity.cpp
- * @brief 3D viscosity (stage 4): the coupled evolution with a laterally
+ * @brief 3D viscosity: the coupled evolution with a laterally
  * varying mantle, against its radially averaged twin.
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)) with a degree-2-like
  * log perturbation of one decade peak to peak; the within-step lateral
- * iteration (the research content of plan §3) converges each implicit
+ * iteration (design.md §6) converges each implicit
  * step under the same Anderson-mixed fixed point as the ocean load and
  * rotation. The zero-lateral twin isolates what the lateral structure
  * does to the predictions.
  *
+ * The load is a tenth of the Antarctic ice of the present-day state,
+ * melted at once and held.
+ *
  * Outputs (SI): final sea-level maps for both runs and their difference,
- * and the per-step iteration counts of the lateral fixed point. Run from
- * the build tree; plot with plots/plot_lateral.py.
+ * and the per-step iteration counts of the lateral fixed point.
+ *
+ *   ExampleLateralViscosity [--lmax N] [--state FILE]
+ *
+ * Run from the build tree; plot with python/plot_lateral.py.
  */
 
 #include <cmath>
+#include <format>
 #include <iostream>
 #include <numbers>
 
 #include "Common.hpp"
 #include "sl3dpp/Evolution3D.hpp"
-#include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
 using namespace sl3dpp;
 
-int main() {
-  constexpr auto lmax = 16;
+int main(int argc, char** argv) {
+  const auto options = examples::ParseOptions(argc, argv, 48);
+  const auto lmax = options.lmax;
   constexpr auto meltFraction = 0.1;
   constexpr auto tEnd = 10.0e3 * examples::kYear;
   constexpr auto nodes = 11;
 
+  examples::Say(
+      std::format("ExampleLateralViscosity: 3D viscosity at lmax {}, state {}",
+                  lmax, options.state.string()));
+  examples::Say("building the model and the 3D operators");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   Viscoelastic3D lateral(earth.rheology, lmax,
                          [](double, double theta, double phi) {
@@ -48,22 +59,24 @@ int main() {
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
 
-  Fingerprint fingerprint(lmax, lateral.ElasticLove());
-  fingerprint.SetAnalyticTestState(0.0);
+  const auto earthState = examples::LoadEarthState(grid, options.state);
   const auto length = scales.Length();
   auto toNd = [&](std::vector<double> si) {
     for (auto& v : si) v /= length;
     return si;
   };
-  const auto iceSi = fingerprint.IceThickness();
-  auto state = solver.MakeState(toNd(iceSi), toNd(fingerprint.SeaLevel()));
+  const auto& iceSi = earthState.iceThickness;
+  auto state = solver.MakeState(toNd(iceSi), toNd(earthState.seaLevel));
 
-  // A held melt load switched on at t = 0 (the north-polar cap).
+  // A held melt load switched on at t = 0: a tenth of the Antarctic ice.
   const auto& C = state.oceanFunction;
   auto load = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < load.size(); ++i) {
-    load[i] = -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
-              iceSi[i] / length;
+    const auto south = grid.CoLatitudes()[i / grid.NumberOfLongitudes()] >
+                       std::numbers::pi / 2;
+    load[i] = south ? -solver.IceDensity() * (1.0 - C[i]) * meltFraction *
+                          iceSi[i] / length
+                    : 0.0;
   }
   auto iceLoad = [&](double) { return load; };
   auto times = std::vector<double>{};
@@ -71,12 +84,18 @@ int main() {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
 
-  SeaLevelEvolution3D run3(lateral, solver, state, {});
+  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+      nodes - 1, scales.Time());
+  examples::Say(
+      std::format("the run with lateral viscosity, {} steps:", nodes - 1));
+  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
   const auto with = run3.Run(times, iceLoad);
-  SeaLevelEvolution3D run1(flat, solver, state, {});
+  examples::Say("its radial twin:");
+  SeaLevelEvolution3D run1(flat, solver, state, {.on_snapshot = report});
   const auto without = run1.Run(times, iceLoad);
 
   examples::Writer out("lateral.txt");
+  out.Comment("state " + options.state.string());
   out.Comment(
       "3D lateral viscosity (one decade peak to peak) vs the radial "
       "reference, held northern melt, 10 kyr (SI)");

@@ -1,5 +1,5 @@
-// Internal variables at the Gauss points in the 3D path (plan.md §5.5,
-// performance chunk 7c): the coupling's radial memory nodes are the
+// Internal variables at the Gauss points in the 3D path (docs/design.md
+// §5): the coupling's radial memory nodes are the
 // elements' interior Gauss points, ~20% fewer than the GLL nodes; with no
 // lateral perturbation a 3D step, a coupled run and its continuous kernels
 // reproduce the 1D operator on the same points (the zero-lateral gate,

@@ -1,0 +1,55 @@
+# Builds and tests sl3dpp against every sibling library's main, rather than
+# the commits CMakeLists.txt pins: weekly, and on demand from the Actions tab.
+# A red run means a library has moved in a way sl3dpp will meet at its next
+# bump (scripts/bump_dependencies.py), and says so before anyone bumps. A
+# green one means a bump to today's mains should be routine.
+#
+# GitHub runs scheduled workflows from the default branch (main) only.
+name: Upstream
+
+on:
+  schedule:
+    - cron: "0 6 * * 1"  # Mondays, 06:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  mains:
+    name: against the libraries' main
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config libfftw3-dev liblapack-dev libnetcdf-dev \
+            g++-14 libopenblas-openmp-dev
+
+      - name: Configure against every main
+        run: |
+          tags=()
+          for name in NUMERICCONCEPTS GAUSSQUAD INTERPOLATION FFTWPP GSHTRANS \
+                      PLANETMODEL; do
+            tags+=("-DSL3DPP_${name}_TAG=main")
+          done
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Release \
+            "${tags[@]}"
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        run: ctest --test-dir build --parallel 4 --output-on-failure
+
+      - name: Name the revisions tested
+        if: always()
+        run: |
+          for dir in build/_deps/*-src; do
+            echo "$(basename "$dir" -src) $(git -C "$dir" rev-parse HEAD)"
+          done

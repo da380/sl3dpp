@@ -1,4 +1,4 @@
-// The zero-lateral gate of stage 4 (docs/stage4.md §7a): a random
+// The zero-lateral gate (docs/dev/lateral-coupling.md §7a): a random
 // degree-basis internal-variable state, pushed through the FULL grid
 // pipeline — components, spin synthesis, a pointwise (here uniform)
 // multiply, spin analysis, force assembly, degree solves — must reproduce
@@ -35,7 +35,7 @@ double Noise(std::size_t k) {
 
 }  // namespace
 
-TEST(Stage4, CouplingsShareOneGrid) {
+TEST(Lateral, CouplingsShareOneGrid) {
   constexpr auto lmax = 4;
   auto deck =
       Deck::Read(
@@ -86,7 +86,7 @@ TEST(Stage4, CouplingsShareOneGrid) {
       std::invalid_argument);
 }
 
-TEST(Stage4, TransformsIntoBuffersAndThreadedPointwise) {
+TEST(Lateral, TransformsIntoBuffersAndThreadedPointwise) {
   // The into-buffer transforms (what the step reuses its buffers through)
   // overwrite every value: on buffers full of junk they give bitwise the
   // allocating forms. The pointwise loops are element-wise, so threaded
@@ -160,7 +160,7 @@ TEST(Stage4, TransformsIntoBuffersAndThreadedPointwise) {
   ASSERT_EQ(sa.r, sb.r);
 }
 
-TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
+TEST(LateralGate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   constexpr auto lmax = 8;
   auto deck =
       Deck::Read(
@@ -316,7 +316,7 @@ TEST(Stage4Gate, ZeroLateralPipelineMatchesTheDegreeBasisStepper) {
   }
 }
 
-TEST(Stage4, DegreeOneToroidalForceIsTorqueFree) {
+TEST(Lateral, DegreeOneToroidalForceIsTorqueFree) {
   // The memory force of any real tensor is orthogonal to the degree-1
   // rigid rotations (a symmetric stress does no work on a rigid motion):
   // the discrete consistency condition that lets the pinned degree-1

@@ -1,0 +1,65 @@
+# Builds the API reference and user pages with Doxygen and publishes them to
+# GitHub Pages (https://da380.github.io/sl3dpp/) on every push to main.
+#
+# One-time setup, in the repository settings: Settings -> Pages -> Build and
+# deployment -> Source: "GitHub Actions". The first successful run creates
+# the site.
+#
+# Doxygen reads only the sources, but the Doxyfile is configured by CMake, and
+# configuring resolves the library's dependencies, so they are installed here
+# as in ci.yml; nothing is compiled.
+name: Docs
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Queue deployments rather than cancelling one half done.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build pkg-config libfftw3-dev liblapack-dev libnetcdf-dev \
+            g++-14 libopenblas-openmp-dev doxygen
+
+      - name: Build the reference
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DSL3DPP_BUILD_TESTS=OFF \
+            -DSL3DPP_BUILD_APPS=OFF \
+            -DSL3DPP_BUILD_EXAMPLES=OFF \
+            -DSL3DPP_BUILD_DOCS=ON
+          cmake --build build --target sl3dpp_docs
+
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: build/docs/html
+
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v5

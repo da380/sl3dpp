@@ -1,9 +1,10 @@
 """The decay-time fixture: pyslfp's estimator on a deterministic noisy
 series, for TestMeasurements to hold the C++ port to.
 
-Run from a pyslfp checkout's environment, writing into sl3dpp:
+Run in this directory's environment (pyproject.toml):
 
-    cd ../pyslfp && poetry run python ../sl3dpp/scripts/make_decay_fixtures.py
+    cd scripts && poetry install --no-root
+    poetry run python make_decay_fixtures.py [--data-dir DIR]
 
 The series is a clean decay plus reproducible noise from the same
 linear-congruential generator the C++ test uses elsewhere, fitted with
@@ -12,12 +13,10 @@ fitted decay time, amplitude and offset, and every weight, floats
 written to round-trip.
 """
 
-from pathlib import Path
-
 import numpy as np
 from pyslfp.viscoelastic import fit_decay_time
 
-OUT = Path(__file__).resolve().parent.parent / "tests" / "data" / "decay_time.txt"
+from fixture_tools import data_dir
 
 
 def series() -> tuple[np.ndarray, np.ndarray]:
@@ -31,6 +30,7 @@ def series() -> tuple[np.ndarray, np.ndarray]:
 
 
 def main() -> None:
+    out = data_dir(__doc__) / "decay_time.txt"
     t, y = series()
     lines = []
     for name, sigma_t in (("pinned", 0.0), ("free", 0.05)):
@@ -42,8 +42,8 @@ def main() -> None:
         lines.append(f"amplitude {float(fit.amplitude)!r}")
         lines.append(f"offset {float(fit.offset)!r}")
         lines += [f"weight {j} {float(w)!r}" for j, w in enumerate(fit.weights)]
-    OUT.write_text("\n".join(lines) + "\n")
-    print(OUT)
+    out.write_text("\n".join(lines) + "\n")
+    print(out)
 
 
 if __name__ == "__main__":

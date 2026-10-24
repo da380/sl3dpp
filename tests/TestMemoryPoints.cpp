@@ -1,4 +1,4 @@
-// Memory points and the point shear (plan.md §5.5): the GLL set is the
+// Memory points and the point shear (docs/design.md §5): the GLL set is the
 // nodes themselves and the Gauss set interpolates and integrates exactly to
 // its polynomial degrees; with GLL points the long-term material plus the
 // branches' unrelaxed shear at the points reproduces the operators

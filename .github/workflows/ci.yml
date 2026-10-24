@@ -1,0 +1,187 @@
+# Build sl3dpp and run its tests, install it and consume the installed
+# package, and build the API reference: on every push to main or develop and
+# every pull request.
+#
+# The sibling libraries are fetched from GitHub at the commits pinned in the
+# top-level CMakeLists.txt (SL3DPP_*_PIN), so a run tests exactly what the
+# commit names. Their current mains are tested weekly
+# by upstream.yml instead.
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  # FFTW in all three precisions, LAPACK and netCDF-C; the BLAS comes with each
+  # compiler below, because which OpenBLAS build goes with which compiler
+  # matters.
+  BASE_PACKAGES: ninja-build pkg-config libfftw3-dev liblapack-dev libnetcdf-dev
+
+jobs:
+  # The compilers the README claims (GCC 13+, Clang 18+). The GCC entries take
+  # the OpenMP build of OpenBLAS, which shares libgomp with the library. Clang
+  # uses libomp, and two OpenMP runtimes in one process are to be avoided, so
+  # it takes the pthread build, with the variable that build reads. Each test
+  # runs on one OpenMP thread already (tests/CMakeLists.txt).
+  #
+  # One Debug entry besides: the asserts, and the code at -O0. Its suite takes
+  # about eight times as long as Release's, about a minute on four cores.
+  build:
+    name: ${{ matrix.compiler.cxx }} / ${{ matrix.build_type }}
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        compiler:
+          - {cxx: g++-13, packages: g++-13 libopenblas-openmp-dev}
+          - {cxx: g++-14, packages: g++-14 libopenblas-openmp-dev}
+          - cxx: clang++-18
+            packages: clang-18 libomp-18-dev libopenblas-pthread-dev
+        build_type: [Release]
+        include:
+          - compiler: {cxx: g++-14, packages: g++-14 libopenblas-openmp-dev}
+            build_type: Debug
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES ${{ matrix.compiler.packages }}
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }}
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+
+      - name: Build
+        run: cmake --build build --parallel
+
+      - name: Test
+        env:
+          OPENBLAS_NUM_THREADS: 1
+        run: ctest --test-dir build --parallel 4 --output-on-failure
+
+  # The point of the install rules is that a separate project can consume
+  # them, so consume them from one (tests/package), against nothing but the
+  # prefix. This also catches a sibling library whose own package cannot be
+  # found again downstream.
+  package:
+    name: install and find_package
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev
+
+      - name: Build and install
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_INSTALL_PREFIX="$GITHUB_WORKSPACE/prefix" \
+            -DSL3DPP_BUILD_TESTS=OFF \
+            -DSL3DPP_BUILD_EXAMPLES=OFF
+          cmake --build build --parallel
+          cmake --install build
+
+      - name: Consume the installed package
+        run: |
+          cmake -S tests/package -B build-package -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_PREFIX_PATH="$GITHUB_WORKSPACE/prefix"
+          cmake --build build-package
+          ctest --test-dir build-package --output-on-failure
+          "$GITHUB_WORKSPACE/prefix/bin/sl3d" --version
+
+  # The examples and the sl3d configs, on the synthetic Earth the build
+  # writes, each at a small degree: this checks that they run, not what they
+  # show (examples/README.md has the full-size runs and the plots).
+  examples:
+    name: examples
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev
+
+      - name: Build the examples and the sl3d program
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DSL3DPP_BUILD_TESTS=OFF
+          cmake --build build --parallel
+
+      - name: Run the library examples
+        working-directory: build/examples
+        env:
+          OMP_NUM_THREADS: 4
+        run: |
+          set -e
+          for run in "ExampleLoveNumbers --lmax 16" \
+                     "ExampleFingerprint --lmax 32" \
+                     "ExampleEvolution --lmax 16" \
+                     "ExampleLateralViscosity --lmax 8" \
+                     "ExampleModelViscosity --lmax 8" \
+                     "ExampleIceKernels --lmax 16" \
+                     "ExampleViscosityKernels3D --lmax 8"; do
+            echo "::group::$run"
+            ./$run
+            echo "::endgroup::"
+          done
+
+      - name: Run the sl3d configs
+        working-directory: build/examples/configs
+        env:
+          OMP_NUM_THREADS: 4
+        run: ./run_all.sh
+
+  # The reference builds, and its warnings are shown; they do not fail the job
+  # yet. Publishing is docs.yml's, from main only.
+  docs:
+    name: documentation
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev doxygen
+
+      - name: Build the reference
+        run: |
+          cmake -S . -B build -G Ninja \
+            -DCMAKE_CXX_COMPILER=g++-14 \
+            -DSL3DPP_BUILD_TESTS=OFF \
+            -DSL3DPP_BUILD_APPS=OFF \
+            -DSL3DPP_BUILD_EXAMPLES=OFF \
+            -DSL3DPP_BUILD_DOCS=ON
+          cmake --build build --target sl3dpp_docs
+
+      - name: Show the warnings
+        if: always()
+        run: cat build/docs/doxygen-warnings.log

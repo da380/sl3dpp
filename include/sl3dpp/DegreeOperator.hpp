@@ -27,7 +27,7 @@
  * centre-of-mass frame); for l = 0 there is no tangential dof, fluid
  * regions are mu = 0 elastic media, and U(0) = 0 is imposed at a centre.
  * Degrees above zero act on the element subset of the one global mesh
- * where the solution is not negligible (plan §5.3).
+ * where the solution is not negligible (docs/design.md §3).
  *
  * The system is symmetric, stored as an upper band, scaled symmetrically
  * by its diagonal and factorised on construction: banded Cholesky, falling
@@ -66,7 +66,7 @@ class DegreeOperator {
     /// The relative level below which a degree's solution is truncated
     /// with depth.
     double eps = 1e-8;
-    /// The truncation-radius rule (plan §5.3, open question 3).
+    /// The truncation-radius rule (docs/design.md §3).
     TruncationRule truncation = TruncationRule::Graded;
     /// A shear modulus at the memory points to add (MemoryPoints.hpp):
     /// with the long-term material, the elastic or a step's effective

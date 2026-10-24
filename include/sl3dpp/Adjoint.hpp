@@ -7,7 +7,7 @@
  * — one interface and result type for both, so every gate and driver is
  * formulation-blind. A port of pyslfp's `adjoint_ice_history` /
  * `continuous_adjoint_ice_history` (whose docstrings, with Yu et al. 2025,
- * are the authoritative statements); the design record is docs/stage5.md.
+ * are the authoritative statements); the design record is docs/dev/adjoints.md.
  *
  * The discrete adjoint transposes the time-stepped forward map exactly:
  * the gradient identity holds to solver tolerance for any load
@@ -29,6 +29,7 @@
  */
 
 #include <array>
+#include <functional>
 #include <map>
 #include <optional>
 #include <span>
@@ -72,7 +73,7 @@ struct Measurement {
 
 /**
  * @brief Sensitivity kernels of one objective with respect to the ice
- * history, in three views (stage5.md §4; Yu et al. 2025 §3.7).
+ * history, in three views (docs/dev/adjoints.md §4; Yu et al. 2025 §3.7).
  *
  * DISCRETE view: `loadDuals[n]` is the dual of the direct ice-load grid
  * at time node n — delta J = sum_n int loadDuals[n] delta f_n dS, exact
@@ -150,6 +151,11 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
+    /// Called at the start of each step of the reversed sweep, with the
+    /// node it steps back from (the last node first, down to 1): a hook for
+    /// progress reports, since a sweep can take as long as the forward run.
+    /// Empty by default.
+    std::function<void(std::size_t node)> on_node{};
   };
 
   explicit AdjointSolver(const SeaLevelEvolution& evolution, Options options);

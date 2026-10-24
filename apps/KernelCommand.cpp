@@ -4,6 +4,7 @@
 #include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
+#include <span>
 #include <stdexcept>
 #include <utility>
 #include <vector>
@@ -325,6 +326,53 @@ void WriteIceKernels(const std::filesystem::path& path,
   pm::WriteSurfaceFile(path, file);
 }
 
+/// Holds each measurement to the run before anything runs: its dates must
+/// be nodes of the times grid, a decay window must hold enough nodes for
+/// the fit, and a coefficient must exist at the run's band. Everything
+/// these depend on is in the config, so a mistake costs a read rather
+/// than the forward run that BuildMeasurement would otherwise follow.
+void CheckMeasurements(std::span<const Json> items, const KernelInput& input) {
+  const auto& run = input.run;
+  // the member a date came from, or the measurement when it defaulted
+  const auto at = [](const Json& item, const char* member) -> const Json& {
+    return Has(item, member) ? item.At(member) : item;
+  };
+  for (auto k = std::size_t{0}; k < input.measurements.size(); ++k) {
+    const auto& spec = input.measurements[k];
+    const auto& item = items[k];
+    switch (spec.type) {
+      case Type::DecayTime: {
+        const auto first = NodeOf(at(item, "window_start_kyr_bp"),
+                                  spec.window_start_kyr_bp, run);
+        const auto last =
+            NodeOf(at(item, "window_end_kyr_bp"), spec.window_end_kyr_bp, run);
+        // ReadSpec has the window running back in time, so last > first;
+        // the fit (DecayTimeMeasurements) needs four samples
+        if (const auto held = last - first + 1; held < 4) {
+          Fail(item, std::format("the decay window holds {} nodes of the "
+                                 "times grid; the fit needs at least four",
+                                 held));
+        }
+        break;
+      }
+      case Type::StokesCoefficient:
+        if (spec.degree < 0 || spec.degree > run.lmax ||
+            std::abs(spec.order) > spec.degree) {
+          Fail(item, std::format("({}, {}) is not a degree and order at "
+                                 "lmax {}",
+                                 spec.degree, spec.order, run.lmax));
+        }
+        static_cast<void>(
+            NodeOf(at(item, "date_kyr_bp"), spec.date_kyr_bp, run));
+        break;
+      default:
+        static_cast<void>(
+            NodeOf(at(item, "date_kyr_bp"), spec.date_kyr_bp, run));
+        break;
+    }
+  }
+}
+
 }  // namespace
 
 KernelInput ReadKernelInput(const std::filesystem::path& config) {
@@ -358,6 +406,7 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
   for (auto k = std::size_t{0}; k < items.size(); ++k) {
     out.measurements.push_back(ReadSpec(items[k], k));
   }
+  CheckMeasurements(items, out);
   out.output = PathOf(top, "output", directory);
   return out;
 }
@@ -397,9 +446,10 @@ std::string RunKernelsWith(
     values << spec.name << ' ' << items[k].At("type").AsString() << ' '
            << std::format("{:.17g}", built.factor * built.value_nd);
     if (built.fit) {
+      // the fit ran on the series in SI metres (BuildMeasurement), so its
+      // amplitude and offset are metres already
       values << std::format(" {:.17g} {:.17g} {:.17g}", built.fit->decay_time,
-                            built.fit->amplitude * solver.SolverScales().Length(),
-                            built.fit->offset * solver.SolverScales().Length());
+                            built.fit->amplitude, built.fit->offset);
     }
     values << '\n';
   }

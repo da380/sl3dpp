@@ -223,7 +223,7 @@ TEST(ToroidalOperator, DegreeOneRigidRotationsArePinned) {
   // solid region (inner core, mantle). The gauge pins one dof per region;
   // for a right-hand side in the operator's range (torque-free) the pinned
   // solve satisfies every equation, pinned rows included, and the pin
-  // changes the solution only by rigid rotations (plan.md §4).
+  // changes the solution only by rigid rotations (docs/design.md §8).
   auto material = CoreMantleMaterial(8);
   ToroidalOperator top(material, 1);
   ToroidalOperator deeper(material, 1, {.pin_fraction = 0.5});

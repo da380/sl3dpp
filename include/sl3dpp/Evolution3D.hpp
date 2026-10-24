@@ -2,8 +2,8 @@
 
 /**
  * @file Evolution3D.hpp
- * @brief Forward GIA with lateral viscosity: the coupled loop of plan §3 —
- * one combined within-step fixed point over the ocean load, the rotational
+ * @brief Forward GIA with lateral viscosity: the coupled loop of docs/design.md
+ * §6 — one combined within-step fixed point over the ocean load, the rotational
  * feedback and the lateral viscosity term, under one Anderson mixer.
  *
  * Per step, the opened 3D step (Viscoelastic3D::OpenStep) holds the
@@ -99,20 +99,20 @@ class SeaLevelEvolution3D {
     /// Hand every node's snapshot to on_snapshot as it is recorded, so a
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
-    std::function<void(std::size_t node, const Snapshot&)> on_snapshot;
+    std::function<void(std::size_t node, const Snapshot&)> on_snapshot{};
     /// With record_stride set, hand each kept node's internal state to
     /// on_state (after its on_snapshot) INSTEAD of keeping it on the
     /// snapshot: the recording then lives where the callback puts it (a
     /// disk store, say), the snapshots keep the loads alone, and a
     /// reverse sweep reads the states back through
     /// ForwardTrajectory3D's fetch.
-    std::function<void(std::size_t node, Viscoelastic3D::State&&)> on_state;
+    std::function<void(std::size_t node, Viscoelastic3D::State&&)> on_state{};
     /// Hand every checkpoint_stride-th node's recurrence, and the last
     /// node's, to on_checkpoint (0 hands none), after that node's
     /// on_snapshot. Strides count within the call, for `Run` and
     /// `Resume` alike.
     int checkpoint_stride = 0;
-    std::function<void(std::size_t node, const Checkpoint&)> on_checkpoint;
+    std::function<void(std::size_t node, const Checkpoint&)> on_checkpoint{};
   };
 
   /// The operator and solver are borrowed for the evolution's lifetime;

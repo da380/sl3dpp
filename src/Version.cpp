@@ -4,7 +4,8 @@
 
 namespace sl3dpp {
 
-std::string_view Version() { return "0.1.0"; }
+// SL3DPP_VERSION is the CMake project version (CMakeLists.txt).
+std::string_view Version() { return SL3DPP_VERSION; }
 
 std::string_view PlanetModelVersion() { return planetmodel::Version(); }
 

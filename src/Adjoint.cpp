@@ -336,6 +336,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   auto loadDuals = std::vector<std::vector<double>>(times.size());
 
   for (std::size_t n = N; n >= 1; --n) {
+    if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
     auto& flavour = op.FlavourOf(scheme, dt);
@@ -670,9 +671,9 @@ IceKernels AdjointSolver::ContinuousSweep(
   };
 
   // The instantaneous adjoint fingerprint of a measurement, through the
-  // forward channel mapping of the elastic adjoint (stage5.md §3): its
-  // sea level (the delta amplitude), and the converged channel
-  // coefficients that drive the radial jump.
+  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md §3):
+  // its sea level (the delta amplitude), and the converged channel coefficients
+  // that drive the radial jump.
   struct Jump {
     std::vector<double> xiA;
     std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent
@@ -977,6 +978,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   observe(N);
   accumulateItau(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
+    if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
     const auto step =
         op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),

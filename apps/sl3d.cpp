@@ -40,8 +40,9 @@ constexpr auto kUsage =
     "                 measurements, 3D lateral viscosity\n"
     "  kernel1d       its 1D counterpart\n"
     "\n"
-    "sl3d --version prints the library versions; a config's members are\n"
-    "documented with the command in apps/Commands.hpp and the manual.\n";
+    "sl3d --version prints the library versions. Every command's config\n"
+    "is documented in docs/sl3d-configs.md, also at\n"
+    "https://da380.github.io/sl3dpp/\n";
 
 struct Command {
   std::string_view name;

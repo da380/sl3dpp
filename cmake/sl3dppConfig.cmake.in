@@ -1,0 +1,19 @@
+# sl3dpp's installed package: find_package(sl3dpp) gives the target
+# sl3dpp::sl3dpp, as FetchContent does. The libraries it links are found
+# again here: the siblings by their own packages (installed beside this one
+# by the same `cmake --install`), the rest by CMake's find modules.
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(GSHTrans)
+find_dependency(Interpolation)
+find_dependency(GaussQuad)
+find_dependency(planetmodel)
+find_dependency(OpenMP COMPONENTS CXX)
+find_dependency(BLAS)
+find_dependency(LAPACK)
+
+include("${CMAKE_CURRENT_LIST_DIR}/sl3dppTargets.cmake")
+
+check_required_components(sl3dpp)

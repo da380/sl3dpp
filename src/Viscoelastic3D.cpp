@@ -383,9 +383,10 @@ void Viscoelastic3D::AddUnitChannels(
     const std::function<const DegreeOperator&(int)>& spheroidal,
     std::map<int, std::vector<double>>& units) const {
   if (!load && !tide) return;
-  for (auto& [l, columns_] : solutions.spheroidal) {
-    // A plain reference: clang does not yet allow capturing a structured
-    // binding in a lambda under OpenMP.
+  for (auto& [degree, columns_] : solutions.spheroidal) {
+    // Plain names: clang does not yet allow capturing a structured binding
+    // in a lambda under OpenMP.
+    const auto l = degree;
     auto& x = columns_;
     const auto& system = spheroidal(l);
     const auto ndof = system.DofCount();
