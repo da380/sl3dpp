@@ -435,6 +435,50 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
               tol * fluidTidal);
 }
 
+TEST(LoveNumbers, ConventionalNumbersAreFrameIndependent) {
+  // The table carries G with g and a, so the conventional numbers come out
+  // the same from the SI table and from its non-dimensional conversion,
+  // and the PREM-like deck gives the familiar degree-2 values.
+  const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
+  auto deck = sl3dpp::Deck::Read(
+                  data / "prem8.elastic.deck",
+                  sl3dpp::DeckFormat(
+                      "elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+                  .value();
+  auto model = sl3dpp::EarthModel::FromDeck(deck).value();
+  constexpr auto lmax = 8;
+  auto mesh = sl3dpp::RadialMesh::Create(model, {.lmax = lmax}).value();
+  auto material = sl3dpp::Material::Create(model, mesh).value();
+  const auto si = sl3dpp::ComputeLoveNumbers(material, lmax);
+  EXPECT_DOUBLE_EQ(si.gravitational_constant, sl3dpp::GravitationalConstantSI);
+  const auto conventional = si.Conventional();
+  const auto nd =
+      si.ConvertedTo(sl3dpp::Scales::Geophysical(6.371e6)).Conventional();
+  for (auto l = 0; l <= lmax; ++l) {
+    for (const auto& [a, b] :
+         {std::pair{conventional.h_load[l], nd.h_load[l]},
+          std::pair{conventional.l_load[l], nd.l_load[l]},
+          std::pair{conventional.k_load[l], nd.k_load[l]}}) {
+      EXPECT_NEAR(a, b, 1e-12 * std::max(1.0, std::abs(a))) << "degree " << l;
+    }
+    if (l >= 2) {
+      EXPECT_NEAR(conventional.h_tide[l], nd.h_tide[l], 1e-12) << l;
+      EXPECT_NEAR(conventional.k_tide[l], nd.k_tide[l], 1e-12) << l;
+    } else {
+      EXPECT_TRUE(std::isnan(conventional.k_tide[l]));
+    }
+  }
+  // Farrell's degree 2 (h' -1.00, l' 0.030, k' -0.31) and PREM's tidal
+  // numbers (h 0.60, l 0.084, k 0.30); the centre-of-mass frame's k'_1 = -1
+  EXPECT_NEAR(conventional.h_load[2], -1.0, 0.05);
+  EXPECT_NEAR(conventional.l_load[2], 0.025, 0.01);
+  EXPECT_NEAR(conventional.k_load[2], -0.31, 0.02);
+  EXPECT_NEAR(conventional.h_tide[2], 0.60, 0.02);
+  EXPECT_NEAR(conventional.l_tide[2], 0.084, 0.005);
+  EXPECT_NEAR(conventional.k_tide[2], 0.30, 0.01);
+  EXPECT_NEAR(conventional.k_load[1], -1.0, 1e-9);
+}
+
 TEST(GravityGate, GravityMatchesPlanetmodel) {
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   auto deck = sl3dpp::Deck::Read(data / "prem8.rho.deck",

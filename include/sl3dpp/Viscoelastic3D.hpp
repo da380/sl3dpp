@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 
+#include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/GridCoupling.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/ToroidalOperator.hpp"
@@ -100,10 +101,29 @@ class Viscoelastic3D {
     /// the step an exact elimination still; MemoryPoints.hpp), or GLL
     /// nodes.
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
+    /// Radial cuts for every degree system, the reference operator's
+    /// included (ViscoelasticOperator::Options::radial_cuts).
+    std::vector<int> radial_cuts{};
+    /// The degrees the transforms may be cut to with depth
+    /// (GridCoupling::Options::transform_degrees): each memory node is
+    /// transformed, and delta sampled, on a grid of the least of these
+    /// covering its element's degrees. Empty: every node at lmax.
+    std::vector<int> transform_degrees{};
+    /// Distributed over the segments of radial_cuts (Distributed.hpp's
+    /// ShareMesh fills these): the segments this process owns, contiguous,
+    /// and the collectives over the processes. The process then holds the
+    /// memory nodes of its segments' elements alone (the state, the
+    /// strain), solves only its segments of every degree system (each
+    /// solution holding its segments and the cut nodes, zero elsewhere),
+    /// and every step, solve and Surface is collective; its strain
+    /// coefficients and memory are its own nodes'. Empty collectives: one
+    /// process, every segment.
+    std::vector<int> segments{};
+    Collectives collectives{};
   };
 
   /// The reference rheology is copied (shared, immutable); delta is
-  /// sampled as delta(r, theta, phi) over the memory nodes' grid.
+  /// sampled as delta(r, theta, phi) over each memory node's grid.
   Viscoelastic3D(const Rheology& rheology, int lmax,
                  const std::function<double(double, double, double)>& delta,
                  Options options);
@@ -228,6 +248,8 @@ class Viscoelastic3D {
                                 const LoadCallable3D& tide = {}) const;
 
   /// The surface value of U, V or phi per degree: complex m >= 0 columns.
+  /// Distributed, collective: every process gets the values (the surface
+  /// segment's process holds them).
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 
@@ -257,6 +279,16 @@ class Viscoelastic3D {
    */
   class OpenStep {
    public:
+    OpenStep() = default;
+    OpenStep(const OpenStep&) = default;
+    OpenStep& operator=(const OpenStep&) = default;
+    OpenStep(OpenStep&&) noexcept = default;
+    OpenStep& operator=(OpenStep&&) noexcept = default;
+    /// Hands the step's large arrays back to the operator for the next
+    /// StartStep (those Finish moved into the new state excepted), so a
+    /// step must not outlive its operator.
+    ~OpenStep();
+
     [[nodiscard]] double EndTime() const { return t_; }
     /// The start strain's coefficients: where the iteration starts.
     [[nodiscard]] const GridCoupling::SpectralTensor& StartStrain() const {
@@ -293,7 +325,8 @@ class Viscoelastic3D {
     [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Converge(
         const Pass& pass, const IterationControl& control) const;
 
-    /// The inertia moment of the degree-0, m = 0 column of solutions.
+    /// The inertia moment of the degree-0, m = 0 column of solutions;
+    /// distributed, collective (each process's share summed).
     [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;
 
     /// The effective Love numbers of this step's reference solid (SI).
@@ -331,14 +364,37 @@ class Viscoelastic3D {
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
-  /// consistent solve under the start-time channels.
+  /// consistent solve under the start-time channels. Its grid-sized
+  /// arrays (the decayed memory, the weights, the workspace) come from the
+  /// arrays recycled since the last StartStep where there are any, and are
+  /// allocated otherwise.
   [[nodiscard]] OpenStep StartStep(const State& state, double dt,
                                    Scheme scheme = Scheme::ExponentialTrapezoid,
                                    const LoadCallable3D& load = {},
                                    const LoadCallable3D& tide = {}) const;
 
+  /// Hands back a state the caller is done with, so that the next
+  /// StartStep reuses its tensors instead of allocating and zero-filling
+  /// fresh ones: an evolution recycles each state a step replaces (a
+  /// closed step hands back its own arrays itself). A state merely dropped
+  /// is freed as before; arrays of another shape are dropped. Thread-safe.
+  void Recycle(State&& state) const;
+
+  /// Frees the arrays kept for reuse, as at the end of a run.
+  void ReleaseScratch() const;
+
  private:
   friend class AdjointSolver3D;  // the sweeps transpose these internals
+
+  /// The arrays kept for reuse by StartStep (Recycle, ~OpenStep): at most
+  /// one step's worth, under their own lock.
+  [[nodiscard]] GridCoupling::TensorField TakeTensor() const;
+  [[nodiscard]] std::vector<double> TakeField() const;
+  void Give(GridCoupling::TensorField&& tensor) const;
+  void Give(std::vector<double>&& field) const;
+  std::unique_ptr<std::mutex> scratchMutex_ = std::make_unique<std::mutex>();
+  mutable std::vector<GridCoupling::TensorField> spareTensors_;
+  mutable std::vector<std::vector<double>> spareFields_;
 
   /// The lazily filled caches below (and the reference operator's) are
   /// filled under this lock, so the const methods may be called from

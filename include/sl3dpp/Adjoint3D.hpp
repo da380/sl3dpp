@@ -26,7 +26,9 @@
  *
  * Conventions follow Adjoint.hpp: times increasing in SLE units,
  * measurements keyed by node index, duals paired by the surface
- * integral; itau in MATERIAL units.
+ * integral; itau in MATERIAL units. About a migrating-shoreline run
+ * (SeaLevelEvolution3D::RunMigrating) the sweep linearises about the run's
+ * ocean functions, node by node, as the 1D continuous sweep does.
  */
 
 #include <functional>
@@ -75,26 +77,35 @@ struct ForwardTrajectory3D {
       std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
 };
 
+/// The ocean function of every node of a migrating 3D run (RunMigrating),
+/// for the sweep's linearisation about it; refused for a frozen run's
+/// snapshots, which carry none.
+[[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
+    std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
+
 /**
  * @brief The 3D kernels. `ice` carries the ice-history views exactly as
  * the 1D IceKernels does.
  *
- * `itauKernel3D[k][node * FieldSize + x]` is dJ / d itau(x) for branch
- * k as an ANGULAR DENSITY on the coupling's (oversampled) grid at each
- * radial memory node: dJ = sum_node int K delta-itau dOmega, the radial
- * quadrature folded in as in the 1D nodal pairing; itau in material
- * units. `itauKernelSpherical[k][node]` is its angular integral — it
- * pairs with angle-uniform perturbations exactly as the 1D
- * AdjointSolver's nodal kernel does at that (element, gll) node, which
- * is the zero-lateral bridge between the two. With the memory nodes at
- * Gauss points the kernels live at the points (the itau the step
- * samples); laid out over the mesh's points, the reference's
+ * `itauKernel3D[k][FieldOffset(node) + x]` is dJ / d itau(x) for branch
+ * k as an ANGULAR DENSITY on each radial memory node's own (oversampled)
+ * grid (GridCoupling::GridOf; node * FieldSize + x on the one lmax grid
+ * unless the transforms are cut with depth): dJ = sum_node int K
+ * delta-itau dOmega, the radial quadrature folded in as in the 1D nodal
+ * pairing; itau in material units. `itauKernelSpherical[k][node]` is its
+ * angular integral — it pairs with angle-uniform perturbations exactly
+ * as the 1D AdjointSolver's nodal kernel does at that (element, gll)
+ * node, which is the zero-lateral bridge between the two. With the
+ * memory nodes at Gauss points the kernels live at the points (the itau
+ * the step samples); laid out over the mesh's points, the reference's
  * ItauKernelsAtNodes carries the spherical reduction to the nodal itau
  * as the 1D sweep carries its own. `logViscosityKernel3D` is
  * dJ / d delta(x) for the operator's log-viscosity perturbation
  * (eta = eta_ref exp(delta), so itau = itau_ref exp(-delta)):
  * -itau(x) itauKernel3D(x), same layout. All empty unless a trajectory
- * was supplied.
+ * was supplied. Distributed over radius, each rank's are its own memory
+ * nodes' (its coupling's layout; the ranks' arrays laid end to end in
+ * rank order are the whole mesh's), and `ice` is every rank's alike.
  */
 struct Kernels3D {
   IceKernels ice;
@@ -102,6 +113,25 @@ struct Kernels3D {
   std::vector<std::vector<double>> itauKernelSpherical;
   std::vector<std::vector<double>> logViscosityKernel3D;
 };
+
+/// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
+/// density with each memory node's radial quadrature weight folded in) as
+/// a density per unit volume: each node's values divided by its radial
+/// weight (GridCoupling::WeightOfNode) and r^2, so that dJ = int K delta dV
+/// over the memory nodes' shells. Non-dimensional in the material's scheme
+/// like the kernel; Factor(objective) / Length^3 makes it SI. What
+/// io::WriteKernels stores, before it carries the values to the file's
+/// nodes.
+[[nodiscard]] std::vector<double> VolumeDensity(const GridCoupling& coupling,
+                                                std::span<const double> kernel);
+
+/// A kernel of the Kernels3D layout as a density in radius, one value per
+/// memory node: the angular integral over the node's radial weight, so
+/// that an angle-uniform perturbation pairs as dJ = int k(r) delta(r) dr
+/// (the pairing the 1D nodal kernels make). Material scheme; per unit
+/// length, so Factor(objective) / Length makes it SI.
+[[nodiscard]] std::vector<double> RadialDensity(const GridCoupling& coupling,
+                                                std::span<const double> kernel);
 
 class AdjointSolver3D {
  public:
@@ -128,10 +158,19 @@ class AdjointSolver3D {
 
   /// The continuous-adjoint kernels over the forward time grid; with a
   /// fully recorded `trajectory` the viscosity kernels are carried too.
+  /// With `oceanFunctions`, one grid per node from a migrating run
+  /// (OceanFunctionsOf its snapshots), the kernels linearise about that
+  /// run's shorelines instead of the frozen background ones, and the
+  /// initial sea level kernel is formed; a recorded trajectory must then
+  /// come from the same migrating run. Distributed over radius (the
+  /// evolution's operator's collectives), collective: every rank passes
+  /// the same times, measurements and ocean functions, and its own
+  /// trajectory (its forward run's).
   [[nodiscard]] Kernels3D IceHistoryKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      const ForwardTrajectory3D* trajectory = nullptr) const;
+      const ForwardTrajectory3D* trajectory = nullptr,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
 
  private:
   const SeaLevelEvolution3D* evolution_;

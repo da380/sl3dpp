@@ -23,6 +23,13 @@
  * radial operator works in the material's, with the ratios carried here.
  * The m >= 0 SLE coefficients and the full-m material columns are bridged
  * by the Hermitian symmetry of real fields.
+ *
+ * Two shoreline treatments, as SeaLevelEvolution's: `Run` solves the
+ * linear (frozen shoreline) equation in each pass, for a given non-ocean
+ * load; `RunMigrating` solves the nonlinear equation in each pass, for a
+ * given ice thickness history, so the ocean function follows the
+ * flotation condition inside the combined fixed point and every snapshot
+ * records the converged one.
  */
 
 #include <array>
@@ -48,6 +55,8 @@ class SeaLevelEvolution3D {
     std::array<double, 3> angularVelocity{};
     int coupledIterations = 0;
     double coupledResidual = 0.0;
+    /// Whether the combined fixed point and its last pass's sea level
+    /// solve met their tolerances.
     bool converged = true;
     /// The internal variables, without the strain cache unless
     /// Options::record_strain (one elastic solve under the recorded load
@@ -55,6 +64,9 @@ class SeaLevelEvolution3D {
     std::optional<Viscoelastic3D::State> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;
+    /// The node's ocean function under migrating shorelines; empty when
+    /// the shorelines are frozen at the background state's.
+    std::vector<double> oceanFunction;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -84,6 +96,9 @@ class SeaLevelEvolution3D {
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
+    /// The most passes of each nonlinear sea level solve under migrating
+    /// shorelines (one per pass of the combined fixed point).
+    int max_nonlinear_iterations = 50;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
     /// coefficients are kept whenever the stride is set. A reverse sweep
@@ -137,9 +152,41 @@ class SeaLevelEvolution3D {
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceLoad);
 
+  /// Integrates under migrating shorelines, as
+  /// SeaLevelEvolution::RunMigrating: `iceThickness(t)` is the ice
+  /// thickness at t on the SLE grid, solver units, and the background
+  /// state is the state at times[0] (its ice thickness iceThickness(times[0])
+  /// and its ocean function the flotation one); the run starts undisturbed.
+  /// Each pass of a step's combined fixed point solves the nonlinear sea
+  /// level equation from the background with the pass's memory and lateral
+  /// responses, and closes the load channel with the load the converged
+  /// state carries relative to the background. Every snapshot records its
+  /// ocean function. Recording and checkpointing as for `Run`.
+  [[nodiscard]] std::vector<Snapshot> RunMigrating(
+      std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness);
+
+  /// `Resume` for a migrating run: the same recurrence, each pass closed
+  /// by the nonlinear solve.
+  [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
+      const Checkpoint& from, std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness);
+
   [[nodiscard]] const Viscoelastic3D::State& FinalState() const {
     return vstate_;
   }
+
+  /// The background surface state: the initial state of every run.
+  [[nodiscard]] const SeaLevelSolver::State& BackgroundState() const {
+    return state_;
+  }
+
+  /// Replaces the background state (a calibrated initial state, say);
+  /// its fields must live on the solver's grid.
+  void SetBackgroundState(SeaLevelSolver::State state);
+
+  /// The sea level solver the evolution was built with.
+  [[nodiscard]] const SeaLevelSolver& Solver() const { return *solver_; }
 
  private:
   friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
@@ -155,11 +202,17 @@ class SeaLevelEvolution3D {
       const std::map<int, std::vector<Complex>>& perDegree,
       double factor) const;
 
-  /// The loop both entries share; `resumed` skips the elastic start,
-  /// the members below holding the checkpoint's recurrence instead.
+  /// The loop every entry shares, given the non-ocean load (frozen
+  /// shorelines) or the ice thickness (migrating); `resumed` skips the
+  /// start, the members below holding the checkpoint's recurrence instead.
   [[nodiscard]] std::vector<Snapshot> March(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad, bool resumed);
+      const std::function<std::vector<double>(double)>* iceLoad,
+      const std::function<std::vector<double>(double)>* iceThickness,
+      bool resumed);
+
+  /// Restores a checkpoint's recurrence into the members below.
+  void Restore(const Checkpoint& from, std::span<const double> times);
 
   const Viscoelastic3D* op_;
   const SeaLevelSolver* solver_;

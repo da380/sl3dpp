@@ -30,14 +30,20 @@ of mantle viscosity using deglacial sea level observations.
   stepped implicitly: exponential trapezoid (second order, the default) or
   backward Euler, with exponential Euler and an adaptive step controller
   also available. Step sizes are not limited by the shortest Maxwell time. A
-  coupled driver runs an ice history through the sea-level equation.
+  coupled driver runs an ice history through the sea-level equation, with
+  frozen or migrating shorelines.
+- **The initial sea level.** Calibrated so that a run reaches a given final
+  (present-day) sea level: in one linear step under frozen shorelines, or
+  iteratively under migrating ones, by the classical update or the adjoint
+  gradient.
 - **3D viscoelastic evolution.** Viscosity varying laterally as
   η(r, θ, φ) = η̄(r) exp(δ(r, θ, φ)) about a radial reference. The lateral
   term is applied pseudospectrally with dealiased generalised spherical
   harmonic transforms ([GSHTrans](https://github.com/da380/GSHTrans)), and
   each implicit step solves a fixed point about the reference (Picard,
   Anderson-accelerated where it converges slowly). A coupled driver runs an
-  ice history through the sea-level equation.
+  ice history through the sea-level equation, with frozen or migrating
+  shorelines.
 - **Sensitivity kernels.** Kernels of sea-level, displacement, potential and
   rotation measurements with respect to the ice history (as load duals,
   densities in time, and rate kernels) and to viscosity (the inverse
@@ -269,6 +275,15 @@ nodes.
   degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
   degree of a few dozen there is too little work to share among the cores
   of a large node: more threads then make a run slower, not faster.
+- **Cutting the transforms with depth.** `Viscoelastic3D::Options::
+  transform_degrees` (sl3d's `coupled.transform_degrees`) transforms each
+  memory node only to the degrees its solution carries there under the
+  degree truncation. At lmax 128, the list 32, 48, ..., 112 made a step
+  1.5 times faster and cut its peak memory from 34 to 24 GB, with the
+  surface response unchanged to round-off under a smooth viscosity
+  pattern; a deep viscosity rougher than the solution there would want
+  the listed degrees higher. Below about lmax 30 every mantle node needs
+  lmax and nothing is cut.
 - **Measuring.** `step_timing` (built with `-DSL3DPP_BUILD_BENCHMARKS=ON`)
   times each phase of a 3D step and reports the peak memory. Run it at the
   production degree over a few thread counts and both bindings, and take
@@ -307,8 +322,10 @@ nodes.
   GLIBC_TUNABLES=glibc.malloc.hugetlb=1 OMP_NUM_THREADS=8 ./ExampleLateralViscosity
   ```
 
-  At lmax 64 on 8 threads this makes the 3D run about 10% faster, with
-  unchanged results.
+  The 3D step reuses its large arrays from step to step, so they are
+  faulted in once per run: at lmax 64 on 8 threads huge pages now make the
+  3D run about 1.5% faster (it was 10% when every step allocated afresh),
+  with unchanged results.
 - **Memory points.** The internal variables live at the Gauss points of each
   radial element by default; `memory_points = MemoryPointSet::Gll` places
   them at the GLL nodes, as the Fortran codes and pyslfp do, for direct
@@ -356,8 +373,9 @@ solvers on their own, and the adjoints of all of them.
 | `SurfaceGrid.hpp`, `ShConventions.hpp`, `Geography.hpp` | The Gauss–Legendre surface grid and its transforms; spherical-harmonic conventions; geographic coordinates |
 | `Fingerprint.hpp` | Elastic sea-level fingerprints, SI in and out |
 | `SeaLevel.hpp` | The sea-level solver (linear, generalised, nonlinear) and its adjoint |
-| `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution |
-| `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution |
+| `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution, frozen or migrating shorelines |
+| `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
+| `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution, frozen or migrating shorelines |
 | `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D |
 | `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |
 
@@ -472,9 +490,21 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve` and `kernel` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.
+
+With `SL3DPP_WITH_MPI`, CMake's FindMPI picks the MPI; with several
+installed, name one by its compiler wrapper,
+`-DMPI_CXX_COMPILER=/path/to/mpicxx`. An MPI whose library directory also
+holds netCDF, HDF5 or zlib under the system's names (a PETSc install that
+downloaded them, say) would shadow the system's at run time: point FindMPI
+at the MPI library alone instead, with
+`-DMPI_CXX_SKIP_MPICXX=ON -DMPI_CXX_INCLUDE_PATH=<dir of mpi.h>
+-DMPI_CXX_LIB_NAMES=mpi -DMPI_mpi_LIBRARY=<path of libmpi.so>
+-DMPIEXEC_EXECUTABLE=<its mpiexec>`, where the two directories hold the MPI
+headers and library and nothing else (symbolic links will do).
 
 To build against local checkouts of the sibling libraries rather than the
 downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the comment at the
@@ -499,8 +529,10 @@ runs on one thread.
 
 With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
 
-- `step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]`
-  times each phase of a 3D step and reports the peak memory.
+- `step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
+  [degrees]` times each phase of a 3D step and reports the peak memory;
+  `steps` 0 times the phases alone (the quick comparison), and `degrees`
+  (such as `32,48,64`) cuts the transforms with depth.
 - `fortran_gate` compares a 3D lateral-viscosity run with the Fortran sl3d;
   `scripts/run_fortran_gate.sh` builds both codes and runs the comparison.
 - `traction_numbers <deck> <lmax> <out.txt> [nongrav|grav]` writes the E1
@@ -513,6 +545,16 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   Maxwell load Love-number histories under a Heaviside load (taus in
   seconds per layer, `inf` elastic), for the V1 tier in
   `benchmarks/viscoelastic/love/`.
+- `substructure_timing <deck> <lmax> [repeats] [parts...]` times the degree
+  solves substructured over radial segments against the direct ones, and
+  `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
+  `SL3DPP_WITH_MPI`) the same solves distributed over ranks
+  ([docs/dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+- `mpiexec -n <ranks> distributed_step <deck> <lmax> [repeats] [degrees]`
+  (with `SL3DPP_WITH_MPI`) times the phases of the 3D step distributed
+  over ranks, one radial segment each, with OpenMP threads inside: run it
+  as ranks x threads over a node (`OMP_NUM_THREADS=4 mpiexec -n 2
+  -bind-to core:4 ...` with MPICH).
 
 ## Documentation
 
@@ -525,6 +567,11 @@ The API reference and these pages are published at
 - [docs/design.md](docs/design.md): what sl3dpp is built on and how it
   works: formulation, discretisation, the adjoints, units, the comparison
   rules for cross-code work, validation and known limitations.
+- [docs/radial-partitioning.md](docs/radial-partitioning.md): the 3D
+  problem split over radial segments: the substructured degree solves and
+  their distributed form, the transforms cut with depth, the balance of
+  the cuts and the communication, and the step, adjoint and `sl3d` over
+  MPI ranks.
 - [docs/conventions.md](docs/conventions.md): units, signs, harmonic
   conventions and code style.
 

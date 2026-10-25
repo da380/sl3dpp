@@ -24,13 +24,16 @@ run() {  # run <command> <config>
 run love-numbers love_numbers.json
 run fingerprint fingerprint.json
 run evolve1d evolve1d.json
+run evolve1d evolve1d_calibrated.json
 run evolve evolve.json
+run evolve evolve_calibrated.json
 run kernel1d kernel1d.json
 run kernel kernel.json
 
 if [[ -f ../ice7g.nc ]]; then
   run fingerprint fingerprint_ice7g.json
   run evolve1d evolve1d_ice7g.json
+  run evolve1d evolve1d_ice7g_calibrated.json
 else
   echo "run_all.sh: no ../ice7g.nc, so the ICE-7G configs are skipped" \
        "(python get_ice7g.py in build/examples writes it)"

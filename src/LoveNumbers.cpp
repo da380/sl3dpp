@@ -99,6 +99,8 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   out.radius = material.Radius() * scales.Length();
   out.surface_gravity =
       material.SurfaceGravity() * scales.Factor(AccelerationDimensions);
+  out.gravitational_constant =
+      material.G() * scales.Factor(GravitationalConstantDimensions);
 
   const auto hLoad = scales.Factor(kHPerLoad);
   const auto kLoad = scales.Factor(kKPerLoad);
@@ -194,6 +196,27 @@ LoveNumbers LoveNumbers::ConvertedTo(const Scales& scales) const {
   out.m_c /= scales.Factor(kMomentPerPotential);
   out.radius /= scales.Length();
   out.surface_gravity /= scales.Factor(AccelerationDimensions);
+  out.gravitational_constant /= scales.Factor(GravitationalConstantDimensions);
+  return out;
+}
+
+ConventionalLoveNumbers LoveNumbers::Conventional() const {
+  constexpr auto kNaN = std::numeric_limits<double>::quiet_NaN();
+  const auto fourPiGa =
+      4.0 * std::numbers::pi * gravitational_constant * radius;
+  const auto g = surface_gravity;
+  auto out = ConventionalLoveNumbers{};
+  out.degrees = degrees;
+  for (auto i = std::size_t{0}; i < degrees.size(); ++i) {
+    const auto l = degrees[i];
+    const auto f = (2.0 * l + 1.0) / fourPiGa;
+    out.h_load.push_back(f * g * (h_u[i] + h_phi[i]));
+    out.l_load.push_back(f * g * (l_u[i] + l_phi[i]));
+    out.k_load.push_back(-f * (k_u[i] + k_phi[i]) - 1.0);
+    out.h_tide.push_back(l >= 2 ? -g * h_t[i] : kNaN);
+    out.l_tide.push_back(l >= 2 ? -g * l_t[i] : kNaN);
+    out.k_tide.push_back(l >= 2 ? k_t[i] : kNaN);
+  }
   return out;
 }
 

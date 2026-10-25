@@ -23,9 +23,6 @@ namespace sl3dpp::app {
 
 namespace {
 
-/// Seconds in a kiloyear of Julian years, as pyslfp counts them.
-constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
-
 IceChange ReadChange(const Json& change) {
   Allow(change, {"type", "latitude", "longitude", "width_deg", "fraction",
                  "thickness_m"});

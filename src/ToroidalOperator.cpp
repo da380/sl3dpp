@@ -6,6 +6,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/detail/BandSolvers.hpp"
+#include "sl3dpp/detail/BandSubstructure.hpp"
 
 // Banded Cholesky: the toroidal blocks are SPD at l >= 2, and at l = 1 once
 // one dof per solid region is pinned.
@@ -25,7 +26,7 @@ ToroidalOperator::ToroidalOperator(const Material& material, int l,
   kd_ = mesh.NGll() - 1;
   BuildDofMap();
   Assemble(options.point_shear);
-  Factorise();
+  Factorise(options);
 }
 
 void ToroidalOperator::BuildDofMap() {
@@ -145,7 +146,49 @@ void ToroidalOperator::Assemble(const PointShear* pointShear) {
   }
 }
 
-void ToroidalOperator::Factorise() {
+std::pair<std::vector<std::pair<int, int>>, int> ToroidalOperator::Separators(
+    std::span<const int> cuts) const {
+  const auto& mesh = material_->Mesh();
+  auto out = std::vector<std::pair<int, int>>{};
+  auto dropped = 0;
+  auto previous = 0;
+  for (const auto cut : cuts) {
+    if (cut <= previous || cut >= mesh.ElementCount()) {
+      throw std::invalid_argument(std::format(
+          "the radial cuts must be increasing elements inside the mesh "
+          "(1 to {}); got {}",
+          mesh.ElementCount() - 1, cut));
+    }
+    previous = cut;
+    if (cut <= firstElement_) {
+      ++dropped;
+      continue;
+    }
+    // A fluid cut node has no dof: an empty separator at the first dof
+    // above it keeps one segment per cut (the two sides do not couple).
+    const auto node = mesh.GlobalIndex(cut, 0);
+    if (const auto d = Dof(node); d >= 0) {
+      out.emplace_back(d, d + 1);
+      continue;
+    }
+    auto above = ndof_;
+    for (auto gn = node + 1; gn < mesh.NodeCount(); ++gn) {
+      if (Dof(gn) >= 0) {
+        above = Dof(gn);
+        break;
+      }
+    }
+    out.emplace_back(above, above);
+  }
+  return {out, dropped};
+}
+
+int ToroidalOperator::SegmentCount() const {
+  return substructure_ ? substructure_->SegmentCount() : 1;
+}
+
+void ToroidalOperator::Factorise(const Options& options) {
+  auto [separators, dropped] = Separators(options.cuts);
   const auto n = ndof_;
   const auto ldab = kd_ + 1;
   scale_.resize(n);
@@ -173,6 +216,21 @@ void ToroidalOperator::Factorise() {
           i == k ? 1.0 : 0.0;
     }
   }
+  if (!separators.empty()) {
+    auto owned = std::vector<int>{};
+    for (const auto p : options.segments) {
+      if (p >= dropped) owned.push_back(p - dropped);
+    }
+    try {
+      substructure_ = std::make_shared<const detail::BandSubstructure>(
+          factor_, n, kd_, std::move(separators), owned, options.combine);
+    } catch (const std::runtime_error& error) {
+      throw std::runtime_error(
+          std::format("toroidal degree {}: {}", l_, error.what()));
+    }
+    factor_.clear();
+    return;
+  }
   const auto info = detail::BandCholeskyFactor(factor_, n, kd_);
   if (info != 0) {
     throw std::runtime_error(std::format(
@@ -180,27 +238,61 @@ void ToroidalOperator::Factorise() {
   }
 }
 
-std::vector<double> ToroidalOperator::Solve(std::span<const double> b,
-                                            int nrhs) const {
+std::vector<double> ToroidalOperator::Solve(std::span<const double> b, int nrhs,
+                                            RightHandSide rhs) const {
+  auto pending = BeginSolve(b, nrhs, rhs);
+  if (substructure_) substructure_->Sum(pending.separators);
+  return FinishSolve(std::move(pending));
+}
+
+PendingSolve ToroidalOperator::BeginSolve(std::span<const double> b, int nrhs,
+                                          RightHandSide rhs) const {
   const auto n = ndof_;
   if (static_cast<int>(b.size()) != n * nrhs) {
     throw std::invalid_argument(std::format(
         "expected {} x {} right-hand-side values, got {}", n, nrhs, b.size()));
   }
-  auto x = std::vector<double>(b.begin(), b.end());
+  auto pending = PendingSolve{};
+  pending.nrhs = nrhs;
+  auto& x = pending.values;
+  x.assign(b.begin(), b.end());
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j) {
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
     }
     for (const auto p : pinned_) x[static_cast<std::size_t>(k) * n + p] = 0.0;
   }
-  detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
-  for (auto k = 0; k < nrhs; ++k) {
+  if (substructure_) {
+    substructure_->Condense(x, nrhs, rhs, pending.separators,
+                            pending.interiors);
+  } else {
+    detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
+  }
+  return pending;
+}
+
+std::vector<double> ToroidalOperator::FinishSolve(
+    PendingSolve&& pending) const {
+  const auto n = ndof_;
+  auto x = std::move(pending.values);
+  if (substructure_) {
+    substructure_->Complete(x, pending.nrhs, pending.separators,
+                            pending.interiors);
+  }
+  for (auto k = 0; k < pending.nrhs; ++k) {
     for (auto j = 0; j < n; ++j) {
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
     }
   }
   return x;
+}
+
+bool ToroidalOperator::Holds(int dof) const {
+  return !substructure_ || substructure_->Holds(dof);
+}
+
+void ToroidalOperator::MaskToShare(std::span<double> x, int nrhs) const {
+  if (substructure_) substructure_->MaskToShare(x, nrhs);
 }
 
 std::vector<double> ToroidalOperator::Apply(std::span<const double> x,

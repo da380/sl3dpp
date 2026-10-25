@@ -14,7 +14,10 @@
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
 #include <stdexcept>
+#include <string>
 #include <vector>
+
+#include <unistd.h>
 
 #include "sl3dpp/SurfaceGrid.hpp"
 
@@ -65,9 +68,11 @@ std::filesystem::path WriteFile(const std::filesystem::path& path) {
 class FieldHistoryTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
+    // One file per process: ctest runs each test in a process of its own,
+    // and a shared name let one test's teardown delete another's file.
     path_ = new std::filesystem::path(
         std::filesystem::temp_directory_path() /
-        "sl3dpp_test_field_history.nc");
+        ("sl3dpp_test_field_history_" + std::to_string(::getpid()) + ".nc"));
     WriteFile(*path_);
   }
   static void TearDownTestSuite() {

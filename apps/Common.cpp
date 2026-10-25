@@ -1,5 +1,6 @@
 #include "Common.hpp"
 
+#include <cmath>
 #include <format>
 #include <planetmodel/json.hpp>
 #include <utility>
@@ -11,9 +12,13 @@
 namespace sl3dpp::app {
 
 std::vector<std::string_view> RunMemberNames() {
-  return {"model",  "model_format", "lmax",    "viscosity", "state",
-          "ice_history", "times",   "scheme",  "rotation",  "moments",
-          "rtol",   "coupled"};
+  return {"model",      "model_format",
+          "lmax",       "viscosity",
+          "state",      "ice_history",
+          "times",      "scheme",
+          "rotation",   "moments",
+          "rtol",       "coupled",
+          "shorelines", "calibrate_initial_sea_level"};
 }
 
 void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
@@ -69,11 +74,45 @@ void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
                                          {"hydrostatic", true}});
   }
   out.rtol = Number(top, "rtol", 1e-9);
+  if (Has(top, "shorelines")) {
+    out.shorelines = Choice<Shorelines>(
+        top.At("shorelines"),
+        {{"frozen", Shorelines::Frozen}, {"migrating", Shorelines::Migrating}});
+  }
+  if (Has(top, "calibrate_initial_sea_level")) {
+    const auto& calibration = top.At("calibrate_initial_sea_level");
+    Allow(calibration, {"method", "iterations", "rtol"});
+    out.calibrate = true;
+    if (Has(calibration, "method")) {
+      out.calibration_method = Choice<CalibrationMethod>(
+          calibration.At("method"),
+          {{"fixed_point", CalibrationMethod::FixedPoint},
+           {"gradient", CalibrationMethod::Gradient}});
+    }
+    out.calibration_iterations = Integer(calibration, "iterations", 10);
+    if (out.calibration_iterations < 1) {
+      Fail(calibration.At("iterations"), "is fewer than one run");
+    }
+    out.calibration_rtol = Number(calibration, "rtol", 1e-4);
+    if (!(out.calibration_rtol > 0.0)) {
+      Fail(calibration.At("rtol"), "is not a positive tolerance");
+    }
+  }
   if (Has(top, "coupled")) {
     const auto& coupled = top.At("coupled");
-    Allow(coupled, {"rtol", "max_iterations"});
+    Allow(coupled, {"rtol", "max_iterations", "transform_degrees"});
     out.coupled_rtol = Number(coupled, "rtol", 1e-9);
     out.max_coupled_iterations = Integer(coupled, "max_iterations", 60);
+    if (Has(coupled, "transform_degrees")) {
+      for (const auto& item : coupled.At("transform_degrees").AsArray()) {
+        const auto value = item.AsNumber();
+        if (value != std::floor(value) || value < 2 || value > out.lmax) {
+          Fail(item,
+               std::format("is not a degree in [2, lmax = {}]", out.lmax));
+        }
+        out.transform_degrees.push_back(static_cast<int>(value));
+      }
+    }
   }
 }
 
@@ -136,6 +175,39 @@ Loaded LoadWorld(const EvolveInput& input, const Json& top,
           std::move(background)};
 }
 
+std::vector<double> FinalSeaLevelOf(const EvolveInput& input, const Json& top,
+                                    const SeaLevelSolver& solver,
+                                    const Loaded& world) {
+  const auto end_si = -input.end_kyr_bp * KYR;
+  // The file's end values are held beyond its span, which would make a
+  // file ending before the window's end a target silently: refused.
+  if (const auto span = world.state.Span(); span.has_value()) {
+    const auto slack = 1e-9 * KYR;
+    if (end_si < span->first - slack || end_si > span->second + slack) {
+      Fail(top.At("state").At("file"),
+           std::format("spans {:g} to {:g} kyr BP, which leaves out the "
+                       "window's end ({:g} kyr BP), the calibration's target",
+                       -span->first / KYR, -span->second / KYR,
+                       input.end_kyr_bp));
+    }
+  }
+  auto ice = std::vector<double>{};
+  auto topography = std::vector<double>{};
+  try {
+    ice = world.state.Values("ice_thickness", end_si);
+    topography = world.state.Values("topography", end_si);
+  } catch (const std::runtime_error& error) {
+    Fail(top.At("state").At("file"),
+         std::format("gives no sea level at the window's end, which the "
+                     "calibration needs: {}",
+                     error.what()));
+  }
+  auto sea = SeaLevelFromTopography(topography, ice, solver.Parameters());
+  const auto length = solver.SolverScales().Length();
+  for (auto& v : sea) v /= length;
+  return sea;
+}
+
 std::vector<double> MakeTimes(const EvolveInput& input, const Scales& scales) {
   auto times = std::vector<double>{};
   const auto span_s = (input.start_kyr_bp - input.end_kyr_bp) * KYR;
@@ -166,6 +238,127 @@ std::function<std::vector<double>(double)> IceLoadOf(
     }
     return load;
   };
+}
+
+std::function<std::vector<double>(double)> IceThicknessOf(
+    const EvolveInput& input, const SeaLevelSolver& solver,
+    const Loaded& world) {
+  const auto& scales = solver.SolverScales();
+  const auto length = scales.Length();
+  const auto time = scales.Time();
+  const auto start_si = -input.start_kyr_bp * KYR;
+  // the background's ice plus the history's change from world.ice0, the
+  // start's ice the frozen load is measured from (IceLoadOf), so a history
+  // that disagrees with the state at the start is refused by the migrating
+  // run rather than measured from another baseline
+  return [&world, length, time, start_si](double t) {
+    auto thickness = world.ice.Values("ice_thickness", start_si + t * time);
+    const auto& background = world.background.iceThickness;
+    for (auto i = std::size_t{0}; i < thickness.size(); ++i) {
+      thickness[i] = background[i] + (thickness[i] - world.ice0[i]) / length;
+    }
+    return thickness;
+  };
+}
+
+IceHistory HistoryOf(const EvolveInput& input, const SeaLevelSolver& solver,
+                     const Loaded& world) {
+  return input.shorelines == Shorelines::Frozen
+             ? IceHistory::Frozen(IceLoadOf(input, solver, world))
+             : IceHistory::Migrating(IceThicknessOf(input, solver, world));
+}
+
+namespace {
+
+CalibrationOptions CalibrationOptionsOf(const EvolveInput& input) {
+  auto options = CalibrationOptions{};
+  options.method = input.calibration_method;
+  options.iterations = input.calibration_iterations;
+  options.rtol = input.calibration_rtol;
+  options.adjoint.rtol = input.rtol;
+  options.adjoint3D.rtol = input.rtol;
+  options.adjoint3D.coupled_rtol = input.coupled_rtol;
+  options.adjoint3D.max_coupled_iterations = input.max_coupled_iterations;
+  return options;
+}
+
+template <class Calibration>
+CalibrationSummary Adopt(const EvolveInput& input, const Json& top,
+                         const SeaLevelSolver& solver, Loaded& world,
+                         Calibration calibration) {
+  for (const auto& snapshot : calibration.snapshots) {
+    if (!snapshot.converged) {
+      throw std::runtime_error(std::format(
+          "the calibration's last run did not converge at t = {} (its sea "
+          "level solve, or in 3D its coupled fixed point); loosen rtol or "
+          "coupled.rtol",
+          snapshot.t));
+    }
+  }
+  if (!calibration.converged) {
+    Fail(top.At("calibrate_initial_sea_level"),
+         std::format("did not converge in {} runs (relative update {:.3g}, "
+                     "tolerance {:.3g}); raise its iterations",
+                     calibration.updates.size(), calibration.updates.back(),
+                     input.calibration_rtol));
+  }
+  world.background = std::move(calibration.state);
+  const auto length = solver.SolverScales().Length();
+  // one run under frozen shorelines, one per update when migrating
+  return {calibration.misfits.front() * length,
+          calibration.misfits.back() * length, calibration.updates.size()};
+}
+
+}  // namespace
+
+void StartFromIceHistory(const EvolveInput& input, const SeaLevelSolver& solver,
+                         Loaded& world, std::span<const double> seaLevelGuess) {
+  const auto length = solver.SolverScales().Length();
+  world.ice0 = world.ice.Values("ice_thickness", -input.start_kyr_bp * KYR);
+  auto ice = world.ice0;
+  for (auto& v : ice) v /= length;
+  world.background = solver.MakeState(
+      std::move(ice),
+      std::vector<double>(seaLevelGuess.begin(), seaLevelGuess.end()));
+}
+
+namespace {
+
+/// The calibration's start, pyslfp's construction: the ice history's ice
+/// at the window's start under the target sea level, as the guess.
+std::vector<double> PrepareCalibration(const EvolveInput& input,
+                                       const Json& top,
+                                       const SeaLevelSolver& solver,
+                                       Loaded& world) {
+  auto target = FinalSeaLevelOf(input, top, solver, world);
+  StartFromIceHistory(input, solver, world, target);
+  return target;
+}
+
+}  // namespace
+
+CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+                                  const SeaLevelSolver& solver, Loaded& world,
+                                  SeaLevelEvolution& evolution,
+                                  std::span<const double> times) {
+  const auto target = PrepareCalibration(input, top, solver, world);
+  evolution.SetBackgroundState(world.background);
+  return Adopt(input, top, solver, world,
+               CalibrateInitialSeaLevel(evolution, times,
+                                        HistoryOf(input, solver, world), target,
+                                        CalibrationOptionsOf(input)));
+}
+
+CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+                                  const SeaLevelSolver& solver, Loaded& world,
+                                  SeaLevelEvolution3D& evolution,
+                                  std::span<const double> times) {
+  const auto target = PrepareCalibration(input, top, solver, world);
+  evolution.SetBackgroundState(world.background);
+  return Adopt(input, top, solver, world,
+               CalibrateInitialSeaLevel(evolution, times,
+                                        HistoryOf(input, solver, world), target,
+                                        CalibrationOptionsOf(input)));
 }
 
 }  // namespace sl3dpp::app

@@ -37,6 +37,24 @@
 
 namespace sl3dpp {
 
+/// The conventional dimensionless Love numbers by degree, from the
+/// generalised ones (LoveNumbers::Conventional): Farrell's (1972) load
+/// numbers, referred to the load's own potential with the geodetic sign
+/// (h' < 0 for a downward response to added mass),
+///
+///   h' = (2l + 1) g / (4 pi G a) h,   l' likewise,
+///   k' = -(2l + 1) / (4 pi G a) k - 1,
+///
+/// with h = h_u + h_phi and so on, and the tidal numbers referred to the
+/// external potential, h = -g h_t, l = -g l_t, k = k_t. The tidal numbers
+/// are NaN below degree 2, where they vanish by construction. Degree 1 is
+/// in the centre-of-mass frame of the generalised numbers.
+struct ConventionalLoveNumbers {
+  std::vector<int> degrees;
+  std::vector<double> h_load, l_load, k_load;
+  std::vector<double> h_tide, l_tide, k_tide;
+};
+
 struct LoveNumbers {
   std::vector<int> degrees;
 
@@ -52,6 +70,9 @@ struct LoveNumbers {
 
   double radius = 0;           ///< the surface radius, m
   double surface_gravity = 0;  ///< g there, m s^-2
+  /// G, m^3 kg^-1 s^-2 (in the table's own scheme after ConvertedTo), so
+  /// that the table alone gives the conventional numbers.
+  double gravitational_constant = GravitationalConstantSI;
 
   /// The worst relative violation of the reciprocity identities across
   /// the degrees (and the axial pair), a structural check of the
@@ -62,6 +83,10 @@ struct LoveNumbers {
   /// under the given scales: what an internal, non-dimensional component
   /// (the sea level solver) works with. The table itself stays SI.
   [[nodiscard]] LoveNumbers ConvertedTo(const Scales& scales) const;
+
+  /// The conventional dimensionless numbers (ConventionalLoveNumbers), in
+  /// any scheme the table is stated in.
+  [[nodiscard]] ConventionalLoveNumbers Conventional() const;
 
   /// A table from a fixture-style file as
   /// `scripts/make_love_number_fixtures.py` writes one (SI): the `radius`,

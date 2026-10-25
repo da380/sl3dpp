@@ -18,8 +18,10 @@
  *
  * Layout: one part per contiguous run of viscous elements, its edges
  * the mesh's own (RadialMesh::Left/Right), its nodes the GLL points of
- * each element, written on the coupling's grid with the BILINEAR
- * lateral rule (a peaked field; the bicubic rings). The file
+ * each element, written on the coupling's lmax grid with the BILINEAR
+ * lateral rule (a peaked field; the bicubic rings). With the transforms
+ * cut with depth, a deeper block's nodes are carried to that grid first
+ * (GridCoupling::OnSurfaceGrid: its own degrees, zero padded). The file
  * stores one value per node with a shared element-edge radius held
  * once per side, so the field is piecewise: with GLL memory points the
  * file's nodes are the memory nodes and the values pass as they are;
@@ -52,7 +54,8 @@ struct KernelField {
   std::string name;
   std::string meaning;
   Dimensions objective = {};
-  /// The Kernels3D layout, [node * Grid().FieldSize() + x],
+  /// The Kernels3D layout, [FieldOffset(node) + x] (each node on its
+  /// block's grid, carried to the lmax grid for the file),
   /// non-dimensional under the model's scales.
   std::span<const double> values;
 };
@@ -70,6 +73,15 @@ struct KernelFileOptions {
 [[nodiscard]] std::expected<void, IoError> WriteKernels(
     const std::filesystem::path& path, const Viscoelastic3D& op,
     const EarthModel& model, const std::vector<KernelField>& kernels,
+    const KernelFileOptions& options = {});
+
+/// The same over a coupling and its rheology's mesh rather than an
+/// operator's: a whole-mesh coupling, say, on the rank that writes a
+/// radially distributed run's kernels gathered from every rank.
+[[nodiscard]] std::expected<void, IoError> WriteKernels(
+    const std::filesystem::path& path, const GridCoupling& coupling,
+    const RadialMesh& mesh, const EarthModel& model,
+    const std::vector<KernelField>& kernels,
     const KernelFileOptions& options = {});
 
 }  // namespace sl3dpp::io

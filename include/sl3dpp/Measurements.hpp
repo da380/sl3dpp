@@ -100,7 +100,10 @@ enum class AngularVelocityComponent { X = 0, Y = 1, Z = 2 };
 /// The uncertainties the decay-time estimator is built with. Both are
 /// required: only their ratio shapes the fit and the weights, and there
 /// is no default that survives a change of units. A zero
-/// `time_uncertainty` pins the model times to the nominal ones.
+/// `time_uncertainty` pins the model times to the nominal ones. Each is in
+/// the unit of what it qualifies, and the fit refuses a time uncertainty
+/// not smaller than the window's span, or a value uncertainty not smaller
+/// than the series' range: the marks of an uncertainty in the wrong unit.
 struct DecayTimeOptions {
   double time_uncertainty = 0.0;  ///< one-sigma timing error, >= 0
   double value_uncertainty = 0.0; ///< one-sigma series error, > 0
@@ -126,7 +129,8 @@ struct DecayTimeFit {
 /// with its sensitivity to the values. `times` must increase, with at
 /// least four entries, measured from any origin in the unit the decay
 /// time is wanted in. Refused (std::invalid_argument) when the inputs
-/// are malformed or the window constrains no decay, and
+/// are malformed, an uncertainty is out of scale (DecayTimeOptions) or
+/// the window constrains no decay, and
 /// (std::runtime_error) when the fit does not reach stationarity.
 [[nodiscard]] DecayTimeFit FitDecayTime(std::span<const double> times,
                                         std::span<const double> values,

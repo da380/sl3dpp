@@ -16,8 +16,10 @@
 #include <limits>
 #include <map>
 #include <thread>
+#include <utility>
 #include <vector>
 
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Material.hpp"
@@ -190,6 +192,37 @@ TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   }
 }
 
+TEST(Lateral, KernelDensitiesUndoTheRadialQuadrature) {
+  // VolumeDensity and RadialDensity of a Kernels3D-layout field: the
+  // per-volume values times each node's radial weight and r^2 give the
+  // field back, and the radial density times the weight is the angular
+  // integral, so an angle-uniform delta pairs as sum w k delta.
+  const auto body = Body::Make();
+  Viscoelastic3D op(body.rheology, kLmax,
+                    [](double, double, double) { return 0.0; });
+  const auto& coupling = op.Coupling();
+  const auto fieldSize = coupling.Grid().FieldSize();
+  auto kernel = std::vector<double>(
+      static_cast<std::size_t>(coupling.NodeCount()) * fieldSize);
+  for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] = Noise(i);
+  const auto volume = VolumeDensity(coupling, kernel);
+  const auto radial = RadialDensity(coupling, kernel);
+  ASSERT_EQ(radial.size(), static_cast<std::size_t>(coupling.NodeCount()));
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto r = coupling.RadiusOfNode(node);
+    const auto w = coupling.WeightOfNode(node);
+    const auto at = static_cast<std::size_t>(node) * fieldSize;
+    for (auto x = std::size_t{0}; x < fieldSize; ++x) {
+      EXPECT_NEAR(volume[at + x] * w * r * r, kernel[at + x], 1e-13);
+    }
+    const auto slice = std::span(kernel).subspan(at, fieldSize);
+    EXPECT_NEAR(radial[node] * w, coupling.Grid().Integrate(slice), 1e-13);
+  }
+  EXPECT_THROW(static_cast<void>(VolumeDensity(
+                   coupling, std::span(kernel).first(kernel.size() - 1))),
+               std::invalid_argument);
+}
+
 TEST(Lateral, LateralViscosityCouplesAndConverges) {
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
@@ -338,6 +371,50 @@ TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
   ASSERT_TRUE(copied.strain.has_value() && moved.strain.has_value());
   EXPECT_TRUE(same(*copied.strain, *moved.strain));
   EXPECT_EQ(copied.t, moved.t);
+}
+
+TEST(Lateral, RecycledArraysGiveBitwiseTheFreshSteps) {
+  // StartStep reuses the arrays of recycled states and closed steps, which
+  // hold the last step's values: every array is written before it is read,
+  // so a run recycling every replaced state is bitwise the run that
+  // allocates afresh (and one with a state of another shape recycled is
+  // unaffected).
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto delta = [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto run = [&](bool recycle) {
+    const auto op = Viscoelastic3D(body.rheology, kLmax, delta);
+    auto state = op.ZeroState();
+    if (recycle) {
+      auto odd = Viscoelastic3D::State{};
+      odd.m.resize(1);
+      odd.m[0].r.assign(7, 1.0);
+      op.Recycle(std::move(odd));
+    }
+    for (auto n = 0; n < 4; ++n) {
+      auto next = op.Step(state, tau, Scheme::ExponentialTrapezoid, load).state;
+      if (recycle) {
+        op.Recycle(std::exchange(state, std::move(next)));
+      } else {
+        state = std::move(next);
+      }
+    }
+    op.ReleaseScratch();
+    return state;
+  };
+  const auto fresh = run(false);
+  const auto recycled = run(true);
+  ASSERT_EQ(fresh.m.size(), recycled.m.size());
+  for (auto k = std::size_t{0}; k < fresh.m.size(); ++k) {
+    EXPECT_EQ(fresh.m[k].c[0], recycled.m[k].c[0]) << "branch " << k;
+    EXPECT_EQ(fresh.m[k].c[1], recycled.m[k].c[1]) << "branch " << k;
+    EXPECT_EQ(fresh.m[k].r, recycled.m[k].r) << "branch " << k;
+  }
+  ASSERT_TRUE(fresh.strain.has_value() && recycled.strain.has_value());
+  EXPECT_EQ(fresh.strain->r, recycled.strain->r);
 }
 
 TEST(Lateral, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {

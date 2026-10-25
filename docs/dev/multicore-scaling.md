@@ -3,7 +3,8 @@
 *Written 24 October 2026 against commit faea9f5 (main). The first runs of
 sl3dpp on a large shared-memory node, what they show, and the plans that
 follow. Nothing here is implemented beyond §1; the plans are for later
-work, each to be measured before and after with the sweeps below.*
+work, each to be measured before and after with the sweeps below. §6 adds
+the work of 25 October: plan 1 built, plan 3's node blocks measured.*
 
 ## 1. The machines, and the OpenBLAS crash (fixed)
 
@@ -181,3 +182,64 @@ sweep (and §4's split) before and after, and the results added here.
 Advice that already follows, in README *Running*: one thread per physical
 core, pinned, one NUMA node per run, and one job per NUMA node with
 `numactl` to use a whole node.
+
+## 6. 25 October: plan 1 built, plan 3's node blocks measured
+
+Laptop, Release, `step_timing tests/data/prem.simp.vm1 <lmax> <steps>`,
+8 threads with `OMP_PLACES=cores OMP_PROC_BIND=close`.
+
+**Plan 1, reuse of the step's arrays, is built.** `Viscoelastic3D` keeps
+one step's worth of grid-sized arrays: a closed step hands back its
+weights (`~OpenStep`), `Recycle(State&&)` hands back the tensors of a state
+the caller is done with, and `StartStep` takes from these before it
+allocates, writing every array before reading it (the first branch assigns
+where the others add, `0.0 + v` as the accumulation onto zeros gave). The
+3D evolution and the continuous 3D adjoint recycle each state a step
+replaces and release the arrays at the end of a run; `step_timing`
+recycles like the evolution. The one-thread state is bitwise the old
+(fingerprint `36dbd27521e4fddf` at lmax 32, three steps, before and after),
+and `Lateral.RecycledArraysGiveBitwiseTheFreshSteps` holds a recycling run
+to the allocating one.
+
+| lmax | startStep before → after | whole steps before → after |
+|---|---|---|
+| 64 (3 steps) | 1.14 → 0.77 s | 17.1 → 15.7 s |
+| 96 (2 steps) | 3.69 → 2.71 s | 37.5 → 36.8 s |
+
+What `StartStep` has left is mostly its two analyses (about 1 s each at
+lmax 96): its allocation remainder was ~1 s there and is now the decayed
+memory and weights loop. On the server the remainder was 1.5–1.7 s of a
+~20 s step at lmax 128, so expect a few per cent there. Peak RSS is
+unchanged (the arrays the old code freed and reallocated are the ones kept).
+
+**Plan 2 (first touch) is not built.** With plan 1 the fresh pages are
+faulted once per run, not per step; placing them by socket still needs
+`TensorField`'s vectors to skip value-initialisation (a type change through
+the coupling), and matters only for runs spanning sockets — which §3 says
+to avoid, and which radial substructuring (below) would replace.
+
+**Plan 3: node blocks lose.** Threading the tensor transforms over blocks
+of radial nodes (each block one sequential GSHTrans call, GSHTrans's
+workspaces being `thread_local`) instead of GSHTrans's colatitude rows was
+built and measured at lmax 64: analyse 0.346 s against 0.238 s with rows,
+synthesise 0.317 against 0.215, the pass 0.98 against 0.75 s. With the
+Wigner values stored, each thread of a node block streams the whole table
+(about 16 MB here, this chip's entire L3; ~128 MB at lmax 128), where rows
+give each thread its own colatitudes' slice. It was removed again. Two
+consequences: a "rows inside, groups of nodes per socket" hybrid cannot be
+built inside one process, because GSHTrans keeps one level of threading
+(`Execution::TeamSize`: no threads inside an active parallel region); and
+the natural way to give each socket its own nodes and its own copy of the
+table is a process per socket — see
+[radial-substructuring.md](radial-substructuring.md). Within a socket the
+open question stays GSHTrans's (its `docs/open-issues.md` §4): the forward
+transform's per-thread accumulators, where a decomposition over orders m
+would write disjoint coefficients and read only its own orders' Wigner
+values.
+
+**Plan 5: thread counts.** On the laptop the 3D example (`evolve.json`,
+lmax 16) takes 9.5 s on one thread, 4.9 s on 4, 4.3 s on 8 and 5.9 s on 16
+(two threads per core): the loss past the physical cores is the shared
+core, which a cap by work size would not remove. The README's advice (one
+thread per physical core, pinned) is the remedy; no cap was built.
+

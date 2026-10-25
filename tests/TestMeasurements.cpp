@@ -6,10 +6,9 @@
 // differences, times pinned and free), and windows without a decay are
 // refused.
 
-#include "sl3dpp/Measurements.hpp"
-
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <fstream>
 #include <numbers>
@@ -18,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "sl3dpp/Measurements.hpp"
 #include "sl3dpp/ShConventions.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 
@@ -162,6 +162,35 @@ TEST(DecayTime, RefusesWindowsWithoutADecay) {
                    std::vector<double>{3.0, 2.0, 1.0},
                    {.time_uncertainty = 0.0, .value_uncertainty = 0.5})),
                std::invalid_argument);
+}
+
+TEST(DecayTime, RefusesUncertaintiesOutOfScale) {
+  // Only the ratio of the uncertainties shapes the fit, so one in the wrong
+  // unit (years for kiloyears, metres for a non-dimensional series) is
+  // refused where it leaves the fit meaningless, naming the likely slip.
+  const auto t = Window(8, 3.0);
+  const auto y = Series(t, 40.0, 1.7, -3.0);
+  const auto span = t.back() - t.front();
+  auto [low, high] = std::ranges::minmax(y);
+  auto refused = [&](DecayTimeOptions options, const std::string& unit) {
+    try {
+      static_cast<void>(FitDecayTime(t, y, options));
+      ADD_FAILURE() << "accepted " << options.time_uncertainty << ", "
+                    << options.value_uncertainty;
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string{error.what()}.find(unit), std::string::npos)
+          << error.what();
+    }
+  };
+  refused({.time_uncertainty = 1000.0 * span / 8.0, .value_uncertainty = 0.5},
+          "times' unit");
+  refused({.time_uncertainty = 0.0, .value_uncertainty = 2.0 * (high - low)},
+          "values' unit");
+  // just inside both bounds the fit runs
+  EXPECT_NO_THROW(static_cast<void>(
+      FitDecayTime(t, y,
+                   {.time_uncertainty = 0.01 * span,
+                    .value_uncertainty = 0.01 * (high - low)})));
 }
 
 TEST(DecayTime, MatchesPyslfpOnTheFixture) {

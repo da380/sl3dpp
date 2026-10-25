@@ -216,7 +216,8 @@ SeaLevelSolver::State SeaLevelSolver::MakeState(
     std::vector<double> iceThickness, std::vector<double> seaLevel,
     std::span<const char> forcedLand) const {
   if (iceThickness.size() != grid_.FieldSize() ||
-      seaLevel.size() != grid_.FieldSize()) {
+      seaLevel.size() != grid_.FieldSize() ||
+      (!forcedLand.empty() && forcedLand.size() != grid_.FieldSize())) {
     throw std::invalid_argument("state fields must live on the grid");
   }
   State state;
@@ -230,6 +231,7 @@ SeaLevelSolver::State SeaLevelSolver::MakeState(
   state.iceThickness = std::move(iceThickness);
   state.seaLevel = std::move(seaLevel);
   state.oceanArea = IntegrateSurface(state.oceanFunction);
+  state.forcedLand.assign(forcedLand.begin(), forcedLand.end());
   return state;
 }
 
@@ -861,9 +863,11 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       newSlc[i] = slcLocal[i] + eustaticShift;
       newBathy[i] = rawBathy[i] + eustaticShift;
-      newOcean[i] = waterDensity_ * newBathy[i] - iceDensity_ * newIce[i] > 0.0
-                        ? 1.0
-                        : 0.0;
+      const auto land = !state.forcedLand.empty() && state.forcedLand[i] != 0;
+      newOcean[i] =
+          !land && waterDensity_ * newBathy[i] - iceDensity_ * newIce[i] > 0.0
+              ? 1.0
+              : 0.0;
     }
 
     const auto maxSlc = MaxAbs(slcData);
@@ -913,6 +917,7 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
   out.finalState.seaLevel = std::move(currentBathy);
   out.finalState.oceanFunction = std::move(currentOcean);
   out.finalState.oceanArea = IntegrateSurface(out.finalState.oceanFunction);
+  out.finalState.forcedLand = state.forcedLand;
   out.response.seaLevelChange = std::move(slcData);
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);

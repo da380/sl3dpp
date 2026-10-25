@@ -32,7 +32,11 @@
  * The system is symmetric, stored as an upper band, scaled symmetrically
  * by its diagonal and factorised on construction: banded Cholesky, falling
  * back to banded LU (the fluid limit's semi-definite elastic block, say).
- * Solves take one or several right-hand sides.
+ * Solves take one or several right-hand sides. With radial cuts the same
+ * system is solved by substructuring (detail/BandSubstructure.hpp): each
+ * segment of the mesh between cuts eliminates its interior on its own, and
+ * the cut nodes' dofs solve together, the algebra of a solve distributed
+ * over radial segments (docs/dev/radial-substructuring.md).
  *
  * With `gravitating = false` the same discretisation solves the
  * non-gravitating problem of the cross-code benchmark hierarchy: the
@@ -44,15 +48,23 @@
  * `DegreeSystem(..., gravitating=False)` exactly.
  */
 
+#include <functional>
+#include <memory>
 #include <span>
 #include <string>
+#include <utility>
 #include <vector>
 
+#include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 
 namespace sl3dpp {
+
+namespace detail {
+class BandSubstructure;
+}
 
 /// The three solution components at a node.
 enum class Component { U = 0, V = 1, Phi = 2 };
@@ -76,6 +88,21 @@ class DegreeOperator {
     /// false drops the gravity and potential terms and the phi dofs: the
     /// non-gravitating problem, on a solid model, l != 1 (see above).
     bool gravitating = true;
+    /// Radial cuts: elements (increasing, each inside the mesh) at whose
+    /// bottom node the mesh is cut into segments, the system then solved
+    /// by substructuring with the cut nodes' dofs as the separators. The
+    /// solution is the direct solve's to rounding. Cuts at or below the
+    /// degree's first element are ignored; empty, the direct solve.
+    std::vector<int> cuts{};
+    /// Distributed (with `combine`): the segments of the cut mesh this
+    /// process solves, numbered from the bottom of the whole mesh (segment
+    /// p lies between cuts p - 1 and p); every segment must belong to
+    /// exactly one process. `combine` sums a vector over the processes in
+    /// place (an MPI all-reduce: the library calls no MPI itself), which
+    /// makes construction and Solve collective. Empty, one process solves
+    /// every segment.
+    std::vector<int> segments{};
+    std::function<void(std::span<double>)> combine{};
   };
 
   /// Assemble and factorise the degree-l system. The material is
@@ -137,12 +164,44 @@ class DegreeOperator {
 
   /// x with A x = b for `nrhs` right-hand sides stored column-major in
   /// `b` (DofCount() rows each); the result has the same layout.
-  [[nodiscard]] std::vector<double> Solve(std::span<const double> b,
+  /// Distributed (Options::segments), only this process's segments' rows
+  /// and the cut nodes' are read (the cut nodes' as `rhs` says: whole on
+  /// every process, or in shares that the solve sums), and only those are
+  /// solved; the rest of x is zero.
+  [[nodiscard]] std::vector<double> Solve(
+      std::span<const double> b, int nrhs = 1,
+      RightHandSide rhs = RightHandSide::Whole) const;
+
+  /// Solve split at its one collective: BeginSolve is local to the
+  /// process (the direct solve outright, or the segments' condensation),
+  /// a distributed caller then sums the pending separators over the
+  /// processes (several solves' together, in one collective), and
+  /// FinishSolve completes. Solve is the three in turn.
+  [[nodiscard]] PendingSolve BeginSolve(
+      std::span<const double> b, int nrhs,
+      RightHandSide rhs = RightHandSide::Whole) const;
+  [[nodiscard]] std::vector<double> FinishSolve(PendingSolve&& pending) const;
+
+  /// Whether this process's part of a distributed solution holds dof d as
+  /// its share (its segments' interiors; the cut nodes on one process),
+  /// so that the parts so held sum over the processes to the solution;
+  /// always, undistributed.
+  [[nodiscard]] bool Holds(int dof) const;
+  /// Zeroes, in nrhs columns of a solution, every dof this process does
+  /// not hold.
+  void MaskToShare(std::span<double> x, int nrhs = 1) const;
+
+  /// A x for `nrhs` column-major columns: the assembled (unscaled)
+  /// operator, for residuals.
+  [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 
   /// Whether the (scaled) Cholesky factorisation held; false means the LU
-  /// fallback is in use.
+  /// fallback is in use (in some segment, when substructured).
   [[nodiscard]] bool UsedCholesky() const { return !choleskyFailed_; }
+
+  /// The radial segments the solve runs over: 1 for the direct solve.
+  [[nodiscard]] int SegmentCount() const;
 
   // -- views
   // --------------------------------------------------------------------
@@ -162,7 +221,11 @@ class DegreeOperator {
  private:
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
-  void Factorise();
+  /// The dof ranges of the cut nodes above the first element, and the
+  /// count of cuts at or below it.
+  [[nodiscard]] std::pair<std::vector<std::pair<int, int>>, int> Separators(
+      std::span<const int> cuts) const;
+  void Factorise(const Options& options);
 
   [[nodiscard]] double& Band(int i, int j) {
     return band_[static_cast<std::size_t>(j) * (kd_ + 1) + (kd_ + i - j)];
@@ -188,11 +251,13 @@ class DegreeOperator {
   std::vector<double> band_;  // upper band, column-major (kd + 1) x ndof
 
   // The factorisation: the symmetric diagonal scaling s, then the Cholesky
-  // band or the LU band with its pivots.
+  // band or the LU band with its pivots, or with cuts the substructured
+  // factors (immutable, so copies share them).
   std::vector<double> scale_;
   std::vector<double> factor_;
   std::vector<int> pivots_;
   bool choleskyFailed_ = false;
+  std::shared_ptr<const detail::BandSubstructure> substructure_;
 };
 
 }  // namespace sl3dpp

@@ -62,12 +62,21 @@ Material MaterialOf(const std::filesystem::path& deck_path, ModelFormat format,
 
 LoveNumbersInput ReadLoveNumbersInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  Allow(top, {"model", "model_format", "lmax", "output"});
+  Allow(top,
+        {"model", "model_format", "lmax", "output", "conventional_output"});
   const auto directory = config.parent_path();
-  return LoveNumbersInput{.model = PathOf(top, "model", directory),
-                          .format = ReadFormat(top),
-                          .lmax = ReadLmax(top),
-                          .output = PathOf(top, "output", directory)};
+  auto out = LoveNumbersInput{.model = PathOf(top, "model", directory),
+                              .format = ReadFormat(top),
+                              .lmax = ReadLmax(top),
+                              .output = PathOf(top, "output", directory)};
+  if (Has(top, "conventional_output")) {
+    out.conventional_output = PathOf(top, "conventional_output", directory);
+    if (std::filesystem::weakly_canonical(out.conventional_output) ==
+        std::filesystem::weakly_canonical(out.output)) {
+      Fail(top.At("conventional_output"), "is the output's own file");
+    }
+  }
+  return out;
 }
 
 std::string RunLoveNumbers(const std::filesystem::path& config) {
@@ -76,24 +85,32 @@ std::string RunLoveNumbers(const std::filesystem::path& config) {
   const auto material = MaterialOf(input.model, input.format, input.lmax, top);
   const auto love = ComputeLoveNumbers(material, input.lmax);
 
-  if (const auto parent = input.output.parent_path(); !parent.empty()) {
-    std::filesystem::create_directories(parent);
-  }
-  auto out = std::ofstream(input.output);
-  if (!out) {
-    throw std::runtime_error(
-        std::format("cannot write {}", input.output.string()));
-  }
-  out << std::format("# sl3d love-numbers (sl3dpp {})\n", Version())
-      << std::format("# created {}\n", CreatedNow())
-      << std::format("# config {}\n", config.string())
-      << std::format("# model {}\n", input.model.string())
-      << std::format("# lmax {}\n", input.lmax)
-      << std::format("# radius_m {:.17g}\n", love.radius)
+  auto open = [](const std::filesystem::path& path) {
+    if (const auto parent = path.parent_path(); !parent.empty()) {
+      std::filesystem::create_directories(parent);
+    }
+    auto file = std::ofstream(path);
+    if (!file) {
+      throw std::runtime_error(std::format("cannot write {}", path.string()));
+    }
+    return file;
+  };
+  const auto created = CreatedNow();
+  auto header = [&](std::ofstream& file) {
+    file << std::format("# sl3d love-numbers (sl3dpp {})\n", Version())
+         << std::format("# created {}\n", created)
+         << std::format("# config {}\n", config.string())
+         << std::format("# model {}\n", input.model.string())
+         << std::format("# lmax {}\n", input.lmax);
+  };
+  auto out = open(input.output);
+  header(out);
+  out << std::format("# radius_m {:.17g}\n", love.radius)
       << std::format("# surface_gravity_m_s2 {:.17g}\n", love.surface_gravity)
-      << std::format("# degree_zero_axial h_c {:.17g} k_c {:.17g} m_u {:.17g} "
-                     "m_phi {:.17g} m_c {:.17g}\n",
-                     love.h_c, love.k_c, love.m_u, love.m_phi, love.m_c)
+      << std::format(
+             "# degree_zero_axial h_c {:.17g} k_c {:.17g} m_u {:.17g} "
+             "m_phi {:.17g} m_c {:.17g}\n",
+             love.h_c, love.k_c, love.m_u, love.m_phi, love.m_c)
       << std::format("# reciprocity_residual {:.3g}\n",
                      love.ReciprocityResidual())
       << "# l h_u l_u k_u h_phi l_phi k_phi h_v l_v k_v h_t l_t k_t\n";
@@ -105,8 +122,26 @@ std::string RunLoveNumbers(const std::filesystem::path& config) {
         love.l_phi[i], love.k_phi[i], love.h_v[i], love.l_v[i], love.k_v[i],
         love.h_t[i], love.l_t[i], love.k_t[i]);
   }
-  return std::format("wrote {} (degrees 0..{})", input.output.string(),
-                     input.lmax);
+  if (input.conventional_output.empty()) {
+    return std::format("wrote {} (degrees 0..{})", input.output.string(),
+                       input.lmax);
+  }
+  const auto conventional = love.Conventional();
+  auto table = open(input.conventional_output);
+  header(table);
+  table << "# conventional dimensionless Love numbers: Farrell's load numbers "
+           "(geodetic sign, k referred to the load's own potential) and the "
+           "tidal numbers; nan where undefined (tidal, degrees 0 and 1)\n"
+        << "# l h_load l_load k_load h_tide l_tide k_tide\n";
+  for (auto i = std::size_t{0}; i < conventional.degrees.size(); ++i) {
+    table << std::format("{} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g} {:.17g}\n",
+                         conventional.degrees[i], conventional.h_load[i],
+                         conventional.l_load[i], conventional.k_load[i],
+                         conventional.h_tide[i], conventional.l_tide[i],
+                         conventional.k_tide[i]);
+  }
+  return std::format("wrote {} and {} (degrees 0..{})", input.output.string(),
+                     input.conventional_output.string(), input.lmax);
 }
 
 }  // namespace sl3dpp::app

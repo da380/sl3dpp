@@ -52,10 +52,11 @@ one interface and one result type so every gate runs on both alike.
    the latter both from the 1D sweeps directly and as the spherical
    average of the 3D kernel, whose agreement in the zero-lateral limit
    is a free consistency gate between the two pipelines.
-3. Not built: linearisation about a migrating-shoreline
-   trajectory (pyslfp's `ocean_functions`) waits until sl3dpp's forward
-   evolution grows migration (the SLE's nonlinear solve exists; the
-   driver doesn't use it yet). Decay-time functionals (pyslfp
+3. Deferred when this was drafted: linearisation about a
+   migrating-shoreline trajectory (pyslfp's `ocean_functions`), until
+   sl3dpp's forward evolution grew migration. It was built on 25 October
+   2026 with the migrating evolutions, 1D and 3D: the sweeps'
+   `oceanFunctions` argument (design.md §7). Decay-time functionals (pyslfp
    `functionals.py`), a front end over Measurement, were ported later
    (`DecayTimeMeasurements` in `Measurements.hpp`).
 

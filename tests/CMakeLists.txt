@@ -48,3 +48,39 @@ sl3dpp_add_test(TestKernelWriter)
 sl3dpp_add_test(TestUnitsParity)
 sl3dpp_add_test(TestGaussMemory)
 sl3dpp_add_test(TestGaussMemory3D)
+sl3dpp_add_test(TestInitialSeaLevel)
+sl3dpp_add_test(TestSubstructure)
+sl3dpp_add_test(TestNodeBlocks)
+sl3dpp_add_test(TestRadialRanks)
+
+# The distributed solves, under mpiexec on 2, 3 and 4 ranks (one thread
+# each), when the library is built with SL3DPP_WITH_MPI.
+if(SL3DPP_WITH_MPI)
+  add_executable(TestDistributed TestDistributed.cpp)
+  target_link_libraries(TestDistributed PRIVATE sl3dpp::sl3dpp GTest::gtest)
+  target_compile_definitions(TestDistributed PRIVATE
+    SL3DPP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+  foreach(ranks 2 3 4)
+    add_test(NAME Distributed.Ranks${ranks}
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks}
+              ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestDistributed>
+              ${MPIEXEC_POSTFLAGS})
+    set_tests_properties(Distributed.Ranks${ranks} PROPERTIES
+      ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
+  endforeach()
+  # ... and sl3d's 3D commands over 2 and 3 ranks.
+  if(TARGET sl3d_app)
+    add_executable(TestAppsDistributed TestAppsDistributed.cpp)
+    target_link_libraries(TestAppsDistributed PRIVATE sl3d_app GTest::gtest)
+    target_compile_definitions(TestAppsDistributed PRIVATE
+      SL3DPP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    foreach(ranks 2 3)
+      add_test(NAME AppsDistributed.Ranks${ranks}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks}
+                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestAppsDistributed>
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(AppsDistributed.Ranks${ranks} PROPERTIES
+        ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
+    endforeach()
+  endif()
+endif()

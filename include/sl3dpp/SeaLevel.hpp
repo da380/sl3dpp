@@ -155,13 +155,22 @@ class SeaLevelSolver {
    * @brief A snapshot of ice thickness and sea level (non-dimensional),
    * with the ocean function the flotation condition rho_w SL - rho_i I > 0
    * implies and its area. `forcedLand` marks points held at C = 0
-   * whatever the flotation says (pyslfp masks the Caspian this way).
+   * whatever the flotation says (pyslfp masks the Caspian this way); the
+   * state keeps it, so the nonlinear solve's migrating shorelines respect
+   * it too (empty: none).
+   *
+   * The ocean function need not be the flotation one: a state may carry a
+   * prescribed C (the frozen shorelines of a calibrated initial state,
+   * InitialSeaLevel.hpp), with oceanArea its integral. The linear solves
+   * read C and its area only, never the sea level; the nonlinear solve
+   * starts from the state's C and re-derives it by flotation.
    */
   struct State {
     std::vector<double> iceThickness;
     std::vector<double> seaLevel;
     std::vector<double> oceanFunction;
     double oceanArea = 0.0;  ///< int C dS, radius factor included
+    std::vector<char> forcedLand;
   };
 
   [[nodiscard]] State MakeState(std::vector<double> iceThickness,

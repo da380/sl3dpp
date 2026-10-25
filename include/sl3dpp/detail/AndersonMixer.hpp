@@ -11,8 +11,10 @@
 #include <algorithm>
 #include <array>
 #include <format>
+#include <functional>
 #include <span>
 #include <stdexcept>
+#include <utility>
 #include <vector>
 
 // LAPACK: the small least-squares solve of the mixer.
@@ -37,11 +39,14 @@ namespace sl3dpp::detail {
 /// With `parallel`, the sweeps over the vector run threaded on OpenMP's
 /// thread count, the sums as per-thread partials added in thread order:
 /// reproducible at a given thread count, and at one thread bitwise the
-/// serial update.
+/// serial update. With `sum`, the vector is distributed (each process
+/// holding its own part) and the Gram system's entries are summed over
+/// the processes, which then mix alike: each update is collective.
 class AndersonMixer {
  public:
-  explicit AndersonMixer(int memory, bool parallel = false)
-      : memory_(memory), parallel_(parallel) {}
+  explicit AndersonMixer(int memory, bool parallel = false,
+                         std::function<void(std::span<double>)> sum = {})
+      : memory_(memory), parallel_(parallel), sum_(std::move(sum)) {}
 
   std::vector<double> Update(std::span<const double> x,
                              std::span<const double> gx) {
@@ -148,15 +153,13 @@ class AndersonMixer {
         }
       }
     }
-    std::vector<double> column(partial.begin(), partial.begin() + m),
-        gamma(partial.begin() + m, partial.begin() + 2 * m);
     for (auto t = 1; t < threads; ++t) {
       const auto* p = partial.data() + static_cast<std::size_t>(t) * 2 * m;
-      for (auto i = 0; i < m; ++i) {
-        column[i] += p[i];
-        gamma[i] += p[m + i];
-      }
+      for (auto i = 0; i < 2 * m; ++i) partial[i] += p[i];
     }
+    if (sum_) sum_(std::span(partial).first(static_cast<std::size_t>(2 * m)));
+    std::vector<double> column(partial.begin(), partial.begin() + m),
+        gamma(partial.begin() + m, partial.begin() + 2 * m);
     count_ = m;
     slot_ = (slot + 1) % memory_;
     for (auto i = 0; i < m; ++i) {
@@ -199,6 +202,7 @@ class AndersonMixer {
  private:
   int memory_;
   bool parallel_;
+  std::function<void(std::span<double>)> sum_;
   int count_ = 0;
   int slot_ = 0;
   std::vector<double> xPrev_, fPrev_, gram_;

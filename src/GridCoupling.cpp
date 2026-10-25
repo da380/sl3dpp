@@ -3,11 +3,25 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <span>
 #include <stdexcept>
 
 #include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
+
+namespace {
+
+// The stored values of nodes [first, last) of a field over the nodes,
+// given where each node's values start (one past the last included).
+template <class Vector>
+auto Nodes(Vector& values, const std::vector<std::size_t>& offsets, int first,
+           int last) {
+  return std::span(values).subspan(offsets[first],
+                                   offsets[last] - offsets[first]);
+}
+
+}  // namespace
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
     : GridCoupling(rheology, lmax,
@@ -34,7 +48,14 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
   const auto& material = rheology.BaseMaterial();
   const auto& mesh = material.Mesh();
   const auto n = mesh.NGll();
-  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+  const auto [firstElement, endElement] = options.elements;
+  const auto end = endElement < 0 ? mesh.ElementCount() : endElement;
+  if (firstElement < 0 || firstElement > end || end > mesh.ElementCount()) {
+    throw std::invalid_argument(
+        std::format("the element range [{}, {}) is not within the mesh's {}",
+                    firstElement, endElement, mesh.ElementCount()));
+  }
+  for (auto e = firstElement; e < end; ++e) {
     auto active = false;
     for (auto i = 0; i < n && !active; ++i) {
       active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
@@ -44,7 +65,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
       nodes_.push_back({e, p, points_.RadiusAt(mesh, e, p)});
     }
   }
-  if (nodes_.empty()) {
+  const auto whole = firstElement == 0 && end == mesh.ElementCount();
+  if (nodes_.empty() && whole) {
     throw std::invalid_argument(
         "the rheology has no active branch anywhere: nothing for the grid "
         "coupling to carry");
@@ -53,6 +75,100 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
     firstElementOf_[l] =
         l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   }
+
+  // The node blocks. An element's transform degree only grows with the
+  // element (TransformDegrees), so each degree's nodes form one run.
+  const auto degreeOf = TransformDegrees(rheology, lmax, options);
+  for (auto node = 0; node < NodeCount(); ++node) {
+    const auto degree = degreeOf[nodes_[node].element];
+    if (blocks_.empty() || degree != blocks_.back().grid.LMax()) {
+      blocks_.push_back(
+          {node, 0,
+           degree == lmax
+               ? grid_
+               : SurfaceGrid(degree,
+                             {.nmax = 2,
+                              .oversampling = options.oversampling,
+                              .parallel = options.parallel,
+                              .matrix_kernel = options.matrix_kernel})});
+    }
+    ++blocks_.back().nodeCount;
+    blockOf_.push_back(static_cast<int>(blocks_.size()) - 1);
+  }
+  fieldOffset_.assign(1, 0);
+  for (auto& offsets : spinOffset_) offsets.assign(1, 0);
+  coefficientOffset_.assign(1, 0);
+  for (auto node = 0; node < NodeCount(); ++node) {
+    const auto& grid = GridOf(node);
+    fieldOffset_.push_back(fieldOffset_.back() + grid.FieldSize());
+    for (auto c = 0; c < 2; ++c) {
+      spinOffset_[c].push_back(spinOffset_[c].back() +
+                               grid.SpinCoefficientSize(kSpins[c]));
+    }
+    coefficientOffset_.push_back(coefficientOffset_.back() +
+                                 grid.CoefficientSize());
+  }
+  firstNodeOfDegree_.assign(lmax_ + 1, NodeCount());
+  for (auto l = lmax_; l >= 0; --l) {
+    for (const auto& block : blocks_) {
+      if (block.grid.LMax() >= l) {
+        firstNodeOfDegree_[l] = block.firstNode;
+        break;
+      }
+    }
+  }
+}
+
+std::vector<int> GridCoupling::TransformDegrees(const Rheology& rheology,
+                                                int lmax,
+                                                const Options& options) {
+  // Each element at the least listed degree (or lmax) covering the
+  // largest degree whose subset reaches it.
+  auto degrees = options.transform_degrees;
+  for (const auto d : degrees) {
+    if (d < 2 || d > lmax) {
+      throw std::invalid_argument(std::format(
+          "a transform degree of {} is outside [2, lmax = {}]", d, lmax));
+    }
+  }
+  degrees.push_back(lmax);
+  std::ranges::sort(degrees);
+  degrees.erase(std::ranges::unique(degrees).begin(), degrees.end());
+  const auto& mesh = rheology.BaseMaterial().Mesh();
+  const auto n = mesh.NGll();
+  auto first = std::vector<int>(lmax + 1, 0);
+  for (auto l = 1; l <= lmax; ++l) {
+    first[l] = mesh.StartElement(l, options.truncation, options.eps);
+  }
+  auto out = std::vector<int>(mesh.ElementCount(), 0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    auto active = false;
+    for (auto i = 0; i < n && !active; ++i) {
+      active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
+    }
+    if (!active) continue;
+    auto reach = 0;
+    for (auto l = 0; l <= lmax; ++l) {
+      if (first[l] <= e) reach = l;
+    }
+    out[e] = *std::ranges::lower_bound(degrees, reach);
+  }
+  return out;
+}
+
+std::vector<double> GridCoupling::TransformWeights(const Rheology& rheology,
+                                                   int lmax,
+                                                   const Options& options) {
+  const auto degrees = TransformDegrees(rheology, lmax, options);
+  const auto points =
+      MemoryPoints::Of(options.memory_points, rheology.BaseMaterial().Mesh())
+          .count;
+  auto out = std::vector<double>(degrees.size(), 0.0);
+  for (auto e = std::size_t{0}; e < degrees.size(); ++e) {
+    if (degrees[e] == 0) continue;
+    out[e] = points * std::pow((degrees[e] + 1.0) / (lmax + 1.0), 3);
+  }
+  return out;
 }
 
 double GridCoupling::WeightOfNode(int node) const {
@@ -63,21 +179,42 @@ double GridCoupling::WeightOfNode(int node) const {
 
 GridCoupling::TensorField GridCoupling::ZeroTensor() const {
   TensorField field;
-  for (auto& component : field.c) {
-    component.assign(nodes_.size() * grid_.FieldSize(), 0.0);
-  }
-  field.r.assign(nodes_.size() * grid_.FieldSize(), 0.0);
+  for (auto& component : field.c) component.assign(GridValueCount(), 0.0);
+  field.r.assign(GridValueCount(), 0.0);
   return field;
 }
 
 GridCoupling::SpectralTensor GridCoupling::ZeroSpectral() const {
   SpectralTensor spectral;
   for (auto c = 0; c < 2; ++c) {
-    spectral.c[c].assign(nodes_.size() * grid_.SpinCoefficientSize(kSpins[c]),
-                         0.0);
+    spectral.c[c].assign(spinOffset_[c].back(), 0.0);
   }
-  spectral.r.assign(nodes_.size() * grid_.CoefficientSize(), 0.0);
+  spectral.r.assign(coefficientOffset_.back(), 0.0);
   return spectral;
+}
+
+std::vector<double> GridCoupling::OnSurfaceGrid(
+    std::span<const double> values) const {
+  if (values.size() != GridValueCount()) {
+    throw std::invalid_argument(
+        std::format("the field has {} values, the nodes' grids {}",
+                    values.size(), GridValueCount()));
+  }
+  const auto size = grid_.FieldSize();
+  auto out = std::vector<double>(nodes_.size() * size);
+  for (auto node = 0; node < NodeCount(); ++node) {
+    const auto in = values.subspan(FieldOffset(node), FieldSizeOf(node));
+    const auto to = std::span(out).subspan(node * size, size);
+    const auto& grid = GridOf(node);
+    if (grid.LMax() == lmax_) {
+      std::ranges::copy(in, to.begin());
+      continue;
+    }
+    auto coefficients = grid_.ZeroCoefficients();
+    std::ranges::copy(grid.Expand(in), coefficients.begin());
+    grid_.Synthesise(coefficients, to);
+  }
+  return out;
 }
 
 GridCoupling::TensorField GridCoupling::Synthesise(
@@ -90,11 +227,18 @@ GridCoupling::TensorField GridCoupling::Synthesise(
 void GridCoupling::Synthesise(const SpectralTensor& spectral,
                               TensorField& field) const {
   if (field.r.empty()) field = ZeroTensor();
-  const auto count = static_cast<int>(nodes_.size());
-  for (auto c = 0; c < 2; ++c) {
-    grid_.SynthesiseSpinBatch(kSpins[c], spectral.c[c], count, field.c[c]);
+  for (const auto& block : blocks_) {
+    const auto first = block.firstNode;
+    const auto last = first + block.nodeCount;
+    for (auto c = 0; c < 2; ++c) {
+      block.grid.SynthesiseSpinBatch(
+          kSpins[c], Nodes(spectral.c[c], spinOffset_[c], first, last),
+          block.nodeCount, Nodes(field.c[c], fieldOffset_, first, last));
+    }
+    block.grid.SynthesiseBatch(
+        Nodes(spectral.r, coefficientOffset_, first, last), block.nodeCount,
+        Nodes(field.r, fieldOffset_, first, last));
   }
-  grid_.SynthesiseBatch(spectral.r, count, field.r);
 }
 
 GridCoupling::SpectralTensor GridCoupling::Analyse(
@@ -107,16 +251,23 @@ GridCoupling::SpectralTensor GridCoupling::Analyse(
 void GridCoupling::Analyse(const TensorField& field,
                            SpectralTensor& spectral) const {
   if (spectral.r.empty()) spectral = ZeroSpectral();
-  const auto count = static_cast<int>(nodes_.size());
-  for (auto c = 0; c < 2; ++c) {
-    grid_.ExpandSpinBatch(kSpins[c], field.c[c], count, spectral.c[c]);
+  for (const auto& block : blocks_) {
+    const auto first = block.firstNode;
+    const auto last = first + block.nodeCount;
+    for (auto c = 0; c < 2; ++c) {
+      block.grid.ExpandSpinBatch(
+          kSpins[c], Nodes(field.c[c], fieldOffset_, first, last),
+          block.nodeCount, Nodes(spectral.c[c], spinOffset_[c], first, last));
+    }
+    block.grid.ExpandBatch(Nodes(field.r, fieldOffset_, first, last),
+                           block.nodeCount,
+                           Nodes(spectral.r, coefficientOffset_, first, last));
   }
-  grid_.ExpandBatch(field.r, count, spectral.r);
 }
 
 void GridCoupling::Multiply(TensorField& field,
                             std::span<const double> weight) const {
-  const auto size = nodes_.size() * grid_.FieldSize();
+  const auto size = GridValueCount();
   if (weight.size() != size) {
     throw std::invalid_argument(std::format(
         "the weight field has {} values, the tensor {}", weight.size(), size));
@@ -133,25 +284,28 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
   if (factor.size() != nodes_.size()) {
     throw std::invalid_argument("one factor per radial node, please");
   }
-  const auto sizes =
-      std::array{grid_.SpinCoefficientSize(kSpins[0]),
-                 grid_.SpinCoefficientSize(kSpins[1]), grid_.CoefficientSize()};
+  const auto offsets =
+      std::array{&spinOffset_[0], &spinOffset_[1], &coefficientOffset_};
   const auto blocks = std::array{&spectral.c[0], &spectral.c[1], &spectral.r};
   detail::ParallelElements(
       nodes_.size(), options_.parallel, [&](std::size_t node) {
         for (auto b = std::size_t{0}; b < blocks.size(); ++b) {
-          for (auto k = std::size_t{0}; k < sizes[b]; ++k) {
-            (*blocks[b])[node * sizes[b] + k] *= factor[node];
+          const auto& offset = *offsets[b];
+          for (auto k = offset[node]; k < offset[node + 1]; ++k) {
+            (*blocks[b])[k] *= factor[node];
           }
         }
       });
 }
 
-int GridCoupling::FirstNodeFor(int firstElement) const {
-  for (auto node = std::size_t{0}; node < nodes_.size(); ++node) {
-    if (nodes_[node].element >= firstElement) return static_cast<int>(node);
+int GridCoupling::FirstNodeFor(int firstElement, int l) const {
+  // The block bound is implied when the operators share this coupling's
+  // truncation; it keeps every degree within its nodes' coefficients when
+  // they do not.
+  for (auto node = firstNodeOfDegree_[l]; node < NodeCount(); ++node) {
+    if (nodes_[node].element >= firstElement) return node;
   }
-  return static_cast<int>(nodes_.size());
+  return NodeCount();
 }
 
 void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
@@ -165,7 +319,7 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
         std::format("a degree-{} scalar state needs {} nodes x {} columns", l,
                     nodes_.size(), columns));
   }
-  const auto first = FirstNodeFor(firstElementOf_.at(l));
+  const auto first = FirstNodeFor(firstElementOf_.at(l), l);
   for (auto node = first; node < NodeCount(); ++node) {
     const auto r = nodes_[node].radius;
     for (auto m = 0; m <= l; ++m) {
@@ -184,15 +338,14 @@ void GridCoupling::Scatter(SpectralTensor& spectral, int node, int l, int m,
   const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
   for (auto c = 0; c < 2; ++c) {
     if (l < std::abs(kSpins[c])) continue;
-    const auto size = grid_.SpinCoefficientSize(kSpins[c]);
-    auto* block = &spectral.c[c][node * size];
+    auto* block = &spectral.c[c][spinOffset_[c][node]];
     block[SurfaceGrid::SpinIndex(kSpins[c], l, m)] += A[c];
     if (m > 0) {
       block[SurfaceGrid::SpinIndex(kSpins[c], l, -m)] +=
           sign * std::conj(A[4 - c]);
     }
   }
-  spectral.r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, m)] += A[2];
+  spectral.r[coefficientOffset_[node] + SurfaceGrid::Index(l, m)] += A[2];
 }
 
 std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
@@ -201,19 +354,16 @@ std::array<GridCoupling::Complex, 5> GridCoupling::Gather(
   const auto sign = (m % 2 == 0) ? 1.0 : -1.0;
   auto A = std::array<Complex, 5>{};
   const auto real = [&](int mm) {
-    return spectral
-        .r[node * grid_.CoefficientSize() + SurfaceGrid::Index(l, mm)];
+    return spectral.r[coefficientOffset_[node] + SurfaceGrid::Index(l, mm)];
   };
   A[2] = m >= 0 ? real(m) : sign * std::conj(real(-m));
   if (l >= 1) {
-    const auto size = grid_.SpinCoefficientSize(-1);
-    const auto* block = &spectral.c[1][node * size];
+    const auto* block = &spectral.c[1][spinOffset_[1][node]];
     A[1] = block[SurfaceGrid::SpinIndex(-1, l, m)];
     A[3] = sign * std::conj(block[SurfaceGrid::SpinIndex(-1, l, -m)]);
   }
   if (l >= 2) {
-    const auto size = grid_.SpinCoefficientSize(-2);
-    const auto* block = &spectral.c[0][node * size];
+    const auto* block = &spectral.c[0][spinOffset_[0][node]];
     A[0] = block[SurfaceGrid::SpinIndex(-2, l, m)];
     A[4] = sign * std::conj(block[SurfaceGrid::SpinIndex(-2, l, -m)]);
   }
@@ -229,7 +379,7 @@ void GridCoupling::AddStrainOfSolution(SpectralTensor& spectral, int l,
   const auto n = mesh.NGll();
   const auto columns = static_cast<std::size_t>(l + 1);
   const auto ndof = spheroidal.DofCount();
-  const auto first = FirstNodeFor(spheroidal.FirstElement());
+  const auto first = FirstNodeFor(spheroidal.FirstElement(), l);
   const auto gll = points_.set == MemoryPointSet::Gll;
 
   auto gatherS = [&](int e, int i, Component component,
@@ -294,7 +444,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
-    const auto first = FirstNodeFor(op.FirstElement());
+    const auto first = FirstNodeFor(op.FirstElement(), l);
     for (auto node = first; node < NodeCount(); ++node) {
       const auto e = nodes_[node].element;
       const auto q = nodes_[node].nodeInElement;
@@ -356,7 +506,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
     const auto columns = static_cast<std::size_t>(l + 1);
     std::vector<Complex> b(static_cast<std::size_t>(op.DofCount()) * columns,
                            0.0);
-    const auto first = FirstNodeFor(op.FirstElement());
+    const auto first = FirstNodeFor(op.FirstElement(), l);
     for (auto node = first; node < NodeCount(); ++node) {
       const auto e = nodes_[node].element;
       const auto q = nodes_[node].nodeInElement;

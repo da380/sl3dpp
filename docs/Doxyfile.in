@@ -22,6 +22,7 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/include/sl3dpp \
                          @PROJECT_SOURCE_DIR@/docs/sl3d-configs.md \
                          @PROJECT_SOURCE_DIR@/docs/design.md \
+                         @PROJECT_SOURCE_DIR@/docs/radial-partitioning.md \
                          @PROJECT_SOURCE_DIR@/docs/conventions.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md \
                          @PROJECT_SOURCE_DIR@/examples/configs/README.md
@@ -37,6 +38,9 @@ STRIP_FROM_INC_PATH    = @PROJECT_SOURCE_DIR@/include
 # The implementation details stay out: detail/ is not part of the API.
 EXCLUDE                = @PROJECT_SOURCE_DIR@/include/sl3dpp/detail
 EXCLUDE_SYMBOLS        = sl3dpp::detail sl3dpp::detail::*
+
+# The MPI parts are documented whether or not this build has them.
+PREDEFINED             = SL3DPP_HAVE_MPI
 
 EXTRACT_ALL            = YES
 EXTRACT_STATIC         = YES

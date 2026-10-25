@@ -14,14 +14,14 @@
 #include "Commands.hpp"
 #include "Input.hpp"
 #include "sl3dpp/EarthModel.hpp"
+#include "sl3dpp/Evolution.hpp"
+#include "sl3dpp/Evolution3D.hpp"
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
 
 namespace sl3dpp::app {
-
-/// Seconds in a kiloyear of Julian years, as pyslfp counts them.
-inline constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
 
 /// The names of the run members `ReadRunMembers` reads, for a command's
 /// Allow list.
@@ -57,6 +57,14 @@ struct Loaded {
 [[nodiscard]] Loaded LoadWorld(const EvolveInput& input, const Json& top,
                                const SeaLevelSolver& solver);
 
+/// The sea level the state file gives at the window's end, by the
+/// flotation construction, solver units: the calibration's target. Refused
+/// when the window's end lies outside the file's time span.
+[[nodiscard]] std::vector<double> FinalSeaLevelOf(const EvolveInput& input,
+                                                  const Json& top,
+                                                  const SeaLevelSolver& solver,
+                                                  const Loaded& world);
+
 /// The window's uniform time grid, SLE units, zero at its start.
 [[nodiscard]] std::vector<double> MakeTimes(const EvolveInput& input,
                                             const Scales& scales);
@@ -67,5 +75,46 @@ struct Loaded {
 [[nodiscard]] std::function<std::vector<double>(double)> IceLoadOf(
     const EvolveInput& input, const SeaLevelSolver& solver,
     const Loaded& world);
+
+/// The ice thickness the migrating runs take, solver units: the
+/// background's ice plus the history's change from the start's ice
+/// (world.ice0, as IceLoadOf measures it). The references must outlive it.
+[[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
+    const EvolveInput& input, const SeaLevelSolver& solver,
+    const Loaded& world);
+
+/// The run's ice history under its shorelines: IceLoadOf when frozen,
+/// IceThicknessOf when migrating.
+[[nodiscard]] IceHistory HistoryOf(const EvolveInput& input,
+                                   const SeaLevelSolver& solver,
+                                   const Loaded& world);
+
+/// Rebuilds the world's start from the ice history: its ice at the
+/// window's start (world.ice0 too) under the given sea level, the ocean
+/// function by flotation.
+void StartFromIceHistory(const EvolveInput& input, const SeaLevelSolver& solver,
+                         Loaded& world, std::span<const double> seaLevelGuess);
+
+/// Calibrates the world's initial sea level against the state file's sea
+/// level at the window's end, as the config asks, by an evolution the
+/// caller built to stream nothing, and adopts it as the world's
+/// background. The start is pyslfp's: the ice history's ice at the window's
+/// start, the target sea level as the guess (StartFromIceHistory), so the
+/// state file is read at the end alone. Refused when the calibration runs
+/// out of iterations. Returns the misfits before and after (SI metres) and
+/// the runs taken.
+struct CalibrationSummary {
+  double before_m = 0.0;
+  double after_m = 0.0;
+  std::size_t runs = 0;
+};
+CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+                                  const SeaLevelSolver& solver, Loaded& world,
+                                  SeaLevelEvolution& evolution,
+                                  std::span<const double> times);
+CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+                                  const SeaLevelSolver& solver, Loaded& world,
+                                  SeaLevelEvolution3D& evolution,
+                                  std::span<const double> times);
 
 }  // namespace sl3dpp::app

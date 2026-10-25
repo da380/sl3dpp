@@ -31,6 +31,9 @@ option(SL3DPP_BUILD_BENCHMARKS "Build the cross-code benchmark drivers" OFF)
 option(SL3DPP_BUILD_EXAMPLES "Build the example drivers" ${PROJECT_IS_TOP_LEVEL})
 option(SL3DPP_BUILD_DOCS "Add the sl3dpp_docs target (Doxygen)" OFF)
 option(SL3DPP_INSTALL "Generate the install and export rules" ON)
+option(SL3DPP_WITH_MPI
+  "Build the MPI-distributed parts (Distributed.hpp), guarded in the code by SL3DPP_HAVE_MPI"
+  OFF)
 
 # ---------------------------------------------------------------------------
 # Dependencies.
@@ -162,6 +165,7 @@ add_library(sl3dpp STATIC
   src/Adjoint.cpp
   src/Adjoint3D.cpp
   src/BandSolvers.cpp
+  src/BandSubstructure.cpp
   src/Deck.cpp
   src/DegreeOperator.cpp
   src/EarthModel.cpp
@@ -169,6 +173,7 @@ add_library(sl3dpp STATIC
   src/Evolution3D.cpp
   src/Fingerprint.cpp
   src/GridCoupling.cpp
+  src/InitialSeaLevel.cpp
   src/io/KernelWriter.cpp
   src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
@@ -179,6 +184,7 @@ add_library(sl3dpp STATIC
   src/RadialMesh.cpp
   src/Rheology.cpp
   src/SeaLevel.cpp
+  src/Shorelines.cpp
   src/ToroidalOperator.cpp
   src/Version.cpp
   src/Viscoelastic.cpp
@@ -211,6 +217,17 @@ target_compile_definitions(sl3dpp PRIVATE
 
 target_compile_options(sl3dpp PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)
+
+# MPI is optional: with SL3DPP_WITH_MPI the distributed parts are compiled
+# in and SL3DPP_HAVE_MPI is defined for the library and its users, whose
+# MPI sections it guards (docs/dev/radial-substructuring.md). Point CMake
+# at an MPI with -DMPI_CXX_COMPILER=<its mpicxx> when several are installed.
+if(SL3DPP_WITH_MPI)
+  find_package(MPI REQUIRED COMPONENTS CXX)
+  target_sources(sl3dpp PRIVATE src/Distributed.cpp)
+  target_link_libraries(sl3dpp PUBLIC MPI::MPI_CXX)
+  target_compile_definitions(sl3dpp PUBLIC SL3DPP_HAVE_MPI)
+endif()
 
 # Clang 18 reports __cpp_concepts = 201907, which makes libstdc++ disable
 # <expected> although the needed support is present; Clang 19 fixed the

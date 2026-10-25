@@ -27,6 +27,7 @@
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/Geography.hpp"
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/Measurements.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
@@ -47,6 +48,9 @@ struct LoveNumbersInput {
   ModelFormat format = ModelFormat::Gia;
   int lmax = 0;
   std::filesystem::path output;
+  /// Where to write the conventional dimensionless numbers too
+  /// (LoveNumbers::Conventional); empty for none.
+  std::filesystem::path conventional_output{};
 };
 
 /// Reads a love-numbers config, relative paths against its directory.
@@ -102,9 +106,24 @@ struct EvolveInput {
   int nodes = 0;                      ///< time nodes, the ends included
   Scheme scheme = Scheme::ExponentialTrapezoid;
   RotationalFeedback rotation = RotationalFeedback::Full;
+  /// The shorelines: frozen at the start's (the linear equation), or
+  /// following flotation.
+  Shorelines shorelines = Shorelines::Frozen;
+  /// With `calibrate`, the initial sea level is calibrated so that the run
+  /// reaches the state file's sea level at the window's end, by the method
+  /// and within the iterations and tolerance given (InitialSeaLevel.hpp),
+  /// instead of being read from the state file at the window's start.
+  bool calibrate = false;
+  CalibrationMethod calibration_method = CalibrationMethod::FixedPoint;
+  int calibration_iterations = 10;
+  double calibration_rtol = 1e-4;
   /// The 3D command's combined (strain, ocean, rotation) fixed point.
   double coupled_rtol = 1e-9;
   int max_coupled_iterations = 60;
+  /// The 3D commands' transforms cut with depth: the degrees a memory
+  /// node's grid may take below lmax (Viscoelastic3D::Options::
+  /// transform_degrees); empty, every node at lmax.
+  std::vector<int> transform_degrees;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
   /// which the full transverse feedback needs when the input moments
