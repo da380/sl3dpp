@@ -32,6 +32,37 @@ sl3d <command> <config.json>
   `OMP_NUM_THREADS` to choose the thread count. One-thread runs are bitwise
   reproducible; threaded runs agree to round-off.
 
+### Over MPI ranks
+
+Built with the CMake option `SL3DPP_WITH_MPI`, `evolve` and `kernel` run
+under `mpiexec` over several ranks, the same config on every rank:
+
+```
+OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
+  mpiexec -n 4 -bind-to core:32 sl3d evolve evolve.json
+```
+
+(the binding flags are MPICH's; another MPI names them otherwise). The
+run is split over radius, one contiguous radial segment per rank, the cuts
+balancing the transform work (docs/dev/radial-substructuring.md §11-12):
+each rank holds and steps its own segment's internal variables, with its
+threads inside, and every rank reads the inputs and solves the sea level
+equation, the first rank's solution serving all. One rank per socket (or
+per node) with threads inside is the intended shape. Rank 0 writes every
+output and prints the summary, with `on <n> ranks` appended. A failure on
+any rank ends the whole job, the message naming the rank. The other
+commands refuse several ranks (exit status 2).
+
+The results agree with a one-process run to round-off of the radially
+substructured solves (about 1e-12 relative), not bitwise. Each rank's
+checkpoints go to its own subdirectory, `rank_RRRR` of
+`checkpoint.directory`, holding its own segment's state (rank 0's holds
+the histories too), and a recorded trajectory spills to `rank_RRRR` of
+`trajectory.directory` likewise. A run resumes from the newest node whose
+checkpoint every rank has, and over the same number of ranks only: the
+rank count is part of the checkpoints' hash, so a resumption over another
+count is refused like another run's.
+
 ## Configs
 
 A config is one JSON object, read strictly by planetmodel's JSON reader:

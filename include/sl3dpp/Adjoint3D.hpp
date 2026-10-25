@@ -103,7 +103,9 @@ struct ForwardTrajectory3D {
  * dJ / d delta(x) for the operator's log-viscosity perturbation
  * (eta = eta_ref exp(delta), so itau = itau_ref exp(-delta)):
  * -itau(x) itauKernel3D(x), same layout. All empty unless a trajectory
- * was supplied.
+ * was supplied. Distributed over radius, each rank's are its own memory
+ * nodes' (its coupling's layout; the ranks' arrays laid end to end in
+ * rank order are the whole mesh's), and `ice` is every rank's alike.
  */
 struct Kernels3D {
   IceKernels ice;
@@ -160,7 +162,10 @@ class AdjointSolver3D {
   /// (OceanFunctionsOf its snapshots), the kernels linearise about that
   /// run's shorelines instead of the frozen background ones, and the
   /// initial sea level kernel is formed; a recorded trajectory must then
-  /// come from the same migrating run.
+  /// come from the same migrating run. Distributed over radius (the
+  /// evolution's operator's collectives), collective: every rank passes
+  /// the same times, measurements and ocean functions, and its own
+  /// trajectory (its forward run's).
   [[nodiscard]] Kernels3D IceHistoryKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,

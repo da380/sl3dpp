@@ -3,6 +3,7 @@
 #include <cmath>
 #include <format>
 #include <fstream>
+#include <optional>
 #include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
@@ -15,6 +16,7 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Input.hpp"
+#include "Ranks.hpp"
 #include "Serialize.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Adjoint3D.hpp"
@@ -450,10 +452,13 @@ std::string RunKernelsWith(
     const std::function<IceKernels(
         const std::map<std::size_t, Measurement>&,
         const std::filesystem::path& stem, const Built&)>& sweep) {
-  std::filesystem::create_directories(input.output);
+  // On several ranks every rank sweeps, rank 0 alone writes.
+  const auto writes = TheRanks().First();
+  if (writes) std::filesystem::create_directories(input.output);
   const auto top = planetmodel::ReadJsonFile(config);
   const auto& grid = solver.Grid();
-  auto values = std::ofstream(input.output / "measurements.txt");
+  auto values = writes ? std::ofstream(input.output / "measurements.txt")
+                       : std::ofstream{};
   values << std::format("# sl3d {} (sl3dpp {})\n", command, Version())
          << std::format("# created {}\n", CreatedNow())
          << std::format("# config {}\n", config.string())
@@ -465,10 +470,11 @@ std::string RunKernelsWith(
                                                   solver, snapshots);
     const auto stem = input.output / spec.name;
     const auto kernels = sweep(built.measurements, stem, built);
-    WriteIceKernels(
-        std::filesystem::path(stem.string() + "_ice_kernels.nc"), grid,
-        input.run.lmax, input.run, kernels, built,
-        solver.SolverScales().Length(), command);
+    if (writes) {
+      WriteIceKernels(std::filesystem::path(stem.string() + "_ice_kernels.nc"),
+                      grid, input.run.lmax, input.run, kernels, built,
+                      solver.SolverScales().Length(), command);
+    }
     values << spec.name << ' ' << items[k].At("type").AsString() << ' '
            << std::format("{:.17g}", built.factor * built.value_nd);
     if (built.fit) {
@@ -603,7 +609,25 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   if (!rheology) Fail(top.At("viscosity").At("file"),
                       rheology.error().message);
   Viscoelastic3D op(*rheology, input.run.lmax, viscosity->Delta(),
-                    {.transform_degrees = input.run.transform_degrees});
+                    OperatorOptions(input.run, *rheology));
+  // On several ranks each holds its own radial segment's memory nodes:
+  // its states spill into its own subdirectory, and its viscosity kernels
+  // are gathered to rank 0, which writes them over the whole mesh.
+  const auto& ranks = TheRanks();
+  const auto trajectoryDirectory = RankDirectory(input.trajectory_directory);
+  auto whole = std::optional<GridCoupling>{};
+  if (ranks.Distributed() && ranks.First()) {
+    const auto& o = op.GetOptions();
+    whole.emplace(
+        op.GetRheology(), input.run.lmax, op.Coupling().Grid(),
+        GridCoupling::Options{.eps = o.eps,
+                              .truncation = o.truncation,
+                              .oversampling = o.oversampling,
+                              .parallel = o.parallel,
+                              .matrix_kernel = o.matrix_kernel,
+                              .memory_points = o.memory_points,
+                              .transform_degrees = o.transform_degrees});
+  }
   SeaLevelSolver solver(SurfaceGrid(input.run.lmax), op.ElasticLove(),
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
@@ -626,10 +650,10 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   auto spilled = std::vector<bool>(static_cast<std::size_t>(input.run.nodes),
                                    false);
   auto state_path = [&](std::size_t node) {
-    return input.trajectory_directory / std::format("node_{:06}.traj", node);
+    return trajectoryDirectory / std::format("node_{:06}.traj", node);
   };
   if (spilling) {
-    std::filesystem::create_directories(input.trajectory_directory);
+    std::filesystem::create_directories(trajectoryDirectory);
     options.on_state = [&](std::size_t node, Viscoelastic3D::State&& state) {
       auto out = std::ofstream(state_path(node), std::ios::binary);
       PutState3D(out, state);
@@ -688,6 +712,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
              ++b) {
           auto values = kernels.logViscosityKernel3D[b];
           for (auto& v : values) v *= toModel;
+          if (ranks.Distributed()) values = GatherToFirst(values);
           scaled.push_back(std::move(values));
           fields.push_back(io::KernelField{
               .name = std::format("K_ln_eta_{}", b),
@@ -697,9 +722,14 @@ std::string RunKernel3D(const std::filesystem::path& config) {
               .objective = built.objective,
               .values = scaled.back()});
         }
-        const auto written = io::WriteKernels(
-            std::filesystem::path(stem.string() + "_viscosity_kernels.nc"),
-            op, earth.model, fields, {});
+        if (!ranks.First()) return kernels.ice;
+        const auto path =
+            std::filesystem::path(stem.string() + "_viscosity_kernels.nc");
+        const auto written =
+            whole ? io::WriteKernels(path, *whole,
+                                     op.GetRheology().BaseMaterial().Mesh(),
+                                     earth.model, fields, {})
+                  : io::WriteKernels(path, op, earth.model, fields, {});
         if (!written) throw std::runtime_error(written.error().message);
         return kernels.ice;
       });

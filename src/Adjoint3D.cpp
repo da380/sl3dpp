@@ -4,7 +4,9 @@
 #include <cmath>
 #include <format>
 #include <map>
+#include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
@@ -64,10 +66,6 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
-  if (op.GetOptions().collectives.Distributed()) {
-    throw std::invalid_argument(
-        "the 3D adjoint does not run distributed over radius yet");
-  }
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
@@ -162,6 +160,27 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     return found->second;
   };
 
+  // Distributed over radius (Viscoelastic3D::Options::collectives), the
+  // sweep steps every rank's own memory nodes as the forward run does, and
+  // every rank solves the sea level equations alike; their transforms may
+  // round differently, so rank 0's results serve all (as in
+  // SeaLevelEvolution3D::March), and a solve that fails fails on all.
+  const auto& collectives = op.GetOptions().collectives;
+  auto agree = [&](auto& values) {
+    if (!collectives.Distributed() || values.empty()) return;
+    using Value =
+        typename std::remove_reference_t<decltype(values)>::value_type;
+    collectives.share(
+        std::span(reinterpret_cast<double*>(values.data()),
+                  values.size() * sizeof(Value) / sizeof(double)));
+  };
+  auto everywhere = [&](bool converged) {
+    if (!collectives.Distributed()) return converged;
+    auto failed = converged ? 0.0 : 1.0;
+    collectives.max(std::span(&failed, 1));
+    return failed == 0.0;
+  };
+
   // The adjoint state, stepped by the forward coupled machinery in
   // reversed time with no ice load.
   auto vstate = op.ZeroState();
@@ -211,7 +230,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     }
     const auto resp =
         solverFor(op.ElasticLove()).SolveGeneralised(ev.state_, f, sleOptions);
-    if (!resp.converged) {
+    if (!everywhere(resp.converged)) {
       throw std::runtime_error(
           "the instantaneous adjoint fingerprint did not converge");
     }
@@ -229,6 +248,11 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
                    : grid.ZeroCoefficients();
     if (!zetaU.empty()) out.zu = grid.Expand(zetaU);
     if (!zetaPhi.empty()) out.zphi = grid.Expand(zetaPhi);
+    agree(out.xiA);
+    agree(out.lam);
+    agree(out.psiA);
+    agree(out.zu);
+    agree(out.zphi);
     return out;
   };
 
@@ -297,10 +321,15 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   auto momentOf = [&](const Viscoelastic3D::Solutions& solutions) {
     const auto& deg = locked([&]() -> const auto& { return reference.Deg(0); });
     const auto& x = solutions.spheroidal.at(0);
+    // Distributed, each rank's share of the solution, summed.
+    auto column = std::vector<double>(x.size());
+    for (auto d = std::size_t{0}; d < x.size(); ++d) column[d] = x[d].real();
+    op.Spheroidal(0).MaskToShare(column);
     auto sum = 0.0;
     for (auto d = 0; d < deg.ndof; ++d) {
-      sum += deg.momentRow[d] * x[d].real();
+      sum += deg.momentRow[d] * column[d];
     }
+    if (collectives.Distributed()) collectives.sum(std::span(&sum, 1));
     return sum;
   };
   auto smoothEquilibrium = [&](std::size_t node) {
@@ -313,9 +342,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     f.potentialResponse = ev.Coefficients(
         op.Surface(solutions, Component::Phi), ev.toNdPotential_);
     f.inertiaMomentChange = momentOf(solutions) * ev.toNdMoment_;
-    const auto resp =
+    auto resp =
         solverFor(op.ElasticLove()).SolveGeneralised(ev.state_, f, sleOptions);
-    if (!resp.converged) {
+    if (!everywhere(resp.converged)) {
       throw std::runtime_error(
           "the adjoint equilibrium solve did not converge");
     }
@@ -328,6 +357,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     psiC = rotation != RotationalFeedback::None
                ? solver.CentrifugalCoefficients(resp.angularVelocity)
                : grid.ZeroCoefficients();
+    agree(sigmaC);
+    agree(psiC);
+    agree(resp.seaLevelChange);
     return resp.seaLevelChange;
   };
 
@@ -521,6 +553,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           psiC = rotation != RotationalFeedback::None
                      ? solver.CentrifugalCoefficients(response.angularVelocity)
                      : grid.ZeroCoefficients();
+          agree(sigmaC);
+          agree(psiC);
+          agree(response.seaLevelChange);
           step.AddChannels(responses, ev.Columns(sigmaC, ev.toMatDensity_),
                            ev.Columns(psiC, ev.toMatPotential_));
           return step.StrainOf(responses);

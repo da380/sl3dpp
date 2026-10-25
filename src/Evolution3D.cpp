@@ -218,8 +218,10 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
   // Distributed (Viscoelastic3D::Options::collectives), every process
   // solves the sea level equation alike, but their transforms may round
   // differently (each process plans its own FFTs): the first process's
-  // loads, and ocean function, then serve them all, so that every
-  // segment is forced alike.
+  // loads, ocean function and response then serve them all, so that
+  // every segment is forced alike and every process's snapshots are the
+  // same (whatever is decided from them, a calibration's next run say,
+  // is decided alike).
   const auto& collectives = op.GetOptions().collectives;
   auto agree = [&] {
     if (!collectives.Distributed()) return;
@@ -228,6 +230,14 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
           std::span(reinterpret_cast<double*>(coefficients->data()),
                     2 * coefficients->size()));
     }
+    for (auto* field : {&response.seaLevelChange, &response.displacement,
+                        &response.potential}) {
+      collectives.share(*field);
+    }
+    collectives.share(response.angularVelocity);
+    auto converged = response.converged ? 1.0 : 0.0;
+    collectives.share(std::span(&converged, 1));
+    response.converged = converged != 0.0;
     if (migrating) collectives.share(ocean);
   };
   if (!resumed && migrating) {

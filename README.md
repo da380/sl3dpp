@@ -490,7 +490,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step over radial segments, one per rank), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve` and `kernel` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.

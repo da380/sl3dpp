@@ -68,4 +68,19 @@ if(SL3DPP_WITH_MPI)
     set_tests_properties(Distributed.Ranks${ranks} PROPERTIES
       ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
   endforeach()
+  # ... and sl3d's 3D commands over 2 and 3 ranks.
+  if(TARGET sl3d_app)
+    add_executable(TestAppsDistributed TestAppsDistributed.cpp)
+    target_link_libraries(TestAppsDistributed PRIVATE sl3d_app GTest::gtest)
+    target_compile_definitions(TestAppsDistributed PRIVATE
+      SL3DPP_TEST_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/data")
+    foreach(ranks 2 3)
+      add_test(NAME AppsDistributed.Ranks${ranks}
+        COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} ${ranks}
+                ${MPIEXEC_PREFLAGS} $<TARGET_FILE:TestAppsDistributed>
+                ${MPIEXEC_POSTFLAGS})
+      set_tests_properties(AppsDistributed.Ranks${ranks} PROPERTIES
+        ENVIRONMENT "OMP_NUM_THREADS=1" PROCESSORS ${ranks})
+    endforeach()
+  endif()
 endif()

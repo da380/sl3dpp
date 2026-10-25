@@ -422,8 +422,10 @@ Beyond the fixtures:
   library calls no MPI itself: `Viscoelastic3D` takes `Collectives`
   (sum, max and share callbacks), which `Distributed.hpp` fills from a
   communicator. The sea level equation is solved on every rank alike and
-  the first rank's loads shared. The 3D adjoint does not run distributed
-  yet.
+  the first rank's solution shared. The 3D adjoint runs the same way, each
+  rank sweeping its own nodes back over its own trajectory, and `sl3d`'s
+  `evolve` and `kernel` run under `mpiexec` with per-rank checkpoints
+  (docs/sl3d-configs.md).
 
 ## 13. Dependencies and boundaries
 

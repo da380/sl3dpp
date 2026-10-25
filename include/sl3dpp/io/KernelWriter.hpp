@@ -75,4 +75,13 @@ struct KernelFileOptions {
     const EarthModel& model, const std::vector<KernelField>& kernels,
     const KernelFileOptions& options = {});
 
+/// The same over a coupling and its rheology's mesh rather than an
+/// operator's: a whole-mesh coupling, say, on the rank that writes a
+/// radially distributed run's kernels gathered from every rank.
+[[nodiscard]] std::expected<void, IoError> WriteKernels(
+    const std::filesystem::path& path, const GridCoupling& coupling,
+    const RadialMesh& mesh, const EarthModel& model,
+    const std::vector<KernelField>& kernels,
+    const KernelFileOptions& options = {});
+
 }  // namespace sl3dpp::io

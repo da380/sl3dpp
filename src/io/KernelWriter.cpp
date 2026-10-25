@@ -44,8 +44,15 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
                                           const EarthModel& model,
                                           const std::vector<KernelField>& kernels,
                                           const KernelFileOptions& options) {
-  const auto& coupling = op.Coupling();
-  const auto& mesh = op.GetRheology().BaseMaterial().Mesh();
+  return WriteKernels(path, op.Coupling(),
+                      op.GetRheology().BaseMaterial().Mesh(), model, kernels,
+                      options);
+}
+
+std::expected<void, IoError> WriteKernels(
+    const std::filesystem::path& path, const GridCoupling& coupling,
+    const RadialMesh& mesh, const EarthModel& model,
+    const std::vector<KernelField>& kernels, const KernelFileOptions& options) {
   const auto& grid = coupling.Grid();
   const auto& scales = model.ModelScales();
   const auto length = scales.Length();

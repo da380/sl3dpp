@@ -5,8 +5,8 @@ measurements of [multicore-scaling.md](multicore-scaling.md). A plan; the
 code then was a serial prototype of the per-degree solve
 (`benchmarks/substructure_prototype.cpp`, §4). Step 1 of §5 was built the
 same day (§7), the distributed solve over MPI (§8) and, on David's
-direction, the transforms cut with depth (§10) and the distributed 3D
-step (§11).*
+direction, the transforms cut with depth (§10), the distributed 3D
+step (§11), and the distributed adjoint and sl3d (§12).*
 
 ## 1. Why radius
 
@@ -548,7 +548,55 @@ table each (the §1 node-block pattern), and the high degrees, whose dofs
 lie near the surface, are solved by the top rank alone on its one thread.
 
 **Not yet.** The measurement that matters, on the server: 2 x 32 against
-1 x 64 on one node, then across nodes. The 3D adjoint distributed (it
-refuses for now). `sl3d` under `mpiexec`, with per-rank checkpoint files
-(Q4). The top rank's share of the high-degree solves, if the server shows
-it.
+1 x 64 on one node, then across nodes. The top rank's share of the
+high-degree solves, if the server shows it. (The 3D adjoint and `sl3d`
+followed: §12.)
+
+## 12. The 3D adjoint and sl3d over ranks (25 October 2026)
+
+**The adjoint** (`src/Adjoint3D.cpp`) needed little: its reversed sweep
+steps the same distributed machinery (StartStep, Respond, Surface,
+InertiaMoment, Converge), its viscosity-kernel accumulation runs over the
+rank's own nodes, and its jump uses the 1D reference operator's unit
+responses, which every rank holds whole. What changed: the equilibrium's
+inertia moment is the rank's share of the degree-0 column, summed; after
+every sea level solve (the jump's fingerprint, the equilibrium, each
+reversed pass) rank 0's results are shared, as in the forward run, so the
+ice kernels are every rank's alike bitwise; and a sea level solve's
+failure is decided over all ranks, so that all throw together. Each
+rank's viscosity kernels are its own nodes'; laid end to end in rank order
+they are the whole mesh's. Tests: three thread ranks and 2-4 MPI ranks
+against the one-process sweep, frozen and migrating: ice kernels to 5e-15,
+log-viscosity kernels to 4e-14.
+
+**sl3d** (`apps/Ranks.hpp`, docs/sl3d-configs.md "Over MPI ranks"): built
+with SL3DPP_WITH_MPI, `main` starts MPI (MPI_THREAD_FUNNELED) and the 3D
+commands run over the ranks of MPI_COMM_WORLD; the others refuse several
+ranks. `OperatorOptions` gives the rank its segment (ShareMesh balanced on
+the transform work) and the collectives. Rank 0 writes every output and
+prints; a failure on any rank calls MPI_Abort, since the others would
+wait at their next collective. Checkpoints, per Q4: each rank writes its
+own into `rank_RRRR` of the checkpoint directory (rank 0's with the
+histories), the rank count enters the checkpoints' hash, a run resumes
+from the newest node every rank has (rank 0's newest two shared, each
+rank flagging which it lacks), a set the ranks do not share is cleared,
+and the wall-time stop is decided over all ranks (their clocks differ).
+The spilled trajectory goes to `rank_RRRR` of its directory. The kernel
+command gathers each viscosity kernel to rank 0, which writes it over a
+whole-mesh coupling (`io::WriteKernels`'s coupling overload). The 3D
+evolution now shares rank 0's whole sea level response too, so that every
+rank's snapshots are the same and whatever is decided from them (a
+calibration's next run) is decided alike.
+
+Tests: `tests/TestAppsDistributed.cpp` on 2 and 3 ranks: evolve and kernel
+against the one-process run (rank 0 alone, as one rank), a run stopped at
+every checkpoint and resumed from the ranks' subdirectories (bitwise the
+uninterrupted one), and the per-rank spilled trajectory (bitwise the
+in-memory one). By hand, the evolve example at lmax 16 (8 nodes) through
+`mpiexec -n 2 sl3d evolve`: within 3.4e-12 of the one-process run (whose
+solves are direct, not substructured), the resumed run bitwise the same.
+
+**Not yet, for the server:** the timing runs; the memory each rank keeps
+beyond its segment (about half a gigabyte at lmax 64, not itemised); and
+`sl3d`'s calibration and kernel paths at scale. A rank's checkpoints are
+raw binary for its machine, as before.

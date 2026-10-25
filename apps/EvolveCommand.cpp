@@ -16,6 +16,7 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Input.hpp"
+#include "Ranks.hpp"
 #include "Serialize.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
@@ -128,6 +129,9 @@ std::uint64_t FingerprintOf(const EvolveInput& input) {
     hash.AddValue(input.calibration_iterations);
     hash.AddValue(input.calibration_rtol);
   }
+  // on several ranks each rank's checkpoint holds its own radial segment:
+  // a restart over another number of ranks is another run
+  if (TheRanks().Distributed()) hash.AddValue(TheRanks().size);
   return hash.Value();
 }
 
@@ -288,21 +292,19 @@ struct ReadBack {
   std::vector<Node> history;
 };
 
-/// The newest checkpoint of this run in the directory, or nothing.
+/// One checkpoint file of this run, or nothing when it is not a whole
+/// checkpoint; refused when another run wrote it.
 template <class CheckpointT>
-std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
-    const std::filesystem::path& directory, std::uint64_t hash,
-    bool migrating) {
-  auto candidates = CheckpointsIn(directory);
-  std::reverse(candidates.begin(), candidates.end());
-  for (const auto& path : candidates) {
+std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
+    const std::filesystem::path& path, std::uint64_t hash, bool migrating) {
+  {
     auto in = std::ifstream(path, std::ios::binary);
-    if (!in || GetOne<std::uint64_t>(in) != kMagic) continue;
+    if (!in || GetOne<std::uint64_t>(in) != kMagic) return std::nullopt;
     if (GetOne<std::uint64_t>(in) != hash) {
       throw std::runtime_error(std::format(
-          "{} was checkpointed by a different run (another config, or "
-          "changed input files); set \"restart\": false to start over, "
-          "or point checkpoint.directory elsewhere",
+          "{} was checkpointed by a different run (another config, changed "
+          "input files, or another number of ranks); set \"restart\": false "
+          "to start over, or point checkpoint.directory elsewhere",
           path.string()));
     }
     auto out = ReadBack<CheckpointT>{};
@@ -329,6 +331,67 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
       out.history.push_back(std::move(kept));
     }
     if (in) return out;
+  }
+  return std::nullopt;
+}
+
+/// The newest checkpoint of this run in the directory, or nothing.
+template <class CheckpointT>
+std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
+    const std::filesystem::path& directory, std::uint64_t hash,
+    bool migrating) {
+  auto candidates = CheckpointsIn(directory);
+  std::reverse(candidates.begin(), candidates.end());
+  for (const auto& path : candidates) {
+    if (auto read = ReadCheckpointFile<CheckpointT>(path, hash, migrating)) {
+      return read;
+    }
+  }
+  return std::nullopt;
+}
+
+/// On several ranks, each reading its own directory: the newest
+/// checkpoint every rank has (a run stopped while the ranks wrote leaves
+/// some a node ahead), or nothing on every rank. Each rank keeps its
+/// newest two, so rank 0's newest two are the candidates.
+template <class CheckpointT>
+std::optional<ReadBack<CheckpointT>> ReadCommonCheckpoint(
+    const std::filesystem::path& directory, std::uint64_t hash,
+    bool migrating) {
+  const auto& collectives = TheRanks().collectives;
+  auto mine = std::vector<std::size_t>{};
+  for (const auto& path : CheckpointsIn(directory)) {
+    mine.push_back(static_cast<std::size_t>(
+        std::stoul(path.filename().string().substr(5, 6))));
+  }
+  auto candidates = std::array{-1.0, -1.0};
+  for (auto i = std::size_t{0}; i < std::min<std::size_t>(2, mine.size());
+       ++i) {
+    candidates[i] = static_cast<double>(mine[mine.size() - 1 - i]);
+  }
+  collectives.share(candidates);
+  auto lacks = std::array{0.0, 0.0};
+  for (auto i = 0; i < 2; ++i) {
+    lacks[i] =
+        candidates[i] < 0.0 ||
+                std::ranges::find(
+                    mine, static_cast<std::size_t>(candidates[i])) == mine.end()
+            ? 1.0
+            : 0.0;
+  }
+  collectives.max(lacks);
+  for (auto i = 0; i < 2; ++i) {
+    if (lacks[i] != 0.0) continue;
+    const auto node = static_cast<std::size_t>(candidates[i]);
+    auto read = ReadCheckpointFile<CheckpointT>(
+        directory / std::format("node_{:06}.ckpt", node), hash, migrating);
+    auto unreadable = read ? 0.0 : 1.0;
+    collectives.max(std::span(&unreadable, 1));
+    if (unreadable != 0.0) {
+      throw std::runtime_error(std::format(
+          "the checkpoint of node {} is unreadable on some rank", node));
+    }
+    return read;
   }
   return std::nullopt;
 }
@@ -469,15 +532,26 @@ std::string RunWith(
     history.push_back(std::move(kept));
   };
 
+  // On several ranks each checkpoints its own radial segment into its own
+  // subdirectory, and they resume from the newest node all of them have;
+  // rank 0 alone keeps the history and writes the output.
+  const auto& ranks = TheRanks();
   const auto checkpointing = !input.checkpoint_directory.empty();
+  const auto directory = RankDirectory(input.checkpoint_directory);
   const auto hash = checkpointing ? FingerprintOf(input) : std::uint64_t{0};
   auto resumed = std::optional<ReadBack<typename Evolution::Checkpoint>>{};
   auto cleared = std::size_t{0};
   if (checkpointing && input.restart) {
-    resumed = ReadCheckpoint<typename Evolution::Checkpoint>(
-        input.checkpoint_directory, hash, migrating);
+    using CheckpointT = typename Evolution::Checkpoint;
+    resumed =
+        ranks.Distributed()
+            ? ReadCommonCheckpoint<CheckpointT>(directory, hash, migrating)
+            : ReadCheckpoint<CheckpointT>(directory, hash, migrating);
+    // a set the ranks do not share is stale: cleared, or its later nodes
+    // would outrank the new run's in the pruning
+    if (!resumed && ranks.Distributed()) cleared = ClearCheckpoints(directory);
   } else if (checkpointing) {
-    cleared = ClearCheckpoints(input.checkpoint_directory);
+    cleared = ClearCheckpoints(directory);
   }
   const auto replaced =
       cleared > 0 ? std::format(", replacing {} earlier checkpoint(s)", cleared)
@@ -494,8 +568,7 @@ std::string RunWith(
   if (input.calibrate) {
     auto restored = std::optional<SeaLevelSolver::State>{};
     if (resumed) {
-      restored =
-          ReadInitialState(input.checkpoint_directory, hash, world.background);
+      restored = ReadInitialState(directory, hash, world.background);
     }
     if (restored) {
       StartFromIceHistory(input, solver, world, restored->seaLevel);
@@ -506,9 +579,7 @@ std::string RunWith(
       auto calibrating = make(options);
       const auto calibrated =
           CalibrateWorld(input, top, solver, world, calibrating, times);
-      if (checkpointing) {
-        WriteInitialState(input.checkpoint_directory, hash, world.background);
-      }
+      if (checkpointing) WriteInitialState(directory, hash, world.background);
       origin = std::format(
           "calibrated against the state file at the window's end, {} run(s), "
           "rms misfit {:.3g} m before, {:.3g} m after",
@@ -525,8 +596,8 @@ std::string RunWith(
     options.checkpoint_stride = input.checkpoint_every;
     options.on_checkpoint = [&](std::size_t node,
                                 const typename Evolution::Checkpoint& cp) {
-      WriteCheckpoint(input.checkpoint_directory, hash, base_node + node, cp,
-                      history, migrating);
+      WriteCheckpoint(directory, hash, base_node + node, cp,
+                      ranks.First() ? history : std::vector<Node>{}, migrating);
       const auto done =
           base_node + node + 1 >= static_cast<std::size_t>(input.nodes);
       if (input.max_walltime_min > 0.0 && !done) {
@@ -534,9 +605,10 @@ std::string RunWith(
                                  std::chrono::steady_clock::now() - started)
                                  .count() /
                              60.0;
-        if (minutes > input.max_walltime_min) {
-          throw WalltimeReached{base_node + node};
-        }
+        // the ranks' clocks differ: they stop when any has passed it
+        auto passed = minutes > input.max_walltime_min ? 1.0 : 0.0;
+        if (ranks.Distributed()) ranks.collectives.max(std::span(&passed, 1));
+        if (passed != 0.0) throw WalltimeReached{base_node + node};
       }
     };
   }
@@ -573,7 +645,9 @@ std::string RunWith(
 
   auto initial = world.background.seaLevel;
   for (auto& v : initial) v *= length;
-  WriteHistoryFile(input, config, grid, history, command, initial, origin);
+  if (ranks.First()) {
+    WriteHistoryFile(input, config, grid, history, command, initial, origin);
+  }
   const auto calibrated = input.calibrate
                               ? std::string{", initial sea level calibrated"}
                               : std::string{};
@@ -668,7 +742,7 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
   if (!rheology) Fail(top.At("viscosity").At("file"),
                       rheology.error().message);
   Viscoelastic3D op(*rheology, input.lmax, viscosity->Delta(),
-                    {.transform_degrees = input.transform_degrees});
+                    OperatorOptions(input, *rheology));
   SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLove(),
                         ParametersOf(input, earth.material));
   auto world = LoadWorld(input, top, solver);

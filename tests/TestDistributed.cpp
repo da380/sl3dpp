@@ -7,10 +7,10 @@
 // direct solve's, and agreement as far as the systems determine their
 // solutions. Then the 3D step and the coupled evolution, distributed
 // (each rank its segment's memory nodes, the cuts balanced on the
-// transform work), against the one-process run on the same cuts that
-// every rank also makes (TestRadialRanks makes the same comparisons with
-// threads for ranks). Each rank's errors are reduced to rank 0, which
-// alone prints.
+// transform work), and the 3D adjoint's kernels, against the one-process
+// run on the same cuts that every rank also makes (TestRadialRanks makes the
+// same comparisons with threads for ranks). Each rank's errors are reduced to
+// rank 0, which alone prints.
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -24,6 +24,7 @@
 #include <span>
 #include <vector>
 
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/Distributed.hpp"
@@ -422,6 +423,103 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
     // 6e-16 to 5e-15 on two to four ranks when written
     EXPECT_LT(MaxOverRanks(worst), 1e-12)
         << (migrating ? "migrating" : "frozen");
+  }
+}
+
+TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
+  // The 3D continuous adjoint, each rank sweeping its own memory nodes
+  // back over its own forward trajectory: the ice kernels on every rank,
+  // and each rank's slice of the log-viscosity kernel, frozen shorelines
+  // and about a migrating run.
+  constexpr auto lmax = 8;
+  const auto body = Body::Make(lmax);
+  const auto share =
+      ShareMesh(body.material.Mesh(), MPI_COMM_WORLD,
+                GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  SeaLevelSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                        SeaLevelParameters{});
+  const auto length = solver.SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  const auto times =
+      std::vector<double>{0.0, 2.5 * kyr, 5.0 * kyr, 7.5 * kyr, 10.0 * kyr};
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] =
+        -0.1 * solver.IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
+  }
+  const auto iceLoad = [&](double t) {
+    auto out = melt;
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  const auto thickness = [&](double t) {
+    auto out = ice;
+    for (auto& v : out) v *= 1.0 - 0.3 * t / times.back();
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual =
+      solver.Grid().FromFunction([](double theta, double phi) {
+        return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+      });
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
+  const auto evolutionOptions =
+      SeaLevelEvolution3D::Options{.rtol = 1e-12,
+                                   .max_coupled_iterations = 100,
+                                   .coupled_rtol = 1e-11,
+                                   .record_stride = 1};
+  const auto adjointOptions = AdjointSolver3D::Options{
+      .rtol = 1e-12, .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
+  for (const auto migrating : {false, true}) {
+    auto sweep = [&](const Viscoelastic3D& op) {
+      SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+      const auto snapshots = migrating
+                                 ? evolution.RunMigrating(times, thickness)
+                                 : evolution.Run(times, iceLoad);
+      const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+      AdjointSolver3D adjoint(evolution, adjointOptions);
+      return adjoint.IceHistoryKernels(
+          times, measurements, &trajectory,
+          migrating ? OceanFunctionsOf(snapshots)
+                    : std::vector<std::vector<double>>{});
+    };
+    const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+    const auto want = sweep(whole);
+    auto mine = options;
+    mine.segments = share.segments;
+    mine.collectives = share.collectives;
+    const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
+    const auto got = sweep(op);
+    auto worstIce = 0.0;
+    for (auto n = std::size_t{0}; n < want.ice.loadDuals.size(); ++n) {
+      worstIce = std::max(
+          worstIce, Relative(got.ice.loadDuals[n], want.ice.loadDuals[n]));
+    }
+    const auto& part = op.Coupling();
+    const auto& all = whole.Coupling();
+    auto worstViscosity = 0.0;
+    if (part.NodeCount() > 0) {
+      auto first = 0;
+      while (all.ElementOfNode(first) != part.ElementOfNode(0)) ++first;
+      const auto& kernel = got.logViscosityKernel3D[0];
+      worstViscosity =
+          Relative(kernel, std::span(want.logViscosityKernel3D[0])
+                               .subspan(all.FieldOffset(first), kernel.size()));
+    }
+    // 3e-15 and 4e-14 with threads for ranks when written
+    const auto label = migrating ? "migrating" : "frozen";
+    EXPECT_LT(MaxOverRanks(worstIce), 1e-11) << label;
+    EXPECT_LT(MaxOverRanks(worstViscosity), 1e-11) << label;
   }
 }
 
