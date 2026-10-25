@@ -411,7 +411,8 @@ Beyond the fixtures:
   `SL3DPP_WITH_MPI` (which defines `SL3DPP_HAVE_MPI` and guards the MPI
   sections) the 3D step runs over contiguous radial segments, one per
   rank, with OpenMP threads inside each
-  ([dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+  ([radial-partitioning.md](radial-partitioning.md); the measurements in
+  [dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
   Every large array is indexed by radial node and the pseudospectral
   products are pointwise within a node, so each rank holds and transforms
   its own segment's memory nodes alone, and no global transposes are

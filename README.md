@@ -567,6 +567,11 @@ The API reference and these pages are published at
 - [docs/design.md](docs/design.md): what sl3dpp is built on and how it
   works: formulation, discretisation, the adjoints, units, the comparison
   rules for cross-code work, validation and known limitations.
+- [docs/radial-partitioning.md](docs/radial-partitioning.md): the 3D
+  problem split over radial segments: the substructured degree solves and
+  their distributed form, the transforms cut with depth, the balance of
+  the cuts and the communication, and the step, adjoint and `sl3d` over
+  MPI ranks.
 - [docs/conventions.md](docs/conventions.md): units, signs, harmonic
   conventions and code style.
 

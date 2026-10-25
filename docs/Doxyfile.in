@@ -22,6 +22,7 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/include/sl3dpp \
                          @PROJECT_SOURCE_DIR@/docs/sl3d-configs.md \
                          @PROJECT_SOURCE_DIR@/docs/design.md \
+                         @PROJECT_SOURCE_DIR@/docs/radial-partitioning.md \
                          @PROJECT_SOURCE_DIR@/docs/conventions.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md \
                          @PROJECT_SOURCE_DIR@/examples/configs/README.md

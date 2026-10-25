@@ -371,9 +371,9 @@ later balanced on the transform work rather than on node counts. Built on
 one process first; the MPI distribution of §9 follows it.
 
 **Why nothing is lost.** Degree l's system has dofs only above its
-truncation radius, (r/a)^l = eps under the default graded rule
+truncation radius, (r/a)^(l + 1) = eps under the default graded rule
 (`RadialMesh::StartElement`). So a memory node's strain carries no degree
-above L(r) = ln(1/eps) / ln(a/r), and the memory force it produces above
+above L(r) = ln(1/eps) / ln(a/r) - 1, and the memory force it produces above
 L(r) has no rows to enter. Yet every node was transformed at lmax. At the
 default eps = 1e-8 on prem.simp.vm1:
 
