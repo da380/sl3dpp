@@ -24,8 +24,12 @@
  * are non-dimensional SLE-unit grid densities pairing with the outputs by
  * the surface integral int . dS, the angular-velocity dual by the dot
  * product. The returned kernels pair with load perturbations the same
- * way; densities and rates are per unit SLE time. Frozen shorelines (the
- * forward driver's linear equation) throughout.
+ * way; densities and rates are per unit SLE time. The sweeps linearise
+ * about frozen shorelines (the forward driver's linear equation) or, given
+ * the ocean function of every node of a migrating run, about that
+ * trajectory: the adjoint stays linear with the time-reversed C(t) as its
+ * coefficients (Yu et al. 2025, §3.3; the shoreline-motion singular terms
+ * cancel), as pyslfp's `ocean_functions`.
  */
 
 #include <array>
@@ -61,6 +65,12 @@ struct ForwardTrajectory {
       std::span<const SeaLevelEvolution::Snapshot> snapshots);
 };
 
+/// The ocean function of every node of a migrating run (RunMigrating),
+/// for the sweeps' linearisation about it; refused for a frozen run's
+/// snapshots, which carry none.
+[[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
+    std::span<const SeaLevelEvolution::Snapshot> snapshots);
+
 /// The duals of one observation node's outputs: the gains of
 ///   J += int g_xi xi dS + int g_u u dS + int g_phi phi dS + g_omega . omega
 /// at that node. Empty vectors are absent duals.
@@ -81,7 +91,11 @@ struct Measurement {
  * `thickness[n]` the dual of ice thickness there under the grounding
  * factor rho_i (1 - C), with the initial-thickness `baseline` folded
  * into node 0 (valid when the forward load was rho_i (1 - C)(I_n - I_0));
- * `initialSeaLevel` is identically zero under frozen shorelines.
+ * about a migrating trajectory the grounding factor is the node's own
+ * rho_i (1 - C_n), the baseline keeping the initial C. `initialSeaLevel`
+ * is the dual of the initial sea level, rho_w sum_n (C_n - C_0)
+ * loadDuals[n] (the initial sea level enters each node's load through the
+ * shorelines that moved): identically zero under frozen shorelines.
  *
  * DISTRIBUTIONAL view: the kernel is a continuous `density` (per unit
  * time, converging under grid refinement) plus a delta at each
@@ -128,11 +142,16 @@ namespace detail {
 /// the 1D and 3D sweeps: loadDuals complete (lumps folded in), density
 /// the continuous part per unit time, lumps the delta amplitudes
 /// (load-dual space, by node).
+/// With `oceanFunctions` (one per node, about a migrating trajectory) the
+/// grounding factors are per node and the initial sea level dual is
+/// formed, with the water density `waterDensity`.
 [[nodiscard]] IceKernels AssembleIceViews(
     std::span<const double> oceanFunction, double iceDensity,
     std::span<const double> times, std::vector<std::vector<double>> loadDuals,
     std::vector<std::vector<double>> density,
-    std::map<std::size_t, std::vector<double>> lumps);
+    std::map<std::size_t, std::vector<double>> lumps,
+    std::span<const std::vector<double>> oceanFunctions = {},
+    double waterDensity = 0.0);
 }  // namespace detail
 
 /**
@@ -167,28 +186,36 @@ class AdjointSolver {
   /// nodes). Measurement keys are node indices into `times`. With a
   /// recorded forward `trajectory` (one entry per node, from a run with
   /// record_stride under the same scheme and loads), the kernels also
-  /// carry the inverse-relaxation-time sensitivity.
+  /// carry the inverse-relaxation-time sensitivity. With
+  /// `oceanFunctions`, one grid per node from a migrating run
+  /// (OceanFunctionsOf its snapshots), the kernels linearise about that
+  /// trajectory instead of the frozen background shorelines, and the
+  /// initial sea level kernel is formed; a recorded trajectory must then
+  /// come from the same migrating run.
   [[nodiscard]] IceKernels IceHistoryKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      const ForwardTrajectory* trajectory = nullptr) const;
+      const ForwardTrajectory* trajectory = nullptr,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
 
  private:
   [[nodiscard]] IceKernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      const ForwardTrajectory* trajectory) const;
+      const ForwardTrajectory* trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
   [[nodiscard]] IceKernels ContinuousSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      const ForwardTrajectory* trajectory) const;
+      const ForwardTrajectory* trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
   /// The grounded views and the distributional/quelled assembly shared by
   /// the two sweeps (lumps: the delta amplitudes, by node).
   [[nodiscard]] IceKernels AssembleViews(
-      std::span<const double> times,
-      std::vector<std::vector<double>> loadDuals,
+      std::span<const double> times, std::vector<std::vector<double>> loadDuals,
       std::vector<std::vector<double>> density,
-      std::map<std::size_t, std::vector<double>> lumps) const;
+      std::map<std::size_t, std::vector<double>> lumps,
+      std::span<const std::vector<double>> oceanFunctions) const;
 
   const SeaLevelEvolution* evolution_;
   Options options_;

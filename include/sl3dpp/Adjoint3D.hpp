@@ -103,6 +103,25 @@ struct Kernels3D {
   std::vector<std::vector<double>> logViscosityKernel3D;
 };
 
+/// A kernel of the Kernels3D layout ([node * FieldSize + x], an angular
+/// density with each memory node's radial quadrature weight folded in) as
+/// a density per unit volume: each node's values divided by its radial
+/// weight (GridCoupling::WeightOfNode) and r^2, so that dJ = int K delta dV
+/// over the memory nodes' shells. Non-dimensional in the material's scheme
+/// like the kernel; Factor(objective) / Length^3 makes it SI. What
+/// io::WriteKernels stores, before it carries the values to the file's
+/// nodes.
+[[nodiscard]] std::vector<double> VolumeDensity(const GridCoupling& coupling,
+                                                std::span<const double> kernel);
+
+/// A kernel of the Kernels3D layout as a density in radius, one value per
+/// memory node: the angular integral over the node's radial weight, so
+/// that an angle-uniform perturbation pairs as dJ = int k(r) delta(r) dr
+/// (the pairing the 1D nodal kernels make). Material scheme; per unit
+/// length, so Factor(objective) / Length makes it SI.
+[[nodiscard]] std::vector<double> RadialDensity(const GridCoupling& coupling,
+                                                std::span<const double> kernel);
+
 class AdjointSolver3D {
  public:
   struct Options {

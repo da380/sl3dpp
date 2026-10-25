@@ -141,6 +141,18 @@ class SeaLevelEvolution3D {
     return vstate_;
   }
 
+  /// The background surface state: the initial state of every run.
+  [[nodiscard]] const SeaLevelSolver::State& BackgroundState() const {
+    return state_;
+  }
+
+  /// Replaces the background state (a calibrated initial state, say);
+  /// its fields must live on the solver's grid.
+  void SetBackgroundState(SeaLevelSolver::State state);
+
+  /// The sea level solver the evolution was built with.
+  [[nodiscard]] const SeaLevelSolver& Solver() const { return *solver_; }
+
  private:
   friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
 

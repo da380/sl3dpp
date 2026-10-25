@@ -1,0 +1,12 @@
+{
+  "model": "prem8.gia.deck",
+  "lmax": 64,
+  "state": {"file": "../ice7g.nc"},
+  "ice_history": {"file": "../ice7g.nc"},
+  "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "shorelines": "migrating",
+  "calibrate_initial_sea_level": {"method": "fixed_point", "iterations": 12},
+  "output": "out/evolve1d_ice7g_calibrated.nc"
+}

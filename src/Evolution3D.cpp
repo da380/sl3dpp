@@ -76,6 +76,17 @@ void CheckTimes(std::span<const double> times) {
 
 }  // namespace
 
+void SeaLevelEvolution3D::SetBackgroundState(SeaLevelSolver::State state) {
+  const auto fieldSize = solver_->Grid().FieldSize();
+  if (state.iceThickness.size() != fieldSize ||
+      state.seaLevel.size() != fieldSize ||
+      state.oceanFunction.size() != fieldSize ||
+      (!state.forcedLand.empty() && state.forcedLand.size() != fieldSize)) {
+    throw std::invalid_argument("state fields must live on the solver's grid");
+  }
+  state_ = std::move(state);
+}
+
 std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::Run(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceLoad) {
@@ -260,12 +271,15 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
          .rtol = options_.coupled_rtol,
          .anderson_memory = options_.anderson_memory,
          .anderson_rate = options_.anderson_rate});
-    vstate_ = std::move(step).Finish(std::move(strain));
+    // the replaced state's tensors go to the next StartStep
+    op.Recycle(
+        std::exchange(vstate_, std::move(step).Finish(std::move(strain))));
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);
     checkpoint(node);
   }
+  op.ReleaseScratch();
   return snapshots;
 }
 

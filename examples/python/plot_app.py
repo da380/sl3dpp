@@ -4,7 +4,8 @@ ICE-7G configs too), then `poetry run python plot_app.py` from
 build/examples. The outputs in configs/out/ are read with planetmodel's own
 readers, and one figure per command is written beside this script:
 app_love_numbers.png, app_fingerprint.png, app_evolve.png,
-app_kernels1d.png and app_kernels3d.png, plus app_fingerprint_ice7g.png
+app_evolve1d_calibrated.png, app_kernels1d.png and app_kernels3d.png,
+plus app_evolve1d_ice7g_calibrated.png, app_fingerprint_ice7g.png
 and app_evolve1d_ice7g.png where the ICE-7G runs exist. A missing output
 skips its figure.
 """
@@ -177,6 +178,56 @@ def evolve() -> None:
     print("wrote app_evolve.png")
 
 
+def evolve_calibrated(name: str, reference: str, state: str | None,
+                      title: str) -> None:
+    """A migrating-shoreline run whose initial sea level was calibrated
+    against the present day, beside the uncalibrated run from the state
+    file's own initial sea level: what the calibration changed at the
+    start, and where the ocean moved over the history."""
+    path = OUT / f"{name}.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
+    calibrated = np.asarray(file.variables["initial_sea_level"].values)
+    ocean = np.asarray(file.variables["ocean_function"].values)
+    sea_level = np.asarray(file.variables["sea_level_change"].values)
+    fields = {"flooded": ocean[-1] - ocean[0],
+              "sea_level_change": sea_level[-1]}
+    reference_path = OUT / f"{reference}.nc"
+    if reference_path.exists():
+        held = read_surface_file(reference_path).variables
+        if "initial_sea_level" in held:
+            fields["change"] = calibrated - np.asarray(
+                held["initial_sea_level"].values)
+    ex = Example.from_fields(grid.colatitudes, grid.longitudes, fields)
+    fig = plt.figure(figsize=(12, 7.5))
+    if "change" in fields:
+        ax = world_map(fig, 2, 2, 1, state=state)
+        mesh = plot_field(ax, ex, "change",
+                          title="calibrated initial sea level minus the "
+                                f"state file's at {dates[0]:g} ka (m)")
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = world_map(fig, 2, 2, 2, state=state)
+    mesh = plot_field(ax, ex, "flooded",
+                      title=f"ocean function, present minus {dates[0]:g} ka")
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = world_map(fig, 2, 2, 3, state=state)
+    mesh = plot_field(ax, ex, "sea_level_change",
+                      title=f"sea level change, {dates[0]:g} ka to the "
+                            "present (m)")
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = fig.add_subplot(2, 2, 4)
+    ax.axis("off")
+    ax.text(0.0, 0.9, "initial sea level: " + file.meta["initial_sea_level"],
+            wrap=True, fontsize=9, va="top")
+    fig.suptitle(title)
+    fig.tight_layout()
+    fig.savefig(f"app_{name}.png", dpi=150)
+    print(f"wrote app_{name}.png")
+
+
 def evolve_ice7g() -> None:
     path = OUT / "evolve1d_ice7g.nc"
     if not path.exists():
@@ -307,6 +358,13 @@ if __name__ == "__main__":
     fingerprint("fingerprint_ice7g", "sl3d fingerprint: 10% of the ICE-7G "
                                      "Greenland ice melted", synthetic=False)
     evolve()
+    evolve_calibrated("evolve1d_calibrated", "evolve1d", None,
+                      "sl3d evolve1d, migrating shorelines, initial sea "
+                      "level calibrated against the present day")
+    evolve_calibrated("evolve1d_ice7g_calibrated", "evolve1d_ice7g",
+                      "ice7g.nc",
+                      "sl3d evolve1d on ICE-7G, migrating shorelines, "
+                      "initial sea level calibrated against the present day")
     evolve_ice7g()
     kernels1d()
     kernels3d()

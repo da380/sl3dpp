@@ -170,6 +170,20 @@ std::vector<std::vector<double>> IceKernels::Viscosity(
   return out;
 }
 
+std::vector<std::vector<double>> OceanFunctionsOf(
+    std::span<const SeaLevelEvolution::Snapshot> snapshots) {
+  auto out = std::vector<std::vector<double>>{};
+  for (const auto& snapshot : snapshots) {
+    if (snapshot.oceanFunction.empty()) {
+      throw std::invalid_argument(
+          "the snapshots carry no ocean functions: a migrating run records "
+          "them");
+    }
+    out.push_back(snapshot.oceanFunction);
+  }
+  return out;
+}
+
 AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
                              Options options)
     : evolution_(&evolution), options_(options) {}
@@ -177,7 +191,8 @@ AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
 IceKernels AdjointSolver::IceHistoryKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    const ForwardTrajectory* trajectory) const {
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
@@ -213,6 +228,18 @@ IceKernels AdjointSolver::IceHistoryKernels(
           "coefficients: build it from the recording run's snapshots");
     }
   }
+  if (!oceanFunctions.empty()) {
+    if (oceanFunctions.size() != times.size()) {
+      throw std::invalid_argument(
+          "the ocean functions must give one grid per time node");
+    }
+    for (const auto& Cn : oceanFunctions) {
+      if (Cn.size() != fieldSize) {
+        throw std::invalid_argument(
+            "the ocean functions must be fields on the solver's grid");
+      }
+    }
+  }
   if (ev.options_.rotation == RotationalFeedback::Full) {
     // The forward run's stability condition (see SeaLevelEvolution::Run).
     const auto kHyd = FluidTidalNumber(ev.op_->BaseMaterial(), 2);
@@ -223,8 +250,8 @@ IceKernels AdjointSolver::IceHistoryKernels(
     }
   }
   return options_.method == AdjointMethod::Discrete
-             ? DiscreteSweep(times, measurements, trajectory)
-             : ContinuousSweep(times, measurements, trajectory);
+             ? DiscreteSweep(times, measurements, trajectory, oceanFunctions)
+             : ContinuousSweep(times, measurements, trajectory, oceanFunctions);
 }
 
 // -- the discrete transpose
@@ -233,7 +260,8 @@ IceKernels AdjointSolver::IceHistoryKernels(
 IceKernels AdjointSolver::DiscreteSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    const ForwardTrajectory* trajectory) const {
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -242,6 +270,16 @@ IceKernels AdjointSolver::DiscreteSweep(
   const bool implicit = scheme == Scheme::BackwardEuler;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
+  // About a migrating-shoreline trajectory the adjoint stays linear with
+  // the node's ocean function as its coefficient (Yu et al. 2025, §3.3);
+  // frozen, every node has the background's.
+  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
+    return oceanFunctions.empty() ? C : oceanFunctions[node];
+  };
+  auto overrideAt = [&](std::size_t node) {
+    return oceanFunctions.empty() ? std::vector<double>{}
+                                  : oceanFunctions[node];
+  };
   const auto rhoW = solver.WaterDensity();
   const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
@@ -311,10 +349,12 @@ IceKernels AdjointSolver::DiscreteSweep(
                          std::size_t node) {
     SeaLevelSolver::AdjointForcing duals;
     duals.rotation = rotation;
+    duals.oceanFunctionOverride = overrideAt(node);
+    const auto& Cn = oceanAt(node);
     auto synth = grid.Synthesise(sigmaDual);
     duals.seaLevelDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      duals.seaLevelDual[i] = rhoW * C[i] * synth[i] / r2;
+      duals.seaLevelDual[i] = rhoW * Cn[i] * synth[i] / r2;
     }
     auto gOmega = std::array<double, 3>{0.0, 0.0, 0.0};
     if (rotation != RotationalFeedback::None) {
@@ -582,6 +622,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   for (const auto& [node, m] : measurements) {
     SeaLevelSolver::AdjointForcing duals;
     duals.rotation = rotation;
+    duals.oceanFunctionOverride = overrideAt(node);
     duals.seaLevelDual = m.seaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
@@ -609,7 +650,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   }
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
-                           std::move(lumps));
+                           std::move(lumps), oceanFunctions);
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   return out;
 }
@@ -620,7 +661,8 @@ IceKernels AdjointSolver::DiscreteSweep(
 IceKernels AdjointSolver::ContinuousSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    const ForwardTrajectory* trajectory) const {
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -628,6 +670,16 @@ IceKernels AdjointSolver::ContinuousSweep(
   const auto scheme = ev.options_.scheme;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
+  // About a migrating-shoreline trajectory the adjoint stays linear with
+  // the node's ocean function as its coefficient (Yu et al. 2025, §3.3);
+  // frozen, every node has the background's.
+  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
+    return oceanFunctions.empty() ? C : oceanFunctions[node];
+  };
+  auto overrideAt = [&](std::size_t node) {
+    return oceanFunctions.empty() ? std::vector<double>{}
+                                  : oceanFunctions[node];
+  };
   const auto rhoW = solver.WaterDensity();
   const auto g = solver.SurfaceGravity();
   const auto r2 = solver.Radius() * solver.Radius();
@@ -678,9 +730,10 @@ IceKernels AdjointSolver::ContinuousSweep(
     std::vector<double> xiA;
     std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent
   };
-  auto jump = [&](const Measurement& m) {
+  auto jump = [&](const Measurement& m, std::size_t node) {
     SeaLevelSolver::GeneralisedForcing f;
     f.rotation = rotation;
+    f.oceanFunctionOverride = overrideAt(node);
     if (!m.seaLevelDual.empty()) f.directLoad = m.seaLevelDual;
     std::vector<double> zetaU, zetaPhi;
     if (!m.displacementDual.empty()) {
@@ -713,10 +766,11 @@ IceKernels AdjointSolver::ContinuousSweep(
     }
     Jump out;
     out.xiA = resp.seaLevelChange;
+    const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
-                   rhoW * C[i] * out.xiA[i];
+                   rhoW * Cn[i] * out.xiA[i];
     }
     out.lam = grid.Expand(lamGrid);
     out.psiA = rotation != RotationalFeedback::None
@@ -810,10 +864,11 @@ IceKernels AdjointSolver::ContinuousSweep(
   // The memory-only adjoint equilibrium of the current state: its sea
   // level (the smooth kernel density, per material time) and the load
   // and centrifugal coefficients the next reversed step starts from.
-  auto smoothEquilibrium = [&]() {
+  auto smoothEquilibrium = [&](std::size_t node) {
     const auto solutions = op.SolveElastic(vstate);
     SeaLevelSolver::GeneralisedForcing f;
     f.rotation = rotation;
+    f.oceanFunctionOverride = overrideAt(node);
     f.displacementResponse =
         ev.Coefficients(op.Surface(solutions, Component::U), ev.toNdLength_);
     f.potentialResponse =
@@ -826,9 +881,10 @@ IceKernels AdjointSolver::ContinuousSweep(
       throw std::runtime_error(
           "the adjoint equilibrium solve did not converge");
     }
+    const auto& Cn = oceanAt(node);
     auto sig = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
+      sig[i] = rhoW * Cn[i] * resp.seaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
     psiC = rotation != RotationalFeedback::None
@@ -966,10 +1022,10 @@ IceKernels AdjointSolver::ContinuousSweep(
   auto observe = [&](std::size_t node) {
     const auto found = measurements.find(node);
     if (found == measurements.end()) return;
-    const auto j = jump(found->second);
+    const auto j = jump(found->second, node);
     lumps.emplace(node, j.xiA);
     applyJump(j);
-    auto early = smoothEquilibrium();
+    auto early = smoothEquilibrium(node);
     if (node > 0) densityEarly[node] = std::move(early);
   };
 
@@ -985,6 +1041,7 @@ IceKernels AdjointSolver::ContinuousSweep(
                      ev.Columns(psiC, ev.toMatPotential_));
     SeaLevelSolver::GeneralisedForcing f;
     f.rotation = rotation;
+    f.oceanFunctionOverride = overrideAt(n - 1);
     f.displacementResponse = ev.Coefficients(
         step.MemorySurface(Component::U), ev.toNdLength_);
     f.potentialResponse = ev.Coefficients(
@@ -996,9 +1053,10 @@ IceKernels AdjointSolver::ContinuousSweep(
           "the adjoint coupled solve at node {} did not converge", n - 1));
     }
     densityLate[n - 1] = resp.seaLevelChange;
+    const auto& Cn = oceanAt(n - 1);
     auto sig = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sig[i] = rhoW * C[i] * resp.seaLevelChange[i];
+      sig[i] = rhoW * Cn[i] * resp.seaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
     psiC = rotation != RotationalFeedback::None
@@ -1040,7 +1098,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   }
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
-                           std::move(lumps));
+                           std::move(lumps), oceanFunctions);
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   return out;
 }
@@ -1051,24 +1109,31 @@ IceKernels AdjointSolver::ContinuousSweep(
 IceKernels AdjointSolver::AssembleViews(
     std::span<const double> times, std::vector<std::vector<double>> loadDuals,
     std::vector<std::vector<double>> density,
-    std::map<std::size_t, std::vector<double>> lumps) const {
-  return detail::AssembleIceViews(evolution_->state_.oceanFunction,
-                                  evolution_->solver_->IceDensity(), times,
-                                  std::move(loadDuals), std::move(density),
-                                  std::move(lumps));
+    std::map<std::size_t, std::vector<double>> lumps,
+    std::span<const std::vector<double>> oceanFunctions) const {
+  return detail::AssembleIceViews(
+      evolution_->state_.oceanFunction, evolution_->solver_->IceDensity(),
+      times, std::move(loadDuals), std::move(density), std::move(lumps),
+      oceanFunctions, evolution_->solver_->WaterDensity());
 }
 
 IceKernels detail::AssembleIceViews(
     std::span<const double> C, double rhoI, std::span<const double> times,
     std::vector<std::vector<double>> loadDuals,
     std::vector<std::vector<double>> density,
-    std::map<std::size_t, std::vector<double>> lumps) {
+    std::map<std::size_t, std::vector<double>> lumps,
+    std::span<const std::vector<double>> oceanFunctions, double rhoW) {
   const auto fieldSize = loadDuals.front().size();
 
-  auto ground = [&](const std::vector<double>& f) {
+  // The grounding factor rho_i (1 - C_n) at node n: the node's own ocean
+  // function about a migrating trajectory, the background's when frozen.
+  auto ground = [&](const std::vector<double>& f, std::size_t node) {
+    const auto Cn = oceanFunctions.empty()
+                        ? C
+                        : std::span<const double>(oceanFunctions[node]);
     auto out = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      out[i] = rhoI * (1.0 - C[i]) * f[i];
+      out[i] = rhoI * (1.0 - Cn[i]) * f[i];
     }
     return out;
   };
@@ -1081,21 +1146,35 @@ IceKernels detail::AssembleIceViews(
       out.baseline[i] -= rhoI * (1.0 - C[i]) * ld[i];
     }
   }
-  for (const auto& ld : loadDuals) out.thickness.push_back(ground(ld));
+  for (auto n = std::size_t{0}; n < loadDuals.size(); ++n) {
+    out.thickness.push_back(ground(loadDuals[n], n));
+  }
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.thickness[0][i] += out.baseline[i];
   }
-  // Identically zero under frozen shorelines (every C_n equals C).
+  // The initial sea level enters each node's load as rho_w (C_n - C_0)
+  // delta S_0, the discrete analogue of Yu et al.'s eq. (65): identically
+  // zero under frozen shorelines (every C_n equals C).
   out.initialSeaLevel.assign(fieldSize, 0.0);
-  for (const auto& [node, lump] : lumps) {
-    out.instantaneous.emplace(node, ground(lump));
+  if (!oceanFunctions.empty()) {
+    for (auto n = std::size_t{0}; n < loadDuals.size(); ++n) {
+      const auto& Cn = oceanFunctions[n];
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        out.initialSeaLevel[i] += rhoW * (Cn[i] - C[i]) * loadDuals[n][i];
+      }
+    }
   }
-  for (const auto& d : density) out.density.push_back(ground(d));
+  for (const auto& [node, lump] : lumps) {
+    out.instantaneous.emplace(node, ground(lump, node));
+  }
+  for (auto n = std::size_t{0}; n < density.size(); ++n) {
+    out.density.push_back(ground(density[n], n));
+  }
   // The quelled view: the cumulative tail of the thickness duals.
   auto tail = std::vector<double>(fieldSize, 0.0);
   out.rate.resize(times.size() - 1);
   for (std::size_t n = times.size() - 1; n >= 1; --n) {
-    const auto grounded = ground(loadDuals[n]);
+    const auto grounded = ground(loadDuals[n], n);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) tail[i] += grounded[i];
     out.rate[n - 1] = tail;
   }

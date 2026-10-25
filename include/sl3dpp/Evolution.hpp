@@ -15,8 +15,13 @@
  * material's scheme and the sea level solver in its own, with the unit
  * ratios carried here exactly as pyslfp does. Times and the ice-load
  * callable are in the SLE solver's units; the returned fields likewise.
- * The linear (frozen shoreline) equation is used throughout, with the
- * background state's ocean function.
+ *
+ * Two shoreline treatments, as pyslfp's `run_ice_history`: `Run` solves
+ * the linear (frozen shoreline) equation with the background state's ocean
+ * function, for a given non-ocean load; `RunMigrating` solves the
+ * nonlinear equation each step, for a given ice thickness history, the
+ * ocean function following the flotation condition and every snapshot
+ * recording it (the C(t) an adjoint about the trajectory reads back).
  */
 
 #include <array>
@@ -48,6 +53,11 @@ class SeaLevelEvolution {
     std::optional<ViscoelasticState> internalState;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;
+    /// The node's ocean function under migrating shorelines; empty when
+    /// the shorelines are frozen at the background state's.
+    std::vector<double> oceanFunction;
+    /// Whether the node's sea level solve met its tolerance.
+    bool converged = true;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -70,6 +80,9 @@ class SeaLevelEvolution {
     RotationalFeedback rotation = RotationalFeedback::Full;
     double rtol = 1e-9;
     int anderson_memory = 5;
+    /// The most passes of each step's nonlinear sea level solve under
+    /// migrating shorelines (pyslfp's default).
+    int max_nonlinear_iterations = 50;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
     /// coefficients are kept whenever the stride is set, so a reverse
@@ -121,7 +134,40 @@ class SeaLevelEvolution {
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceLoad);
 
+  /// Integrates under migrating shorelines (pyslfp's `run_ice_history`
+  /// with shorelines="migrating"): `iceThickness(t)` is the ice thickness
+  /// at t on the SLE grid, solver units, and the background state is the
+  /// state at times[0], so its ice thickness must be iceThickness(times[0])
+  /// and its ocean function the flotation one (a prescribed ocean function
+  /// is refused: the shorelines follow flotation from the first node).
+  /// Each step solves the nonlinear sea level equation from the background
+  /// state with the step's memory channels, and finishes under the
+  /// converged state's grounded-ice and ocean load relative to the
+  /// background; the run starts undisturbed. Every snapshot records its
+  /// ocean function. Recording and checkpointing as for `Run`.
+  [[nodiscard]] std::vector<Snapshot> RunMigrating(
+      std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness);
+
+  /// `Resume` for a migrating run: the same recurrence, the steps closed
+  /// by the nonlinear solve.
+  [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
+      const Checkpoint& from, std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness);
+
   [[nodiscard]] const ViscoelasticState& FinalState() const { return vstate_; }
+
+  /// The background surface state: the initial state of every run.
+  [[nodiscard]] const SeaLevelSolver::State& BackgroundState() const {
+    return state_;
+  }
+
+  /// Replaces the background state (a calibrated initial state, say);
+  /// its fields must live on the solver's grid.
+  void SetBackgroundState(SeaLevelSolver::State state);
+
+  /// The sea level solver the evolution was built with.
+  [[nodiscard]] const SeaLevelSolver& Solver() const { return *solver_; }
 
  private:
   friend class AdjointSolver;  // reuses the operator/solver/state/ratios
@@ -136,11 +182,17 @@ class SeaLevelEvolution {
   [[nodiscard]] std::vector<std::complex<double>> Coefficients(
       const std::map<int, std::vector<double>>& perDegree, double factor) const;
 
-  /// The loop both entries share; `resumed` skips the elastic start,
-  /// the members below holding the checkpoint's recurrence instead.
+  /// The loop every entry shares, given the non-ocean load (frozen
+  /// shorelines) or the ice thickness (migrating); `resumed` skips the
+  /// start, the members below holding the checkpoint's recurrence instead.
   [[nodiscard]] std::vector<Snapshot> March(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad, bool resumed);
+      const std::function<std::vector<double>(double)>* iceLoad,
+      const std::function<std::vector<double>(double)>* iceThickness,
+      bool resumed);
+
+  /// Restores a checkpoint's recurrence into the members below.
+  void Restore(const Checkpoint& from, std::span<const double> times);
 
   const ViscoelasticOperator* op_;
   const SeaLevelSolver* solver_;

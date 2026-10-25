@@ -490,6 +490,84 @@ void Viscoelastic3D::PrimeStrain(State& state, const LoadCallable3D& load,
   state.strain = coupling_.Synthesise(*state.strainCoefficients);
 }
 
+GridCoupling::TensorField Viscoelastic3D::TakeTensor() const {
+  {
+    auto lock = std::scoped_lock(*scratchMutex_);
+    if (!spareTensors_.empty()) {
+      auto tensor = std::move(spareTensors_.back());
+      spareTensors_.pop_back();
+      return tensor;
+    }
+  }
+  return coupling_.ZeroTensor();
+}
+
+std::vector<double> Viscoelastic3D::TakeField() const {
+  {
+    auto lock = std::scoped_lock(*scratchMutex_);
+    if (!spareFields_.empty()) {
+      auto field = std::move(spareFields_.back());
+      spareFields_.pop_back();
+      return field;
+    }
+  }
+  return std::vector<double>(static_cast<std::size_t>(coupling_.NodeCount()) *
+                             coupling_.Grid().FieldSize());
+}
+
+void Viscoelastic3D::Give(GridCoupling::TensorField&& tensor) const {
+  const auto size = static_cast<std::size_t>(coupling_.NodeCount()) *
+                    coupling_.Grid().FieldSize();
+  if (tensor.c[0].size() != size || tensor.c[1].size() != size ||
+      tensor.r.size() != size) {
+    return;
+  }
+  auto lock = std::scoped_lock(*scratchMutex_);
+  // one step's worth: a memory tensor per branch and the workspace
+  if (spareTensors_.size() < rheology_->BranchCount() + 1) {
+    spareTensors_.push_back(std::move(tensor));
+  }
+}
+
+void Viscoelastic3D::Give(std::vector<double>&& field) const {
+  const auto size = static_cast<std::size_t>(coupling_.NodeCount()) *
+                    coupling_.Grid().FieldSize();
+  if (field.size() != size) return;
+  auto lock = std::scoped_lock(*scratchMutex_);
+  // one step's worth: a weight per branch and the lateral weight
+  if (spareFields_.size() < rheology_->BranchCount() + 1) {
+    spareFields_.push_back(std::move(field));
+  }
+}
+
+void Viscoelastic3D::Recycle(State&& state) const {
+  for (auto& tensor : state.m) Give(std::move(tensor));
+  if (state.strain.has_value()) Give(std::move(*state.strain));
+}
+
+void Viscoelastic3D::ReleaseScratch() const {
+  auto tensors = std::vector<GridCoupling::TensorField>{};
+  auto fields = std::vector<std::vector<double>>{};
+  {
+    auto lock = std::scoped_lock(*scratchMutex_);
+    tensors.swap(spareTensors_);
+    fields.swap(spareFields_);
+  }
+  // freed here, outside the lock
+}
+
+Viscoelastic3D::OpenStep::~OpenStep() {
+  if (op_ == nullptr) return;
+  try {
+    for (auto& tensor : memory_) op_->Give(std::move(tensor));
+    op_->Give(std::move(grid_));
+    op_->Give(std::move(weight_));
+    for (auto& field : beta_) op_->Give(std::move(field));
+  } catch (...) {
+    // the arrays are freed instead
+  }
+}
+
 Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
     const LoadCallable3D& tide) const {
@@ -527,13 +605,24 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   // and its beta_k for Finish; summed over branches, the lateral weight
   // and the fixed memory force sum_k mu_k m~_k, analysed once here. The
   // fixed force is formed in what becomes Respond's grid workspace.
+  // Every array is written before it is read (the first branch assigns
+  // what the others add to), so reused ones need no clearing.
   step.beta_.resize(K);
-  step.weight_.assign(nodes * fieldSize, 0.0);
-  step.grid_ = coupling_.ZeroTensor();
+  step.weight_ = TakeField();
+  step.grid_ = TakeTensor();
   auto& fixed = step.grid_;
+  if (K == 0) {
+    detail::ParallelElements(nodes * fieldSize, options_.parallel,
+                             [&](std::size_t i) {
+                               step.weight_[i] = 0.0;
+                               fixed.c[0][i] = 0.0;
+                               fixed.c[1][i] = 0.0;
+                               fixed.r[i] = 0.0;
+                             });
+  }
   for (auto k = std::size_t{0}; k < K; ++k) {
-    step.memory_.push_back(coupling_.ZeroTensor());
-    step.beta_[k].assign(nodes * fieldSize, 0.0);
+    step.memory_.push_back(TakeTensor());
+    step.beta_[k] = TakeField();
     detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
       const auto itauRef = itauRef_[k][node];
       const auto refBeta = scheme == Scheme::BackwardEuler
@@ -561,6 +650,17 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
           memory.c[c][at] = e_w * state.m[k].c[c][at] + a_w * d0.c[c][at];
         }
         memory.r[at] = e_w * state.m[k].r[at] + a_w * d0.r[at];
+        if (k == 0) {
+          // 0.0 + v as the accumulation onto zeros gave (a -0.0 sum
+          // becomes +0.0), so the step is bitwise the cleared form
+          step.weight_[at] = 0.0 + mu * (b_w - refBeta);
+          for (auto c = 0; c < 2; ++c) {
+            // complex + complex, so a -0.0 imaginary part becomes +0.0 too
+            fixed.c[c][at] = Complex{} + mu * memory.c[c][at];
+          }
+          fixed.r[at] = 0.0 + mu * memory.r[at];
+          continue;
+        }
         if (mu == 0.0) continue;
         step.weight_[at] += mu * (b_w - refBeta);
         for (auto c = 0; c < 2; ++c) fixed.c[c][at] += mu * memory.c[c][at];

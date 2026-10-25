@@ -19,7 +19,7 @@ package-mode = false
 
 [tool.poetry.dependencies]
 python = ">=3.12"
-pyslfp = ">=2.2.2,<3"
+pyslfp = ">=2.2.2,<4"
 planetmodel = {version = ">=1.3.2,<2", extras = ["netcdf", "plot"]}
 numpy = ">=2.0"
 

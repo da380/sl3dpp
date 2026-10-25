@@ -19,7 +19,8 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Load, tidal and traction Love numbers of transversely isotropic radial models | `LoveNumbers.hpp`, `DegreeOperator.hpp`, `ToroidalOperator.hpp` |
 | The sea level equation: linear, generalised (extra channels), nonlinear (migrating shorelines), with rotational feedback, and its exact adjoint | `SeaLevel.hpp` |
 | Elastic sea-level fingerprints, SI at the interface | `Fingerprint.hpp` |
-| 1D viscoelastic evolution under an ice history | `Viscoelastic.hpp`, `Evolution.hpp` |
+| 1D viscoelastic evolution under an ice history, frozen or migrating shorelines | `Viscoelastic.hpp`, `Evolution.hpp` |
+| The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
 | 3D (lateral-viscosity) evolution under an ice history | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
@@ -64,8 +65,20 @@ Deliberately out of scope:
   a uniform ocean shift, and rotational feedback by first-order
   quasi-static Liouville theory solved in closed form at degree 2 (axial
   and transverse, no Chandler wobble, the hydrostatic-moment guard of
-  pyslfp). The evolutions use the linear equation with frozen shorelines;
-  the nonlinear (Kendall-style) solve is available to direct callers.
+  pyslfp). The evolutions use the linear equation with frozen shorelines,
+  or, in 1D, the nonlinear (Kendall-style) solve at every step with
+  migrating shorelines (`RunMigrating`, pyslfp's `_run_migrating`): the
+  step's memory field enters through the response channels and the step
+  finishes under the converged state's grounded-ice and ocean load. A
+  state may carry a prescribed ocean function, which the linear solves use
+  as given.
+- **The initial sea level.** `InitialSeaLevel.hpp` lifts pyslfp's
+  calibration (pyslfp 3.0.0): the initial sea level whose run reaches a
+  given final one. Under frozen shorelines the problem is linear and one
+  run gives it exactly, the shorelines kept as a prescribed ocean
+  function; under migrating ones it iterates, by the classical update
+  (Kendall et al. 2005) or steepest descent with the adjoint gradient (Yu
+  et al. 2025, §3.9), Anderson-mixed.
 - **Lateral viscosity.** η(r, θ, φ) = η̄(r) exp(δ(r, θ, φ)) about a radial
   reference, so the inverse relaxation time is itau(x) = itau_ref(r)
   exp(−δ(x)), positive whatever δ is.
@@ -219,6 +232,12 @@ Deliberately out of scope:
   (a density in time plus the instantaneous amplitude of each
   measurement; Yu et al. 2025 §3.7), and the quelled view (the kernel
   against the thickness rate on each interval).
+- **About a migrating trajectory.** Given the ocean function of every node
+  of a migrating run, the 1D sweeps linearise about it: the adjoint stays
+  linear with the time-reversed C(t) as its coefficients (Yu et al. 2025,
+  §3.3; the shoreline-motion singular terms cancel), the grounding factors
+  are per node, and the initial sea level kernel
+  ρ_w Σₙ (Cₙ − C₀) loadDualsₙ is formed (zero under frozen shorelines).
 - **Viscosity kernels**, in the multiplier form of Yu et al. (2025), as
   pyslfp: in 1D, dJ/d itau = ∫ W_k m†/itau (d − m) dt per branch, mapped to
   dJ/dη by dη = −η² d(itau)/μ; in 3D, μ_k m†:(d − m)/itau per branch and
@@ -423,9 +442,10 @@ What is not built, or holds only within limits:
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
-- **Migrating shorelines in the evolutions and adjoints.** The evolutions
-  use frozen shorelines, and the adjoints linearise about them; the
-  nonlinear sea level solve exists but no driver uses it.
+- **Migrating shorelines in 3D.** The 1D evolution and its adjoints run
+  migrating shorelines; the 3D evolution, its adjoint and so its
+  calibration hold the shorelines frozen. Migrating shorelines in 3D would
+  put the nonlinear solve inside the combined within-step fixed point (§6).
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold
   into the same within-step fixed point
   ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §7a).
@@ -448,11 +468,14 @@ What is not built, or holds only within limits:
   of a pass) stop scaling first: GSHTrans threads the colatitude rows of
   each chunk and sums per-thread accumulators, and the analysis gets
   slower beyond 32 threads. The large arrays are not placed socket by
-  socket (first touch in the threads that use them), and the once-per-step
-  start (`StartStep`, about a fifth of a step) does not scale. README,
-  *Running*, has the advice that follows;
+  socket (first touch in the threads that use them; they are now reused
+  from step to step, so allocated once per run), and the once-per-step
+  start (`StartStep`) is mostly two analyses, which carry the transforms'
+  limit. README, *Running*, has the advice that follows;
   [dev/multicore-scaling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) has the
-  measurements and the plans.
+  measurements and the plans, and
+  [dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)
+  a plan for one process per socket.
 - **Memory at lmax 512.** A 3D run there needs the recorded states on disk
   (the `on_state` store) and a large node.
 - **Inversion.** There are no inversion drivers or optimiser interface: the

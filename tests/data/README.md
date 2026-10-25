@@ -33,6 +33,7 @@ anything back.
 | `pyslfp_stepper.txt` | `make_stepper_fixtures.py` | `TestFixtures` | Love-number histories of a Maxwell mantle under a held load, by both steppers, and the step's effective Love numbers |
 | `pyslfp_evolution.txt` | `make_evolution_fixture.py` | `TestEvolution` | the coupled 1D evolution of the analytic state under a linear melt |
 | `pyslfp_kernels.txt` | `make_kernel_fixtures.py` | `TestAdjoint` | ice-history (load-dual) and inverse-relaxation-time kernels of that evolution, by the discrete and continuous adjoints |
+| `pyslfp_migrating.txt` | `make_migrating_fixture.py` | `TestInitialSeaLevel` | a migrating-shoreline run under a melting marine cap (its initial fields as coefficients, the per-node sea level change and ocean function), the gradient of a final sea level misfit, and both calibrations' misfit histories |
 | `decay_time.txt` | `make_decay_fixtures.py` | `TestMeasurements` | the decay-time estimator on a deterministic noisy series |
 | `e1_homogeneous.deck`, `e1_two_solid.deck` | `make_e1_fixtures.py` | `TestTractionNumbers` | the solid models of AdGIA's benchmark ladder, full precision |
 | `e1_traction_numbers.txt` | `make_e1_fixtures.py` | `TestTractionNumbers` | their traction numbers, without and with gravity |

@@ -56,6 +56,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -273,7 +274,8 @@ int main(int argc, char** argv) {
     passes += result.info.iterations;
     std::printf(" %d%s", result.info.iterations,
                 result.info.converged ? "" : "(NOT converged)");
-    state = std::move(result.state);
+    // as the evolutions do: the replaced state's tensors serve the next step
+    op.Recycle(std::exchange(state, std::move(result.state)));
     last = std::move(result.solutions);
   }
   const auto total = Seconds(start);

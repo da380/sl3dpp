@@ -310,6 +310,24 @@ DecayTimeFit FitDecayTime(std::span<const double> times,
         "the value uncertainty must be positive and the time uncertainty "
         "non-negative");
   }
+  // Only the ratio of the uncertainties shapes the fit, so one given in
+  // the wrong unit changes the answer silently; these bounds catch the
+  // slips that leave the fit meaningless.
+  const auto span = times.back() - times.front();
+  if (options.time_uncertainty >= span) {
+    throw std::invalid_argument(std::format(
+        "the time uncertainty ({:.3g}) is not smaller than the window's span "
+        "({:.3g}): the fitted times would be free; is it in the times' unit?",
+        options.time_uncertainty, span));
+  }
+  const auto [low, high] = std::ranges::minmax(values);
+  if (options.value_uncertainty >= high - low) {
+    throw std::invalid_argument(std::format(
+        "the value uncertainty ({:.3g}) is not smaller than the series' range "
+        "({:.3g}): the series constrains no decay at that uncertainty; is it "
+        "in the values' unit?",
+        options.value_uncertainty, high - low));
+  }
   const auto free_times = options.time_uncertainty > 0.0;
   auto problem = FitProblem{
       .t = times,

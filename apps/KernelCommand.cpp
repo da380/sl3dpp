@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <fstream>
 #include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
+#include <set>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -406,6 +409,29 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
   for (auto k = std::size_t{0}; k < items.size(); ++k) {
     out.measurements.push_back(ReadSpec(items[k], k));
   }
+  // A name is the stem of its output files in the output directory, so it
+  // must be a plain file name, and one only one measurement uses.
+  auto names = std::set<std::string>{};
+  for (auto k = std::size_t{0}; k < items.size(); ++k) {
+    const auto& name = out.measurements[k].name;
+    const auto& where = Has(items[k], "name") ? items[k].At("name") : items[k];
+    const auto plain = !name.empty() && name.front() != '.' &&
+                       std::ranges::all_of(name, [](char c) {
+                         return std::isalnum(static_cast<unsigned char>(c)) ||
+                                c == '_' || c == '-' || c == '.';
+                       });
+    if (!plain) {
+      Fail(where, std::format("\"{}\" is not a plain file name (letters, "
+                              "digits, '_', '-' and '.', not leading '.'): "
+                              "it names the measurement's output files",
+                              name));
+    }
+    if (!names.insert(name).second) {
+      Fail(where, std::format("\"{}\" names another measurement too; their "
+                              "output files would collide",
+                              name));
+    }
+  }
   CheckMeasurements(items, out);
   out.output = PathOf(top, "output", directory);
   return out;
@@ -471,6 +497,11 @@ std::string RunKernel1D(const std::filesystem::path& config) {
     Fail(top.At("trajectory"),
          "spills a 3D recording; the 1D trajectory fits in memory");
   }
+  if (Has(top, "coupled")) {
+    Fail(top.At("coupled"),
+         "sets the 3D commands' within-step fixed point, which kernel1d does "
+         "not have");
+  }
   auto earth = BuildEarth(input.run, top);
   const auto rheology = Rheology::FromModel(earth.material, earth.model);
   if (!rheology) Fail(top.At("model"), rheology.error().message);
@@ -479,15 +510,32 @@ std::string RunKernel1D(const std::filesystem::path& config) {
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
   const auto times = MakeTimes(input.run, solver.SolverScales());
-  const auto iceLoad = IceLoadOf(input.run, solver, world);
   auto options = SeaLevelEvolution::Options{};
   options.scheme = input.run.scheme;
   options.rotation = input.run.rotation;
   options.rtol = input.run.rtol;
+  if (input.run.calibrate) {
+    // calibrated by runs that record nothing; the recording run follows
+    SeaLevelEvolution calibrating(op, solver, world.background, options);
+    static_cast<void>(
+        CalibrateWorld(input.run, top, solver, world, calibrating, times));
+  }
   options.record_stride = input.record_stride;
   SeaLevelEvolution evolution(op, solver, world.background, options);
-  const auto snapshots = evolution.Run(times, iceLoad);
+  const auto history = HistoryOf(input.run, solver, world);
+  const auto snapshots = RunIceHistory(evolution, times, history);
+  for (const auto& snapshot : snapshots) {
+    if (!snapshot.converged) {
+      throw std::runtime_error(std::format(
+          "the sea level solve did not converge at t = {}; loosen rtol",
+          snapshot.t));
+    }
+  }
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+  // about a migrating run, the sweeps linearise about its own shorelines
+  const auto oceans = input.run.shorelines == Shorelines::Migrating
+                          ? OceanFunctionsOf(snapshots)
+                          : std::vector<std::vector<double>>{};
 
   const auto& material = earth.material;
   const auto& mesh = material.Mesh();
@@ -499,7 +547,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
       [&](const std::map<std::size_t, Measurement>& measurements,
           const std::filesystem::path& stem, const Built& built) {
         const auto kernels =
-            adjoint.IceHistoryKernels(times, measurements, &trajectory);
+            adjoint.IceHistoryKernels(times, measurements, &trajectory, oceans);
         // the radial viscosity kernels as densities in radius, SI:
         // dJ = int K(r) d eta(r) dr per branch
         const auto eta = kernels.Viscosity(*rheology);
@@ -541,6 +589,11 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   if (input.method == AdjointMethod::Discrete) {
     Fail(top.At("adjoint"), "the 3D sweep is the continuous adjoint alone");
   }
+  if (input.run.shorelines == Shorelines::Migrating) {
+    Fail(top.At("shorelines"),
+         "is migrating, which the 1D commands alone run: the 3D evolution "
+         "holds its shorelines frozen");
+  }
   auto earth = BuildEarth(input.run, top);
   auto mv_options = io::ModelViscosityOptions{};
   mv_options.reference = input.run.viscosity_file_radial
@@ -566,6 +619,11 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   options.rtol = input.run.rtol;
   options.coupled_rtol = input.run.coupled_rtol;
   options.max_coupled_iterations = input.run.max_coupled_iterations;
+  if (input.run.calibrate) {
+    SeaLevelEvolution3D calibrating(op, solver, world.background, options);
+    static_cast<void>(
+        CalibrateWorld(input.run, top, solver, world, calibrating, times));
+  }
   options.record_stride = input.record_stride;
   // with a trajectory directory, the recorded states spill to disk as
   // the run passes them, and the sweep fetches them back one at a time
@@ -610,7 +668,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
 
   const auto& matScales = earth.material.ModelScales();
   AdjointSolver3D adjoint(evolution, {.rtol = input.run.rtol});
-  return RunKernelsWith<SeaLevelEvolution3D::Snapshot>(
+  const auto summary = RunKernelsWith<SeaLevelEvolution3D::Snapshot>(
       config, input, solver, snapshots, "kernel",
       [&](const std::map<std::size_t, Measurement>& measurements,
           const std::filesystem::path& stem, const Built& built) {
@@ -640,6 +698,15 @@ std::string RunKernel3D(const std::filesystem::path& config) {
         if (!written) throw std::runtime_error(written.error().message);
         return kernels.ice;
       });
+  // the spilled states served the sweeps and nothing else: the files this
+  // run wrote go (anything else in the directory stays)
+  auto removed = std::size_t{0};
+  for (auto node = std::size_t{0}; node < spilled.size(); ++node) {
+    if (spilled[node] && std::filesystem::remove(state_path(node))) ++removed;
+  }
+  return spilling
+             ? std::format("{}, {} spilled state(s) removed", summary, removed)
+             : summary;
 }
 
 }  // namespace sl3dpp::app

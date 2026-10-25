@@ -487,11 +487,13 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           n - 1));
     }
     densityLate[n - 1] = response.seaLevelChange;
-    vstate = std::move(step).Finish(std::move(strain));
+    op.Recycle(
+        std::exchange(vstate, std::move(step).Finish(std::move(strain))));
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);
   }
+  op.ReleaseScratch();
 
   // Node duals from the densities and the lumps (the 1D assembly).
   std::vector<std::vector<double>> loadDuals(times.size()),
@@ -532,6 +534,49 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
             -op.itau_[k][i] * out.itauKernel3D[k][i];
       }
     }
+  }
+  return out;
+}
+
+namespace {
+
+void CheckKernelLayout(const GridCoupling& coupling,
+                       std::span<const double> kernel) {
+  const auto expected = static_cast<std::size_t>(coupling.NodeCount()) *
+                        coupling.Grid().FieldSize();
+  if (kernel.size() != expected) {
+    throw std::invalid_argument(std::format(
+        "the kernel holds {} values; the coupling's nodes and grid {}",
+        kernel.size(), expected));
+  }
+}
+
+}  // namespace
+
+std::vector<double> VolumeDensity(const GridCoupling& coupling,
+                                  std::span<const double> kernel) {
+  CheckKernelLayout(coupling, kernel);
+  const auto fieldSize = coupling.Grid().FieldSize();
+  auto out = std::vector<double>(kernel.begin(), kernel.end());
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto r = coupling.RadiusOfNode(node);
+    const auto scale = 1.0 / (coupling.WeightOfNode(node) * r * r);
+    const auto at = static_cast<std::size_t>(node) * fieldSize;
+    for (auto x = std::size_t{0}; x < fieldSize; ++x) out[at + x] *= scale;
+  }
+  return out;
+}
+
+std::vector<double> RadialDensity(const GridCoupling& coupling,
+                                  std::span<const double> kernel) {
+  CheckKernelLayout(coupling, kernel);
+  const auto fieldSize = coupling.Grid().FieldSize();
+  auto out = std::vector<double>{};
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto slice =
+        kernel.subspan(static_cast<std::size_t>(node) * fieldSize, fieldSize);
+    out.push_back(coupling.Grid().Integrate(slice) /
+                  coupling.WeightOfNode(node));
   }
   return out;
 }

@@ -21,3 +21,7 @@ account of how sl3dpp works, and the code is the authority.
   for posing and solving inverse problems through pygeoinf v2: spaces,
   operators, what sl3dpp and pygeoinf would each need, and the order of
   work.
+- [radial-substructuring.md](radial-substructuring.md): a plan (not
+  built) for distributing the 3D step over radial segments, one process
+  per socket, the per-degree solves by substructuring, with a serial
+  prototype of that solve.

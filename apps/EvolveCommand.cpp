@@ -10,6 +10,7 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -19,6 +20,7 @@
 #include "Serialize.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
@@ -36,6 +38,7 @@ struct Node {
   std::vector<double> displacement;
   std::vector<double> potential;
   std::array<double, 3> angularVelocity{};
+  std::vector<double> oceanFunction;  ///< migrating runs alone
 };
 
 /// A run stopped on purpose at a checkpoint: the wall clock passed the
@@ -114,7 +117,62 @@ std::uint64_t FingerprintOf(const EvolveInput& input) {
   hash.AddValue(input.max_coupled_iterations);
   hash.AddValue(input.hydrostatic_moments);
   hash.AddValue(input.rtol);
+  // added only when set, so a frozen, uncalibrated run's checkpoints
+  // written before these members existed still resume
+  if (input.shorelines != Shorelines::Frozen) hash.AddValue(input.shorelines);
+  if (input.calibrate) {
+    hash.AddValue(input.calibration_method);
+    hash.AddValue(input.calibration_iterations);
+    hash.AddValue(input.calibration_rtol);
+  }
   return hash.Value();
+}
+
+/// The calibrated initial state a calibrating run keeps beside its
+/// checkpoints, so that a resumption need not calibrate again.
+constexpr auto kInitialStateName = std::string_view{"initial_state.bin"};
+constexpr auto kInitialStateMagic =
+    std::uint64_t{0x534c334449535431};  // "SL3DIST1"
+
+void WriteInitialState(const std::filesystem::path& directory,
+                       std::uint64_t hash, const SeaLevelSolver::State& state) {
+  std::filesystem::create_directories(directory);
+  const auto path = directory / kInitialStateName;
+  const auto partial = directory / ".initial_state.partial";
+  {
+    auto out = std::ofstream(partial, std::ios::binary);
+    PutOne(out, kInitialStateMagic);
+    PutOne(out, hash);
+    PutVector(out, state.iceThickness);
+    PutVector(out, state.seaLevel);
+    PutVector(out, state.oceanFunction);
+    PutOne(out, state.oceanArea);
+    if (!out) {
+      throw std::runtime_error(
+          std::format("cannot write {}", partial.string()));
+    }
+  }
+  std::filesystem::rename(partial, path);
+}
+
+/// The calibrated initial state of this run, if the directory keeps one.
+std::optional<SeaLevelSolver::State> ReadInitialState(
+    const std::filesystem::path& directory, std::uint64_t hash,
+    const SeaLevelSolver::State& background) {
+  auto in = std::ifstream(directory / kInitialStateName, std::ios::binary);
+  if (!in || GetOne<std::uint64_t>(in) != kInitialStateMagic ||
+      GetOne<std::uint64_t>(in) != hash) {
+    return std::nullopt;
+  }
+  auto state = background;
+  state.iceThickness = GetVector(in);
+  state.seaLevel = GetVector(in);
+  state.oceanFunction = GetVector(in);
+  state.oceanArea = GetOne<double>(in);
+  if (!in || state.seaLevel.size() != background.seaLevel.size()) {
+    return std::nullopt;
+  }
+  return state;
 }
 
 /// Whether a file name is one this program writes into a checkpoint
@@ -170,15 +228,16 @@ std::size_t ClearCheckpoints(const std::filesystem::path& directory) {
       ++removed;
     }
   }
+  std::filesystem::remove(directory / kInitialStateName);
   return removed;
 }
 
 /// Writes a checkpoint whole (a temporary renamed into place) and keeps
 /// the newest two in the directory.
 template <class CheckpointT>
-void WriteCheckpoint(const std::filesystem::path& directory,
-                     std::uint64_t hash, std::size_t node,
-                     const CheckpointT& cp, const std::vector<Node>& history) {
+void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
+                     std::size_t node, const CheckpointT& cp,
+                     const std::vector<Node>& history, bool migrating) {
   std::filesystem::create_directories(directory);
   const auto path = directory / std::format("node_{:06}.ckpt", node);
   const auto partial = directory / std::format(".node_{:06}.partial", node);
@@ -203,6 +262,7 @@ void WriteCheckpoint(const std::filesystem::path& directory,
       PutVector(out, kept.displacement);
       PutVector(out, kept.potential);
       Put(out, kept.angularVelocity.data(), 3 * sizeof(double));
+      if (migrating) PutVector(out, kept.oceanFunction);
     }
     if (!out) {
       throw std::runtime_error(
@@ -228,7 +288,8 @@ struct ReadBack {
 /// The newest checkpoint of this run in the directory, or nothing.
 template <class CheckpointT>
 std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
-    const std::filesystem::path& directory, std::uint64_t hash) {
+    const std::filesystem::path& directory, std::uint64_t hash,
+    bool migrating) {
   auto candidates = CheckpointsIn(directory);
   std::reverse(candidates.begin(), candidates.end());
   for (const auto& path : candidates) {
@@ -261,6 +322,7 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
       kept.potential = GetVector(in);
       in.read(reinterpret_cast<char*>(kept.angularVelocity.data()),
               3 * sizeof(double));
+      if (migrating) kept.oceanFunction = GetVector(in);
       out.history.push_back(std::move(kept));
     }
     if (in) return out;
@@ -273,7 +335,9 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpoint(
 void WriteHistoryFile(const EvolveInput& input,
                       const std::filesystem::path& config,
                       const SurfaceGrid& grid, const std::vector<Node>& history,
-                      std::string_view command) {
+                      std::string_view command,
+                      std::span<const double> initialSeaLevel,
+                      std::string_view initialSeaLevelOrigin) {
   namespace pm = planetmodel;
   auto file = pm::SurfaceFile{};
   file.grid = pm::AngularGrid(
@@ -306,6 +370,11 @@ void WriteHistoryFile(const EvolveInput& input,
   if (!input.viscosity.empty()) {
     file.meta.emplace("viscosity", input.viscosity.string());
   }
+  file.meta.emplace(
+      "shorelines",
+      std::string{input.shorelines == Shorelines::Frozen ? "frozen"
+                                                         : "migrating"});
+  file.meta.emplace("initial_sea_level", std::string{initialSeaLevelOrigin});
   const auto fieldSize = grid.FieldSize();
   const auto potential = pm::Dimensions{.length = 2, .time = -2};
   auto gather = [&](auto member) {
@@ -333,6 +402,24 @@ void WriteHistoryFile(const EvolveInput& input,
       "radial surface displacement");
   put("potential", gather(&Node::potential), potential,
       "gravitational potential perturbation at the surface");
+  {
+    auto options = pm::SurfaceFieldOptions{};
+    options.support = "static";
+    options.dimensions = pm::units::LENGTH;
+    options.meaning =
+        "the initial sea level the run started from; the sea level at a node "
+        "is this plus sea_level_change there";
+    file.variables.emplace(
+        "initial_sea_level",
+        pm::SurfaceField(
+            "initial_sea_level",
+            std::vector<double>(initialSeaLevel.begin(), initialSeaLevel.end()),
+            options));
+  }
+  if (input.shorelines == Shorelines::Migrating) {
+    put("ocean_function", gather(&Node::oceanFunction), std::nullopt,
+        "the ocean function at each node, following flotation");
+  }
   if (const auto parent = input.output.parent_path(); !parent.empty()) {
     std::filesystem::create_directories(parent);
   }
@@ -354,6 +441,11 @@ std::string RunWith(
   const auto length = scales.Length();
   const auto times = MakeTimes(input, scales);
   const auto iceLoad = IceLoadOf(input, solver, world);
+  constexpr auto is1D = std::is_same_v<Evolution, SeaLevelEvolution>;
+  const auto migrating = input.shorelines == Shorelines::Migrating;
+  const auto thickness = migrating
+                             ? IceThicknessOf(input, solver, world)
+                             : std::function<std::vector<double>(double)>{};
 
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toOmega = 1.0 / scales.Time();
@@ -371,6 +463,7 @@ std::string RunWith(
     for (auto k = 0; k < 3; ++k) {
       kept.angularVelocity[k] = snapshot.angularVelocity[k] * toOmega;
     }
+    if constexpr (is1D) kept.oceanFunction = snapshot.oceanFunction;
     history.push_back(std::move(kept));
   };
 
@@ -380,7 +473,7 @@ std::string RunWith(
   auto cleared = std::size_t{0};
   if (checkpointing && input.restart) {
     resumed = ReadCheckpoint<typename Evolution::Checkpoint>(
-        input.checkpoint_directory, hash);
+        input.checkpoint_directory, hash, migrating);
   } else if (checkpointing) {
     cleared = ClearCheckpoints(input.checkpoint_directory);
   }
@@ -391,6 +484,36 @@ std::string RunWith(
   options.scheme = input.scheme;
   options.rotation = input.rotation;
   options.rtol = input.rtol;
+
+  // The initial sea level: the state file's at the start, or calibrated
+  // against its sea level at the end, by an evolution that streams nothing
+  // (a resumption reads back the calibrated state its run kept).
+  auto origin = std::string{"the state file at the window's start"};
+  if (input.calibrate) {
+    auto restored = std::optional<SeaLevelSolver::State>{};
+    if (resumed) {
+      restored =
+          ReadInitialState(input.checkpoint_directory, hash, world.background);
+    }
+    if (restored) {
+      StartFromIceHistory(input, solver, world, restored->seaLevel);
+      world.background = std::move(*restored);
+      origin = "calibrated (read back from the checkpoint directory)";
+    } else {
+      const auto top = planetmodel::ReadJsonFile(config);
+      auto calibrating = make(options);
+      const auto calibrated =
+          CalibrateWorld(input, top, solver, world, calibrating, times);
+      if (checkpointing) {
+        WriteInitialState(input.checkpoint_directory, hash, world.background);
+      }
+      origin = std::format(
+          "calibrated against the state file at the window's end, {} run(s), "
+          "rms misfit {:.3g} m before, {:.3g} m after",
+          calibrated.runs, calibrated.before_m, calibrated.after_m);
+    }
+  }
+
   options.on_snapshot = [&](std::size_t,
                             const typename Evolution::Snapshot& s) {
     keep(s);
@@ -401,7 +524,7 @@ std::string RunWith(
     options.on_checkpoint = [&](std::size_t node,
                                 const typename Evolution::Checkpoint& cp) {
       WriteCheckpoint(input.checkpoint_directory, hash, base_node + node, cp,
-                      history);
+                      history, migrating);
       const auto done =
           base_node + node + 1 >= static_cast<std::size_t>(input.nodes);
       if (input.max_walltime_min > 0.0 && !done) {
@@ -424,8 +547,24 @@ std::string RunWith(
           times.begin() + static_cast<std::ptrdiff_t>(resumed->node),
           times.end());
       if (remaining.size() >= 2) {  // a checkpoint at the last node is done
-        static_cast<void>(
-            evolution.Resume(resumed->checkpoint, remaining, iceLoad));
+        if constexpr (is1D) {
+          if (migrating) {
+            static_cast<void>(evolution.ResumeMigrating(resumed->checkpoint,
+                                                        remaining, thickness));
+          } else {
+            static_cast<void>(
+                evolution.Resume(resumed->checkpoint, remaining, iceLoad));
+          }
+        } else {
+          static_cast<void>(
+              evolution.Resume(resumed->checkpoint, remaining, iceLoad));
+        }
+      }
+    } else if constexpr (is1D) {
+      if (migrating) {
+        static_cast<void>(evolution.RunMigrating(times, thickness));
+      } else {
+        static_cast<void>(evolution.Run(times, iceLoad));
       }
     } else {
       static_cast<void>(evolution.Run(times, iceLoad));
@@ -439,10 +578,16 @@ std::string RunWith(
                       : "set \"restart\": true (the default) to resume");
   }
 
-  WriteHistoryFile(input, config, grid, history, command);
-  return std::format("wrote {} ({} nodes, {} to {} kyr BP{}{})",
+  auto initial = world.background.seaLevel;
+  for (auto& v : initial) v *= length;
+  WriteHistoryFile(input, config, grid, history, command, initial, origin);
+  const auto calibrated = input.calibrate
+                              ? std::string{", initial sea level calibrated"}
+                              : std::string{};
+  return std::format("wrote {} ({} nodes, {} to {} kyr BP{}{}{})",
                      input.output.string(), history.size(), input.start_kyr_bp,
-                     input.end_kyr_bp, resumed ? ", resumed" : "", replaced);
+                     input.end_kyr_bp, calibrated, resumed ? ", resumed" : "",
+                     replaced);
 }
 
 }  // namespace
@@ -480,6 +625,11 @@ std::string RunEvolve(const std::filesystem::path& config) {
          "names a 3D viscosity; evolve1d takes the model's own column — "
          "use `sl3d evolve`");
   }
+  if (Has(top, "coupled")) {
+    Fail(top.At("coupled"),
+         "sets the 3D commands' within-step fixed point, which evolve1d does "
+         "not have");
+  }
   auto earth = BuildEarth(input, top);
   const auto rheology = Rheology::FromModel(earth.material, earth.model);
   if (!rheology) Fail(top.At("model"), rheology.error().message);
@@ -493,7 +643,15 @@ std::string RunEvolve(const std::filesystem::path& config) {
         return SeaLevelEvolution(op, solver, world.background,
                                  std::move(options));
       },
-      [](const SeaLevelEvolution::Snapshot&) {});
+      [](const SeaLevelEvolution::Snapshot& snapshot) {
+        if (!snapshot.converged) {
+          throw std::runtime_error(std::format(
+              "the sea level solve did not converge at t = {} (shoreline "
+              "cells flipping back and forth defeat the migrating solve's "
+              "tolerance); loosen rtol",
+              snapshot.t));
+        }
+      });
 }
 
 std::string RunEvolve3D(const std::filesystem::path& config) {
@@ -502,6 +660,11 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
   if (input.viscosity.empty()) {
     Fail(top, "needs a viscosity section: a planetmodel model file whose "
               "viscosity drives the 3D run");
+  }
+  if (input.shorelines == Shorelines::Migrating) {
+    Fail(top.At("shorelines"),
+         "is migrating, which the 1D commands alone run: the 3D evolution "
+         "holds its shorelines frozen");
   }
   auto earth = BuildEarth(input, top);
   auto mv_options = io::ModelViscosityOptions{};

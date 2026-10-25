@@ -37,6 +37,13 @@ draws a figure per command from `out/`.
   `out/checkpoints_evolve1d`, so a rerun resumes rather than starting again;
   a rerun after the config or an input has changed is refused instead,
   until `"restart": false` is set or the directory removed.
+- **`evolve1d_calibrated.json`** — that deglaciation with migrating
+  shorelines, its initial sea level calibrated against the synthetic
+  Earth's present day rather than read at 21 ka (the device a
+  thickness-only ice history needs), by the classical update in a few runs:
+  `out/evolve1d_calibrated.nc`, which also holds the calibrated
+  `initial_sea_level` and the `ocean_function` at every node. The marine
+  margins of the synthetic ice sheets flood as they melt.
 - **`evolve.json`** — the same deglaciation with the laterally varying
   viscosity of `../viscosity_log.nc` (a planetmodel model file on the same
   body, a zero-mean log perturbation about 1e21 Pa s), at lmax 16 in
@@ -59,9 +66,13 @@ this column.
 
 ## ICE-7G
 
-`fingerprint_ice7g.json` (10% of Greenland's ice, lmax 256) and
+`fingerprint_ice7g.json` (10% of Greenland's ice, lmax 256),
 `evolve1d_ice7g.json` (26 ka to the present at lmax 64, a node on every
-stored ICE-7G date) are the same runs on ICE-7G. They read
+stored ICE-7G date) and `evolve1d_ice7g_calibrated.json` (that run with
+migrating shorelines and its initial sea level calibrated against the
+present day: the misfit falls from about 150 m to a few millimetres in five
+runs, as pyslfp's tutorial 10 reports, and about 45 s) are the same runs on
+ICE-7G. They read
 `../ice7g.nc`, which `python get_ice7g.py` writes in `build/examples` (see
 `examples/README.md`); `run_all.sh` runs them once that file exists and
 skips them otherwise.

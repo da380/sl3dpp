@@ -30,7 +30,12 @@ of mantle viscosity using deglacial sea level observations.
   stepped implicitly: exponential trapezoid (second order, the default) or
   backward Euler, with exponential Euler and an adaptive step controller
   also available. Step sizes are not limited by the shortest Maxwell time. A
-  coupled driver runs an ice history through the sea-level equation.
+  coupled driver runs an ice history through the sea-level equation, with
+  frozen or migrating shorelines.
+- **The initial sea level.** Calibrated so that a run reaches a given final
+  (present-day) sea level: in one linear step under frozen shorelines, or
+  iteratively under migrating ones, by the classical update or the adjoint
+  gradient.
 - **3D viscoelastic evolution.** Viscosity varying laterally as
   η(r, θ, φ) = η̄(r) exp(δ(r, θ, φ)) about a radial reference. The lateral
   term is applied pseudospectrally with dealiased generalised spherical
@@ -307,8 +312,10 @@ nodes.
   GLIBC_TUNABLES=glibc.malloc.hugetlb=1 OMP_NUM_THREADS=8 ./ExampleLateralViscosity
   ```
 
-  At lmax 64 on 8 threads this makes the 3D run about 10% faster, with
-  unchanged results.
+  The 3D step reuses its large arrays from step to step, so they are
+  faulted in once per run: at lmax 64 on 8 threads huge pages now make the
+  3D run about 1.5% faster (it was 10% when every step allocated afresh),
+  with unchanged results.
 - **Memory points.** The internal variables live at the Gauss points of each
   radial element by default; `memory_points = MemoryPointSet::Gll` places
   them at the GLL nodes, as the Fortran codes and pyslfp do, for direct
@@ -356,7 +363,8 @@ solvers on their own, and the adjoints of all of them.
 | `SurfaceGrid.hpp`, `ShConventions.hpp`, `Geography.hpp` | The Gauss–Legendre surface grid and its transforms; spherical-harmonic conventions; geographic coordinates |
 | `Fingerprint.hpp` | Elastic sea-level fingerprints, SI in and out |
 | `SeaLevel.hpp` | The sea-level solver (linear, generalised, nonlinear) and its adjoint |
-| `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution |
+| `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution, frozen or migrating shorelines |
+| `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
 | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution |
 | `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D |
 | `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |

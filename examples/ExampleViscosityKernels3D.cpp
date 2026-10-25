@@ -201,8 +201,9 @@ int main(int argc, char** argv) {
   }
 
   // Slices and profiles for the plot. Kernels3D holds an angular density
-  // with the radial quadrature folded in, so per unit volume it is divided
-  // by the node's radial weight and r^2; in SI, by the model length cubed.
+  // with the radial quadrature folded in: VolumeDensity divides out the
+  // node's radial weight and r^2, RadialDensity integrates over angle per
+  // unit radius; in SI, by the model length cubed and once.
   const auto& coupling = op.Coupling();
   const auto& kernelGrid = coupling.Grid();
   const auto fieldSize = kernelGrid.FieldSize();
@@ -221,6 +222,10 @@ int main(int argc, char** argv) {
   out.Scalar("decay_time_kyr", fit.decay_time);
   const auto displayUnit =
       std::array{1.0, 1.0 / examples::kYear};  // m; s to yr
+  auto volume = std::vector<std::vector<double>>{};
+  for (const auto& objective : objectives) {
+    volume.push_back(VolumeDensity(coupling, objective.kernel));
+  }
   for (const auto depthKm : {400.0, 1200.0, 2200.0}) {
     // the memory node nearest the depth
     const auto target = 1.0 - depthKm * 1.0e3 / modelLength;
@@ -232,32 +237,30 @@ int main(int argc, char** argv) {
       }
     }
     const auto r = coupling.RadiusOfNode(node);
-    const auto perVolume = 1.0e9 / (modelLength * modelLength * modelLength *
-                                    coupling.WeightOfNode(node) * r * r);
+    const auto perKm3 = 1.0e9 / (modelLength * modelLength * modelLength);
     const auto depth =
         static_cast<int>(std::lround((1.0 - r) * modelLength / 1.0e3));
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
       auto slice = std::vector<double>(fieldSize);
       for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        slice[x] = objectives[k]
-                       .kernel[static_cast<std::size_t>(node) * fieldSize + x] *
-                   objectives[k].unitSi * displayUnit[k] * perVolume;
+        slice[x] = volume[k][static_cast<std::size_t>(node) * fieldSize + x] *
+                   objectives[k].unitSi * displayUnit[k] * perKm3;
       }
       out.Field(std::format("{}_{}km", objectives[k].name, depth), slice);
     }
+  }
+  auto radial = std::vector<std::vector<double>>{};
+  for (const auto& objective : objectives) {
+    radial.push_back(RadialDensity(coupling, objective.kernel));
   }
   auto rows = std::vector<std::vector<double>>{};
   for (auto p = 0; p < coupling.NodeCount(); ++p) {
     auto row =
         std::vector<double>{coupling.RadiusOfNode(p) * modelLength / 1.0e3};
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
-      const auto slice =
-          std::span(objectives[k].kernel)
-              .subspan(static_cast<std::size_t>(p) * fieldSize, fieldSize);
-      // dJ/dr: the angular integral over the radial weight, per km
-      row.push_back(kernelGrid.Integrate(slice) / coupling.WeightOfNode(p) *
-                    objectives[k].unitSi * displayUnit[k] * 1.0e3 /
-                    modelLength);
+      // dJ/dr per km
+      row.push_back(radial[k][p] * objectives[k].unitSi * displayUnit[k] *
+                    1.0e3 / modelLength);
     }
     rows.push_back(row);
   }

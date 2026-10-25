@@ -145,6 +145,7 @@ et al. 2024).
 | `model_format` | word | `"gia"` | `"gia"`, `"mineos"` or `"elastic"` |
 | `lmax` | integer >= 0 | required | the largest degree |
 | `output` | path | required | the table to write |
+| `conventional_output` | path | absent | where to write the conventional dimensionless numbers too (below); not `output`'s file |
 
 The output is a plain-text table under a header of `#` lines: the program
 and sl3dpp version, the creation time (UTC), the config, the deck and
@@ -159,14 +160,33 @@ l h_u l_u k_u h_phi l_phi k_phi h_v l_v k_v h_t l_t k_t
 ```
 
 The `u` and `phi` channels are the traction and attraction parts of the
-response to a unit surface load (kg m^-2), so the conventional load Love
-numbers are their sums (h = h_u + h_phi, and likewise l and k); `v` is the
-response to a unit tangential traction, and `t` the tidal response to a unit
-external potential. h and l are surface displacements in metres and k the
-potential perturbation in m^2 s^-2, per unit of the forcing. Degree 1 is in
-the centre-of-mass frame.
+response to a unit surface load (kg m^-2), whose sums are the load numbers
+(h = h_u + h_phi, and likewise l and k); `v` is the response to a unit
+tangential traction, and `t` the tidal response to a unit external
+potential. h and l are surface displacements in metres and k the potential
+perturbation in m^2 s^-2, per unit of the forcing, with the potential
+negative near added mass. Degree 1 is in the centre-of-mass frame.
 
-Summary: `wrote <output> (degrees 0..<lmax>)`.
+These are generalised numbers in SI, not the conventional dimensionless
+ones. Farrell's (1972) load numbers, referred to the load's own potential
+with the geodetic sign, and the tidal numbers referred to the external
+potential, are
+
+```
+h' = (2l + 1) g / (4 pi G a) h      l' = (2l + 1) g / (4 pi G a) l
+k' = -(2l + 1) / (4 pi G a) k - 1
+h_tide = -g h_t    l_tide = -g l_t    k_tide = k_t
+```
+
+with a and g the header's `radius_m` and `surface_gravity_m_s2` and G =
+6.6743e-11 m^3 kg^-1 s^-2 (so h'_2 is about -1 for the Earth and k'_2 about
+-0.3). `conventional_output` writes them, one row per degree under the same
+provenance header: `l h_load l_load k_load h_tide l_tide k_tide`, the tidal
+numbers `nan` below degree 2. The library gives them as
+`LoveNumbers::Conventional`.
+
+Summary: `wrote <output> (degrees 0..<lmax>)`, or `wrote <output> and
+<conventional_output> (degrees 0..<lmax>)`.
 
 ```json
 {
@@ -271,6 +291,30 @@ time node is the change of grounded ice thickness in `ice_history.file`
 from its value at the start. The outputs are changes from the window's
 start.
 
+Two members change that, as pyslfp's `run_ice_history` does:
+
+- `shorelines: "migrating"` (`evolve1d` and `kernel1d` alone) solves the
+  nonlinear sea level equation at every node instead of the linear one: the
+  ocean function follows the flotation condition as the ice and sea level
+  change, so melting marine ice floods and grounding ice displaces the
+  ocean. The ice thickness at each node is the background's plus the
+  history's change since the start. The kernels of `kernel1d` then
+  linearise about the run's own shorelines, and its
+  `initial_sea_level_dual` is no longer zero.
+- `calibrate_initial_sea_level` replaces the initial sea level read from
+  `state.file` at the start by the one whose run reaches the sea level
+  `state.file` gives at `times.end_kyr_bp` (usually the present day): the
+  standard device when the ice history carries thickness alone. The run
+  then starts as pyslfp's calibration does: the ice is the ice history's at
+  the start, and the starting guess for the sea level is the target itself,
+  so `state.file` is read at the window's end alone, which must lie within
+  the file's time span. Under frozen
+  shorelines the problem is linear and one run gives the answer exactly,
+  the guess's shorelines kept; under migrating shorelines the
+  calibration iterates, by the classical update or by steepest descent with
+  the adjoint gradient, each accelerated by Anderson mixing. The
+  calibration runs before the run proper, which then costs one more run.
+
 ### The run members
 
 These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
@@ -293,12 +337,19 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 | `rtol` | number | 1e-9 | the relative tolerance of the sea level solves (and, for the kernels, of the adjoint solves) |
 | `coupled.rtol` | number | 1e-9 | `evolve` and `kernel`: the relative tolerance of each step's combined fixed point |
 | `coupled.max_iterations` | integer | 60 | `evolve` and `kernel`: its iteration limit |
+| `shorelines` | word | `"frozen"` | `"frozen"`: the start's ocean function throughout (the linear equation); `"migrating"`: the ocean function follows flotation (`evolve1d` and `kernel1d` alone) |
+| `calibrate_initial_sea_level` | object | absent | calibrate the initial sea level against `state.file` at the window's end (above); its members, all optional, follow |
+| `calibrate_initial_sea_level.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
+| `calibrate_initial_sea_level.iterations` | integer >= 1 | 10 | the most runs under migrating shorelines; running out is an error |
+| `calibrate_initial_sea_level.rtol` | number > 0 | 1e-4 | convergence under migrating shorelines: the largest update below this times the largest initial sea level (1e-4 is of order a metre) |
 
 The time nodes are `nodes` evenly spaced dates from `start_kyr_bp` to
 `end_kyr_bp`; the step is not limited by the shortest Maxwell time. The
-1D commands accept `coupled` but have no use for it. In `evolve`, a node
+1D commands refuse `coupled`, which they have no use for. In `evolve`, a node
 whose fixed point does not converge within `coupled.max_iterations` is an
-error.
+error, and in the 1D commands so is a sea level solve that misses `rtol`
+(under migrating shorelines a cell flipping back and forth can keep the
+nonlinear solve above a tight tolerance: loosen it).
 
 ### The evolve members
 
@@ -323,13 +374,18 @@ past). Its fields are SI node fields with linear time interpolation:
 | `sea_level_change` | m | the sea-level change from the window's start |
 | `displacement` | m | the radial surface displacement |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
+| `initial_sea_level` | m | static: the initial sea level the run started from (the sea level at a node is this plus `sea_level_change` there) |
+| `ocean_function` | 1 | migrating shorelines alone: the ocean function at each node |
 
-Its metadata record the config, deck and ice-history paths (and the
+Its metadata record the shorelines (`shorelines`), where the initial sea
+level came from (`initial_sea_level`: the state file at the start, or the
+calibration with its runs and misfits), the config, deck and ice-history paths (and the
 viscosity file's, for `evolve`), the node dates as `dates_kyr_bp`, and the
 angular velocity perturbation at each node as `omega_x_rad_s`,
 `omega_y_rad_s` and `omega_z_rad_s` (rad s^-1).
 
-Summary: `wrote <output> (<n> nodes, <start> to <end> kyr BP)`, ending in
+Summary: `wrote <output> (<n> nodes, <start> to <end> kyr BP)`, with
+`, initial sea level calibrated` when it was, ending in
 `, resumed` when the run resumed from a checkpoint, and in
 `, replacing <k> earlier checkpoint(s)` when a run starting over removed
 some.
@@ -362,8 +418,13 @@ as long as the files' contents do not, so a run directory can be moved. A
 checkpoint of the other command (`evolve1d` against `evolve`) is refused
 too. The files are raw binary, for the machine that wrote them.
 
+A calibrating run also keeps its calibrated initial state in the directory
+(`initial_state.bin`, bound to the run by the same hash), and a resumption
+reads it back instead of calibrating again.
+
 With `restart` set to `false` the run starts over: it first removes the
-checkpoints it finds in the directory, then writes its own. Only this
+checkpoints it finds in the directory (and any kept initial state), then
+writes its own. Only this
 program's checkpoint files (`node_NNNNNN.ckpt`, and the `.node_NNNNNN.partial`
 it renames) are read, pruned or removed; anything else in the directory is
 left alone. Leave `restart` at `true` in a chain of jobs that is meant to
@@ -391,6 +452,26 @@ the model and files are read.
   "output": "histories.nc"
 }
 ```
+
+A thickness-only history under migrating shorelines, its initial sea level
+calibrated against the present-day state:
+
+```json
+{
+  "model": "earth.deck",
+  "lmax": 64,
+  "state": {"file": "present_day.nc"},
+  "ice_history": {"file": "ice_history.nc"},
+  "times": {"start_kyr_bp": 26.0, "nodes": 53},
+  "shorelines": "migrating",
+  "calibrate_initial_sea_level": {"method": "fixed_point", "iterations": 12},
+  "checkpoint": {"directory": "checkpoints", "every": 4},
+  "output": "histories.nc"
+}
+```
+
+Here `state.file` need only hold the present day: with the calibration it
+is read at the window's end alone.
 
 ```json
 {
@@ -439,15 +520,18 @@ in 3D each is large (see the README's notes on memory). With
 `trajectory.directory`, `kernel` writes each recorded state to a file
 `node_NNNNNN.traj` there as the forward run passes it, and the sweep reads
 them back one at a time: the lever for large `lmax`. The files are raw
-binary and are left in place after the run. `kernel1d` refuses a
+binary; the run removes the ones it wrote once its sweeps are done (the
+summary says how many), leaving anything else in the directory alone, and
+a run that fails leaves them in place. `kernel1d` refuses a
 `trajectory` section, its trajectory fitting in memory.
 
 ### Measurements
 
 Each element of `measurements` is an object with a `type` and a `name`.
 The `name` (by default `measurement_<k>`, with k the element's position
-from 0) is the stem of the measurement's files, so names should be distinct
-and usable as file names. A measurement taken on one date reads the outputs
+from 0) is the stem of the measurement's files, so names must be distinct
+plain file names: letters, digits, `_`, `-` and `.`, not starting with `.`
+(anything else is refused when the config is read). A measurement taken on one date reads the outputs
 at that date, which must be a time node of the run (`times`). Every
 measurement is held to the run when the config is read, before anything
 runs: a date that is not a node, a coefficient that does not exist at

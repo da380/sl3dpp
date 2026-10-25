@@ -6,6 +6,11 @@ target_compile_definitions(fortran_gate PRIVATE
 add_executable(step_timing step_timing.cpp)
 target_link_libraries(step_timing PRIVATE sl3dpp::sl3dpp)
 
+# The serial prototype of the radially substructured degree solve
+# (docs/dev/radial-substructuring.md).
+add_executable(substructure_prototype substructure_prototype.cpp)
+target_link_libraries(substructure_prototype PRIVATE sl3dpp::sl3dpp)
+
 # The E1 exchange writer records which commit computed it.
 execute_process(COMMAND git rev-parse --short HEAD
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}

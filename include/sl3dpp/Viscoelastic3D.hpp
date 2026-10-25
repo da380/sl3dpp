@@ -257,6 +257,16 @@ class Viscoelastic3D {
    */
   class OpenStep {
    public:
+    OpenStep() = default;
+    OpenStep(const OpenStep&) = default;
+    OpenStep& operator=(const OpenStep&) = default;
+    OpenStep(OpenStep&&) noexcept = default;
+    OpenStep& operator=(OpenStep&&) noexcept = default;
+    /// Hands the step's large arrays back to the operator for the next
+    /// StartStep (those Finish moved into the new state excepted), so a
+    /// step must not outlive its operator.
+    ~OpenStep();
+
     [[nodiscard]] double EndTime() const { return t_; }
     /// The start strain's coefficients: where the iteration starts.
     [[nodiscard]] const GridCoupling::SpectralTensor& StartStrain() const {
@@ -331,14 +341,37 @@ class Viscoelastic3D {
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
-  /// consistent solve under the start-time channels.
+  /// consistent solve under the start-time channels. Its grid-sized
+  /// arrays (the decayed memory, the weights, the workspace) come from the
+  /// arrays recycled since the last StartStep where there are any, and are
+  /// allocated otherwise.
   [[nodiscard]] OpenStep StartStep(const State& state, double dt,
                                    Scheme scheme = Scheme::ExponentialTrapezoid,
                                    const LoadCallable3D& load = {},
                                    const LoadCallable3D& tide = {}) const;
 
+  /// Hands back a state the caller is done with, so that the next
+  /// StartStep reuses its tensors instead of allocating and zero-filling
+  /// fresh ones: an evolution recycles each state a step replaces (a
+  /// closed step hands back its own arrays itself). A state merely dropped
+  /// is freed as before; arrays of another shape are dropped. Thread-safe.
+  void Recycle(State&& state) const;
+
+  /// Frees the arrays kept for reuse, as at the end of a run.
+  void ReleaseScratch() const;
+
  private:
   friend class AdjointSolver3D;  // the sweeps transpose these internals
+
+  /// The arrays kept for reuse by StartStep (Recycle, ~OpenStep): at most
+  /// one step's worth, under their own lock.
+  [[nodiscard]] GridCoupling::TensorField TakeTensor() const;
+  [[nodiscard]] std::vector<double> TakeField() const;
+  void Give(GridCoupling::TensorField&& tensor) const;
+  void Give(std::vector<double>&& field) const;
+  std::unique_ptr<std::mutex> scratchMutex_ = std::make_unique<std::mutex>();
+  mutable std::vector<GridCoupling::TensorField> spareTensors_;
+  mutable std::vector<std::vector<double>> spareFields_;
 
   /// The lazily filled caches below (and the reference operator's) are
   /// filled under this lock, so the const methods may be called from

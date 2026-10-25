@@ -21,6 +21,10 @@ namespace sl3dpp::app {
 
 using planetmodel::Json;
 
+/// Seconds in a kiloyear of Julian years, as pyslfp counts them: the
+/// configs' dates are kyr before present.
+inline constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
+
 /// Throws an error naming the file, the member and the fault.
 [[noreturn]] void Fail(const Json& json, std::string_view message);
 
