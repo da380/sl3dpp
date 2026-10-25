@@ -30,9 +30,17 @@
 //
 // Usage:
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
+//               [degrees]
 //
-// The last argument places the internal variables (Options::
+// With steps 0 only the phases are timed (one warm-up step, no whole
+// steps, no surface sums or fingerprint): the quick comparison.
+//
+// The sixth argument places the internal variables (Options::
 // memory_points): at the Gauss points, the default, or at the GLL nodes.
+// The seventh cuts the transforms with depth (Options::
+// transform_degrees), as a comma-separated list such as 32,48; the
+// fingerprint then hashes another layout, and the surface sums are what
+// compare with the uncut run.
 //
 // Options::parallel is set when OMP_NUM_THREADS > 1, as in fortran_gate:
 // the transforms and the per-degree loops (force, solves, strain) then run
@@ -123,7 +131,7 @@ int main(int argc, char** argv) {
   if (argc < 3) {
     std::fprintf(stderr,
                  "usage: %s <deck> <lmax> [steps] [repeats] [loop|matrix] "
-                 "[gauss|gll]\n",
+                 "[gauss|gll] [degrees]\n",
                  argv[0]);
     return 1;
   }
@@ -133,6 +141,16 @@ int main(int argc, char** argv) {
   const auto repeats = argc > 4 ? std::atoi(argv[4]) : 3;
   const auto matrix = argc > 5 && std::string(argv[5]) == "matrix";
   const auto gauss = argc <= 6 || std::string(argv[6]) != "gll";
+  auto degrees = std::vector<int>{};
+  if (argc > 7) {
+    auto list = std::string(argv[7]);
+    for (auto at = std::size_t{0}; at < list.size();) {
+      auto end = list.find(',', at);
+      if (end == std::string::npos) end = list.size();
+      degrees.push_back(std::stoi(list.substr(at, end - at)));
+      at = end + 1;
+    }
+  }
   const auto threads = omp_get_max_threads();
   constexpr auto year = 365.25 * 24.0 * 3600.0;
 
@@ -153,6 +171,7 @@ int main(int argc, char** argv) {
   options.matrix_kernel = matrix;
   options.rtol = 1e-10;
   options.memory_points = gauss ? MemoryPointSet::Gauss : MemoryPointSet::Gll;
+  options.transform_degrees = degrees;
 
   auto start = std::chrono::steady_clock::now();
   Viscoelastic3D op(rheology, lmax, delta, options);
@@ -178,24 +197,35 @@ int main(int argc, char** argv) {
   const auto& coupling = op.Coupling();
   const auto& grid = coupling.Grid();
   const auto nodes = coupling.NodeCount();
-  const double tensorGb = static_cast<double>(nodes) *
-                          static_cast<double>(grid.FieldSize()) * 40.0 / 1e9;
+  const double tensorGb =
+      static_cast<double>(coupling.GridValueCount()) * 40.0 / 1e9;
   std::printf("step_timing: lmax %d, %d thread%s, %s kernel, %s points\n", lmax,
               threads, threads == 1 ? "" : "s", matrix ? "matrix" : "loop",
               gauss ? "Gauss" : "GLL");
   std::printf("  memory nodes %d, grid %d x %d, one TensorField %.2f GB\n",
               nodes, grid.NumberOfCoLatitudes(), grid.NumberOfLongitudes(),
               tensorGb);
+  if (coupling.BlockCount() > 1) {
+    for (auto b = 0; b < coupling.BlockCount(); ++b) {
+      const auto& g = coupling.GridOfBlock(b);
+      std::printf("    block %d: degree %d, %d nodes, grid %d x %d\n", b,
+                  g.LMax(), coupling.NodeCountOfBlock(b),
+                  g.NumberOfCoLatitudes(), g.NumberOfLongitudes());
+    }
+  }
   std::printf("  construction %.3f s\n", construction);
   std::fflush(stdout);
 
-  // Warm-up: the first steps build and factorise every operator.
+  // Warm-up: the first steps build and factorise every operator (one is
+  // enough for the phases alone).
+  const auto warmUp = steps > 0 ? 2 : 1;
   auto state = op.ZeroState();
   start = std::chrono::steady_clock::now();
-  for (auto i = 0; i < 2; ++i) {
+  for (auto i = 0; i < warmUp; ++i) {
     state = op.Step(state, dt, scheme, load).state;
   }
-  std::printf("  warm-up (2 steps) %.3f s\n\n", Seconds(start));
+  std::printf("  warm-up (%d step%s) %.3f s\n\n", warmUp,
+              warmUp == 1 ? "" : "s", Seconds(start));
   std::fflush(stdout);
 
   // The phases in isolation, on the warmed state's opened step (scoped:
@@ -263,6 +293,10 @@ int main(int argc, char** argv) {
   std::printf("  once per step [s]\n");
   std::printf("    %-11s %9.4f\n", "startStep", startStep);
   std::fflush(stdout);
+  if (steps == 0) {
+    std::printf("\n  peak RSS %.2f GB\n", PeakRssGb());
+    return 0;
+  }
 
   // Whole steps: per-pass time and the iteration's own overhead.
   auto passes = 0;

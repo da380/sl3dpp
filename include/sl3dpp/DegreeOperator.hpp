@@ -55,6 +55,7 @@
 #include <utility>
 #include <vector>
 
+#include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/RadialMesh.hpp"
@@ -163,10 +164,32 @@ class DegreeOperator {
 
   /// x with A x = b for `nrhs` right-hand sides stored column-major in
   /// `b` (DofCount() rows each); the result has the same layout.
-  /// Distributed (Options::segments), only this process's segments and the
-  /// cut nodes are solved; the rest of x is unspecified.
-  [[nodiscard]] std::vector<double> Solve(std::span<const double> b,
-                                          int nrhs = 1) const;
+  /// Distributed (Options::segments), only this process's segments' rows
+  /// and the cut nodes' are read (the cut nodes' as `rhs` says: whole on
+  /// every process, or in shares that the solve sums), and only those are
+  /// solved; the rest of x is zero.
+  [[nodiscard]] std::vector<double> Solve(
+      std::span<const double> b, int nrhs = 1,
+      RightHandSide rhs = RightHandSide::Whole) const;
+
+  /// Solve split at its one collective: BeginSolve is local to the
+  /// process (the direct solve outright, or the segments' condensation),
+  /// a distributed caller then sums the pending separators over the
+  /// processes (several solves' together, in one collective), and
+  /// FinishSolve completes. Solve is the three in turn.
+  [[nodiscard]] PendingSolve BeginSolve(
+      std::span<const double> b, int nrhs,
+      RightHandSide rhs = RightHandSide::Whole) const;
+  [[nodiscard]] std::vector<double> FinishSolve(PendingSolve&& pending) const;
+
+  /// Whether this process's part of a distributed solution holds dof d as
+  /// its share (its segments' interiors; the cut nodes on one process),
+  /// so that the parts so held sum over the processes to the solution;
+  /// always, undistributed.
+  [[nodiscard]] bool Holds(int dof) const;
+  /// Zeroes, in nrhs columns of a solution, every dof this process does
+  /// not hold.
+  void MaskToShare(std::span<double> x, int nrhs = 1) const;
 
   /// A x for `nrhs` column-major columns: the assembled (unscaled)
   /// operator, for residuals.

@@ -942,6 +942,36 @@ TEST_F(AppsTest, The1DCommandsRefuseTheCoupledFixedPoint) {
                                   "component": "z"}], "output": "out"})"));
 }
 
+TEST_F(AppsTest, TransformDegreesAreReadAndChecked) {
+  const auto config = [&](std::string_view degrees) {
+    return Write("transform.json", std::string{R"({
+      "model": "ball.deck", "lmax": 4,
+      "state": {"file": "history.nc"},
+      "ice_history": {"file": "history.nc"},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 3},
+      "coupled": {"transform_degrees": )"} +
+                                       std::string{degrees} +
+                                       R"(}, "output": "out.nc"})");
+  };
+  EXPECT_EQ(app::ReadEvolveInput(config("[2, 3]")).transform_degrees,
+            (std::vector<int>{2, 3}));
+  for (const auto* bad : {"[5]", "[1]", "[2.5]"}) {
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(app::ReadEvolveInput(config(bad)));
+          } catch (const planetmodel::Error& error) {
+            EXPECT_NE(std::string{error.what()}.find("[2, lmax = 4]"),
+                      std::string::npos)
+                << error.what();
+            throw;
+          }
+        },
+        planetmodel::Error)
+        << bad;
+  }
+}
+
 TEST_F(AppsTest, Kernel1DRefusesASpilledTrajectory) {
   const auto config = Write("kernel1d_spill.json", R"({
     "model": "ball.deck", "lmax": 4,

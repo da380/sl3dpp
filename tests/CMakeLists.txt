@@ -50,6 +50,8 @@ sl3dpp_add_test(TestGaussMemory)
 sl3dpp_add_test(TestGaussMemory3D)
 sl3dpp_add_test(TestInitialSeaLevel)
 sl3dpp_add_test(TestSubstructure)
+sl3dpp_add_test(TestNodeBlocks)
+sl3dpp_add_test(TestRadialRanks)
 
 # The distributed solves, under mpiexec on 2, 3 and 4 ranks (one thread
 # each), when the library is built with SL3DPP_WITH_MPI.

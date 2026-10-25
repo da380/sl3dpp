@@ -58,11 +58,11 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
     if (kernel.name.empty()) {
       return std::unexpected(IoError{"a kernel needs a name"});
     }
-    if (kernel.values.size() !=
-        static_cast<std::size_t>(nodeCount) * fieldSize) {
+    if (kernel.values.size() != coupling.GridValueCount()) {
       return std::unexpected(IoError{std::format(
-          "{}: {} values for {} memory nodes of {} grid points each",
-          kernel.name, kernel.values.size(), nodeCount, fieldSize)});
+          "{}: {} values for {} memory nodes of {} grid points in all",
+          kernel.name, kernel.values.size(), nodeCount,
+          coupling.GridValueCount())});
     }
   }
   const auto np = coupling.Points().count;
@@ -81,7 +81,7 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
     file.SetMeta("code", "sl3dpp");
     for (const auto& [key, value] : options.meta) file.SetMeta(key, value);
 
-    // The coupling's own grid, poleless Gauss-Legendre.
+    // The coupling's lmax grid, poleless Gauss-Legendre.
     const auto fileGrid = planetmodel::AngularGrid(
         {grid.CoLatitudes().begin(), grid.CoLatitudes().end()},
         {grid.Longitudes().begin(), grid.Longitudes().end()}, "gauss_legendre",
@@ -143,6 +143,8 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
       // and r^2, re-dimensionalised.
       const auto factor =
           scales.Factor(kernel.objective) / (length * length * length);
+      // every node on the lmax grid (a deeper block's carried there)
+      const auto values = coupling.OnSurfaceGrid(kernel.values);
       const auto nphi = grid.Longitudes().size();
       auto sources = std::map<int, planetmodel::LayerSource>{};
       for (const auto& run : runs) {
@@ -161,7 +163,7 @@ std::expected<void, IoError> WriteKernels(const std::filesystem::path& path,
               const auto r = coupling.RadiusOfNode(base + p);
               const auto scale =
                   factor / (coupling.WeightOfNode(base + p) * r * r);
-              const auto at = kernel.values.subspan(
+              const auto at = std::span(values).subspan(
                   static_cast<std::size_t>(base + p) * fieldSize, fieldSize);
               for (auto x = std::size_t{0}; x < fieldSize; ++x) {
                 density[static_cast<std::size_t>(p) * fieldSize + x] =

@@ -17,6 +17,9 @@ target_link_libraries(substructure_timing PRIVATE sl3dpp::sl3dpp)
 if(SL3DPP_WITH_MPI)
   add_executable(distributed_solves distributed_solves.cpp)
   target_link_libraries(distributed_solves PRIVATE sl3dpp::sl3dpp)
+  # ... and the phases of the distributed 3D step, ranks x threads.
+  add_executable(distributed_step distributed_step.cpp)
+  target_link_libraries(distributed_step PRIVATE sl3dpp::sl3dpp)
 endif()
 
 # The E1 exchange writer records which commit computed it.

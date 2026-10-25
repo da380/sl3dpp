@@ -4,7 +4,9 @@
 measurements of [multicore-scaling.md](multicore-scaling.md). A plan; the
 code then was a serial prototype of the per-degree solve
 (`benchmarks/substructure_prototype.cpp`, §4). Step 1 of §5 was built the
-same day (§7).*
+same day (§7), the distributed solve over MPI (§8) and, on David's
+direction, the transforms cut with depth (§10) and the distributed 3D
+step (§11).*
 
 ## 1. Why radius
 
@@ -360,3 +362,193 @@ point's tolerance. (f) The step on the server: 2 ranks × 32 threads
 against 1 × 64. Then the 3D adjoint (`src/Adjoint3D.cpp`: its jump, the
 reference's unit responses and the kernel accumulation over nodes, which
 is local) and the per-rank checkpoint and trajectory stores.
+
+## 10. Transforms cut with depth: the node blocks (25 October 2026)
+
+The first of the steps agreed after §9 (David, 25 October): a transform
+degree per radial partition, chosen so that nothing is lost, with the cuts
+later balanced on the transform work rather than on node counts. Built on
+one process first; the MPI distribution of §9 follows it.
+
+**Why nothing is lost.** Degree l's system has dofs only above its
+truncation radius, (r/a)^l = eps under the default graded rule
+(`RadialMesh::StartElement`). So a memory node's strain carries no degree
+above L(r) = ln(1/eps) / ln(a/r), and the memory force it produces above
+L(r) has no rows to enter. Yet every node was transformed at lmax. At the
+default eps = 1e-8 on prem.simp.vm1:
+
+| depth | 440 km | 845 km | 1560 km | 2710 km |
+|---|---|---|---|---|
+| L(r) | 256 | 128 | 64 | 32 |
+
+Below about lmax 30 every mantle node needs lmax, so the blocks only
+matter above that.
+
+**What was built.** `GridCoupling::Options::transform_degrees` (and
+`Viscoelastic3D::Options::transform_degrees`, sl3d's
+`coupled.transform_degrees`): each viscous element's memory nodes take
+the least listed degree, or lmax, at or above the largest degree whose
+subset reaches the element (`GridCoupling::TransformDegrees`, which needs
+no grid). That degree only grows outwards, so each degree's nodes form one
+contiguous block with its own `SurfaceGrid` (and Wigner table) at the same
+oversampling. Every field over the nodes lays the blocks end to end
+(`FieldOffset(node)`, `FieldSizeOf(node)`, `GridValueCount()`); a node's
+coefficients are its block's degree's, a prefix of lmax's in GSHTrans's
+(l, m) order, so carrying them between blocks is zero padding
+(`OnSurfaceGrid`, which the kernel writer uses to put every node on the
+lmax grid). The batched transforms run block by block; the degree loops
+start each degree at its first node whose block carries it. With no
+degrees listed there is one block and the step is bitwise the same
+(step_timing fingerprint 36dbd27521e4fddf, lmax 32, one thread).
+
+**The one approximation, and David's point about it.** The lateral
+product W(x) d(x) is formed on the block's grid. The force at degrees up
+to L needs W up to degree 2L; the 3/2 rule's grid at L integrates it
+exactly for W to about degree L, where the lmax grid did so for the deep
+nodes to well beyond 2L. As David put it, this depends on the viscosity's
+spectrum, not the fields': the lateral viscosity is typically smoother
+than the solution, whose resolution (and the shorelines') sets lmax. For
+smooth patterns the difference is at round-off (below); a rough deep
+viscosity would want higher listed degrees there, or a per-block
+oversampling chosen from its spectrum (not built).
+
+**Measurements** (laptop, 8 threads pinned to cores; step_timing's
+Y_{2,±2} log-viscosity of amplitude 0.6, Gauss memory points; the last
+column is the relative change of the final surface sums):
+
+| lmax, degrees | TensorField | analyse | synthesise | per pass | startStep | peak RSS | surface sums |
+|---|---|---|---|---|---|---|---|
+| 64, none | 0.74 GB | 0.254 s | 0.227 s | 0.754 s | 0.80 s | 6.31 GB | — |
+| 64, 32 48 | 0.65 GB | 0.216 s | 0.184 s | 0.661 s | 0.65 s | 5.68 GB | 5e-16 |
+| 64, 16 24 … 56 | 0.63 GB | 0.204 s | 0.185 s | 0.639 s | 0.61 s | 5.53 GB | 5e-16 |
+| 128, none | 4.13 GB | 3.28 s | 2.26 s | 7.17 s | 8.32 s | 34.0 GB | — |
+| 128, 32 48 … 112 | 2.78 GB | 2.06 s | 1.47 s | 4.65 s | 5.03 s | 24.2 GB | 3e-16 |
+
+At lmax 128 the step takes 0.65 of the time and 0.71 of the memory; the
+(L + 1)^3 model of `TransformWeights` predicts 0.61 for the transforms,
+which take 0.63 (analysis) and 0.65 (synthesis): the FFTs and per-node
+overheads, which shrink more slowly than L^3, make the deep blocks a
+little dearer than the model. At lmax 64 three quarters of the nodes still
+need lmax, and the gain is 15%. It grows with lmax (the model gives 0.42
+at 256). The listed degrees need only be fine enough: seven at lmax 128
+(every 16) or two at lmax 64 leave little on the table.
+
+**Tests** (`tests/TestNodeBlocks.cpp`, lmax 16 with eps = 1e-2 so that
+blocks form at a test's size): the blocks follow the truncation and
+`TransformDegrees` / `TransformWeights` agree with them; each block's
+transforms invert, and `OnSurfaceGrid` equals the lmax grid's synthesis of
+the zero-padded coefficients; a step without lateral viscosity equals the
+single grid's to 1e-12; with a smooth pattern of a decade's contrast it
+differs by 3.8e-9, of a third of that amplitude by 5e-12 (the iteration's
+tolerance); and the 3D adjoint on the blocks gives the single grid's
+spherical kernels, ice kernels and the pairing of its log-viscosity kernel
+with a smooth direction to 6e-14 without lateral viscosity and 1.3e-9
+with it.
+
+**Next** (step 2 of the agreed order): `ShareMesh` balanced on
+`TransformWeights` rather than one per element, then the element range
+per rank (step 3). Computed on 25 October for prem.simp.vm1, with every
+element at its own degree L(e) and the cuts at whole elements: the
+busiest rank's transform work over the mean, and the separator values
+the redundant Schur solves sum per pass (4 dofs per separator node,
+2(l + 1) columns per degree, only the separators above each degree's
+first element):
+
+| ranks | weighted by element | by memory node | by work, lmax 128 | by work, lmax 256 | summed per pass, lmax 256 |
+|---|---|---|---|---|---|
+| 2 | 1.84 | 1.70 | 1.00 | 1.00 | 2 MB |
+| 4 | 1.91 | 1.74 | 1.00 | 1.01 | 6 MB |
+| 8 | 2.32 | 1.76 | 1.01 | 1.03 | 14 MB |
+| 16 | 2.32 | 1.76 | 1.04 | 1.04 | 29 MB |
+| 32 | 2.40 | 1.76 | 1.12 | 1.20 | 59 MB |
+| 64 | 2.56 | 1.92 | 1.28 | 1.37 | 119 MB |
+| 128 | 2.56 | 2.56 | 1.92 | 1.37 | 238 MB |
+
+(The element and node columns are at lmax 128.) Two limits near a hundred
+ranks: whole elements cannot balance (the mesh is worth about 200
+full-degree elements, so a rank gets one or two surface elements), and
+the separator sum grows with the ranks, since every rank solves the
+small cut-node system redundantly; a distributed solve of that
+block-tridiagonal system (cyclic reduction, neighbour exchanges) would
+replace it there.
+
+## 11. The 3D step distributed (step 3, 25 October 2026)
+
+Built on David's answers to §9's questions: callbacks rather than MPI in
+the core (Q2), the sea level equation solved on every rank (Q3), per-rank
+checkpoints (Q4, for the app layer, not built yet).
+
+**The pieces.**
+- `Collectives` (`Collectives.hpp`): `sum`, `max` and `share` (the first
+  rank's values to all), each in place on a span; empty means one
+  process. `Distributed.hpp`'s `CollectivesOver(comm)` makes them from
+  MPI_Allreduce and MPI_Bcast, and `ShareMesh` returns them with the cuts
+  and the rank's segment. The core never includes `mpi.h`.
+- `Viscoelastic3D::Options::segments` and `collectives`, beside
+  `radial_cuts`. The rank's coupling then holds the memory nodes of its
+  segment's elements only (`GridCoupling::Options::elements`), and its
+  degree systems solve its segment only.
+- The degree solves split at their one collective
+  (`BeginSolve` / `FinishSolve`, over `BandSubstructure::Condense` /
+  `Complete`). `SolveAll` begins every degree's solve threaded, sums all
+  the cut nodes' right-hand sides in one call on the main thread, and
+  finishes them threaded. The forces arrive in shares (each rank's own
+  elements' rows, partial at the cut nodes: `RightHandSide::Shares`); the
+  unit loads arrive whole. A rank's solution holds its segment and the cut
+  nodes, zero elsewhere (`Holds`, `MaskToShare`).
+- Every MPI call is on the main thread, outside parallel regions
+  (MPI_THREAD_FUNNELED is enough).
+
+**The collectives of a pass**, in order: one sum of the cut nodes' parts
+of every degree system (the one sizeable one; §10's table gives its size);
+two sums of the surface columns (U and phi, (lmax + 1)(lmax + 2)/2
+complex values each, in `Surface`); one of the inertia moment; the
+first-rank share of the load and centrifugal coefficients (and, under
+migrating shorelines, the ocean function); a max of three values for the
+convergence test; and, once Anderson mixing engages, a sum of its 2m Gram
+values. The first pass of a step adds a max of one flag (whether StartStep's
+force may be used), and a degree's first unit solve one sum.
+
+**Why the sea level loads are shared.** Every rank solves the sea level
+equation from the same summed inputs, but each builds its own grids and
+FFTW plans (by measurement), which may round differently; under migrating
+shorelines a cell at the flotation threshold could then flip on one rank
+and not another. Rank 0's loads (and ocean function) therefore serve all
+ranks, for half a megabyte per pass at lmax 128.
+
+**Tests.** Without MPI, `tests/TestRadialRanks.cpp` runs two and three
+ranks as threads of one process (each collective a rendezvous reducing in
+rank order) against the one-process run on the same cuts: two lateral
+steps with the transforms cut with depth (surface response to 5e-16, each
+rank's memory to 2.5e-14), and the coupled evolution, frozen and migrating
+(4 cells flip; sea level to 1.3e-15, the ocean functions equal). Under
+MPI, `tests/TestDistributed.cpp` makes the same comparisons on 2, 3 and 4
+ranks: up to 1.8e-13 for the step (MPI sums in its own order) and 5e-15
+for the evolutions. The one-process path is bitwise unchanged
+(fingerprint 36dbd27521e4fddf).
+
+**Measured on the laptop** (one socket, 8 cores, `distributed_step`,
+lmax 64, transform degrees 32 48, phases only):
+
+| ranks x threads | memory nodes per rank | respond | analyse | startStep | peak RSS per rank |
+|---|---|---|---|---|---|
+| 1 x 8 | 980 | 0.550 s | 0.217 s | 0.66 s | 5.44 GB |
+| 2 x 4 | 564, 416 | 0.549 s | 0.191 s | 0.56 s | 3.10 GB |
+| 4 x 2 | 356, 208 × 3 | 0.612 s | 0.199 s | 0.53 s | 1.89 GB |
+| 8 x 1 | 252, 104 × 7 | 0.824 s | 0.260 s | 0.66 s | 1.25 GB |
+
+On one socket the ranks cannot be faster: they share its cores and
+memory. What they show: the memory per rank falls with the ranks, each
+keeping a fixed part of roughly half a gigabyte at lmax 64 (libraries,
+tables, the 1D reference operator, MPI's buffers; not itemised yet); the
+transform work balances (the deep rank holds more,
+cheaper nodes); and two ranks of four threads cost nothing. Pure MPI is
+slower here for two reasons: one-thread ranks stream the whole Wigner
+table each (the §1 node-block pattern), and the high degrees, whose dofs
+lie near the surface, are solved by the top rank alone on its one thread.
+
+**Not yet.** The measurement that matters, on the server: 2 x 32 against
+1 x 64 on one node, then across nodes. The 3D adjoint distributed (it
+refuses for now). `sl3d` under `mpiexec`, with per-rank checkpoint files
+(Q4). The top rank's share of the high-degree solves, if the server shows
+it.

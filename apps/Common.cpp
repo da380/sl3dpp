@@ -1,5 +1,6 @@
 #include "Common.hpp"
 
+#include <cmath>
 #include <format>
 #include <planetmodel/json.hpp>
 #include <utility>
@@ -99,9 +100,19 @@ void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
   }
   if (Has(top, "coupled")) {
     const auto& coupled = top.At("coupled");
-    Allow(coupled, {"rtol", "max_iterations"});
+    Allow(coupled, {"rtol", "max_iterations", "transform_degrees"});
     out.coupled_rtol = Number(coupled, "rtol", 1e-9);
     out.max_coupled_iterations = Integer(coupled, "max_iterations", 60);
+    if (Has(coupled, "transform_degrees")) {
+      for (const auto& item : coupled.At("transform_degrees").AsArray()) {
+        const auto value = item.AsNumber();
+        if (value != std::floor(value) || value < 2 || value > out.lmax) {
+          Fail(item,
+               std::format("is not a degree in [2, lmax = {}]", out.lmax));
+        }
+        out.transform_degrees.push_back(static_cast<int>(value));
+      }
+    }
   }
 }
 

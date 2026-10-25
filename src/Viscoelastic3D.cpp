@@ -65,6 +65,36 @@ bool SameValues(const GridCoupling::SpectralTensor& a,
   return same;
 }
 
+// The elements of this process's segments of the radial cuts: the whole
+// mesh (end -1) undistributed.
+std::pair<int, int> OwnedElements(const RadialMesh& mesh,
+                                  const Viscoelastic3D::Options& options) {
+  if (!options.collectives.Distributed()) return {0, -1};
+  const auto& cuts = options.radial_cuts;
+  const auto& segments = options.segments;
+  const auto count = static_cast<int>(cuts.size()) + 1;
+  auto contiguous = !segments.empty();
+  for (auto i = std::size_t{0}; i < segments.size() && contiguous; ++i) {
+    contiguous = segments[i] >= 0 && segments[i] < count &&
+                 (i == 0 || segments[i] == segments[i - 1] + 1);
+  }
+  if (!contiguous) {
+    throw std::invalid_argument(std::format(
+        "a distributed operator owns contiguous segments among the {} of its "
+        "radial cuts",
+        count));
+  }
+  const auto first = segments.front() == 0 ? 0 : cuts[segments.front() - 1];
+  const auto end = segments.back() + 1 == count ? mesh.ElementCount()
+                                                : cuts[segments.back()];
+  return {first, end};
+}
+
+// A complex vector's values as real ones, for the collectives.
+std::span<double> Reals(std::vector<std::complex<double>>& v) {
+  return {reinterpret_cast<double*>(v.data()), 2 * v.size()};
+}
+
 // m += beta d over every stored component, point by point.
 void AdvanceMemory(GridCoupling::TensorField& m,
                    const std::vector<double>& beta,
@@ -106,52 +136,53 @@ Viscoelastic3D::Viscoelastic3D(
     : rheology_(std::make_shared<const Rheology>(rheology)),
       lmax_(lmax),
       options_(options),
-      coupling_(*rheology_, lmax, grid,
-                {.eps = options.eps,
-                 .truncation = options.truncation,
-                 .oversampling = options.oversampling,
-                 .parallel = options.parallel,
-                 .matrix_kernel = options.matrix_kernel,
-                 .memory_points = options.memory_points}),
+      coupling_(
+          *rheology_, lmax, grid,
+          {.eps = options.eps,
+           .truncation = options.truncation,
+           .oversampling = options.oversampling,
+           .parallel = options.parallel,
+           .matrix_kernel = options.matrix_kernel,
+           .memory_points = options.memory_points,
+           .transform_degrees = options.transform_degrees,
+           .elements = OwnedElements(rheology.BaseMaterial().Mesh(), options)}),
       reference_(*rheology_, lmax,
                  {.eps = options.eps,
                   .truncation = options.truncation,
                   .memory_points = options.memory_points,
                   .radial_cuts = options.radial_cuts}) {
-  // Sample exp(-delta) once and scale every branch's inverse times; the
-  // reference profile is the unperturbed radial rheology itself, at the
-  // memory points as the 1D reference holds it.
-  const auto& sampling = coupling_.Grid();
-  const auto fieldSize = sampling.FieldSize();
+  // Sample exp(-delta) once, on each node's grid, and scale every
+  // branch's inverse times; the reference profile is the unperturbed
+  // radial rheology itself, at the memory points as the 1D reference
+  // holds it.
   const auto np = coupling_.Points().count;
-  const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
-  auto factor = std::vector<double>(nodes * fieldSize);
-  const auto thetas = sampling.CoLatitudes();
-  const auto phis = sampling.Longitudes();
-  for (auto node = std::size_t{0}; node < nodes; ++node) {
-    const auto r = coupling_.RadiusOfNode(static_cast<int>(node));
-    auto x = std::size_t{0};
-    for (auto theta : thetas) {
-      for (auto phi : phis) {
-        factor[node * fieldSize + x++] = std::exp(-delta(r, theta, phi));
+  const auto nodes = coupling_.NodeCount();
+  auto factor = std::vector<double>(coupling_.GridValueCount());
+  for (auto node = 0; node < nodes; ++node) {
+    const auto& sampling = coupling_.GridOf(node);
+    const auto r = coupling_.RadiusOfNode(node);
+    auto x = coupling_.FieldOffset(node);
+    for (auto theta : sampling.CoLatitudes()) {
+      for (auto phi : sampling.Longitudes()) {
+        factor[x++] = std::exp(-delta(r, theta, phi));
       }
     }
   }
   for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
     const auto pointMu = reference_.PointMu(k);
     const auto pointItau = reference_.PointItau(k);
-    auto itau = std::vector<double>(nodes * fieldSize);
+    auto itau = std::vector<double>(coupling_.GridValueCount());
     auto mu = std::vector<double>(nodes);
     auto itauRef = std::vector<double>(nodes);
-    for (auto node = std::size_t{0}; node < nodes; ++node) {
-      const auto e = coupling_.ElementOfNode(static_cast<int>(node));
-      const auto p = coupling_.NodeInElementOf(static_cast<int>(node));
+    for (auto node = 0; node < nodes; ++node) {
+      const auto e = coupling_.ElementOfNode(node);
+      const auto p = coupling_.NodeInElementOf(node);
       const auto at = static_cast<std::size_t>(e) * np + p;
       mu[node] = pointMu[at];
       itauRef[node] = pointItau[at];
-      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        itau[node * fieldSize + x] =
-            pointItau[at] * factor[node * fieldSize + x];
+      const auto first = coupling_.FieldOffset(node);
+      for (auto x = first; x < first + coupling_.FieldSizeOf(node); ++x) {
+        itau[x] = pointItau[at] * factor[x];
       }
     }
     itau_.push_back(std::move(itau));
@@ -184,7 +215,9 @@ const DegreeOperator& Viscoelastic3D::Spheroidal(int l) const {
                                 .eps = options_.eps,
                                 .truncation = options_.truncation,
                                 .point_shear = reference_.ElasticPointShear(),
-                                .cuts = options_.radial_cuts}))
+                                .cuts = options_.radial_cuts,
+                                .segments = options_.segments,
+                                .combine = options_.collectives.sum}))
             .first;
   }
   return *found->second;
@@ -203,7 +236,9 @@ const ToroidalOperator& Viscoelastic3D::Toroidal(int l) const {
                                 .truncation = options_.truncation,
                                 .pin_fraction = options_.toroidal_pin_fraction,
                                 .point_shear = reference_.ElasticPointShear(),
-                                .cuts = options_.radial_cuts}))
+                                .cuts = options_.radial_cuts,
+                                .segments = options_.segments,
+                                .combine = options_.collectives.sum}))
             .first;
   }
   return *found->second;
@@ -306,8 +341,11 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
   }
   std::ranges::stable_sort(tasks, std::greater{}, &Task::l);  // largest first
 
-  // The complex columns solved as real pairs.
-  auto solve = [](const auto& op, const std::vector<Complex>& b, int columns) {
+  // The complex columns solved as real pairs, the force held in shares
+  // (each process's own elements' rows): begun task by task, threaded and
+  // local to the process; distributed, the cut nodes' parts of every
+  // system summed in one collective; then finished, threaded again.
+  auto begin = [](const auto& op, const std::vector<Complex>& b, int columns) {
     const auto ndof = op.DofCount();
     auto rhs =
         std::vector<double>(static_cast<std::size_t>(ndof) * 2 * columns);
@@ -319,7 +357,11 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
             b[static_cast<std::size_t>(c) * ndof + d].imag();
       }
     }
-    auto x = op.Solve(rhs, 2 * columns);
+    return op.BeginSolve(rhs, 2 * columns, RightHandSide::Shares);
+  };
+  auto finish = [](const auto& op, PendingSolve&& pending, int columns) {
+    const auto ndof = op.DofCount();
+    const auto x = op.FinishSolve(std::move(pending));
     auto solution =
         std::vector<Complex>(static_cast<std::size_t>(ndof) * columns);
     for (auto c = 0; c < columns; ++c) {
@@ -332,14 +374,35 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
     return solution;
   };
 
+  auto pending = std::vector<PendingSolve>(tasks.size());
+  detail::ParallelFor(
+      static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
+        const auto& task = tasks[i];
+        const auto columns = task.l + 1;
+        pending[i] = task.tor != nullptr ? begin(*task.tor, *task.b, columns)
+                                         : begin(*task.sph, *task.b, columns);
+      });
+  if (options_.collectives.Distributed()) {
+    auto size = std::size_t{0};
+    for (const auto& p : pending) size += p.separators.size();
+    auto all = std::vector<double>(size);
+    auto at = all.begin();
+    for (const auto& p : pending) at = std::ranges::copy(p.separators, at).out;
+    options_.collectives.sum(all);
+    at = all.begin();
+    for (auto& p : pending) {
+      std::copy(at, at + static_cast<std::ptrdiff_t>(p.separators.size()),
+                p.separators.begin());
+      at += static_cast<std::ptrdiff_t>(p.separators.size());
+    }
+  }
   detail::ParallelFor(
       static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
         auto& task = tasks[i];
-        const auto l = task.l;
-        const auto columns = l + 1;
+        const auto columns = task.l + 1;
         task.solution = task.tor != nullptr
-                            ? solve(*task.tor, *task.b, columns)
-                            : solve(*task.sph, *task.b, columns);
+                            ? finish(*task.tor, std::move(pending[i]), columns)
+                            : finish(*task.sph, std::move(pending[i]), columns);
       });
 
   Solutions out;
@@ -355,14 +418,15 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveElastic(
     const LoadCallable3D& tide) const {
   // The combined weighted memory tensor sum_k mu_k(r) m_k(x).
   auto combined = coupling_.ZeroTensor();
-  const auto fieldSize = coupling_.Grid().FieldSize();
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   for (auto k = std::size_t{0}; k < state.m.size(); ++k) {
     const auto& m = state.m[k];
     detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
       const auto mu = muBranch_[k][node];
       if (mu == 0.0) return;
-      for (auto i = node * fieldSize; i < (node + 1) * fieldSize; ++i) {
+      const auto first = coupling_.FieldOffset(static_cast<int>(node));
+      const auto last = first + coupling_.FieldSizeOf(static_cast<int>(node));
+      for (auto i = first; i < last; ++i) {
         combined.c[0][i] += mu * m.c[0][i];
         combined.c[1][i] += mu * m.c[1][i];
         combined.r[i] += mu * m.r[i];
@@ -442,7 +506,9 @@ const DegreeOperator& Viscoelastic3D::FlavourSpheroidal(Flavour& flavour,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
                                                 : nullptr,
-                             .cuts = options_.radial_cuts}))
+                             .cuts = options_.radial_cuts,
+                             .segments = options_.segments,
+                             .combine = options_.collectives.sum}))
             .first;
   }
   return *found->second;
@@ -465,7 +531,9 @@ const ToroidalOperator& Viscoelastic3D::FlavourToroidal(Flavour& flavour,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
                                                 : nullptr,
-                             .cuts = options_.radial_cuts}))
+                             .cuts = options_.radial_cuts,
+                             .segments = options_.segments,
+                             .combine = options_.collectives.sum}))
             .first;
   }
   return *found->second;
@@ -516,13 +584,11 @@ std::vector<double> Viscoelastic3D::TakeField() const {
       return field;
     }
   }
-  return std::vector<double>(static_cast<std::size_t>(coupling_.NodeCount()) *
-                             coupling_.Grid().FieldSize());
+  return std::vector<double>(coupling_.GridValueCount());
 }
 
 void Viscoelastic3D::Give(GridCoupling::TensorField&& tensor) const {
-  const auto size = static_cast<std::size_t>(coupling_.NodeCount()) *
-                    coupling_.Grid().FieldSize();
+  const auto size = coupling_.GridValueCount();
   if (tensor.c[0].size() != size || tensor.c[1].size() != size ||
       tensor.r.size() != size) {
     return;
@@ -535,8 +601,7 @@ void Viscoelastic3D::Give(GridCoupling::TensorField&& tensor) const {
 }
 
 void Viscoelastic3D::Give(std::vector<double>&& field) const {
-  const auto size = static_cast<std::size_t>(coupling_.NodeCount()) *
-                    coupling_.Grid().FieldSize();
+  const auto size = coupling_.GridValueCount();
   if (field.size() != size) return;
   auto lock = std::scoped_lock(*scratchMutex_);
   // one step's worth: a weight per branch and the lateral weight
@@ -581,7 +646,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     throw std::invalid_argument(
         "the 3D step is implicit: ExponentialTrapezoid or BackwardEuler");
   }
-  const auto fieldSize = coupling_.Grid().FieldSize();
+  const auto values = coupling_.GridValueCount();
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   const auto K = state.m.size();
 
@@ -617,13 +682,12 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   step.grid_ = TakeTensor();
   auto& fixed = step.grid_;
   if (K == 0) {
-    detail::ParallelElements(nodes * fieldSize, options_.parallel,
-                             [&](std::size_t i) {
-                               step.weight_[i] = 0.0;
-                               fixed.c[0][i] = 0.0;
-                               fixed.c[1][i] = 0.0;
-                               fixed.r[i] = 0.0;
-                             });
+    detail::ParallelElements(values, options_.parallel, [&](std::size_t i) {
+      step.weight_[i] = 0.0;
+      fixed.c[0][i] = 0.0;
+      fixed.c[1][i] = 0.0;
+      fixed.r[i] = 0.0;
+    });
   }
   for (auto k = std::size_t{0}; k < K; ++k) {
     step.memory_.push_back(TakeTensor());
@@ -634,8 +698,10 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
                                ? 1.0 - BackwardEulerWeight(dt * itauRef)
                                : ExponentialTrapezoidWeights(dt * itauRef).beta;
       const auto mu = muBranch_[k][node];
-      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        const auto h = dt * itau_[k][node * fieldSize + x];
+      const auto base = coupling_.FieldOffset(static_cast<int>(node));
+      const auto size = coupling_.FieldSizeOf(static_cast<int>(node));
+      for (auto x = std::size_t{0}; x < size; ++x) {
+        const auto h = dt * itau_[k][base + x];
         double e_w, a_w, b_w;
         if (scheme == Scheme::BackwardEuler) {
           const auto w = BackwardEulerWeight(h);
@@ -648,7 +714,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
           a_w = w.alpha;
           b_w = w.beta;
         }
-        const auto at = node * fieldSize + x;
+        const auto at = base + x;
         step.beta_[k][at] = b_w;
         auto& memory = step.memory_[k];
         for (auto c = 0; c < 2; ++c) {
@@ -677,12 +743,11 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
 
   // The first pass's force, from the grid strain already in hand, so that
   // the first Respond (of s0) skips its synthesis.
-  detail::ParallelElements(nodes * fieldSize, options_.parallel,
-                           [&](std::size_t i) {
-                             fixed.c[0][i] = step.weight_[i] * d0.c[0][i];
-                             fixed.c[1][i] = step.weight_[i] * d0.c[1][i];
-                             fixed.r[i] = step.weight_[i] * d0.r[i];
-                           });
+  detail::ParallelElements(values, options_.parallel, [&](std::size_t i) {
+    fixed.c[0][i] = step.weight_[i] * d0.c[0][i];
+    fixed.c[1][i] = step.weight_[i] * d0.c[1][i];
+    fixed.r[i] = step.weight_[i] * d0.r[i];
+  });
   coupling_.Analyse(fixed, step.analysed_);
   const auto in = Blocks(std::as_const(step.fixed_));
   const auto out = Blocks(step.analysed_);
@@ -704,8 +769,14 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   // The lateral force of the strain (synthesised, weighted pointwise,
   // analysed, in the step's buffers) plus the step's fixed memory force;
   // for the start strain, the first time, formed already by StartStep.
-  const auto formed = std::exchange(startForce_, false) &&
-                      SameValues(strain, s0_, op.options_.parallel);
+  auto formed = std::exchange(startForce_, false) &&
+                SameValues(strain, s0_, op.options_.parallel);
+  if (op.options_.collectives.Distributed()) {
+    // every process alike: the start force only where all may use it
+    auto differs = formed ? 0.0 : 1.0;
+    op.options_.collectives.max(std::span(&differs, 1));
+    formed = differs == 0.0;
+  }
   if (!formed) {
     coupling.Synthesise(strain, grid_);
     coupling.Multiply(grid_, weight_);
@@ -774,8 +845,17 @@ double Viscoelastic3D::OpenStep::InertiaMoment(
   const auto& x = solutions.spheroidal.at(0);
   auto column = std::vector<double>(x.size());
   for (auto i = std::size_t{0}; i < x.size(); ++i) column[i] = x[i].real();
-  const auto lock = op_->LockCaches();
-  return op_->reference_.InertiaMoment(column, 1)[0];
+  // Distributed, each process's share, summed.
+  op_->FlavourSpheroidal(*flavour_, 0).MaskToShare(column);
+  auto moment = 0.0;
+  {
+    const auto lock = op_->LockCaches();
+    moment = op_->reference_.InertiaMoment(column, 1)[0];
+  }
+  if (op_->options_.collectives.Distributed()) {
+    op_->options_.collectives.sum(std::span(&moment, 1));
+  }
+  return moment;
 }
 
 const LoveNumbers& Viscoelastic3D::OpenStep::EffectiveLove() const {
@@ -827,7 +907,8 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
   const auto adaptive = control.anderson_rate > 0.0;
   auto mixer = std::optional<detail::AndersonMixer>{};
   if (control.anderson_memory > 0 && !adaptive) {
-    mixer.emplace(control.anderson_memory, parallel);
+    mixer.emplace(control.anderson_memory, parallel,
+                  op_->options_.collectives.sum);
   }
   auto previous = 0.0;  // the last pass's residual
   for (auto iteration = 0; iteration < control.max_iterations; ++iteration) {
@@ -854,6 +935,14 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
         diff = std::max(diff, std::norm(n[i] - o[i]));
       }
     }
+    const auto& collectives = op_->options_.collectives;
+    if (collectives.Distributed()) {
+      auto global = std::array{scale, diff, finite ? 0.0 : 1.0};
+      collectives.max(global);
+      scale = global[0];
+      diff = global[1];
+      finite = global[2] == 0.0;
+    }
     info.iterations = iteration + 1;
     if (!finite) {
       info.residual = std::numeric_limits<double>::quiet_NaN();
@@ -877,7 +966,8 @@ Viscoelastic3D::OpenStep::Converge(const Pass& pass,
     const auto residual = info.residual;
     if (adaptive && !mixer && control.anderson_memory > 0 && iteration > 0 &&
         residual > control.anderson_rate * previous) {
-      mixer.emplace(control.anderson_memory, parallel);
+      mixer.emplace(control.anderson_memory, parallel,
+                    op_->options_.collectives.sum);
     }
     previous = residual;
     if (mixer) {
@@ -919,12 +1009,27 @@ std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
     const auto columns = l + 1;
     const auto dof = op.SurfaceDof(component);
     auto values = std::vector<Complex>(columns, 0.0);
-    if (dof >= 0) {
+    if (dof >= 0 && op.Holds(dof)) {
       for (auto c = 0; c < columns; ++c) {
         values[c] = x[static_cast<std::size_t>(c) * op.DofCount() + dof];
       }
     }
     out.emplace(l, std::move(values));
+  }
+  if (options_.collectives.Distributed()) {
+    // The surface segment's process holds them: summed, every process has
+    // them.
+    auto all = std::vector<Complex>{};
+    for (const auto& [l, values] : out) {
+      all.insert(all.end(), values.begin(), values.end());
+    }
+    options_.collectives.sum(Reals(all));
+    auto at = all.begin();
+    for (auto& [l, values] : out) {
+      std::copy(at, at + static_cast<std::ptrdiff_t>(values.size()),
+                values.begin());
+      at += static_cast<std::ptrdiff_t>(values.size());
+    }
   }
   return out;
 }

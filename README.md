@@ -275,6 +275,15 @@ nodes.
   degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
   degree of a few dozen there is too little work to share among the cores
   of a large node: more threads then make a run slower, not faster.
+- **Cutting the transforms with depth.** `Viscoelastic3D::Options::
+  transform_degrees` (sl3d's `coupled.transform_degrees`) transforms each
+  memory node only to the degrees its solution carries there under the
+  degree truncation. At lmax 128, the list 32, 48, ..., 112 made a step
+  1.5 times faster and cut its peak memory from 34 to 24 GB, with the
+  surface response unchanged to round-off under a smooth viscosity
+  pattern; a deep viscosity rougher than the solution there would want
+  the listed degrees higher. Below about lmax 30 every mantle node needs
+  lmax and nothing is cut.
 - **Measuring.** `step_timing` (built with `-DSL3DPP_BUILD_BENCHMARKS=ON`)
   times each phase of a 3D step and reports the peak memory. Run it at the
   production degree over a few thread counts and both bindings, and take
@@ -481,7 +490,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`), their tests (run under `mpiexec`) and the `distributed_solves` benchmark; defines `SL3DPP_HAVE_MPI` for the library and its users |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step over radial segments, one per rank), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.
@@ -520,8 +529,10 @@ runs on one thread.
 
 With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
 
-- `step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]`
-  times each phase of a 3D step and reports the peak memory.
+- `step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
+  [degrees]` times each phase of a 3D step and reports the peak memory;
+  `steps` 0 times the phases alone (the quick comparison), and `degrees`
+  (such as `32,48,64`) cuts the transforms with depth.
 - `fortran_gate` compares a 3D lateral-viscosity run with the Fortran sl3d;
   `scripts/run_fortran_gate.sh` builds both codes and runs the comparison.
 - `traction_numbers <deck> <lmax> <out.txt> [nongrav|grav]` writes the E1
@@ -539,6 +550,11 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
   `SL3DPP_WITH_MPI`) the same solves distributed over ranks
   ([docs/dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+- `mpiexec -n <ranks> distributed_step <deck> <lmax> [repeats] [degrees]`
+  (with `SL3DPP_WITH_MPI`) times the phases of the 3D step distributed
+  over ranks, one radial segment each, with OpenMP threads inside: run it
+  as ranks x threads over a node (`OMP_NUM_THREADS=4 mpiexec -n 2
+  -bind-to core:4 ...` with MPICH).
 
 ## Documentation
 

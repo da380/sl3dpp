@@ -26,13 +26,17 @@
  * processes (an MPI all-reduce, which the library does not call itself):
  * once at construction for S, once per solve for g. Every process then
  * holds S and x_S, and its own segments' x_I. One process owning every
- * segment, with no callback, is the serial solve.
+ * segment, with no callback, is the serial solve. A solve splits at its
+ * one sum (Condense, the sum, Complete), so that a caller can condense
+ * many systems, in parallel, and sum all their g in one collective.
  */
 
 #include <functional>
 #include <span>
 #include <utility>
 #include <vector>
+
+#include "sl3dpp/Collectives.hpp"
 
 namespace sl3dpp::detail {
 
@@ -58,12 +62,43 @@ class BandSubstructure {
                    std::vector<std::pair<int, int>> separators,
                    std::span<const int> owned = {}, Combine combine = {});
 
-  /// x <- A^-1 x for nrhs column-major columns of n values each. Every
-  /// process passes the whole right-hand side; only its own segments'
-  /// rows and the separators' are read (the separators' from the owner of
-  /// segment 0), and only those are solved: its own segments' interiors
-  /// and every separator. Distributed, collective (one `combine`).
-  void Solve(std::span<double> x, int nrhs) const;
+  /// x <- A^-1 x for nrhs column-major columns of n values each. Only
+  /// this process's own segments' rows and the separators' are read: held
+  /// Whole, every process passes the whole right-hand side and the
+  /// separators' rows are read from the owner of segment 0; held in
+  /// Shares, each passes its own segments' rows and its part of the
+  /// separators', which the solve sums. Only those are solved: its own
+  /// segments' interiors and every separator; the other interiors become
+  /// zero. Distributed, collective (one `combine`).
+  void Solve(std::span<double> x, int nrhs,
+             RightHandSide rhs = RightHandSide::Whole) const;
+
+  /// Solve's first phase, local to the process: each owned segment's
+  /// interior solve, into `interiors`, and this process's part of the
+  /// separators' reduced right-hand side g = b_S - K_SI K_II^-1 b_I, into
+  /// `separators` (SeparatorDofCount() x nrhs, column-major).
+  void Condense(std::span<const double> x, int nrhs, RightHandSide rhs,
+                std::vector<double>& separators,
+                std::vector<std::vector<double>>& interiors) const;
+  /// Solve's last phase, once `separators` holds g summed over the
+  /// processes: the separators' solve (in place) and each owned segment's
+  /// back-substitution, into x; the other interiors become zero.
+  void Complete(std::span<double> x, int nrhs, std::vector<double>& separators,
+                const std::vector<std::vector<double>>& interiors) const;
+
+  /// The collective between Condense and Complete: the separators' parts
+  /// summed over the processes (nothing undistributed).
+  void Sum(std::vector<double>& separators) const {
+    if (combine_) combine_(separators);
+  }
+
+  /// Whether this process's part of a solution holds dof d as its share:
+  /// its own segments' interiors, and the separators on the owner of
+  /// segment 0. The parts so held sum over the processes to the whole.
+  [[nodiscard]] bool Holds(int dof) const;
+  /// Zeroes, in nrhs columns of a solution, every dof this process does
+  /// not hold.
+  void MaskToShare(std::span<double> x, int nrhs) const;
 
   /// Whether this process solves segment p.
   [[nodiscard]] bool Owns(int segment) const {

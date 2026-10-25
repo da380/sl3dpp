@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <format>
+#include <span>
 #include <stdexcept>
 #include <utility>
 
@@ -213,6 +214,22 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
   auto loadGrid = std::vector<double>{};
   auto response = SeaLevelSolver::Response{};
   auto ocean = std::vector<double>{};  // the node's C, migrating only
+
+  // Distributed (Viscoelastic3D::Options::collectives), every process
+  // solves the sea level equation alike, but their transforms may round
+  // differently (each process plans its own FFTs): the first process's
+  // loads, and ocean function, then serve them all, so that every
+  // segment is forced alike.
+  const auto& collectives = op.GetOptions().collectives;
+  auto agree = [&] {
+    if (!collectives.Distributed()) return;
+    for (auto* coefficients : {&sigma_, &psi_}) {
+      collectives.share(
+          std::span(reinterpret_cast<double*>(coefficients->data()),
+                    2 * coefficients->size()));
+    }
+    if (migrating) collectives.share(ocean);
+  };
   if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
     response.seaLevelChange.assign(fieldSize, 0.0);
@@ -233,6 +250,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     psi_ = options_.rotation == RotationalFeedback::None
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(response.angularVelocity);
+    agree();
   }
   if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
                                  Columns(psi_, toMatPotential_));
@@ -331,6 +349,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
           psi_ = options_.rotation == RotationalFeedback::None
                      ? grid.ZeroCoefficients()
                      : solver.CentrifugalCoefficients(response.angularVelocity);
+          agree();
           step.AddChannels(responses, Columns(sigma_, toMatDensity_),
                            Columns(psi_, toMatPotential_));
           return step.StrainOf(responses);

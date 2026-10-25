@@ -99,7 +99,7 @@ int main(int argc, char** argv) {
     const DegreeOperator system(material, l,
                                 {.cuts = share.cuts,
                                  .segments = share.segments,
-                                 .combine = share.combine});
+                                 .combine = share.collectives.sum});
     build += MaxOverRanks(Seconds(start));
     best = 1e300;
     for (auto r = 0; r < repeats; ++r) {
@@ -129,7 +129,7 @@ int main(int argc, char** argv) {
     const ToroidalOperator toroidal(material, l,
                                     {.cuts = share.cuts,
                                      .segments = share.segments,
-                                     .combine = share.combine});
+                                     .combine = share.collectives.sum});
     build += MaxOverRanks(Seconds(start));
     best = 1e300;
     for (auto r = 0; r < repeats; ++r) {

@@ -64,6 +64,10 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
+  if (op.GetOptions().collectives.Distributed()) {
+    throw std::invalid_argument(
+        "the 3D adjoint does not run distributed over radius yet");
+  }
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
@@ -343,7 +347,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   // weights exactly in the angle-uniform limit; branch modulus, radial
   // quadrature, the covariant pairing ratio (Adjoint.cpp) and the
   // division by the laterally varying itau complete it.
-  const auto gridF = coupling.Grid().FieldSize();
+  const auto values = coupling.GridValueCount();
   const auto nodeCount = static_cast<std::size_t>(coupling.NodeCount());
   auto itauKernel = std::vector<std::vector<double>>{};
   const auto& matMesh = op.GetRheology().BaseMaterial().Mesh();
@@ -354,7 +358,7 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       (aMat * aMat * ev.toMatDensity_ *
        op.GetRheology().BaseMaterial().SurfaceGravity());
   if (trajectory != nullptr) {
-    itauKernel.assign(K, std::vector<double>(nodeCount * gridF, 0.0));
+    itauKernel.assign(K, std::vector<double>(values, 0.0));
   }
   // The forward state at a node. A kept one is read as recorded. The
   // states between two kept ones are rebuilt when the sweep, coming down,
@@ -447,8 +451,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
             const auto r = coupling.RadiusOfNode(static_cast<int>(rn));
             const auto wq = coupling.WeightOfNode(static_cast<int>(rn));
             const double factor = pairing * weight * mu[rn] * wq * r * r;
-            const auto base = rn * gridF;
-            for (auto x = std::size_t{0}; x < gridF; ++x) {
+            const auto base = coupling.FieldOffset(static_cast<int>(rn));
+            const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
+            for (auto x = std::size_t{0}; x < size; ++x) {
               const auto i = base + x;
               if (itau[i] <= 0.0) continue;
               // d - m of the forward state, against the adjoint state:
@@ -565,14 +570,14 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   if (trajectory != nullptr) {
     out.itauKernel3D = std::move(itauKernel);
     out.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));
-    out.logViscosityKernel3D.assign(
-        K, std::vector<double>(nodeCount * gridF, 0.0));
+    out.logViscosityKernel3D.assign(K, std::vector<double>(values, 0.0));
     for (auto k = std::size_t{0}; k < K; ++k) {
-      for (auto rn = std::size_t{0}; rn < nodeCount; ++rn) {
-        out.itauKernelSpherical[k][rn] = coupling.Grid().Integrate(
-            std::span(out.itauKernel3D[k]).subspan(rn * gridF, gridF));
+      for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+        out.itauKernelSpherical[k][rn] = coupling.GridOf(rn).Integrate(
+            std::span(out.itauKernel3D[k])
+                .subspan(coupling.FieldOffset(rn), coupling.FieldSizeOf(rn)));
       }
-      for (auto i = std::size_t{0}; i < nodeCount * gridF; ++i) {
+      for (auto i = std::size_t{0}; i < values; ++i) {
         out.logViscosityKernel3D[k][i] =
             -op.itau_[k][i] * out.itauKernel3D[k][i];
       }
@@ -585,8 +590,7 @@ namespace {
 
 void CheckKernelLayout(const GridCoupling& coupling,
                        std::span<const double> kernel) {
-  const auto expected = static_cast<std::size_t>(coupling.NodeCount()) *
-                        coupling.Grid().FieldSize();
+  const auto expected = coupling.GridValueCount();
   if (kernel.size() != expected) {
     throw std::invalid_argument(std::format(
         "the kernel holds {} values; the coupling's nodes and grid {}",
@@ -599,13 +603,14 @@ void CheckKernelLayout(const GridCoupling& coupling,
 std::vector<double> VolumeDensity(const GridCoupling& coupling,
                                   std::span<const double> kernel) {
   CheckKernelLayout(coupling, kernel);
-  const auto fieldSize = coupling.Grid().FieldSize();
   auto out = std::vector<double>(kernel.begin(), kernel.end());
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto r = coupling.RadiusOfNode(node);
     const auto scale = 1.0 / (coupling.WeightOfNode(node) * r * r);
-    const auto at = static_cast<std::size_t>(node) * fieldSize;
-    for (auto x = std::size_t{0}; x < fieldSize; ++x) out[at + x] *= scale;
+    const auto at = coupling.FieldOffset(node);
+    for (auto x = at; x < at + coupling.FieldSizeOf(node); ++x) {
+      out[x] *= scale;
+    }
   }
   return out;
 }
@@ -613,12 +618,11 @@ std::vector<double> VolumeDensity(const GridCoupling& coupling,
 std::vector<double> RadialDensity(const GridCoupling& coupling,
                                   std::span<const double> kernel) {
   CheckKernelLayout(coupling, kernel);
-  const auto fieldSize = coupling.Grid().FieldSize();
   auto out = std::vector<double>{};
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto slice =
-        kernel.subspan(static_cast<std::size_t>(node) * fieldSize, fieldSize);
-    out.push_back(coupling.Grid().Integrate(slice) /
+        kernel.subspan(coupling.FieldOffset(node), coupling.FieldSizeOf(node));
+    out.push_back(coupling.GridOf(node).Integrate(slice) /
                   coupling.WeightOfNode(node));
   }
   return out;

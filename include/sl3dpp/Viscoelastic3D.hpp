@@ -53,6 +53,7 @@
 #include <utility>
 #include <vector>
 
+#include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/GridCoupling.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/ToroidalOperator.hpp"
@@ -103,10 +104,26 @@ class Viscoelastic3D {
     /// Radial cuts for every degree system, the reference operator's
     /// included (ViscoelasticOperator::Options::radial_cuts).
     std::vector<int> radial_cuts{};
+    /// The degrees the transforms may be cut to with depth
+    /// (GridCoupling::Options::transform_degrees): each memory node is
+    /// transformed, and delta sampled, on a grid of the least of these
+    /// covering its element's degrees. Empty: every node at lmax.
+    std::vector<int> transform_degrees{};
+    /// Distributed over the segments of radial_cuts (Distributed.hpp's
+    /// ShareMesh fills these): the segments this process owns, contiguous,
+    /// and the collectives over the processes. The process then holds the
+    /// memory nodes of its segments' elements alone (the state, the
+    /// strain), solves only its segments of every degree system (each
+    /// solution holding its segments and the cut nodes, zero elsewhere),
+    /// and every step, solve and Surface is collective; its strain
+    /// coefficients and memory are its own nodes'. Empty collectives: one
+    /// process, every segment.
+    std::vector<int> segments{};
+    Collectives collectives{};
   };
 
   /// The reference rheology is copied (shared, immutable); delta is
-  /// sampled as delta(r, theta, phi) over the memory nodes' grid.
+  /// sampled as delta(r, theta, phi) over each memory node's grid.
   Viscoelastic3D(const Rheology& rheology, int lmax,
                  const std::function<double(double, double, double)>& delta,
                  Options options);
@@ -231,6 +248,8 @@ class Viscoelastic3D {
                                 const LoadCallable3D& tide = {}) const;
 
   /// The surface value of U, V or phi per degree: complex m >= 0 columns.
+  /// Distributed, collective: every process gets the values (the surface
+  /// segment's process holds them).
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 
@@ -306,7 +325,8 @@ class Viscoelastic3D {
     [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Converge(
         const Pass& pass, const IterationControl& control) const;
 
-    /// The inertia moment of the degree-0, m = 0 column of solutions.
+    /// The inertia moment of the degree-0, m = 0 column of solutions;
+    /// distributed, collective (each process's share summed).
     [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;
 
     /// The effective Love numbers of this step's reference solid (SI).

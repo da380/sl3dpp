@@ -445,30 +445,59 @@ void DegreeOperator::Factorise(const Options& options) {
   }
 }
 
-std::vector<double> DegreeOperator::Solve(std::span<const double> b,
-                                          int nrhs) const {
+std::vector<double> DegreeOperator::Solve(std::span<const double> b, int nrhs,
+                                          RightHandSide rhs) const {
+  auto pending = BeginSolve(b, nrhs, rhs);
+  if (substructure_) substructure_->Sum(pending.separators);
+  return FinishSolve(std::move(pending));
+}
+
+PendingSolve DegreeOperator::BeginSolve(std::span<const double> b, int nrhs,
+                                        RightHandSide rhs) const {
   const int n = ndof_;
   if (static_cast<int>(b.size()) != n * nrhs) {
     throw std::invalid_argument(std::format(
         "expected {} x {} right-hand-side values, got {}", n, nrhs, b.size()));
   }
-  auto x = std::vector<double>(b.begin(), b.end());
+  auto pending = PendingSolve{};
+  pending.nrhs = nrhs;
+  auto& x = pending.values;
+  x.assign(b.begin(), b.end());
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
   if (substructure_) {
-    substructure_->Solve(x, nrhs);
+    substructure_->Condense(x, nrhs, rhs, pending.separators,
+                            pending.interiors);
   } else if (!choleskyFailed_) {
     detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
   } else {
     detail::BandLuSolve(factor_, n, kd_, kd_, pivots_, x, nrhs);
   }
-  for (auto k = 0; k < nrhs; ++k) {
+  return pending;
+}
+
+std::vector<double> DegreeOperator::FinishSolve(PendingSolve&& pending) const {
+  const int n = ndof_;
+  auto x = std::move(pending.values);
+  if (substructure_) {
+    substructure_->Complete(x, pending.nrhs, pending.separators,
+                            pending.interiors);
+  }
+  for (auto k = 0; k < pending.nrhs; ++k) {
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
   return x;
+}
+
+bool DegreeOperator::Holds(int dof) const {
+  return !substructure_ || substructure_->Holds(dof);
+}
+
+void DegreeOperator::MaskToShare(std::span<double> x, int nrhs) const {
+  if (substructure_) substructure_->MaskToShare(x, nrhs);
 }
 
 std::vector<double> DegreeOperator::Apply(std::span<const double> x,

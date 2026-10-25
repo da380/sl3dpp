@@ -119,6 +119,10 @@ std::uint64_t FingerprintOf(const EvolveInput& input) {
   // added only when set, so a frozen, uncalibrated run's checkpoints
   // written before these members existed still resume
   if (input.shorelines != Shorelines::Frozen) hash.AddValue(input.shorelines);
+  if (!input.transform_degrees.empty()) {
+    hash.AddValue(input.transform_degrees.size());
+    for (const auto degree : input.transform_degrees) hash.AddValue(degree);
+  }
   if (input.calibrate) {
     hash.AddValue(input.calibration_method);
     hash.AddValue(input.calibration_iterations);
@@ -663,7 +667,8 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
       Rheology::Maxwell(earth.material, viscosity->Viscosity());
   if (!rheology) Fail(top.At("viscosity").At("file"),
                       rheology.error().message);
-  Viscoelastic3D op(*rheology, input.lmax, viscosity->Delta());
+  Viscoelastic3D op(*rheology, input.lmax, viscosity->Delta(),
+                    {.transform_degrees = input.transform_degrees});
   SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLove(),
                         ParametersOf(input, earth.material));
   auto world = LoadWorld(input, top, solver);

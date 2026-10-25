@@ -87,16 +87,17 @@ struct ForwardTrajectory3D {
  * @brief The 3D kernels. `ice` carries the ice-history views exactly as
  * the 1D IceKernels does.
  *
- * `itauKernel3D[k][node * FieldSize + x]` is dJ / d itau(x) for branch
- * k as an ANGULAR DENSITY on the coupling's (oversampled) grid at each
- * radial memory node: dJ = sum_node int K delta-itau dOmega, the radial
- * quadrature folded in as in the 1D nodal pairing; itau in material
- * units. `itauKernelSpherical[k][node]` is its angular integral — it
- * pairs with angle-uniform perturbations exactly as the 1D
- * AdjointSolver's nodal kernel does at that (element, gll) node, which
- * is the zero-lateral bridge between the two. With the memory nodes at
- * Gauss points the kernels live at the points (the itau the step
- * samples); laid out over the mesh's points, the reference's
+ * `itauKernel3D[k][FieldOffset(node) + x]` is dJ / d itau(x) for branch
+ * k as an ANGULAR DENSITY on each radial memory node's own (oversampled)
+ * grid (GridCoupling::GridOf; node * FieldSize + x on the one lmax grid
+ * unless the transforms are cut with depth): dJ = sum_node int K
+ * delta-itau dOmega, the radial quadrature folded in as in the 1D nodal
+ * pairing; itau in material units. `itauKernelSpherical[k][node]` is its
+ * angular integral — it pairs with angle-uniform perturbations exactly
+ * as the 1D AdjointSolver's nodal kernel does at that (element, gll)
+ * node, which is the zero-lateral bridge between the two. With the
+ * memory nodes at Gauss points the kernels live at the points (the itau
+ * the step samples); laid out over the mesh's points, the reference's
  * ItauKernelsAtNodes carries the spherical reduction to the nodal itau
  * as the 1D sweep carries its own. `logViscosityKernel3D` is
  * dJ / d delta(x) for the operator's log-viscosity perturbation
@@ -111,7 +112,7 @@ struct Kernels3D {
   std::vector<std::vector<double>> logViscosityKernel3D;
 };
 
-/// A kernel of the Kernels3D layout ([node * FieldSize + x], an angular
+/// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
 /// density with each memory node's radial quadrature weight folded in) as
 /// a density per unit volume: each node's values divided by its radial
 /// weight (GridCoupling::WeightOfNode) and r^2, so that dJ = int K delta dV

@@ -202,16 +202,31 @@ bool BandSubstructure::UsedCholesky() const {
          });
 }
 
-void BandSubstructure::Solve(std::span<double> x, int nrhs) const {
+void BandSubstructure::Solve(std::span<double> x, int nrhs,
+                             RightHandSide rhs) const {
+  auto separators = std::vector<double>{};
+  auto interiors = std::vector<std::vector<double>>{};
+  Condense(x, nrhs, rhs, separators, interiors);
+  Sum(separators);
+  Complete(x, nrhs, separators, interiors);
+}
+
+void BandSubstructure::Condense(
+    std::span<const double> x, int nrhs, RightHandSide rhs,
+    std::vector<double>& separators,
+    std::vector<std::vector<double>>& interiors) const {
   const auto n = static_cast<std::size_t>(n_);
   if (nrhs < 0 || x.size() != n * static_cast<std::size_t>(nrhs)) {
     throw std::invalid_argument(
         std::format("expected {} x {} values, got {}", n_, nrhs, x.size()));
   }
   const auto ns = static_cast<std::size_t>(schur_.n);
-  // The separators' right-hand sides, b_S (from the owner of segment 0).
-  auto xs = std::vector<double>(ns * static_cast<std::size_t>(nrhs), 0.0);
-  for (auto k = 0; k < nrhs && Owns(0); ++k) {
+  // The separators' right-hand sides, b_S: this process's share, or the
+  // whole from the owner of segment 0.
+  auto& xs = separators;
+  xs.assign(ns * static_cast<std::size_t>(nrhs), 0.0);
+  const auto reads = rhs == RightHandSide::Shares || Owns(0);
+  for (auto k = 0; k < nrhs && reads; ++k) {
     auto a = static_cast<std::size_t>(k) * ns;
     for (const auto& [first, end] : separators_) {
       for (auto d = first; d < end; ++d) {
@@ -220,13 +235,13 @@ void BandSubstructure::Solve(std::span<double> x, int nrhs) const {
     }
   }
   // Each owned segment's interior solve y = K_II^-1 b_I, and
-  // g = b_S - K_SI y summed over the processes.
-  auto interior = std::vector<std::vector<double>>(segments_.size());
+  // g = b_S - K_SI y, this process's part.
+  interiors.assign(segments_.size(), {});
   for (auto p = std::size_t{0}; p < segments_.size(); ++p) {
     const auto& segment = segments_[p];
     if (segment.count == 0 || owned_[p] == 0) continue;
     const auto rows = static_cast<std::size_t>(segment.count);
-    auto& y = interior[p];
+    auto& y = interiors[p];
     y.resize(rows * static_cast<std::size_t>(nrhs));
     for (auto k = 0; k < nrhs; ++k) {
       const auto* from = &x[static_cast<std::size_t>(k) * n +
@@ -245,14 +260,35 @@ void BandSubstructure::Solve(std::span<double> x, int nrhs) const {
       }
     }
   }
-  if (combine_) combine_(xs);
+}
+
+void BandSubstructure::Complete(
+    std::span<double> x, int nrhs, std::vector<double>& separators,
+    const std::vector<std::vector<double>>& interiors) const {
+  const auto n = static_cast<std::size_t>(n_);
+  const auto ns = static_cast<std::size_t>(schur_.n);
+  if (x.size() != n * static_cast<std::size_t>(nrhs) ||
+      separators.size() != ns * static_cast<std::size_t>(nrhs) ||
+      interiors.size() != segments_.size()) {
+    throw std::invalid_argument("the solve was condensed for another shape");
+  }
+  auto& xs = separators;
   schur_.Solve(xs, nrhs);
-  // Back-substitution, x_I = y - (K_II^-1 K_IS) x_S, and the separators.
+  // Back-substitution, x_I = y - (K_II^-1 K_IS) x_S, the other interiors
+  // zero, and the separators.
   for (auto p = std::size_t{0}; p < segments_.size(); ++p) {
     const auto& segment = segments_[p];
-    if (segment.count == 0 || owned_[p] == 0) continue;
+    if (segment.count == 0) continue;
     const auto rows = static_cast<std::size_t>(segment.count);
-    const auto& y = interior[p];
+    if (owned_[p] == 0) {
+      for (auto k = 0; k < nrhs; ++k) {
+        auto* to = &x[static_cast<std::size_t>(k) * n +
+                      static_cast<std::size_t>(segment.first)];
+        std::fill(to, to + rows, 0.0);
+      }
+      continue;
+    }
+    const auto& y = interiors[p];
     for (auto k = 0; k < nrhs; ++k) {
       auto* to = &x[static_cast<std::size_t>(k) * n +
                     static_cast<std::size_t>(segment.first)];
@@ -272,6 +308,40 @@ void BandSubstructure::Solve(std::span<double> x, int nrhs) const {
       for (auto d = first; d < end; ++d) {
         x[static_cast<std::size_t>(k) * n + d] = xs[a++];
       }
+    }
+  }
+}
+
+bool BandSubstructure::Holds(int dof) const {
+  for (const auto& [first, end] : separators_) {
+    if (dof >= first && dof < end) return Owns(0);
+  }
+  for (auto p = std::size_t{0}; p < segments_.size(); ++p) {
+    const auto& segment = segments_[p];
+    if (dof >= segment.first && dof < segment.first + segment.count) {
+      return owned_[p] != 0;
+    }
+  }
+  return false;
+}
+
+void BandSubstructure::MaskToShare(std::span<double> x, int nrhs) const {
+  const auto n = static_cast<std::size_t>(n_);
+  if (x.size() != n * static_cast<std::size_t>(nrhs)) {
+    throw std::invalid_argument(
+        std::format("expected {} x {} values, got {}", n_, nrhs, x.size()));
+  }
+  for (auto k = 0; k < nrhs; ++k) {
+    auto* column = &x[static_cast<std::size_t>(k) * n];
+    for (auto p = std::size_t{0}; p < segments_.size(); ++p) {
+      const auto& segment = segments_[p];
+      if (owned_[p] != 0) continue;
+      std::fill(column + segment.first, column + segment.first + segment.count,
+                0.0);
+    }
+    if (Owns(0)) continue;
+    for (const auto& [first, end] : separators_) {
+      std::fill(column + first, column + end, 0.0);
     }
   }
 }

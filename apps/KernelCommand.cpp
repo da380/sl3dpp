@@ -602,7 +602,8 @@ std::string RunKernel3D(const std::filesystem::path& config) {
       Rheology::Maxwell(earth.material, viscosity->Viscosity());
   if (!rheology) Fail(top.At("viscosity").At("file"),
                       rheology.error().message);
-  Viscoelastic3D op(*rheology, input.run.lmax, viscosity->Delta());
+  Viscoelastic3D op(*rheology, input.run.lmax, viscosity->Delta(),
+                    {.transform_degrees = input.run.transform_degrees});
   SeaLevelSolver solver(SurfaceGrid(input.run.lmax), op.ElasticLove(),
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);

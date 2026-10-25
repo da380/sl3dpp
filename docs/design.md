@@ -133,7 +133,10 @@ Deliberately out of scope:
   handle to one immutable GSHTrans grid, shared where the resolution is
   the same). The sea level grid is band-exact; the 3D coupling's grid
   carries spins up to 2 and is oversampled by 3/2 so that the pointwise
-  products are dealiased (the Fortran never dealiased).
+  products are dealiased (the Fortran never dealiased). With
+  `transform_degrees` the memory nodes fall into blocks by depth, each on
+  a grid of its own degree, just covering the degrees its solution
+  carries under the truncation (docs/dev/radial-substructuring.md §10).
 - **Reality reduction.** The strain and memory tensors are real, so of the
   five canonical trace-free components (spins −2..2) only spins −2 and −1
   are stored, as complex fields, and spin 0 as a real field; spins +1 and
@@ -142,9 +145,9 @@ Deliberately out of scope:
   coefficient columns indexed by m ≥ 0 (m = 0 real). Any pairing of two
   such column sets weights m > 0 twice — (1, 2, 2, ...) — against a real
   dof pairing; transposes halve or double accordingly.
-- **Batching.** Transforms are issued once per spin component with the
-  radial memory nodes as the batch, threaded by GSHTrans; its BLAS matrix
-  kernel is an option.
+- **Batching.** Transforms are issued once per spin component and node
+  block with the block's radial memory nodes as the batch, threaded by
+  GSHTrans; its BLAS matrix kernel is an option.
 
 ## 5. Time stepping
 
@@ -402,21 +405,25 @@ Beyond the fixtures:
   so any BLAS works, with no environment variables to set.
 - **Reproducibility.** One-thread runs are bitwise reproducible; threaded
   runs agree with them to round-off.
-- **No distributed memory yet.** A production 3D problem (lmax 256) fits
-  one large node, but a step is fastest on one socket. The plan is one MPI
-  rank per socket over contiguous radial segments
+- **Distributed over radius (MPI, optional).** A production 3D problem
+  (lmax 256) fits one large node, but a step is fastest on one socket, and
+  larger problems want the memory of several nodes. With the CMake option
+  `SL3DPP_WITH_MPI` (which defines `SL3DPP_HAVE_MPI` and guards the MPI
+  sections) the 3D step runs over contiguous radial segments, one per
+  rank, with OpenMP threads inside each
   ([dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
   Every large array is indexed by radial node and the pseudospectral
-  products are pointwise within a node, so each rank transforms its own
-  nodes and no global transposes are needed. Only the per-degree solves
-  couple the segments, and those exchange the cut nodes' dofs alone. The
-  substructured solve is built (`radial_cuts`), and so is its distributed
-  form: with the CMake option `SL3DPP_WITH_MPI`, which defines
-  `SL3DPP_HAVE_MPI` and guards the MPI sections, `Distributed.hpp` gives
-  each rank its segment, and the degree systems factorise and solve that
-  segment alone, with one all-reduce per construction and per solve. The
-  solvers themselves take a `combine` callback and call no MPI. The 3D
-  step's distributed data (each rank's memory nodes) is not built yet.
+  products are pointwise within a node, so each rank holds and transforms
+  its own segment's memory nodes alone, and no global transposes are
+  needed; the cuts balance the transform work
+  (`GridCoupling::TransformWeights`). The degree systems are substructured
+  over the segments: each rank solves its own, and the cut nodes' parts of
+  every degree's system are summed in one collective per pass. The
+  library calls no MPI itself: `Viscoelastic3D` takes `Collectives`
+  (sum, max and share callbacks), which `Distributed.hpp` fills from a
+  communicator. The sea level equation is solved on every rank alike and
+  the first rank's loads shared. The 3D adjoint does not run distributed
+  yet.
 
 ## 13. Dependencies and boundaries
 

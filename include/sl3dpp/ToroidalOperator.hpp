@@ -44,6 +44,7 @@
 #include <utility>
 #include <vector>
 
+#include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/RadialMesh.hpp"
@@ -101,8 +102,20 @@ class ToroidalOperator {
   /// x with A x = b for nrhs column-major right-hand sides; at l = 1 in
   /// the pinned gauge (x zero at the pinned dofs), which needs b
   /// torque-free (orthogonal to every RigidRotation) to solve A x = b.
-  [[nodiscard]] std::vector<double> Solve(std::span<const double> b,
-                                          int nrhs = 1) const;
+  /// Distributed, as DegreeOperator::Solve.
+  [[nodiscard]] std::vector<double> Solve(
+      std::span<const double> b, int nrhs = 1,
+      RightHandSide rhs = RightHandSide::Whole) const;
+
+  /// Solve split at its one collective, as DegreeOperator::BeginSolve.
+  [[nodiscard]] PendingSolve BeginSolve(
+      std::span<const double> b, int nrhs,
+      RightHandSide rhs = RightHandSide::Whole) const;
+  [[nodiscard]] std::vector<double> FinishSolve(PendingSolve&& pending) const;
+
+  /// As DegreeOperator::Holds and MaskToShare.
+  [[nodiscard]] bool Holds(int dof) const;
+  void MaskToShare(std::span<double> x, int nrhs = 1) const;
 
   /// A x with the full (unpinned) operator, nrhs column-major columns.
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,

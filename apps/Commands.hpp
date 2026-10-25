@@ -120,6 +120,10 @@ struct EvolveInput {
   /// The 3D command's combined (strain, ocean, rotation) fixed point.
   double coupled_rtol = 1e-9;
   int max_coupled_iterations = 60;
+  /// The 3D commands' transforms cut with depth: the degrees a memory
+  /// node's grid may take below lmax (Viscoelastic3D::Options::
+  /// transform_degrees); empty, every node at lmax.
+  std::vector<int> transform_degrees;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
   /// which the full transverse feedback needs when the input moments
