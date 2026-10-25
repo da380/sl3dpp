@@ -6,6 +6,7 @@
 #include <format>
 #include <limits>
 #include <numeric>
+#include <stdexcept>
 
 namespace sl3dpp {
 
@@ -227,6 +228,38 @@ double RadialMesh::TruncationRadius(int l, TruncationRule rule,
 
 int RadialMesh::StartElement(int l, TruncationRule rule, double eps) const {
   return ElementOf(TruncationRadius(l, rule, eps));
+}
+
+std::vector<int> RadialMesh::BalancedCuts(
+    int parts, std::span<const double> elementWeights) const {
+  const auto count = ElementCount();
+  if (parts < 1) {
+    throw std::invalid_argument("a mesh is cut into one part or more");
+  }
+  if (!elementWeights.empty() &&
+      elementWeights.size() != static_cast<std::size_t>(count)) {
+    throw std::invalid_argument("the weights must give one per element");
+  }
+  // The summed weight below each element boundary.
+  auto below = std::vector<double>(static_cast<std::size_t>(count) + 1, 0.0);
+  for (auto e = 0; e < count; ++e) {
+    below[e + 1] =
+        below[e] + (elementWeights.empty() ? 1.0 : elementWeights[e]);
+  }
+  auto out = std::vector<int>{};
+  for (auto k = 1; k < parts; ++k) {
+    const auto target = below.back() * k / parts;
+    auto best = -1;
+    for (auto e = out.empty() ? 1 : out.back() + 1; e < count; ++e) {
+      if (layer_[e - 1] != layer_[e]) continue;
+      if (best < 0 ||
+          std::abs(below[e] - target) < std::abs(below[best] - target)) {
+        best = e;
+      }
+    }
+    if (best >= 0) out.push_back(best);
+  }
+  return out;
 }
 
 std::vector<double> RadialMesh::Nodal(const EarthModel& model,

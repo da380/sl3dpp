@@ -42,7 +42,8 @@ of mantle viscosity using deglacial sea level observations.
   harmonic transforms ([GSHTrans](https://github.com/da380/GSHTrans)), and
   each implicit step solves a fixed point about the reference (Picard,
   Anderson-accelerated where it converges slowly). A coupled driver runs an
-  ice history through the sea-level equation.
+  ice history through the sea-level equation, with frozen or migrating
+  shorelines.
 - **Sensitivity kernels.** Kernels of sea-level, displacement, potential and
   rotation measurements with respect to the ice history (as load duals,
   densities in time, and rate kernels) and to viscosity (the inverse
@@ -365,7 +366,7 @@ solvers on their own, and the adjoints of all of them.
 | `SeaLevel.hpp` | The sea-level solver (linear, generalised, nonlinear) and its adjoint |
 | `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution, frozen or migrating shorelines |
 | `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
-| `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution |
+| `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution, frozen or migrating shorelines |
 | `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D |
 | `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |
 
@@ -480,9 +481,21 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`), their tests (run under `mpiexec`) and the `distributed_solves` benchmark; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.
+
+With `SL3DPP_WITH_MPI`, CMake's FindMPI picks the MPI; with several
+installed, name one by its compiler wrapper,
+`-DMPI_CXX_COMPILER=/path/to/mpicxx`. An MPI whose library directory also
+holds netCDF, HDF5 or zlib under the system's names (a PETSc install that
+downloaded them, say) would shadow the system's at run time: point FindMPI
+at the MPI library alone instead, with
+`-DMPI_CXX_SKIP_MPICXX=ON -DMPI_CXX_INCLUDE_PATH=<dir of mpi.h>
+-DMPI_CXX_LIB_NAMES=mpi -DMPI_mpi_LIBRARY=<path of libmpi.so>
+-DMPIEXEC_EXECUTABLE=<its mpiexec>`, where the two directories hold the MPI
+headers and library and nothing else (symbolic links will do).
 
 To build against local checkouts of the sibling libraries rather than the
 downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the comment at the
@@ -521,6 +534,11 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   Maxwell load Love-number histories under a Heaviside load (taus in
   seconds per layer, `inf` elastic), for the V1 tier in
   `benchmarks/viscoelastic/love/`.
+- `substructure_timing <deck> <lmax> [repeats] [parts...]` times the degree
+  solves substructured over radial segments against the direct ones, and
+  `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
+  `SL3DPP_WITH_MPI`) the same solves distributed over ranks
+  ([docs/dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
 
 ## Documentation
 

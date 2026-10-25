@@ -100,6 +100,9 @@ class Viscoelastic3D {
     /// the step an exact elimination still; MemoryPoints.hpp), or GLL
     /// nodes.
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
+    /// Radial cuts for every degree system, the reference operator's
+    /// included (ViscoelasticOperator::Options::radial_cuts).
+    std::vector<int> radial_cuts{};
   };
 
   /// The reference rheology is copied (shared, immutable); delta is

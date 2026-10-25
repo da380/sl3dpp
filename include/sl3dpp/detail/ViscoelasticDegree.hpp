@@ -72,7 +72,8 @@ struct ViscoelasticOperator::Degree {
         system(nodalMaterial, degree,
                {.eps = options.eps,
                 .truncation = options.truncation,
-                .point_shear = elasticShear}),
+                .point_shear = elasticShear,
+                .cuts = options.radial_cuts}),
         points(&memoryPoints) {
     const auto& mesh = rheology.BaseMaterial().Mesh();
     const auto subset = system.FirstElement();

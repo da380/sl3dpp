@@ -21,7 +21,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Elastic sea-level fingerprints, SI at the interface | `Fingerprint.hpp` |
 | 1D viscoelastic evolution under an ice history, frozen or migrating shorelines | `Viscoelastic.hpp`, `Evolution.hpp` |
 | The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
-| 3D (lateral-viscosity) evolution under an ice history | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
+| 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
@@ -66,10 +66,11 @@ Deliberately out of scope:
   quasi-static Liouville theory solved in closed form at degree 2 (axial
   and transverse, no Chandler wobble, the hydrostatic-moment guard of
   pyslfp). The evolutions use the linear equation with frozen shorelines,
-  or, in 1D, the nonlinear (Kendall-style) solve at every step with
-  migrating shorelines (`RunMigrating`, pyslfp's `_run_migrating`): the
-  step's memory field enters through the response channels and the step
-  finishes under the converged state's grounded-ice and ocean load. A
+  or the nonlinear (Kendall-style) solve at every step with migrating
+  shorelines (`RunMigrating`, pyslfp's `_run_migrating`): the step's
+  memory field enters through the response channels and the step finishes
+  under the converged state's grounded-ice and ocean load. In 3D the
+  nonlinear solve runs in every pass of the combined fixed point (§6). A
   state may carry a prescribed ocean function, which the linear solves use
   as given.
 - **The initial sea level.** `InitialSeaLevel.hpp` lifts pyslfp's
@@ -109,7 +110,12 @@ Deliberately out of scope:
   Cholesky, falling back to banded LU where the matrix is not positive
   definite (the semi-definite fluid limit). The toroidal blocks, pinned at
   l = 1 (§8), are SPD and use banded Cholesky. Factorisations are cached
-  per (scheme, step size) and reused across a run.
+  per (scheme, step size) and reused across a run. With radial cuts
+  (`radial_cuts`, `RadialMesh::BalancedCuts`) every degree system is solved
+  by substructuring instead (`detail/BandSubstructure.hpp`): each segment
+  of the mesh eliminates its interior on its own and the cut nodes' dofs
+  solve together. The answers are the same, with the direct solve's
+  residuals. This is the per-degree algebra of a distributed solve (§12).
 - **Non-gravitating variant.** `DegreeOperator` with `gravitating = false`
   drops the gravity and potential terms (U, V alone) for the
   non-gravitating tier of the cross-code benchmarks, mirroring pyslfp's
@@ -195,7 +201,12 @@ Deliberately out of scope:
 - **With sea level.** `SeaLevelEvolution3D` folds the ocean load and
   rotation into one combined fixed point per step (`coupled_rtol`,
   `max_coupled_iterations`); a node that does not converge is reported in
-  its snapshot.
+  its snapshot. Under migrating shorelines (`RunMigrating`) each pass
+  solves the nonlinear sea level equation from the background with the
+  pass's memory and lateral responses, so the ocean function follows
+  flotation inside the fixed point, and the load channel carries the
+  converged state's load relative to the background. With no lateral
+  perturbation this is the 1D migrating run, shorelines included.
 - **Envelope.** Measured on a smooth degree-1 pattern
   ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §5a): peak-to-peak contrasts
   up to 1000x converge at Δt/τ up to 2 (in about 150 passes at the hard
@@ -233,7 +244,7 @@ Deliberately out of scope:
   measurement; Yu et al. 2025 §3.7), and the quelled view (the kernel
   against the thickness rate on each interval).
 - **About a migrating trajectory.** Given the ocean function of every node
-  of a migrating run, the 1D sweeps linearise about it: the adjoint stays
+  of a migrating run, the sweeps (1D and 3D) linearise about it: the adjoint stays
   linear with the time-reversed C(t) as its coefficients (Yu et al. 2025,
   §3.3; the shoreline-motion singular terms cancel), the grounding factors
   are per node, and the initial sea level kernel
@@ -391,12 +402,21 @@ Beyond the fixtures:
   so any BLAS works, with no environment variables to set.
 - **Reproducibility.** One-thread runs are bitwise reproducible; threaded
   runs agree with them to round-off.
-- **No distributed memory.** A production 3D problem (lmax 256) fits one
-  large node, so MPI is not built. Distributing it would need two things:
-  the per-degree radial solves split across ranks (radial substructuring,
-  with an interface solve per degree, is the workable route), and global
-  transposes for the pseudospectral products, which couple every (l, m).
-  Neither is justified at present sizes.
+- **No distributed memory yet.** A production 3D problem (lmax 256) fits
+  one large node, but a step is fastest on one socket. The plan is one MPI
+  rank per socket over contiguous radial segments
+  ([dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+  Every large array is indexed by radial node and the pseudospectral
+  products are pointwise within a node, so each rank transforms its own
+  nodes and no global transposes are needed. Only the per-degree solves
+  couple the segments, and those exchange the cut nodes' dofs alone. The
+  substructured solve is built (`radial_cuts`), and so is its distributed
+  form: with the CMake option `SL3DPP_WITH_MPI`, which defines
+  `SL3DPP_HAVE_MPI` and guards the MPI sections, `Distributed.hpp` gives
+  each rank its segment, and the degree systems factorise and solve that
+  segment alone, with one all-reduce per construction and per solve. The
+  solvers themselves take a `combine` callback and call no MPI. The 3D
+  step's distributed data (each rank's memory nodes) is not built yet.
 
 ## 13. Dependencies and boundaries
 
@@ -442,10 +462,15 @@ What is not built, or holds only within limits:
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
-- **Migrating shorelines in 3D.** The 1D evolution and its adjoints run
-  migrating shorelines; the 3D evolution, its adjoint and so its
-  calibration hold the shorelines frozen. Migrating shorelines in 3D would
-  put the nonlinear solve inside the combined within-step fixed point (§6).
+- **Shoreline flips inside the 3D fixed point.** Under migrating
+  shorelines the 3D combined fixed point re-derives the ocean function in
+  every pass, so a cell sitting at the flotation threshold can flip between
+  passes and hold the residual above a tight `coupled_rtol`; such a node is
+  reported unconverged rather than accepted. The tests' marine caps converge
+  at 1e-12. The 3D gradient calibration uses the continuous adjoint, whose
+  kernel is exact only as the step goes to zero; the iteration's fixed
+  point is still the calibrated state, since the kernel is linear in the
+  residual.
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold
   into the same within-step fixed point
   ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §7a).

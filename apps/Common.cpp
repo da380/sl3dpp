@@ -236,8 +236,6 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   const auto length = scales.Length();
   const auto time = scales.Time();
   const auto start_si = -input.start_kyr_bp * KYR;
-  // the history's changes from the window's start, on the background's own
-  // ice, as IceLoadOf takes them
   // the background's ice plus the history's change from world.ice0, the
   // start's ice the frozen load is measured from (IceLoadOf), so a history
   // that disagrees with the state at the start is refused by the migrating
@@ -267,6 +265,9 @@ CalibrationOptions CalibrationOptionsOf(const EvolveInput& input) {
   options.iterations = input.calibration_iterations;
   options.rtol = input.calibration_rtol;
   options.adjoint.rtol = input.rtol;
+  options.adjoint3D.rtol = input.rtol;
+  options.adjoint3D.coupled_rtol = input.coupled_rtol;
+  options.adjoint3D.max_coupled_iterations = input.max_coupled_iterations;
   return options;
 }
 
@@ -277,8 +278,9 @@ CalibrationSummary Adopt(const EvolveInput& input, const Json& top,
   for (const auto& snapshot : calibration.snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
-          "the calibration's last run has a sea level solve that did not "
-          "converge (t = {}); loosen rtol",
+          "the calibration's last run did not converge at t = {} (its sea "
+          "level solve, or in 3D its coupled fixed point); loosen rtol or "
+          "coupled.rtol",
           snapshot.t));
     }
   }
@@ -344,7 +346,7 @@ CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
   evolution.SetBackgroundState(world.background);
   return Adopt(input, top, solver, world,
                CalibrateInitialSeaLevel(evolution, times,
-                                        IceLoadOf(input, solver, world), target,
+                                        HistoryOf(input, solver, world), target,
                                         CalibrationOptionsOf(input)));
 }
 

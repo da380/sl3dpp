@@ -589,11 +589,6 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   if (input.method == AdjointMethod::Discrete) {
     Fail(top.At("adjoint"), "the 3D sweep is the continuous adjoint alone");
   }
-  if (input.run.shorelines == Shorelines::Migrating) {
-    Fail(top.At("shorelines"),
-         "is migrating, which the 1D commands alone run: the 3D evolution "
-         "holds its shorelines frozen");
-  }
   auto earth = BuildEarth(input.run, top);
   auto mv_options = io::ModelViscosityOptions{};
   mv_options.reference = input.run.viscosity_file_radial
@@ -612,7 +607,6 @@ std::string RunKernel3D(const std::filesystem::path& config) {
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
   const auto times = MakeTimes(input.run, solver.SolverScales());
-  const auto iceLoad = IceLoadOf(input.run, solver, world);
   auto options = SeaLevelEvolution3D::Options{};
   options.scheme = input.run.scheme;
   options.rotation = input.run.rotation;
@@ -646,14 +640,21 @@ std::string RunKernel3D(const std::filesystem::path& config) {
     };
   }
   SeaLevelEvolution3D evolution(op, solver, world.background, options);
-  const auto snapshots = evolution.Run(times, iceLoad);
+  const auto history = HistoryOf(input.run, solver, world);
+  const auto snapshots = RunIceHistory(evolution, times, history);
   for (const auto& snapshot : snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
-          "the coupled fixed point did not converge at t = {}", snapshot.t));
+          "the coupled fixed point or its sea level solve did not converge "
+          "at t = {}; loosen coupled.rtol or rtol",
+          snapshot.t));
     }
   }
   auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+  // about a migrating run, the sweep linearises about its own shorelines
+  const auto oceans = input.run.shorelines == Shorelines::Migrating
+                          ? OceanFunctionsOf(snapshots)
+                          : std::vector<std::vector<double>>{};
   if (spilling) {
     trajectory.stored = spilled;
     trajectory.fetch = [state_path](std::size_t node) {
@@ -667,13 +668,16 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   }
 
   const auto& matScales = earth.material.ModelScales();
-  AdjointSolver3D adjoint(evolution, {.rtol = input.run.rtol});
+  AdjointSolver3D adjoint(
+      evolution, {.rtol = input.run.rtol,
+                  .max_coupled_iterations = input.run.max_coupled_iterations,
+                  .coupled_rtol = input.run.coupled_rtol});
   const auto summary = RunKernelsWith<SeaLevelEvolution3D::Snapshot>(
       config, input, solver, snapshots, "kernel",
       [&](const std::map<std::size_t, Measurement>& measurements,
           const std::filesystem::path& stem, const Built& built) {
         const auto kernels =
-            adjoint.IceHistoryKernels(times, measurements, &trajectory);
+            adjoint.IceHistoryKernels(times, measurements, &trajectory, oceans);
         // the 3D log-viscosity kernels as a planetmodel model file, the
         // values made non-dimensional under the model's own scales
         const auto toModel = built.factor / matScales.Factor(built.objective);

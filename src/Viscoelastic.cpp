@@ -269,7 +269,8 @@ const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
                              .truncation = options_.truncation,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
-                                                : nullptr}))
+                                                : nullptr,
+                             .cuts = options_.radial_cuts}))
             .first;
   }
   return found->second;

@@ -365,6 +365,9 @@ if __name__ == "__main__":
                       "ice7g.nc",
                       "sl3d evolve1d on ICE-7G, migrating shorelines, "
                       "initial sea level calibrated against the present day")
+    evolve_calibrated("evolve_calibrated", "evolve", None,
+                      "sl3d evolve (3D), migrating shorelines, initial sea "
+                      "level calibrated against the present day")
     evolve_ice7g()
     kernels1d()
     kernels3d()

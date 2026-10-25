@@ -38,6 +38,9 @@ STRIP_FROM_INC_PATH    = @PROJECT_SOURCE_DIR@/include
 EXCLUDE                = @PROJECT_SOURCE_DIR@/include/sl3dpp/detail
 EXCLUDE_SYMBOLS        = sl3dpp::detail sl3dpp::detail::*
 
+# The MPI parts are documented whether or not this build has them.
+PREDEFINED             = SL3DPP_HAVE_MPI
+
 EXTRACT_ALL            = YES
 EXTRACT_STATIC         = YES
 EXTRACT_PRIVATE        = NO

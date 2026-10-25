@@ -6,6 +6,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -213,7 +214,10 @@ TEST_F(AppsTest, FingerprintRunsAToyStateEndToEnd) {
 /// cap shrinking linearly over the window (2 kyr BP to the present).
 /// `bump_last` adds a smooth mid-latitude patch to the final date's ice
 /// alone, for finite differences of the kernels.
-void WriteToyHistory(const fs::path& path, double bump_last = 0.0) {
+/// With `marine`, the polar ice sits in a basin 500 m below sea level and
+/// thins to a fifth by the present, so it floats off as it melts.
+void WriteToyHistory(const fs::path& path, double bump_last = 0.0,
+                     bool marine = false) {
   namespace pm = planetmodel;
   constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
   const auto grid = pm::Equiangular(19, 36);
@@ -222,14 +226,18 @@ void WriteToyHistory(const fs::path& path, double bump_last = 0.0) {
   for (const auto d : dates) time.push_back(-d * kyr);
   auto ice = std::vector<double>{};
   auto topo = std::vector<double>{};
-  // melt from 2 to 1 kyr BP, then hold: the hold is the decay window
-  const auto fractions = std::vector<double>{1.0, 0.7, 0.7};
+  // melt from 2 to 1 kyr BP, then hold: the hold is the decay window (a
+  // marine history melts on)
+  const auto fractions = marine ? std::vector<double>{1.0, 0.6, 0.2}
+                                : std::vector<double>{1.0, 0.7, 0.7};
   for (auto k = std::size_t{0}; k < dates.size(); ++k) {
     const auto fraction = fractions[k];
     const auto bump = k + 1 == dates.size() ? bump_last : 0.0;
     for (const auto theta : grid.Colatitudes()) {
       for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
-        topo.push_back(3000.0 * std::cos(theta));
+        topo.push_back(
+            3000.0 * std::cos(theta) -
+            (marine ? 3500.0 * std::exp(-std::pow(theta / 0.3, 2)) : 0.0));
         auto thickness = theta < 0.45 ? fraction * 1500.0 *
                                             std::exp(-std::pow(theta / 0.3, 2))
                                       : 0.0;
@@ -499,14 +507,90 @@ TEST_F(AppsTest, EvolveCalibratesTheInitialSeaLevel) {
               std::string::npos)
         << error.what();
   }
+}
 
-  // and the 3D commands, frozen alone, refuse migrating shorelines
-  static_cast<void>(Write("viscosity.nc", ""));
-  const auto lateral =
-      Write("lateral.json", "{" + body + R"(, "shorelines": "migrating",
-              "viscosity": {"file": "viscosity.nc"},
-              "output": "out/lateral.nc"})");
-  EXPECT_THROW(static_cast<void>(app::RunEvolve3D(lateral)), pm::Error);
+TEST_F(AppsTest, The3DCommandsCalibrateUnderMigratingShorelines) {
+  // The 3D commands take migrating shorelines as the 1D ones do: the
+  // calibrated run reaches the state file's present-day sea level and
+  // records its ocean functions, through wall-time stops as uninterrupted,
+  // and the kernels come about its own shorelines. The history's polar
+  // ice sits in a basin below sea level and floats off as it thins.
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc", 0.0, true);
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto body = std::string{R"(
+    "model": ")"} + data +
+                    R"(/prem8.elastic.deck",
+    "model_format": "elastic",
+    "lmax": 8,
+    "viscosity": {"file": ")" +
+                    data + R"(/viscosity_log.nc"},
+    "state": {"file": "history.nc"},
+    "ice_history": {"file": "history.nc"},
+    "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+    "rotation": "full",
+    "shorelines": "migrating",
+    "calibrate_initial_sea_level": {"rtol": 1e-8})";
+  const auto grid = SurfaceGrid(8);
+  const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
+  ASSERT_TRUE(history);
+  const auto target =
+      SeaLevelFromTopography(history->Values("topography", 0.0),
+                             history->Values("ice_thickness", 0.0));
+
+  const auto whole =
+      Write("whole.json", "{" + body + R"(, "output": "out/whole.nc"})");
+  auto summary = app::RunEvolve3D(whole);
+  EXPECT_NE(summary.find("initial sea level calibrated"), std::string::npos)
+      << summary;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
+  EXPECT_EQ(std::get<std::string>(reference.meta.at("shorelines")),
+            "migrating");
+  ASSERT_TRUE(reference.variables.contains("ocean_function"));
+  const auto& s0 = reference.variables.at("initial_sea_level").values;
+  const auto& slc = reference.variables.at("sea_level_change").values;
+  const auto last = slc.size() - target.size();
+  auto worst = 0.0, scale = 0.0;
+  for (auto i = std::size_t{0}; i < target.size(); ++i) {
+    worst = std::max(worst, std::abs(s0[i] + slc[last + i] - target[i]));
+    scale = std::max(scale, std::abs(target[i]));
+  }
+  EXPECT_LT(worst, 1e-6 * scale);
+  const auto& ocean = reference.variables.at("ocean_function").values;
+  EXPECT_FALSE(
+      std::equal(ocean.begin(), ocean.begin() + target.size(),
+                 ocean.end() - static_cast<std::ptrdiff_t>(target.size())))
+      << "no cell flipped";
+
+  const auto pieces = Write("pieces.json", "{" + body + R"(,
+              "checkpoint": {"directory": "ckpt", "every": 1,
+                             "max_walltime_min": 1e-9},
+              "output": "out/pieces.nc"})");
+  for (auto attempts = 0; attempts < 8; ++attempts) {
+    summary = app::RunEvolve3D(pieces);
+    if (summary.find("wrote") != std::string::npos) break;
+  }
+  EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
+  const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
+  for (const auto name :
+       {"sea_level_change", "initial_sea_level", "ocean_function"}) {
+    EXPECT_EQ(rebuilt.variables.at(name).values,
+              reference.variables.at(name).values)
+        << name;
+  }
+
+  const auto kernels = Write("kernels.json", "{" + body + R"(,
+              "measurements": [{"type": "sea_level_point", "name": "site",
+                                "latitude": -30.0, "longitude": 20.0,
+                                "date_kyr_bp": 0.0}],
+              "output": "out/kernels"})");
+  summary = app::RunKernel3D(kernels);
+  const auto ice =
+      pm::ReadSurfaceFile(dir_ / "out" / "kernels" / "site_ice_kernels.nc");
+  // about moving shorelines the initial sea level kernel is no longer zero
+  const auto& dual = ice.variables.at("initial_sea_level_dual").values;
+  EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
+      << summary;
 }
 
 TEST_F(AppsTest, Evolve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {

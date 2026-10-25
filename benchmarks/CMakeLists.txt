@@ -10,6 +10,14 @@ target_link_libraries(step_timing PRIVATE sl3dpp::sl3dpp)
 # (docs/dev/radial-substructuring.md).
 add_executable(substructure_prototype substructure_prototype.cpp)
 target_link_libraries(substructure_prototype PRIVATE sl3dpp::sl3dpp)
+# ... and the library's substructured solves on the real degree systems.
+add_executable(substructure_timing substructure_timing.cpp)
+target_link_libraries(substructure_timing PRIVATE sl3dpp::sl3dpp)
+# ... and distributed over MPI ranks (mpiexec), with SL3DPP_WITH_MPI.
+if(SL3DPP_WITH_MPI)
+  add_executable(distributed_solves distributed_solves.cpp)
+  target_link_libraries(distributed_solves PRIVATE sl3dpp::sl3dpp)
+endif()
 
 # The E1 exchange writer records which commit computed it.
 execute_process(COMMAND git rev-parse --short HEAD

@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/detail/BandSolvers.hpp"
+#include "sl3dpp/detail/BandSubstructure.hpp"
 
 namespace sl3dpp {
 
@@ -46,7 +47,7 @@ DegreeOperator::DegreeOperator(const Material& material, int l, Options options)
   kd_ = ncomp * (mesh.NGll() - 1) + ncomp - 1;
   BuildDofMap();
   Assemble(options.point_shear);
-  Factorise();
+  Factorise(options);
 }
 
 // -- numbering ----------------------------------------------------------------
@@ -334,7 +335,44 @@ void DegreeOperator::Assemble(const PointShear* pointShear) {
 // -- factorisation
 // ---------------------------------------------------------------
 
-void DegreeOperator::Factorise() {
+std::pair<std::vector<std::pair<int, int>>, int> DegreeOperator::Separators(
+    std::span<const int> cuts) const {
+  const auto& mesh = material_->Mesh();
+  auto out = std::vector<std::pair<int, int>>{};
+  auto dropped = 0;
+  auto previous = 0;
+  for (const auto cut : cuts) {
+    if (cut <= previous || cut >= mesh.ElementCount()) {
+      throw std::invalid_argument(std::format(
+          "the radial cuts must be increasing elements inside the mesh "
+          "(1 to {}); got {}",
+          mesh.ElementCount() - 1, cut));
+    }
+    previous = cut;
+    if (cut <= firstElement_) {
+      ++dropped;
+      continue;
+    }
+    // The cut node's dofs, consecutive in the node-major numbering.
+    const auto node = mesh.GlobalIndex(cut, 0);
+    auto first = ndof_, end = 0;
+    for (const auto c : {Component::U, Component::V, Component::Phi}) {
+      if (const auto d = Dof(node, c); d >= 0) {
+        first = std::min(first, d);
+        end = std::max(end, d + 1);
+      }
+    }
+    if (end > first) out.emplace_back(first, end);
+  }
+  return {out, dropped};
+}
+
+int DegreeOperator::SegmentCount() const {
+  return substructure_ ? substructure_->SegmentCount() : 1;
+}
+
+void DegreeOperator::Factorise(const Options& options) {
+  auto [separators, dropped] = Separators(options.cuts);
   const int n = ndof_;
   const int kd = kd_;
   const int ldab = kd + 1;
@@ -352,6 +390,29 @@ void DegreeOperator::Factorise() {
     return band_[static_cast<std::size_t>(j) * ldab + (kd + i - j)] *
            scale_[i] * scale_[j];
   };
+
+  if (!separators.empty()) {
+    // The scaled band, substructured over the cuts.
+    auto band = std::vector<double>(static_cast<std::size_t>(ldab) * n, 0.0);
+    for (auto j = 0; j < n; ++j) {
+      for (int i = std::max(0, j - kd); i <= j; ++i) {
+        band[static_cast<std::size_t>(j) * ldab + (kd + i - j)] = scaled(i, j);
+      }
+    }
+    // This process's segments, renumbered past those the degree drops.
+    auto owned = std::vector<int>{};
+    for (const auto p : options.segments) {
+      if (p >= dropped) owned.push_back(p - dropped);
+    }
+    try {
+      substructure_ = std::make_shared<const detail::BandSubstructure>(
+          band, n, kd, std::move(separators), owned, options.combine);
+    } catch (const std::runtime_error& error) {
+      throw std::runtime_error(std::format("degree {}: {}", l_, error.what()));
+    }
+    choleskyFailed_ = !substructure_->UsedCholesky();
+    return;
+  }
 
   if (positive) {
     factor_.assign(static_cast<std::size_t>(ldab) * n, 0.0);
@@ -396,7 +457,9 @@ std::vector<double> DegreeOperator::Solve(std::span<const double> b,
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
-  if (!choleskyFailed_) {
+  if (substructure_) {
+    substructure_->Solve(x, nrhs);
+  } else if (!choleskyFailed_) {
     detail::BandCholeskySolve(factor_, n, kd_, x, nrhs);
   } else {
     detail::BandLuSolve(factor_, n, kd_, kd_, pivots_, x, nrhs);
@@ -406,6 +469,30 @@ std::vector<double> DegreeOperator::Solve(std::span<const double> b,
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
   return x;
+}
+
+std::vector<double> DegreeOperator::Apply(std::span<const double> x,
+                                          int nrhs) const {
+  const auto n = ndof_;
+  if (static_cast<int>(x.size()) != n * nrhs) {
+    throw std::invalid_argument(
+        std::format("expected {} x {} values, got {}", n, nrhs, x.size()));
+  }
+  const auto ldab = kd_ + 1;
+  auto y = std::vector<double>(x.size(), 0.0);
+  for (auto k = 0; k < nrhs; ++k) {
+    const auto* xk = x.data() + static_cast<std::size_t>(k) * n;
+    auto* yk = y.data() + static_cast<std::size_t>(k) * n;
+    for (auto j = 0; j < n; ++j) {
+      for (auto i = std::max(0, j - kd_); i <= j; ++i) {
+        const auto a =
+            band_[static_cast<std::size_t>(j) * ldab + (kd_ + i - j)];
+        yk[i] += a * xk[j];
+        if (i != j) yk[j] += a * xk[i];
+      }
+    }
+  }
+  return y;
 }
 
 // -- right-hand sides

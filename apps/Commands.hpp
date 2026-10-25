@@ -107,7 +107,7 @@ struct EvolveInput {
   Scheme scheme = Scheme::ExponentialTrapezoid;
   RotationalFeedback rotation = RotationalFeedback::Full;
   /// The shorelines: frozen at the start's (the linear equation), or
-  /// following flotation (the 1D commands alone).
+  /// following flotation.
   Shorelines shorelines = Shorelines::Frozen;
   /// With `calibrate`, the initial sea level is calibrated so that the run
   /// reaches the state file's sea level at the window's end, by the method

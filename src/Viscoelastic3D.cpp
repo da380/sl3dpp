@@ -116,7 +116,8 @@ Viscoelastic3D::Viscoelastic3D(
       reference_(*rheology_, lmax,
                  {.eps = options.eps,
                   .truncation = options.truncation,
-                  .memory_points = options.memory_points}) {
+                  .memory_points = options.memory_points,
+                  .radial_cuts = options.radial_cuts}) {
   // Sample exp(-delta) once and scale every branch's inverse times; the
   // reference profile is the unperturbed radial rheology itself, at the
   // memory points as the 1D reference holds it.
@@ -182,7 +183,8 @@ const DegreeOperator& Viscoelastic3D::Spheroidal(int l) const {
                             DegreeOperator::Options{
                                 .eps = options_.eps,
                                 .truncation = options_.truncation,
-                                .point_shear = reference_.ElasticPointShear()}))
+                                .point_shear = reference_.ElasticPointShear(),
+                                .cuts = options_.radial_cuts}))
             .first;
   }
   return *found->second;
@@ -200,7 +202,8 @@ const ToroidalOperator& Viscoelastic3D::Toroidal(int l) const {
                                 .eps = options_.eps,
                                 .truncation = options_.truncation,
                                 .pin_fraction = options_.toroidal_pin_fraction,
-                                .point_shear = reference_.ElasticPointShear()}))
+                                .point_shear = reference_.ElasticPointShear(),
+                                .cuts = options_.radial_cuts}))
             .first;
   }
   return *found->second;
@@ -438,7 +441,8 @@ const DegreeOperator& Viscoelastic3D::FlavourSpheroidal(Flavour& flavour,
                              .truncation = options_.truncation,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
-                                                : nullptr}))
+                                                : nullptr,
+                             .cuts = options_.radial_cuts}))
             .first;
   }
   return *found->second;
@@ -460,7 +464,8 @@ const ToroidalOperator& Viscoelastic3D::FlavourToroidal(Flavour& flavour,
                              .pin_fraction = options_.toroidal_pin_fraction,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
-                                                : nullptr}))
+                                                : nullptr,
+                             .cuts = options_.radial_cuts}))
             .first;
   }
   return *found->second;

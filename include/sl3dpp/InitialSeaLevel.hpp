@@ -32,8 +32,11 @@
  * measurement w r at t_f. Either update is accelerated by Anderson mixing.
  *
  * Units are the evolution's: solver-unit fields on its grid, times
- * increasing in SLE units. The 3D evolution is frozen-shoreline only, and
- * so is its calibration.
+ * increasing in SLE units. The 3D evolution calibrates the same way under
+ * either treatment; its gradient comes from the continuous adjoint, the
+ * only 3D sweep, which is exact as the time step goes to zero. The
+ * gradient method's fixed point does not depend on that: the kernel is
+ * linear in the residual, so the update vanishes where the residual does.
  */
 
 #include <functional>
@@ -41,6 +44,7 @@
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
 
@@ -73,6 +77,9 @@ struct IceHistory {
 [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunIceHistory(
     SeaLevelEvolution& evolution, std::span<const double> times,
     const IceHistory& history);
+[[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunIceHistory(
+    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    const IceHistory& history);
 
 /// The misfit of a run's final sea level to a target, and its gradient
 /// with respect to the initial sea level.
@@ -104,6 +111,23 @@ struct FinalSeaLevelMisfit {
     std::span<const double> weights = {}, bool gradient = true,
     AdjointSolver::Options adjoint = {.method = AdjointMethod::Discrete});
 
+/// The 3D misfit, as the 1D one.
+struct FinalSeaLevelMisfit3D {
+  double value = 0.0;
+  std::vector<double> residual;
+  std::vector<double> gradient;
+  std::vector<SeaLevelEvolution3D::Snapshot> snapshots;
+};
+
+/// The misfit of a 3D run, as the 1D one; under migrating shorelines the
+/// initial sea level kernel comes from the continuous 3D sweep about the
+/// run's C(t) under `adjoint`.
+[[nodiscard]] FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
+    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    const IceHistory& history, std::span<const double> finalSeaLevel,
+    std::span<const double> weights = {}, bool gradient = true,
+    const AdjointSolver3D::Options& adjoint = {});
+
 enum class CalibrationMethod {
   FixedPoint,  ///< the classical update S0 <- S0 - step w>0 r
   Gradient,    ///< steepest descent S0 <- S0 - step grad J
@@ -125,6 +149,8 @@ struct CalibrationOptions {
   int anderson_memory = 5;
   /// The adjoint sweep of the gradient method.
   AdjointSolver::Options adjoint{.method = AdjointMethod::Discrete};
+  /// The 3D evolution's sweep for the gradient method (continuous).
+  AdjointSolver3D::Options adjoint3D{};
   /// Called after each run with its iteration (from 1), its weighted rms
   /// misfit and the relative update it led to; empty by default.
   std::function<void(int iteration, double misfit, double update)>
@@ -175,14 +201,14 @@ struct InitialSeaLevelCalibration3D {
   bool converged = false;
 };
 
-/// The frozen-shoreline calibration of a 3D evolution: one run under the
-/// non-ocean `iceLoad`, the same linear answer as in 1D (the lateral
-/// structure changes xi(t_f), not the linearity), the evolution adopting
-/// the calibrated state. Only `weights` of the options applies.
+/// The calibration of a 3D evolution, as the 1D one. Under frozen
+/// shorelines one run gives the same linear answer as in 1D (the lateral
+/// structure changes xi(t_f), not the linearity); under migrating ones the
+/// iteration is the 1D one with 3D runs, the gradient method's sweep by
+/// `options.adjoint3D`. The evolution adopts the calibrated state.
 [[nodiscard]] InitialSeaLevelCalibration3D CalibrateInitialSeaLevel(
     SeaLevelEvolution3D& evolution, std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad,
-    std::span<const double> finalSeaLevel,
+    const IceHistory& history, std::span<const double> finalSeaLevel,
     const CalibrationOptions& options = {});
 
 }  // namespace sl3dpp

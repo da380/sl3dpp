@@ -26,7 +26,9 @@
  *
  * Conventions follow Adjoint.hpp: times increasing in SLE units,
  * measurements keyed by node index, duals paired by the surface
- * integral; itau in MATERIAL units.
+ * integral; itau in MATERIAL units. About a migrating-shoreline run
+ * (SeaLevelEvolution3D::RunMigrating) the sweep linearises about the run's
+ * ocean functions, node by node, as the 1D continuous sweep does.
  */
 
 #include <functional>
@@ -74,6 +76,12 @@ struct ForwardTrajectory3D {
   [[nodiscard]] static ForwardTrajectory3D FromSnapshots(
       std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
 };
+
+/// The ocean function of every node of a migrating 3D run (RunMigrating),
+/// for the sweep's linearisation about it; refused for a frozen run's
+/// snapshots, which carry none.
+[[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
+    std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
 
 /**
  * @brief The 3D kernels. `ice` carries the ice-history views exactly as
@@ -147,10 +155,16 @@ class AdjointSolver3D {
 
   /// The continuous-adjoint kernels over the forward time grid; with a
   /// fully recorded `trajectory` the viscosity kernels are carried too.
+  /// With `oceanFunctions`, one grid per node from a migrating run
+  /// (OceanFunctionsOf its snapshots), the kernels linearise about that
+  /// run's shorelines instead of the frozen background ones, and the
+  /// initial sea level kernel is formed; a recorded trajectory must then
+  /// come from the same migrating run.
   [[nodiscard]] Kernels3D IceHistoryKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      const ForwardTrajectory3D* trajectory = nullptr) const;
+      const ForwardTrajectory3D* trajectory = nullptr,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
 
  private:
   const SeaLevelEvolution3D* evolution_;

@@ -1,11 +1,10 @@
 #include "sl3dpp/Evolution.hpp"
 
-#include <algorithm>
-#include <cmath>
 #include <format>
 #include <stdexcept>
 
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/Shorelines.hpp"
 
 namespace sl3dpp {
 
@@ -149,29 +148,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
   if (migrating && !resumed) {
     // The shorelines follow flotation from the first node, so the
     // background must be the state there, flotation's own C included.
-    const auto start = (*iceThickness)(times[0]);
-    if (start.size() != fieldSize) {
-      throw std::invalid_argument(
-          "the ice thickness must be a field on the solver's grid");
-    }
-    auto scale = 0.0, worst = 0.0;
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      scale = std::max(scale, std::abs(start[i]));
-      worst = std::max(worst, std::abs(state_.iceThickness[i] - start[i]));
-    }
-    if (worst > 1e-6 * scale) {
-      throw std::invalid_argument(
-          "the background state's ice thickness is not the history's at the "
-          "first node; build the state at times[0]");
-    }
-    const auto flotation = solver.MakeState(state_.iceThickness,
-                                            state_.seaLevel, state_.forcedLand);
-    if (flotation.oceanFunction != state_.oceanFunction) {
-      throw std::invalid_argument(
-          "migrating shorelines follow the flotation condition from the first "
-          "node, so the background state must not prescribe its ocean "
-          "function");
-    }
+    detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]));
   }
 
   if (options_.rotation == RotationalFeedback::Full) {
@@ -209,24 +186,6 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
     }
     return grid.Expand(total);
   };
-  // Under migrating shorelines, the load the converged state carries
-  // relative to the background, grounded ice and ocean water (pyslfp's
-  // `_total_load_coeffs`), so the radial step finishes under the load
-  // its sea level solution saw.
-  auto migratedLoadCoefficients = [&](const SeaLevelSolver::State& final) {
-    const auto& start = state_;
-    auto total = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      total[i] =
-          solver.IceDensity() *
-              ((1.0 - final.oceanFunction[i]) * final.iceThickness[i] -
-               (1.0 - start.oceanFunction[i]) * start.iceThickness[i]) +
-          solver.WaterDensity() * (final.oceanFunction[i] * final.seaLevel[i] -
-                                   start.oceanFunction[i] * start.seaLevel[i]);
-    }
-    return grid.Expand(total);
-  };
-
   // Solvers for the unrelaxed table and the per-dt effective tables, each
   // under the caller's parameters; the Love tables themselves are cached
   // by the operator, so a repeated dt costs a table conversion only.
@@ -350,7 +309,10 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
       auto solved =
           effectiveSolver.SolveNonlinear(state_, moving, nonlinearOptions);
       response = std::move(solved.response);
-      sigma_ = migratedLoadCoefficients(solved.finalState);
+      // the load the converged state carries relative to the background,
+      // so the radial step finishes under the load its solution saw
+      sigma_ =
+          detail::MigratedLoadCoefficients(solver, state_, solved.finalState);
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
       SeaLevelSolver::GeneralisedForcing coupled;

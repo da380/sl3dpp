@@ -49,6 +49,11 @@ draws a figure per command from `out/`.
   body, a zero-mean log perturbation about 1e21 Pa s), at lmax 16 in
   half-kiloyear steps: `out/evolve.nc`. The deck's viscosity column is not
   used; the model file's is.
+- **`evolve_calibrated.json`** — that 3D run with migrating shorelines and
+  its initial sea level calibrated against the present day, as
+  `evolve1d_calibrated.json` is in 1D: `out/evolve_calibrated.nc`. Each
+  pass of the 3D fixed point solves the nonlinear sea level equation; the
+  calibration takes four runs (about 20 s on 8 threads).
 - **`kernel1d.json`** — adjoint kernels in 1D of five measurements of that
   deglaciation: the present sea level averaged over Hudson Bay, the sea
   level at a far-field point at 10 ka, the length of day (the axial

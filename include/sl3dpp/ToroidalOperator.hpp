@@ -33,9 +33,13 @@
  * operator.
  *
  * Truncation follows the spheroidal operator: the element subset of the
- * one global mesh from the mesh's truncation rule.
+ * one global mesh from the mesh's truncation rule, and so do radial cuts:
+ * the same system solved by substructuring over segments of the mesh
+ * (DegreeOperator.hpp).
  */
 
+#include <functional>
+#include <memory>
 #include <span>
 #include <utility>
 #include <vector>
@@ -45,6 +49,10 @@
 #include "sl3dpp/RadialMesh.hpp"
 
 namespace sl3dpp {
+
+namespace detail {
+class BandSubstructure;
+}
 
 class ToroidalOperator {
  public:
@@ -61,6 +69,13 @@ class ToroidalOperator {
     /// operator with internal variables at those points. Read during
     /// construction only.
     const PointShear* point_shear = nullptr;
+    /// Radial cuts, as DegreeOperator::Options::cuts: the system solved by
+    /// substructuring over the segments between them (a cut node in a
+    /// fluid region carries no toroidal dof and separates nothing).
+    std::vector<int> cuts{};
+    /// Distributed, as DegreeOperator::Options::segments and combine.
+    std::vector<int> segments{};
+    std::function<void(std::span<double>)> combine{};
   };
 
   /// Assemble and factorise (Cholesky; at l = 1 with one dof per solid
@@ -105,6 +120,9 @@ class ToroidalOperator {
   /// The pinned dofs (one per solid region at l = 1; none above).
   [[nodiscard]] std::span<const int> PinnedDofs() const { return pinned_; }
 
+  /// The radial segments the solve runs over: 1 for the direct solve.
+  [[nodiscard]] int SegmentCount() const;
+
   /// Nodal W over the mesh from a solution vector, zero where there is
   /// no dof (fluid regions, the truncated depths).
   [[nodiscard]] std::vector<double> Expand(std::span<const double> x) const;
@@ -112,7 +130,11 @@ class ToroidalOperator {
  private:
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
-  void Factorise();
+  /// The dofs of the cut nodes above the first element (an empty range at
+  /// a fluid node), and the count of cuts at or below it.
+  [[nodiscard]] std::pair<std::vector<std::pair<int, int>>, int> Separators(
+      std::span<const int> cuts) const;
+  void Factorise(const Options& options);
 
   [[nodiscard]] double& Band(int i, int j) {
     return band_[static_cast<std::size_t>(j) * (kd_ + 1) + (kd_ + i - j)];
@@ -130,6 +152,7 @@ class ToroidalOperator {
   std::vector<double> band_;  // upper band, column-major
   std::vector<double> scale_;
   std::vector<double> factor_;
+  std::shared_ptr<const detail::BandSubstructure> substructure_;
 };
 
 }  // namespace sl3dpp

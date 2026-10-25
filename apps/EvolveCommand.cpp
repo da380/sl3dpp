@@ -10,7 +10,6 @@
 #include <span>
 #include <stdexcept>
 #include <string_view>
-#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -441,7 +440,6 @@ std::string RunWith(
   const auto length = scales.Length();
   const auto times = MakeTimes(input, scales);
   const auto iceLoad = IceLoadOf(input, solver, world);
-  constexpr auto is1D = std::is_same_v<Evolution, SeaLevelEvolution>;
   const auto migrating = input.shorelines == Shorelines::Migrating;
   const auto thickness = migrating
                              ? IceThicknessOf(input, solver, world)
@@ -463,7 +461,7 @@ std::string RunWith(
     for (auto k = 0; k < 3; ++k) {
       kept.angularVelocity[k] = snapshot.angularVelocity[k] * toOmega;
     }
-    if constexpr (is1D) kept.oceanFunction = snapshot.oceanFunction;
+    kept.oceanFunction = snapshot.oceanFunction;
     history.push_back(std::move(kept));
   };
 
@@ -547,25 +545,16 @@ std::string RunWith(
           times.begin() + static_cast<std::ptrdiff_t>(resumed->node),
           times.end());
       if (remaining.size() >= 2) {  // a checkpoint at the last node is done
-        if constexpr (is1D) {
-          if (migrating) {
-            static_cast<void>(evolution.ResumeMigrating(resumed->checkpoint,
-                                                        remaining, thickness));
-          } else {
-            static_cast<void>(
-                evolution.Resume(resumed->checkpoint, remaining, iceLoad));
-          }
+        if (migrating) {
+          static_cast<void>(evolution.ResumeMigrating(resumed->checkpoint,
+                                                      remaining, thickness));
         } else {
           static_cast<void>(
               evolution.Resume(resumed->checkpoint, remaining, iceLoad));
         }
       }
-    } else if constexpr (is1D) {
-      if (migrating) {
-        static_cast<void>(evolution.RunMigrating(times, thickness));
-      } else {
-        static_cast<void>(evolution.Run(times, iceLoad));
-      }
+    } else if (migrating) {
+      static_cast<void>(evolution.RunMigrating(times, thickness));
     } else {
       static_cast<void>(evolution.Run(times, iceLoad));
     }
@@ -661,11 +650,6 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
     Fail(top, "needs a viscosity section: a planetmodel model file whose "
               "viscosity drives the 3D run");
   }
-  if (input.shorelines == Shorelines::Migrating) {
-    Fail(top.At("shorelines"),
-         "is migrating, which the 1D commands alone run: the 3D evolution "
-         "holds its shorelines frozen");
-  }
   auto earth = BuildEarth(input, top);
   auto mv_options = io::ModelViscosityOptions{};
   mv_options.reference = input.viscosity_file_radial
@@ -694,8 +678,10 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
       [](const SeaLevelEvolution3D::Snapshot& snapshot) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
-              "the coupled fixed point did not converge at t = {} (residual "
-              "{:.3g} after {} iterations)",
+              "the coupled fixed point or its sea level solve did not "
+              "converge at t = {} (residual {:.3g} after {} iterations; "
+              "under migrating shorelines, cells flipping back and forth can "
+              "defeat the tolerances); loosen coupled.rtol or rtol",
               snapshot.t, snapshot.coupledResidual,
               snapshot.coupledIterations));
         }

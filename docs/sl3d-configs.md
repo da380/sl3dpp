@@ -293,14 +293,15 @@ start.
 
 Two members change that, as pyslfp's `run_ice_history` does:
 
-- `shorelines: "migrating"` (`evolve1d` and `kernel1d` alone) solves the
+- `shorelines: "migrating"` solves the
   nonlinear sea level equation at every node instead of the linear one: the
   ocean function follows the flotation condition as the ice and sea level
   change, so melting marine ice floods and grounding ice displaces the
   ocean. The ice thickness at each node is the background's plus the
-  history's change since the start. The kernels of `kernel1d` then
-  linearise about the run's own shorelines, and its
-  `initial_sea_level_dual` is no longer zero.
+  history's change since the start. In `evolve` and `kernel` the nonlinear
+  solve runs in every pass of each step's combined fixed point. The kernels
+  of `kernel1d` and `kernel` then linearise about the run's own shorelines,
+  and their `initial_sea_level_dual` is no longer zero.
 - `calibrate_initial_sea_level` replaces the initial sea level read from
   `state.file` at the start by the one whose run reaches the sea level
   `state.file` gives at `times.end_kyr_bp` (usually the present day): the
@@ -335,9 +336,9 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 | `rotation` | word | `"full"` | `"none"`, `"axial"` or `"full"` |
 | `moments` | word | `"input"` | `"input"`: the Earth's standard moments of inertia; `"hydrostatic"`: their difference set from the model's own hydrostatic fluid limit, which full rotational feedback needs when the standard moments sustain less oblateness than the model's tidal response |
 | `rtol` | number | 1e-9 | the relative tolerance of the sea level solves (and, for the kernels, of the adjoint solves) |
-| `coupled.rtol` | number | 1e-9 | `evolve` and `kernel`: the relative tolerance of each step's combined fixed point |
-| `coupled.max_iterations` | integer | 60 | `evolve` and `kernel`: its iteration limit |
-| `shorelines` | word | `"frozen"` | `"frozen"`: the start's ocean function throughout (the linear equation); `"migrating"`: the ocean function follows flotation (`evolve1d` and `kernel1d` alone) |
+| `coupled.rtol` | number | 1e-9 | `evolve` and `kernel`: the relative tolerance of each step's combined fixed point (in `kernel`, of the reversed sweep's steps too) |
+| `coupled.max_iterations` | integer | 60 | `evolve` and `kernel`: its iteration limit (likewise) |
+| `shorelines` | word | `"frozen"` | `"frozen"`: the start's ocean function throughout (the linear equation); `"migrating"`: the ocean function follows flotation |
 | `calibrate_initial_sea_level` | object | absent | calibrate the initial sea level against `state.file` at the window's end (above); its members, all optional, follow |
 | `calibrate_initial_sea_level.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
 | `calibrate_initial_sea_level.iterations` | integer >= 1 | 10 | the most runs under migrating shorelines; running out is an error |
@@ -345,11 +346,12 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 
 The time nodes are `nodes` evenly spaced dates from `start_kyr_bp` to
 `end_kyr_bp`; the step is not limited by the shortest Maxwell time. The
-1D commands refuse `coupled`, which they have no use for. In `evolve`, a node
-whose fixed point does not converge within `coupled.max_iterations` is an
-error, and in the 1D commands so is a sea level solve that misses `rtol`
+1D commands refuse `coupled`, which they have no use for. A sea level
+solve that misses `rtol` is an error, and in `evolve` and `kernel` so is a
+node whose fixed point does not converge within `coupled.max_iterations`
 (under migrating shorelines a cell flipping back and forth can keep the
-nonlinear solve above a tight tolerance: loosen it).
+nonlinear solve, or the 3D fixed point, above a tight tolerance: loosen
+it).
 
 ### The evolve members
 

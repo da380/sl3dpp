@@ -170,6 +170,15 @@ class RadialMesh {
                                  TruncationRule rule = TruncationRule::Graded,
                                  double eps = 1e-8) const;
 
+  /// Radial cuts (DegreeOperator::Options::cuts) splitting the mesh into
+  /// `parts` segments of about equal weight: the element boundaries nearest
+  /// the equal shares of the summed element weights (one per element when
+  /// empty), only where both sides lie in one layer, so never at a model
+  /// boundary (solid-fluid ones included). Increasing; fewer than
+  /// parts - 1 when the layers leave too few boundaries.
+  [[nodiscard]] std::vector<int> BalancedCuts(
+      int parts, std::span<const double> elementWeights = {}) const;
+
   // -- nodal sampling ---------------------------------------------------------
 
   /// A model field at the nodes, per element, row-major (element, node):

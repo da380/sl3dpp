@@ -94,6 +94,10 @@ class ViscoelasticOperator {
     /// fewer, docs/design.md §5) or the GLL nodes (pyslfp's and the Fortran's,
     /// for like-for-like comparisons).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
+    /// Radial cuts for every degree system (DegreeOperator::Options::cuts,
+    /// RadialMesh::BalancedCuts): solved by substructuring over the
+    /// segments, the same answers to rounding. Empty, the direct solves.
+    std::vector<int> radial_cuts{};
   };
 
   /// The rheology is copied into immutable shared storage, so the

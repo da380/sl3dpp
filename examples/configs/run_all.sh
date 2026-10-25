@@ -26,6 +26,7 @@ run fingerprint fingerprint.json
 run evolve1d evolve1d.json
 run evolve1d evolve1d_calibrated.json
 run evolve evolve.json
+run evolve evolve_calibrated.json
 run kernel1d kernel1d.json
 run kernel kernel.json
 

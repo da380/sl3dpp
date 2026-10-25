@@ -79,28 +79,22 @@ Result CalibrateFrozen(Evolution& evolution, std::span<const double> finalSea,
   return out;
 }
 
-}  // namespace
-
-std::vector<SeaLevelEvolution::Snapshot> RunIceHistory(
-    SeaLevelEvolution& evolution, std::span<const double> times,
-    const IceHistory& history) {
-  return history.shorelines == Shorelines::Frozen
-             ? evolution.Run(times, history.field)
-             : evolution.RunMigrating(times, history.field);
-}
-
-FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
-    SeaLevelEvolution& evolution, std::span<const double> times,
-    const IceHistory& history, std::span<const double> finalSeaLevel,
-    std::span<const double> weights, bool gradient,
-    AdjointSolver::Options adjoint) {
+/// The misfit both evolutions share; `initialSeaLevelKernel(snapshots,
+/// measurement)` is the initial sea level kernel of a sea level measurement
+/// at the last node, about the run's own shorelines.
+template <typename Misfit, typename Evolution, typename KernelFn>
+Misfit MisfitOf(Evolution& evolution, std::span<const double> times,
+                const IceHistory& history,
+                std::span<const double> finalSeaLevel,
+                std::span<const double> weights, bool gradient,
+                KernelFn&& initialSeaLevelKernel) {
   const auto& solver = evolution.Solver();
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   CheckField(finalSeaLevel, fieldSize);
   const auto w = WeightsOf(weights, fieldSize);
 
-  FinalSeaLevelMisfit out;
+  Misfit out;
   out.snapshots = RunIceHistory(evolution, times, history);
   const auto& S0 = evolution.BackgroundState().seaLevel;
   const auto& xi = out.snapshots.back().seaLevelChange;
@@ -123,34 +117,21 @@ FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
     // last node, about the run's own shorelines.
     auto measurement = Measurement{};
     measurement.seaLevelDual = out.gradient;
-    const auto oceans = OceanFunctionsOf(out.snapshots);
-    const auto kernels =
-        AdjointSolver(evolution, std::move(adjoint))
-            .IceHistoryKernels(times, {{times.size() - 1, measurement}},
-                               nullptr, oceans);
+    const auto kernel = initialSeaLevelKernel(out.snapshots, measurement);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      out.gradient[i] += kernels.initialSeaLevel[i];
+      out.gradient[i] += kernel[i];
     }
   }
   return out;
 }
 
-InitialSeaLevelCalibration CalibrateInitialSeaLevel(
-    SeaLevelEvolution& evolution, std::span<const double> times,
-    const IceHistory& history, std::span<const double> finalSeaLevel,
-    const CalibrationOptions& options) {
-  if (options.iterations < 1) {
-    throw std::invalid_argument("iterations must be at least one");
-  }
-  if (history.shorelines == Shorelines::Frozen) {
-    // With the shorelines fixed the problem is linear and the run does not
-    // depend on S0 at all: one run gives the misfit's exact minimiser, and
-    // the run from it is the run already made.
-    return CalibrateFrozen<SeaLevelEvolution, InitialSeaLevelCalibration>(
-        evolution, finalSeaLevel, options.weights,
-        [&] { return evolution.Run(times, history.field); });
-  }
-
+/// The migrating-shoreline iteration both evolutions share;
+/// `misfitOf(gradient)` runs from the evolution's background state.
+template <typename Result, typename Evolution, typename MisfitFn>
+Result CalibrateMigrating(Evolution& evolution,
+                          std::span<const double> finalSeaLevel,
+                          const CalibrationOptions& options,
+                          MisfitFn&& misfitOf) {
   const auto& solver = evolution.Solver();
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
@@ -160,16 +141,14 @@ InitialSeaLevelCalibration CalibrateInitialSeaLevel(
 
   auto mixer = detail::AndersonMixer(options.anderson_memory);
   auto guess = background.seaLevel;
-  InitialSeaLevelCalibration out;
-  auto misfit = FinalSeaLevelMisfit{};
+  Result out;
+  auto misfit = decltype(misfitOf(true)){};
   for (auto n = 0; n < options.iterations; ++n) {
     // Each iterate's shorelines follow from its sea level by flotation.
     out.state =
         solver.MakeState(background.iceThickness, guess, background.forcedLand);
     evolution.SetBackgroundState(out.state);
-    misfit = ComputeFinalSeaLevelMisfit(
-        evolution, times, history, finalSeaLevel, options.weights,
-        options.method == CalibrationMethod::Gradient, options.adjoint);
+    misfit = misfitOf(options.method == CalibrationMethod::Gradient);
     out.misfits.push_back(WeightedRms(grid, w, misfit.residual));
     auto image = guess;
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -200,13 +179,97 @@ InitialSeaLevelCalibration CalibrateInitialSeaLevel(
   return out;
 }
 
+void CheckIterations(const CalibrationOptions& options) {
+  if (options.iterations < 1) {
+    throw std::invalid_argument("iterations must be at least one");
+  }
+}
+
+}  // namespace
+
+std::vector<SeaLevelEvolution::Snapshot> RunIceHistory(
+    SeaLevelEvolution& evolution, std::span<const double> times,
+    const IceHistory& history) {
+  return history.shorelines == Shorelines::Frozen
+             ? evolution.Run(times, history.field)
+             : evolution.RunMigrating(times, history.field);
+}
+
+std::vector<SeaLevelEvolution3D::Snapshot> RunIceHistory(
+    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    const IceHistory& history) {
+  return history.shorelines == Shorelines::Frozen
+             ? evolution.Run(times, history.field)
+             : evolution.RunMigrating(times, history.field);
+}
+
+FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
+    SeaLevelEvolution& evolution, std::span<const double> times,
+    const IceHistory& history, std::span<const double> finalSeaLevel,
+    std::span<const double> weights, bool gradient,
+    AdjointSolver::Options adjoint) {
+  return MisfitOf<FinalSeaLevelMisfit>(
+      evolution, times, history, finalSeaLevel, weights, gradient,
+      [&](const auto& snapshots, const Measurement& measurement) {
+        return AdjointSolver(evolution, std::move(adjoint))
+            .IceHistoryKernels(times, {{times.size() - 1, measurement}},
+                               nullptr, OceanFunctionsOf(snapshots))
+            .initialSeaLevel;
+      });
+}
+
+FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
+    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    const IceHistory& history, std::span<const double> finalSeaLevel,
+    std::span<const double> weights, bool gradient,
+    const AdjointSolver3D::Options& adjoint) {
+  return MisfitOf<FinalSeaLevelMisfit3D>(
+      evolution, times, history, finalSeaLevel, weights, gradient,
+      [&](const auto& snapshots, const Measurement& measurement) {
+        return AdjointSolver3D(evolution, adjoint)
+            .IceHistoryKernels(times, {{times.size() - 1, measurement}},
+                               nullptr, OceanFunctionsOf(snapshots))
+            .ice.initialSeaLevel;
+      });
+}
+
+InitialSeaLevelCalibration CalibrateInitialSeaLevel(
+    SeaLevelEvolution& evolution, std::span<const double> times,
+    const IceHistory& history, std::span<const double> finalSeaLevel,
+    const CalibrationOptions& options) {
+  CheckIterations(options);
+  if (history.shorelines == Shorelines::Frozen) {
+    // With the shorelines fixed the problem is linear and the run does not
+    // depend on S0 at all: one run gives the misfit's exact minimiser, and
+    // the run from it is the run already made.
+    return CalibrateFrozen<SeaLevelEvolution, InitialSeaLevelCalibration>(
+        evolution, finalSeaLevel, options.weights,
+        [&] { return evolution.Run(times, history.field); });
+  }
+  return CalibrateMigrating<InitialSeaLevelCalibration>(
+      evolution, finalSeaLevel, options, [&](bool gradient) {
+        return ComputeFinalSeaLevelMisfit(evolution, times, history,
+                                          finalSeaLevel, options.weights,
+                                          gradient, options.adjoint);
+      });
+}
+
 InitialSeaLevelCalibration3D CalibrateInitialSeaLevel(
     SeaLevelEvolution3D& evolution, std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad,
-    std::span<const double> finalSeaLevel, const CalibrationOptions& options) {
-  return CalibrateFrozen<SeaLevelEvolution3D, InitialSeaLevelCalibration3D>(
-      evolution, finalSeaLevel, options.weights,
-      [&] { return evolution.Run(times, iceLoad); });
+    const IceHistory& history, std::span<const double> finalSeaLevel,
+    const CalibrationOptions& options) {
+  CheckIterations(options);
+  if (history.shorelines == Shorelines::Frozen) {
+    return CalibrateFrozen<SeaLevelEvolution3D, InitialSeaLevelCalibration3D>(
+        evolution, finalSeaLevel, options.weights,
+        [&] { return evolution.Run(times, history.field); });
+  }
+  return CalibrateMigrating<InitialSeaLevelCalibration3D>(
+      evolution, finalSeaLevel, options, [&](bool gradient) {
+        return ComputeFinalSeaLevelMisfit(evolution, times, history,
+                                          finalSeaLevel, options.weights,
+                                          gradient, options.adjoint3D);
+      });
 }
 
 }  // namespace sl3dpp
