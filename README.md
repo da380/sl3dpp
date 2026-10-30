@@ -94,10 +94,13 @@ The outputs land in `out/`. The configs there are yours to edit — the build
 copies them only when they are missing and never overwrites them — so change
 the degree, the dates, the ice change or the measurements and run again. To
 draw the outputs, and to run on the real ice history (ICE-7G, through
-[pyslfp](https://github.com/da380/pyslfp)):
+[pyslfp](https://github.com/da380/pyslfp)), go up to `build/examples`: the
+build puts the examples' poetry file (`pyproject.toml`) and Python scripts
+there, and the scripts read the outputs relative to it, so poetry runs from
+there — not from `build` or the repository root:
 
 ```
-cd build/examples
+cd ..                                     # from build/examples/configs up to build/examples
 poetry install --no-root                  # the examples' Python environment
 poetry run python plot_app.py             # a figure per command
 poetry run python get_ice7g.py            # writes ice7g.nc (about 24 MB the first time)
