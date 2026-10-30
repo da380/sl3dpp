@@ -108,7 +108,7 @@ poetry run python plot_app.py
 ## ICE-7G
 
 ```sh
-cd build/examples
+cd build/examples                         # from the repository root
 poetry run python get_ice7g.py            # writes ice7g.nc
 ./ExampleFingerprint --state ice7g.nc     # any driver
 (cd configs && ./run_all.sh)                  # now runs the *_ice7g.json configs too
