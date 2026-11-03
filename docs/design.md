@@ -29,6 +29,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | 3D second-order adjoints: the Hessian's action on a direction for 3D viscosity objectives | `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | Material derivatives of the static elastic problem: the variation operator and the Love-number derivatives along directions in κ, μ and ρ (self-consistent gravity) | `Material.hpp` (`MaterialDirection`, `Variation`, `Shifted`), `DegreeOperator.hpp` (`ApplyVariation`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`) |
 | The first-order (Born) response of the static elastic problem to lateral δμ(x) and δκ(x), through the grid pipeline: the start of a 3D elastic reference | `ElasticPerturbation3D.hpp` |
+| The 1D tangent-linear along a direction of the moduli (the effective system's variation and the memory force's branch moduli, per step; the start's unrelaxed response) | `TangentLinear.hpp` (`TangentPerturbation::material`), `Viscoelastic.hpp` (`ViscoelasticStep::AddForce`) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -454,6 +455,10 @@ Beyond the fixtures:
   derivatives against central differences of the shifted material's
   numbers, Richardson to 1e-7 for every channel, degree and axial number
   under μ, κ and ρ directions; the reciprocity identities differentiated.
+- **Material tangent, 1D.** The time-stepped tangent-linear along a
+  direction in κ and μ (branch moduli as fixed fractions, times held)
+  against central differences on the shifted material, both schemes,
+  second order with Richardson at 1e-6.
 - **Lateral elastic perturbation (Born).** Angle-uniform directions
   reproducing the 1D Love-number derivatives at 1e-8 through the grid
   pipeline; the perturbation force symmetric at 1e-10; the selection

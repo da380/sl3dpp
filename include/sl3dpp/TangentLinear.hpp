@@ -31,6 +31,13 @@
  * the strain, the transpose of the continuous sweep. The two coincide in
  * the loads and differ in the relaxation times by the order of the scheme.
  *
+ * A perturbation of the material's moduli (`TangentPerturbation::material`,
+ * docs/dev/adjoints.md §13) enters as forces on each step's own systems:
+ * the variation of the effective system on the full base solution, the
+ * memory force of the base memory with the branch moduli's variation,
+ * and the start's unrelaxed response; the branch moduli follow as fixed
+ * fractions of the unrelaxed modulus and the relaxation times are held.
+ *
  * Conventions are the evolution's: times increasing in SLE units, grids in
  * the solver's units, the itau perturbation nodal (element, gll) per
  * branch over the material's mesh in MATERIAL units (the layout of
@@ -40,6 +47,7 @@
 #include <complex>
 #include <functional>
 #include <map>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -64,10 +72,18 @@ struct TangentPerturbation {
   /// over the material's mesh in its units; needs the recorded forward
   /// trajectory.
   std::vector<std::vector<double>> itau;
+  /// A perturbation of the material's moduli, delta kappa and delta mu
+  /// nodal over the mesh (MaterialDirection; its density is refused
+  /// here), the branch moduli following as fixed fractions of the
+  /// unrelaxed modulus and the relaxation times held (compose with `itau`
+  /// for a viscosity held instead). Needs the recorded trajectory, the
+  /// internal variables at the GLL nodes and no rotational feedback.
+  MaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
     return directLoad.empty() && iceThickness.empty() &&
-           initialSeaLevel.empty() && itau.empty();
+           initialSeaLevel.empty() && itau.empty() && material.kappa.empty() &&
+           material.mu.empty() && material.rho.empty();
   }
 };
 
@@ -164,10 +180,11 @@ class TangentLinearSolver {
   /// The loop the runs share: the forward problem with the trajectory's
   /// ocean functions prescribed, the direct load given per node (empty
   /// where nothing drives it) and a memory increment per step.
+  struct MaterialDrive;
   [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
-      const Direct& directAt, const Drive& drive) const;
+      const Direct& directAt, const Drive& drive, MaterialDrive* material) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two
@@ -189,6 +206,15 @@ class TangentLinearSolver {
   [[nodiscard]] static std::function<LoadCallable(
       const std::vector<std::complex<double>>&)>
   TideColumnsOf(const SeaLevelEvolution& ev);
+
+  /// The material drive of a step: the per-dt effective variation, the
+  /// force -(dK_eff) x on the base step's full solution plus the memory
+  /// force of the base decayed memory with the branch moduli's variation,
+  /// and the effective table's Love-number derivatives (the sea level
+  /// closure's response channels), cached per dt.
+  [[nodiscard]] std::shared_ptr<MaterialDrive> MakeMaterialDrive(
+      const MaterialDirection& d, const ForwardTrajectory& trajectory,
+      std::span<const double> times) const;
 
   const SeaLevelEvolution* evolution_;
   Options options_;

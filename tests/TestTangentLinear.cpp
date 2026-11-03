@@ -578,3 +578,115 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
   EXPECT_GT(gaps[0] / gaps[1], 3.0);
 }
 
+// -- the material ------------------------------------------------------------
+
+TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
+  // Along a direction in the material's kappa and mu — the branch moduli
+  // as fixed fractions of the unrelaxed one, the relaxation times held —
+  // the tangent-linear run matches central differences of the coupled run
+  // on the shifted material (its rheology rebuilt with the same fractions
+  // and times), at second order with Richardson landing at 1e-6, both
+  // schemes; the start's instantaneous response moves with the material
+  // too (the trapezoid's first step reads its strain).
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(31);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[2].potentialDual = setup.Smooth(rng, 0.7);
+
+  // A smooth direction in kappa and mu on the solid mantle and lithosphere
+  // (not the fluid core; the centre element kept to keep the comparison
+  // honest in 1D).
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      d.mu[i] = profile * m0[i];
+    }
+  }
+  // The rheology of a shifted material: the branch moduli as the same
+  // fractions of the (shifted) unrelaxed modulus, the inverse times held.
+  const auto& base = setup.rheology;
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(d, eps);
+    const auto muU = base.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      auto branch = base.BranchAt(k);
+      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+      }
+      branches.push_back(std::move(branch));
+    }
+    return std::pair(shifted, Rheology::Create(shifted, branches).value());
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax,
+                            {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.scheme = scheme,
+                                 .rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    TangentLinearSolver tangent(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    TangentPerturbation direction;
+    direction.material = d;
+    const auto predicted =
+        Objective(setup, tangent.Run(times, direction, &trajectory), measurements);
+
+    auto functional = [&](double eps) {
+      const auto [shifted, rheology] = rheologyAt(eps);
+      ViscoelasticOperator moved(rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gll});
+      SeaLevelEvolution movedEvolution(moved, setup.solver, setup.state,
+                                       {.scheme = scheme,
+                                        .rotation = RotationalFeedback::None,
+                                        .rtol = 1e-12});
+      return Objective(setup, movedEvolution.Run(times, History(times, loads)),
+                       measurements);
+    };
+    // The steps are wide (1% and 0.5% of the moduli) so the differences'
+    // truncation error stands above the solves' 1e-12 noise: the
+    // functional moves by parts in 1e-12 per unit step.
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+
+    // Refusals: a density direction, rotation on, Gauss memory points.
+    TangentPerturbation withRho = direction;
+    withRho.material.rho.assign(k0.size(), 1.0);
+    EXPECT_THROW((void)tangent.Run(times, withRho, &trajectory),
+                 std::invalid_argument);
+  }
+}
+

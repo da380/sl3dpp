@@ -391,6 +391,14 @@ class ViscoelasticStep {
   /// solutions.
   void AddMemory(const std::map<int, std::vector<double>>& increment);
 
+  /// Adds a force per degree (ndof x ncols, column-major, the solutions'
+  /// layout) to the step's memory force before the effective solve: the
+  /// drive of a tangent-linear step in the material (the derivative of
+  /// the effective system on the base solution, and the memory force of
+  /// the base memory with the branch moduli's variation). Degrees absent
+  /// are left as they are. Invalidates the cached memory solutions.
+  void AddForce(const std::map<int, std::vector<double>>& force);
+
   /// Completes the step under the end-time loads: one effective solve per
   /// degree, the state update, and solutions consistent with it.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
@@ -398,6 +406,7 @@ class ViscoelasticStep {
 
  private:
   friend class ViscoelasticOperator;
+  friend class TangentLinearSolver;  // reads the decayed memory
   ViscoelasticStep(const ViscoelasticOperator& op,
                    const ViscoelasticState& state, double dt, Scheme scheme,
                    const LoadCallable& load, const LoadCallable& tide);
@@ -408,6 +417,7 @@ class ViscoelasticStep {
   double t_;
   std::map<int, int> ncols_;
   std::map<int, std::vector<double>> mem_;  // the decayed memory state
+  std::map<int, std::vector<double>> extraForce_;  // AddForce
   mutable std::map<int, std::vector<double>> memorySolutions_;
 };
 

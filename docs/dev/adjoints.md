@@ -667,10 +667,52 @@ angle-uniform limit rests on the pipeline (gated through the viscosity
 path) and these structural identities; its independent check is the
 cross-code comparison with AdGIA, which is what this is for.
 
-Next: step 3, the time-stepped tangent-linear in the material (the
-effective modulus and the memory force per step, with the branch moduli
-as fixed fractions of the unrelaxed one), 1D first; and, for the
-benchmark, a driver that writes the Born surface response to a cap load
-under a lateral δμ in the exchange format. Deferred: the discrete 3D
+**Step 3, the time-stepped tangent-linear in the material, 1D (3
+November 2026):** `TangentPerturbation::material` (a `MaterialDirection`
+in κ and μ; ρ refused) runs the 1D tangent-linear along a direction of
+the moduli with the branch moduli as fixed fractions f_k = μ_k/μ_U of
+the unrelaxed modulus and the relaxation times held (compose with `itau`
+for a viscosity held instead). The material enters a step in two places
+and the start in one, and each is a force on the step's own systems:
+
+- the effective system K_eff of a step (the effective material, whose
+  shear is μ_U − Σ_k μ_k (1 − w_k) with w_k the scheme's weight at the
+  GLL memory points): its variation along δμ_eff = δμ (1 − Σ_k f_k
+  (1 − w_k)), δκ, applied to the FULL base solution x_n of the step
+  (`DegreeOperator::ApplyVariation`, step 1), negated;
+- the memory force Σ_k μ_k ⟨m̃_k, ·⟩ of the base decayed memory m̃ =
+  e m + α d₀ with δμ_k = f_k δμ in place of μ_k;
+- the start's unrelaxed solve: −K_U⁻¹ (δK_U) x₀ about the base start
+  solution, whose surface values close the start's sea level solve and
+  whose strain is added to the primed start strain (the trapezoid's
+  α d₀ reads it).
+
+Both step terms go in through `ViscoelasticStep::AddForce` (a force per
+degree added to the memory force before the effective solve; the cached
+memory solutions invalidated), so the step's memory surface — what the
+sea level closure already reads — carries them, and the closure needs no
+Love-table derivative: acting on the full solution, the first term holds
+the material derivative of the load response too (adding δh_eff σ as a
+response channel double counts; the diagnostic that found it is the
+record). The scheme weights depend on itau and dt only, so the memory
+recursion is unchanged. Refused: a density direction, memory points away
+from the GLL nodes (no effective material there), rotational feedback
+(the inertia and the rotational Love numbers would move too).
+
+GATE (`TestTangentLinear.MaterialDirectionMatchesDifferences`): along
+a smooth direction in κ and μ on the solid, both schemes, the tangent
+run matches central differences of the coupled run on the shifted
+material — `Material::Shifted` with its rheology rebuilt at the same
+fractions and times — at second order (ratio in (3, 5)) with Richardson
+landing at 1e-6 of the derivative. The steps are 1% and 0.5% of the
+moduli, wide enough for the truncation error to stand above the solves'
+1e-12 noise: the functional moves by parts in 1e-12 per unit step, and
+at narrower steps the ratio check reads noise.
+
+Next: the 3D form (a lateral δμ(x) in the stepping, the lateral weight
+pipeline carrying it as it carries the viscosity term), the material
+pairing of the adjoints (the κ and μ kernels, 1D then 3D), and for the
+benchmark a driver writing the Born surface response to a cap load under
+a lateral δμ in the exchange format. Deferred: the discrete 3D
 second-order adjoint and distributing the discrete sweep.
 

@@ -566,9 +566,15 @@ const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     const auto count = static_cast<int>(inputs.size());
     detail::ParallelFor(count, op_->options_.parallel, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
-      const auto ncols = ncols_.at(inputs[j].first);
-      solved[j] = systems[j]->Solve(
-          degs[j]->MemoryForce(*inputs[j].second, ncols), ncols);
+      const auto l = inputs[j].first;
+      const auto ncols = ncols_.at(l);
+      auto force = degs[j]->MemoryForce(*inputs[j].second, ncols);
+      if (const auto extra = extraForce_.find(l); extra != extraForce_.end()) {
+        for (auto k = std::size_t{0}; k < force.size(); ++k) {
+          force[k] += extra->second[k];
+        }
+      }
+      solved[j] = systems[j]->Solve(force, ncols);
     });
     for (auto j = std::size_t{0}; j < inputs.size(); ++j) {
       memorySolutions_.emplace(inputs[j].first, std::move(solved[j]));
@@ -593,6 +599,27 @@ std::vector<double> ViscoelasticStep::InertiaMoment() const {
 
 const LoveNumbers& ViscoelasticStep::EffectiveLove() const {
   return op_->EffectiveLoveNumbers(scheme_, dt_);
+}
+
+void ViscoelasticStep::AddForce(
+    const std::map<int, std::vector<double>>& force) {
+  for (const auto& [l, f] : force) {
+    if (!mem_.contains(l)) continue;
+    const auto expected =
+        static_cast<std::size_t>(op_->Deg(l).ndof) * ncols_.at(l);
+    if (f.size() != expected) {
+      throw std::invalid_argument(std::format(
+          "a degree-{} force has {} entries, the step's solutions {}", l,
+          f.size(), expected));
+    }
+    auto& extra = extraForce_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  memorySolutions_.clear();
 }
 
 void ViscoelasticStep::AddMemory(
