@@ -127,6 +127,34 @@ struct LoveNumberOptions {
     const Material& material, int lmax, const MaterialDirection& direction,
     LoveNumberOptions options = {});
 
+/// The sensitivity kernels of the Love numbers in the bulk and shear
+/// moduli: for every channel of LoveNumbers (the load's force and
+/// potential pieces, the tangential load, the tide) and every degree, the
+/// nodal arrays dh_l/d kappa(r), dh_l/d mu(r) and so on over the
+/// material's full mesh — the number's SI units per unit modulus in the
+/// material's units, pairing with a MaterialDirection in kappa and mu by
+/// the plain nodal sum to ComputeLoveNumberDerivatives' entry. The
+/// adjoint of the static elastic problem: per degree the forcings'
+/// solutions x and the unit surface duals' solutions y, paired through
+/// DegreeOperator::MaterialGradient, so dh = -<y_U, (dK) x>. The
+/// density is not a kernel here (its variation moves the forcings and
+/// the gravity; ComputeLoveNumberDerivatives carries it); the degree-0
+/// centrifugal channel and the inertia moments are not formed.
+struct LoveNumberKernels {
+  struct Channel {
+    /// [degree][node]
+    std::vector<std::vector<double>> h_kappa, h_mu;
+    std::vector<std::vector<double>> l_kappa, l_mu;
+    std::vector<std::vector<double>> k_kappa, k_mu;
+  };
+  Channel load;        ///< h_u, l_u, k_u
+  Channel potential;   ///< h_phi, l_phi, k_phi
+  Channel tangential;  ///< h_v, l_v, k_v
+  Channel tide;        ///< h_t, l_t, k_t
+};
+[[nodiscard]] LoveNumberKernels ComputeLoveNumberKernels(
+    const Material& material, int lmax, LoveNumberOptions options = {});
+
 /// The degree-l tidal Love number of the material's hydrostatic fluid
 /// limit (every region a mu = 0 solid, solved by the LU path): the k_hyd
 /// of the rotational-stability literature. A homogeneous body gives

@@ -102,6 +102,28 @@ class ElasticPerturbation3D {
   [[nodiscard]] static double Pair(const Solutions& x, const Forces& spheroidal,
                                    const Forces& toroidal);
 
+  /// The static material kernels of a pair of solutions: dJ/d kappa(x),
+  /// dJ/d mu(x) over the grid values as angular densities per node (the
+  /// radial weight folded in, the itauKernel3D layout) for J = <y, K x>
+  /// — the transpose of Force: sum_node int (kappa dKappa + mu dMu)
+  /// dOmega = Pair(y, Force(x, dMu, dKappa)). With y the response to a
+  /// measurement's dual (SolveSurfaceDual), the kernels of that
+  /// measurement of the static problem.
+  struct Kernels {
+    std::vector<double> kappa;
+    std::vector<double> mu;
+  };
+  [[nodiscard]] Kernels StaticKernels(const Solutions& y,
+                                      const Solutions& x) const;
+
+  /// The reference response to a dual on a surface component: per degree
+  /// the m >= 0 coefficients of a surface field's dual (the pairing
+  /// weights of the measurement), placed at the component's surface dof
+  /// and solved by the spheroidal systems — the adjoint solution of the
+  /// static problem for a surface measurement.
+  [[nodiscard]] Solutions SolveSurfaceDual(std::span<const Complex> dual,
+                                           Component component) const;
+
   [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;
   [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
 

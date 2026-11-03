@@ -234,3 +234,102 @@ TEST(ElasticPerturbation3D, SelectionRules) {
     }
   }
 }
+
+TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
+  // The static material kernels of a solution pair: their grid pairing
+  // with lateral directions in kappa and mu equals the Hermitian pairing
+  // of the dual solution with the force of those directions on the
+  // other — the transpose of Force; with the dual the response to a
+  // surface dual, the kernels of a static surface measurement.
+  const auto material = MakeMaterial();
+  ElasticPerturbation3D born(material, kLmax);
+  const auto& coupling = born.Coupling();
+  const auto& grid = coupling.Grid();
+  std::mt19937 rng(7);
+  std::normal_distribution<double> normal;
+  auto randomCoefficients = [&] {
+    auto c = grid.ZeroCoefficients();
+    for (auto l = 0; l <= kLmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        c[SurfaceGrid::Index(l, m)] = {normal(rng), m == 0 ? 0.0 : normal(rng)};
+      }
+    }
+    return c;
+  };
+  const auto x = born.SolveLoad(randomCoefficients());
+  const auto y = born.SolveSurfaceDual(randomCoefficients(), Component::U);
+  const auto top = [&] {
+    auto s = 0.0;
+    for (auto v : material.Moduli().L) s = std::max(s, v);
+    return s;
+  }();
+  const auto dMu = Lateral(
+      coupling, [&](double r) { return 0.1 * top * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return std::sin(theta) * std::cos(theta) * std::cos(phi) +
+               0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta);
+      });
+  const auto dKappa = Lateral(
+      coupling, [&](double r) { return 0.2 * top * (1.0 - 0.5 * r); },
+      [](double theta, double phi) {
+        return std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+      });
+  const auto kernels = born.StaticKernels(y, x);
+  auto pairing = [&](std::span<const double> kernel, std::span<const double> d) {
+    auto total = 0.0;
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto at = coupling.FieldOffset(rn);
+      const auto size = coupling.FieldSizeOf(rn);
+      auto product = std::vector<double>(size);
+      for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernel[at + i] * d[at + i];
+      total += coupling.GridOf(rn).Integrate(product);
+    }
+    return total;
+  };
+  const auto [sMu, tMu] = born.Force(x, dMu, {});
+  const auto [sKappa, tKappa] = born.Force(x, {}, dKappa);
+  const auto direct = ElasticPerturbation3D::Pair(y, sMu, tMu) +
+                      ElasticPerturbation3D::Pair(y, sKappa, tKappa);
+  const auto paired = pairing(kernels.mu, dMu) + pairing(kernels.kappa, dKappa);
+  EXPECT_NEAR(paired, direct, 1e-10 * std::abs(direct));
+  EXPECT_NE(direct, 0.0);
+  // the dual solution is the adjoint of the surface readout
+  const auto dual = randomCoefficients();
+  const auto z = born.SolveSurfaceDual(dual, Component::Phi);
+  const auto surface = born.Surface(x, Component::Phi);
+  auto readout = 0.0;
+  for (auto l = 0; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      readout += (m == 0 ? 1.0 : 2.0) *
+                 (surface.at(l)[m] * std::conj(dual[SurfaceGrid::Index(l, m)])).real();
+    }
+  }
+  // <z, K x> = <dual, surface(x)>: pair z with the load force of x
+  const auto [sx, tx] = born.Force(x, {}, {});  // empty: zero forces
+  (void)sx; (void)tx;
+  const auto& sph = [&](int l) -> const DegreeOperator& { return born.Spheroidal(l); };
+  auto viaK = 0.0;
+  for (const auto& [l, zl] : z.spheroidal) {
+    const auto& op = sph(l);
+    const auto ndof = op.DofCount();
+    auto zr = std::vector<double>(static_cast<std::size_t>(ndof) * 2 * (l + 1));
+    for (auto c = 0; c <= l; ++c) {
+      for (auto d = 0; d < ndof; ++d) {
+        zr[static_cast<std::size_t>(c) * ndof + d] = zl[static_cast<std::size_t>(c) * ndof + d].real();
+        zr[static_cast<std::size_t>(l + 1 + c) * ndof + d] = zl[static_cast<std::size_t>(c) * ndof + d].imag();
+      }
+    }
+    const auto Kz = op.Apply(zr, 2 * (l + 1));
+    const auto& xl = x.spheroidal.at(l);
+    for (auto c = 0; c <= l; ++c) {
+      const auto w = c == 0 ? 1.0 : 2.0;
+      for (auto d = 0; d < ndof; ++d) {
+        const auto i = static_cast<std::size_t>(c) * ndof + d;
+        const Complex kz{Kz[i], Kz[static_cast<std::size_t>(l + 1 + c) * ndof + d]};
+        viaK += w * (xl[i] * std::conj(kz)).real();
+      }
+    }
+  }
+  EXPECT_NEAR(viaK, readout, 1e-10 * std::abs(readout));
+}
+

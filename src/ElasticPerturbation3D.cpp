@@ -242,6 +242,77 @@ ElasticPerturbation3D::SurfaceToroidal(const Solutions& x) const {
   return out;
 }
 
+ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
+    const Solutions& y, const Solutions& x) const {
+  const auto& coupling = coupling_;
+  const auto values = coupling.GridValueCount();
+  const auto nodes = coupling.NodeCount();
+  const auto sph = [&](int l) -> const DegreeOperator& { return Spheroidal(l); };
+  const auto tor = [&](int l) -> const ToroidalOperator& { return Toroidal(l); };
+  auto strainOf = [&](const Solutions& s) {
+    auto spectral = coupling.ZeroSpectral();
+    for (const auto& [l, sl] : s.spheroidal) {
+      const auto torIt = s.toroidal.find(l);
+      coupling.AddStrainOfSolution(
+          spectral, l, sph(l), sl, torIt != s.toroidal.end() ? &tor(l) : nullptr,
+          torIt != s.toroidal.end() ? std::span<const Complex>(torIt->second)
+                                    : std::span<const Complex>{});
+    }
+    return coupling.Synthesise(spectral);
+  };
+  auto dilatationOf = [&](const Solutions& s) {
+    auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
+    for (const auto& [l, sl] : s.spheroidal) {
+      coupling.AddDilatationOfSolution(scalar, l, sph(l), sl);
+    }
+    return coupling.SynthesiseScalar(scalar);
+  };
+  const auto ey = strainOf(y);
+  const auto ex = strainOf(x);
+  const auto Dy = dilatationOf(y);
+  const auto Dx = dilatationOf(x);
+  Kernels out;
+  out.kappa.assign(values, 0.0);
+  out.mu.assign(values, 0.0);
+  for (auto rn = 0; rn < nodes; ++rn) {
+    const auto base = coupling.FieldOffset(rn);
+    const auto size = coupling.FieldSizeOf(rn);
+    const auto rr = coupling.RadiusOfNode(rn);
+    const auto wq = coupling.WeightOfNode(rn);
+    for (auto xg = std::size_t{0}; xg < size; ++xg) {
+      const auto i = base + xg;
+      out.kappa[i] = wq * Dy[i] * Dx[i];
+      out.mu[i] = wq * rr * rr *
+                  (12.0 * ey.r[i] * ex.r[i] +
+                   8.0 * (ey.c[1][i] * std::conj(ex.c[1][i])).real() +
+                   4.0 * (ey.c[0][i] * std::conj(ex.c[0][i])).real());
+    }
+  }
+  return out;
+}
+
+ElasticPerturbation3D::Solutions ElasticPerturbation3D::SolveSurfaceDual(
+    std::span<const Complex> dual, Component component) const {
+  const auto& grid = coupling_.Grid();
+  if (dual.size() != grid.CoefficientSize()) {
+    throw std::invalid_argument("a surface dual lives on the lmax grid");
+  }
+  Forces forces;
+  for (auto l = 0; l <= lmax_; ++l) {
+    const auto& op = Spheroidal(l);
+    const auto ndof = op.DofCount();
+    const auto dof = op.SurfaceDof(component);
+    auto b = std::vector<Complex>(static_cast<std::size_t>(ndof) * (l + 1), 0.0);
+    if (dof >= 0) {
+      for (auto m = 0; m <= l; ++m) {
+        b[static_cast<std::size_t>(m) * ndof + dof] = dual[SurfaceGrid::Index(l, m)];
+      }
+    }
+    forces.emplace(l, std::move(b));
+  }
+  return Solve(forces, {}, false);
+}
+
 double ElasticPerturbation3D::Pair(const Solutions& x, const Forces& spheroidal,
                                    const Forces& toroidal) {
   auto total = 0.0;

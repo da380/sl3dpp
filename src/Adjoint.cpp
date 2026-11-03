@@ -722,11 +722,6 @@ IceKernels AdjointSolver::ContinuousSweep(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
-  if (options_.material_kernels) {
-    throw std::invalid_argument(
-        "the material kernels are formed by the discrete sweep "
-        "(AdjointMethod::Discrete)");
-  }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -774,6 +769,36 @@ IceKernels AdjointSolver::ContinuousSweep(
   // The adjoint state, stepped by the forward machinery in reversed time
   // with no ice load; sigmaC/psiC are its SLE-closure load and
   // centrifugal coefficients.
+  const bool material = options_.material_kernels;
+  auto fractions = std::vector<std::vector<double>>{};
+  std::vector<double> kappaKernel, muKernel;
+  if (material) {
+    if (trajectory == nullptr) {
+      throw std::invalid_argument(
+          "the material kernels need the recorded forward trajectory");
+    }
+    if (op.options_.memory_points != MemoryPointSet::Gll) {
+      throw std::invalid_argument(
+          "the material kernels need the memory points at the GLL nodes");
+    }
+    if (rotation != RotationalFeedback::None) {
+      throw std::invalid_argument(
+          "the material kernels are built without rotational feedback yet");
+    }
+    const auto& rheology = op.GetRheology();
+    const auto muU = rheology.MuUnrelaxed();
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& branch = rheology.BranchAt(k);
+      auto f = std::vector<double>(muU.size(), 0.0);
+      for (auto i = std::size_t{0}; i < f.size(); ++i) {
+        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
+      }
+      fractions.push_back(std::move(f));
+    }
+    kappaKernel.assign(muU.size(), 0.0);
+    muKernel.assign(muU.size(), 0.0);
+  }
+
   auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
   auto sigmaC = grid.ZeroCoefficients();
   auto psiC = grid.ZeroCoefficients();
@@ -849,6 +874,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   // over the relaxation time, jumps the adjoint internal variables; the
   // split load channels carry displacement and potential measurements
   // into the radial field.
+  std::map<int, std::vector<double>> lumpSolutions;  // the jump's, per degree
   auto applyJump = [&](const Jump& j) {
     const auto lamCols = ev.Columns(j.lam, ev.toMatDensity_);
     const auto psiCols = ev.Columns(j.psiA, ev.toMatPotential_);
@@ -883,6 +909,10 @@ IceKernels AdjointSolver::ContinuousSweep(
       tasks.push_back(std::move(task));
     }
     const auto count = static_cast<int>(tasks.size());
+    if (material) {
+      // the entries made before the parallel loop fills them
+      for (const auto& task : tasks) lumpSolutions[task.l].clear();
+    }
     detail::ParallelFor(count, op.options_.parallel, [&](int i) {
       const auto& task = tasks[count - 1 - i];
       const auto l = task.l;
@@ -904,6 +934,7 @@ IceKernels AdjointSolver::ContinuousSweep(
       if (task.zu) add(task.split->data(), *task.zu);
       if (task.zphi) add(task.split->data() + deg.ndof, *task.zphi);
       const auto dTilde = deg.Strain(x, ncols);
+      if (material) lumpSolutions.at(l) = x;
       for (auto k = std::size_t{0}; k < K; ++k) {
         for (auto s = 0; s < 3; ++s) {
           for (auto e = 0; e < deg.ne; ++e) {
@@ -1014,6 +1045,95 @@ IceKernels AdjointSolver::ContinuousSweep(
   const double pairing =
       r2 * ev.toNdLength_ /
       (aMat * aMat * ev.toMatDensity_ * op.BaseMaterial().SurfaceGravity());
+  // -- the material pairing (docs/dev/adjoints.md §13, continuous)
+  // The continuous adjoint displacement lambda at a node — the unrelaxed
+  // solve under the adjoint memory and the closed adjoint load, the
+  // adjoint problem having the forward form — paired with the forward
+  // solution and memory at that node through the material gradient of
+  // the degree form and the memory force's variation, under the time
+  // quadrature of the itau kernel; at an observation the lumped
+  // instantaneous adjoint solution pairs without a time weight. The
+  // Hermitian column weights and the units constant are the itau
+  // kernel's.
+  // The pairing of adjoint degree solutions (natural columns) with the
+  // forward state at a node, scaled by `weight` (the time weight times
+  // the units constant), added to the kernels.
+  auto pairMaterial = [&](const std::map<int, std::vector<double>>& lambda,
+                          std::size_t node, double weight) {
+    if (weight == 0.0) return;
+    const auto& fwd = cursor->State(node);
+    const auto x = op.SolveElastic(fwd, ev.Columns(trajectory->loads[node],
+                                                   ev.toMatDensity_),
+                                   ev.Columns(trajectory->tides[node],
+                                              ev.toMatPotential_));
+    auto tasks = std::vector<int>{};
+    for (const auto& [l, y] : lambda) tasks.push_back(l);
+    auto terms =
+        std::vector<std::pair<std::vector<double>, std::vector<double>>>(
+            tasks.size());
+    const auto count = static_cast<int>(tasks.size());
+    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+      const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
+      const auto& deg = op.Deg(l);
+      const auto ncols = 2 * (l + 1);
+      const auto block = deg.NodalSize(ncols);
+      // the columns weighted for the Hermitian pairing: m = 0 real once,
+      // its imaginary part not at all, m > 0 twice
+      auto y = lambda.at(l);
+      for (auto c = 0; c < ncols; ++c) {
+        const auto m = c <= l ? c : c - (l + 1);
+        const auto cw = m == 0 ? (c == 0 ? 1.0 : 0.0) : 2.0;
+        for (auto d = 0; d < deg.ndof; ++d) {
+          y[static_cast<std::size_t>(c) * deg.ndof + d] *= cw;
+        }
+      }
+      auto [kappa, mu] = deg.system.MaterialGradient(y, x.at(l), ncols);
+      for (auto j = std::size_t{0}; j < kappa.size(); ++j) {
+        kappa[j] = -weight * kappa[j];
+        mu[j] = -weight * mu[j];
+      }
+      const auto sy = deg.Strain(y, ncols);
+      const auto& mFwd = fwd.m.at(l);
+      const auto wc = detail::ScalarWeights(deg.k2);
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto p = static_cast<std::size_t>(e) * deg.np + q;
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          const auto gridNode = p * ncols;
+          auto mem = 0.0;
+          for (auto k = std::size_t{0}; k < K; ++k) {
+            const auto fk = fractions[k][full];
+            if (fk == 0.0) continue;
+            for (auto s = 0; s < 3; ++s) {
+              const auto sn = s * block + gridNode;
+              const auto at = (k * 3 + s) * block + gridNode;
+              for (auto c = 0; c < ncols; ++c) {
+                mem += fk * wc[s] * sy[sn + c] * mFwd[at + c];
+              }
+            }
+          }
+          mu[full] += weight * deg.Wq[p] * mem;
+        }
+      }
+      terms[static_cast<std::size_t>(count - 1 - i)] = {std::move(kappa),
+                                                         std::move(mu)};
+    });
+    for (const auto& [kappa, mu] : terms) {
+      for (auto j = std::size_t{0}; j < kappaKernel.size(); ++j) {
+        kappaKernel[j] += kappa[j];
+        muKernel[j] += mu[j];
+      }
+    }
+  };
+  // The regular adjoint displacement at a node, under the current
+  // adjoint memory and closed load.
+  auto accumulateMaterial = [&](std::size_t node, double weight) {
+    if (!material || weight == 0.0) return;
+    pairMaterial(op.SolveElastic(vstate, ev.Columns(sigmaC, ev.toMatDensity_),
+                                 ev.Columns(psiC, ev.toMatPotential_)),
+                 node, pairing * weight);
+  };
+
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (!cursor.has_value() || weight == 0.0) return;
     const auto& fwd = cursor->State(node);
@@ -1089,6 +1209,8 @@ IceKernels AdjointSolver::ContinuousSweep(
     const auto j = jump(found->second, node);
     lumps.emplace(node, j.xiA);
     applyJump(j);
+    // the lumped adjoint displacement of the observation, no time weight
+    if (material) pairMaterial(lumpSolutions, node, pairing);
     auto early = smoothEquilibrium(node);
     if (node > 0) densityEarly[node] = std::move(early);
   };
@@ -1097,6 +1219,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   // so an unmeasured terminal node has zero density.
   observe(N);
   accumulateItau(N, wEarly[N] * perTime);
+  accumulateMaterial(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
@@ -1131,8 +1254,10 @@ IceKernels AdjointSolver::ContinuousSweep(
                     ev.Columns(psiC, ev.toMatPotential_));
     vstate = std::move(next);
     accumulateItau(n - 1, wLate[n - 1] * perTime);
+    accumulateMaterial(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);
+    accumulateMaterial(n - 1, wEarly[n - 1] * perTime);
   }
 
   // Node duals from the density and the lumps. The jumps divide by
@@ -1164,6 +1289,8 @@ IceKernels AdjointSolver::ContinuousSweep(
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
+  out.kappaKernel = std::move(kappaKernel);
+  out.muKernel = std::move(muKernel);
   return out;
 }
 

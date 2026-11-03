@@ -112,13 +112,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const std::vector<double>> oceanFunctions,
     std::span<const SeaLevelEvolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau) const {
-  if (options_.material_kernels) {
-    throw std::invalid_argument(
-        "the material kernels are formed by the discrete sweep "
-        "(AdjointMethod::Discrete)");
-  }
-
   const bool second = ditau != nullptr;
+  const bool material = options_.material_kernels;
   if (second && options_.method == AdjointMethod::Discrete) {
     throw std::invalid_argument(
         "the discrete 3D second-order adjoint is not built: use Continuous");
@@ -177,6 +172,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           "the trajectory must keep the first node's state (a run with "
           "record_stride set keeps it): the states between kept ones are "
           "rebuilt forward from the kept one below");
+    }
+    if (material && op.GetOptions().memory_points != MemoryPointSet::Gll) {
+      throw std::invalid_argument(
+          "the material kernels need the memory nodes at the GLL points");
     }
     if (trajectory->loads.size() != times.size() ||
         trajectory->tides.size() != times.size()) {
@@ -338,6 +337,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto lock = op.LockCaches();
     return get();
   };
+  Viscoelastic3D::Solutions lumpSolutions;  // the jump's, when material
+  GridCoupling::TensorField lumpStrain;
   auto applyJump = [&](const Jump& j) {
     auto spectral = coupling.ZeroSpectral();
     const auto split = !j.zu.empty() || !j.zphi.empty();
@@ -370,8 +371,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         }
       }
       coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x);
+      if (material) lumpSolutions.spheroidal[l] = std::move(x);
     }
     const auto dTilde = coupling.Synthesise(spectral);
+    if (material) lumpStrain = dTilde;
     // m += itau(x) d-tilde for the adjoint state, and dm += delta itau(x)
     // d-tilde for its derivative.
     auto bump = [&](Viscoelastic3D::State& state,
@@ -612,6 +615,95 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
   };
 
+  // -- the material pairing (docs/dev/adjoints.md §13, continuous)
+  // The continuous adjoint displacement at a node (the unrelaxed solve
+  // under the adjoint memory and closed load) paired with the forward
+  // solution and memory there: the energy contraction of the grid
+  // strains for the shear and of the dilatations for the bulk, under the
+  // itau kernel's time quadrature and units constant; at an observation
+  // the lumped instantaneous solution pairs without a time weight.
+  std::vector<double> kappaKernel, muKernel;
+  auto fractions = std::vector<std::vector<double>>{};
+  if (material) {
+    if (trajectory == nullptr) {
+      throw std::invalid_argument(
+          "the material kernels need the recorded forward trajectory");
+    }
+    if (rotation != RotationalFeedback::None) {
+      throw std::invalid_argument(
+          "the material kernels are built without rotational feedback yet");
+    }
+    kappaKernel.assign(values, 0.0);
+    muKernel.assign(values, 0.0);
+    const auto& base = op.GetRheology().BaseMaterial();
+    const auto ngll = base.Mesh().NGll();
+    const auto [kappaU, muU] = base.Moduli().KappaMu();
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      auto f = std::vector<double>(nodeCount, 0.0);
+      for (auto rn = std::size_t{0}; rn < nodeCount; ++rn) {
+        const auto full =
+            static_cast<std::size_t>(coupling.ElementOfNode(static_cast<int>(rn))) *
+                ngll +
+            coupling.NodeInElementOf(static_cast<int>(rn));
+        f[rn] = muU[full] > 0.0 ? op.muBranch_[k][rn] / muU[full] : 0.0;
+      }
+      fractions.push_back(std::move(f));
+    }
+  }
+  const auto unrelaxedSph = [&](int l) -> const DegreeOperator& {
+    return op.Spheroidal(l);
+  };
+  const auto unrelaxedTor = [&](int l) -> const ToroidalOperator& {
+    return op.Toroidal(l);
+  };
+  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x) {
+    auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
+    for (const auto& [l, xl] : x.spheroidal) {
+      coupling.AddDilatationOfSolution(scalar, l, op.Spheroidal(l), xl);
+    }
+    return coupling.SynthesiseScalar(scalar);
+  };
+  auto pairMaterial = [&](const Viscoelastic3D::Solutions& lambda,
+                          const GridCoupling::TensorField& eLambda,
+                          std::size_t node, double weight) {
+    if (weight == 0.0) return;
+    const auto& fwd = forwardState(node);
+    const auto& dFwd = forwardStrain(node);
+    const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
+    const auto Dy = dilatationOf(lambda);
+    const auto Dx = dilatationOf(x);
+    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+      const auto base = coupling.FieldOffset(static_cast<int>(rn));
+      const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
+      const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));
+      const auto wq = coupling.WeightOfNode(static_cast<int>(rn));
+      for (auto xg = std::size_t{0}; xg < size; ++xg) {
+        const auto i = base + xg;
+        auto contraction = [&](const GridCoupling::TensorField& a,
+                               const GridCoupling::TensorField& b) {
+          return 12.0 * a.r[i] * b.r[i] +
+                 8.0 * (a.c[1][i] * std::conj(b.c[1][i])).real() +
+                 4.0 * (a.c[0][i] * std::conj(b.c[0][i])).real();
+        };
+        kappaKernel[i] -= weight * wq * Dy[i] * Dx[i];
+        auto shear = -contraction(eLambda, dFwd);
+        for (auto k = std::size_t{0}; k < K; ++k) {
+          if (fractions[k][rn] == 0.0) continue;
+          shear += fractions[k][rn] * contraction(eLambda, fwd.m[k]);
+        }
+        muKernel[i] += weight * wq * rr * rr * shear;
+      }
+    });
+  };
+  auto accumulateMaterial = [&](std::size_t node, double weight) {
+    if (!material || weight == 0.0) return;
+    const auto lambda = op.SolveElastic(vs.state, ev.Columns(vs.sigma, ev.toMatDensity_),
+                                        ev.Columns(vs.psi, ev.toMatPotential_));
+    const auto e = coupling.Synthesise(
+        op.StrainCoefficients(lambda, unrelaxedSph, unrelaxedTor));
+    pairMaterial(lambda, e, node, pairing * weight);
+  };
+
   std::vector<std::vector<double>> densityLate(times.size()),
       densityEarly(times.size()), dDensityLate(times.size()),
       dDensityEarly(times.size());
@@ -623,6 +715,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto j = jump(found->second, node);
     lumps.emplace(node, j.xiA);
     applyJump(j);
+    if (material) pairMaterial(lumpSolutions, lumpStrain, node, pairing);
     auto early = smoothEquilibrium(vs, node);
     if (node > 0) densityEarly[node] = std::move(early);
     if (second) {
@@ -693,6 +786,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // adjoint state before and after its own step.
   observe(N);
   accumulateItau(N, wEarly[N] * perTime);
+  accumulateMaterial(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
@@ -709,8 +803,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       dDensityLate[n - 1] = reversedStep(ds, dt, n - 1, &drive);
     }
     accumulateItau(n - 1, wLate[n - 1] * perTime);
+    accumulateMaterial(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);
+    accumulateMaterial(n - 1, wEarly[n - 1] * perTime);
   }
   op.ReleaseScratch();
 
@@ -789,6 +885,20 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
             -((*ditau)[k][i] * out.itauKernel3D[k][i] +
               op.itau_[k][i] * derivatives.itauKernel3D[k][i]);
       }
+    }
+  }
+  if (material) {
+    out.kappaKernel3D = std::move(kappaKernel);
+    out.muKernel3D = std::move(muKernel);
+    out.kappaKernelSpherical.assign(nodeCount, 0.0);
+    out.muKernelSpherical.assign(nodeCount, 0.0);
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto at = coupling.FieldOffset(rn);
+      const auto size = coupling.FieldSizeOf(rn);
+      out.kappaKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
+          std::span(out.kappaKernel3D).subspan(at, size));
+      out.muKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
+          std::span(out.muKernel3D).subspan(at, size));
     }
   }
   return {std::move(out), std::move(derivatives)};

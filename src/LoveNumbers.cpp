@@ -305,6 +305,84 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
   return out;
 }
 
+LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
+                                           LoveNumberOptions options) {
+  if (lmax < 0) {
+    throw std::invalid_argument("lmax must be non-negative");
+  }
+  const auto& scales = material.ModelScales();
+  const auto size = material.Rho().size();
+  const auto hLoad = scales.Factor(kHPerLoad);
+  const auto kLoad = scales.Factor(kKPerLoad);
+  const auto hPot = scales.Factor(kHPerPotential);
+  const auto kPot = scales.Factor(kKPerPotential);
+  LoveNumberKernels out;
+  for (auto* channel : {&out.load, &out.potential, &out.tangential, &out.tide}) {
+    for (auto* v : {&channel->h_kappa, &channel->h_mu, &channel->l_kappa,
+                    &channel->l_mu, &channel->k_kappa, &channel->k_mu}) {
+      v->assign(lmax + 1, std::vector<double>(size, 0.0));
+    }
+  }
+
+#pragma omp parallel for schedule(dynamic)
+  for (auto l = 0; l <= lmax; ++l) {
+    DegreeOperator op(material, l,
+                      {.eps = options.eps,
+                       .truncation = options.truncation,
+                       .point_shear = options.point_shear});
+    const auto n = op.DofCount();
+    constexpr auto nrhs = 4;
+    auto rhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
+    const auto columns = {op.Load(LoadPart::Force),
+                          op.Load(LoadPart::Potential), op.Tangential(),
+                          op.Tide()};
+    auto k = 0;
+    for (const auto& column : columns) {
+      std::ranges::copy(column, rhs.begin() + (k++) * n);
+    }
+    const auto x = op.Solve(rhs, nrhs);
+    // The unit surface duals' solutions, U, V and phi.
+    const int dofs[3] = {op.SurfaceDof(Component::U), op.SurfaceDof(Component::V),
+                         op.SurfaceDof(Component::Phi)};
+    auto duals = std::vector<double>(static_cast<std::size_t>(n) * 3, 0.0);
+    for (auto c = 0; c < 3; ++c) {
+      if (dofs[c] >= 0) duals[static_cast<std::size_t>(c) * n + dofs[c]] = 1.0;
+    }
+    const auto y = op.Solve(duals, 3);
+    struct Target {
+      LoveNumberKernels::Channel* channel;
+      int column;
+      double hFactor, kFactor;
+    };
+    const Target targets[4] = {{&out.load, 0, hLoad, kLoad},
+                               {&out.potential, 1, hLoad, kLoad},
+                               {&out.tangential, 2, hLoad, kLoad},
+                               {&out.tide, 3, hPot, kPot}};
+    for (const auto& t : targets) {
+      const auto xc = std::span(x).subspan(
+          static_cast<std::size_t>(t.column) * n, static_cast<std::size_t>(n));
+      std::vector<std::vector<double>>* kappas[3] = {
+          &t.channel->h_kappa, &t.channel->l_kappa, &t.channel->k_kappa};
+      std::vector<std::vector<double>>* mus[3] = {&t.channel->h_mu, &t.channel->l_mu,
+                                                  &t.channel->k_mu};
+      const double factors[3] = {t.hFactor, t.hFactor, t.kFactor};
+      for (auto c = 0; c < 3; ++c) {
+        if (dofs[c] < 0) continue;
+        const auto yc = std::span(y).subspan(static_cast<std::size_t>(c) * n,
+                                             static_cast<std::size_t>(n));
+        auto [gk, gm] = op.MaterialGradient(yc, xc, 1);
+        auto& kappa = (*kappas[c])[l];
+        auto& mu = (*mus[c])[l];
+        for (auto i = std::size_t{0}; i < size; ++i) {
+          kappa[i] = -factors[c] * gk[i];
+          mu[i] = -factors[c] * gm[i];
+        }
+      }
+    }
+  }
+  return out;
+}
+
 LoveNumbers LoveNumbers::ConvertedTo(const Scales& scales) const {
   auto out = *this;
   const auto hLoad = scales.Factor(kHPerLoad);

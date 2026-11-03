@@ -32,7 +32,8 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | The 1D tangent-linear along a direction of the moduli (the effective system's variation and the memory force's branch moduli, per step; the start's unrelaxed response) | `TangentLinear.hpp` (`TangentPerturbation::material`), `Viscoelastic.hpp` (`ViscoelasticStep::AddForce`) |
 | The 3D tangent-linear along a lateral direction of the moduli on the memory nodes, the three terms through the grid pipeline into the opened step | `TangentLinear3D.hpp` (`MaterialDirection3D`, `TangentPerturbation3D::material`), `Viscoelastic3D.hpp` (`OpenStep::AddForce`) |
 | The 1D material kernels dJ/dκ(r), dJ/dμ(r) by the discrete sweep: the transpose of the material tangent, through the nodal material gradient of the degree form | `Adjoint.hpp` (`Options::material_kernels`, `IceKernels::kappaKernel/muKernel`), `DegreeOperator.hpp` (`MaterialGradient`) |
-| The 3D material kernels dJ/dκ(x), dJ/dμ(x) on the coupling's grid by the discrete 3D transpose, with their spherical reductions | `Adjoint3D.hpp` (`Options::material_kernels`, `Kernels3D::kappaKernel3D/muKernel3D`) |
+| The material kernels dJ/dκ, dJ/dμ, 1D and 3D (the 3D ones on the coupling's grid with spherical reductions): exact by the discrete sweeps, at the commute level by the continuous ones | `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`, `IceKernels::kappaKernel/muKernel`, `Kernels3D::kappaKernel3D/muKernel3D`) |
+| The static kernels: the Love numbers' in κ(r), μ(r) per channel and degree, and the lateral kernels of a static surface measurement in 3D | `LoveNumbers.hpp` (`ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`StaticKernels`, `SolveSurfaceDual`) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -467,6 +468,13 @@ Beyond the fixtures:
   kernels paired with a direction against the material tangent at 1e-10
   and against central differences on the shifted material, both
   schemes.
+- **Continuous material kernels, 1D and 3D.** Against the exact
+  discrete ones on one problem under refinement: a per-cent gap at
+  2.5 kyr steps falling at the schemes' orders, both schemes.
+- **Static material kernels.** The Love-number kernels in κ and μ
+  against the Love-number derivatives at 1e-10 for every channel and
+  degree; the 3D static kernels as the transpose of the Born force at
+  1e-10.
 - **Material kernels, 3D.** The discrete κ(x) and μ(x) kernels paired
   with lateral directions against the 3D material tangent at 1e-8 with
   lateral viscosity on, both schemes; the zero-lateral bridge to the 1D

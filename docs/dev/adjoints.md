@@ -844,6 +844,64 @@ dimensions: Love-number derivatives (step 1), the lateral Born response
 transposes (the κ and μ kernels, 1D and 3D), each gated against the
 previous rung.
 
+**The continuous material kernels, 1D and 3D (3 November 2026,
+evening):** `material_kernels` now works under `AdjointMethod::Continuous`
+too. The continuous adjoint problem has the forward form, so at a node
+the adjoint displacement λ is the unrelaxed solve under the adjoint
+memory and the closed adjoint load (what `smoothEquilibrium` closes),
+and the true multiplier is λ times the itau kernel's units constant
+(and, in 1D, its Hermitian column weights: m = 0 real once, its
+imaginary part not at all, m > 0 twice — derived from the itau pairing,
+whose calibration fixes the multiplier). The kernels are then
+
+- the time quadrature, with the itau kernel's trapezoid half-weights on
+  both sides of each node, of −(the material gradient of λ and the
+  forward solution x_n) + (the memory force's variation with the FULL
+  forward memory m_n): no effective factor and no decayed memory, those
+  being the discrete form's;
+- plus, at each observation, the lumped pairing of the instantaneous
+  adjoint solution (the jump's, kept from `applyJump`) with x_n and m_n,
+  without a time weight: the delta the adjoint displacement carries
+  there, whose jump in the adjoint memory the viscosity path already
+  took.
+
+In 3D the same with the grid strains' energy contraction and the
+dilatations through the scalar companion (as the discrete 3D kernels),
+no column weights (the grid pairing is the full real one). Cost: one
+more unrelaxed solve per node than the discrete form.
+
+GATES: `TestAdjoint.ContinuousMaterialKernelsAgreeAndConverge` and
+`TestDiscreteAdjoint3D.ContinuousMaterialKernelsAgreeAndConverge` — ONE
+problem at every resolution (a ramp of fixed fields, measurements at the
+same times), against the exact discrete kernels paired with a direction
+(lateral in 3D, lateral viscosity on): at 2.5 kyr steps the gap is 0.9%
+(trapezoid) and 5.6% / 0.5% (backward Euler, 1D / 3D), falling under
+refinement at the schemes' orders (1D trapezoid 0.95% → 0.24% → 0.06%
+over 5, 9, 17 nodes; backward Euler 5.6% → 2.9% → 1.5%). A first
+version of the gate drew the loads per node from a seeded generator, so
+the resolutions were different problems and the finer one, with a
+near-cancelling pairing, showed a growing relative gap; the discrete
+kernels were checked against finite differences in that regime before
+the gate was rewritten.
+
+**The static kernels (same evening):** for the static elastic problem
+the kernel is the start term alone. `ComputeLoveNumberKernels`
+(`LoveNumbers.hpp`): per channel (load force and potential pieces,
+tangential, tide) and degree, dh_l/dκ(r), dh_l/dμ(r) and the l and k
+alike, nodal over the full mesh, by the unit surface duals' solutions
+paired with the forcings' through `DegreeOperator::MaterialGradient`;
+gated against `ComputeLoveNumberDerivatives` along a direction at 1e-10
+for every channel and degree
+(`TestMaterialDerivatives.LoveNumberKernelsPairToTheDerivatives`). In 3D
+`ElasticPerturbation3D::StaticKernels(y, x)` (the transpose of its
+`Force`, as angular densities on its grid) with `SolveSurfaceDual` for
+the adjoint solution of a surface measurement; gated as the transpose
+of `Force` under the Hermitian pairing at 1e-10 and by the dual solve
+being the adjoint of the surface readout
+(`TestElasticPerturbation3D.StaticKernelsAreTheTransposeOfTheForce`).
+The 3D elastic benchmark against AdGIA can thus compare kernels as well
+as responses.
+
 Next: for the benchmark, a driver writing the Born surface response to a
 cap load under a lateral δμ in the exchange format (the 3D elastic
 comparison with AdGIA). Deferred: the discrete 3D second-order adjoint,

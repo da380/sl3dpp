@@ -602,15 +602,76 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
     const auto full = FieldPairing(coupling, kernels.muKernel3D, uniform);
     EXPECT_NEAR(spherical, full, 1e-12 * std::abs(full));
 
-    // Refusals.
+    // The refusal without a trajectory.
     EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
                  std::invalid_argument);
-    AdjointSolver3D continuous(evolution, {.method = AdjointMethod::Continuous,
-                                           .rtol = 1e-12,
-                                           .coupled_rtol = 1e-12,
-                                           .material_kernels = true});
-    EXPECT_THROW((void)continuous.IceHistoryKernels(times, measurements, &trajectory),
-                 std::invalid_argument);
+  }
+}
+
+TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
+  // The 3D continuous material kernels against the exact discrete ones,
+  // paired with lateral directions in kappa and mu, lateral viscosity on:
+  // a few per cent at 2.5 kyr steps, falling under refinement, both
+  // schemes — one problem at every resolution (a ramped cap load, the
+  // measurements at the same times).
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(29);
+  const auto load = scene.MeltLoad(-0.1);
+  const auto gMid = scene.Smooth(rng, 1.0);
+  const auto gEnd = scene.Smooth(rng, 0.6);
+  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto gap = [&](std::size_t npts, Scheme scheme) {
+    auto times = std::vector<double>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
+      times.push_back(10.0 * static_cast<double>(n) /
+                      static_cast<double>(npts - 1) * scene.Kyr());
+    }
+    const auto iceLoad = Ramp(load, times.back());
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[npts / 2].seaLevelDual = gMid;
+    measurements[npts - 1].displacementDual = gEnd;
+    Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
+                      {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+    const auto& coupling = op.Coupling();
+    const auto dKappa = LateralModulus(
+        coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+        [](double theta, double phi) {
+          return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+        });
+    const auto dMu = LateralModulus(
+        coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+        [](double theta, double phi) {
+          return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6) +
+                 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        });
+    auto paired = std::map<AdjointMethod, double>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto kernels = AdjointSolver3D(evolution, {.method = method,
+                                                       .rtol = 1e-12,
+                                                       .coupled_rtol = 1e-12,
+                                                       .material_kernels = true})
+                               .IceHistoryKernels(times, measurements, &trajectory);
+      paired[method] = FieldPairing(coupling, kernels.kappaKernel3D, dKappa) +
+                       FieldPairing(coupling, kernels.muKernel3D, dMu);
+    }
+    return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
+           std::abs(paired[AdjointMethod::Discrete]);
+  };
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto coarse = gap(5, scheme);
+    const auto fine = gap(9, scheme);
+    EXPECT_LT(coarse, 0.1) << "scheme " << static_cast<int>(scheme);
+    EXPECT_LT(fine, coarse / 1.5) << "scheme " << static_cast<int>(scheme)
+                                  << " " << coarse << " " << fine;
   }
 }
 

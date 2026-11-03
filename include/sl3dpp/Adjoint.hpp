@@ -140,8 +140,8 @@ struct IceKernels {
   /// plain nodal sum — the transpose of TangentPerturbation::material
   /// (the branch moduli as fixed fractions of the unrelaxed modulus, the
   /// relaxation times held; docs/dev/adjoints.md §13). Empty unless
-  /// Options::material_kernels asked for them (Discrete, with a
-  /// trajectory).
+  /// Options::material_kernels asked for them (with a trajectory;
+  /// Discrete exact, Continuous at the commute level).
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
 };
@@ -198,12 +198,16 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// Also form the material kernels (IceKernels::kappaKernel, muKernel):
-    /// the pairing of each step's dual solution with the material
-    /// derivative of the step's force, the exact transpose of the
-    /// material tangent. Discrete only, needs the trajectory, the memory
-    /// points at the GLL nodes and no rotational feedback; the bulk
-    /// pairing costs one unrelaxed solve per step.
+    /// Also form the material kernels (IceKernels::kappaKernel, muKernel).
+    /// Discrete: the pairing of each step's dual solution with the
+    /// material derivative of the step's force, the exact transpose of
+    /// the material tangent. Continuous: the time quadrature of the
+    /// continuous adjoint displacement's pairing with the forward
+    /// solution and memory, plus the lumped pairings at the observations
+    /// — the commute error of the viscosity kernels, falling under
+    /// refinement. Both need the trajectory, the memory points at the
+    /// GLL nodes and no rotational feedback, and cost one unrelaxed solve
+    /// per node (two for the continuous form).
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for

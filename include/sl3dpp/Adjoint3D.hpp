@@ -121,7 +121,7 @@ struct Kernels3D {
   /// (docs/dev/adjoints.md §13) — and their angular integrals per node,
   /// which pair with angle-uniform directions as the 1D kappaKernel and
   /// muKernel do at that node. Empty unless Options::material_kernels
-  /// (Discrete, with a trajectory).
+  /// (with a trajectory; Discrete exact, Continuous at the commute level).
   std::vector<double> kappaKernel3D;
   std::vector<double> muKernel3D;
   std::vector<double> kappaKernelSpherical;
@@ -182,11 +182,15 @@ class AdjointSolver3D {
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
     /// Also form the material kernels (Kernels3D::kappaKernel3D,
-    /// muKernel3D): the pairing of each step's dual solution with the
-    /// material derivative of the step's forces, the exact transpose of
-    /// the 3D material tangent. Discrete only, needs the trajectory, the
-    /// memory nodes at the GLL points and no rotational feedback; the
-    /// bulk pairing costs one unrelaxed solve per step.
+    /// muKernel3D). Discrete: the pairing of each step's dual solution
+    /// with the material derivative of the step's forces, the exact
+    /// transpose of the 3D material tangent. Continuous: the time
+    /// quadrature of the continuous adjoint displacement's pairing with
+    /// the forward solution and memory plus the lumped pairings at the
+    /// observations, at the commute level of the viscosity kernels. Both
+    /// need the trajectory, the memory nodes at the GLL points and no
+    /// rotational feedback; one unrelaxed solve per node (two for the
+    /// continuous form), not distributed.
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for

@@ -268,3 +268,68 @@ TEST(MaterialDerivatives, ReciprocityDifferentiated) {
   const auto none = ComputeLoveNumberDerivatives(material, kLmax, {});
   for (const auto& [name, v] : Entries(none)) EXPECT_EQ(v, 0.0) << name;
 }
+
+TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
+  // The static kernels: for every channel and degree, the kappa and mu
+  // kernels paired with a smooth direction in the moduli equal the
+  // Love-number derivatives along it (step 1's exact linearisation) at
+  // 1e-10 — the adjoint of the static problem against its tangent.
+  const auto material = MakeMaterial();
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      if (!material.IsFluid(e)) d.mu[i] = profile * m0[i];
+    }
+  }
+  const auto derivatives = ComputeLoveNumberDerivatives(material, kLmax, d);
+  const auto kernels = ComputeLoveNumberKernels(material, kLmax);
+  auto pair = [&](const std::vector<double>& kappa, const std::vector<double>& mu) {
+    auto total = 0.0;
+    for (auto i = std::size_t{0}; i < k0.size(); ++i) {
+      total += kappa[i] * d.kappa[i] + mu[i] * d.mu[i];
+    }
+    return total;
+  };
+  struct Check {
+    const char* name;
+    const LoveNumberKernels::Channel* channel;
+    const std::vector<double>* h;
+    const std::vector<double>* l;
+    const std::vector<double>* k;
+  };
+  const Check checks[4] = {
+      {"load", &kernels.load, &derivatives.h_u, &derivatives.l_u, &derivatives.k_u},
+      {"potential", &kernels.potential, &derivatives.h_phi, &derivatives.l_phi,
+       &derivatives.k_phi},
+      {"tangential", &kernels.tangential, &derivatives.h_v, &derivatives.l_v,
+       &derivatives.k_v},
+      {"tide", &kernels.tide, &derivatives.h_t, &derivatives.l_t, &derivatives.k_t}};
+  for (const auto& c : checks) {
+    auto scale = 0.0;
+    for (auto l = 0; l <= kLmax; ++l) {
+      scale = std::max({scale, std::abs((*c.h)[l]), std::abs((*c.l)[l]),
+                        std::abs((*c.k)[l])});
+    }
+    ASSERT_GT(scale, 0.0) << c.name;
+    for (auto l = 0; l <= kLmax; ++l) {
+      EXPECT_NEAR(pair(c.channel->h_kappa[l], c.channel->h_mu[l]), (*c.h)[l],
+                  1e-10 * scale)
+          << c.name << " h degree " << l;
+      EXPECT_NEAR(pair(c.channel->l_kappa[l], c.channel->l_mu[l]), (*c.l)[l],
+                  1e-10 * scale)
+          << c.name << " l degree " << l;
+      EXPECT_NEAR(pair(c.channel->k_kappa[l], c.channel->k_mu[l]), (*c.k)[l],
+                  1e-10 * scale)
+          << c.name << " k degree " << l;
+    }
+  }
+}
+
