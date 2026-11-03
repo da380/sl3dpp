@@ -113,6 +113,20 @@ struct LoveNumberOptions {
 [[nodiscard]] LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
                                              LoveNumberOptions options = {});
 
+/// The derivative of the Love numbers along a material direction: the
+/// Fréchet derivative of every number at the material, as a table of the
+/// same shape — each channel's entry the derivative of that number, SI
+/// per unit of the direction (whose fields are in the material's units),
+/// `surface_gravity` the surface gravity's derivative and `radius` and
+/// `gravitational_constant` zero. Per degree, dx = K^-1 (db - (dK) x)
+/// for each forcing (DegreeOperator::ApplyVariation and the forcing
+/// variations), read off at the surface as the numbers are; the axial
+/// inertia moments carry the density's variation too. Exact for the map
+/// Material::Shifted, which the gates drive.
+[[nodiscard]] LoveNumbers ComputeLoveNumberDerivatives(
+    const Material& material, int lmax, const MaterialDirection& direction,
+    LoveNumberOptions options = {});
+
 /// The degree-l tidal Love number of the material's hydrostatic fluid
 /// limit (every region a mu = 0 solid, solved by the LU path): the k_hyd
 /// of the rotational-stability literature. A homogeneous body gives

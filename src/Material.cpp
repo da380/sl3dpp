@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cmath>
 #include <format>
+#include <numbers>
+#include <stdexcept>
 
 namespace sl3dpp {
 
@@ -110,6 +112,144 @@ std::expected<Material, MaterialError> Material::Create(
   }
 
   return material;
+}
+
+namespace {
+
+/// Gauss-Legendre nodes and weights of order n on [-1, 1] (Newton on the
+/// Legendre polynomial from the standard cosine guesses).
+std::pair<std::vector<double>, std::vector<double>> GaussLegendre(int n) {
+  std::vector<double> x(n), w(n);
+  for (auto i = 0; i < n; ++i) {
+    auto z = std::cos(std::numbers::pi * (i + 0.75) / (n + 0.5));
+    double dp = 0.0;
+    for (auto it = 0; it < 100; ++it) {
+      // P_n(z) and P_n'(z) by the recurrence.
+      double p0 = 1.0, p1 = z;
+      for (auto k = 2; k <= n; ++k) {
+        const auto p2 = ((2.0 * k - 1.0) * z * p1 - (k - 1.0) * p0) / k;
+        p0 = p1;
+        p1 = p2;
+      }
+      dp = n * (z * p1 - p0) / (z * z - 1.0);
+      const auto dz = p1 / dp;
+      z -= dz;
+      if (std::abs(dz) < 1e-15) break;
+    }
+    x[i] = z;
+    w[i] = 2.0 / ((1.0 - z * z) * dp * dp);
+  }
+  return {x, w};
+}
+
+/// The integral of a nodal field f over the mesh from its bottom to each
+/// node: within an element, the exact integral of the Lagrange
+/// interpolant of f from the left end to the node (the integrals of the
+/// GLL basis functions, P(i, j) = int_{-1}^{xi_i} l_j, by Gauss-Legendre
+/// quadrature on each part), the elements' totals accumulated below (the
+/// last row of P is the GLL weights, so the totals are the quadrature's).
+std::vector<double> CumulativeIntegral(const RadialMesh& mesh,
+                                       std::span<const double> f) {
+  const auto n = mesh.NGll();
+  const auto xi = mesh.Points();
+  // The Lagrange basis on the GLL points.
+  auto lagrange = [&](int j, double t) {
+    auto v = 1.0;
+    for (auto k = 0; k < n; ++k) {
+      if (k != j) v *= (t - xi[k]) / (xi[j] - xi[k]);
+    }
+    return v;
+  };
+  const auto [gx, gw] = GaussLegendre(n);
+  auto P = std::vector<double>(static_cast<std::size_t>(n) * n, 0.0);
+  for (auto i = 0; i < n; ++i) {
+    // int_{-1}^{xi_i} l_j dt, by Gauss-Legendre on [-1, xi_i].
+    const auto half = 0.5 * (xi[i] + 1.0);
+    const auto mid = 0.5 * (xi[i] - 1.0);
+    for (auto j = 0; j < n; ++j) {
+      auto sum = 0.0;
+      for (auto q = 0; q < n; ++q) sum += gw[q] * lagrange(j, mid + half * gx[q]);
+      P[static_cast<std::size_t>(i) * n + j] = half * sum;
+    }
+  }
+  auto out = std::vector<double>(f.size(), 0.0);
+  auto below = 0.0;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto base = static_cast<std::size_t>(e) * n;
+    const auto jac = mesh.Jacobian(e);
+    for (auto i = 0; i < n; ++i) {
+      auto sum = 0.0;
+      for (auto j = 0; j < n; ++j) {
+        sum += P[static_cast<std::size_t>(i) * n + j] * f[base + j];
+      }
+      out[base + i] = below + jac * sum;
+    }
+    below = out[base + n - 1];
+  }
+  return out;
+}
+
+}  // namespace
+
+MaterialVariation Material::Variation(const MaterialDirection& d) const {
+  const auto& mesh = mesh_;
+  const auto size = rho_.size();
+  for (const auto* a : {&d.kappa, &d.mu, &d.rho}) {
+    if (!a->empty() && a->size() != size) {
+      throw std::invalid_argument(std::format(
+          "a material direction's arrays have the mesh's {} nodal values",
+          size));
+    }
+  }
+  const auto zeros = std::vector<double>(size, 0.0);
+  MaterialVariation out;
+  out.moduli = NodalModuli::Isotropic(d.kappa.empty() ? zeros : d.kappa,
+                                      d.mu.empty() ? zeros : d.mu);
+  out.rho = d.rho.empty() ? zeros : d.rho;
+  out.drho.assign(size, 0.0);
+  out.g.assign(size, 0.0);
+  if (!d.rho.empty()) {
+    const auto n = mesh.NGll();
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      const auto base = static_cast<std::size_t>(e) * n;
+      const auto jac = mesh.Jacobian(e);
+      for (auto i = 0; i < n; ++i) {
+        auto v = 0.0;
+        for (auto j = 0; j < n; ++j) v += mesh.Derivative(i, j) * d.rho[base + j];
+        out.drho[base + i] = v / jac;
+      }
+    }
+    auto f = std::vector<double>(size);
+    for (auto i = std::size_t{0}; i < size; ++i) {
+      const auto r = mesh.Radii()[i];
+      f[i] = d.rho[i] * r * r;
+    }
+    const auto mass = CumulativeIntegral(mesh, f);
+    for (auto i = std::size_t{0}; i < size; ++i) {
+      const auto r = mesh.Radii()[i];
+      out.g[i] = r > 0.0 ? 4.0 * std::numbers::pi * G_ * mass[i] / (r * r) : 0.0;
+    }
+  }
+  out.surfaceGravity = out.g.back();
+  return out;
+}
+
+Material Material::Shifted(const MaterialDirection& d, double eps) const {
+  const auto v = Variation(d);
+  auto other = *this;
+  const auto size = rho_.size();
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    other.moduli_.A[i] += eps * v.moduli.A[i];
+    other.moduli_.C[i] += eps * v.moduli.C[i];
+    other.moduli_.F[i] += eps * v.moduli.F[i];
+    other.moduli_.L[i] += eps * v.moduli.L[i];
+    other.moduli_.N[i] += eps * v.moduli.N[i];
+    other.rho_[i] += eps * v.rho[i];
+    other.drho_[i] += eps * v.drho[i];
+    other.g_[i] += eps * v.g[i];
+  }
+  other.surfaceGravity_ += eps * v.surfaceGravity;
+  return other;
 }
 
 std::expected<Material, MaterialError> Material::WithModuli(

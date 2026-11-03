@@ -580,10 +580,60 @@ central differences landing at 1e-7; and the continuous sweep's gap to
 the discrete one falling by > 2.5 as the steps halve, in the loads and
 in the log-viscosity kernel (the resolution diagnostic in 3D).
 
-Next: the forward perturbations in the elastic parameters and the
-density — new design, not a port: the derivative of the radial and
-coupled responses with respect to μ(r), κ(r), ρ(r) (and their lateral
-perturbations), the first step towards the 3D elastic work. Deferred
-behind it: the discrete 3D second-order adjoint (the 1D pattern on this
-transpose), and distributing the discrete sweep.
+## 13. Material derivatives, step 1: the static elastic problem (3 November 2026)
+
+New design, not a port (pyslfp has no material derivatives). The
+parameters are the material's nodal fields — `MaterialDirection`:
+δκ, δμ, δρ on the mesh's (element, gll) nodes in material units, any
+empty — and the derivative is taken of the computed map through
+`Material::Shifted(d, ε)`, whose linearisation `Material::Variation(d)`
+is exact: the moduli's variation (A, C, F, L, N from δκ, δμ), the
+density's, its radial derivative's (the element differentiation of δρ,
+one-sided at interfaces) and gravity's, δg = 4πG r⁻² ∫ δρ r² dr from the
+bottom of the mesh by the exact integrals of the GLL Lagrange basis
+(the integral of the interpolant of δρ r², consistent with the GLL
+quadrature on whole elements; spectral integration through the
+differentiation matrix was tried first and is wrong at the top degree).
+Decided with David: the density derivative is self-consistent in 1D —
+the background gravity, the stratification and the interface terms move
+with δρ; lateral δρ is excluded in 3D (incompatible with the hydrostatic
+equations used, and it opens the rotation question AdGIA's generalised
+theory fixes; sl3dpp carries the traditional theory only).
+
+`DegreeOperator` assembles its band from a `Coefficients` set
+(`AssembleBand`), the base one from the material and the variation's
+from `VariationCoefficients`: the elastic block's moduli replaced by
+their variations, and the density terms differentiated — the U-U
+coupling 4ρ(πGρr − g)r, the U-V coupling k²ρgr, the V-φ coupling k²ρr,
+the U-φ gradient ρr², the fluid stratification r²ρ'/g and the
+fluid-solid interface terms ρ_f g r², ρ_f r² — with the exterior
+closures and the point shear (fixed branches) carrying none.
+`ApplyVariation(dm, x)` is (dK·dm) x; `LoadVariation` (the traction
+piece through δg(a)), `TangentialVariation` and `TideVariation` (through
+δρ, δρ', δg and the interfaces) are the forcings'.
+`ComputeLoveNumberDerivatives(material, lmax, direction)` solves
+dx = K⁻¹(db − dK x) per degree and forcing and reads the surface off as
+the numbers are, the axial inertia moments carrying ∫δρ U r³ too; it
+returns a LoveNumbers-shaped table of derivatives (surface_gravity =
+δg(a), radius and G zero).
+
+GATES (`TestMaterialDerivatives`, prem8 at lmax 6): gravity's variation
+exact for constant and quadratic density directions (4πGr/3, 4πGr³/5);
+the variation operator against central differences of K(m ± εd)x,
+Richardson to 1e-9 at every degree; the Love-number derivatives against
+central differences of the shifted material's numbers for directions in
+μ, κ, ρ alone and together, Richardson to 1e-7 per kind of number for
+every channel, degree and axial number and the surface gravity, the
+differences second order where resolved; the reciprocity identities
+differentiated (δg h_φ + g δh_φ = δk_u and the two others) at 1e-10; an
+empty direction gives zeros.
+
+Next, in order (§13 continued): step 2, the lateral extension through
+the grid pipeline — δμ(x) as a pointwise weight on the deviatoric strain
+fed back through the force assembly (the lateral viscosity term's
+structure), δκ(x) needing the isotropic part the pipeline does not
+carry, no lateral δρ; step 3, the time-stepped tangent-linear in the
+material (the effective modulus and the memory force per step, with the
+branch moduli as fixed fractions of the unrelaxed one). Deferred: the
+discrete 3D second-order adjoint and distributing the discrete sweep.
 

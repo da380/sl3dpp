@@ -193,6 +193,27 @@ class DegreeOperator {
 
   /// A x for `nrhs` column-major columns: the assembled (unscaled)
   /// operator, for residuals.
+  /// The derivative of the system along a material variation, applied to
+  /// one or several vectors: the bilinear form with each coefficient
+  /// replaced by its variation — the moduli's, and the density's with
+  /// gravity, the stratification and the fluid-solid interface terms
+  /// differentiated (the self-consistent density derivative). The point
+  /// shear (fixed branches) and the exterior closures carry no variation.
+  /// Non-gravitating: the moduli alone.
+  [[nodiscard]] std::vector<double> ApplyVariation(const MaterialVariation& dm,
+                                                   std::span<const double> x,
+                                                   int nrhs = 1) const;
+  /// The variations of the forcings along the same: the load's traction
+  /// piece and the tangential traction through the surface gravity, the
+  /// tide through the density, its derivative, gravity and the interfaces;
+  /// the attraction piece and the unit tractions carry none.
+  [[nodiscard]] std::vector<double> LoadVariation(
+      const MaterialVariation& dm, LoadPart part = LoadPart::Both) const;
+  [[nodiscard]] std::vector<double> TangentialVariation(
+      const MaterialVariation& dm) const;
+  [[nodiscard]] std::vector<double> TideVariation(const MaterialVariation& dm,
+                                                  int power = -1) const;
+
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 
@@ -221,12 +242,30 @@ class DegreeOperator {
  private:
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
+  /// The per-node coefficients one band assembly integrates: the base
+  /// system's from the material, or their variation along a direction.
+  struct Coefficients;
+  /// Assembles the bilinear form of the coefficients into a band of this
+  /// system's layout (the exterior closures and the k^2 potential term
+  /// only with `closures`).
+  void AssembleBand(std::vector<double>& band, const Coefficients& c,
+                    const PointShear* pointShear, bool closures) const;
+  [[nodiscard]] Coefficients BaseCoefficients() const;
+  [[nodiscard]] Coefficients VariationCoefficients(
+      const MaterialVariation& dm) const;
+  [[nodiscard]] std::vector<double> ApplyBand(const std::vector<double>& band,
+                                              std::span<const double> x,
+                                              int nrhs) const;
   /// The dof ranges of the cut nodes above the first element, and the
   /// count of cuts at or below it.
   [[nodiscard]] std::pair<std::vector<std::pair<int, int>>, int> Separators(
       std::span<const int> cuts) const;
   void Factorise(const Options& options);
 
+  [[nodiscard]] static double& BandOf(std::vector<double>& band, int kd, int i,
+                                      int j) {
+    return band[static_cast<std::size_t>(j) * (kd + 1) + (kd + i - j)];
+  }
   [[nodiscard]] double& Band(int i, int j) {
     return band_[static_cast<std::size_t>(j) * (kd_ + 1) + (kd_ + i - j)];
   }

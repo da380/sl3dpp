@@ -56,6 +56,27 @@ struct NodalModuli {
       const;
 };
 
+/// A direction in the material's nodal fields — the isotropic moduli
+/// kappa and mu and the density rho — each (element, node) over the mesh
+/// in the material's non-dimensional units, or empty for no perturbation.
+/// The parameters of the material derivatives (docs/dev/adjoints.md §13).
+struct MaterialDirection {
+  std::vector<double> kappa, mu, rho;
+};
+
+/// The linearised nodal fields along a direction: the moduli's variation
+/// (A, C, F, L, N from delta kappa and delta mu), the density's, its radial
+/// derivative's (the element differentiation of delta rho, one-sided at
+/// interfaces), gravity's (4 pi G r^-2 of the integral of delta rho r^2
+/// from the bottom of the mesh, elementwise spectral integration — the
+/// natural integral of a nodal field, exact for the polynomial it
+/// interpolates) and the surface gravity's.
+struct MaterialVariation {
+  NodalModuli moduli;
+  std::vector<double> rho, drho, g;
+  double surfaceGravity = 0.0;
+};
+
 class Material {
  public:
   /// The nodal arrays of a model on a mesh; the mesh is copied in.
@@ -86,6 +107,16 @@ class Material {
 
   /// The scales carried from the model, for dimensionalising outputs.
   [[nodiscard]] const Scales& ModelScales() const { return scales_; }
+
+  /// The variation of the nodal fields along a direction (above); a
+  /// direction's arrays must have the mesh's nodal size.
+  [[nodiscard]] MaterialVariation Variation(const MaterialDirection& d) const;
+
+  /// The material with its nodal fields moved by eps times the variation
+  /// along a direction (gravity included): the map whose derivative at
+  /// eps = 0 the material derivatives are, exactly. The fluid flags, the
+  /// mesh and the scales stay.
+  [[nodiscard]] Material Shifted(const MaterialDirection& d, double eps) const;
 
  private:
   explicit Material(RadialMesh mesh) : mesh_(std::move(mesh)) {}
