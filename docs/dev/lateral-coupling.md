@@ -44,7 +44,7 @@ In the 1D limit (W = 0, no lateral variation) these reduce to the
 degree-basis scalars of the ported stepper: A3 ∝ e_R, A2 = A4 ∝ e_S,
 A1 = A5 ∝ e_M, with the squared map constants reproducing the force
 weights (4/3, k², k²(k²−2)) — the consistency identity the zero-lateral
-gate (§7a below) rests on.
+gate (§7, item a) rests on.
 
 ## 3. The memory force from the components
 
@@ -135,64 +135,6 @@ per degree plus a bounded number of spin transforms per pass.
 Fallbacks if contraction fails under strong contrasts: damped Picard
 (built), a better reference profile (per-degree or worst-case) and IMEX
 (neither built; [design.md](../design.md) §14).
-
-## 6. Data layout, dealiasing, memory
-
-- Memory state: per branch, 5 complex component fields over (viscous
-  radial memory nodes × angular grid). Radial memory nodes are the Gauss
-  points of viscous elements by default, ~20% fewer than the GLL nodes,
-  which remain selectable ([design.md](../design.md) §5).
-- Grid: one `SurfaceGrid` with nMax = 2 and `ForBand` oversampling 1.5
-  (the 3/2 rule) for the pointwise products — an improvement over the
-  Fortran, which never dealiased.
-- Transforms are issued **batched** (one call per spin component, the
-  radial nodes as the batch — GSHTrans guarantees exact equality with the
-  per-field calls) with the BLAS matrix kernel and threaded execution as
-  options. Measured on the PREM-deck Maxwell body (15 Oct 2026, 8
-  threads): a full synthesis + analysis pass over all five components,
-  lmax 128, 1630 graded-mesh viscous nodes: 51.6 s naive single-field
-  loop kernel → 12.9 s batched loop → 5.0 s batched matrix kernel —
-  about 10x; lmax 64 (1170 nodes): 0.8 s. (Those are the five-component
-  pipeline's numbers.) With the reality reduction (15 Oct 2026): the
-  full reduced pass is **5.2 s at lmax 128 / 0.6 s at lmax 64, batched
-  loop kernel, 8 threads** — the 12.9 s loop figure roughly halved, as
-  the component count predicts. Grid construction is 0.1 s at lmax 128.
-  The BLAS-threading livelock diagnosed here (GSHTrans open issue 8:
-  GEMMs inside the transform's parallel region) is FIXED upstream
-  (15 Oct 2026, GSHTrans `ecc4dcd`: the matrix kernel's order loops run
-  sequentially and the BLAS threads the GEMMs). Post-fix, the unsafe
-  path no longer exists (the nesting is structurally unrepresentable),
-  and the kernels are comparable on the reduced pass: matrix 4.4 s vs
-  loop 4.9 s at lmax 128, a wash at lmax 64 — the old 2.6x matrix edge
-  was partly an artefact of the nesting the fix removed. The matrix
-  kernel stays opt-in only because its gain is now marginal. The Gauss-point
-  memory nodes (~20% fewer) remain to compound.
-- Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
-  mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
-  complex ≈ 11 GB per branch... **the oversampled grid is for products
-  only**: m is band-limited at lmax, stored as coefficients or on the
-  unoversampled grid (257 × 515 ≈ 4.8 GB complex per branch), with
-  synthesis to the big grid per step. Final layout to be settled against
-  measurements; the Wigner table adds 2.6–5.2 GB.
-
-## 7. Implementation order and gates
-
-a. **Spin machinery**: `SurfaceGrid` grows spin-N transforms (complex
-   fields, N = −2..2); the degree ↔ spin maps of §2 and force rows of §3
-   as a `TensorPipeline` beside the 1D `Degree` workspace. GATE: with
-   zero lateral perturbation (δ = 0, weights uniform in angle), one full
-   grid-pipeline step must reproduce the 1D stepper's state and
-   solutions at machine precision, degree by degree — the round trip
-   through synthesis/multiply/analysis is then exact up to transform
-   round-off. This is the decisive correctness gate and needs no
-   external reference.
-b. **Toroidal operator** (§4), with its own tests.
-c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
-   self-convergence at order 2 with lateral viscosity on; the old sl3d
-   in the weak-contrast limit (tolerances set by its explicit stepping
-   and lack of dealiasing); contraction diagnostics over a contrast
-   ladder (the research measurements).
-d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
 
 ## 5a. Measured within-step convergence (15 Oct 2026, first numbers)
 
@@ -330,6 +272,65 @@ builds both repos and runs the comparison at a chosen lmax; the lmax-32
 fixture is committed for reference. The sl3d driver patch (I/O only)
 must be committed in that repo for the kit to work from a fresh clone.
 
+## 6. Data layout, dealiasing, memory
+
+- Memory state: per branch, 5 complex component fields over (viscous
+  radial memory nodes × angular grid). Radial memory nodes are the Gauss
+  points of viscous elements by default, ~20% fewer than the GLL nodes,
+  which remain selectable ([design.md](../design.md) §5).
+- Grid: one `SurfaceGrid` with nMax = 2 and `ForBand` oversampling 1.5
+  (the 3/2 rule) for the pointwise products — an improvement over the
+  Fortran, which never dealiased.
+- Transforms are issued **batched** (one call per spin component, the
+  radial nodes as the batch — GSHTrans guarantees exact equality with the
+  per-field calls) with the BLAS matrix kernel and threaded execution as
+  options. Measured on the PREM-deck Maxwell body (15 Oct 2026, 8
+  threads): a full synthesis + analysis pass over all five components,
+  lmax 128, 1630 graded-mesh viscous nodes: 51.6 s naive single-field
+  loop kernel → 12.9 s batched loop → 5.0 s batched matrix kernel —
+  about 10x; lmax 64 (1170 nodes): 0.8 s. (Those are the five-component
+  pipeline's numbers.) With the reality reduction (15 Oct 2026): the
+  full reduced pass is **5.2 s at lmax 128 / 0.6 s at lmax 64, batched
+  loop kernel, 8 threads** — the 12.9 s loop figure roughly halved, as
+  the component count predicts. Grid construction is 0.1 s at lmax 128.
+  The BLAS-threading livelock diagnosed here (GSHTrans open issue 8:
+  GEMMs inside the transform's parallel region) is FIXED upstream
+  (15 Oct 2026, GSHTrans `ecc4dcd`: the matrix kernel's order loops run
+  sequentially and the BLAS threads the GEMMs). Post-fix, the unsafe
+  path no longer exists (the nesting is structurally unrepresentable),
+  and the kernels are comparable on the reduced pass: matrix 4.4 s vs
+  loop 4.9 s at lmax 128, a wash at lmax 64 — the old 2.6x matrix edge
+  was partly an artefact of the nesting the fix removed. The matrix
+  kernel stays opt-in only because its gain is now marginal. The Gauss-point
+  memory nodes (~20% fewer) remain to compound.
+- Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
+  mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
+  complex ≈ 11 GB per branch... **the oversampled grid is for products
+  only**: m is band-limited at lmax, stored as coefficients or on the
+  unoversampled grid (257 × 515 ≈ 4.8 GB complex per branch), with
+  synthesis to the big grid per step. Final layout to be settled against
+  measurements; the Wigner table adds 2.6–5.2 GB.
+
+## 7. Implementation order and gates
+
+a. **Spin machinery**: `SurfaceGrid` grows spin-N transforms (complex
+   fields, N = −2..2); the degree ↔ spin maps of §2 and force rows of §3
+   as a `TensorPipeline` beside the 1D `Degree` workspace (built as
+   `GridCoupling`, with `SpinComponents.hpp`). GATE: with
+   zero lateral perturbation (δ = 0, weights uniform in angle), one full
+   grid-pipeline step must reproduce the 1D stepper's state and
+   solutions at machine precision, degree by degree — the round trip
+   through synthesis/multiply/analysis is then exact up to transform
+   round-off. This is the decisive correctness gate and needs no
+   external reference.
+b. **Toroidal operator** (§4), with its own tests.
+c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
+   self-convergence at order 2 with lateral viscosity on; the old sl3d
+   in the weak-contrast limit (tolerances set by its explicit stepping
+   and lack of dealiasing); contraction diagnostics over a contrast
+   ladder (the research measurements).
+d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
+
 ## 7a. Nonlinear Maxwell rheologies (readily buildable here)
 
 Stress-dependent relaxation times — AdGIA's `RelaxationLaw`
@@ -388,7 +389,9 @@ AdGIA's `RelaxationLaw` path.
   groups at reduced lmax would save transform work. Declined because it
   fragments the cross-node batches and complicates the entry/exit
   bookkeeping for a saving concentrated in the few deep nodes of a
-  graded mesh; revisit only if production profiles say otherwise.
+  graded mesh; revisit only if production profiles say otherwise. Built
+  since, as `transform_degrees` (node blocks by depth, each transformed at
+  its own degree; [radial-partitioning.md](../radial-partitioning.md) §6).
 - The grid (its Wigner table is the gigabytes) is shared: SurfaceGrid is
   a cheap handle to one immutable GSHTrans grid, and GridCoupling /
   Viscoelastic3D accept an existing grid. One grid per resolution: the

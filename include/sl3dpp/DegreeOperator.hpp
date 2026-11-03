@@ -3,8 +3,8 @@
 /**
  * @file DegreeOperator.hpp
  * @brief The degree-l system of the loading problem: dofs, band assembly,
- * factorisation, right-hand sides. A port of pyslfp's
- * `love_numbers.assembly.DegreeSystem`, non-dimensional throughout.
+ * factorisation, right-hand sides. Corresponds to pyslfp's
+ * `love_numbers.assembly.DegreeSystem`; non-dimensional throughout.
  *
  * For one spherical-harmonic degree l, with k^2 = l(l + 1), the unknowns
  * are the radial and tangential displacement scalars U, V and the
@@ -27,7 +27,7 @@
  * centre-of-mass frame); for l = 0 there is no tangential dof, fluid
  * regions are mu = 0 elastic media, and U(0) = 0 is imposed at a centre.
  * Degrees above zero act on the element subset of the one global mesh
- * where the solution is not negligible (docs/design.md §3).
+ * where the solution is not negligible (docs/design.md).
  *
  * The system is symmetric, stored as an upper band, scaled symmetrically
  * by its diagonal and factorised on construction: banded Cholesky, falling
@@ -36,7 +36,7 @@
  * system is solved by substructuring (detail/BandSubstructure.hpp): each
  * segment of the mesh between cuts eliminates its interior on its own, and
  * the cut nodes' dofs solve together, the algebra of a solve distributed
- * over radial segments (docs/dev/radial-substructuring.md).
+ * over radial segments (docs/radial-partitioning.md).
  *
  * With `gravitating = false` the same discretisation solves the
  * non-gravitating problem of the cross-code benchmark hierarchy: the
@@ -78,7 +78,7 @@ class DegreeOperator {
     /// The relative level below which a degree's solution is truncated
     /// with depth.
     double eps = 1e-8;
-    /// The truncation-radius rule (docs/design.md §3).
+    /// The truncation-radius rule (docs/design.md).
     TruncationRule truncation = TruncationRule::Graded;
     /// A shear modulus at the memory points to add (MemoryPoints.hpp):
     /// with the long-term material, the elastic or a step's effective

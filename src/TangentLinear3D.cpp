@@ -598,10 +598,10 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
     }
     if (ev.options_.rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
-          "the material tangent is built without rotational feedback yet");
+          "the material tangent takes no rotational feedback");
     }
     if (op.GetOptions().collectives.Distributed()) {
-      throw std::invalid_argument("the material tangent is not distributed yet");
+      throw std::invalid_argument("the material tangent is not distributed");
     }
   }
 

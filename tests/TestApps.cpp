@@ -538,7 +538,7 @@ TEST_F(AppsTest, The3DCommandsCalibrateUnderMigratingShorelines) {
   summary = app::RunKernel3D(kernels);
   const auto ice =
       pm::ReadSurfaceFile(dir_ / "out" / "kernels" / "site_ice_kernels.nc");
-  // about moving shorelines the initial sea level kernel is no longer zero
+  // about moving shorelines the initial sea level kernel is not zero
   const auto& dual = ice.variables.at("initial_sea_level_dual").values;
   EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
       << summary;
@@ -670,7 +670,7 @@ TEST_F(AppsTest, KernelsMatchFiniteDifferencesOfTheForwardValue) {
     EXPECT_LT(std::abs(offset), 1.0e3);
   }
 
-  // the finite-difference gate: the site value's change under an ice
+  // the finite-difference check: the site value's change under an ice
   // bump at the final date equals the thickness duals' prediction
   static_cast<void>(
       app::RunKernel1D(config_with("plus.nc", "plus.json", "out_plus")));

@@ -5,7 +5,7 @@
  * @brief The sea level engine: the gravitationally consistent sea level
  * equation — linear, generalised, or nonlinear with migrating shorelines,
  * with the rotational feedbacks — for whatever Love numbers it is given.
- * A port of pyslfp's `core.sea_level` (its docstrings and
+ * Corresponds to pyslfp's `core.sea_level` (its docstrings and
  * `pyslfp_theory.tex` are the authoritative statements), on GSHTrans
  * fields.
  *

@@ -2,7 +2,7 @@
  * @file TestUnitsParity.cpp
  * @brief Scales.hpp mirrors planetmodel::units exactly: the library keeps
  * its own copy of the constants and factors rather than aliasing
- * planetmodel's, and this parity gate holds the copy to them, constant by
+ * planetmodel's, and this parity test holds the copy to them, constant by
  * constant and factor by factor.
  */
 

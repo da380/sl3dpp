@@ -3,7 +3,7 @@
 // per rank: every spheroidal and toroidal degree to lmax 32 is solved
 // collectively, the ranks' parts (each its own interiors, rank 0 the cut
 // nodes) are summed into the whole solution, and that is held to the
-// serial substructured solve's gate: residuals within a few times the
+// serial substructured solve's criteria: residuals within a few times the
 // direct solve's, and agreement as far as the systems determine their
 // solutions. Then the 3D step and the coupled evolution, distributed
 // (each rank its segment's memory nodes, the cuts balanced on the
@@ -348,8 +348,8 @@ TEST(Distributed, TheLateralStepMatchesTheOneProcessStep) {
   const auto worstSurface = MaxOverRanks(surface);
   const auto worstMemory =
       MaxOverRanks(SliceDifference(op, got.state, whole, want.state));
-  // Round-off of another summation order (MPI's): 5e-16 and 2.4e-14 on
-  // two ranks, 1.8e-13 and 1.1e-13 on four, when written.
+  // Round-off of another summation order (MPI's): measured 5e-16 and
+  // 2.4e-14 on two ranks, 1.8e-13 and 1.1e-13 on four.
   EXPECT_LT(worstSurface, 1e-11);
   EXPECT_LT(worstMemory, 1e-11);
 }
@@ -420,7 +420,7 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
         EXPECT_EQ(got[n].oceanFunction, want[n].oceanFunction) << n;
       }
     }
-    // 6e-16 to 5e-15 on two to four ranks when written
+    // measured 6e-16 to 5e-15 on two to four ranks
     EXPECT_LT(MaxOverRanks(worst), 1e-12)
         << (migrating ? "migrating" : "frozen");
   }
@@ -516,7 +516,7 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
           Relative(kernel, std::span(want.logViscosityKernel3D[0])
                                .subspan(all.FieldOffset(first), kernel.size()));
     }
-    // 3e-15 and 4e-14 with threads for ranks when written
+    // measured 3e-15 and 4e-14 with threads for ranks
     const auto label = migrating ? "migrating" : "frozen";
     EXPECT_LT(MaxOverRanks(worstIce), 1e-11) << label;
     EXPECT_LT(MaxOverRanks(worstViscosity), 1e-11) << label;

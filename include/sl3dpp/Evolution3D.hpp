@@ -3,7 +3,7 @@
 /**
  * @file Evolution3D.hpp
  * @brief Forward GIA with lateral viscosity: the coupled loop of docs/design.md
- * §6 — one combined within-step fixed point over the ocean load, the rotational
+ * — one combined within-step fixed point over the ocean load, the rotational
  * feedback and the lateral viscosity term, under one Anderson mixer.
  *
  * Per step, the opened 3D step (Viscoelastic3D::OpenStep) holds the
@@ -15,8 +15,7 @@
  * and centrifugal channels from the SLE's answer, and updates the strain
  * through the step's reference solves. With no lateral perturbation the
  * channels are strain-independent, the loop converges on its first pass,
- * and the history equals the 1D coupled evolution's — the coupled
- * zero-lateral gate.
+ * and the history equals the 1D coupled evolution's.
  *
  * Units follow SeaLevelEvolution: times, the ice-load callable and the
  * returned fields are in the SLE solver's non-dimensional scheme; the

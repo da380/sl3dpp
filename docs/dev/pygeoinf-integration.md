@@ -2,8 +2,9 @@
 
 *Written 24 October 2026 against sl3dpp ebfc3d5 (develop) and pygeoinf's
 `refactor` branch at 4844c5f, where v2 lives as `pygeoinf2/`, unfinished
-and unreleased. A planning note: nothing here is built. It is to be taken
-up again once pygeoinf v2 is released, when the D-numbers (pygeoinf's
+and unreleased. A planning note. Of sl3dpp's part, the tangent-linear
+model and the discrete 3D transpose (§6 items 6–7) are built since; the
+rest is not. It is to be taken up again once pygeoinf v2 is released, when the D-numbers (pygeoinf's
 `pygeoinf2/DECISIONS.md`) and the file references below need re-checking
 against the released code. §8 lists features pygeoinf v2 could build in
 for this use.*
@@ -52,20 +53,24 @@ not into the spaces as such (§3).
 **sl3dpp.**
 
 - Forward evolutions, 1D and 3D (`Evolution.hpp`, `Evolution3D.hpp`), and
-  measurement duals (`Measurements.hpp`; `Measurement`,
-  `include/sl3dpp/Adjoint.hpp:67`).
-- `IceKernels::loadDuals` (`include/sl3dpp/Adjoint.hpp:97`):
+  measurement duals (`Measurements.hpp`; `Measurement` in `Adjoint.hpp`).
+- `IceKernels::loadDuals` (`Adjoint.hpp`):
   `dJ = sum_n int loadDuals[n] df_n dS`, an L2 density per time node.
-- `Kernels3D::logViscosityKernel3D` (`include/sl3dpp/Adjoint3D.hpp:99`):
-  the radial quadrature folded in, `dJ = sum_node int K dδ dOmega`, which
-  is already a derivative in pygeoinf's sense.
-- 3D has only the continuous adjoint (`include/sl3dpp/Adjoint3D.hpp:129`);
-  the discrete 3D transpose is designed in [adjoints.md](adjoints.md) §6b
-  and not built.
-- δ enters `Viscoelastic3D` as a callable sampled at construction
-  (`include/sl3dpp/Viscoelastic3D.hpp:105`).
-- No tangent-linear model and no Python bindings. design.md §1 already
-  places inversion drivers in an external framework.
+- `Kernels3D::logViscosityKernel3D` (`Adjoint3D.hpp`): the radial
+  quadrature folded in, `dJ = sum_node int K dδ dOmega`, which is already
+  a derivative in pygeoinf's sense.
+- Both adjoints in 3D as in 1D (`AdjointSolver3D::Options::method`): the
+  continuous one by default and the exact discrete transpose
+  ([adjoints.md](adjoints.md) §12), the 3D discrete one single-process.
+- δ enters `Viscoelastic3D` as a callable sampled at construction (its
+  constructor's `delta`).
+- Tangent-linear runs, 1D and 3D (`TangentLinearSolver`,
+  `TangentLinearSolver3D`), the 3D one along log-viscosity directions
+  through `TangentLinearSolver3D::ItauOfLogViscosity`, and second-order
+  adjoints, the Hessian's action on a direction (`SecondOrderKernels`,
+  1D and 3D; [adjoints.md](adjoints.md) §8–§11).
+- No Python bindings. design.md §1 already places inversion drivers in an
+  external framework.
 
 ## 3. Where the cost is, and the boundary rule
 
@@ -186,7 +191,8 @@ the weighted measurements. L-BFGS on the MAP objective needs nothing more:
 `MaximumAPosteriori` uses only `derivative.adjoint`
 (pygeoinf's `inference/laplace.py:199`). Gauss-Newton-CG, the
 model-space Laplace covariance and `random_eig` of the prior-preconditioned
-Hessian need `J v`, the tangent model, as well; but see the next item.
+Hessian need `J v`, the tangent model (`TangentLinearSolver3D`), as well;
+but see the next item.
 
 **The data-space route needs only adjoints.** GIA data are few (10^2 to
 10^4) against models of 10^4 to 10^6 components. With the kernels
@@ -220,9 +226,13 @@ and the model space is a `DirectSum`.
 6. A tangent-linear model of the 3D evolution with respect to δ. δ enters
    only through `itau_ref exp(-δ)`, so the tangent is the same step with an
    extra source term in the memory update, and `OpenStep::Converge` serves
-   it. Gated by a Taylor test and by `(J v, y) = (v, J* y)`.
-7. The discrete 3D transpose ([adjoints.md](adjoints.md) §6b), for the
-   Krylov and low-rank methods (§7 item 1).
+   it. Gated by a Taylor test and by `(J v, y) = (v, J* y)`. Built:
+   `TangentLinearSolver3D` along log-viscosity directions
+   (`ItauOfLogViscosity`), gated against central differences and, by the
+   discrete method, by the pairing identity with the discrete 3D kernels
+   ([adjoints.md](adjoints.md) §10, §12).
+7. The discrete 3D transpose, for the Krylov and low-rank methods (§7
+   item 1). Built ([adjoints.md](adjoints.md) §12), single-process.
 
 ## 7. Things that will bite
 
@@ -369,9 +379,9 @@ released.
 3. δ by values, Route A with `P` and `P^T`, L-BFGS MAP on a synthetic
    lateral anomaly from relative sea level and uplift rates; then the
    data-space Gauss-Newton of §5 with the continuous kernels.
-4. The tangent model and the discrete 3D transpose: model-space
-   Gauss-Newton-CG, the low-rank Laplace posterior, the joint ice and
-   viscosity problem.
+4. Model-space Gauss-Newton-CG, the low-rank Laplace posterior, the joint
+   ice and viscosity problem, on the tangent model and the discrete 3D
+   transpose (both built in sl3dpp, §6 items 6–7).
 5. Route B, only if wanted.
 
 ## 11. Open decisions

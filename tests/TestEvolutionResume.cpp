@@ -1,7 +1,7 @@
 // Checkpointed evolution: a run hands out its recurrence at the asked
 // stride, and a fresh evolution resumed from a mid-run checkpoint
 // reproduces the uninterrupted history node for node, bitwise on one
-// thread — the gate that the checkpoint bookkeeping is right.
+// thread, which checks the checkpoint bookkeeping.
 
 #include <gtest/gtest.h>
 

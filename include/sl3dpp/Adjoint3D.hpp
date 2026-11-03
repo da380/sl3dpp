@@ -4,12 +4,11 @@
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
  * evolution: by the CONTINUOUS adjoint — the preferred path for the
- * viscosity (docs/dev/adjoints.md §1, §6) — or by the DISCRETE transpose
- * of the coupled time-stepped map (§6b, AdjointDiscrete3D.cpp), which
- * alone forms the material kernels (§13): ice-history kernels, the full
- * 3D inverse-relaxation-time kernel on the (memory node × angular grid)
- * with its spherical reduction, and, on request, the lateral bulk and
- * shear modulus kernels in the same layout.
+ * viscosity (docs/dev/adjoints.md) — or by the DISCRETE transpose of the
+ * coupled time-stepped map (AdjointDiscrete3D.cpp): ice-history kernels,
+ * the full 3D inverse-relaxation-time kernel on the (memory node ×
+ * angular grid) with its spherical reduction, and, on request, the
+ * lateral bulk and shear modulus kernels in the same layout.
  *
  * The continuous adjoint equations have the forward problem's form, so
  * between observations the adjoint state is stepped by the SAME coupled
@@ -22,9 +21,8 @@
  * and memory node, the null-basis tensor contraction of the adjoint
  * state with the forward (d - m), over itau, with the branch modulus
  * and radial quadrature — the metric weights are fixed by requiring the
- * angle-uniform limit to reproduce the (gated) 1D force weights
- * (4/3, k^2, k^2 (k^2 - 2)) exactly, which is also the zero-lateral
- * gate's identity.
+ * angle-uniform limit to reproduce the 1D force weights
+ * (4/3, k^2, k^2 (k^2 - 2)) exactly.
  *
  * Conventions follow Adjoint.hpp: times increasing in SLE units,
  * measurements keyed by node index, duals paired by the surface
@@ -118,7 +116,7 @@ struct Kernels3D {
   /// dJ / d kappa(x) and dJ / d mu(x) in the itauKernel3D layout (an
   /// angular density per memory node, the radial quadrature folded in),
   /// material units — the transpose of TangentPerturbation3D::material
-  /// (docs/dev/adjoints.md §13) — and their angular integrals per node,
+  /// (docs/dev/adjoints.md) — and their angular integrals per node,
   /// which pair with angle-uniform directions as the 1D kappaKernel and
   /// muKernel do at that node. Empty unless Options::material_kernels
   /// (with a trajectory; Discrete exact, Continuous at the commute level).
@@ -167,11 +165,10 @@ struct KernelDerivatives3D {
 class AdjointSolver3D {
  public:
   struct Options {
-    /// Continuous (the default and preferred path, §6a) or Discrete: the
-    /// exact transpose of the coupled time-stepped map (§6b), the
-    /// transposed within-step fixed point solved by the same iteration;
-    /// gated against the tangent-linear run at solver tolerance. Not
-    /// distributed yet.
+    /// Continuous (the default and preferred path) or Discrete: the
+    /// exact transpose of the coupled time-stepped map, the transposed
+    /// within-step fixed point solved by the same iteration. Discrete is
+    /// not distributed.
     AdjointMethod method = AdjointMethod::Continuous;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
@@ -223,7 +220,7 @@ class AdjointSolver3D {
   /**
    * @brief The 3D second-order adjoint, continuous: the kernels and their
    * derivative along a direction v — the Hessian's action on v (the 3D
-   * form of AdjointSolver::SecondOrderKernels; docs/dev/adjoints.md §11).
+   * form of AdjointSolver::SecondOrderKernels; docs/dev/adjoints.md).
    * The adjoint state and its derivative are both stepped by the reversed
    * coupled machinery; the derivative state's step carries the continuous
    * first-order drive built from the adjoint trajectory (pointwise, as

@@ -4,7 +4,7 @@
  * @file Distributed.hpp
  * @brief The radial distribution over MPI ranks: one contiguous segment of
  * the radial mesh per rank, the per-degree solves substructured over the
- * segments (docs/dev/radial-substructuring.md). Compiled only with the CMake
+ * segments (docs/radial-partitioning.md). Compiled only with the CMake
  * option SL3DPP_WITH_MPI, which defines SL3DPP_HAVE_MPI; without it this
  * header declares nothing.
  *

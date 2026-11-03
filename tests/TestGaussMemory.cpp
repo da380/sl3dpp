@@ -1,4 +1,4 @@
-// Internal variables at the Gauss points (docs/design.md §5): 20% fewer memory
+// Internal variables at the Gauss points (docs/design.md): 20% fewer memory
 // points than at the GLL nodes; the implicit step stays an exact elimination of
 // the new internal variables (the long-term shear at the nodes, the branches'
 // at the points, MemoryPoints.hpp), and stable however far a step outruns the
@@ -258,8 +258,8 @@ TEST(GaussMemory, StableAtLargeSteps) {
   // the effective operator stays positive (MemoryPoints.hpp), and the
   // Gauss run stays with the GLL one (gap 1.7e-9). Integrating the
   // unrelaxed shear at the nodes and subtracting the relaxed share at the
-  // points instead left a quadrature difference of no definite sign: the
-  // run grew from round-off to a gap of 0.5 here. (Much further out, near
+  // points instead leaves a quadrature difference of no definite sign: the
+  // run grows from round-off to a gap of 0.5 here. (Much further out, near
   // h = 1e4 over hundreds of steps, both point sets grow, and alike: that
   // growth does not depend on where the internal variables live.)
   auto body = Body::Make({.lmax = kLmax});

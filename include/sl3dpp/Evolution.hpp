@@ -3,7 +3,7 @@
 /**
  * @file Evolution.hpp
  * @brief Forward GIA: ice history in, sea level, displacement, potential
- * and rotation histories out. A port of pyslfp's
+ * and rotation histories out. Corresponds to pyslfp's
  * `viscoelastic.evolution.SeaLevelEvolution`: each implicit step is opened
  * before its end-time loads are known, its memory responses and inertia
  * moment enter the sea level equation through the generalised response

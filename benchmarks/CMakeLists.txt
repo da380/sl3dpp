@@ -7,7 +7,7 @@ add_executable(step_timing step_timing.cpp)
 target_link_libraries(step_timing PRIVATE sl3dpp::sl3dpp)
 
 # The serial prototype of the radially substructured degree solve
-# (docs/dev/radial-substructuring.md).
+# (docs/radial-partitioning.md).
 add_executable(substructure_prototype substructure_prototype.cpp)
 target_link_libraries(substructure_prototype PRIVATE sl3dpp::sl3dpp)
 # ... and the library's substructured solves on the real degree systems.

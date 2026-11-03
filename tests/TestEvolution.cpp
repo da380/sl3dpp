@@ -1,6 +1,6 @@
 // The coupled GIA evolution: the elastic-rheology limit against the
 // fingerprint solver (machine-tight, fully self-contained), qualitative
-// relaxation, and the pyslfp coupled gate.
+// relaxation, and the coupled comparison with pyslfp.
 
 #include <gtest/gtest.h>
 

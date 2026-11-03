@@ -2,9 +2,9 @@
 // objective and their derivative along a direction v of the model
 // parameters, by the discrete method (the exact derivative of the exact
 // gradient) and by the continuous one (the second-order adjoint equations
-// discretised by the forward stepper). Ports of pyslfp's
+// discretised by the forward stepper), as pyslfp's
 // `second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
-// under the sharp flotation rule; docs/dev/adjoints.md §9.
+// under the sharp flotation rule; see docs/dev/adjoints.md.
 
 #include <algorithm>
 #include <cmath>

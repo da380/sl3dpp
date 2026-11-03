@@ -116,7 +116,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const bool material = options_.material_kernels;
   if (second && options_.method == AdjointMethod::Discrete) {
     throw std::invalid_argument(
-        "the discrete 3D second-order adjoint is not built: use Continuous");
+        "the 3D second-order adjoint is continuous: use Continuous");
   }
   if (second && trajectory == nullptr) {
     throw std::invalid_argument(
@@ -615,7 +615,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
   };
 
-  // -- the material pairing (docs/dev/adjoints.md §13, continuous)
+  // -- the material pairing (continuous; docs/dev/adjoints.md)
   // The continuous adjoint displacement at a node (the unrelaxed solve
   // under the adjoint memory and closed load) paired with the forward
   // solution and memory there: the energy contraction of the grid
@@ -631,7 +631,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
-          "the material kernels are built without rotational feedback yet");
+          "the material kernels take no rotational feedback");
+    }
+    if (collectives.Distributed()) {
+      throw std::invalid_argument("the material kernels are not distributed");
     }
     kappaKernel.assign(values, 0.0);
     muKernel.assign(values, 0.0);

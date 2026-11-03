@@ -122,7 +122,7 @@ struct LoveNumberOptions {
 /// for each forcing (DegreeOperator::ApplyVariation and the forcing
 /// variations), read off at the surface as the numbers are; the axial
 /// inertia moments carry the density's variation too. Exact for the map
-/// Material::Shifted, which the gates drive.
+/// Material::Shifted.
 [[nodiscard]] LoveNumbers ComputeLoveNumberDerivatives(
     const Material& material, int lmax, const MaterialDirection& direction,
     LoveNumberOptions options = {});

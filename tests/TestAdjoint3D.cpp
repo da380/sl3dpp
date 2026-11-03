@@ -1,4 +1,4 @@
-// The 3D continuous adjoint: the zero-lateral gate — with
+// The 3D continuous adjoint: the zero-lateral limit — with
 // delta = 0 the 3D sweep's ice kernels and spherically reduced viscosity
 // kernels must reproduce the 1D continuous sweep's — and the
 // finite-difference check of the full 3D log-viscosity kernel with
@@ -129,7 +129,7 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
 
   // The 1D continuous sweep. At the GLL nodes, where the 3D memory nodes
-  // are the 1D kernel's own; TestGaussMemory3D is the Gauss-point gate.
+  // are the 1D kernel's own; TestGaussMemory3D covers the Gauss points.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
   SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
@@ -304,7 +304,7 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
   // The full 3D kernel with lateral structure on: dJ/d delta paired
   // with an analytic direction against central differences of the
   // coupled forward. The continuous kernel is exact only up to the
-  // discretise/transpose commute error, so the gate runs in the
+  // discretise/transpose commute error, so the test runs in the
   // resolved regime and asks for agreement at that level, improving
   // under step refinement.
   auto scene = Scene::Make(1e22);

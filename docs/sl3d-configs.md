@@ -44,7 +44,7 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
 
 (the binding flags are MPICH's; another MPI names them otherwise). The
 run is split over radius, one contiguous radial segment per rank, the cuts
-balancing the transform work (docs/dev/radial-substructuring.md §11-12):
+balancing the transform work ([radial-partitioning.md](radial-partitioning.md) §7 and §9):
 each rank holds and steps its own segment's internal variables, with its
 threads inside, and every rank reads the inputs and solves the sea level
 equation, the first rank's solution serving all. One rank per socket (or
@@ -543,7 +543,7 @@ adjoint.
 | --- | --- | --- | --- |
 | the run members | | | as for evolve, above |
 | `record_stride` | integer >= 1 | 1 | record the forward state at every `record_stride`-th node (and the last); the sweep rebuilds the states in between |
-| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"`; `kernel` takes `"continuous"` alone |
+| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"`; `kernel` takes `"continuous"` alone: sl3d's 3D kernels use the continuous adjoint, and the library's discrete 3D sweep is not exposed by the app |
 | `trajectory.directory` | path | none | `kernel` alone: spill the recorded states to this directory instead of holding them in memory |
 | `measurements` | array | required | the measurements, at least one (below) |
 | `output` | path | required | the directory the kernel files go into |

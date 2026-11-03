@@ -5,8 +5,8 @@ numerical choices and the rules its results are held to. This page states
 the design as it stands. The derivations and convergence measurements of
 [the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md),
 and a [code map of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md), are dated
-developer notes in `docs/dev`, kept as written; units, signs and code style
-are in [conventions.md](conventions.md).
+developer notes in `docs/dev`; code style and testing conventions are in
+[conventions.md](conventions.md).
 
 ## 1. Scope
 
@@ -23,17 +23,10 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
 | 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity, by the continuous adjoint or the exact discrete transpose (1D and 3D) | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
-| Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
-| Second-order adjoints: the Hessian's action on a direction, as derivatives of the kernels | `Adjoint.hpp` (`SecondOrderKernels`) |
-| 3D tangent-linear runs: the derivative of the coupled lateral-viscosity evolution along loads, thickness, initial sea level and itau(x), and the second-order run | `TangentLinear3D.hpp` |
-| 3D second-order adjoints: the Hessian's action on a direction for 3D viscosity objectives | `Adjoint3D.hpp` (`SecondOrderKernels`) |
-| Material derivatives of the static elastic problem: the variation operator and the Love-number derivatives along directions in κ, μ and ρ (self-consistent gravity) | `Material.hpp` (`MaterialDirection`, `Variation`, `Shifted`), `DegreeOperator.hpp` (`ApplyVariation`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`) |
-| The first-order (Born) response of the static elastic problem to lateral δμ(x) and δκ(x), through the grid pipeline: the start of a 3D elastic reference | `ElasticPerturbation3D.hpp` |
-| The 1D tangent-linear along a direction of the moduli (the effective system's variation and the memory force's branch moduli, per step; the start's unrelaxed response) | `TangentLinear.hpp` (`TangentPerturbation::material`), `Viscoelastic.hpp` (`ViscoelasticStep::AddForce`) |
-| The 3D tangent-linear along a lateral direction of the moduli on the memory nodes, the three terms through the grid pipeline into the opened step | `TangentLinear3D.hpp` (`MaterialDirection3D`, `TangentPerturbation3D::material`), `Viscoelastic3D.hpp` (`OpenStep::AddForce`) |
-| The 1D material kernels dJ/dκ(r), dJ/dμ(r) by the discrete sweep: the transpose of the material tangent, through the nodal material gradient of the degree form | `Adjoint.hpp` (`Options::material_kernels`, `IceKernels::kappaKernel/muKernel`), `DegreeOperator.hpp` (`MaterialGradient`) |
-| The material kernels dJ/dκ, dJ/dμ, 1D and 3D (the 3D ones on the coupling's grid with spherical reductions): exact by the discrete sweeps, at the commute level by the continuous ones | `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`, `IceKernels::kappaKernel/muKernel`, `Kernels3D::kappaKernel3D/muKernel3D`) |
-| The static kernels: the Love numbers' in κ(r), μ(r) per channel and degree, and the lateral kernels of a static surface measurement in 3D | `LoveNumbers.hpp` (`ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`StaticKernels`, `SolveSurfaceDual`) |
+| Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
+| Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
+| Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives (in ρ too, gravity self-consistent) and Love-number kernels; its first-order (Born) response to lateral δμ(x), δκ(x) and the lateral kernels of a surface measurement; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions, 1D and 3D, by both sweeps (discrete exact, continuous at the commute level) | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp`, `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
+| The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -51,7 +44,6 @@ Deliberately out of scope:
   (`export_ice_history`). sl3dpp reads their files (§13).
 - **Inversion drivers.** The kernels are the deliverable; an inversion
   loop belongs to an external framework.
-- **Distributed memory** (§12).
 
 ## 2. Formulation
 
@@ -64,7 +56,9 @@ Deliberately out of scope:
   Dirichlet-to-Neumann term at the surface; a domain truncated above the
   centre is closed by the interior continuation at its base. The
   formulation follows pyslfp's `love_numbers`, whose `pyslfp_theory.tex`
-  is the authoritative statement of signs and normalisations.
+  is the authoritative statement of signs and normalisations: g = ∂_r Φ >
+  0, the sea level ξ = −u − (φ + ψ)/g + c, and the Love numbers
+  normalised with the radial model's body triple (b, g, G).
 - **Rheology.** Generalised Maxwell (Prony) branches in shear on an
   isotropic elastic background where any branch is active:
   T = κ tr(ε) I + 2μ∞ d + Σ_k 2μ_k (d − m_k), dm_k/dt = (d − m_k)/τ_k,
@@ -104,8 +98,13 @@ Deliberately out of scope:
   Legendre nodes (5 per element by default) serves every degree and every
   grid field. Every model boundary is an element boundary, and each span
   is divided uniformly into elements no wider than 0.1 a/(lmax + 1)
-  (planetmodel's rule). Nodal arrays are stored per element, so a shared
-  node carries one value from each side.
+  (planetmodel's rule). `RadialMesh::CreateGraded` (pyslfp's
+  `graded_mesh`) widens the elements with depth instead, each degree
+  keeping the uniform rule's resolution over its own subset; the
+  benchmarks (`step_timing`, `fortran_gate`, `substructure_timing`,
+  `distributed_*`) use it, the `sl3d` program and the examples the uniform
+  rule. Nodal arrays are stored per element, so a shared node carries one
+  value from each side.
 - **Degree truncation is a subset, not a sub-mesh.** A degree-l solve
   acts on the elements above its truncation radius, snapped to an element
   boundary. The pseudospectral 3D coupling needs every degree's
@@ -139,7 +138,8 @@ Deliberately out of scope:
   Y^N_lm = √((2l+1)/4π) d^l_{Nm} e^{imφ}, forward transform ∫ conj(Y) f dΩ
   — the old Fortran's basis. The real orthonormal pyshtools convention of
   pyslfp and planetmodel exists only in the converters of
-  `ShConventions.hpp`.
+  `ShConventions.hpp`, which the rotational feedback's degree-2, order-1
+  terms and the expansion-coefficient measurements use.
 - **Grids.** Fields live on Gauss–Legendre grids (`SurfaceGrid`, a cheap
   handle to one immutable GSHTrans grid, shared where the resolution is
   the same). The sea level grid is band-exact; the 3D coupling's grid
@@ -147,7 +147,7 @@ Deliberately out of scope:
   products are dealiased (the Fortran never dealiased). With
   `transform_degrees` the memory nodes fall into blocks by depth, each on
   a grid of its own degree, just covering the degrees its solution
-  carries under the truncation (docs/dev/radial-substructuring.md §10).
+  carries under the truncation ([radial-partitioning.md](radial-partitioning.md) §6).
 - **Reality reduction.** The strain and memory tensors are real, so of the
   five canonical trace-free components (spins −2..2) only spins −2 and −1
   are stored, as complex fields, and spin 0 as a real field; spins +1 and
@@ -234,7 +234,7 @@ Deliberately out of scope:
   lateral mean; the file's own radial reference is the alternative.
 - **Memory.** One internal-variable tensor (one branch, every memory node)
   is about 0.7 GB at lmax 64, 4 GB at 128, 21 GB at 256 and 98 GB at 512,
-  and a step holds several.
+  and a step holds several; README, *Memory*, has the levers.
 
 ## 7. Adjoints and kernels
 
@@ -245,13 +245,12 @@ Deliberately out of scope:
   differ by the discretise–transpose commute error, which is large exactly
   when the forward run is under-resolved, so their disagreement is a
   resolution diagnostic. `AdjointSolver3D` offers both too: the
-  continuous adjoint (the default) and, since 3 November 2026, the
-  discrete transpose of the coupled lateral-viscosity map — the
-  transposed within-step fixed point solved by the same iteration, with
-  the force assembly as the transpose of the strain evaluation under the
-  energy pairing; exact against the 3D tangent-linear run at 1e-8 and
-  second order to solver precision in the Taylor test. Not distributed
-  yet.
+  continuous adjoint (the default) and the discrete transpose of the
+  coupled lateral-viscosity map — the transposed within-step fixed point
+  solved by the same iteration, with the force assembly as the transpose
+  of the strain evaluation under the energy pairing; exact against the 3D
+  tangent-linear run at 1e-8 and second order to solver precision in the
+  Taylor test. The discrete 3D sweep is single-process.
 - **Measurements.** Linear functionals of one node's outputs,
   J = a² ∫ g ξ dΩ + a² ∫ g_u u dΩ + a² ∫ g_φ φ dΩ + g_ω·ω, keyed by node
   index into the time grid. `Measurements.hpp` builds the duals: cap means,
@@ -308,13 +307,6 @@ Deliberately out of scope:
   derivative of the coupled forward (gated against central differences
   with Richardson to 1e-6); the continuous run is the transpose of the
   continuous 3D sweep to the commute error.
-- **3D second-order adjoints** (`AdjointSolver3D::SecondOrderKernels`):
-  the continuous sweep carrying the derivative adjoint state along v,
-  stepped with the continuous drive of the adjoint trajectory through the
-  same `AddMemory`; returns `KernelDerivatives3D` (the views' derivatives,
-  the itau kernel's derivative and its spherical reduction, and the
-  log-viscosity kernel's derivative, the Hessian-vector product of the
-  log parameterisation). Continuous only, as the 3D first-order sweep.
 - **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
   `second_order_adjoint_ice_history`): the kernels and their derivative
   along a direction v, the Hessian's action on v, as `KernelDerivatives`
@@ -326,6 +318,49 @@ Deliberately out of scope:
   functions held, the derivative state stepped with the continuous drive
   of the adjoint trajectory. A Hessian-vector product costs the forward
   run, v's tangent-linear run and the second-order sweep.
+- **3D second-order adjoints** (`AdjointSolver3D::SecondOrderKernels`):
+  the continuous sweep carrying the derivative adjoint state along v,
+  stepped with the continuous drive of the adjoint trajectory through the
+  same `AddMemory`; returns `KernelDerivatives3D` (the views' derivatives,
+  the itau kernel's derivative and its spherical reduction, and the
+  log-viscosity kernel's derivative, the Hessian-vector product of the
+  log parameterisation). Continuous only; the discrete 3D second-order
+  sweep is not built.
+- **Material derivatives** (`MaterialDirection`: δκ, δμ, δρ on the mesh's
+  nodes). `Material::Variation` is the exact linearisation of
+  `Material::Shifted`, gravity's variation integrated from δρ so that the
+  background gravity, the stratification and the interface terms move
+  with it; `DegreeOperator::ApplyVariation` applies the degree system's
+  variation and `ComputeLoveNumberDerivatives` gives the Love numbers'.
+  The time-stepped tangent-linear runs take directions in κ and μ
+  (`TangentPerturbation::material`; `TangentPerturbation3D::material` on
+  the memory nodes' grid values), the branch moduli fixed fractions of
+  the unrelaxed modulus and the relaxation times held: the variations of
+  each step's effective system and memory force enter as forces on the
+  step (`AddForce`), and the start's unrelaxed response to the variation
+  seeds the start. Density directions are refused there, and lateral δρ
+  is excluded in 3D.
+- **The lateral Born response** (`ElasticPerturbation3D`): the first-order
+  response of the static elastic problem to lateral δμ(x) and δκ(x),
+  applied through the grid pipeline as the lateral viscosity is (δμ on
+  the deviatoric strain, δκ on the dilatation) and solved on the radial
+  reference systems; it couples degrees and orders by the products'
+  selection rules, and spheroidal to toroidal motion.
+- **Material kernels** (`Options::material_kernels`): dJ/dκ and dJ/dμ,
+  nodal in 1D (`IceKernels::kappaKernel`, `muKernel`) and on the
+  coupling's grid in 3D with spherical reductions
+  (`Kernels3D::kappaKernel3D`, `muKernel3D`). By the discrete sweeps they
+  are the exact transposes of the material tangents (in 1D through the
+  degree form's nodal gradient, `DegreeOperator::MaterialGradient`; in 3D
+  through the grid strains' energy contraction and the dilatations); by
+  the continuous ones, the time quadrature of the adjoint displacement's
+  pairing with the forward solution and memory plus lumped pairings at
+  the observations, at the commute level. They need the recorded
+  trajectory, the memory points at the GLL nodes and no rotational
+  feedback. The static kernels: `ComputeLoveNumberKernels` (the Love
+  numbers' in κ(r), μ(r) per channel and degree) and
+  `ElasticPerturbation3D::StaticKernels` with `SolveSurfaceDual` (the
+  lateral kernels of a static surface measurement).
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
@@ -410,9 +445,10 @@ These hold for the fixture gates here and for the cross-code benchmarks
 
 ## 11. Validation
 
-The suite runs at small degree (lmax ≤ 8) and few steps, each test on one
-thread: the gates are identities, convergence orders and fixture
-comparisons, which small problems pin as tightly as large ones.
+The suite runs mostly at small degree (lmax ≤ 8; some fixture gates and
+the substructuring and distribution tests go to 16–64) and few steps, each
+test on one thread: the gates are identities, convergence orders and
+fixture comparisons, which small problems pin as tightly as large ones.
 
 | Gate | Compared against | Fixture | Tolerance |
 | --- | --- | --- | --- |
@@ -422,9 +458,10 @@ comparisons, which small problems pin as tightly as large ones.
 | `SeaLevelGate.SharpOceanFingerprintNearPyslfp` | pyslfp, sharp flotation ocean | `pyslfp_fingerprint.txt` | 8e-2 in coefficients, 1% ocean area |
 | `EvolutionGate.StepperMatchesPyslfp` | pyslfp's 1D stepper, Love-number histories | `pyslfp_stepper.txt` | 1e-9 |
 | `EvolutionGate.CoupledEvolutionMatchesPyslfp` | pyslfp's coupled 1D GIA run | `pyslfp_evolution.txt` | 1e-5 |
+| `MigratingGate.RunMisfitAndCalibrationMatchPyslfp` | pyslfp's migrating-shoreline run, the gradient of a final sea level misfit, and both calibrations' misfit histories | `pyslfp_migrating.txt` | ocean functions equal; 1e-9 (run), 1e-10 (gradient), 1e-7 (histories) |
 | `AdjointGate` | pyslfp's ice-history load duals (both adjoints) and itau kernels | `pyslfp_kernels.txt` | 1e-5 |
-| `TractionNumbers` | pyslfp's traction numbers, gravitating and not | `e1_traction_numbers.txt` | 1e-10 |
-| `Measurements` (decay time) | pyslfp's decay-time estimator | `decay_time.txt` | 1e-6 relative |
+| `E1Gate.TractionNumbersMatchPyslfp` | pyslfp's traction numbers, gravitating and not | `e1_traction_numbers.txt` | 1e-10 |
+| `DecayTime.MatchesPyslfpOnTheFixture` | pyslfp's decay-time estimator | `decay_time.txt` | 1e-6 relative |
 | `ModelViscosity` | planetmodel's Python reading of model files | `viscosity_*.nc`, `viscosity_probes_*.txt` | 1e-11 |
 | `LateralGate` | the 1D path, with zero lateral variation | — | 1e-11 (pipeline), 1e-10 (step), 1e-8 (coupled evolution) |
 
@@ -453,46 +490,12 @@ Beyond the fixtures:
   continuous run against the continuous 3D kernel's pairing at the
   commute level; the second-order run as the derivative of the first
   with the log parameterisation's second variation, symmetric.
-- **Material derivatives (static).** Gravity's variation exact for
-  polynomial density directions; the variation operator against central
-  differences of the assembled system at 1e-9; the Love-number
-  derivatives against central differences of the shifted material's
-  numbers, Richardson to 1e-7 for every channel, degree and axial number
-  under μ, κ and ρ directions; the reciprocity identities differentiated.
-- **Material tangent, 1D.** The time-stepped tangent-linear along a
-  direction in κ and μ (branch moduli as fixed fractions, times held)
-  against central differences on the shifted material, both schemes,
-  second order with Richardson at 1e-6.
-- **Material kernels, 1D.** The nodal material gradient against the
-  variation operator at 1e-12 for every degree; the discrete κ and μ
-  kernels paired with a direction against the material tangent at 1e-10
-  and against central differences on the shifted material, both
-  schemes.
-- **Continuous material kernels, 1D and 3D.** Against the exact
-  discrete ones on one problem under refinement: a per-cent gap at
-  2.5 kyr steps falling at the schemes' orders, both schemes.
-- **Static material kernels.** The Love-number kernels in κ and μ
-  against the Love-number derivatives at 1e-10 for every channel and
-  degree; the 3D static kernels as the transpose of the Born force at
-  1e-10.
-- **Material kernels, 3D.** The discrete κ(x) and μ(x) kernels paired
-  with lateral directions against the 3D material tangent at 1e-8 with
-  lateral viscosity on, both schemes; the zero-lateral bridge to the 1D
-  material kernels at 1e-7.
-- **Material tangent, 3D.** Angle-uniform directions in κ and μ with
-  lateral viscosity on against central differences on the shifted
-  material (both schemes); the zero-lateral bridge to the 1D material
-  tangent at 1e-7.
-- **Lateral elastic perturbation (Born).** Angle-uniform directions
-  reproducing the 1D Love-number derivatives at 1e-8 through the grid
-  pipeline; the perturbation force symmetric at 1e-10; the selection
-  rules of a single-harmonic direction, spheroidal and toroidal.
-- **The discrete 3D transpose.** The pairing identity with the 3D
-  tangent-linear run at 1e-8 (both schemes, loads and a log-viscosity
-  direction, stride-2 trajectories); zero-lateral equal to the 1D
-  discrete sweep at 1e-8; the machine-grade Taylor test (second order at
-  every step, Richardson to 1e-7); the continuous gap closing under
-  refinement.
+- **Second-order adjoints.** The carried kernels equal to the first-order
+  sweep's at 1e-12; central differences of the gradient along v against
+  the derivatives at second order with Richardson to 1e-6, both schemes;
+  the Hessian symmetric at 1e-9 and adjoint to the second-order
+  tangent-linear run at 1e-9, frozen and migrating; the continuous
+  derivatives converging to the discrete block by block.
 - **3D second-order adjoints.** Zero-lateral equal to the 1D continuous
   second-order sweep at 1e-6 (kernels and derivatives); with lateral
   structure, the carried kernels equal to the first-order sweep's at
@@ -500,12 +503,6 @@ Beyond the fixtures:
   second-order run and its agreement with central differences of the
   continuous kernels all at the commute level, improving under
   refinement.
-- **Second-order adjoints.** The carried kernels equal to the first-order
-  sweep's at 1e-12; central differences of the gradient along v against
-  the derivatives at second order with Richardson to 1e-6, both schemes;
-  the Hessian symmetric at 1e-9 and adjoint to the second-order
-  tangent-linear run at 1e-9, frozen and migrating; the continuous
-  derivatives converging to the discrete block by block.
 - **Adjoints.** The discrete gradient identity to 1e-8 under both schemes;
   finite differences with Richardson extrapolation of the itau kernels;
   the continuous adjoint converging to the discrete under refinement;
@@ -513,6 +510,46 @@ Beyond the fixtures:
   sweep equal to the 1D one at 1e-6, the log-viscosity kernel against
   finite differences at the commute level, and a Taylor test of the
   gradient remainder.
+- **The discrete 3D transpose.** The pairing identity with the 3D
+  tangent-linear run at 1e-8 (both schemes, loads and a log-viscosity
+  direction, stride-2 trajectories); zero-lateral equal to the 1D
+  discrete sweep at 1e-8; the machine-grade Taylor test (second order at
+  every step, Richardson to 1e-7); the continuous gap closing under
+  refinement.
+- **Material derivatives (static).** Gravity's variation exact for
+  polynomial density directions; the variation operator against central
+  differences of the assembled system at 1e-9; the Love-number
+  derivatives against central differences of the shifted material's
+  numbers, Richardson to 1e-7 for every channel, degree and axial number
+  under μ, κ and ρ directions; the reciprocity identities differentiated.
+- **Lateral elastic perturbation (Born).** Angle-uniform directions
+  reproducing the 1D Love-number derivatives at 1e-8 through the grid
+  pipeline; the perturbation force symmetric at 1e-10; the selection
+  rules of a single-harmonic direction, spheroidal and toroidal.
+- **Material tangent, 1D.** The time-stepped tangent-linear along a
+  direction in κ and μ (branch moduli as fixed fractions, times held)
+  against central differences on the shifted material, both schemes,
+  second order with Richardson at 1e-6.
+- **Material tangent, 3D.** Angle-uniform directions in κ and μ with
+  lateral viscosity on against central differences on the shifted
+  material (both schemes); the zero-lateral bridge to the 1D material
+  tangent at 1e-7.
+- **Material kernels, 1D.** The nodal material gradient against the
+  variation operator at 1e-12 for every degree; the discrete κ and μ
+  kernels paired with a direction against the material tangent at 1e-10
+  and against central differences on the shifted material, both
+  schemes.
+- **Material kernels, 3D.** The discrete κ(x) and μ(x) kernels paired
+  with lateral directions against the 3D material tangent at 1e-8 with
+  lateral viscosity on, both schemes; the zero-lateral bridge to the 1D
+  material kernels at 1e-7.
+- **Continuous material kernels, 1D and 3D.** Against the exact
+  discrete ones on one problem under refinement: a per-cent gap at
+  2.5 kyr steps falling at the schemes' orders, both schemes.
+- **Static material kernels.** The Love-number kernels in κ and μ
+  against the Love-number derivatives at 1e-10 for every channel and
+  degree; the 3D static kernels as the transpose of the Born force at
+  1e-10.
 - **Writers and units.** Kernel files round-trip through planetmodel's
   reader at 1e-11; `UnitsParity` holds the constants equal.
 - **External.** The Fortran sl3d's `visco_test` with lateral viscosity
@@ -534,13 +571,9 @@ Beyond the fixtures:
   per-thread partial sums added in thread order.
 - **No BLAS inside the threads.** The banded factorisations and solves
   are the library's own (`detail/BandSolvers.hpp`, LAPACK's unblocked
-  algorithms with LAPACK's storage and pivoting), because a BLAS called
-  from every thread of a degree loop at once fails: OpenBLAS's pthread
-  build runs out of its fixed table of memory buffers and crashes on
-  many-core nodes, and its OpenMP build livelocks when nested. LAPACK
-  remains for small serial solves (the decay fit, Anderson mixing), and
-  GSHTrans's matrix kernel calls BLAS only from outside its own threads,
-  so any BLAS works, with no environment variables to set.
+  algorithms with its storage and pivoting), because a BLAS called from
+  every thread of a degree loop at once fails on many-core nodes; README,
+  *Running*, has the detail.
 - **Reproducibility.** One-thread runs are bitwise reproducible; threaded
   runs agree with them to round-off.
 - **Distributed over radius (MPI, optional).** A production 3D problem
@@ -561,10 +594,12 @@ Beyond the fixtures:
   library calls no MPI itself: `Viscoelastic3D` takes `Collectives`
   (sum, max and share callbacks), which `Distributed.hpp` fills from a
   communicator. The sea level equation is solved on every rank alike and
-  the first rank's solution shared. The 3D adjoint runs the same way, each
-  rank sweeping its own nodes back over its own trajectory, and `sl3d`'s
-  `evolve` and `kernel` run under `mpiexec` with per-rank checkpoints
-  (docs/sl3d-configs.md).
+  the first rank's solution shared. The continuous 3D adjoint and the 3D
+  tangent-linear runs run the same way, each rank sweeping its own nodes
+  over its own trajectory; the discrete 3D sweep, the material tangent and
+  the material kernels are single-process. `sl3d`'s `evolve` and `kernel`
+  run under `mpiexec` with per-rank checkpoints
+  ([sl3d-configs.md](sl3d-configs.md)).
 
 ## 13. Dependencies and boundaries
 
@@ -576,6 +611,7 @@ Beyond the fixtures:
 | FFTWpp, NumericConcepts | through GSHTrans |
 | planetmodel | decks, model files, surface files, units, JSON configs |
 | LAPACK, BLAS | small serial solves: the decay fit and Anderson mixing |
+| MPI (optional, `SL3DPP_WITH_MPI`) | the collectives of the radial distribution (`Distributed.hpp`) and `sl3d` over ranks |
 | netCDF-C | through planetmodel |
 
 - **Pins.** The sibling libraries are pinned to exact commits
@@ -605,8 +641,9 @@ Beyond the fixtures:
 
 What is not built, or holds only within limits:
 
-- **The discrete 3D adjoint.** In 3D only the continuous adjoint exists;
-  its design is in [dev/adjoints.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md) §6b.
+- **The discrete 3D sweeps.** The discrete 3D adjoint is single-process
+  (refused when distributed), and the discrete 3D second-order sweep is
+  not built (refused; the continuous one serves).
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
@@ -615,10 +652,11 @@ What is not built, or holds only within limits:
   every pass, so a cell sitting at the flotation threshold can flip between
   passes and hold the residual above a tight `coupled_rtol`; such a node is
   reported unconverged rather than accepted. The tests' marine caps converge
-  at 1e-12. The 3D gradient calibration uses the continuous adjoint, whose
-  kernel is exact only as the step goes to zero; the iteration's fixed
-  point is still the calibrated state, since the kernel is linear in the
-  residual.
+  at 1e-12. The 3D gradient calibration uses the continuous adjoint by
+  default (`CalibrationOptions::adjoint3D`; the discrete sweep serves
+  single-process), whose kernel is exact only as the step goes to zero;
+  the iteration's fixed point is still the calibrated state, since the
+  kernel is linear in the residual.
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold
   into the same within-step fixed point
   ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §7a).
@@ -627,7 +665,16 @@ What is not built, or holds only within limits:
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
   and whether moduli relax on different time-scales — is open.
 - **Bulk relaxation** is not modelled.
-- **Second-order adjoints** (Yu et al. 2025) are not built.
+- **Second-order runs and adjoints** take no material directions, and the
+  shoreline terms of pyslfp's smoothed flotation rule are not ported
+  (sl3dpp has the sharp rule only).
+- **Material derivatives.** The time-stepped material tangents and
+  kernels need the memory points at the GLL nodes and no rotational
+  feedback; density directions are refused in the time-stepped tangent,
+  and lateral density variations are excluded in 3D.
+- **The `sl3d` program** exposes none of the discrete 3D kernels, the
+  tangent-linear runs, the Hessian products and the material kernels;
+  they are library calls.
 - **Adaptive stepping** exists in `ViscoelasticOperator` but not in the
   evolution drivers.
 - **Sharp lateral structure** (cratons, slabs) aliases in the pointwise
@@ -641,14 +688,14 @@ What is not built, or holds only within limits:
   of a pass) stop scaling first: GSHTrans threads the colatitude rows of
   each chunk and sums per-thread accumulators, and the analysis gets
   slower beyond 32 threads. The large arrays are not placed socket by
-  socket (first touch in the threads that use them; they are now reused
-  from step to step, so allocated once per run), and the once-per-step
+  socket (they are reused from step to step, so allocated once per run,
+  but not first touched in the threads that use them), and the once-per-step
   start (`StartStep`) is mostly two analyses, which carry the transforms'
-  limit. README, *Running*, has the advice that follows;
-  [dev/multicore-scaling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) has the
-  measurements and the plans, and
-  [dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)
-  a plan for one process per socket.
+  limit. README, *Running*, has the advice that follows, and
+  [dev/multicore-scaling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) the
+  measurements. One process per socket, over MPI, is built (§12,
+  [radial-partitioning.md](radial-partitioning.md)); its timing on the
+  server is still to be measured.
 - **Memory at lmax 512.** A 3D run there needs the recorded states on disk
   (the `on_state` store) and a large node.
 - **Inversion.** There are no inversion drivers or optimiser interface: the

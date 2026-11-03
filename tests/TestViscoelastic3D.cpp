@@ -1,4 +1,4 @@
-// The 3D stepper: the zero-lateral step gate (a full implicit step through
+// The 3D stepper: the zero-lateral step (a full implicit step through
 // the grid machinery equals the 1D two-phase stepper at machine
 // precision), the onset of spheroidal-toroidal coupling under lateral
 // viscosity, and the dt self-convergence of the laterally varying step —
@@ -91,7 +91,7 @@ TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   const auto n = mesh.NGll();
 
   // At the GLL nodes, whose (element, node) layout the grid-state check
-  // below reads directly; TestGaussMemory3D is the Gauss-point gate.
+  // below reads directly; TestGaussMemory3D covers the Gauss points.
   ViscoelasticOperator op1(body.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
   Viscoelastic3D op3(body.rheology, kLmax,
@@ -568,7 +568,7 @@ TEST(Lateral, DegreeOneToroidalIsDrivenAndGaugeFree) {
   // Moving the pin must leave everything well defined unchanged (the
   // strain, the memory, the spheroidal and l >= 2 toroidal solutions) and
   // change the degree-1 toroidal solution only by rigid rotations
-  // (docs/design.md §8: don't measure things that are gauge).
+  // (docs/design.md: don't measure things that are gauge).
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {

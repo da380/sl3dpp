@@ -4,10 +4,10 @@
  * @file Adjoint.hpp
  * @brief Ice-history sensitivity kernels of the coupled evolution, by the
  * continuous adjoint (the preferred path) or the exact discrete transpose
- * — one interface and result type for both, so every gate and driver is
- * formulation-blind. A port of pyslfp's `adjoint_ice_history` /
+ * — one interface and result type for both, so every test and driver is
+ * formulation-blind. Corresponds to pyslfp's `adjoint_ice_history` /
  * `continuous_adjoint_ice_history` (whose docstrings, with Yu et al. 2025,
- * are the authoritative statements); the design record is docs/dev/adjoints.md.
+ * are the authoritative statements); see docs/dev/adjoints.md.
  *
  * The discrete adjoint transposes the time-stepped forward map exactly:
  * the gradient identity holds to solver tolerance for any load
@@ -84,7 +84,7 @@ struct Measurement {
 
 /**
  * @brief Sensitivity kernels of one objective with respect to the ice
- * history, in three views (docs/dev/adjoints.md §4; Yu et al. 2025 §3.7).
+ * history, in three views (docs/dev/adjoints.md; Yu et al. 2025 §3.7).
  *
  * DISCRETE view: `loadDuals[n]` is the dual of the direct ice-load grid
  * at time node n — delta J = sum_n int loadDuals[n] delta f_n dS, exact
@@ -139,7 +139,7 @@ struct IceKernels {
   /// full mesh, material units, pairing with a MaterialDirection by the
   /// plain nodal sum — the transpose of TangentPerturbation::material
   /// (the branch moduli as fixed fractions of the unrelaxed modulus, the
-  /// relaxation times held; docs/dev/adjoints.md §13). Empty unless
+  /// relaxation times held; docs/dev/adjoints.md). Empty unless
   /// Options::material_kernels asked for them (with a trajectory;
   /// Discrete exact, Continuous at the commute level).
   std::vector<double> kappaKernel;

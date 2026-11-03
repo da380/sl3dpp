@@ -227,7 +227,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   // The material kernels: the dual solution of each step's effective
   // solve paired with the material derivative of the step's force — the
-  // transpose of the material tangent (docs/dev/adjoints.md §13). The
+  // transpose of the material tangent (docs/dev/adjoints.md). The
   // branch fractions f_k = mu_k / mu_U carry the branch moduli.
   const bool material = options_.material_kernels;
   auto fractions = std::vector<std::vector<double>>{};
@@ -244,7 +244,7 @@ IceKernels AdjointSolver::DiscreteSweep(
     }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
-          "the material kernels are built without rotational feedback yet");
+          "the material kernels take no rotational feedback");
     }
     const auto& rheology = op.GetRheology();
     const auto muU = rheology.MuUnrelaxed();
@@ -783,7 +783,7 @@ IceKernels AdjointSolver::ContinuousSweep(
     }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
-          "the material kernels are built without rotational feedback yet");
+          "the material kernels take no rotational feedback");
     }
     const auto& rheology = op.GetRheology();
     const auto muU = rheology.MuUnrelaxed();
@@ -812,7 +812,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   };
 
   // The instantaneous adjoint fingerprint of a measurement, through the
-  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md §3):
+  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md):
   // its sea level (the delta amplitude), and the converged channel coefficients
   // that drive the radial jump.
   struct Jump {
@@ -1038,14 +1038,14 @@ IceKernels AdjointSolver::ContinuousSweep(
   // carried state is the true multiplier times the ratio of the two
   // pairings. The ratio is dimensionless but not 1 even in matched
   // frames (the solver's sea-floor radius differs from the surface) —
-  // pyslfp's units-covariance fix of 16 Oct 2026, mirrored here.
+  // pyslfp carries the same ratio.
   const auto& matMesh = op.BaseMaterial().Mesh();
   const double aMat =
       matMesh.Radius(matMesh.ElementCount() - 1, matMesh.NGll() - 1);
   const double pairing =
       r2 * ev.toNdLength_ /
       (aMat * aMat * ev.toMatDensity_ * op.BaseMaterial().SurfaceGravity());
-  // -- the material pairing (docs/dev/adjoints.md §13, continuous)
+  // -- the material pairing (continuous; docs/dev/adjoints.md)
   // The continuous adjoint displacement lambda at a node — the unrelaxed
   // solve under the adjoint memory and the closed adjoint load, the
   // adjoint problem having the forward form — paired with the forward
@@ -1138,8 +1138,8 @@ IceKernels AdjointSolver::ContinuousSweep(
     if (!cursor.has_value() || weight == 0.0) return;
     const auto& fwd = cursor->State(node);
     // One task per degree, largest first, each forming its own term per
-    // point; the terms are added to the kernel in degree order after, as
-    // the serial sweep added them.
+    // point; the terms are added to the kernel in degree order after, so
+    // the sum does not depend on the threading.
     auto tasks = std::vector<std::pair<int, const std::vector<double>*>>{};
     auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
     for (const auto& [l, mdual] : vstate.m) {

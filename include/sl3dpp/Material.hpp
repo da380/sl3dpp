@@ -59,7 +59,7 @@ struct NodalModuli {
 /// A direction in the material's nodal fields — the isotropic moduli
 /// kappa and mu and the density rho — each (element, node) over the mesh
 /// in the material's non-dimensional units, or empty for no perturbation.
-/// The parameters of the material derivatives (docs/dev/adjoints.md §13).
+/// The parameters of the material derivatives (docs/dev/adjoints.md).
 struct MaterialDirection {
   std::vector<double> kappa, mu, rho;
 };

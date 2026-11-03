@@ -3,7 +3,7 @@
 /**
  * @file InitialSeaLevel.hpp
  * @brief The initial sea level of a run, calibrated so that the run reaches
- * a given final sea level: a port of pyslfp's
+ * a given final sea level, as pyslfp's
  * `SeaLevelEvolution.final_sea_level_misfit` and
  * `calibrate_initial_sea_level` (pyslfp 3.0.0; its docstrings and
  * `pyslfp_theory.tex`, "Calibrating the initial sea level", are the
@@ -33,9 +33,10 @@
  *
  * Units are the evolution's: solver-unit fields on its grid, times
  * increasing in SLE units. The 3D evolution calibrates the same way under
- * either treatment; its gradient comes from the continuous adjoint, the
- * only 3D sweep, which is exact as the time step goes to zero. The
- * gradient method's fixed point does not depend on that: the kernel is
+ * either treatment; its gradient comes from the 3D sweep `adjoint3D`
+ * selects (the continuous adjoint by default, exact as the time step goes
+ * to zero). The gradient method's fixed point does not depend on the
+ * sweep's accuracy: the kernel is
  * linear in the residual, so the update vanishes where the residual does.
  */
 
@@ -120,8 +121,8 @@ struct FinalSeaLevelMisfit3D {
 };
 
 /// The misfit of a 3D run, as the 1D one; under migrating shorelines the
-/// initial sea level kernel comes from the continuous 3D sweep about the
-/// run's C(t) under `adjoint`.
+/// initial sea level kernel comes from the 3D sweep `adjoint` selects
+/// (continuous by default) about the run's C(t).
 [[nodiscard]] FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
     SeaLevelEvolution3D& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
@@ -149,7 +150,8 @@ struct CalibrationOptions {
   int anderson_memory = 5;
   /// The adjoint sweep of the gradient method.
   AdjointSolver::Options adjoint{.method = AdjointMethod::Discrete};
-  /// The 3D evolution's sweep for the gradient method (continuous).
+  /// The 3D evolution's sweep for the gradient method (continuous by
+  /// default).
   AdjointSolver3D::Options adjoint3D{};
   /// Called after each run with its iteration (from 1), its weighted rms
   /// misfit and the relative update it led to; empty by default.

@@ -1,9 +1,9 @@
-// Internal variables at the Gauss points in the 3D path (docs/design.md
-// §5): the coupling's radial memory nodes are the
+// Internal variables at the Gauss points in the 3D path (docs/design.md):
+// the coupling's radial memory nodes are the
 // elements' interior Gauss points, ~20% fewer than the GLL nodes; with no
 // lateral perturbation a 3D step, a coupled run and its continuous kernels
-// reproduce the 1D operator on the same points (the zero-lateral gate,
-// now for either point set); with lateral structure on, the two point sets
+// reproduce the 1D operator on the same points (the zero-lateral limit,
+// for either point set); with lateral structure on, the two point sets
 // agree to discretisation level and the log-viscosity kernel still meets
 // finite differences.
 
@@ -164,7 +164,7 @@ TEST(GaussMemory3D, FewerNodesAndTheZeroLateralStepGate) {
   // points, through the grid pipeline: surface responses and the grid
   // memory (against the synthesised degree-basis state) to round-off —
   // tighter than the 1-2e-12 by which the 1D GLL step differs here, so
-  // the gate tells the point sets apart.
+  // the test tells the point sets apart.
   const auto scene = Scene::Make(1e21);
   const auto& mesh = scene.material.Mesh();
   const auto tau = scene.rheology.MinRelaxationTime();

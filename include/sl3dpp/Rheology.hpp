@@ -2,8 +2,8 @@
 
 /**
  * @file Rheology.hpp
- * @brief Generalised Maxwell (Prony) branch data on the mesh nodes: a port
- * of pyslfp's `viscoelastic.rheology`, non-dimensional like every internal
+ * @brief Generalised Maxwell (Prony) branch data on the mesh nodes, as
+ * pyslfp's `viscoelastic.rheology`; non-dimensional like every internal
  * component.
  *
  * A Rheology pairs an elastic Material (whose moduli are the UNRELAXED
@@ -18,7 +18,7 @@
  * itau_k = 0 is an infinite relaxation time. Bulk relaxation is not
  * modelled, and the material must be isotropic where any branch is active
  * (the degree-basis internal variables of A&T 2014 App. D assume isotropic
- * shear relaxation; the TI generalisation is not built; docs/design.md §14).
+ * shear relaxation; docs/design.md).
  */
 
 #include <expected>

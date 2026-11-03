@@ -2,11 +2,11 @@
 
 /**
  * @file GridCoupling.hpp
- * @brief The grid side of the 3D memory coupling (docs/dev/lateral-coupling.md
- * §2–3, §7a): tensor fields over (viscous radial node × angular grid), the
- * transforms between them and their per-degree spectral components, and
- * the assembly of the memory force onto the spheroidal and toroidal
- * degree systems.
+ * @brief The grid side of the 3D memory coupling
+ * (docs/dev/lateral-coupling.md): tensor fields over (viscous radial node
+ * × angular grid), the transforms between them and their per-degree
+ * spectral components, and the assembly of the memory force onto the
+ * spheroidal and toroidal degree systems.
  *
  * The radial memory nodes are the memory points (MemoryPoints.hpp) of the
  * elements where any rheology branch is active: by default their
@@ -39,8 +39,8 @@
  * branch moduli mu_k(r) — the elastic structure stays 1D — scale the
  * analysed components per node, and the force assembly applies only the
  * quadrature factors. With angle-uniform weights the whole pipeline
- * reduces exactly to the 1D degree-basis memory force: the zero-lateral
- * gate (LateralGate in the tests).
+ * reduces exactly to the 1D degree-basis memory force (the LateralGate
+ * tests).
  *
  * Reality: the pipeline carries REAL tensors, so only the spin -2 and -1
  * components are stored as complex fields and the spin 0 component as a

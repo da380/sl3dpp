@@ -1,5 +1,5 @@
 // The coupled 3D evolution: the combined (load + rotation + lateral)
-// within-step fixed point. The zero-lateral gate: with delta = 0, the
+// within-step fixed point. The zero-lateral limit: with delta = 0, the
 // coupled history must equal the 1D coupled evolution's.
 
 #include <gtest/gtest.h>

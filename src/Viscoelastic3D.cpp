@@ -459,7 +459,7 @@ void Viscoelastic3D::AddUnitChannels(
     std::map<int, std::vector<double>>& units) const {
   if (!load && !tide) return;
   for (auto& [degree, columns_] : solutions.spheroidal) {
-    // Plain names: clang does not yet allow capturing a structured binding
+    // Plain names: clang does not allow capturing a structured binding
     // in a lambda under OpenMP.
     const auto l = degree;
     auto& x = columns_;
@@ -730,7 +730,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
         }
         memory.r[at] = e_w * state.m[k].r[at] + a_w * d0.r[at];
         if (k == 0) {
-          // 0.0 + v as the accumulation onto zeros gave (a -0.0 sum
+          // 0.0 + v as an accumulation onto zeros gives (a -0.0 sum
           // becomes +0.0), so the step is bitwise the cleared form
           step.weight_[at] = 0.0 + mu * (b_w - refBeta);
           for (auto c = 0; c < 2; ++c) {
@@ -1028,8 +1028,8 @@ Viscoelastic3D::OpenStep::Converge(
   StepInfo info;
   info.converged = false;
   // Picard until a pass contracts too slowly, then Anderson for the rest
-  // of the step (IterationControl). Not adaptive: Anderson from the first
-  // pass (the iteration before 17 Oct, chunk 9).
+  // of the step (IterationControl). Not adaptive (anderson_rate <= 0):
+  // Anderson from the first pass.
   const auto adaptive = control.anderson_rate > 0.0;
   auto mixer = std::optional<detail::AndersonMixer>{};
   if (control.anderson_memory > 0 && !adaptive) {

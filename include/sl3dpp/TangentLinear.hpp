@@ -5,8 +5,8 @@
  * @brief The tangent-linear runs of the coupled evolution: the derivative
  * of a run's responses along a perturbation of the ice history, the
  * initial sea level and the inverse relaxation times, about a forward
- * trajectory. A port of pyslfp's `tangent_linear_ice_history`; the design
- * record is docs/dev/adjoints.md (tangent-linear section).
+ * trajectory. Corresponds to pyslfp's `tangent_linear_ice_history`; see
+ * docs/dev/adjoints.md.
  *
  * With the trajectory's ocean functions held the forward problem is linear
  * in its loads, so the derivative is the forward problem once more: the
@@ -31,8 +31,8 @@
  * the strain, the transpose of the continuous sweep. The two coincide in
  * the loads and differ in the relaxation times by the order of the scheme.
  *
- * A perturbation of the material's moduli (`TangentPerturbation::material`,
- * docs/dev/adjoints.md §13) enters as forces on each step's own systems:
+ * A perturbation of the material's moduli (`TangentPerturbation::material`)
+ * enters as forces on each step's own systems:
  * the variation of the effective system on the full base solution, the
  * memory force of the base memory with the branch moduli's variation,
  * and the start's unrelaxed response; the branch moduli follow as fixed

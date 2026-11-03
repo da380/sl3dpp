@@ -3,10 +3,9 @@
 /**
  * @file StepWeights.hpp
  * @brief The per-step weight algebra of the viscoelastic time-stepping
- * schemes: a port of pyslfp's `viscoelastic.weights`, itself a port of
- * AdGIA's `detail::ExponentialTrapezoidWeights`. The three must stay
- * algebraically identical for the cross-benchmarks to isolate spatial
- * discretisation.
+ * schemes, algebraically identical to pyslfp's `viscoelastic.weights` and
+ * AdGIA's `detail::ExponentialTrapezoidWeights`, so that the
+ * cross-benchmarks isolate the spatial discretisation.
  *
  * Everything is a function of h = dt / tau, evaluated per node and per
  * branch. The exponential trapezoid update of an internal variable m

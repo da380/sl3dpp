@@ -4,9 +4,7 @@
  * @file ElasticPerturbation3D.hpp
  * @brief The first-order (Born) response of the static gravitating elastic
  * problem to LATERAL perturbations of the shear and bulk moduli, through
- * the grid pipeline of the 3D memory coupling: the second step of the
- * material derivatives (docs/dev/adjoints.md §13), and the first step
- * towards a 3D elastic reference for the cross-code benchmarks.
+ * the grid pipeline of the 3D memory coupling (docs/dev/adjoints.md).
  *
  * The elastic structure of the reference problem is radial, and a lateral
  * delta mu(x) enters its bilinear form exactly as the lateral viscosity

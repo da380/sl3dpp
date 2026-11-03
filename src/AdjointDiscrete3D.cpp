@@ -1,5 +1,5 @@
 // The discrete 3D adjoint: the exact transpose of the coupled
-// lateral-viscosity time-stepped map (docs/dev/adjoints.md §6b). Under the
+// lateral-viscosity time-stepped map (docs/dev/adjoints.md). Under the
 // energy pairing the force assembly is the transpose of the strain
 // evaluation (Entry = Exit^T), the pointwise weight and the reference
 // systems are self-adjoint, and the sea level equation has its exact
@@ -60,7 +60,6 @@ Kernels3D AdjointSolver3D::DiscreteSweep(
   const auto rhoW = solver.WaterDensity();
   const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
-  const auto lmax = op.LMax();
   const auto K = op.GetRheology().BranchCount();
   const auto N = times.size() - 1;
   const auto values = coupling.GridValueCount();
@@ -76,7 +75,7 @@ Kernels3D AdjointSolver3D::DiscreteSweep(
   }
   if (op.GetOptions().collectives.Distributed()) {
     throw std::invalid_argument(
-        "the discrete 3D adjoint is not distributed yet: use Continuous");
+        "the discrete 3D adjoint is not distributed: use Continuous");
   }
   const bool material = options_.material_kernels;
   if (material) {
@@ -90,7 +89,7 @@ Kernels3D AdjointSolver3D::DiscreteSweep(
     }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
-          "the material kernels are built without rotational feedback yet");
+          "the material kernels take no rotational feedback");
     }
   }
   for (const auto& [node, m] : measurements) {

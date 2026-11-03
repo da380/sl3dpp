@@ -634,7 +634,7 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferences) {
     const auto predicted = Objective(scene, g, run.back().seaLevelChange);
 
     // wide steps (1%, 0.5% of the moduli): the truncation error above
-    // the solves' noise, as in the 1D gate
+    // the solves' noise, as in the 1D test
     auto fd = std::map<double, double>{};
     for (double eps : {0.1, 0.05}) {
       fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);

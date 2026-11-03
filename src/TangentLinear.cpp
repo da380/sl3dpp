@@ -392,8 +392,7 @@ TangentLinearSolver::MakeMaterialDrive(const MaterialDirection& d,
   const auto& op = *ev.op_;
   if (!d.rho.empty()) {
     throw std::invalid_argument(
-        "the material tangent takes kappa and mu; the density is not "
-        "carried through the stepping yet");
+        "the material tangent takes kappa and mu, not the density");
   }
   if (op.options_.memory_points != MemoryPointSet::Gll) {
     throw std::invalid_argument(
@@ -402,7 +401,7 @@ TangentLinearSolver::MakeMaterialDrive(const MaterialDirection& d,
   }
   if (ev.options_.rotation != RotationalFeedback::None) {
     throw std::invalid_argument(
-        "the material tangent is built without rotational feedback yet");
+        "the material tangent takes no rotational feedback");
   }
   const auto& rheology = op.GetRheology();
   auto drive = std::make_shared<MaterialDrive>();

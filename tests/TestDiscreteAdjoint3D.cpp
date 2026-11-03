@@ -3,7 +3,7 @@
 // direction alike), the zero-lateral limit equal to the 1D discrete
 // sweep, the machine-grade Taylor test of the 3D log-viscosity kernel
 // (second order to solver precision at every step), and the continuous
-// sweep's gap closing under refinement — docs/dev/adjoints.md §6b.
+// sweep's gap closing under refinement — docs/dev/adjoints.md.
 
 #include <gtest/gtest.h>
 
@@ -509,8 +509,8 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
   // The exact transpose in the material: with lateral viscosity on, the
   // discrete material kernels paired with LATERAL directions in kappa and
   // mu equal the 3D material tangent's objective change, both schemes,
-  // each modulus alone and together — the gate of the lateral shear term
-  // of both. Refused by the continuous sweep and without a trajectory.
+  // each modulus alone and together. Refused by the continuous sweep and
+  // without a trajectory.
   auto scene = Scene::Make(1e21);
   std::mt19937 rng(17);
   auto times = std::vector<double>{};

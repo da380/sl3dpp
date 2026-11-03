@@ -4,7 +4,7 @@
  * @file Viscoelastic3D.hpp
  * @brief The 3D-viscosity stepper: grid-held internal variables, pointwise
  * step weights from laterally varying relaxation times, and the
- * within-step lateral iteration (docs/dev/lateral-coupling.md §5).
+ * within-step lateral iteration (docs/dev/lateral-coupling.md).
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)): the base (radial)
  * Rheology is the REFERENCE, whose per-(scheme, dt) effective operators
@@ -26,20 +26,20 @@
  *   K_ref u = F + b( m~_k(x) + (beta_k(x) - beta_ref_k(r)) d(u) ),
  *
  * so each pass of the within-step iteration is one trip through the
- * (gated) GridCoupling pipeline plus the reference banded back-solves,
+ * GridCoupling pipeline plus the reference banded back-solves,
  * spheroidal and toroidal. The iteration is Anderson-accelerated
  * (memory 5 by default; 0 gives plain Picard, optionally damped), and
  * one loop, OpenStep::Converge, serves this class's Step, the sea level
  * coupling and the adjoint sweep. Its convergence against viscosity
- * contrast is measured in docs/dev/lateral-coupling.md §5a.
+ * contrast is measured in docs/dev/lateral-coupling.md.
  *
  * With delta = 0 the lateral term vanishes identically and a step
- * reproduces the 1D two-phase stepper exactly — the zero-lateral step
- * gate. The memory nodes are the Gauss points of the viscous elements or,
- * with Options::memory_points, their GLL nodes (MemoryPoints.hpp);
- * the 1D reference takes the same set, so the gate holds for either. Load
- * channels are prescribed here (complex m >= 0 columns of real fields); the
- * sea-level coupling drives this class through the same channels.
+ * reproduces the 1D two-phase stepper exactly. The memory nodes are the
+ * Gauss points of the viscous elements or, with Options::memory_points,
+ * their GLL nodes (MemoryPoints.hpp); the 1D reference takes the same
+ * set, so the identity holds for either. Load channels are prescribed
+ * here (complex m >= 0 columns of real fields); the sea-level coupling
+ * drives this class through the same channels.
  */
 
 #include <complex>
@@ -224,7 +224,7 @@ class Viscoelastic3D {
   /// by less than anderson_rate (0.5 by default, about where Anderson's
   /// fewer passes start to pay for its dearer ones), Anderson mixing with
   /// anderson_memory differences takes over for the rest of the step
-  /// (docs/dev/lateral-coupling.md §5a). anderson_rate <= 0 mixes from the
+  /// (docs/dev/lateral-coupling.md). anderson_rate <= 0 mixes from the
   /// first pass; anderson_memory 0 never mixes.
   struct IterationControl {
     int max_iterations = 40;
@@ -406,7 +406,7 @@ class Viscoelastic3D {
   /// StartStep reuses its tensors instead of allocating and zero-filling
   /// fresh ones: an evolution recycles each state a step replaces (a
   /// closed step hands back its own arrays itself). A state merely dropped
-  /// is freed as before; arrays of another shape are dropped. Thread-safe.
+  /// is simply freed; arrays of another shape are dropped. Thread-safe.
   void Recycle(State&& state) const;
 
   /// Frees the arrays kept for reuse, as at the end of a run.

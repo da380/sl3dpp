@@ -19,7 +19,7 @@
  * Cholesky, falling back to banded LU as DegreeOperator does), forms the
  * coupling columns (K_II^p)^-1 K_IS^p (one per adjacent separator dof) and
  * factorises S (the same way: it is positive definite whenever the matrix
- * is, and no worse conditioned). docs/dev/radial-substructuring.md §4.
+ * is, and no worse conditioned). docs/radial-partitioning.md.
  *
  * Distributed, each process owns some of the segments and factorises and
  * solves those alone; a `combine` callback sums a vector over the

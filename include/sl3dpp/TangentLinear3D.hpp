@@ -7,8 +7,8 @@
  * the ice history, the initial sea level and the laterally varying
  * inverse relaxation times, about a recorded trajectory, and the
  * second-order run along two such directions. The 3D form of
- * TangentLinear.hpp, and sl3dpp's own (pyslfp has no 3D); the design
- * record is docs/dev/adjoints.md §10.
+ * TangentLinear.hpp (pyslfp has no 3D counterpart); see
+ * docs/dev/adjoints.md.
  *
  * With the ocean functions held the coupled step is linear in its loads
  * and its memory, so the tangent-linear step is the forward step once
@@ -24,8 +24,8 @@
  * weight of the fixed point is the trajectory's, so the drive enters the
  * memory force and the end state alike, as in 1D.
  *
- * A lateral perturbation of the moduli (`TangentPerturbation3D::material`,
- * docs/dev/adjoints.md §13) enters each opened step as forces through
+ * A lateral perturbation of the moduli (`TangentPerturbation3D::material`)
+ * enters each opened step as forces through
  * the grid pipeline (OpenStep::AddForce): the effective system's
  * variation on the full base solution with the step's own lateral
  * weights, the memory force of the base step's decayed memory with the
@@ -75,7 +75,7 @@ struct TangentPerturbation3D {
   std::vector<std::vector<double>> itau;
   /// Over the grid values: delta itau_k = -itau_k(x) logViscosity(x).
   std::vector<double> logViscosity;
-  /// The moduli (docs/dev/adjoints.md §13); needs the recorded
+  /// The moduli (docs/dev/adjoints.md); needs the recorded
   /// trajectory, memory nodes at the GLL points, no rotational feedback
   /// and no distribution.
   MaterialDirection3D material;

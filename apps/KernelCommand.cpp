@@ -593,7 +593,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
               "viscosity drives the 3D run");
   }
   if (input.method == AdjointMethod::Discrete) {
-    Fail(top.At("adjoint"), "the 3D sweep is the continuous adjoint alone");
+    Fail(top.At("adjoint"), "sl3d's 3D kernels use the continuous adjoint");
   }
   auto earth = BuildEarth(input.run, top);
   auto mv_options = io::ModelViscosityOptions{};

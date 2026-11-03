@@ -2,7 +2,7 @@
 // tolerance for a full measurement set, the thickness-view identity with
 // the baseline, the continuous adjoint's agreement with the discrete and
 // its convergence under step refinement, and the cross-validation of the
-// delta amplitudes — the gate structure of pyslfp's
+// delta amplitudes — the structure of pyslfp's
 // test_continuous_adjoint_against_the_discrete.
 
 #include <gtest/gtest.h>
@@ -277,7 +277,7 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
 }
 
 TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
-  // The deliverable of the comparison (docs/dev/adjoints.md §1): the discrete
+  // The comparison (docs/dev/adjoints.md): the discrete
   // transpose is exact at any step; the continuous adjoint carries the
   // discretise/transpose commute error — at the per-cent level or better
   // once the steps resolve the relaxation, falling under refinement.
@@ -629,8 +629,8 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
 TEST(AdjointGate, KernelsMatchPyslfp) {
   // The reference is pyslfp's adjoint kernels on its GLQ grid (which
   // coincides with ours at this lmax, isolating implementation error):
-  // load duals per node and the branch-0 itau kernel, each method gating
-  // its own counterpart — the ported algebra is identical. The resolved
+  // load duals per node and the branch-0 itau kernel, each method against
+  // its own counterpart — the algebra is identical. The resolved
   // regime: the continuous kernels amplify exponentially when stiff
   // (see the generating script), so only here is parity meaningful.
   auto setup = Scene::Make(1e22);
@@ -652,7 +652,7 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
   // The potential and angular-velocity duals are SI-anchored (the
   // generating script's PHI_ANCHOR / OMEGA_ANCHOR): pyslfp's EarthModel
   // scales differ from planetmodel/sl3dpp geophysical (phi_nd ~ T^2, a
-  // factor 4 pi / 3 — docs/design.md §9), so each code
+  // factor 4 pi / 3 — docs/design.md), so each code
   // multiplies its dual by ITS OWN factor against the shared anchor and
   // the objective is code-invariant. Lengths need no anchor.
   const double potConv =
@@ -739,9 +739,8 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
       auto head = std::string{};
       auto count = std::size_t{0};
       row >> head >> count;
-      // The continuous block carries no itau reference (the pyslfp-side
-      // continuous accumulation is under investigation; the generating
-      // script records why). sl3dpp's own continuous kernel is gated
+      // The continuous block carries no itau reference (the generating
+      // script records why). sl3dpp's own continuous kernel is checked
       // against its exact discrete in ContinuousViscosityKernelsConverge.
       if (count == 0) continue;
       ASSERT_EQ(count, kernels.itauKernel[0].size());
@@ -990,8 +989,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
 TEST(Adjoint, MaterialGradientIsTheTransposeOfTheVariation) {
   // For random solution pairs of every degree, the operator's nodal
   // material gradients paired with a direction in kappa and mu equal the
-  // pair's product with the variation operator (the step 1 linearisation
-  // of the assembled system): the band assembly's integrands, pointwise.
+  // pair's product with the variation operator (the linearisation of the
+  // assembled system): the band assembly's integrands, pointwise.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(11);
   std::normal_distribution<double> normal;

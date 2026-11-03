@@ -3,8 +3,10 @@
 /**
  * @file ShConventions.hpp
  * @brief Conversions between GSHTrans's native spherical-harmonic basis and
- * the real orthonormal basis of pyshtools (planetmodel/pyslfp), used only
- * at the IO and benchmark boundary (docs/design.md §4).
+ * the real orthonormal basis of pyshtools (planetmodel/pyslfp): the IO and
+ * benchmark boundary, the rotational feedback's degree-2 order-1 terms
+ * (SeaLevel.cpp) and the expansion-coefficient measurements
+ * (Measurements.cpp); docs/design.md.
  *
  * GSHTrans: complex, orthonormal, Condon-Shortley phase,
  * Y_lm = (-1)^m K_lm P_lm e^{i m phi}, with the real-field symmetry

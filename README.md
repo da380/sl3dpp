@@ -51,6 +51,24 @@ of mantle viscosity using deglacial sea level observations.
   continuous adjoint or the exact discrete transpose (1D and 3D). The
   forward run can be recorded at any stride; the reverse sweep rebuilds the
   states in between.
+- **Tangent-linear runs.** The derivative of a run's responses along a
+  direction in the loads, the ice thickness, the initial sea level and the
+  viscosity (in 3D a laterally varying one), and the second-order run
+  along two directions, 1D and 3D.
+- **Second-order adjoints.** The Hessian's action on a direction
+  (Hessian-vector products), as the derivatives of the kernels, 1D and 3D.
+- **Material derivatives and kernels.** Derivatives and kernels with
+  respect to the bulk and shear moduli κ and μ, 1D and 3D: the static
+  Love numbers' derivatives (in the density too) and kernels,
+  tangent-linear runs of the evolutions along the moduli, and the
+  evolutions' κ and μ kernels.
+- **The lateral Born response.** The first-order response of the static
+  elastic problem to laterally varying δμ and δκ, with the kernels of a
+  surface measurement (`ElasticPerturbation3D`).
+- **Distribution over radius.** Optionally, the 3D evolution and its
+  continuous adjoint run over MPI ranks, one contiguous radial segment
+  each, with OpenMP threads inside
+  ([docs/radial-partitioning.md](docs/radial-partitioning.md)).
 
 ## Getting started
 
@@ -274,6 +292,12 @@ nodes.
   numactl --cpunodebind=0 --membind=0 sl3d evolve first.json &
   numactl --cpunodebind=1 --membind=1 sl3d evolve second.json &
   ```
+
+  Built with `SL3DPP_WITH_MPI`, `sl3d evolve` and `kernel` can instead
+  spread one run over the node, one MPI rank per socket with its threads
+  inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
+  ranks"); the timing of that shape on a two-socket server is not yet
+  measured.
 - **Small problems want fewer threads.** The parallel loops run over
   degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
   degree of a few dozen there is too little work to share among the cores
@@ -326,9 +350,8 @@ nodes.
   ```
 
   The 3D step reuses its large arrays from step to step, so they are
-  faulted in once per run: at lmax 64 on 8 threads huge pages now make the
-  3D run about 1.5% faster (it was 10% when every step allocated afresh),
-  with unchanged results.
+  faulted in once per run: at lmax 64 on 8 threads huge pages make the 3D
+  run about 1.5% faster, with unchanged results.
 - **Memory points.** The internal variables live at the Gauss points of each
   radial element by default; `memory_points = MemoryPointSet::Gll` places
   them at the GLL nodes, as the Fortran codes and pyslfp do, for direct
@@ -370,7 +393,8 @@ solvers on their own, and the adjoints of all of them.
 | --- | --- |
 | `Deck.hpp` | Tabulated radial models: planetmodel decks (`GiaFormat`), mineos (`MineosFormat`), custom column layouts, and the legacy sl3d/gia1d `prem.simp.vm1` format (`Deck::ReadLegacySl3d`) |
 | `EarthModel.hpp`, `Scales.hpp` | The splined radial model, its layering and gravity, and non-dimensionalisation |
-| `RadialMesh.hpp`, `Material.hpp` | The spectral-element radial mesh (GLL, graded so that each degree uses a subset of it), and the material on its nodes |
+| `RadialMesh.hpp`, `Material.hpp` | The spectral-element radial mesh (GLL, graded so that each degree uses a subset of it), and the material on its nodes, with its directions of variation (`MaterialDirection`, `Variation`) |
+| `MemoryPoints.hpp` | Where the internal variables live in each element (Gauss or GLL points), and the shear term integrated there |
 | `Rheology.hpp` | Relaxing shear branches: a Maxwell body from a viscosity profile, a model's own viscosity column, or general branches |
 | `DegreeOperator.hpp`, `ToroidalOperator.hpp`, `LoveNumbers.hpp` | Per-degree spheroidal and toroidal systems; Love numbers |
 | `SurfaceGrid.hpp`, `ShConventions.hpp`, `Geography.hpp` | The Gauss–Legendre surface grid and its transforms; spherical-harmonic conventions; geographic coordinates |
@@ -379,8 +403,12 @@ solvers on their own, and the adjoints of all of them.
 | `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution, frozen or migrating shorelines |
 | `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
 | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution, frozen or migrating shorelines |
-| `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D |
+| `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D, and the second-order adjoints (`SecondOrderKernels`) |
+| `TangentLinear.hpp`, `TangentLinear3D.hpp` | Tangent-linear runs of the coupled evolutions, 1D and 3D, and the second-order runs |
+| `ElasticPerturbation3D.hpp` | The first-order (Born) response of the static elastic problem to lateral perturbations of the moduli, and its kernels |
 | `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |
+| `Collectives.hpp`, `Distributed.hpp` | Radial distribution: the collectives a distributed run needs, as callbacks, and their MPI form (with `SL3DPP_WITH_MPI`) |
+| `io/` | The planetmodel file boundary: `io::FieldHistory` (surface files), `io::ModelViscosity` (3D viscosity from a model file), `io::WriteKernels` (3D kernels as a model file) |
 
 ### Using the library
 
@@ -448,7 +476,7 @@ the returned diagnostics or thrown.
   coefficients.
 - Fields live on the solver's Gauss–Legendre grid, colatitude-major.
 - Details, including sign conventions, are in
-  [docs/conventions.md](docs/conventions.md).
+  [docs/design.md](docs/design.md) (§2, §4, §9).
 
 ### Using it from CMake
 
@@ -490,7 +518,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_TESTS` | on at top level | The test suite |
 | `SL3DPP_BUILD_APPS` | on at top level | The `sl3d` program |
 | `SL3DPP_BUILD_EXAMPLES` | on at top level | The example drivers |
-| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate` and the cross-code exchange writers |
+| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing`, `substructure_prototype` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
 | `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve` and `kernel` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
@@ -548,6 +576,9 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   Maxwell load Love-number histories under a Heaviside load (taus in
   seconds per layer, `inf` elastic), for the V1 tier in
   `benchmarks/viscoelastic/love/`.
+- `substructure_prototype [elements] [ngll] [parts] [nrhs] [decades]`
+  solves a synthetic system with the degree systems' band structure
+  directly and by substructuring, and compares the two.
 - `substructure_timing <deck> <lmax> [repeats] [parts...]` times the degree
   solves substructured over radial segments against the direct ones, and
   `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
@@ -575,17 +606,19 @@ The API reference and these pages are published at
   their distributed form, the transforms cut with depth, the balance of
   the cuts and the communication, and the step, adjoint and `sl3d` over
   MPI ranks.
-- [docs/conventions.md](docs/conventions.md): units, signs, harmonic
-  conventions and code style.
+- [docs/conventions.md](docs/conventions.md): code style and testing
+  conventions.
 
 The developer notes in [docs/dev](https://github.com/da380/sl3dpp/blob/main/docs/dev) are dated records kept from
 the code's development, not maintained as reference: the derivations and
 convergence measurements of [the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md)
-and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md), and a
-[walkthrough of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md) with pointers
-into the code and its costs, and the first
+and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md), a
+[walkthrough of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md) through the
+code as it then stood, with its costs, the first
 [multicore scaling measurements](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) with the
-plans that follow from them.
+plans that followed from them, the building and measurements of
+[the radial distribution](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md),
+and a plan for [inverse problems through pygeoinf](https://github.com/da380/sl3dpp/blob/main/docs/dev/pygeoinf-integration.md).
 
 ## Licence
 

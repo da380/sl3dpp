@@ -272,7 +272,7 @@ TEST(MaterialDerivatives, ReciprocityDifferentiated) {
 TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
   // The static kernels: for every channel and degree, the kappa and mu
   // kernels paired with a smooth direction in the moduli equal the
-  // Love-number derivatives along it (step 1's exact linearisation) at
+  // Love-number derivatives along it (the exact linearisation) at
   // 1e-10 — the adjoint of the static problem against its tangent.
   const auto material = MakeMaterial();
   const auto& mesh = material.Mesh();

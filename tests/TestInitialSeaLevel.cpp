@@ -1,5 +1,5 @@
 // The migrating-shoreline evolution and the initial sea level calibration,
-// pyslfp 3.0.0's tests lifted: the frozen calibration is one linear step;
+// after pyslfp 3.0.0's tests: the frozen calibration is one linear step;
 // migrating runs reduce to frozen ones when nothing can move, conserve mass
 // when it does, and are the date-by-date nonlinear solve in the elastic
 // limit; the kernels about a migrating trajectory match central
@@ -379,7 +379,7 @@ TEST(Migrating, MatchesFrozenWhenShorelinesCannotMove) {
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   // The nonlinear solve forms its load from the absolute fields (3 km of
   // ocean, 5 km of ice) for a change of metres, so its error has a
-  // round-off floor near 1e-11: pyslfp's tolerance for this gate.
+  // round-off floor near 1e-11: pyslfp's tolerance for this test.
   SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-9});
   const auto frozen =
       evolution.Run(cap.times, FrozenLoad(body.solver, state, thinning, 0.0));
@@ -820,7 +820,7 @@ TEST(InitialSeaLevel, CalibrationRecoversTheTruthUnderMigratingShorelines) {
   EXPECT_LT(rates[CalibrationMethod::Gradient], 0.8);
 }
 
-// -- the pyslfp gate ----------------------------------------------------------
+// -- against pyslfp -----------------------------------------------------------
 
 namespace {
 
@@ -927,7 +927,7 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
   const auto frequency =
       body.solver.SolverScales().Factor(Dimensions{.time = -1});
   const auto a = body.solver.Radius() * length;
-  // Measured 25 Oct 2026: the sea level change to 5e-12, the gradient to
+  // Measured agreement: the sea level change to 5e-12, the gradient to
   // 2e-14, the calibration histories to 1e-12 (1e-9 near convergence).
   constexpr auto tol = 1e-9;
   for (auto n = std::size_t{0}; n < run.size(); ++n) {

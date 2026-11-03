@@ -4,7 +4,7 @@
  * @file Collectives.hpp
  * @brief What a radially distributed computation needs from the processes
  * sharing it, as callbacks, and the pieces of a degree solve split around
- * its one collective (docs/dev/radial-substructuring.md §9-11).
+ * its one collective (docs/radial-partitioning.md).
  *
  * The library calls no MPI itself: Distributed.hpp (built with
  * SL3DPP_WITH_MPI) fills Collectives from a communicator, and a test may

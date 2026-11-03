@@ -342,7 +342,7 @@ TEST(RadialRanks, StepsMatchTheOneProcessSteps) {
                    std::format("{:.3e}", worstSurface));
     RecordProperty(std::format("ranks{}_memory", count),
                    std::format("{:.3e}", worstMemory));
-    // 5e-16 and 2.5e-14 when written: the same algebra, summed in
+    // measured 5e-16 and 2.5e-14: the same algebra, summed in
     // another order
     EXPECT_LT(worstSurface, 1e-13) << count << " ranks";
     EXPECT_LT(worstMemory, 1e-12) << count << " ranks";
@@ -438,7 +438,7 @@ TEST(RadialRanks, EvolutionsMatchTheOneProcessRuns) {
     const auto label = migrating ? "migrating" : "frozen";
     RecordProperty(std::format("{}_sea_level", label),
                    std::format("{:.3e}", worst));
-    EXPECT_LT(worst, 1e-13) << label;  // 4e-16 and 1.3e-15 when written
+    EXPECT_LT(worst, 1e-13) << label;  // measured 4e-16 and 1.3e-15
     if (migrating) {
       auto flips = 0;
       for (auto i = std::size_t{0}; i < state.oceanFunction.size(); ++i) {
@@ -567,7 +567,7 @@ TEST(RadialRanks, AdjointKernelsMatchTheOneProcessSweep) {
                    std::format("{:.3e}", worstViscosity));
     RecordProperty(std::format("{}_spherical", label),
                    std::format("{:.3e}", worstSpherical));
-    // 5e-15, 4e-14 and 2.6e-14 at most when written
+    // measured 5e-15, 4e-14 and 2.6e-14 at most
     EXPECT_LT(worstIce, 1e-12) << label;
     EXPECT_LT(worstViscosity, 1e-12) << label;
     EXPECT_LT(worstSpherical, 1e-12) << label;

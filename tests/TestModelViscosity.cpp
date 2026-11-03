@@ -275,7 +275,7 @@ TEST(ModelViscosity, AMissingFileIsRefused) {
   EXPECT_FALSE(read);
 }
 
-// The operator gate: a run under the file-backed delta reproduces the run
+// Through the operator: a run under the file-backed delta reproduces the run
 // under the analytic lambda the file was written from. The deltas agree
 // to the file's lateral sampling (band 32, bicubic, a degree-2 field:
 // measured 1.7e-6), and the surface responses follow (measured 1.8e-8
@@ -346,7 +346,7 @@ TEST(ModelViscosity, AStepMatchesTheAnalyticLambda) {
 // A realistic file: the viscosity3d mini-app's pipeline (S40RTS,
 // the sl3d conversion, band 96, bicubic, 50 km elements) run on this
 // suite's prem8 body — scripts/make_model_viscosity_fixtures.py --miniapp
-// <out>. Too large to commit (~90 MB), so the gate runs only when
+// <out>. Too large to commit (~90 MB), so the test runs only when
 // SL3DPP_VISCOSITY3D_FILE names it, and skips otherwise.
 TEST(ModelViscosity, TheMiniAppFileWhenPresent) {
   const auto* given = std::getenv("SL3DPP_VISCOSITY3D_FILE");
