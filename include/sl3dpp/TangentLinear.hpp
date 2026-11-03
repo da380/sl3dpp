@@ -146,6 +146,16 @@ class TangentLinearSolver {
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /// The memory increment of a step from `prev` to `next` — two states of
+  /// the trajectory with their strains — for a perturbation of the inverse
+  /// relaxation times at the memory points, bilinear in the two: the
+  /// forward mode of the scheme's weights (Discrete), or the continuous
+  /// drive q_k = (d - m_k) delta itau_k / itau_k discretised by the scheme
+  /// (Continuous). pyslfp's `_first_order_drive`.
+  [[nodiscard]] static std::map<int, std::vector<double>> FirstOrderDrive(
+      const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
+      double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
+      const std::vector<std::vector<double>>& ditauPoints);
  private:
   using Direct = std::function<std::vector<double>(std::size_t node)>;
   using Drive =
@@ -159,16 +169,6 @@ class TangentLinearSolver {
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive) const;
 
-  /// The memory increment of a step from `prev` to `next` — two states of
-  /// the trajectory with their strains — for a perturbation of the inverse
-  /// relaxation times at the memory points, bilinear in the two: the
-  /// forward mode of the scheme's weights (Discrete), or the continuous
-  /// drive q_k = (d - m_k) delta itau_k / itau_k discretised by the scheme
-  /// (Continuous). pyslfp's `_first_order_drive`.
-  [[nodiscard]] static std::map<int, std::vector<double>> FirstOrderDrive(
-      const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
-      double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
-      const std::vector<std::vector<double>>& ditauPoints);
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two
   /// perturbations of the inverse relaxation times at the memory points.

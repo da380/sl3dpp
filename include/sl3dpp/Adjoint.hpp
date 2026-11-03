@@ -37,6 +37,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Evolution.hpp"
@@ -137,6 +138,23 @@ struct IceKernels {
 
 enum class AdjointMethod { Continuous, Discrete };
 
+/**
+ * @brief The derivative of an objective's kernels along a direction v of
+ * the model parameters: what the second-order adjoint returns, the
+ * components of the Hessian's action on v. `thickness` and
+ * `initialSeaLevel` are the derivatives of IceKernels' thickness and
+ * initial-sea-level views (the same pairings; the thickness view's
+ * baseline folded into node 0 as there), `itauKernel` that of the
+ * inverse-relaxation-time kernels (per branch, nodal, material units).
+ * pyslfp's `KernelDerivatives`.
+ */
+struct KernelDerivatives {
+  std::vector<double> times;
+  std::vector<std::vector<double>> thickness;
+  std::vector<double> initialSeaLevel;
+  std::vector<std::vector<double>> itauKernel;
+};
+
 namespace detail {
 /// The grounded views and the distributional/quelled assembly shared by
 /// the 1D and 3D sweeps: loadDuals complete (lumps folded in), density
@@ -198,7 +216,54 @@ class AdjointSolver {
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /**
+   * @brief The second-order adjoint: the kernels of the objective and
+   * their derivative along a direction v, the action of the objective's
+   * Hessian on v (pyslfp's `second_order_adjoint_ice_history`, Yu et al.
+   * 2025 §4). The sweep that gives the kernels is itself a function of
+   * the parameters, through the forward trajectory and the relaxation
+   * times; differentiating it along v gives a second sweep of the same
+   * form, forced not by the measurement but by the first sweep's state
+   * and v's perturbation of the relaxation times, with v's tangent-linear
+   * trajectory entering where the forward one enters the kernels. By the
+   * discrete method this is the exact derivative of the exact gradient,
+   * so the Hessian it gives is symmetric to rounding; by the continuous
+   * method it discretises the second-order adjoint equations with the
+   * ocean functions held (the terms of shoreline motion omitted).
+   *
+   * @param tangent v's tangent-linear run about the forward run, recorded
+   * at every node (TangentLinearSolver::Options::record), by the same
+   * method as this sweep.
+   * @param itau v's perturbation of the inverse relaxation times, nodal
+   * per branch over the material's mesh (TangentPerturbation::itau);
+   * empty for none.
+   * @param trajectory The recorded forward trajectory; required here.
+   * @param oceanFunctions As for IceHistoryKernels, from the same
+   * migrating run as the tangent-linear run.
+   */
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> SecondOrderKernels(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& itau,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
+
  private:
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> DiscreteSecondOrder(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& ditauPoints,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> ContinuousSecondOrder(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& ditauPoints,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
   [[nodiscard]] IceKernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,

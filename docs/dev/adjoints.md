@@ -395,8 +395,67 @@ scheme's order (gap 0.11 → 0.027 from 17 to 33 nodes over 10 kyr at
 η = 1e22; the coarser grids, h ≈ 1, are pre-asymptotic); unrecorded
 tangent runs are refused.
 
-Next, in order: the second-order adjoint sweeps
-(`second_order_adjoint_ice_history`, both methods: the Hessian-vector
-products), then the 3D counterparts on `Evolution3D`, then the forward
+## 9. The second-order adjoint (built 3 November 2026)
+
+`AdjointSolver::SecondOrderKernels` (`AdjointSecondOrder.cpp`; pyslfp's
+`second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
+under the sharp flotation rule, Yu et al. 2025 §4): the kernels of the
+objective and their derivative along a direction v — the action of the
+objective's Hessian on v, returned as `KernelDerivatives` (the thickness
+and initial-sea-level views' derivatives in the kernels' own pairings,
+and the itau kernel's). Inputs: the recorded forward trajectory, v's
+tangent-linear run recorded at every node by the same method, v's
+δitau, and a migrating run's ocean functions. The sweep that gives the
+kernels is itself a function of the parameters, through the forward
+trajectory and the relaxation times; differentiating it along v gives a
+second sweep of the same form, forced by the first sweep's state and
+δitau, with v's tangent trajectory entering where the forward one enters
+the kernels.
+
+- **Discrete** (the exact derivative of the exact gradient; the Hessian
+  symmetric to rounding): per reversed step, beside the first sweep's
+  (m†, d†), the derivative duals (dm†, dd†). The first sweep's solve is
+  the first-order one; the second sweep's dual of the step's solution is
+  dd† + Σ B dm† + Bh dh m† through the strain transpose plus the source
+  Σ Bh dh W s_y (the effective system's derivative acting on the first
+  sweep's solution), contracted with the unit responses into load and
+  tide duals and passed through the SLE adjoint with no measurement; its
+  radial solve closes dm̃† = dm† + W d s_y. The pairings g (the itau
+  kernel) and dg (its derivative: the same expression with each factor
+  replaced in turn by its derivative — the dual state's, the tangent
+  trajectory's (v m⁰, v d⁰, v d¹), and the weights' second derivatives
+  times dh) accumulate at the memory points; the recursion closes both
+  states (dm† = E dm̃† + Eh dh m̃†, dd† = Σ A dm̃† + Ah dh m̃†). The start
+  is the transposed instantaneous solve for both dual states. Weights in
+  the trapezoid's (E, A, B) form, backward Euler as (w, 0, 1 − w).
+- **Continuous**: the adjoint state and its derivative are both stepped
+  by the forward machinery in reversed time; the derivative state's step
+  carries the continuous first-order drive built from the adjoint
+  trajectory (`TangentLinearSolver::FirstOrderDrive` with the primed
+  pre-step state and the post-step state); at an observation both jump
+  by the instantaneous adjoint strain, over itau for the state and by
+  δitau for its derivative; the viscosity pairing is differentiated with
+  the derivative state and v's tangent trajectory in place, less
+  (δitau/itau) times the first-order pairing. Assembly as the first
+  sweep's (split node weights, lumps on the kernels only).
+
+The shoreline terms of pyslfp's smoothed flotation rule are not ported.
+The sweeps' shared pieces (the trajectory cursor, dual packers, node
+weights, measurement check) moved from `Adjoint.cpp` into
+`detail/AdjointInternals.hpp`.
+
+GATES (`TestSecondOrderAdjoint`): the kernels the second-order sweep
+carries equal the first-order sweep's at 1e-12, both methods, about
+frozen and migrating runs; along v, central differences of the gradient
+paired with u converge at second order to the derivatives paired with u
+and Richardson lands on them at 1e-6, both schemes; ⟨H u, w⟩ = ⟨H w, u⟩
+at 1e-9 and equals ⟨g, F''[u, w]⟩ from the second-order tangent-linear
+run at 1e-9, frozen and migrating; the continuous derivatives converge
+to the discrete block by block (ice, viscosity) and their mismatch with
+the continuous second-order run falls at the scheme's order (17 → 33
+nodes, η = 1e22), the discrete pair matching at 1e-9 at every spacing.
+
+Next, in order: the 3D counterparts on `Evolution3D` (tangent-linear and
+second order about a laterally varying viscosity), then the forward
 perturbations in the elastic parameters and the density.
 

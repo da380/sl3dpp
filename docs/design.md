@@ -24,6 +24,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
+| Second-order adjoints: the Hessian's action on a direction, as derivatives of the kernels | `Adjoint.hpp` (`SecondOrderKernels`) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -283,6 +284,17 @@ Deliberately out of scope:
   the forward one, plus the weights' second derivatives by the discrete
   method) reads. Under the sharp flotation rule the loads and the initial
   sea level enter no second derivative.
+- **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
+  `second_order_adjoint_ice_history`): the kernels and their derivative
+  along a direction v, the Hessian's action on v, as `KernelDerivatives`
+  (the thickness and initial-sea-level views' derivatives and the itau
+  kernel's). Given v's recorded tangent-linear run, the sweep carries a
+  second dual state forced by the first sweep's and δitau. Discrete: the
+  exact derivative of the exact gradient, the Hessian symmetric to
+  rounding. Continuous: the second-order adjoint equations with the ocean
+  functions held, the derivative state stepped with the continuous drive
+  of the adjoint trajectory. A Hessian-vector product costs the forward
+  run, v's tangent-linear run and the second-order sweep.
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
@@ -403,6 +415,12 @@ Beyond the fixtures:
   second order, Richardson to 1e-6), symmetric in its directions, zero
   without a viscosity perturbation, and continuous converging to
   discrete at the scheme's order.
+- **Second-order adjoints.** The carried kernels equal to the first-order
+  sweep's at 1e-12; central differences of the gradient along v against
+  the derivatives at second order with Richardson to 1e-6, both schemes;
+  the Hessian symmetric at 1e-9 and adjoint to the second-order
+  tangent-linear run at 1e-9, frozen and migrating; the continuous
+  derivatives converging to the discrete block by block.
 - **Adjoints.** The discrete gradient identity to 1e-8 under both schemes;
   finite differences with Richardson extrapolation of the itau kernels;
   the continuous adjoint converging to the discrete under refinement;
