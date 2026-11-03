@@ -863,6 +863,54 @@ const LoveNumbers& Viscoelastic3D::OpenStep::EffectiveLove() const {
   return op_->reference_.EffectiveLoveNumbers(scheme_, dt_);
 }
 
+void Viscoelastic3D::OpenStep::AddMemory(
+    const std::vector<GridCoupling::TensorField>& increment) {
+  const auto& op = *op_;
+  const auto& coupling = op.coupling_;
+  const auto K = memory_.size();
+  if (increment.size() != K) {
+    throw std::invalid_argument(std::format(
+        "a memory increment gives one tensor per branch: {} branches", K));
+  }
+  const auto values = coupling.GridValueCount();
+  const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
+  // The decayed memory gains the increment, and the fixed force its
+  // branch-weighted sum, analysed once.
+  auto force = coupling.ZeroTensor();
+  for (auto k = std::size_t{0}; k < K; ++k) {
+    const auto& add = increment[k];
+    if (add.r.size() != values) {
+      throw std::invalid_argument(
+          "a memory increment's tensors live on the coupling's grid");
+    }
+    const auto& mu = op.muBranch_[k];
+    auto& memory = memory_[k];
+    detail::ParallelElements(nodes, op.options_.parallel, [&](std::size_t node) {
+      const auto base = coupling.FieldOffset(static_cast<int>(node));
+      const auto size = coupling.FieldSizeOf(static_cast<int>(node));
+      for (auto x = std::size_t{0}; x < size; ++x) {
+        const auto at = base + x;
+        for (auto c = 0; c < 2; ++c) {
+          memory.c[c][at] += add.c[c][at];
+          force.c[c][at] += mu[node] * add.c[c][at];
+        }
+        memory.r[at] += add.r[at];
+        force.r[at] += mu[node] * add.r[at];
+      }
+    });
+  }
+  const auto analysed = coupling.Analyse(force);
+  const auto in = Blocks(analysed);
+  const auto out = Blocks(fixed_);
+  for (auto b = std::size_t{0}; b < out.size(); ++b) {
+    auto& o = *out[b];
+    const auto& f = *in[b];
+    detail::ParallelElements(o.size(), op.options_.parallel,
+                             [&](std::size_t i) { o[i] += f[i]; });
+  }
+  startForce_ = false;
+}
+
 Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
     const GridCoupling::SpectralTensor& strain) const& {
   auto d = op_->coupling_.Synthesise(strain);

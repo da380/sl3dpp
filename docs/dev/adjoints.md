@@ -455,7 +455,52 @@ to the discrete block by block (ice, viscosity) and their mismatch with
 the continuous second-order run falls at the scheme's order (17 → 33
 nodes, η = 1e22), the discrete pair matching at 1e-9 at every spacing.
 
-Next, in order: the 3D counterparts on `Evolution3D` (tangent-linear and
-second order about a laterally varying viscosity), then the forward
-perturbations in the elastic parameters and the density.
+## 10. The 3D tangent-linear runs (built 3 November 2026)
+
+`TangentLinearSolver3D` (`TangentLinear3D.hpp/cpp`; sl3dpp's own — pyslfp
+has no 3D): the derivative of the coupled lateral-viscosity evolution
+along a direction in the direct load, the ice thickness, the initial sea
+level and the laterally varying inverse relaxation times, and the
+second-order run along two directions. The direction in itau is per
+branch over the coupling's grid values (the layout of
+`Kernels3D::itauKernel3D`), or a log-viscosity field δδ(x) which maps
+to it by δitau_k = −itau_k(x) δδ (`ItauOfLogViscosity`; the second
+variation of the log parameterisation, itau u v, by
+`SecondVariationOfLogViscosity`).
+
+The algebra is the 1D one pointwise. The coupled step is linear in its
+loads and its memory with coefficients that depend on itau(x) through
+the pointwise weights alone: the decayed memory e(x) m + α(x) d⁰, the
+lateral weight Σ μ_k (β_k(x) − β_ref) in the fixed point's force, and
+the finish m⁺ = m̃ + β(x) d. Differentiating each in itau(x) gives
+terms that together are exactly the 1D drive dh (de m⁰ + dα d⁰ + dβ d¹)
+added to the decayed memory — `OpenStep::AddMemory`, which raises the
+fixed memory force Σ μ_k m̃_k and the end state alike, so the within-step
+iteration, the reference effective systems and the sea level closure
+run unchanged (the lateral weight W δd is the trajectory's). The
+continuous drive α q⁰ + β q¹, q = (d − m) δitau/itau, is pointwise too.
+The forward trajectory is served forwards by `ForwardCursor3D`: kept
+states as recorded, the gaps rebuilt by forward coupled steps under the
+recorded loads with the run's own iteration (the adjoint's rebuild, in
+the forward direction). Snapshots are `SeaLevelEvolution3D`'s, recording
+the tangent state with its strain for the second-order run.
+
+GATES (`TestTangentLinear3D`, lmax 8): zero-lateral — with δ = 0 at the
+GLL memory points the 3D run equals the 1D run along loads and an
+angle-uniform itau perturbation at 1e-7, both methods; with lateral
+structure on, linear in the loads at 1e-8 against two coupled runs; the
+discrete run along a log-viscosity direction p is the exact derivative
+of the coupled forward (central differences with the operator's δ moved
+by ε p converge at second order, Richardson to 1e-6), and the continuous
+run pairs with the continuous 3D kernel ⟨K_δ, p⟩ at the commute level
+(< 10 %); the second-order run along loads and log-viscosity directions
+(with itau_uv) is the derivative along u of the first-order run along v
+at the moved operator (second order, Richardson to 1e-6), symmetric at
+1e-9, and zero without a viscosity perturbation.
+
+Next: the 3D second-order adjoint (the continuous second-order sweep on
+`Evolution3D`, the derivative adjoint state stepped with the continuous
+drive of the adjoint trajectory, pointwise — Hessian-vector products of
+3D viscosity objectives), then the forward perturbations in the elastic
+parameters and the density.
 

@@ -25,6 +25,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
 | Second-order adjoints: the Hessian's action on a direction, as derivatives of the kernels | `Adjoint.hpp` (`SecondOrderKernels`) |
+| 3D tangent-linear runs: the derivative of the coupled lateral-viscosity evolution along loads, thickness, initial sea level and itau(x), and the second-order run | `TangentLinear3D.hpp` |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -284,6 +285,15 @@ Deliberately out of scope:
   the forward one, plus the weights' second derivatives by the discrete
   method) reads. Under the sharp flotation rule the loads and the initial
   sea level enter no second derivative.
+- **3D tangent-linear runs** (`TangentLinearSolver3D`): the same
+  derivative of the coupled lateral-viscosity evolution, along loads,
+  thickness, initial sea level and the laterally varying itau(x) (or a
+  log-viscosity field), and the second-order run; the 1D drives applied
+  pointwise on the memory grid through `OpenStep::AddMemory`, the
+  within-step fixed point unchanged. The discrete run is the exact
+  derivative of the coupled forward (gated against central differences
+  with Richardson to 1e-6); the continuous run is the transpose of the
+  continuous 3D sweep to the commute error.
 - **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
   `second_order_adjoint_ice_history`): the kernels and their derivative
   along a direction v, the Hessian's action on v, as `KernelDerivatives`
@@ -415,6 +425,13 @@ Beyond the fixtures:
   second order, Richardson to 1e-6), symmetric in its directions, zero
   without a viscosity perturbation, and continuous converging to
   discrete at the scheme's order.
+- **3D tangent-linear runs.** Zero-lateral equal to the 1D run at 1e-7;
+  linear in the loads with lateral structure at 1e-8; the discrete run
+  along a log-viscosity direction against central differences of the
+  coupled forward at second order with Richardson to 1e-6, and the
+  continuous run against the continuous 3D kernel's pairing at the
+  commute level; the second-order run as the derivative of the first
+  with the log parameterisation's second variation, symmetric.
 - **Second-order adjoints.** The carried kernels equal to the first-order
   sweep's at 1e-12; central differences of the gradient along v against
   the derivatives at second order with Richardson to 1e-6, both schemes;

@@ -190,6 +190,7 @@ class SeaLevelEvolution3D {
 
  private:
   friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
+  friend class TangentLinearSolver3D;  // likewise, forwards
 
   using Complex = std::complex<double>;
 

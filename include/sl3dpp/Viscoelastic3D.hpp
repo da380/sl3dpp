@@ -332,6 +332,13 @@ class Viscoelastic3D {
     /// The effective Love numbers of this step's reference solid (SI).
     [[nodiscard]] const LoveNumbers& EffectiveLove() const;
 
+    /// Adds an increment to the step's decayed memory, one tensor per
+    /// branch on the grid: it joins the fixed memory force and the end
+    /// state alike — the drive of a tangent-linear step (the 1D
+    /// ViscoelasticStep::AddMemory, pointwise). The first pass's force is
+    /// rebuilt on the next Respond.
+    void AddMemory(const std::vector<GridCoupling::TensorField>& increment);
+
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
     /// cached. On a step that is done with
@@ -385,6 +392,7 @@ class Viscoelastic3D {
 
  private:
   friend class AdjointSolver3D;  // the sweeps transpose these internals
+  friend class TangentLinearSolver3D;  // the forward-mode drives
 
   /// The arrays kept for reuse by StartStep (Recycle, ~OpenStep): at most
   /// one step's worth, under their own lock.
