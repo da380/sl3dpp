@@ -470,6 +470,17 @@ const std::map<int, std::vector<double>>& ViscoelasticOperator::PrimeStrain(
   return state.strain;
 }
 
+std::pair<std::vector<double>, std::vector<double>>
+ViscoelasticOperator::MaterialGradient(int l, std::span<const double> y,
+                                       std::span<const double> x,
+                                       int ncols) const {
+  if (options_.memory_points != MemoryPointSet::Gll) {
+    throw std::invalid_argument(
+        "the material gradient needs the memory points at the GLL nodes");
+  }
+  return Deg(l).system.MaterialGradient(y, x, ncols);
+}
+
 std::vector<double> ViscoelasticOperator::InertiaMoment(
     std::span<const double> solution0, int ncols) const {
   const auto& deg = Deg(0);

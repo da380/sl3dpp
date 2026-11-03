@@ -203,6 +203,19 @@ class DegreeOperator {
   [[nodiscard]] std::vector<double> ApplyVariation(const MaterialVariation& dm,
                                                    std::span<const double> x,
                                                    int nrhs = 1) const;
+
+  /// The transpose of ApplyVariation in the isotropic moduli: nodal
+  /// arrays (kappa, mu) over the full mesh with
+  /// sum_i kappa_i dkappa_i + mu_i dmu_i = y^T (dK) x for the isotropic
+  /// variation (dkappa, dmu), for solutions y and x of nrhs columns
+  /// each, summed over the columns — the band assembly's elastic
+  /// integrands pointwise at the GLL nodes, over every element of the
+  /// system (the fluid core's bulk term at degree 0 included). The
+  /// gradient of the effective system of a step is the same function,
+  /// the form's shape not depending on the moduli.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  MaterialGradient(std::span<const double> y, std::span<const double> x,
+                   int nrhs) const;
   /// The variations of the forcings along the same: the load's traction
   /// piece and the tangential traction through the surface gravity, the
   /// tide through the density, its derivative, gravity and the interfaces;

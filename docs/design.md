@@ -31,6 +31,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | The first-order (Born) response of the static elastic problem to lateral δμ(x) and δκ(x), through the grid pipeline: the start of a 3D elastic reference | `ElasticPerturbation3D.hpp` |
 | The 1D tangent-linear along a direction of the moduli (the effective system's variation and the memory force's branch moduli, per step; the start's unrelaxed response) | `TangentLinear.hpp` (`TangentPerturbation::material`), `Viscoelastic.hpp` (`ViscoelasticStep::AddForce`) |
 | The 3D tangent-linear along a lateral direction of the moduli on the memory nodes, the three terms through the grid pipeline into the opened step | `TangentLinear3D.hpp` (`MaterialDirection3D`, `TangentPerturbation3D::material`), `Viscoelastic3D.hpp` (`OpenStep::AddForce`) |
+| The 1D material kernels dJ/dκ(r), dJ/dμ(r) by the discrete sweep: the transpose of the material tangent, through the nodal material gradient of the degree form | `Adjoint.hpp` (`Options::material_kernels`, `IceKernels::kappaKernel/muKernel`), `DegreeOperator.hpp` (`MaterialGradient`) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -460,6 +461,11 @@ Beyond the fixtures:
   direction in κ and μ (branch moduli as fixed fractions, times held)
   against central differences on the shifted material, both schemes,
   second order with Richardson at 1e-6.
+- **Material kernels, 1D.** The nodal material gradient against the
+  variation operator at 1e-12 for every degree; the discrete κ and μ
+  kernels paired with a direction against the material tangent at 1e-10
+  and against central differences on the shifted material, both
+  schemes.
 - **Material tangent, 3D.** Angle-uniform directions in κ and μ with
   lateral viscosity on against central differences on the shifted
   material (both schemes); the zero-lateral bridge to the 1D material

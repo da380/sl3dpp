@@ -225,6 +225,85 @@ IceKernels AdjointSolver::DiscreteSweep(
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
 
+  // The material kernels: the dual solution of each step's effective
+  // solve paired with the material derivative of the step's force — the
+  // transpose of the material tangent (docs/dev/adjoints.md §13). The
+  // branch fractions f_k = mu_k / mu_U carry the branch moduli.
+  const bool material = options_.material_kernels;
+  auto fractions = std::vector<std::vector<double>>{};
+  std::vector<double> kappaKernel, muKernel;
+  auto x0 = std::map<int, std::vector<double>>{};  // the base start solution
+  if (material) {
+    if (trajectory == nullptr) {
+      throw std::invalid_argument(
+          "the material kernels need the recorded forward trajectory");
+    }
+    if (op.options_.memory_points != MemoryPointSet::Gll) {
+      throw std::invalid_argument(
+          "the material kernels need the memory points at the GLL nodes");
+    }
+    if (rotation != RotationalFeedback::None) {
+      throw std::invalid_argument(
+          "the material kernels are built without rotational feedback yet");
+    }
+    const auto& rheology = op.GetRheology();
+    const auto muU = rheology.MuUnrelaxed();
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& branch = rheology.BranchAt(k);
+      auto f = std::vector<double>(muU.size(), 0.0);
+      for (auto i = std::size_t{0}; i < f.size(); ++i) {
+        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
+      }
+      fractions.push_back(std::move(f));
+    }
+    kappaKernel.assign(muU.size(), 0.0);
+    muKernel.assign(muU.size(), 0.0);
+  }
+  // The pairing of a dual solution with a base one at a degree's points:
+  // -(dK/d kappa, dK/d mu) of the step's system (the bulk product and
+  // the weighted deviatoric products, the band assembly's integrands)
+  // summed over the columns; the shear scaled by `factor` (the effective
+  // modulus's variation) and, with the base decayed memory, the memory
+  // force's variation added.
+  auto materialTerms = [&](const ViscoelasticOperator::Degree& deg, int ncols,
+                           std::span<const double> y,
+                           std::span<const double> sy,
+                           std::span<const double> x,
+                           std::span<const double> factor,
+                           const std::vector<double>* memory) {
+    // -(dK) over every element of the system (DegreeOperator's gradient,
+    // full-mesh nodal), the shear scaled by the effective factor ...
+    auto [kappa, mu] = deg.system.MaterialGradient(y, x, ncols);
+    for (auto i = std::size_t{0}; i < kappa.size(); ++i) {
+      kappa[i] = -kappa[i];
+      mu[i] = -factor[i] * mu[i];
+    }
+    // ... and the memory force's variation on the memory window.
+    if (memory != nullptr) {
+      const auto block = deg.NodalSize(ncols);
+      const auto wc = detail::ScalarWeights(deg.k2);
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto p = static_cast<std::size_t>(e) * deg.np + q;
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          const auto node = p * ncols;
+          auto mem = 0.0;
+          for (auto c = 0; c < ncols; ++c) {
+            for (auto s = 0; s < 3; ++s) {
+              const auto sn = s * block + node + c;
+              for (auto k = std::size_t{0}; k < K; ++k) {
+                mem += fractions[k][full] * wc[s] * sy[sn] *
+                       (*memory)[(k * 3 + s) * block + node + c];
+              }
+            }
+          }
+          mu[full] += deg.Wq[p] * mem;
+        }
+      }
+    }
+    return std::pair(std::move(kappa), std::move(mu));
+  };
+
   // The engine-adjoint inputs at a node: the measurement's duals plus
   // those carried by the node's total-load and centrifugal coefficients.
   auto engineDuals = [&](const std::vector<Complex>& sigmaDual,
@@ -358,6 +437,29 @@ IceKernels AdjointSolver::DiscreteSweep(
       fwdPrev = &cursor->State(n - 1);
       dweights = &op.SchemeWeightDerivativesOf(scheme, dt);
     }
+    // The base full solutions the material pairing needs: the unrelaxed
+    // solve under the node's memory and recorded loads (a step's
+    // solution satisfies it), and the effective modulus's factor
+    // 1 - sum_k f_k (1 - w_k) at the nodes.
+    auto xn = std::map<int, std::vector<double>>{};
+    auto factor = std::vector<double>{};
+    if (material) {
+      xn = op.SolveElastic(*fwdN, ev.Columns(trajectory->loads[n], ev.toMatDensity_),
+                           ev.Columns(trajectory->tides[n], ev.toMatPotential_));
+      if (n == 1) {
+        x0 = op.SolveElastic(*fwdPrev,
+                             ev.Columns(trajectory->loads[0], ev.toMatDensity_),
+                             ev.Columns(trajectory->tides[0], ev.toMatPotential_));
+      }
+      factor.assign(fractions[0].size(), 1.0);
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        const auto& w = weights[k];
+        for (auto i = std::size_t{0}; i < factor.size(); ++i) {
+          const double b = implicit ? 1.0 - w.e[i] : w.beta[i];
+          factor[i] -= fractions[k][i] * b;
+        }
+      }
+    }
 
     // The transposed radial update: one symmetric effective solve per
     // degree, then the weight recursion closing m-dagger and d-dagger;
@@ -366,6 +468,9 @@ IceKernels AdjointSolver::DiscreteSweep(
     // the kernel in degree order after the loop.
     auto kernelTerms =
         std::vector<std::vector<double>>(dweights != nullptr ? lmax + 1 : 0);
+    auto materialByDegree =
+        std::vector<std::pair<std::vector<double>, std::vector<double>>>(
+            material ? lmax + 1 : 0);
     detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
@@ -391,6 +496,34 @@ IceKernels AdjointSolver::DiscreteSweep(
       const auto y = systems[l]->Solve(rhs, ncols);
       const auto sy = deg.Strain(y, ncols);
       const auto wsy = deg.ApplyWeights(sy, ncols);
+      if (material) {
+        // The base decayed memory m~ = e m + alpha d_0 (e m for backward
+        // Euler) of the step, for the memory force's variation.
+        const auto& mPrev = fwdPrev->m.at(l);
+        auto decayed = std::vector<double>(mPrev.size());
+        const auto& d0 = fwdPrev->strain.at(l);
+        for (auto k = std::size_t{0}; k < K; ++k) {
+          const auto& w = weights[k];
+          for (auto s = 0; s < 3; ++s) {
+            for (auto e = 0; e < deg.ne; ++e) {
+              for (auto q = 0; q < deg.np; ++q) {
+                const std::size_t full =
+                    static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+                const std::size_t node =
+                    (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+                const auto at = (k * 3 + s) * block + node;
+                for (auto c = 0; c < ncols; ++c) {
+                  decayed[at + c] =
+                      w.e[full] * mPrev[at + c] +
+                      (implicit ? 0.0 : w.alpha[full] * d0[s * block + node + c]);
+                }
+              }
+            }
+          }
+        }
+        materialByDegree[l] =
+            materialTerms(deg, ncols, y, sy, xn.at(l), factor, &decayed);
+      }
       // The forward pairings of this degree's itau sensitivity.
       const std::vector<double>* mPrev = nullptr;
       const std::vector<double>* d0 = nullptr;
@@ -460,6 +593,12 @@ IceKernels AdjointSolver::DiscreteSweep(
         }
       }
     }
+    for (const auto& [kappa, mu] : materialByDegree) {
+      for (auto i = std::size_t{0}; i < kappaKernel.size(); ++i) {
+        kappaKernel[i] += kappa[i];
+        muKernel[i] += mu[i];
+      }
+    }
   }
 
   // The start: the transposed instantaneous elastic solve at times[0].
@@ -496,6 +635,41 @@ IceKernels AdjointSolver::DiscreteSweep(
     loadDuals[0].assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       loadDuals[0][i] = adj.directLoadDual[i] + synth[i] / r2;
+    }
+    if (material) {
+      // The start's dual solution: the transposed unrelaxed solve under
+      // the start duals and the start's response duals, paired with the
+      // base start solution (every weight one, no memory).
+      const auto ones = std::vector<double>(fractions[0].size(), 1.0);
+      for (auto l = 0; l <= lmax; ++l) {
+        const auto& deg = op.Deg(l);
+        const auto ncols = 2 * (l + 1);
+        auto rhs = deg.DualFromScalars(ddual[l], ncols);
+        const auto suCols =
+            ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
+        const auto sphiCols =
+            ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
+        const auto su = deg.system.SurfaceDof(Component::U);
+        const auto sphi = deg.system.SurfaceDof(Component::Phi);
+        for (auto c = 0; c < ncols; ++c) {
+          if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
+          if (sphi >= 0) {
+            rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
+          }
+        }
+        if (l == 0) {
+          const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
+          for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
+        }
+        const auto y = deg.system.Solve(rhs, ncols);
+        const auto sy = deg.Strain(y, ncols);
+        const auto [kappa, mu] =
+            materialTerms(deg, ncols, y, sy, x0.at(l), ones, nullptr);
+        for (auto i = std::size_t{0}; i < kappaKernel.size(); ++i) {
+          kappaKernel[i] += kappa[i];
+          muKernel[i] += mu[i];
+        }
+      }
     }
   }
 
@@ -535,6 +709,8 @@ IceKernels AdjointSolver::DiscreteSweep(
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
+  out.kappaKernel = std::move(kappaKernel);
+  out.muKernel = std::move(muKernel);
   return out;
 }
 
@@ -546,6 +722,11 @@ IceKernels AdjointSolver::ContinuousSweep(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
+  if (options_.material_kernels) {
+    throw std::invalid_argument(
+        "the material kernels are formed by the discrete sweep "
+        "(AdjointMethod::Discrete)");
+  }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;

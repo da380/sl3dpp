@@ -460,6 +460,73 @@ std::vector<double> DegreeOperator::ApplyBand(const std::vector<double>& band,
   return y;
 }
 
+std::pair<std::vector<double>, std::vector<double>>
+DegreeOperator::MaterialGradient(std::span<const double> y,
+                                 std::span<const double> x, int nrhs) const {
+  const auto& mesh = material_->Mesh();
+  const auto n = mesh.NGll();
+  const auto k2 = l_ * (l_ + 1.0);
+  const auto w = mesh.Weights();
+  const auto expected = static_cast<std::size_t>(ndof_) * nrhs;
+  if (y.size() != expected || x.size() != expected) {
+    throw std::invalid_argument("the solutions have ndof x nrhs entries");
+  }
+  const auto size = material_->Rho().size();
+  auto kappa = std::vector<double>(size, 0.0);
+  auto mu = std::vector<double>(size, 0.0);
+  auto B = std::vector<double>(static_cast<std::size_t>(n) * n);
+  std::vector<double> Uy(n), Vy(n), Ux(n), Vx(n);
+  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
+    if (material_->IsFluid(e) && l_ > 0) continue;
+    const auto base = static_cast<std::size_t>(e) * n;
+    const auto jac = mesh.Jacobian(e);
+    for (auto q = 0; q < n; ++q) {
+      for (auto i = 0; i < n; ++i) {
+        B[static_cast<std::size_t>(q) * n + i] =
+            mesh.Radius(e, q) * mesh.Derivative(q, i) / jac;
+      }
+    }
+    for (auto c = 0; c < nrhs; ++c) {
+      const auto column = static_cast<std::size_t>(c) * ndof_;
+      for (auto i = 0; i < n; ++i) {
+        const auto g = mesh.GlobalIndex(e, i);
+        const auto iU = Dof(g, Component::U);
+        const auto iV = Dof(g, Component::V);
+        Uy[i] = iU >= 0 ? y[column + iU] : 0.0;
+        Ux[i] = iU >= 0 ? x[column + iU] : 0.0;
+        Vy[i] = iV >= 0 ? y[column + iV] : 0.0;
+        Vx[i] = iV >= 0 ? x[column + iV] : 0.0;
+      }
+      for (auto q = 0; q < n; ++q) {
+        const auto Wq = w[q] * jac;
+        auto Xy = 0.0, Xx = 0.0, dVy = 0.0, dVx = 0.0;
+        for (auto i = 0; i < n; ++i) {
+          const auto b = B[static_cast<std::size_t>(q) * n + i];
+          Xy += b * Uy[i];
+          Xx += b * Ux[i];
+          dVy += b * Vy[i];
+          dVx += b * Vx[i];
+        }
+        const auto Yy = 2.0 * Uy[q] - k2 * Vy[q];
+        const auto Yx = 2.0 * Ux[q] - k2 * Vx[q];
+        const auto Sy = dVy + Uy[q] - Vy[q];
+        const auto Sx = dVx + Ux[q] - Vx[q];
+        const auto dC = Xy * Xx;
+        const auto dAN = Yy * Yx;
+        const auto dF = Xy * Yx + Yy * Xx;
+        const auto dL = k2 * Sy * Sx;
+        const auto dN = k2 * (k2 - 2.0) * Vy[q] * Vx[q];
+        // dC = dA = dkappa + 4/3 dmu, d(A - N) = dkappa + 1/3 dmu,
+        // dF = dkappa - 2/3 dmu, dL = dN = dmu
+        kappa[base + q] += Wq * (dC + dAN + dF);
+        mu[base + q] += Wq * ((4.0 / 3.0) * dC + dAN / 3.0 - (2.0 / 3.0) * dF +
+                              dL + dN);
+      }
+    }
+  }
+  return {std::move(kappa), std::move(mu)};
+}
+
 std::vector<double> DegreeOperator::ApplyVariation(const MaterialVariation& dm,
                                                    std::span<const double> x,
                                                    int nrhs) const {

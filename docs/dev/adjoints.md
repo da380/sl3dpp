@@ -755,9 +755,53 @@ lateral part of the shear term is the pipeline of step 2 and of the
 viscosity path; its exact gate will be the pairing identity with the
 material adjoint (the discrete transpose), which is the next piece.
 
-Next: the material pairing of the adjoints (the κ and μ kernels, 1D
-then 3D, the 3D one gated by the tangent pairing), and for the
-benchmark a driver writing the Born surface response to a cap load
-under a lateral δμ in the exchange format. Deferred: the discrete 3D
-second-order adjoint and distributing the discrete sweep.
+**The material kernels, 1D (3 November 2026):**
+`AdjointSolver::Options::material_kernels` has the discrete sweep form
+`IceKernels::kappaKernel` and `muKernel` — dJ/dκ(r), dJ/dμ(r), nodal
+over the full mesh in material units, pairing with a `MaterialDirection`
+by the plain nodal sum: the exact transpose of
+`TangentPerturbation::material`. The sweep already solves, per step,
+the transposed effective system for the dual y_n of the step's full
+solution (the duals of the next memory through the strain transpose,
+the sea level closure's response duals, the inertia dual); the material
+enters the tangent as forces on that solve, so the kernels are the
+pairings of y_n with each force's material derivative:
+
+- −(dK_eff) x_n: the nodal gradient of the degree form in the moduli
+  for the pair (y_n, x_n), `DegreeOperator::MaterialGradient` — the
+  band assembly's elastic integrands pointwise at the GLL nodes over
+  EVERY element of the system (the bulk product (X+Y)(X'+Y') for κ, the
+  combination 4/3 XX' + 1/3 YY' − 2/3(XY'+YX') + k²SS' + k²(k²−2)VV'
+  for μ, which is the deviatoric-scalar form the memory force uses), the
+  shear scaled by the effective factor 1 − Σ_k f_k (1 − w_k); x_n from
+  one unrelaxed solve under the node's memory and recorded loads;
+- the memory force of the base decayed memory m̃ with δμ_k = f_k δμ:
+  Σ_k f_k W_q Σ_s w_s d_s(y_n) m̃_{k,s}, on the memory window;
+- the start: the transposed unrelaxed solve under the start duals and
+  the start's response duals, paired with the base start solution.
+
+The gradient lives on `DegreeOperator`, not on the operator's per-degree
+workspace, because that workspace covers the memory window only (the
+relaxing elements): a first version built there missed the elastic
+lithosphere, which the static gate caught at once. Discrete only (the
+continuous sweep refuses the request); needs the trajectory, GLL memory
+points, no rotational feedback; the bulk pairing costs one unrelaxed
+solve per step.
+
+GATES (`TestAdjoint`): `MaterialGradientIsTheTransposeOfTheVariation`
+— for random solution pairs of every degree the gradient paired with a
+random direction equals the pair's product with step 1's variation
+operator at 1e-12; `MaterialKernelsAreTheTangentTranspose` — the
+kernels paired with a smooth direction in κ and μ equal the material
+tangent's objective change at 1e-10 (they land at 1e-13), both
+schemes, and central differences on the shifted material land on them
+at second order with Richardson at 1e-6; the refusals.
+
+Next: the 3D material kernels (the lateral δκ(x), δμ(x) kernels on the
+coupling's grid by the discrete 3D transpose, gated by the pairing
+identity with the 3D material tangent — which is also the exact gate of
+the lateral shear term), and for the benchmark a driver writing the
+Born surface response to a cap load under a lateral δμ in the exchange
+format. Deferred: the discrete 3D second-order adjoint and distributing
+the discrete sweep.
 

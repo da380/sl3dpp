@@ -134,6 +134,16 @@ struct IceKernels {
   /// parameterisation. eta in material units.
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
+
+  /// dJ / d kappa(r) and dJ / d mu(r): nodal arrays over the material's
+  /// full mesh, material units, pairing with a MaterialDirection by the
+  /// plain nodal sum — the transpose of TangentPerturbation::material
+  /// (the branch moduli as fixed fractions of the unrelaxed modulus, the
+  /// relaxation times held; docs/dev/adjoints.md §13). Empty unless
+  /// Options::material_kernels asked for them (Discrete, with a
+  /// trajectory).
+  std::vector<double> kappaKernel;
+  std::vector<double> muKernel;
 };
 
 enum class AdjointMethod { Continuous, Discrete };
@@ -188,6 +198,13 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
+    /// Also form the material kernels (IceKernels::kappaKernel, muKernel):
+    /// the pairing of each step's dual solution with the material
+    /// derivative of the step's force, the exact transpose of the
+    /// material tangent. Discrete only, needs the trajectory, the memory
+    /// points at the GLL nodes and no rotational feedback; the bulk
+    /// pairing costs one unrelaxed solve per step.
+    bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.

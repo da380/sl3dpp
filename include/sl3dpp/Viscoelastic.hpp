@@ -215,6 +215,15 @@ class ViscoelasticOperator {
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;
 
+  /// The nodal gradients of a degree's bilinear form in the bulk and
+  /// shear moduli for a pair of solutions (DegreeOperator::MaterialGradient
+  /// of the degree's system; the effective systems share it). Needs the
+  /// memory points at the GLL nodes, where the effective solid is a
+  /// material.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  MaterialGradient(int l, std::span<const double> y, std::span<const double> x,
+                   int ncols) const;
+
   /// The explicit stability scale of the rheology.
   [[nodiscard]] double MinRelaxationTime() const {
     return rheology_->MinRelaxationTime();
