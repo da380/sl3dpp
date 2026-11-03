@@ -709,10 +709,55 @@ moduli, wide enough for the truncation error to stand above the solves'
 1e-12 noise: the functional moves by parts in 1e-12 per unit step, and
 at narrower steps the ratio check reads noise.
 
-Next: the 3D form (a lateral δμ(x) in the stepping, the lateral weight
-pipeline carrying it as it carries the viscosity term), the material
-pairing of the adjoints (the κ and μ kernels, 1D then 3D), and for the
-benchmark a driver writing the Born surface response to a cap load under
-a lateral δμ in the exchange format. Deferred: the discrete 3D
+**Step 3 in 3D (3 November 2026):** `TangentPerturbation3D::material`
+(`MaterialDirection3D`: δκ(x), δμ(x) over the coupling's grid values,
+material units) runs the 3D tangent-linear along a lateral direction of
+the moduli, with the same meaning as in 1D (branch moduli as fixed
+fractions, relaxation times held). The direction lives on the memory
+nodes, which is where the operator's lateral structure lives: an
+elastic region to be perturbed laterally takes a branch of negligible
+inverse relaxation time, so that it carries memory nodes. The three
+terms are the 1D ones through the grid pipeline, entering the opened
+step by `OpenStep::AddForce` (an analysed tensor joining the fixed
+memory force, and per-degree spheroidal forces added after the
+assembly), so the within-step fixed point and the sea level closure
+carry them as they carry the memory force:
+
+- the effective system's variation on the full base solution — the
+  Born force of step 2 with the weight δμ_eff(x) = δμ(x)(1 − Σ_k f_k
+  β_k(x)), the step's OWN lateral weights β_k(x) (a lateral viscosity
+  makes the effective modulus's variation lateral even for a radial δμ)
+  — on the base node's grid strain (the cursor's state carries it; a
+  step's converged solution satisfies the unrelaxed equilibrium with its
+  new memory, so the base solutions a bulk direction needs come from one
+  unrelaxed solve under the recorded loads);
+- the memory force of the BASE step's decayed memory m̃ = e m + α d₀
+  with δμ_k = f_k δμ: a base step opened on the cursor's previous state
+  (the tangent's own step holds the tangent's memory, which is not it —
+  the diagnostic that found this is the record);
+- the bulk term through the scalar pipeline (`DilatationForce` of
+  −δκ times the dilatation of the base solutions);
+
+and the start's unrelaxed response −K_U⁻¹ (δK_U) x₀ by the same
+pipeline, closing the start's sea level solve and seeding the start
+strain. Refused: memory points away from the GLL nodes, rotational
+feedback, distribution.
+
+GATES (`TestTangentLinear3D`): `MaterialDirectionMatchesDifferences`
+— with lateral viscosity ON, along an angle-uniform direction in κ and
+μ on the memory nodes, the 3D tangent matches central differences of
+the coupled 3D run on the shifted material at second order with
+Richardson at 1e-6, both schemes (the lateral β_k(x) factor exercised);
+`ZeroLateralMaterialMatchesThe1DRun` — with δ = 0 the 3D run equals the
+1D material tangent at 1e-7 (it lands at 1e-12), both schemes, and a
+lateral direction of the same angular mean is a different run. The
+lateral part of the shear term is the pipeline of step 2 and of the
+viscosity path; its exact gate will be the pairing identity with the
+material adjoint (the discrete transpose), which is the next piece.
+
+Next: the material pairing of the adjoints (the κ and μ kernels, 1D
+then 3D, the 3D one gated by the tangent pairing), and for the
+benchmark a driver writing the Born surface response to a cap load
+under a lateral δμ in the exchange format. Deferred: the discrete 3D
 second-order adjoint and distributing the discrete sweep.
 

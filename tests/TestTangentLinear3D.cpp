@@ -518,3 +518,212 @@ TEST(TangentLinear3D, SecondOrderRunIsTheDerivativeOfTheFirst) {
   delete evolution;
   delete op;
 }
+
+// -- the material ------------------------------------------------------------
+
+namespace {
+
+/// A nodal field over the material's mesh on the coupling's grid values,
+/// angle-uniform.
+std::vector<double> UniformOnCoupling(const GridCoupling& coupling,
+                                      const Material& material,
+                                      std::span<const double> nodal) {
+  const auto ngll = material.Mesh().NGll();
+  auto out = std::vector<double>(coupling.GridValueCount(), 0.0);
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                      coupling.NodeInElementOf(rn);
+    const auto at = coupling.FieldOffset(rn);
+    for (auto x = std::size_t{0}; x < coupling.FieldSizeOf(rn); ++x) {
+      out[at + x] = nodal[full];
+    }
+  }
+  return out;
+}
+
+/// A smooth direction in kappa and mu on the relaxing elements (the
+/// coupling's nodes), as nodal fields over the mesh.
+MaterialDirection SmoothMaterialDirection(const Scene& scene) {
+  const auto& material = scene.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      if (!scene.rheology.IsActive(i)) continue;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      d.mu[i] = profile * m0[i];
+    }
+  }
+  return d;
+}
+
+/// The rheology of the material shifted along a direction: the branch
+/// moduli as the same fractions of the (shifted) unrelaxed modulus, the
+/// inverse times held.
+std::pair<Material, Rheology> ShiftedRheology(const Scene& scene,
+                                              const MaterialDirection& d,
+                                              double eps) {
+  const auto shifted = scene.material.Shifted(d, eps);
+  const auto muU = scene.rheology.MuUnrelaxed();
+  const auto [kappa, mu] = shifted.Moduli().KappaMu();
+  auto branches = std::vector<Rheology::Branch>{};
+  for (auto k = std::size_t{0}; k < scene.rheology.BranchCount(); ++k) {
+    auto branch = scene.rheology.BranchAt(k);
+    for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+      branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+    }
+    branches.push_back(std::move(branch));
+  }
+  auto rheology = Rheology::Create(shifted, branches).value();
+  return {shifted, std::move(rheology)};
+}
+
+}  // namespace
+
+TEST(TangentLinear3D, MaterialDirectionMatchesDifferences) {
+  // Along an angle-uniform direction in kappa and mu on the memory nodes,
+  // with lateral viscosity ON (so the effective modulus's variation
+  // carries the step's lateral weights), the 3D tangent run matches
+  // central differences of the coupled 3D run on the shifted material at
+  // second order with Richardson landing at 1e-6, both schemes.
+  auto scene = Scene::Make(1e21);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto g = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  const auto d = SmoothMaterialDirection(scene);
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    auto functional = [&](double eps) {
+      const auto [shifted, rheology] = ShiftedRheology(scene, d, eps);
+      Viscoelastic3D op(rheology, kLmax, baseDelta,
+                        {.memory_points = MemoryPointSet::Gll});
+      SeaLevelEvolution3D evolution(
+          op, scene.solver, scene.state,
+          {.scheme = scheme, .rotation = RotationalFeedback::None,
+           .rtol = 1e-12, .coupled_rtol = 1e-12});
+      return Objective(scene, g, evolution.Run(times, iceLoad).back().seaLevelChange);
+    };
+
+    Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
+                      {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+    TangentPerturbation3D direction;
+    direction.material.kappa = UniformOnCoupling(op.Coupling(), scene.material, d.kappa);
+    direction.material.mu = UniformOnCoupling(op.Coupling(), scene.material, d.mu);
+    const auto run = TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                                       .rtol = 1e-12,
+                                                       .coupled_rtol = 1e-12})
+                         .Run(times, direction, &trajectory);
+    const auto predicted = Objective(scene, g, run.back().seaLevelChange);
+
+    // wide steps (1%, 0.5% of the moduli): the truncation error above
+    // the solves' noise, as in the 1D gate
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+  }
+}
+
+TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
+  // With delta = 0 the 3D material tangent along an angle-uniform
+  // direction is the 1D one through the grid pipeline (the effective
+  // system's variation by the pointwise product against the 1D assembled
+  // variation operator), both schemes; and a lateral direction with the
+  // same angular mean is not the same run.
+  auto scene = Scene::Make(1e21);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.0 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  const auto d = SmoothMaterialDirection(scene);
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op1(scene.rheology, kLmax,
+                             {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
+                                 {.scheme = scheme,
+                                  .rotation = RotationalFeedback::None,
+                                  .rtol = 1e-12,
+                                  .record_stride = 1});
+    const auto trajectory1 =
+        ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
+    TangentPerturbation d1;
+    d1.material = d;
+    const auto run1 = TangentLinearSolver(evolution1, {.rtol = 1e-12})
+                          .Run(times, d1, &trajectory1);
+
+    Viscoelastic3D op3(scene.rheology, kLmax,
+                       [](double, double, double) { return 0.0; },
+                       {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution3D evolution3(
+        op3, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory3 =
+        ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, iceLoad));
+    const auto& coupling = op3.Coupling();
+    TangentPerturbation3D d3;
+    d3.material.kappa = UniformOnCoupling(coupling, scene.material, d.kappa);
+    d3.material.mu = UniformOnCoupling(coupling, scene.material, d.mu);
+    const auto run3 = TangentLinearSolver3D(evolution3, {.rtol = 1e-12,
+                                                         .coupled_rtol = 1e-12})
+                          .Run(times, d3, &trajectory3);
+    ASSERT_EQ(run3.size(), times.size());
+    // the ramp starts from nothing: no start response at node 0
+    EXPECT_EQ(MaxAbs(run1[0].seaLevelChange), 0.0);
+    EXPECT_EQ(MaxAbs(run3[0].seaLevelChange), 0.0);
+    for (auto n = std::size_t{1}; n < times.size(); ++n) {
+      EXPECT_LT(MaxDiff(run3[n].seaLevelChange, run1[n].seaLevelChange),
+                1e-7 * MaxAbs(run1[n].seaLevelChange))
+          << "node " << n << " scheme " << static_cast<int>(scheme);
+      EXPECT_LT(MaxDiff(run3[n].displacement, run1[n].displacement),
+                1e-7 * MaxAbs(run1[n].displacement))
+          << "node " << n << " scheme " << static_cast<int>(scheme);
+      EXPECT_LT(MaxDiff(run3[n].potential, run1[n].potential),
+                1e-7 * MaxAbs(run1[n].potential))
+          << "node " << n << " scheme " << static_cast<int>(scheme);
+    }
+
+    // A lateral direction of the same angular mean: a different run,
+    // with toroidal coupling and degree mixing the 1D run cannot have.
+    const auto lateral = OnCoupling(coupling, [](double theta, double phi) {
+      return 1.0 + 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+    });
+    TangentPerturbation3D dl;
+    dl.material.mu = d3.material.mu;
+    for (auto i = std::size_t{0}; i < lateral.size(); ++i) {
+      dl.material.mu[i] *= lateral[i];
+    }
+    const auto runL = TangentLinearSolver3D(evolution3, {.rtol = 1e-12,
+                                                         .coupled_rtol = 1e-12})
+                          .Run(times, dl, &trajectory3);
+    EXPECT_GT(MaxDiff(runL.back().seaLevelChange, run3.back().seaLevelChange),
+              1e-3 * MaxAbs(run3.back().seaLevelChange));
+  }
+}
+

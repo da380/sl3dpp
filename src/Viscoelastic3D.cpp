@@ -798,14 +798,58 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
                                [&](std::size_t i) { o[i] += f[i]; });
     }
   }
-  return op.SolveAll(
-      analysed_,
-      [&](int l) -> const DegreeOperator& {
-        return op.FlavourSpheroidal(flavour, l);
-      },
-      [&](int l) -> const ToroidalOperator& {
-        return op.FlavourToroidal(flavour, l);
-      });
+  const auto spheroidal = [&](int l) -> const DegreeOperator& {
+    return op.FlavourSpheroidal(flavour, l);
+  };
+  const auto toroidal = [&](int l) -> const ToroidalOperator& {
+    return op.FlavourToroidal(flavour, l);
+  };
+  if (extraSpheroidal_.empty()) {
+    return op.SolveAll(analysed_, spheroidal, toroidal);
+  }
+  auto sph = coupling.SpheroidalForce(analysed_, spheroidal);
+  for (const auto& [l, f] : extraSpheroidal_) {
+    auto& b = sph.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+  }
+  return op.SolveForces(sph, coupling.ToroidalForce(analysed_, toroidal),
+                        spheroidal, toroidal);
+}
+
+void Viscoelastic3D::OpenStep::AddForce(
+    const GridCoupling::SpectralTensor& analysed,
+    const std::map<int, std::vector<Complex>>& spheroidal) {
+  const auto& op = *op_;
+  const auto in = Blocks(analysed);
+  const auto out = Blocks(fixed_);
+  if (in.size() != out.size()) {
+    throw std::invalid_argument("a force's tensor has the coupling's layout");
+  }
+  for (auto b = std::size_t{0}; b < out.size(); ++b) {
+    auto& o = *out[b];
+    const auto& f = *in[b];
+    if (f.size() != o.size()) {
+      throw std::invalid_argument("a force's tensor has the coupling's layout");
+    }
+    detail::ParallelElements(o.size(), op.options_.parallel,
+                             [&](std::size_t i) { o[i] += f[i]; });
+  }
+  for (const auto& [l, f] : spheroidal) {
+    const auto expected =
+        static_cast<std::size_t>(Spheroidal(l).DofCount()) * (l + 1);
+    if (f.size() != expected) {
+      throw std::invalid_argument(std::format(
+          "a degree-{} force has {} entries, the solutions {}", l, f.size(),
+          expected));
+    }
+    auto& extra = extraSpheroidal_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  startForce_ = false;
 }
 
 void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,

@@ -24,6 +24,14 @@
  * weight of the fixed point is the trajectory's, so the drive enters the
  * memory force and the end state alike, as in 1D.
  *
+ * A lateral perturbation of the moduli (`TangentPerturbation3D::material`,
+ * docs/dev/adjoints.md §13) enters each opened step as forces through
+ * the grid pipeline (OpenStep::AddForce): the effective system's
+ * variation on the full base solution with the step's own lateral
+ * weights, the memory force of the base step's decayed memory with the
+ * branch moduli's variation, and the bulk term through the scalar
+ * pipeline; the start's unrelaxed response alike.
+ *
  * Conventions follow SeaLevelEvolution3D: times increasing in SLE units,
  * grids in the solver's units; an itau perturbation is per branch over
  * the coupling's grid values ([FieldOffset(node) + x], the layout of
@@ -44,6 +52,21 @@ namespace sl3dpp {
 
 /// A direction in the 3D evolution's inputs. Empty members are absent;
 /// `itau` and `logViscosity` may both be given (they add).
+/// A perturbation of the moduli over the coupling's grid values
+/// (material units): delta kappa(x) and delta mu(x) at the memory nodes,
+/// which is where the 3D operator's lateral structure lives (an elastic
+/// region to be perturbed laterally takes a branch of negligible
+/// inverse relaxation time, so that it carries memory nodes). The branch
+/// moduli follow as fixed fractions of the unrelaxed modulus and the
+/// relaxation times are held; compose with a log-viscosity direction for
+/// a viscosity held instead. Either field may be empty.
+struct MaterialDirection3D {
+  std::vector<double> kappa;
+  std::vector<double> mu;
+
+  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
+};
+
 struct TangentPerturbation3D {
   std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
   std::vector<std::vector<double>> iceThickness;  ///< per node
@@ -52,10 +75,15 @@ struct TangentPerturbation3D {
   std::vector<std::vector<double>> itau;
   /// Over the grid values: delta itau_k = -itau_k(x) logViscosity(x).
   std::vector<double> logViscosity;
+  /// The moduli (docs/dev/adjoints.md §13); needs the recorded
+  /// trajectory, memory nodes at the GLL points, no rotational feedback
+  /// and no distribution.
+  MaterialDirection3D material;
 
   [[nodiscard]] bool Empty() const {
     return directLoad.empty() && iceThickness.empty() &&
-           initialSeaLevel.empty() && itau.empty() && logViscosity.empty();
+           initialSeaLevel.empty() && itau.empty() && logViscosity.empty() &&
+           material.Empty();
   }
 };
 
@@ -144,10 +172,14 @@ class TangentLinearSolver3D {
   using Drive = std::function<std::vector<GridCoupling::TensorField>(
       std::size_t node, double dt)>;
 
+  /// The material drive (TangentLinear3D.cpp): the three forces of a
+  /// material direction, from the forward cursor.
+  struct MaterialDrive3D;
   [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
-      const Direct& directAt, const Drive& drive) const;
+      const Direct& directAt, const Drive& drive,
+      MaterialDrive3D* material) const;
 
   [[nodiscard]] static std::vector<GridCoupling::TensorField> SecondWeightDrive(
       const Viscoelastic3D& op, Scheme scheme, double dt,

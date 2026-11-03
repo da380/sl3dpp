@@ -1,5 +1,6 @@
 #include "sl3dpp/TangentLinear3D.hpp"
 
+#include <complex>
 #include <format>
 #include <map>
 #include <optional>
@@ -372,6 +373,165 @@ TangentLinearSolver3D::TideColumnsOf() const {
   };
 }
 
+// -- the material drive
+// -----------------------------------------------------------------------
+
+struct TangentLinearSolver3D::MaterialDrive3D {
+  using Solutions = Viscoelastic3D::Solutions;
+  using Complex = std::complex<double>;
+  const SeaLevelEvolution3D* ev = nullptr;
+  MaterialDirection3D direction;
+  const ForwardTrajectory3D* trajectory = nullptr;
+  ForwardCursor3D* cursor = nullptr;
+  /// The branch fractions f_k = mu_k / mu_U per node, zero where the
+  /// unrelaxed modulus vanishes.
+  std::vector<std::vector<double>> fractions;
+
+  /// The forces of a direction on solutions x with the grid strain of x
+  /// (its deviatoric part through the tensor pipeline, its dilatation
+  /// through the scalar one): -(dK) x for the shear weight `shear` per
+  /// grid value (delta mu_eff of a step, delta mu of the start) plus the
+  /// tensor `memoryForce` (the memory force's variation, empty for none),
+  /// as an analysed tensor and per-degree spheroidal forces.
+  std::pair<GridCoupling::SpectralTensor, std::map<int, std::vector<Complex>>>
+  Forces(const GridCoupling::TensorField& strain, const Solutions* x,
+         std::span<const double> shear,
+         const GridCoupling::TensorField* memoryForce) const {
+    const auto& op = *ev->op_;
+    const auto& coupling = op.coupling_;
+    const auto values = coupling.GridValueCount();
+    auto grid = coupling.ZeroTensor();
+    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+      const auto w = shear.empty() ? 0.0 : -shear[i];
+      for (auto c = 0; c < 2; ++c) {
+        grid.c[c][i] = w * strain.c[c][i] +
+                       (memoryForce ? memoryForce->c[c][i] : Complex{});
+      }
+      grid.r[i] = w * strain.r[i] + (memoryForce ? memoryForce->r[i] : 0.0);
+    });
+    auto analysed = coupling.Analyse(grid);
+    auto spheroidal = std::map<int, std::vector<Complex>>{};
+    if (!direction.kappa.empty()) {
+      const auto sph = [&](int l) -> const DegreeOperator& {
+        return op.Spheroidal(l);
+      };
+      auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
+      for (const auto& [l, xl] : x->spheroidal) {
+        coupling.AddDilatationOfSolution(scalar, l, op.Spheroidal(l), xl);
+      }
+      auto field = coupling.SynthesiseScalar(scalar);
+      for (auto i = std::size_t{0}; i < values; ++i) {
+        field[i] *= -direction.kappa[i];
+      }
+      spheroidal = coupling.DilatationForce(coupling.AnalyseScalar(field), sph);
+    }
+    return {std::move(analysed), std::move(spheroidal)};
+  }
+
+  /// The full base solutions at a node (the unrelaxed solve under its
+  /// memory and recorded loads: a step's converged solution satisfies it)
+  /// when the bulk direction needs them, and the node's grid strain.
+  struct Base {
+    std::optional<Solutions> x;
+    std::optional<GridCoupling::TensorField> own;
+    const GridCoupling::TensorField* strain = nullptr;
+  };
+  Base BaseAt(std::size_t node) const {
+    const auto& op = *ev->op_;
+    const auto& state = cursor->At(node);
+    Base base;
+    const auto load = ev->Columns(trajectory->loads[node], ev->toMatDensity_);
+    const auto tide = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
+    if (!direction.kappa.empty() || !state.strain) {
+      base.x = op.SolveElastic(state, load, tide);
+    }
+    if (state.strain) {
+      base.strain = &*state.strain;
+    } else {
+      base.own = op.coupling_.Synthesise(op.StrainCoefficients(
+          *base.x, [&](int l) -> const DegreeOperator& { return op.Spheroidal(l); },
+          [&](int l) -> const ToroidalOperator& { return op.Toroidal(l); }));
+      base.strain = &*base.own;
+    }
+    return base;
+  }
+
+  /// The start's response: -K_U^-1 (dK_U) x_0 by the unrelaxed systems,
+  /// whose surface values close the start's sea level solve and whose
+  /// strain seeds the first step.
+  Solutions StartResponse() const {
+    const auto& op = *ev->op_;
+    const auto& coupling = op.coupling_;
+    const auto base = BaseAt(0);
+    const auto sph = [&](int l) -> const DegreeOperator& {
+      return op.Spheroidal(l);
+    };
+    const auto tor = [&](int l) -> const ToroidalOperator& {
+      return op.Toroidal(l);
+    };
+    auto [analysed, extra] =
+        Forces(*base.strain, base.x ? &*base.x : nullptr, direction.mu, nullptr);
+    auto forces = coupling.SpheroidalForce(analysed, sph);
+    for (const auto& [l, f] : extra) {
+      auto& b = forces.at(l);
+      for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+    }
+    return op.SolveForces(forces, coupling.ToroidalForce(analysed, tor), sph, tor);
+  }
+
+  /// The forces of the step ending at `node`, on the opened step: the
+  /// effective system's variation on the full base solution — delta
+  /// mu_eff(x) = delta mu(x) (1 - sum_k f_k beta_k(x)) with the step's
+  /// own lateral weights — and the memory force of the decayed memory
+  /// with delta mu_k = f_k delta mu.
+  void Apply(std::size_t node, double dt, Scheme scheme,
+             Viscoelastic3D::OpenStep& step) const {
+    const auto& op = *ev->op_;
+    const auto& coupling = op.coupling_;
+    const auto values = coupling.GridValueCount();
+    const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
+    const auto K = fractions.size();
+    auto shear = std::vector<double>{};
+    auto memoryForce = std::optional<GridCoupling::TensorField>{};
+    if (!direction.mu.empty()) {
+      // The BASE step's decayed memory m~ = e m + alpha d_0 (the step
+      // given is the tangent's, whose memory is the tangent's own),
+      // opened on the base state before the node — the weights are the
+      // step's, lateral alike.
+      const auto prev = cursor->At(node - 1);
+      const auto baseStep = op.StartStep(
+          prev, dt, scheme,
+          ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
+          ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
+      shear.assign(values, 0.0);
+      memoryForce = coupling.ZeroTensor();
+      detail::ParallelElements(nodes, op.options_.parallel, [&](std::size_t n) {
+        const auto first = coupling.FieldOffset(static_cast<int>(n));
+        const auto last = first + coupling.FieldSizeOf(static_cast<int>(n));
+        for (auto i = first; i < last; ++i) {
+          const auto dmu = direction.mu[i];
+          auto factor = 1.0;
+          for (auto k = std::size_t{0}; k < K; ++k) {
+            const auto fk = fractions[k][n];
+            if (fk == 0.0) continue;
+            factor -= fk * baseStep.beta_[k][i];
+            const auto& m = baseStep.memory_[k];
+            for (auto c = 0; c < 2; ++c) {
+              memoryForce->c[c][i] += fk * dmu * m.c[c][i];
+            }
+            memoryForce->r[i] += fk * dmu * m.r[i];
+          }
+          shear[i] = dmu * factor;
+        }
+      });
+    }
+    const auto base = BaseAt(node);
+    auto [analysed, extra] = Forces(*base.strain, base.x ? &*base.x : nullptr,
+                                    shear, memoryForce ? &*memoryForce : nullptr);
+    step.AddForce(analysed, extra);
+  }
+};
+
 std::vector<Snapshot> TangentLinearSolver3D::Run(
     std::span<const double> times, const TangentPerturbation3D& direction,
     const ForwardTrajectory3D* trajectory,
@@ -422,6 +582,28 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
     }
   }
   if (!ditau.empty()) CheckTrajectory(trajectory, nodes);
+  const bool hasMaterial = !direction.material.Empty();
+  if (hasMaterial) {
+    CheckTrajectory(trajectory, nodes);
+    for (const auto* field : {&direction.material.kappa, &direction.material.mu}) {
+      if (!field->empty() && field->size() != values) {
+        throw std::invalid_argument(
+            "a material direction lives on the coupling's grid values");
+      }
+    }
+    if (op.GetOptions().memory_points != MemoryPointSet::Gll) {
+      throw std::invalid_argument(
+          "the material tangent needs the memory nodes at the GLL points "
+          "(Viscoelastic3D::Options::memory_points)");
+    }
+    if (ev.options_.rotation != RotationalFeedback::None) {
+      throw std::invalid_argument(
+          "the material tangent is built without rotational feedback yet");
+    }
+    if (op.GetOptions().collectives.Distributed()) {
+      throw std::invalid_argument("the material tangent is not distributed yet");
+    }
+  }
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
@@ -461,16 +643,41 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
 
   auto cursor = std::optional<ForwardCursor3D>{};
   Drive drive{};
-  if (!ditau.empty()) {
+  if (!ditau.empty() || hasMaterial) {
     cursor.emplace(op, *trajectory, StepSizes(times), scheme, Control(),
                    LoadColumnsOf(), TideColumnsOf());
+  }
+  if (!ditau.empty()) {
     drive = [&](std::size_t node, double dt) {
       const State prev = cursor->At(node - 1);
       const auto& next = cursor->At(node);
       return FirstOrderDrive(op, options_.method, scheme, dt, prev, next, ditau);
     };
   }
-  return March(times, oceanFunctions, directAt, drive);
+  auto material = std::optional<MaterialDrive3D>{};
+  if (hasMaterial) {
+    material.emplace();
+    material->ev = &ev;
+    material->direction = direction.material;
+    material->trajectory = trajectory;
+    material->cursor = &*cursor;
+    const auto& coupling = op.Coupling();
+    const auto& base = op.GetRheology().BaseMaterial();
+    const auto ngll = base.Mesh().NGll();
+    const auto [kappaU, muU] = base.Moduli().KappaMu();
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      auto f = std::vector<double>(coupling.NodeCount(), 0.0);
+      for (auto n = 0; n < coupling.NodeCount(); ++n) {
+        const auto full =
+            static_cast<std::size_t>(coupling.ElementOfNode(n)) * ngll +
+            coupling.NodeInElementOf(n);
+        f[n] = muU[full] > 0.0 ? op.muBranch_[k][n] / muU[full] : 0.0;
+      }
+      material->fractions.push_back(std::move(f));
+    }
+  }
+  return March(times, oceanFunctions, directAt, drive,
+               material ? &*material : nullptr);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -550,13 +757,14 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
     };
   }
   const Direct none = [](std::size_t) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, none, drive);
+  return March(times, oceanFunctions, none, drive, nullptr);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
-    const Direct& directAt, const Drive& drive) const {
+    const Direct& directAt, const Drive& drive,
+    MaterialDrive3D* material) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -653,11 +861,20 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   response.seaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
-  if (const auto f0 = directAt(0); !f0.empty()) {
+  auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
+  if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
     SeaLevelSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
+    if (material != nullptr) {
+      // The start solve closes about the material's own start response.
+      startResponse = material->StartResponse();
+      forcing.displacementResponse = ev.Coefficients(
+          op.Surface(*startResponse, Component::U), ev.toNdLength_);
+      forcing.potentialResponse = ev.Coefficients(
+          op.Surface(*startResponse, Component::Phi), ev.toNdPotential_);
+    }
     response =
         solverFor(op.ElasticLove()).SolveGeneralised(ev.state_, forcing, sleOptions);
     if (!response.converged) {
@@ -668,9 +885,17 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     psi = centrifugal(response);
     agree();
   }
-  if (options_.record) {
+  if (options_.record || material != nullptr) {
     op.PrimeStrain(tstate, ev.Columns(sigma, ev.toMatDensity_),
                    ev.Columns(psi, ev.toMatPotential_));
+  }
+  if (material != nullptr) {
+    // The start strain carries the start response too.
+    op.AddStrainCoefficients(
+        *tstate.strainCoefficients, *startResponse,
+        [&](int l) -> const DegreeOperator& { return op.Spheroidal(l); },
+        [&](int l) -> const ToroidalOperator& { return op.Toroidal(l); });
+    tstate.strain = op.coupling_.Synthesise(*tstate.strainCoefficients);
   }
 
   auto snapshots = std::vector<Snapshot>{};
@@ -702,6 +927,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
                              ev.Columns(sigma, ev.toMatDensity_),
                              ev.Columns(psi, ev.toMatPotential_));
     if (drive) step.AddMemory(drive(node, dt));
+    if (material != nullptr) material->Apply(node, dt, scheme, step);
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
     const auto f = directAt(node);
     auto [strain, info] = step.Converge(

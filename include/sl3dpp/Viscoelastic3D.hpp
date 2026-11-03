@@ -340,6 +340,18 @@ class Viscoelastic3D {
     /// rebuilt on the next Respond.
     void AddMemory(const std::vector<GridCoupling::TensorField>& increment);
 
+    /// Adds a force to the step: an analysed tensor (the spectral
+    /// coefficients of a weighted grid tensor, as the fixed memory force
+    /// is) joining the fixed force, and per-degree spheroidal forces
+    /// (the solutions' layout) added after the assembly — the drive of a
+    /// tangent-linear step in the material (TangentLinearSolver3D): the
+    /// effective system's variation and the memory force of the branch
+    /// moduli's variation as the tensor, a bulk modulus perturbation as
+    /// the degree forces. The first pass's force is rebuilt on the next
+    /// Respond.
+    void AddForce(const GridCoupling::SpectralTensor& analysed,
+                  const std::map<int, std::vector<Complex>>& spheroidal);
+
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
     /// cached. On a step that is done with
@@ -352,6 +364,7 @@ class Viscoelastic3D {
    private:
     friend class Viscoelastic3D;
     friend class AdjointSolver3D;  // the discrete transpose reads the weights
+    friend class TangentLinearSolver3D;  // the material drive reads the memory
     /// The step's effective systems and their unit responses (cached in
     /// the flavour), for the discrete transpose.
     [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;
@@ -375,6 +388,8 @@ class Viscoelastic3D {
     /// Whether analysed_ holds the start strain's force, formed in
     /// StartStep from the grid strain it had, for the first Respond.
     mutable bool startForce_ = false;
+    /// Per-degree spheroidal forces added after the assembly (AddForce).
+    std::map<int, std::vector<Complex>> extraSpheroidal_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
