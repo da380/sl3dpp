@@ -166,6 +166,7 @@ add_library(sl3dpp STATIC
   src/Adjoint3D.cpp
   src/AdjointSecondOrder.cpp
   src/AdjointDiscrete3D.cpp
+  src/ElasticPerturbation3D.cpp
   src/TangentLinear.cpp
   src/TangentLinear3D.cpp
   src/BandSolvers.cpp

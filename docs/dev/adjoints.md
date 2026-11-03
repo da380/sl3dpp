@@ -628,12 +628,49 @@ differences second order where resolved; the reciprocity identities
 differentiated (δg h_φ + g δh_φ = δk_u and the two others) at 1e-10; an
 empty direction gives zeros.
 
-Next, in order (§13 continued): step 2, the lateral extension through
-the grid pipeline — δμ(x) as a pointwise weight on the deviatoric strain
-fed back through the force assembly (the lateral viscosity term's
-structure), δκ(x) needing the isotropic part the pipeline does not
-carry, no lateral δρ; step 3, the time-stepped tangent-linear in the
-material (the effective modulus and the memory force per step, with the
-branch moduli as fixed fractions of the unrelaxed one). Deferred: the
-discrete 3D second-order adjoint and distributing the discrete sweep.
+**Step 2, the lateral extension (3 November 2026):**
+`ElasticPerturbation3D` (`ElasticPerturbation3D.hpp/cpp`): the
+first-order (Born) response of the static gravitating elastic problem to
+lateral δμ(x) and δκ(x) over the grid values. A lateral δμ enters the
+bilinear form exactly as the lateral viscosity weight enters a step —
+a pointwise weight on the deviatoric strain, fed back through the force
+assembly (`Entry(δμ ⊙ Exit(x))`), which in the angle-uniform limit is
+the 1D shear block exactly — and δκ weights the dilatation r div u =
+X + Y, carried by a new scalar companion of `GridCoupling`
+(`SynthesiseScalar`/`AnalyseScalar` in the spin-0 layouts,
+`AddDilatationOfSolution`, `DilatationForce`: the bulk term κ(X+Y)(X'+Y')
+of the degree form, pointwise in angle). Then δx = −K⁻¹ (dK) x with the
+reference (radial, unrelaxed) systems, spheroidal and toroidal: a
+lateral perturbation couples the degrees by the selection rules of the
+products and couples spheroidal to toroidal motion. The nodes are the
+GLL nodes of every solid element above the one holding the centre (the
+spherical strain components divide by r); they come from a throwaway
+Maxwell rheology over the isotropic Voigt average of the material (a
+branch may not be active where the material is anisotropic), while the
+reference systems and the perturbation's meaning — an isotropic
+increment of whatever anisotropy the material has — are the material's
+own. `SolveLoad` gives the reference response to a surface mass load by
+its m ≥ 0 coefficients; `Force`, `Respond`, `Solve`, `Surface`,
+`SurfaceToroidal` and the Hermitian `Pair` complete the interface. No
+lateral δρ, as decided.
+
+GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): angle-uniform
+δμ(r) and δκ(r) reproduce step 1's exact 1D Love-number derivatives
+(U, V, φ at the surface, every degree) at 1e-8 through the whole
+pipeline, with no coupling into other orders or toroidal motion; the
+perturbation force is symmetric under the Hermitian pairing at 1e-10 for
+lateral μ and κ directions, alone and together; a single-harmonic
+direction f(r) P_L^M cos Mφ couples a degree-l order-m load only to the
+degrees |l − L|..l + L and orders m ± M, spheroidal and toroidal alike,
+with the toroidal response present. The lateral response beyond the
+angle-uniform limit rests on the pipeline (gated through the viscosity
+path) and these structural identities; its independent check is the
+cross-code comparison with AdGIA, which is what this is for.
+
+Next: step 3, the time-stepped tangent-linear in the material (the
+effective modulus and the memory force per step, with the branch moduli
+as fixed fractions of the unrelaxed one), 1D first; and, for the
+benchmark, a driver that writes the Born surface response to a cap load
+under a lateral δμ in the exchange format. Deferred: the discrete 3D
+second-order adjoint and distributing the discrete sweep.
 

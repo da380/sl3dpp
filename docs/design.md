@@ -28,6 +28,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | 3D tangent-linear runs: the derivative of the coupled lateral-viscosity evolution along loads, thickness, initial sea level and itau(x), and the second-order run | `TangentLinear3D.hpp` |
 | 3D second-order adjoints: the Hessian's action on a direction for 3D viscosity objectives | `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | Material derivatives of the static elastic problem: the variation operator and the Love-number derivatives along directions in κ, μ and ρ (self-consistent gravity) | `Material.hpp` (`MaterialDirection`, `Variation`, `Shifted`), `DegreeOperator.hpp` (`ApplyVariation`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`) |
+| The first-order (Born) response of the static elastic problem to lateral δμ(x) and δκ(x), through the grid pipeline: the start of a 3D elastic reference | `ElasticPerturbation3D.hpp` |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -453,6 +454,10 @@ Beyond the fixtures:
   derivatives against central differences of the shifted material's
   numbers, Richardson to 1e-7 for every channel, degree and axial number
   under μ, κ and ρ directions; the reciprocity identities differentiated.
+- **Lateral elastic perturbation (Born).** Angle-uniform directions
+  reproducing the 1D Love-number derivatives at 1e-8 through the grid
+  pipeline; the perturbation force symmetric at 1e-10; the selection
+  rules of a single-harmonic direction, spheroidal and toroidal.
 - **The discrete 3D transpose.** The pairing identity with the 3D
   tangent-linear run at 1e-8 (both schemes, loads and a log-viscosity
   direction, stride-2 trajectories); zero-lateral equal to the 1D

@@ -289,6 +289,40 @@ class GridCoupling {
   void ScaleByNode(SpectralTensor& spectral,
                    std::span<const double> factor) const;
 
+  // -- the scalar companion
+  // ---------------------------------------------------
+
+  /// A real scalar field per node, in the spin-0 layouts: grid values at
+  /// [FieldOffset(node) + x], coefficients (m >= 0) at
+  /// [CoefficientOffset(node) + SurfaceGrid::Index(l, m)]. What the
+  /// dilatation of a solution and a bulk-modulus perturbation need, which
+  /// the trace-free tensors above do not carry.
+  [[nodiscard]] std::size_t CoefficientOffset(int node) const {
+    return coefficientOffset_[node];
+  }
+  [[nodiscard]] std::size_t ScalarCoefficientCount() const {
+    return coefficientOffset_.back();
+  }
+  [[nodiscard]] std::vector<double> SynthesiseScalar(
+      std::span<const Complex> spectral) const;
+  [[nodiscard]] std::vector<Complex> AnalyseScalar(
+      std::span<const double> field) const;
+
+  /// Adds the dilatation r div u = r d_r U + 2 U - k^2 V of degree
+  /// solutions (the X + Y of the degree form) at the nodes to a scalar's
+  /// coefficients, column by column.
+  void AddDilatationOfSolution(std::vector<Complex>& spectral, int l,
+                               const DegreeOperator& spheroidal,
+                               std::span<const Complex> x) const;
+
+  /// The force of a weighted dilatation's coefficients (kappa times the
+  /// dilatation, say): per degree the complex column right-hand sides of
+  /// int w (r div u') dr through the radial quadrature — the bulk term
+  /// kappa (X + Y)(X' + Y') of the elastic form, pointwise in angle.
+  [[nodiscard]] std::map<int, std::vector<Complex>> DilatationForce(
+      std::span<const Complex> weighted,
+      const std::function<const DegreeOperator&(int)>& system) const;
+
  private:
   struct Node {
     int element;
