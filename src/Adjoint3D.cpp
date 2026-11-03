@@ -112,6 +112,12 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const std::vector<double>> oceanFunctions,
     std::span<const SeaLevelEvolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau) const {
+  if (options_.material_kernels) {
+    throw std::invalid_argument(
+        "the material kernels are formed by the discrete sweep "
+        "(AdjointMethod::Discrete)");
+  }
+
   const bool second = ditau != nullptr;
   if (second && options_.method == AdjointMethod::Discrete) {
     throw std::invalid_argument(

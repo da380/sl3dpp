@@ -797,11 +797,57 @@ tangent's objective change at 1e-10 (they land at 1e-13), both
 schemes, and central differences on the shifted material land on them
 at second order with Richardson at 1e-6; the refusals.
 
-Next: the 3D material kernels (the lateral δκ(x), δμ(x) kernels on the
-coupling's grid by the discrete 3D transpose, gated by the pairing
-identity with the 3D material tangent — which is also the exact gate of
-the lateral shear term), and for the benchmark a driver writing the
-Born surface response to a cap load under a lateral δμ in the exchange
-format. Deferred: the discrete 3D second-order adjoint and distributing
-the discrete sweep.
+**The material kernels, 3D (3 November 2026):**
+`AdjointSolver3D::Options::material_kernels` has the discrete 3D sweep
+form `Kernels3D::kappaKernel3D` and `muKernel3D` — dJ/dκ(x), dJ/dμ(x)
+in the itau kernel's layout (an angular density per memory node, the
+radial quadrature folded in) — and their spherical reductions, the
+exact transpose of `TangentPerturbation3D::material`. The transposed
+fixed point already yields, per step, the dual solution y_n of the
+step's full solution (the force of the end strain's dual, the lateral
+weight's transpose and the closure's response duals through the
+effective systems); the material tangent adds its forces to that very
+solve (an analysed tensor into the fixed force, per-degree bulk
+forces), so the kernels are the pairings of y_n with the tangent's grid
+tensors:
+
+- the shear: W_q r² [−(1 − Σ_k f_k β_k(x)) C(e_n, d_n) + Σ_k f_k C(e_n,
+  m̃_k)] with C the (12, 8, 4) energy contraction the itau kernel uses,
+  e_n the dual solution's grid strain, d_n the recorded forward strain
+  and m̃_k the base decayed memory the opened step holds;
+- the bulk: −W_q D(y_n) D(x_n), the dilatations through the scalar
+  companion (`AddDilatationOfSolution`, `SynthesiseScalar`), x_n from
+  one unrelaxed solve under the node's memory and recorded loads;
+- the start: the transposed unrelaxed solve under the start duals and
+  the start's response duals (one more solve than the ice kernels
+  need), paired with the base start solution.
+
+Discrete only (the continuous 3D sweep refuses); needs the trajectory,
+GLL memory nodes, no rotational feedback, and the sweep is serial as
+before.
+
+GATES (`TestDiscreteAdjoint3D`): `MaterialKernelsPairWithTheTangent` —
+with lateral viscosity on, the kernels paired with LATERAL directions in
+κ and μ (a radial profile times caps and harmonics) equal the 3D
+material tangent's objective change at 1e-8, κ alone, μ alone and
+together, both schemes: the exact gate of the lateral shear term of
+tangent and kernel alike, which closes the gap the 3D material tangent's
+record left open; the spherical reductions pair with angle-uniform
+directions as the full kernels do; the refusals.
+`ZeroLateralMaterialKernelsMatchThe1D` — with δ = 0 the spherical
+reductions equal the 1D discrete material kernels at the memory nodes
+at 1e-7, both schemes.
+
+The derivative machinery in the material is now closed in both
+dimensions: Love-number derivatives (step 1), the lateral Born response
+(step 2), the time-stepped tangents (step 3, 1D and 3D) and their exact
+transposes (the κ and μ kernels, 1D and 3D), each gated against the
+previous rung.
+
+Next: for the benchmark, a driver writing the Born surface response to a
+cap load under a lateral δμ in the exchange format (the 3D elastic
+comparison with AdGIA). Deferred: the discrete 3D second-order adjoint,
+the material in the second-order runs, and distributing the discrete
+sweep (with the rest of the parallelisation pass, which waits until the
+features are complete).
 

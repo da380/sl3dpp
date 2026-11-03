@@ -3,11 +3,13 @@
 /**
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
- * evolution by the CONTINUOUS adjoint — the preferred path
- * (docs/dev/adjoints.md §1, §6): ice-history kernels, and the full 3D
- * inverse-relaxation-time kernel on the (memory node × angular grid) together
- * with its spherical reduction. The discrete transpose of the reduced pipeline
- * is not built: in 3D the continuous adjoint is the only sweep.
+ * evolution: by the CONTINUOUS adjoint — the preferred path for the
+ * viscosity (docs/dev/adjoints.md §1, §6) — or by the DISCRETE transpose
+ * of the coupled time-stepped map (§6b, AdjointDiscrete3D.cpp), which
+ * alone forms the material kernels (§13): ice-history kernels, the full
+ * 3D inverse-relaxation-time kernel on the (memory node × angular grid)
+ * with its spherical reduction, and, on request, the lateral bulk and
+ * shear modulus kernels in the same layout.
  *
  * The continuous adjoint equations have the forward problem's form, so
  * between observations the adjoint state is stepped by the SAME coupled
@@ -113,6 +115,17 @@ struct Kernels3D {
   std::vector<std::vector<double>> itauKernel3D;
   std::vector<std::vector<double>> itauKernelSpherical;
   std::vector<std::vector<double>> logViscosityKernel3D;
+  /// dJ / d kappa(x) and dJ / d mu(x) in the itauKernel3D layout (an
+  /// angular density per memory node, the radial quadrature folded in),
+  /// material units — the transpose of TangentPerturbation3D::material
+  /// (docs/dev/adjoints.md §13) — and their angular integrals per node,
+  /// which pair with angle-uniform directions as the 1D kappaKernel and
+  /// muKernel do at that node. Empty unless Options::material_kernels
+  /// (Discrete, with a trajectory).
+  std::vector<double> kappaKernel3D;
+  std::vector<double> muKernel3D;
+  std::vector<double> kappaKernelSpherical;
+  std::vector<double> muKernelSpherical;
 };
 
 /// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
@@ -168,6 +181,13 @@ class AdjointSolver3D {
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
+    /// Also form the material kernels (Kernels3D::kappaKernel3D,
+    /// muKernel3D): the pairing of each step's dual solution with the
+    /// material derivative of the step's forces, the exact transpose of
+    /// the 3D material tangent. Discrete only, needs the trajectory, the
+    /// memory nodes at the GLL points and no rotational feedback; the
+    /// bulk pairing costs one unrelaxed solve per step.
+    bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.

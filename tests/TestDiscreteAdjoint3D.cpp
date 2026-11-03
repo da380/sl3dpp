@@ -460,3 +460,224 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderRefinement) {
     EXPECT_GT((*gaps)[0] / (*gaps)[1], 2.5) << (*gaps)[0] << " " << (*gaps)[1];
   }
 }
+
+// -- the material ------------------------------------------------------------
+
+namespace {
+
+double FieldPairing(const GridCoupling& coupling, std::span<const double> kernel,
+                    std::span<const double> direction) {
+  auto total = 0.0;
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto at = coupling.FieldOffset(rn);
+    const auto size = coupling.FieldSizeOf(rn);
+    auto product = std::vector<double>(size);
+    for (auto x = std::size_t{0}; x < size; ++x) {
+      product[x] = kernel[at + x] * direction[at + x];
+    }
+    total += coupling.GridOf(rn).Integrate(product);
+  }
+  return total;
+}
+
+/// A radial profile times an angular function over the grid values, in
+/// units of a nodal modulus.
+std::vector<double> LateralModulus(const GridCoupling& coupling,
+                                   const Material& material,
+                                   std::span<const double> modulus,
+                                   const std::function<double(double)>& radial,
+                                   const std::function<double(double, double)>& angular) {
+  const auto ngll = material.Mesh().NGll();
+  auto out = std::vector<double>(coupling.GridValueCount(), 0.0);
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                      coupling.NodeInElementOf(rn);
+    const auto r = coupling.RadiusOfNode(rn);
+    const auto values = coupling.GridOf(rn).FromFunction(
+        [&](double theta, double phi) {
+          return modulus[full] * radial(r) * angular(theta, phi);
+        });
+    const auto at = coupling.FieldOffset(rn);
+    for (auto x = std::size_t{0}; x < values.size(); ++x) out[at + x] = values[x];
+  }
+  return out;
+}
+
+}  // namespace
+
+TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
+  // The exact transpose in the material: with lateral viscosity on, the
+  // discrete material kernels paired with LATERAL directions in kappa and
+  // mu equal the 3D material tangent's objective change, both schemes,
+  // each modulus alone and together — the gate of the lateral shear term
+  // of both. Refused by the continuous sweep and without a trajectory.
+  auto scene = Scene::Make(1e21);
+  std::mt19937 rng(17);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
+  Measurement middle;
+  middle.seaLevelDual = scene.Smooth(rng, 1.0);
+  middle.displacementDual = scene.Smooth(rng, -0.5);
+  measurements[2] = std::move(middle);
+  Measurement last;
+  last.displacementDual = scene.Smooth(rng, 0.7);
+  last.potentialDual = scene.Smooth(rng, 0.4);
+  measurements[4] = std::move(last);
+  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    Viscoelastic3D op(scene.rheology, kLmax,
+                      [](double, double theta, double phi) {
+                        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+                      },
+                      {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+    const auto& coupling = op.Coupling();
+    MaterialDirection3D d;
+    d.kappa = LateralModulus(
+        coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+        [](double theta, double phi) {
+          return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+        });
+    d.mu = LateralModulus(
+        coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+        [](double theta, double phi) {
+          return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6) +
+                 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        });
+
+    AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12,
+                                        .material_kernels = true});
+    const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    ASSERT_EQ(kernels.kappaKernel3D.size(), coupling.GridValueCount());
+    ASSERT_EQ(kernels.muKernel3D.size(), coupling.GridValueCount());
+    const auto kappaRhs = FieldPairing(coupling, kernels.kappaKernel3D, d.kappa);
+    const auto muRhs = FieldPairing(coupling, kernels.muKernel3D, d.mu);
+
+    TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = 1e-12});
+    for (const auto& [name, kappa, mu, rhs] :
+         {std::tuple{"kappa", true, false, kappaRhs},
+          std::tuple{"mu", false, true, muRhs},
+          std::tuple{"both", true, true, kappaRhs + muRhs}}) {
+      TangentPerturbation3D direction;
+      if (kappa) direction.material.kappa = d.kappa;
+      if (mu) direction.material.mu = d.mu;
+      const auto lhs =
+          Objective(scene, tangent.Run(times, direction, &trajectory), measurements);
+      EXPECT_NEAR(lhs, rhs, 1e-8 * std::abs(lhs))
+          << name << " scheme " << static_cast<int>(scheme);
+      EXPECT_NE(lhs, 0.0) << name;
+    }
+
+    // The spherical reductions pair with angle-uniform directions.
+    auto uniform = std::vector<double>(coupling.GridValueCount(), 0.0);
+    auto nodal = std::vector<double>(coupling.NodeCount(), 0.0);
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      nodal[rn] = m0[static_cast<std::size_t>(coupling.ElementOfNode(rn)) *
+                         scene.material.Mesh().NGll() +
+                     coupling.NodeInElementOf(rn)] *
+                  0.1 * coupling.RadiusOfNode(rn);
+      const auto at = coupling.FieldOffset(rn);
+      for (auto x = std::size_t{0}; x < coupling.FieldSizeOf(rn); ++x) {
+        uniform[at + x] = nodal[rn];
+      }
+    }
+    auto spherical = 0.0;
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      spherical += kernels.muKernelSpherical[rn] * nodal[rn];
+    }
+    const auto full = FieldPairing(coupling, kernels.muKernel3D, uniform);
+    EXPECT_NEAR(spherical, full, 1e-12 * std::abs(full));
+
+    // Refusals.
+    EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
+                 std::invalid_argument);
+    AdjointSolver3D continuous(evolution, {.method = AdjointMethod::Continuous,
+                                           .rtol = 1e-12,
+                                           .coupled_rtol = 1e-12,
+                                           .material_kernels = true});
+    EXPECT_THROW((void)continuous.IceHistoryKernels(times, measurements, &trajectory),
+                 std::invalid_argument);
+  }
+}
+
+TEST(DiscreteAdjoint3D, ZeroLateralMaterialKernelsMatchThe1D) {
+  // With delta = 0 the spherical reductions of the 3D material kernels
+  // equal the 1D discrete material kernels at the memory nodes, both
+  // schemes: the zero-lateral bridge in the material.
+  auto scene = Scene::Make(1e21);
+  std::mt19937 rng(19);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.0 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].displacementDual = scene.Smooth(rng, 0.5);
+  const auto ngll = scene.material.Mesh().NGll();
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op1(scene.rheology, kLmax,
+                             {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
+                                 {.scheme = scheme,
+                                  .rotation = RotationalFeedback::None,
+                                  .rtol = 1e-12,
+                                  .record_stride = 1});
+    const auto trajectory1 =
+        ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
+    const auto kernels1 =
+        AdjointSolver(evolution1, {.method = AdjointMethod::Discrete,
+                                   .rtol = 1e-12,
+                                   .material_kernels = true})
+            .IceHistoryKernels(times, measurements, &trajectory1);
+
+    Viscoelastic3D op3(scene.rheology, kLmax,
+                       [](double, double, double) { return 0.0; },
+                       {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution3D evolution3(
+        op3, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory3 =
+        ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, iceLoad));
+    const auto kernels3 =
+        AdjointSolver3D(evolution3, {.method = AdjointMethod::Discrete,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12,
+                                     .material_kernels = true})
+            .IceHistoryKernels(times, measurements, &trajectory3);
+    const auto& coupling = op3.Coupling();
+    auto scaleK = 0.0, scaleM = 0.0;
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                        coupling.NodeInElementOf(rn);
+      scaleK = std::max(scaleK, std::abs(kernels1.kappaKernel[full]));
+      scaleM = std::max(scaleM, std::abs(kernels1.muKernel[full]));
+    }
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                        coupling.NodeInElementOf(rn);
+      EXPECT_NEAR(kernels3.kappaKernelSpherical[rn], kernels1.kappaKernel[full],
+                  1e-7 * scaleK)
+          << "node " << rn << " scheme " << static_cast<int>(scheme);
+      EXPECT_NEAR(kernels3.muKernelSpherical[rn], kernels1.muKernel[full],
+                  1e-7 * scaleM)
+          << "node " << rn << " scheme " << static_cast<int>(scheme);
+    }
+  }
+}
+
