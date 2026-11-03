@@ -23,6 +23,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
 | 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
+| Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -261,6 +262,23 @@ Deliberately out of scope:
   (4/3, k², k²(k² − 2)). The 3D results are the itau kernel on (memory
   node × grid), its spherical reduction, and the log-viscosity kernel
   −itau(x) K.
+- **Tangent-linear runs** (`TangentLinearSolver`, the forward mode,
+  pyslfp's `tangent_linear_ice_history`): the derivative of a run's
+  responses along a direction in the direct load, the ice thickness, the
+  initial sea level and the inverse relaxation times, about a recorded
+  trajectory (frozen, or a migrating run's ocean functions held). It is
+  the forward loop once more — the shorelines prescribed, the direct load
+  the perturbation's grounded by each node's C relative to the first's,
+  ρ_w (Cₙ − C₀) δS₀ for the initial sea level — with each opened step's
+  memory state shifted by a drive bilinear in the trajectory and δitau:
+  the scheme weights' h-derivatives (Discrete; the exact transpose of the
+  discrete sweep, gated by the pairing identity at 1e-8) or the continuous
+  q_k = (d − m_k) δitau_k/itau_k discretised by the scheme (Continuous;
+  the transpose of the continuous sweep, converging to the discrete at
+  the scheme's order). The forward trajectory is served forwards from
+  its checkpoints by exact forward steps, which amplify nothing. The
+  returned snapshots can record the tangent-linear state, which the
+  second-order runs read.
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
@@ -368,6 +386,15 @@ Beyond the fixtures:
 - **3D.** `Lateral` checks second-order self-convergence of the lateral
   step, threaded against serial runs, the degree-1 toroidal block (torque-
   free force, pin independence), and resumption.
+- **Tangent-linear runs.** Linear in the loads (the run along a load
+  perturbation equals the difference of two forward runs at 1e-8); the
+  discrete run and the discrete adjoint exact transposes (the pairing
+  identity with the load duals and the itau kernel at 1e-8, node 0 and a
+  checkpointed trajectory included); the continuous drive converging to
+  the discrete at the scheme's order; about a migrating trajectory, the
+  run along thickness and initial sea level perturbations that flip no
+  cell equal to central differences at 1e-7; the weights' second
+  h-derivatives against differences of the first.
 - **Adjoints.** The discrete gradient identity to 1e-8 under both schemes;
   finite differences with Richardson extrapolation of the itau kernels;
   the continuous adjoint converging to the discrete under refinement;

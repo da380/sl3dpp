@@ -171,6 +171,7 @@ class SeaLevelEvolution {
 
  private:
   friend class AdjointSolver;  // reuses the operator/solver/state/ratios
+  friend class TangentLinearSolver;  // likewise, forwards
 
   /// A degree-column callable over a coefficient vector in material
   /// units: degree l maps to its 2 (l + 1) columns, the real block then

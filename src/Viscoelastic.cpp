@@ -107,10 +107,14 @@ ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
 }
 
 const std::vector<ViscoelasticOperator::BranchWeights>&
-ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
+ViscoelasticOperator::WeightsOfOrder(Scheme scheme, double dt,
+                                     int order) const {
+  auto& cache = order == 0   ? weights_
+                : order == 1 ? weightDerivatives_
+                             : weightSecondDerivatives_;
   const auto key = std::pair(static_cast<int>(scheme), dt);
-  auto found = weights_.find(key);
-  if (found == weights_.end()) {
+  auto found = cache.find(key);
+  if (found == cache.end()) {
     auto out = std::vector<BranchWeights>{};
     for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
       const auto& itau = pointItau_[k];
@@ -118,13 +122,19 @@ ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
       w.e.resize(itau.size());
       if (scheme == Scheme::BackwardEuler) {
         for (auto i = std::size_t{0}; i < itau.size(); ++i) {
-          w.e[i] = BackwardEulerWeight(dt * itau[i]);
+          const auto h = dt * itau[i];
+          w.e[i] = order == 0   ? BackwardEulerWeight(h)
+                   : order == 1 ? BackwardEulerWeightDerivative(h)
+                                : BackwardEulerWeightSecondDerivative(h);
         }
       } else {
         w.alpha.resize(itau.size());
         w.beta.resize(itau.size());
         for (auto i = std::size_t{0}; i < itau.size(); ++i) {
-          const auto tw = ExponentialTrapezoidWeights(dt * itau[i]);
+          const auto h = dt * itau[i];
+          const auto tw = order == 0   ? ExponentialTrapezoidWeights(h)
+                          : order == 1 ? ExponentialTrapezoidWeightDerivatives(h)
+                                       : ExponentialTrapezoidWeightSecondDerivatives(h);
           w.e[i] = tw.e;
           w.alpha[i] = tw.alpha;
           w.beta[i] = tw.beta;
@@ -132,41 +142,26 @@ ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
       }
       out.push_back(std::move(w));
     }
-    found = weights_.emplace(key, std::move(out)).first;
+    found = cache.emplace(key, std::move(out)).first;
   }
   return found->second;
 }
 
 const std::vector<ViscoelasticOperator::BranchWeights>&
+ViscoelasticOperator::SchemeWeightsOf(Scheme scheme, double dt) const {
+  return WeightsOfOrder(scheme, dt, 0);
+}
+
+const std::vector<ViscoelasticOperator::BranchWeights>&
 ViscoelasticOperator::SchemeWeightDerivativesOf(Scheme scheme,
                                                 double dt) const {
-  const auto key = std::pair(static_cast<int>(scheme), dt);
-  auto found = weightDerivatives_.find(key);
-  if (found == weightDerivatives_.end()) {
-    auto out = std::vector<BranchWeights>{};
-    for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
-      const auto& itau = pointItau_[k];
-      BranchWeights w;
-      w.e.resize(itau.size());
-      if (scheme == Scheme::BackwardEuler) {
-        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
-          w.e[i] = BackwardEulerWeightDerivative(dt * itau[i]);
-        }
-      } else {
-        w.alpha.resize(itau.size());
-        w.beta.resize(itau.size());
-        for (auto i = std::size_t{0}; i < itau.size(); ++i) {
-          const auto tw = ExponentialTrapezoidWeightDerivatives(dt * itau[i]);
-          w.e[i] = tw.e;
-          w.alpha[i] = tw.alpha;
-          w.beta[i] = tw.beta;
-        }
-      }
-      out.push_back(std::move(w));
-    }
-    found = weightDerivatives_.emplace(key, std::move(out)).first;
-  }
-  return found->second;
+  return WeightsOfOrder(scheme, dt, 1);
+}
+
+const std::vector<ViscoelasticOperator::BranchWeights>&
+ViscoelasticOperator::SchemeWeightSecondDerivativesOf(Scheme scheme,
+                                                      double dt) const {
+  return WeightsOfOrder(scheme, dt, 2);
 }
 
 std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
@@ -200,6 +195,37 @@ std::vector<std::vector<double>> ViscoelasticOperator::ItauKernelsAtNodes(
       if (raw[i] < 0.0) masked[i] = 0.0;
     }
     out.push_back(points_->InterpolateTranspose(masked));
+  }
+  return out;
+}
+
+std::vector<std::vector<double>> ViscoelasticOperator::ItauPerturbationAtPoints(
+    const std::vector<std::vector<double>>& nodal) const {
+  const auto K = rheology_->BranchCount();
+  const auto meshSize = rheology_->BaseMaterial().Rho().size();
+  if (nodal.size() != K) {
+    throw std::invalid_argument(std::format(
+        "an itau perturbation gives one nodal array per branch: {} branches",
+        K));
+  }
+  for (const auto& a : nodal) {
+    if (a.size() != meshSize) {
+      throw std::invalid_argument(
+          "an itau perturbation's arrays live on the material's mesh "
+          "(element, gll)");
+    }
+  }
+  if (options_.memory_points == MemoryPointSet::Gll) return nodal;
+  auto out = std::vector<std::vector<double>>{};
+  for (auto k = std::size_t{0}; k < K; ++k) {
+    // itau at a point is max(interpolant, 0): the derivative is the
+    // interpolant where it is positive, zero where the clamp acted.
+    const auto raw = points_->Interpolate(rheology_->BranchAt(k).itau);
+    auto at = points_->Interpolate(nodal[k]);
+    for (auto i = std::size_t{0}; i < at.size(); ++i) {
+      if (raw[i] < 0.0) at[i] = 0.0;
+    }
+    out.push_back(std::move(at));
   }
   return out;
 }
@@ -567,6 +593,22 @@ std::vector<double> ViscoelasticStep::InertiaMoment() const {
 
 const LoveNumbers& ViscoelasticStep::EffectiveLove() const {
   return op_->EffectiveLoveNumbers(scheme_, dt_);
+}
+
+void ViscoelasticStep::AddMemory(
+    const std::map<int, std::vector<double>>& increment) {
+  for (auto& [l, mem] : mem_) {
+    const auto found = increment.find(l);
+    if (found == increment.end()) continue;
+    const auto& add = found->second;
+    if (add.size() != mem.size()) {
+      throw std::invalid_argument(std::format(
+          "a degree-{} memory increment has {} entries, the step's memory {}",
+          l, add.size(), mem.size()));
+    }
+    for (auto i = std::size_t{0}; i < mem.size(); ++i) mem[i] += add[i];
+  }
+  memorySolutions_.clear();
 }
 
 std::pair<ViscoelasticState, std::map<int, std::vector<double>>>

@@ -164,6 +164,7 @@ find_package(LAPACK REQUIRED)
 add_library(sl3dpp STATIC
   src/Adjoint.cpp
   src/Adjoint3D.cpp
+  src/TangentLinear.cpp
   src/BandSolvers.cpp
   src/BandSubstructure.cpp
   src/Deck.cpp
