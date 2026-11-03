@@ -323,7 +323,8 @@ class Viscoelastic3D {
     /// runs once per iteration, so whatever it records is from the final
     /// pass.
     [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Converge(
-        const Pass& pass, const IterationControl& control) const;
+        const Pass& pass, const IterationControl& control,
+        const GridCoupling::SpectralTensor* start = nullptr) const;
 
     /// The inertia moment of the degree-0, m = 0 column of solutions;
     /// distributed, collective (each process's share summed).
@@ -350,6 +351,12 @@ class Viscoelastic3D {
 
    private:
     friend class Viscoelastic3D;
+    friend class AdjointSolver3D;  // the discrete transpose reads the weights
+    /// The step's effective systems and their unit responses (cached in
+    /// the flavour), for the discrete transpose.
+    [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;
+    [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
+    [[nodiscard]] const std::vector<double>& Units(int l) const;
     const Viscoelastic3D* op_ = nullptr;
     std::shared_ptr<Flavour> flavour_;
     Scheme scheme_{};
@@ -438,6 +445,13 @@ class Viscoelastic3D {
   /// Solve all degrees of both blocks for a combined weighted tensor.
   [[nodiscard]] Solutions SolveAll(
       const GridCoupling::SpectralTensor& weighted,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal) const;
+  /// The solves alone: per-degree spheroidal and toroidal forces (complex
+  /// m >= 0 columns) through the given systems.
+  [[nodiscard]] Solutions SolveForces(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
   /// Adds load/tide channels at time t by linearity, through the

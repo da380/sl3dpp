@@ -57,6 +57,9 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
+  if (options_.method == AdjointMethod::Discrete) {
+    return DiscreteSweep(times, measurements, trajectory, oceanFunctions);
+  }
   return Sweep(times, measurements, trajectory, oceanFunctions, {}, nullptr)
       .first;
 }
@@ -110,6 +113,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const SeaLevelEvolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau) const {
   const bool second = ditau != nullptr;
+  if (second && options_.method == AdjointMethod::Discrete) {
+    throw std::invalid_argument(
+        "the discrete 3D second-order adjoint is not built: use Continuous");
+  }
   if (second && trajectory == nullptr) {
     throw std::invalid_argument(
         "the second-order sweep needs the recorded forward trajectory");

@@ -312,8 +312,16 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveAll(
     const GridCoupling::SpectralTensor& weighted,
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal) const {
-  auto sphForces = coupling_.SpheroidalForce(weighted, spheroidal);
-  auto torForces = coupling_.ToroidalForce(weighted, toroidal);
+  return SolveForces(coupling_.SpheroidalForce(weighted, spheroidal),
+                     coupling_.ToroidalForce(weighted, toroidal), spheroidal,
+                     toroidal);
+}
+
+Viscoelastic3D::Solutions Viscoelastic3D::SolveForces(
+    const std::map<int, std::vector<Complex>>& sphForces,
+    const std::map<int, std::vector<Complex>>& torForces,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal) const {
 
   // The degree tasks, spheroidal and toroidal, with their operators
   // resolved here, serially; each task then writes only its own solution.
@@ -858,6 +866,31 @@ double Viscoelastic3D::OpenStep::InertiaMoment(
   return moment;
 }
 
+const DegreeOperator& Viscoelastic3D::OpenStep::Spheroidal(int l) const {
+  return op_->FlavourSpheroidal(*flavour_, l);
+}
+
+const ToroidalOperator& Viscoelastic3D::OpenStep::Toroidal(int l) const {
+  return op_->FlavourToroidal(*flavour_, l);
+}
+
+const std::vector<double>& Viscoelastic3D::OpenStep::Units(int l) const {
+  const auto& system = Spheroidal(l);
+  const auto lock = op_->LockCaches();
+  auto& units = flavour_->units;
+  auto found = units.find(l);
+  if (found == units.end()) {
+    const auto ndof = system.DofCount();
+    auto unit = std::vector<double>(static_cast<std::size_t>(ndof) * 2, 0.0);
+    const auto loadVec = system.Load();
+    const auto tideVec = system.Tide(l == 0 ? 2 : -1);
+    std::ranges::copy(loadVec, unit.begin());
+    std::ranges::copy(tideVec, unit.begin() + ndof);
+    found = units.emplace(l, system.Solve(unit, 2)).first;
+  }
+  return found->second;
+}
+
 const LoveNumbers& Viscoelastic3D::OpenStep::EffectiveLove() const {
   const auto lock = op_->LockCaches();
   return op_->reference_.EffectiveLoveNumbers(scheme_, dt_);
@@ -943,10 +976,11 @@ Viscoelastic3D::State Viscoelastic3D::OpenStep::Finish(
 }
 
 std::pair<GridCoupling::SpectralTensor, Viscoelastic3D::StepInfo>
-Viscoelastic3D::OpenStep::Converge(const Pass& pass,
-                                   const IterationControl& control) const {
+Viscoelastic3D::OpenStep::Converge(
+    const Pass& pass, const IterationControl& control,
+    const GridCoupling::SpectralTensor* start) const {
   const auto parallel = op_->options_.parallel;
-  auto s = s0_;
+  auto s = start != nullptr ? *start : s0_;
   StepInfo info;
   info.converged = false;
   // Picard until a pass contracts too slowly, then Anderson for the rest

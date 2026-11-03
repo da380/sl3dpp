@@ -48,7 +48,7 @@ of mantle viscosity using deglacial sea level observations.
   rotation measurements with respect to the ice history (as load duals,
   densities in time, and rate kernels) and to viscosity (the inverse
   relaxation time of each branch, and in 3D the log-viscosity field), by the
-  continuous adjoint (1D and 3D) or the exact discrete transpose (1D). The
+  continuous adjoint or the exact discrete transpose (1D and 3D). The
   forward run can be recorded at any stride; the reverse sweep rebuilds the
   states in between.
 

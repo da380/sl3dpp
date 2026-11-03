@@ -22,7 +22,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | 1D viscoelastic evolution under an ice history, frozen or migrating shorelines | `Viscoelastic.hpp`, `Evolution.hpp` |
 | The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
 | 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
-| Sensitivity kernels with respect to the ice history and viscosity | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
+| Sensitivity kernels with respect to the ice history and viscosity, by the continuous adjoint or the exact discrete transpose (1D and 3D) | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
 | Second-order adjoints: the Hessian's action on a direction, as derivatives of the kernels | `Adjoint.hpp` (`SecondOrderKernels`) |
 | 3D tangent-linear runs: the derivative of the coupled lateral-viscosity evolution along loads, thickness, initial sea level and itau(x), and the second-order run | `TangentLinear3D.hpp` |
@@ -237,8 +237,14 @@ Deliberately out of scope:
   The discrete gradient is exact for the discretised problem; the two
   differ by the discretise–transpose commute error, which is large exactly
   when the forward run is under-resolved, so their disagreement is a
-  resolution diagnostic. `AdjointSolver3D` is the continuous adjoint
-  alone.
+  resolution diagnostic. `AdjointSolver3D` offers both too: the
+  continuous adjoint (the default) and, since 3 November 2026, the
+  discrete transpose of the coupled lateral-viscosity map — the
+  transposed within-step fixed point solved by the same iteration, with
+  the force assembly as the transpose of the strain evaluation under the
+  energy pairing; exact against the 3D tangent-linear run at 1e-8 and
+  second order to solver precision in the Taylor test. Not distributed
+  yet.
 - **Measurements.** Linear functionals of one node's outputs,
   J = a² ∫ g ξ dΩ + a² ∫ g_u u dΩ + a² ∫ g_φ φ dΩ + g_ω·ω, keyed by node
   index into the time grid. `Measurements.hpp` builds the duals: cap means,
@@ -440,6 +446,12 @@ Beyond the fixtures:
   continuous run against the continuous 3D kernel's pairing at the
   commute level; the second-order run as the derivative of the first
   with the log parameterisation's second variation, symmetric.
+- **The discrete 3D transpose.** The pairing identity with the 3D
+  tangent-linear run at 1e-8 (both schemes, loads and a log-viscosity
+  direction, stride-2 trajectories); zero-lateral equal to the 1D
+  discrete sweep at 1e-8; the machine-grade Taylor test (second order at
+  every step, Richardson to 1e-7); the continuous gap closing under
+  refinement.
 - **3D second-order adjoints.** Zero-lateral equal to the 1D continuous
   second-order sweep at 1e-6 (kernels and derivatives); with lateral
   structure, the carried kernels equal to the first-order sweep's at

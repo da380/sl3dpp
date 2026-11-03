@@ -154,6 +154,12 @@ struct KernelDerivatives3D {
 class AdjointSolver3D {
  public:
   struct Options {
+    /// Continuous (the default and preferred path, §6a) or Discrete: the
+    /// exact transpose of the coupled time-stepped map (§6b), the
+    /// transposed within-step fixed point solved by the same iteration;
+    /// gated against the tangent-linear run at solver tolerance. Not
+    /// distributed yet.
+    AdjointMethod method = AdjointMethod::Continuous;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
@@ -174,7 +180,7 @@ class AdjointSolver3D {
   explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution)
       : AdjointSolver3D(evolution, Options{}) {}
 
-  /// The continuous-adjoint kernels over the forward time grid; with a
+  /// The kernels over the forward time grid, by Options::method; with a
   /// fully recorded `trajectory` the viscosity kernels are carried too.
   /// With `oceanFunctions`, one grid per node from a migrating run
   /// (OceanFunctionsOf its snapshots), the kernels linearise about that
@@ -219,6 +225,13 @@ class AdjointSolver3D {
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
  private:
+  /// The discrete transpose (AdjointDiscrete3D.cpp).
+  [[nodiscard]] Kernels3D DiscreteSweep(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory3D* trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
+
   /// The continuous sweep, carrying the derivative state along v when a
   /// tangent run is given (IceHistoryKernels and SecondOrderKernels
   /// share it).

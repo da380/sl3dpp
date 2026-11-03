@@ -232,7 +232,7 @@ commute floor (0.1·h·|⟨K,p⟩|) everywhere. The machine-grade Taylor
 test — second order to solver precision at every h — belongs to the
 discrete transpose (§6b).
 
-## 6b. The discrete 3D transpose: design (not built)
+## 6b. The discrete 3D transpose: design (built 3 November 2026, §12)
 
 The step is LINEAR throughout, so its exact transpose is mechanical
 once the pairings are fixed. Write the forward within-step pass (the
@@ -533,8 +533,57 @@ at 17, on the η = 1e22 mantle — the continuous formulation's commute
 level, as the first-order 3D gates. A machine-grade version belongs to
 the discrete 3D transpose (§6b), which is not built.
 
+## 12. The discrete 3D transpose as built (3 November 2026)
+
+`AdjointSolver3D` with `Options::method = Discrete`
+(`AdjointDiscrete3D.cpp`): the exact transpose of the coupled
+lateral-viscosity time-stepped map, the §6b design realised with no new
+low-level transposes. The load-bearing duality holds as stated there:
+under the energy pairing ⟨S, T⟩ = Σ_node Wq r² ∫dΩ [12 S₀T₀ +
+8 Re(S₋₁T̄₋₁) + 4 Re(S₋₂T̄₋₂)] on grid tensors and the Hermitian m ≥ 0
+pairing (m > 0 weighted twice) on degree columns, Entry (force assembly
+of a tensor's analysis) is Exitᵀ (synthesis of the strain of a
+solution), the pointwise weight W and the reference systems K are
+self-adjoint, and the sea level equation has its exact adjoint. So the
+transposed pass is the forward pass with the force and strain legs
+swapped and the SLE solve replaced by its adjoint:
+
+    z ↦ A( d_e† + W ⊙ Exit( K⁻¹ [ Entry(z) + Surfᵀ SLE_adj( Uᵀ Entry(z), g ) ] ) ),
+
+run on the spectral dual z = A(y) by the step's own iteration
+(`OpenStep::Converge` with a start, opened on the forward step's start
+state for its weight field, effective systems and unit responses),
+with the measurement duals g a constant source in every pass as the
+direct load is in the forward; one more pass at the converged dual gives
+the byproducts. Per reversed step: d_e† = d† + Σ β_k(x) m†_k (the finish
+transposed); the transposed fixed point; the load dual f† =
+directLoadDual + synth(σ†)/r²; m̃†_k = m†_k + μ_k Exit(x†) (the fixed
+memory force transposed); the itau kernel as the energy pairing of m̃†
+with dt (dE m + dA d⁰ + dB d¹) — the tangent-linear drive's derivative —
+as an angular density (Wq r² folded in); and the recursion m† = E m̃†,
+d† = Σ A m̃† pointwise. The start is the transposed instantaneous elastic
+solve on the unrelaxed systems. The column duals carry no halving or
+doubling: the Hermitian column pairing matches the solver's real-field
+coefficient pairing (unlike the 1D real columns, which halve and double).
+Not distributed yet (refused); the discrete 3D second-order adjoint is
+not built (the continuous one is, §11).
+
+GATES (`TestDiscreteAdjoint3D`, lmax 8, lateral structure on): the
+pairing identity with the discrete tangent-linear run at 1e-8 for both
+schemes, along loads (node 0 included) and a log-viscosity direction,
+each alone and together, and a stride-2 trajectory giving the same at
+1e-9; zero-lateral at the GLL points equal to the 1D discrete sweep at
+1e-8 (load duals and the spherical reduction of the itau kernel); the
+machine-grade Taylor test — |J(δ + h p) − J − h⟨K_δ, p⟩| falls at second
+order (rate in 1.9–2.1) at every h from 0.2 to 0.025, Richardson on
+central differences landing at 1e-7; and the continuous sweep's gap to
+the discrete one falling by > 2.5 as the steps halve, in the loads and
+in the log-viscosity kernel (the resolution diagnostic in 3D).
+
 Next: the forward perturbations in the elastic parameters and the
 density — new design, not a port: the derivative of the radial and
 coupled responses with respect to μ(r), κ(r), ρ(r) (and their lateral
-perturbations), the first step towards the 3D elastic work.
+perturbations), the first step towards the 3D elastic work. Deferred
+behind it: the discrete 3D second-order adjoint (the 1D pattern on this
+transpose), and distributing the discrete sweep.
 
