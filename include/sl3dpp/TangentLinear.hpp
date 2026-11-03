@@ -37,6 +37,7 @@
  * IceKernels::itauKernel, which pairs with it by the plain nodal sum).
  */
 
+#include <complex>
 #include <functional>
 #include <map>
 #include <span>
@@ -68,6 +69,19 @@ struct TangentPerturbation {
     return directLoad.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty();
   }
+};
+
+/// A pair of directions for a second-order run: the perturbations of the
+/// inverse relaxation times along u and v, and the second variation
+/// itau_uv along both for a parameterisation that is not linear in them
+/// (itau delta_u chi delta_v chi for the log viscosity; empty for a
+/// linear one). Each as TangentPerturbation::itau. Under the sharp
+/// flotation rule the loads and the initial sea level enter no second
+/// derivative, so they are not taken here.
+struct SecondOrderDirection {
+  std::vector<std::vector<double>> itauU;
+  std::vector<std::vector<double>> itauV;
+  std::vector<std::vector<double>> itauUV;
 };
 
 /**
@@ -110,7 +124,41 @@ class TangentLinearSolver {
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /// The second-order tangent-linear run: the second derivative of the
+  /// run's responses along two directions u and v, about the forward
+  /// trajectory and the recorded tangent-linear runs of u and v about it
+  /// (`Run` with `record`). With the ocean functions held the map is
+  /// affine in the loads and the initial sea level, so the second
+  /// derivative is non-zero only through the relaxation times: the
+  /// forward problem with no direct load, the shorelines prescribed, and
+  /// the drive of each branch the bilinear term of the first-order run
+  /// taken with v's trajectory and u's itau perturbation, with u's
+  /// trajectory and v's, with the forward trajectory and itau_uv, and, by
+  /// the discrete method, the second derivatives of the scheme weights
+  /// with the forward trajectory and both perturbations. Symmetric in u
+  /// and v. pyslfp's `second_order_tangent_linear_ice_history` under the
+  /// sharp flotation rule.
+  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunSecondOrder(
+      std::span<const double> times,
+      std::span<const SeaLevelEvolution::Snapshot> tangentU,
+      std::span<const SeaLevelEvolution::Snapshot> tangentV,
+      const SecondOrderDirection& direction,
+      const ForwardTrajectory* trajectory = nullptr,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
+
  private:
+  using Direct = std::function<std::vector<double>(std::size_t node)>;
+  using Drive =
+      std::function<std::map<int, std::vector<double>>(std::size_t node, double dt)>;
+
+  /// The loop the runs share: the forward problem with the trajectory's
+  /// ocean functions prescribed, the direct load given per node (empty
+  /// where nothing drives it) and a memory increment per step.
+  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> March(
+      std::span<const double> times,
+      std::span<const std::vector<double>> oceanFunctions,
+      const Direct& directAt, const Drive& drive) const;
+
   /// The memory increment of a step from `prev` to `next` — two states of
   /// the trajectory with their strains — for a perturbation of the inverse
   /// relaxation times at the memory points, bilinear in the two: the
@@ -121,6 +169,26 @@ class TangentLinearSolver {
       const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
       double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
       const std::vector<std::vector<double>>& ditauPoints);
+  /// The discrete method's term from the second derivatives of the
+  /// scheme's weights, paired with the forward trajectory and the two
+  /// perturbations of the inverse relaxation times at the memory points.
+  /// pyslfp's `_second_weight_drive`.
+  [[nodiscard]] static std::map<int, std::vector<double>> SecondWeightDrive(
+      const ViscoelasticOperator& op, Scheme scheme, double dt,
+      const ViscoelasticState& prev, const ViscoelasticState& next,
+      const std::vector<std::vector<double>>& ditauU,
+      const std::vector<std::vector<double>>& ditauV);
+
+  /// The material-unit step sizes of the time grid, and the evolution's
+  /// column callables of recorded load and centrifugal coefficients.
+  [[nodiscard]] static std::vector<double> StepSizes(
+      const SeaLevelEvolution& ev, std::span<const double> times);
+  [[nodiscard]] static std::function<LoadCallable(
+      const std::vector<std::complex<double>>&)>
+  LoadColumnsOf(const SeaLevelEvolution& ev);
+  [[nodiscard]] static std::function<LoadCallable(
+      const std::vector<std::complex<double>>&)>
+  TideColumnsOf(const SeaLevelEvolution& ev);
 
   const SeaLevelEvolution* evolution_;
   Options options_;

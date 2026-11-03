@@ -101,7 +101,51 @@ void CheckPerNode(const std::vector<std::vector<double>>& fields,
   }
 }
 
+void CheckTrajectory(const ForwardTrajectory* trajectory, std::size_t nodes) {
+  if (trajectory == nullptr) {
+    throw std::invalid_argument(
+        "an itau perturbation needs the recorded forward trajectory");
+  }
+  if (trajectory->states.size() != nodes ||
+      trajectory->loads.size() != nodes || trajectory->tides.size() != nodes) {
+    throw std::invalid_argument(
+        "the trajectory must give one entry per time node, with the "
+        "recorded load and centrifugal coefficients (build it from a "
+        "recording run's snapshots)");
+  }
+  if (!trajectory->states.front().has_value()) {
+    throw std::invalid_argument(
+        "the trajectory must hold the first node's recorded state");
+  }
+}
+
 }  // namespace
+
+/// The material-unit step sizes of the time grid.
+std::vector<double> TangentLinearSolver::StepSizes(const SeaLevelEvolution& ev,
+                              std::span<const double> times) {
+  auto dts = std::vector<double>{};
+  for (auto n = std::size_t{0}; n + 1 < times.size(); ++n) {
+    dts.push_back((times[n + 1] - times[n]) * ev.toMatTime_);
+  }
+  return dts;
+}
+
+std::function<LoadCallable(const std::vector<Complex>&)>
+TangentLinearSolver::LoadColumnsOf(
+    const SeaLevelEvolution& ev) {
+  return [&ev](const std::vector<Complex>& c) {
+    return ev.Columns(c, ev.toMatDensity_);
+  };
+}
+
+std::function<LoadCallable(const std::vector<Complex>&)>
+TangentLinearSolver::TideColumnsOf(
+    const SeaLevelEvolution& ev) {
+  return [&ev](const std::vector<Complex>& c) {
+    return ev.Columns(c, ev.toMatPotential_);
+  };
+}
 
 std::map<int, std::vector<double>> TangentLinearSolver::FirstOrderDrive(
     const ViscoelasticOperator& op, AdjointMethod method, Scheme scheme,
@@ -167,6 +211,51 @@ std::map<int, std::vector<double>> TangentLinearSolver::FirstOrderDrive(
   return out;
 }
 
+std::map<int, std::vector<double>> TangentLinearSolver::SecondWeightDrive(
+    const ViscoelasticOperator& op, Scheme scheme, double dt,
+    const ViscoelasticState& prev, const ViscoelasticState& next,
+    const std::vector<std::vector<double>>& ditauU,
+    const std::vector<std::vector<double>>& ditauV) {
+  const bool implicit = scheme == Scheme::BackwardEuler;
+  const auto K = op.GetRheology().BranchCount();
+  const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
+  auto out = std::map<int, std::vector<double>>{};
+  for (const auto& [l, mPrev] : prev.m) {
+    const auto& deg = op.Deg(l);
+    const auto ncols = static_cast<int>(
+        mPrev.size() / (K * 3 * static_cast<std::size_t>(deg.ne) * deg.np));
+    const auto block = deg.NodalSize(ncols);
+    const auto& d0 = prev.strain.at(l);
+    const auto& d1 = next.strain.at(l);
+    auto extra = std::vector<double>(mPrev.size(), 0.0);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& d2w = d2weights[k];
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto dh2 = dt * dt * ditauU[k][full] * ditauV[k][full];
+            if (dh2 == 0.0) continue;
+            const auto node =
+                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto at = (k * 3 + s) * block + node;
+            const auto sn = s * block + node;
+            for (auto c = 0; c < ncols; ++c) {
+              extra[at + c] =
+                  implicit ? d2w.e[full] * dh2 * (mPrev[at + c] - d1[sn + c])
+                           : dh2 * (d2w.e[full] * mPrev[at + c] +
+                                    d2w.alpha[full] * d0[sn + c] +
+                                    d2w.beta[full] * d1[sn + c]);
+            }
+          }
+        }
+      }
+    }
+    out.emplace(l, std::move(extra));
+  }
+  return out;
+}
+
 TangentLinearSolver::TangentLinearSolver(const SeaLevelEvolution& evolution,
                                          Options options)
     : evolution_(&evolution), options_(std::move(options)) {}
@@ -178,10 +267,8 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
-  const auto& grid = solver.Grid();
-  const auto fieldSize = grid.FieldSize();
+  const auto fieldSize = solver.Grid().FieldSize();
   const auto scheme = ev.options_.scheme;
-  const auto rotation = ev.options_.rotation;
   const auto nodes = times.size();
   const bool migrating = !oceanFunctions.empty();
 
@@ -189,22 +276,10 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
   if (direction.Empty()) {
     throw std::invalid_argument("the tangent-linear run needs a direction");
   }
-  if (migrating) {
-    if (oceanFunctions.size() != nodes) {
-      throw std::invalid_argument(
-          "the ocean functions must give one grid per time node");
-    }
-    for (const auto& Cn : oceanFunctions) {
-      if (Cn.size() != fieldSize) {
-        throw std::invalid_argument(
-            "the ocean functions must be fields on the solver's grid");
-      }
-    }
-    if (!direction.directLoad.empty()) {
-      throw std::invalid_argument(
-          "a migrating run is driven by its ice thickness, not a direct "
-          "load: perturb iceThickness");
-    }
+  if (migrating && !direction.directLoad.empty()) {
+    throw std::invalid_argument(
+        "a migrating run is driven by its ice thickness, not a direct "
+        "load: perturb iceThickness");
   }
   CheckPerNode(direction.directLoad, nodes, fieldSize, "directLoad");
   CheckPerNode(direction.iceThickness, nodes, fieldSize, "iceThickness");
@@ -213,31 +288,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
     throw std::invalid_argument(
         "initialSeaLevel must be a field on the solver's grid");
   }
-  if (!direction.itau.empty()) {
-    if (trajectory == nullptr) {
-      throw std::invalid_argument(
-          "an itau perturbation needs the recorded forward trajectory");
-    }
-    if (trajectory->states.size() != nodes ||
-        trajectory->loads.size() != nodes || trajectory->tides.size() != nodes) {
-      throw std::invalid_argument(
-          "the trajectory must give one entry per time node, with the "
-          "recorded load and centrifugal coefficients (build it from a "
-          "recording run's snapshots)");
-    }
-    if (!trajectory->states.front().has_value()) {
-      throw std::invalid_argument(
-          "the trajectory must hold the first node's recorded state");
-    }
-  }
-  if (rotation == RotationalFeedback::Full) {
-    const auto kHyd = FluidTidalNumber(op.BaseMaterial(), 2);
-    if (solver.TransverseMarginFor(kHyd) <= 0.0) {
-      throw std::invalid_argument(
-          "the transverse rotational feedback is unstable; see "
-          "SeaLevelEvolution::Run");
-    }
-  }
+  if (!direction.itau.empty()) CheckTrajectory(trajectory, nodes);
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
@@ -245,15 +296,12 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
   auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
     return migrating ? oceanFunctions[node] : C0;
   };
-  auto overrideAt = [&](std::size_t node) {
-    return migrating ? oceanFunctions[node] : std::vector<double>{};
-  };
 
   // The direct load of a node: the load perturbation, the grounded
   // thickness perturbation relative to the first node's, and the initial
   // sea level through the shorelines that moved; empty when nothing
   // drives the node.
-  auto directAt = [&](std::size_t node) {
+  const Direct directAt = [&, migrating](std::size_t node) {
     auto f = std::vector<double>{};
     auto ensure = [&] {
       if (f.empty()) f.assign(fieldSize, 0.0);
@@ -282,6 +330,161 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
     }
     return f;
   };
+
+  // The relaxation-time drive: the forward trajectory served forwards,
+  // the perturbation carried to the memory points.
+  auto cursor = std::optional<ForwardCursor>{};
+  auto ditauPoints = std::vector<std::vector<double>>{};
+  Drive drive{};
+  if (!direction.itau.empty()) {
+    ditauPoints = op.ItauPerturbationAtPoints(direction.itau);
+    cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
+                   LoadColumnsOf(ev), TideColumnsOf(ev));
+    drive = [&](std::size_t node, double dt) {
+      const ViscoelasticState prev = cursor->State(node - 1);
+      const auto& next = cursor->State(node);
+      return FirstOrderDrive(op, options_.method, scheme, dt, prev, next,
+                             ditauPoints);
+    };
+  }
+  return March(times, oceanFunctions, directAt, drive);
+}
+
+std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
+    std::span<const double> times,
+    std::span<const SeaLevelEvolution::Snapshot> tangentU,
+    std::span<const SeaLevelEvolution::Snapshot> tangentV,
+    const SecondOrderDirection& direction, const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
+  const auto& ev = *evolution_;
+  const auto& op = *ev.op_;
+  const auto scheme = ev.options_.scheme;
+  const auto nodes = times.size();
+  const bool discrete = options_.method == AdjointMethod::Discrete;
+
+  CheckTimes(times);
+  const bool both = !direction.itauU.empty() && !direction.itauV.empty();
+  // Which first-order drives the run carries: v's trajectory with u's
+  // perturbation, u's with v's, the forward one with itau_uv.
+  struct Part {
+    std::span<const SeaLevelEvolution::Snapshot> along;  // empty: the base
+    std::vector<std::vector<double>> ditau;
+  };
+  auto parts = std::vector<Part>{};
+  if (!direction.itauU.empty()) {
+    parts.push_back({tangentV, op.ItauPerturbationAtPoints(direction.itauU)});
+  }
+  if (!direction.itauV.empty()) {
+    parts.push_back({tangentU, op.ItauPerturbationAtPoints(direction.itauV)});
+  }
+  if (!direction.itauUV.empty()) {
+    parts.push_back({{}, op.ItauPerturbationAtPoints(direction.itauUV)});
+  }
+  auto tangents = std::vector<ForwardTrajectory>{};
+  auto cursor = std::optional<ForwardCursor>{};
+  Drive drive{};
+  if (!parts.empty()) {
+    for (const auto* run : {&tangentU, &tangentV}) {
+      if (run->size() != nodes) {
+        throw std::invalid_argument(
+            "the tangent-linear runs must give one snapshot per time node");
+      }
+      for (const auto& snap : *run) {
+        if (!snap.internalState.has_value() || !snap.internalState->HasStrain()) {
+          throw std::invalid_argument(
+              "the tangent-linear runs must be recorded at every node "
+              "(TangentLinearSolver::Options::record)");
+        }
+      }
+    }
+    CheckTrajectory(trajectory, nodes);
+    cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
+                   LoadColumnsOf(ev), TideColumnsOf(ev));
+    auto uPoints = std::vector<std::vector<double>>{};
+    auto vPoints = std::vector<std::vector<double>>{};
+    if (both && discrete) {
+      uPoints = op.ItauPerturbationAtPoints(direction.itauU);
+      vPoints = op.ItauPerturbationAtPoints(direction.itauV);
+    }
+    drive = [&, uPoints, vPoints](std::size_t node, double dt) {
+      const ViscoelasticState basePrev = cursor->State(node - 1);
+      const auto& baseNext = cursor->State(node);
+      auto total = std::map<int, std::vector<double>>{};
+      auto add = [&](std::map<int, std::vector<double>> term) {
+        for (auto& [l, value] : term) {
+          auto found = total.find(l);
+          if (found == total.end()) {
+            total.emplace(l, std::move(value));
+          } else {
+            for (auto i = std::size_t{0}; i < value.size(); ++i) {
+              found->second[i] += value[i];
+            }
+          }
+        }
+      };
+      for (const auto& part : parts) {
+        if (part.along.empty()) {
+          add(FirstOrderDrive(op, options_.method, scheme, dt, basePrev,
+                              baseNext, part.ditau));
+        } else {
+          add(FirstOrderDrive(op, options_.method, scheme, dt,
+                              *part.along[node - 1].internalState,
+                              *part.along[node].internalState, part.ditau));
+        }
+      }
+      if (both && discrete) {
+        add(SecondWeightDrive(op, scheme, dt, basePrev, baseNext, uPoints,
+                              vPoints));
+      }
+      return total;
+    };
+  }
+  // No direct load under the sharp flotation rule.
+  const Direct none = [](std::size_t) { return std::vector<double>{}; };
+  return March(times, oceanFunctions, none, drive);
+}
+
+std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
+    std::span<const double> times,
+    std::span<const std::vector<double>> oceanFunctions,
+    const Direct& directAt, const Drive& drive) const {
+  const auto& ev = *evolution_;
+  const auto& op = *ev.op_;
+  const auto& solver = *ev.solver_;
+  const auto& grid = solver.Grid();
+  const auto fieldSize = grid.FieldSize();
+  const auto scheme = ev.options_.scheme;
+  const auto rotation = ev.options_.rotation;
+  const auto nodes = times.size();
+  const bool migrating = !oceanFunctions.empty();
+  if (migrating) {
+    if (oceanFunctions.size() != nodes) {
+      throw std::invalid_argument(
+          "the ocean functions must give one grid per time node");
+    }
+    for (const auto& Cn : oceanFunctions) {
+      if (Cn.size() != fieldSize) {
+        throw std::invalid_argument(
+            "the ocean functions must be fields on the solver's grid");
+      }
+    }
+  }
+  if (rotation == RotationalFeedback::Full) {
+    const auto kHyd = FluidTidalNumber(op.BaseMaterial(), 2);
+    if (solver.TransverseMarginFor(kHyd) <= 0.0) {
+      throw std::invalid_argument(
+          "the transverse rotational feedback is unstable; see "
+          "SeaLevelEvolution::Run");
+    }
+  }
+  const auto rhoW = solver.WaterDensity();
+  const auto& C0 = ev.state_.oceanFunction;
+  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
+    return migrating ? oceanFunctions[node] : C0;
+  };
+  auto overrideAt = [&](std::size_t node) {
+    return migrating ? oceanFunctions[node] : std::vector<double>{};
+  };
   auto totalLoadCoefficients = [&](const std::vector<double>& f,
                                    const std::vector<double>& slc,
                                    std::size_t node) {
@@ -297,7 +500,6 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(r.angularVelocity);
   };
-
   SeaLevelSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
@@ -325,26 +527,6 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
           node, r.error));
     }
   };
-
-  // The relaxation-time drive: the forward trajectory served forwards,
-  // the perturbation carried to the memory points.
-  auto cursor = std::optional<ForwardCursor>{};
-  auto ditauPoints = std::vector<std::vector<double>>{};
-  if (!direction.itau.empty()) {
-    ditauPoints = op.ItauPerturbationAtPoints(direction.itau);
-    auto dts = std::vector<double>{};
-    for (auto n = std::size_t{0}; n + 1 < nodes; ++n) {
-      dts.push_back((times[n + 1] - times[n]) * ev.toMatTime_);
-    }
-    cursor.emplace(
-        op, *trajectory, std::move(dts), scheme,
-        [&ev](const std::vector<Complex>& c) {
-          return ev.Columns(c, ev.toMatDensity_);
-        },
-        [&ev](const std::vector<Complex>& c) {
-          return ev.Columns(c, ev.toMatPotential_);
-        });
-  }
 
   auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
   vstate.t = times[0] * ev.toMatTime_;
@@ -398,12 +580,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
     auto step = op.StartStep(vstate, dt, scheme,
                              ev.Columns(sigma, ev.toMatDensity_),
                              ev.Columns(psi, ev.toMatPotential_));
-    if (cursor.has_value()) {
-      const ViscoelasticState prev = cursor->State(node - 1);
-      const auto& next = cursor->State(node);
-      step.AddMemory(FirstOrderDrive(op, options_.method, scheme, dt, prev,
-                                     next, ditauPoints));
-    }
+    if (drive) step.AddMemory(drive(node, dt));
     SeaLevelSolver::GeneralisedForcing coupled;
     coupled.directLoad = directAt(node);
     coupled.displacementResponse =

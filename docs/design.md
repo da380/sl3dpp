@@ -278,7 +278,11 @@ Deliberately out of scope:
   the scheme's order). The forward trajectory is served forwards from
   its checkpoints by exact forward steps, which amplify nothing. The
   returned snapshots can record the tangent-linear state, which the
-  second-order runs read.
+  second-order run (`RunSecondOrder`, F''(x)[u, v]: the same loop with no
+  direct load and the drive bilinear in the two tangent trajectories and
+  the forward one, plus the weights' second derivatives by the discrete
+  method) reads. Under the sharp flotation rule the loads and the initial
+  sea level enter no second derivative.
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
@@ -394,7 +398,11 @@ Beyond the fixtures:
   the discrete at the scheme's order; about a migrating trajectory, the
   run along thickness and initial sea level perturbations that flip no
   cell equal to central differences at 1e-7; the weights' second
-  h-derivatives against differences of the first.
+  h-derivatives against differences of the first; the second-order run
+  as the derivative of the first-order one (central differences at
+  second order, Richardson to 1e-6), symmetric in its directions, zero
+  without a viscosity perturbation, and continuous converging to
+  discrete at the scheme's order.
 - **Adjoints.** The discrete gradient identity to 1e-8 under both schemes;
   finite differences with Richardson extrapolation of the itau kernels;
   the continuous adjoint converging to the discrete under refinement;

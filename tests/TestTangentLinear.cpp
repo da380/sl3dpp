@@ -4,8 +4,9 @@
 // duals and the itau kernel at solver tolerance), the continuous drive
 // converging to the discrete one at the scheme's order, the derivative
 // about a migrating trajectory against central differences while no
-// flotation cell flips, and the second derivatives of the scheme weights
-// against differences of the first — pyslfp's test_tangent_linear.py.
+// flotation cell flips, the second derivatives of the scheme weights
+// against differences of the first, and the second-order run as the
+// derivative of the first-order one — pyslfp's test_tangent_linear.py.
 
 #include <gtest/gtest.h>
 
@@ -124,7 +125,9 @@ struct Scene {
   /// A smooth nodal perturbation of branch 0's inverse relaxation time,
   /// material units, supported where the branch relaxes.
   [[nodiscard]] std::vector<std::vector<double>> DeltaItau(
-      double fraction = 1.0) const {
+      double fraction = 1.0,
+      const std::function<double(double)>& shape =
+          [](double r) { return 0.3 + 0.7 * r * r; }) const {
     const auto& base = rheology.BranchAt(0);
     const auto& mesh = material.Mesh();
     auto top = 0.0;
@@ -135,7 +138,7 @@ struct Scene {
         const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
         if (base.itau[i] > 0.0) {
           const auto r = mesh.Radius(e, q);
-          ditau[i] = fraction * (0.3 + 0.7 * r * r) * top;
+          ditau[i] = fraction * shape(r) * top;
         }
       }
     }
@@ -565,3 +568,235 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     EXPECT_EQ(MaxAbs(snap.seaLevelChange), 0.0);
   }
 }
+
+// -- second order -----------------------------------------------------------
+
+TEST(TangentLinear, SecondOrderRunIsTheDerivativeOfTheFirst) {
+  // The second-order run along (u, v) is the derivative, at the base
+  // point along u, of the first-order run along v: central differences of
+  // the latter — the loads moved by eps delta_u and the rheology by eps
+  // delta itau_u — converge to it at second order and land on it after
+  // extrapolation, for both schemes; and it is symmetric in u and v.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(17);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+  auto loads = std::vector<std::vector<double>>{};
+  auto deltaU = std::vector<std::vector<double>>{};
+  auto deltaV = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+    deltaU.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
+    deltaV.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
+  }
+  const auto g = setup.Smooth(rng, 1.0);
+  auto measurement = std::map<std::size_t, Measurement>{};
+  measurement[times.size() - 1].seaLevelDual = g;
+  const auto ditauU = setup.DeltaItau(0.1);
+  const auto ditauV =
+      setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+  const auto& base = setup.rheology.BranchAt(0);
+  auto shifted = [&](const std::vector<std::vector<double>>& loads,
+                     double eps) {
+    auto out = loads;
+    for (auto n = std::size_t{0}; n < out.size(); ++n) {
+      for (auto i = std::size_t{0}; i < out[n].size(); ++i) {
+        out[n][i] += eps * deltaU[n][i];
+      }
+    }
+    return out;
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    SeaLevelEvolution evolution(
+        op, setup.solver, setup.state,
+        {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    TangentLinearSolver tangent(
+        evolution,
+        {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    TangentPerturbation u, v;
+    u.directLoad = deltaU;
+    u.itau = ditauU;
+    v.directLoad = deltaV;
+    v.itau = ditauV;
+    const auto tangentU = tangent.Run(times, u, &trajectory);
+    const auto tangentV = tangent.Run(times, v, &trajectory);
+    const auto second = tangent.RunSecondOrder(
+        times, tangentU, tangentV, {.itauU = ditauU, .itauV = ditauV},
+        &trajectory);
+    const auto predicted = Objective(setup, second, measurement);
+
+    auto firstOrderAt = [&](double eps) {
+      auto branch = base;
+      for (auto i = std::size_t{0}; i < branch.itau.size(); ++i) {
+        branch.itau[i] += eps * ditauU[0][i];
+      }
+      auto rheology =
+          Rheology::Create(setup.material, {std::move(branch)}).value();
+      ViscoelasticOperator moved(rheology, kLmax);
+      SeaLevelEvolution movedEvolution(
+          moved, setup.solver, setup.state,
+          {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
+      const auto movedLoads = shifted(loads, eps);
+      const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
+          movedEvolution.Run(times, History(times, movedLoads)));
+      TangentLinearSolver along(
+          movedEvolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+      return Objective(setup, along.Run(times, v, &movedTrajectory),
+                       measurement);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.02, 0.01}) {
+      fd[eps] = (firstOrderAt(eps) - firstOrderAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.02] - predicted);
+    const auto r2 = std::abs(fd[0.01] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme);
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.01] - fd[0.02]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+
+    const auto swapped = tangent.RunSecondOrder(
+        times, tangentV, tangentU, {.itauU = ditauV, .itauV = ditauU},
+        &trajectory);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LT(MaxDiff(swapped[n].seaLevelChange, second[n].seaLevelChange),
+                1e-10 * MaxAbs(second[n].seaLevelChange) + 1e-300)
+          << "node " << n;
+      EXPECT_LT(MaxDiff(swapped[n].potential, second[n].potential),
+                1e-10 * MaxAbs(second[n].potential) + 1e-300);
+    }
+
+    // Refusals: unrecorded tangent runs.
+    TangentLinearSolver bare(evolution,
+                             {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    const auto light = bare.Run(times, u, &trajectory);
+    EXPECT_THROW((void)tangent.RunSecondOrder(
+                     times, light, tangentV,
+                     {.itauU = ditauU, .itauV = ditauV}, &trajectory),
+                 std::invalid_argument);
+  }
+}
+
+TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
+  // With the ocean functions held the map is affine in the loads and the
+  // initial sea level, about frozen and migrating runs alike.
+  auto setup = Scene::Make(1e21);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  std::mt19937 rng(23);
+  // frozen
+  {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+    auto loads = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+    }
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.rtol = 1e-12, .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    TangentLinearSolver tangent(evolution, {.rtol = 1e-12, .record = true});
+    auto runs = std::vector<std::vector<SeaLevelEvolution::Snapshot>>{};
+    for (auto seed = 0; seed < 2; ++seed) {
+      TangentPerturbation d;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        d.directLoad.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
+      }
+      runs.push_back(tangent.Run(times, d));
+    }
+    const auto second =
+        tangent.RunSecondOrder(times, runs[0], runs[1], {}, &trajectory);
+    for (const auto& snap : second) {
+      EXPECT_EQ(MaxAbs(snap.seaLevelChange), 0.0);
+      EXPECT_EQ(MaxAbs(snap.displacement), 0.0);
+      EXPECT_EQ(MaxAbs(snap.potential), 0.0);
+    }
+  }
+  // migrating
+  {
+    const auto cap = MarineCap::Make(setup, 5);
+    const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+    SeaLevelEvolution evolution(op, setup.solver, state,
+                                {.rtol = 1e-12, .record_stride = 1});
+    const auto run = evolution.RunMigrating(
+        cap.times, [&](double t) { return cap.Thickness(t); });
+    const auto oceans = OceanFunctionsOf(run);
+    const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+    TangentLinearSolver tangent(evolution, {.rtol = 1e-12, .record = true});
+    auto runs = std::vector<std::vector<SeaLevelEvolution::Snapshot>>{};
+    for (auto seed = 0; seed < 2; ++seed) {
+      TangentPerturbation d;
+      for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
+        d.iceThickness.push_back(setup.Smooth(rng, 1.0 * setup.Metre()));
+      }
+      d.initialSeaLevel = setup.Smooth(rng, 1.0 * setup.Metre());
+      runs.push_back(tangent.Run(cap.times, d, nullptr, oceans));
+    }
+    const auto second = tangent.RunSecondOrder(cap.times, runs[0], runs[1],
+                                               {}, &trajectory, oceans);
+    for (auto n = std::size_t{0}; n < second.size(); ++n) {
+      EXPECT_EQ(MaxAbs(second[n].seaLevelChange), 0.0);
+      EXPECT_EQ(second[n].oceanFunction, oceans[n]);
+    }
+  }
+}
+
+TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
+  // By the continuous method the second-order run converges to the
+  // discrete one at the scheme's order as the steps are refined. On this
+  // mantle (tau about 2 kyr) the grids coarser than 17 nodes over 10 kyr
+  // have h = dt / tau near one and sit before the asymptotic regime (the
+  // gap is 2.9 at 5 nodes, 0.5 at 9); from 17 nodes it falls by four.
+  auto setup = Scene::Make(1e22);
+  std::mt19937 rng(29);
+  const auto field = setup.Smooth(rng, 100.0 * setup.Sigma());
+  const auto g = setup.Smooth(rng, 1.0);
+  const auto span = 10.0 * setup.Kyr();
+  const auto ramp = [&](double t) {
+    auto out = field;
+    for (auto& v : out) v *= t / span;
+    return out;
+  };
+  const auto ditauU = setup.DeltaItau(0.1);
+  const auto ditauV =
+      setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  auto gaps = std::vector<double>{};
+  for (const auto nodes : {17, 33}) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
+    auto measurement = std::map<std::size_t, Measurement>{};
+    measurement[times.size() - 1].seaLevelDual = g;
+    auto values = std::map<AdjointMethod, double>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      TangentLinearSolver tangent(
+          evolution, {.method = method, .rtol = 1e-12, .record = true});
+      TangentPerturbation u, v;
+      u.itau = ditauU;
+      v.itau = ditauV;
+      const auto tangentU = tangent.Run(times, u, &trajectory);
+      const auto tangentV = tangent.Run(times, v, &trajectory);
+      values[method] = Objective(
+          setup,
+          tangent.RunSecondOrder(times, tangentU, tangentV,
+                                 {.itauU = ditauU, .itauV = ditauV},
+                                 &trajectory),
+          measurement);
+    }
+    gaps.push_back(std::abs(values[AdjointMethod::Discrete] -
+                            values[AdjointMethod::Continuous]) /
+                   std::abs(values[AdjointMethod::Discrete]));
+  }
+  EXPECT_LT(gaps[0], 0.2);
+  EXPECT_GT(gaps[0] / gaps[1], 3.0);
+}
+

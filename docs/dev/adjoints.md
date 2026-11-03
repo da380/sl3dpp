@@ -367,12 +367,36 @@ central differences of migrating runs at 1e-7, both methods, and the
 kernels' thickness and initial-sea-level views pairing to the same
 number; the initial sea level inert under frozen shorelines.
 
-Next, in order: the second-order tangent-linear run (pyslfp's
-`second_order_tangent_linear_ice_history`: the drive from the two
-tangent trajectories and the forward one, the discrete weights' second
-derivatives, no direct load under the sharp flotation rule), then the
-second-order adjoint sweeps (`second_order_adjoint_ice_history`, both
-methods: the Hessian-vector products), then the 3D counterparts on
-`Evolution3D`, then the forward perturbations in the elastic parameters
-and the density.
+**The second-order run** (`RunSecondOrder`, built the same day; pyslfp's
+`second_order_tangent_linear_ice_history` under the sharp flotation
+rule): F''(x)[u, v] as the forward problem with no direct load, the
+shorelines prescribed, and the drive the sum of the first-order drive
+taken with v's recorded tangent trajectory and u's δitau, with u's
+trajectory and v's δitau, with the forward trajectory and the second
+variation itau_uv (empty for a parameterisation linear in itau), and, by
+the discrete method, the second derivatives of the scheme weights with
+the forward trajectory and both perturbations (dh_u dh_v (d2e m⁰ +
+d2α d⁰ + d2β d¹), or d2w dh_u dh_v (m⁰ − d¹)). With the ocean functions
+held the map is affine in the loads and the initial sea level, so those
+directions enter only through the tangent trajectories. The smoothed
+flotation rule's shoreline terms (pyslfp's `flotation_curvature`) are
+not ported: sl3dpp has no smoothed rule. Both runs share one loop
+(`March`: prescribed shorelines, a direct load per node, a memory
+increment per step).
+
+GATES: the second-order run along (u, v) is the derivative, at the base
+point along u, of the first-order run along v — central differences
+with the loads moved by ε δu and the rheology by ε δitau_u converge at
+second order (ratio in 3–5) and Richardson lands on it at 1e-6, both
+schemes — and is symmetric in u and v at 1e-10; it vanishes identically
+without a viscosity perturbation, about frozen and migrating runs alike;
+by the continuous method it converges to the discrete one at the
+scheme's order (gap 0.11 → 0.027 from 17 to 33 nodes over 10 kyr at
+η = 1e22; the coarser grids, h ≈ 1, are pre-asymptotic); unrecorded
+tangent runs are refused.
+
+Next, in order: the second-order adjoint sweeps
+(`second_order_adjoint_ice_history`, both methods: the Hessian-vector
+products), then the 3D counterparts on `Evolution3D`, then the forward
+perturbations in the elastic parameters and the density.
 
