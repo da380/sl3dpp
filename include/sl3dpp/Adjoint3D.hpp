@@ -35,6 +35,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -133,6 +134,23 @@ struct Kernels3D {
 [[nodiscard]] std::vector<double> RadialDensity(const GridCoupling& coupling,
                                                 std::span<const double> kernel);
 
+/**
+ * @brief The derivative of the 3D kernels along a direction v of the
+ * model parameters: what the 3D second-order adjoint returns, the
+ * components of the Hessian's action on v. `ice` carries the thickness
+ * and initial-sea-level views' derivatives (its 1D `itauKernel` stays
+ * empty); the 3D fields are the derivatives of Kernels3D's, in its
+ * layouts — `logViscosityKernel3D` the derivative along v of the
+ * log-viscosity kernel −itau K, which for v a log-viscosity direction is
+ * the Hessian-vector product of the log parameterisation.
+ */
+struct KernelDerivatives3D {
+  KernelDerivatives ice;
+  std::vector<std::vector<double>> itauKernel3D;
+  std::vector<std::vector<double>> itauKernelSpherical;
+  std::vector<std::vector<double>> logViscosityKernel3D;
+};
+
 class AdjointSolver3D {
  public:
   struct Options {
@@ -172,7 +190,46 @@ class AdjointSolver3D {
       const ForwardTrajectory3D* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /**
+   * @brief The 3D second-order adjoint, continuous: the kernels and their
+   * derivative along a direction v — the Hessian's action on v (the 3D
+   * form of AdjointSolver::SecondOrderKernels; docs/dev/adjoints.md §11).
+   * The adjoint state and its derivative are both stepped by the reversed
+   * coupled machinery; the derivative state's step carries the continuous
+   * first-order drive built from the adjoint trajectory (pointwise, as
+   * the tangent-linear runs'), both jump at observations by the
+   * instantaneous adjoint strain — over itau(x) and by v's delta itau(x)
+   * — and the viscosity pairing is differentiated with the derivative
+   * state and v's tangent trajectory in place.
+   *
+   * @param tangent v's tangent-linear run about the forward run, recorded
+   * at every node (TangentLinearSolver3D::Options::record), by the
+   * continuous method.
+   * @param itau v's perturbation of itau over the grid values, per
+   * branch (TangentPerturbation3D::itau; a log-viscosity direction maps
+   * to it by TangentLinearSolver3D::ItauOfLogViscosity); empty for none.
+   * @param trajectory The recorded forward trajectory; required here.
+   */
+  [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> SecondOrderKernels(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      const std::vector<std::vector<double>>& itau,
+      const ForwardTrajectory3D& trajectory,
+      std::span<const std::vector<double>> oceanFunctions = {}) const;
+
  private:
+  /// The continuous sweep, carrying the derivative state along v when a
+  /// tangent run is given (IceHistoryKernels and SecondOrderKernels
+  /// share it).
+  [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> Sweep(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory3D* trajectory,
+      std::span<const std::vector<double>> oceanFunctions,
+      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      const std::vector<std::vector<double>>* ditau) const;
+
   const SeaLevelEvolution3D* evolution_;
   Options options_;
 };

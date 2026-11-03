@@ -26,6 +26,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Tangent-linear runs: the derivative of the responses along a direction in the ice history, the initial sea level and the viscosity | `TangentLinear.hpp` |
 | Second-order adjoints: the Hessian's action on a direction, as derivatives of the kernels | `Adjoint.hpp` (`SecondOrderKernels`) |
 | 3D tangent-linear runs: the derivative of the coupled lateral-viscosity evolution along loads, thickness, initial sea level and itau(x), and the second-order run | `TangentLinear3D.hpp` |
+| 3D second-order adjoints: the Hessian's action on a direction for 3D viscosity objectives | `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
 
@@ -294,6 +295,13 @@ Deliberately out of scope:
   derivative of the coupled forward (gated against central differences
   with Richardson to 1e-6); the continuous run is the transpose of the
   continuous 3D sweep to the commute error.
+- **3D second-order adjoints** (`AdjointSolver3D::SecondOrderKernels`):
+  the continuous sweep carrying the derivative adjoint state along v,
+  stepped with the continuous drive of the adjoint trajectory through the
+  same `AddMemory`; returns `KernelDerivatives3D` (the views' derivatives,
+  the itau kernel's derivative and its spherical reduction, and the
+  log-viscosity kernel's derivative, the Hessian-vector product of the
+  log parameterisation). Continuous only, as the 3D first-order sweep.
 - **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
   `second_order_adjoint_ice_history`): the kernels and their derivative
   along a direction v, the Hessian's action on v, as `KernelDerivatives`
@@ -432,6 +440,13 @@ Beyond the fixtures:
   continuous run against the continuous 3D kernel's pairing at the
   commute level; the second-order run as the derivative of the first
   with the log parameterisation's second variation, symmetric.
+- **3D second-order adjoints.** Zero-lateral equal to the 1D continuous
+  second-order sweep at 1e-6 (kernels and derivatives); with lateral
+  structure, the carried kernels equal to the first-order sweep's at
+  1e-10, and the Hessian's symmetry, its adjointness to the 3D
+  second-order run and its agreement with central differences of the
+  continuous kernels all at the commute level, improving under
+  refinement.
 - **Second-order adjoints.** The carried kernels equal to the first-order
   sweep's at 1e-12; central differences of the gradient along v against
   the derivatives at second order with Richardson to 1e-6, both schemes;

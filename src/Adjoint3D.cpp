@@ -11,6 +11,7 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/ParallelFor.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -56,13 +57,62 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  return Sweep(times, measurements, trajectory, oceanFunctions, {}, nullptr)
+      .first;
+}
+
+std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+    const std::vector<std::vector<double>>& itau,
+    const ForwardTrajectory3D& trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
+  const auto& op = *evolution_->op_;
+  const auto K = op.GetRheology().BranchCount();
+  const auto values = op.Coupling().GridValueCount();
+  if (tangent.size() != times.size()) {
+    throw std::invalid_argument(
+        "the tangent-linear run must give one snapshot per time node");
   }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
+  for (const auto& snap : tangent) {
+    if (!snap.internalState.has_value() ||
+        !snap.internalState->strain.has_value()) {
+      throw std::invalid_argument(
+          "the tangent-linear run must be recorded at every node with its "
+          "strain (TangentLinearSolver3D::Options::record)");
     }
+  }
+  auto ditau = itau;
+  if (ditau.empty()) {
+    ditau.assign(K, std::vector<double>(values, 0.0));
+  } else if (ditau.size() != K) {
+    throw std::invalid_argument(std::format(
+        "an itau perturbation gives one array per branch: {} branches", K));
+  } else {
+    for (const auto& a : ditau) {
+      if (a.size() != values) {
+        throw std::invalid_argument(
+            "an itau perturbation's arrays live on the coupling's grid "
+            "values");
+      }
+    }
+  }
+  return Sweep(times, measurements, &trajectory, oceanFunctions, tangent,
+               &ditau);
+}
+
+std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+    const std::vector<std::vector<double>>* ditau) const {
+  const bool second = ditau != nullptr;
+  if (second && trajectory == nullptr) {
+    throw std::invalid_argument(
+        "the second-order sweep needs the recorded forward trajectory");
   }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -182,10 +232,18 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
   };
 
   // The adjoint state, stepped by the forward coupled machinery in
-  // reversed time with no ice load.
-  auto vstate = op.ZeroState();
-  auto sigmaC = grid.ZeroCoefficients();
-  auto psiC = grid.ZeroCoefficients();
+  // reversed time with no ice load, and — for the second-order sweep —
+  // its derivative along v, stepped the same way with the continuous
+  // drive of the adjoint trajectory.
+  struct Carried {
+    Viscoelastic3D::State state;
+    std::vector<Complex> sigma, psi;
+  };
+  auto vs = Carried{op.ZeroState(), grid.ZeroCoefficients(),
+                    grid.ZeroCoefficients()};
+  auto ds = Carried{op.ZeroState(), grid.ZeroCoefficients(),
+                    grid.ZeroCoefficients()};
+  auto& vstate = vs.state;
 
   auto psiStar = [&](const std::vector<double>& potentialDual) {
     auto d = solver.CentrifugalDual(grid.Expand(potentialDual));
@@ -301,19 +359,26 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x);
     }
     const auto dTilde = coupling.Synthesise(spectral);
-    for (auto k = std::size_t{0}; k < K; ++k) {
-      const auto& itau = op.itau_[k];
-      auto& m = vstate.m[k];
-      for (auto c = 0; c < 2; ++c) {
-        for (auto i = std::size_t{0}; i < m.c[c].size(); ++i) {
-          m.c[c][i] += itau[i] * dTilde.c[c][i];
+    // m += itau(x) d-tilde for the adjoint state, and dm += delta itau(x)
+    // d-tilde for its derivative.
+    auto bump = [&](Viscoelastic3D::State& state,
+                    const std::vector<std::vector<double>>& factors) {
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        const auto& factor = factors[k];
+        auto& m = state.m[k];
+        for (auto c = 0; c < 2; ++c) {
+          for (auto i = std::size_t{0}; i < m.c[c].size(); ++i) {
+            m.c[c][i] += factor[i] * dTilde.c[c][i];
+          }
+        }
+        for (auto i = std::size_t{0}; i < m.r.size(); ++i) {
+          m.r[i] += factor[i] * dTilde.r[i];
         }
       }
-      for (auto i = std::size_t{0}; i < m.r.size(); ++i) {
-        m.r[i] += itau[i] * dTilde.r[i];
-      }
-    }
-    vstate.Invalidate();
+      state.Invalidate();
+    };
+    bump(vs.state, op.itau_);
+    if (second) bump(ds.state, *ditau);
   };
 
   // The memory-only adjoint equilibrium of the current state through
@@ -332,8 +397,8 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     if (collectives.Distributed()) collectives.sum(std::span(&sum, 1));
     return sum;
   };
-  auto smoothEquilibrium = [&](std::size_t node) {
-    const auto solutions = op.SolveElastic(vstate);
+  auto smoothEquilibrium = [&](Carried& carried, std::size_t node) {
+    const auto solutions = op.SolveElastic(carried.state);
     SeaLevelSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(node);
@@ -353,12 +418,12 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       sig[i] = rhoW * Cn[i] * resp.seaLevelChange[i];
     }
-    sigmaC = grid.Expand(sig);
-    psiC = rotation != RotationalFeedback::None
-               ? solver.CentrifugalCoefficients(resp.angularVelocity)
-               : grid.ZeroCoefficients();
-    agree(sigmaC);
-    agree(psiC);
+    carried.sigma = grid.Expand(sig);
+    carried.psi = rotation != RotationalFeedback::None
+                      ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                      : grid.ZeroCoefficients();
+    agree(carried.sigma);
+    agree(carried.psi);
     agree(resp.seaLevelChange);
     return resp.seaLevelChange;
   };
@@ -389,8 +454,10 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
       r2 * ev.toNdLength_ /
       (aMat * aMat * ev.toMatDensity_ *
        op.GetRheology().BaseMaterial().SurfaceGravity());
+  auto dItauKernel = std::vector<std::vector<double>>{};
   if (trajectory != nullptr) {
     itauKernel.assign(K, std::vector<double>(values, 0.0));
+    if (second) dItauKernel.assign(K, std::vector<double>(values, 0.0));
   }
   // The forward state at a node. A kept one is read as recorded. The
   // states between two kept ones are rebuilt when the sweep, coming down,
@@ -466,16 +533,29 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     }
     return regenerated;
   };
+  // The second-order sweep's tangent-linear state at a node, with its
+  // strain (recorded at every node).
+  auto tangentState = [&](std::size_t node) -> const Viscoelastic3D::State& {
+    return *tangent[node].internalState;
+  };
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (trajectory == nullptr || weight == 0.0) return;
     const auto& dFwd = forwardStrain(node);
     const auto& fwd = forwardState(node);
+    const auto* tl = second ? &tangentState(node) : nullptr;
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& itau = op.itau_[k];
       const auto& mu = op.muBranch_[k];
       const auto& mA = vstate.m[k];
       const auto& mF = fwd.m[k];
       auto& kernel = itauKernel[k];
+      // The derivative pairing's pieces: the derivative adjoint state, v's
+      // tangent state and strain, and v's delta itau.
+      const auto* dA = second ? &ds.state.m[k] : nullptr;
+      const auto* mT = second ? &tl->m[k] : nullptr;
+      const auto* dT = second ? &*tl->strain : nullptr;
+      const auto* delta = second ? &(*ditau)[k] : nullptr;
+      auto* dKernel = second ? &dItauKernel[k] : nullptr;
       // Node by node, each writing only its own grid values.
       detail::ParallelElements(
           nodeCount, op.options_.parallel, [&](std::size_t rn) {
@@ -494,18 +574,34 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
               const auto dm2 = dFwd.c[0][i] - mF.c[0][i];
               const auto dm1 = dFwd.c[1][i] - mF.c[1][i];
               const double dm0 = dFwd.r[i] - mF.r[i];
-              const double contraction =
-                  12.0 * mA.r[i] * dm0 +
-                  8.0 * (mA.c[1][i] * std::conj(dm1)).real() +
-                  4.0 * (mA.c[0][i] * std::conj(dm2)).real();
+              auto contract = [&](const GridCoupling::TensorField& a,
+                                  const Complex& b2, const Complex& b1,
+                                  double b0) {
+                return 12.0 * a.r[i] * b0 +
+                       8.0 * (a.c[1][i] * std::conj(b1)).real() +
+                       4.0 * (a.c[0][i] * std::conj(b2)).real();
+              };
+              const double contraction = contract(mA, dm2, dm1, dm0);
               kernel[i] += factor * contraction / itau[i];
+              if (!second) continue;
+              // Its derivative along v: the derivative state against the
+              // forward d - m, the adjoint state against the tangent
+              // d - m, less (delta itau / itau) times the pairing itself.
+              const auto vdm2 = dT->c[0][i] - mT->c[0][i];
+              const auto vdm1 = dT->c[1][i] - mT->c[1][i];
+              const double vdm0 = dT->r[i] - mT->r[i];
+              const double dContraction = contract(*dA, dm2, dm1, dm0) +
+                                          contract(mA, vdm2, vdm1, vdm0) -
+                                          (*delta)[i] / itau[i] * contraction;
+              (*dKernel)[i] += factor * dContraction / itau[i];
             }
           });
     }
   };
 
   std::vector<std::vector<double>> densityLate(times.size()),
-      densityEarly(times.size());
+      densityEarly(times.size()), dDensityLate(times.size()),
+      dDensityEarly(times.size());
   auto lumps = std::map<std::size_t, std::vector<double>>{};
 
   auto observe = [&](std::size_t node) {
@@ -514,22 +610,25 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     const auto j = jump(found->second, node);
     lumps.emplace(node, j.xiA);
     applyJump(j);
-    auto early = smoothEquilibrium(node);
+    auto early = smoothEquilibrium(vs, node);
     if (node > 0) densityEarly[node] = std::move(early);
+    if (second) {
+      auto dearly = smoothEquilibrium(ds, node);
+      if (node > 0) dDensityEarly[node] = std::move(dearly);
+    }
   };
 
-  // The reversed sweep: the forward coupled loop with no ice load.
-  observe(N);
-  accumulateItau(N, wEarly[N] * perTime);
-  for (std::size_t n = N; n >= 1; --n) {
-    if (options_.on_node) options_.on_node(n);
-    const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
-    auto step =
-        op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),
-                     ev.Columns(psiC, ev.toMatPotential_));
+  // One reversed coupled step of a carried state under its closure, with
+  // an optional memory drive; returns the step's sea level (the late
+  // density at the node stepped to).
+  auto reversedStep = [&](Carried& carried, double dt, std::size_t to,
+                          const std::vector<GridCoupling::TensorField>* drive) {
+    auto step = op.StartStep(carried.state, dt, scheme,
+                             ev.Columns(carried.sigma, ev.toMatDensity_),
+                             ev.Columns(carried.psi, ev.toMatPotential_));
+    if (drive != nullptr) step.AddMemory(*drive);
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
-    const auto& Cn = oceanAt(n - 1);
-
+    const auto& Cn = oceanAt(to);
     SeaLevelSolver::Response response;
     auto [strain, info] = step.Converge(
         [&](const GridCoupling::SpectralTensor& s) {
@@ -542,22 +641,24 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
           coupled.inertiaMomentChange =
               step.InertiaMoment(responses) * ev.toNdMoment_;
           coupled.rotation = rotation;
-          coupled.oceanFunctionOverride = overrideAt(n - 1);
+          coupled.oceanFunctionOverride = overrideAt(to);
           response =
               effectiveSolver.SolveGeneralised(ev.state_, coupled, sleOptions);
           auto sig = std::vector<double>(fieldSize);
           for (auto i = std::size_t{0}; i < fieldSize; ++i) {
             sig[i] = rhoW * Cn[i] * response.seaLevelChange[i];
           }
-          sigmaC = grid.Expand(sig);
-          psiC = rotation != RotationalFeedback::None
-                     ? solver.CentrifugalCoefficients(response.angularVelocity)
-                     : grid.ZeroCoefficients();
-          agree(sigmaC);
-          agree(psiC);
+          carried.sigma = grid.Expand(sig);
+          carried.psi = rotation != RotationalFeedback::None
+                            ? solver.CentrifugalCoefficients(
+                                  response.angularVelocity)
+                            : grid.ZeroCoefficients();
+          agree(carried.sigma);
+          agree(carried.psi);
           agree(response.seaLevelChange);
-          step.AddChannels(responses, ev.Columns(sigmaC, ev.toMatDensity_),
-                           ev.Columns(psiC, ev.toMatPotential_));
+          step.AddChannels(responses,
+                           ev.Columns(carried.sigma, ev.toMatDensity_),
+                           ev.Columns(carried.psi, ev.toMatPotential_));
           return step.StrainOf(responses);
         },
         {.max_iterations = options_.max_coupled_iterations,
@@ -567,58 +668,117 @@ Kernels3D AdjointSolver3D::IceHistoryKernels(
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the reversed lateral fixed point at node {} did not converge",
-          n - 1));
+          to));
     }
-    densityLate[n - 1] = response.seaLevelChange;
-    op.Recycle(
-        std::exchange(vstate, std::move(step).Finish(std::move(strain))));
+    op.Recycle(std::exchange(carried.state,
+                             std::move(step).Finish(std::move(strain))));
+    return response.seaLevelChange;
+  };
+
+  // The reversed sweep: the forward coupled loop with no ice load; the
+  // derivative state's step carries the continuous drive built from the
+  // adjoint state before and after its own step.
+  observe(N);
+  accumulateItau(N, wEarly[N] * perTime);
+  for (std::size_t n = N; n >= 1; --n) {
+    if (options_.on_node) options_.on_node(n);
+    const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
+    auto before = Viscoelastic3D::State{};
+    if (second) {
+      op.PrimeStrain(vs.state, ev.Columns(vs.sigma, ev.toMatDensity_),
+                     ev.Columns(vs.psi, ev.toMatPotential_));
+      before = vs.state;
+    }
+    densityLate[n - 1] = reversedStep(vs, dt, n - 1, nullptr);
+    if (second) {
+      const auto drive = TangentLinearSolver3D::FirstOrderDrive(
+          op, AdjointMethod::Continuous, scheme, dt, before, vs.state, *ditau);
+      dDensityLate[n - 1] = reversedStep(ds, dt, n - 1, &drive);
+    }
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);
   }
   op.ReleaseScratch();
 
-  // Node duals from the densities and the lumps (the 1D assembly).
-  std::vector<std::vector<double>> loadDuals(times.size()),
-      densityLoad(times.size());
-  for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    loadDuals[n].assign(fieldSize, 0.0);
-    densityLoad[n].assign(fieldSize, 0.0);
-    const auto* late = densityLate[n].empty() ? nullptr : &densityLate[n];
-    const auto* early = densityEarly[n].empty() ? late : &densityEarly[n];
-    const auto lump = lumps.find(n);
-    const auto totalW = wEarly[n] + wLate[n];
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      const double lateV = late == nullptr ? 0.0 : (*late)[i] * perTime;
-      const double earlyV = early == nullptr ? 0.0 : (*early)[i] * perTime;
-      const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
-      loadDuals[n][i] =
-          smooth + (lump == lumps.end() ? 0.0 : lump->second[i]);
-      densityLoad[n][i] = smooth / totalW;
+  // Node duals from the densities and the lumps (the 1D assembly); the
+  // derivative duals carry no lumps.
+  auto assemble = [&](const std::vector<std::vector<double>>& late,
+                      const std::vector<std::vector<double>>& early,
+                      const std::map<std::size_t, std::vector<double>>& lumpsOf,
+                      std::vector<std::vector<double>>& duals,
+                      std::vector<std::vector<double>>& density) {
+    duals.assign(times.size(), {});
+    density.assign(times.size(), {});
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      duals[n].assign(fieldSize, 0.0);
+      density[n].assign(fieldSize, 0.0);
+      const auto* lateP = late[n].empty() ? nullptr : &late[n];
+      const auto* earlyP = early[n].empty() ? lateP : &early[n];
+      const auto lump = lumpsOf.find(n);
+      const auto totalW = wEarly[n] + wLate[n];
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        const double lateV = lateP == nullptr ? 0.0 : (*lateP)[i] * perTime;
+        const double earlyV = earlyP == nullptr ? 0.0 : (*earlyP)[i] * perTime;
+        const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
+        duals[n][i] = smooth + (lump == lumpsOf.end() ? 0.0 : lump->second[i]);
+        density[n][i] = smooth / totalW;
+      }
     }
-  }
+  };
+  std::vector<std::vector<double>> loadDuals, densityLoad;
+  assemble(densityLate, densityEarly, lumps, loadDuals, densityLoad);
 
   Kernels3D out;
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(loadDuals),
       std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
-  if (trajectory != nullptr) {
-    out.itauKernel3D = std::move(itauKernel);
-    out.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));
-    out.logViscosityKernel3D.assign(K, std::vector<double>(values, 0.0));
+  auto spherical = [&](const std::vector<std::vector<double>>& kernel) {
+    auto reduced = std::vector<std::vector<double>>(
+        K, std::vector<double>(nodeCount, 0.0));
     for (auto k = std::size_t{0}; k < K; ++k) {
       for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-        out.itauKernelSpherical[k][rn] = coupling.GridOf(rn).Integrate(
-            std::span(out.itauKernel3D[k])
-                .subspan(coupling.FieldOffset(rn), coupling.FieldSizeOf(rn)));
+        reduced[k][rn] = coupling.GridOf(rn).Integrate(
+            std::span(kernel[k]).subspan(coupling.FieldOffset(rn),
+                                         coupling.FieldSizeOf(rn)));
       }
+    }
+    return reduced;
+  };
+  if (trajectory != nullptr) {
+    out.itauKernel3D = std::move(itauKernel);
+    out.itauKernelSpherical = spherical(out.itauKernel3D);
+    out.logViscosityKernel3D.assign(K, std::vector<double>(values, 0.0));
+    for (auto k = std::size_t{0}; k < K; ++k) {
       for (auto i = std::size_t{0}; i < values; ++i) {
         out.logViscosityKernel3D[k][i] =
             -op.itau_[k][i] * out.itauKernel3D[k][i];
       }
     }
   }
-  return out;
+  KernelDerivatives3D derivatives;
+  if (second) {
+    std::vector<std::vector<double>> dloadDuals, dDensityLoad;
+    assemble(dDensityLate, dDensityEarly, {}, dloadDuals, dDensityLoad);
+    auto views = detail::AssembleIceViews(
+        C, solver.IceDensity(), times, std::move(dloadDuals),
+        std::move(dDensityLoad), {}, oceanFunctions, rhoW);
+    derivatives.ice.times.assign(times.begin(), times.end());
+    derivatives.ice.thickness = std::move(views.thickness);
+    derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
+    derivatives.itauKernel3D = std::move(dItauKernel);
+    derivatives.itauKernelSpherical = spherical(derivatives.itauKernel3D);
+    // d/dv of -itau K: -(delta itau K + itau dK).
+    derivatives.logViscosityKernel3D.assign(K, std::vector<double>(values, 0.0));
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto i = std::size_t{0}; i < values; ++i) {
+        derivatives.logViscosityKernel3D[k][i] =
+            -((*ditau)[k][i] * out.itauKernel3D[k][i] +
+              op.itau_[k][i] * derivatives.itauKernel3D[k][i]);
+      }
+    }
+  }
+  return {std::move(out), std::move(derivatives)};
 }
 
 namespace {

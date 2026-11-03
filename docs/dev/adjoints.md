@@ -498,9 +498,43 @@ run pairs with the continuous 3D kernel ⟨K_δ, p⟩ at the commute level
 at the moved operator (second order, Richardson to 1e-6), symmetric at
 1e-9, and zero without a viscosity perturbation.
 
-Next: the 3D second-order adjoint (the continuous second-order sweep on
-`Evolution3D`, the derivative adjoint state stepped with the continuous
-drive of the adjoint trajectory, pointwise — Hessian-vector products of
-3D viscosity objectives), then the forward perturbations in the elastic
-parameters and the density.
+## 11. The 3D second-order adjoint (built 3 November 2026)
+
+`AdjointSolver3D::SecondOrderKernels`: the continuous sweep of §6a now
+runs as one core (`Sweep`) that carries, when given v's recorded 3D
+tangent run and δitau(x), a second carried state — the derivative of
+the adjoint state along v — beside the first. The derivative state is
+stepped by the same reversed coupled machinery, its step driven by the
+continuous first-order drive of the adjoint trajectory
+(`TangentLinearSolver3D::FirstOrderDrive` with the primed pre-step
+adjoint state and the post-step one, through `OpenStep::AddMemory`);
+both states jump at an observation by the instantaneous adjoint strain,
+over itau(x) and by δitau(x); and the pointwise pairing is
+differentiated — the derivative state against the forward d − m, the
+adjoint state against v's tangent d − m, less (δitau/itau) times the
+pairing itself — with the same null-basis metric. The result is
+`KernelDerivatives3D`: the thickness and initial-sea-level views'
+derivatives, the itau kernel's derivative on the grid and its spherical
+reduction, and the log-viscosity kernel's derivative
+−(δitau K + itau dK), the Hessian-vector product of the log
+parameterisation. `IceHistoryKernels` is the same sweep with no
+tangent run, so the first-order gates guard the refactor.
+
+GATES (`TestSecondOrderAdjoint3D`, lmax 8): zero-lateral — with δ = 0 at
+the GLL points the kernels and the derivatives (thickness views,
+spherical reductions of the itau kernel and its derivative) equal the
+1D continuous second-order sweep's at 1e-6 along a direction
+angle-uniform in itau; lateral — the carried kernels equal the
+first-order sweep's at 1e-10, and ⟨H u, w⟩ against ⟨H w, u⟩, against
+⟨g, F''[u, w]⟩ from the 3D second-order run (the log parameterisation's
+uv term accounted for), and against central differences of the
+continuous kernels along u, all agree below 10 % at 9 nodes and improve
+at 17, on the η = 1e22 mantle — the continuous formulation's commute
+level, as the first-order 3D gates. A machine-grade version belongs to
+the discrete 3D transpose (§6b), which is not built.
+
+Next: the forward perturbations in the elastic parameters and the
+density — new design, not a port: the derivative of the radial and
+coupled responses with respect to μ(r), κ(r), ρ(r) (and their lateral
+perturbations), the first step towards the 3D elastic work.
 
