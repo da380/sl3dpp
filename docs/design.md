@@ -297,7 +297,11 @@ Deliberately out of scope:
   direct load and the drive bilinear in the two tangent trajectories and
   the forward one, plus the weights' second derivatives by the discrete
   method) reads. Under the sharp flotation rule the loads and the initial
-  sea level enter no second derivative.
+  sea level enter no second derivative. The directions may have a part in
+  the moduli (`SecondOrderDirection::materialU/V`): each direction's
+  material forces on the other's tangent trajectory, its full solution
+  recovered from the recorded snapshot and its decayed memory with its
+  own itau drive (docs/dev/adjoints.md §15).
 - **3D tangent-linear runs** (`TangentLinearSolver3D`): the same
   derivative of the coupled lateral-viscosity evolution, along loads,
   thickness, initial sea level and the laterally varying itau(x) (or a
@@ -306,7 +310,9 @@ Deliberately out of scope:
   within-step fixed point unchanged. The discrete run is the exact
   derivative of the coupled forward (gated against central differences
   with Richardson to 1e-6); the continuous run is the transpose of the
-  continuous 3D sweep to the commute error.
+  continuous 3D sweep to the commute error. The second-order run takes
+  material directions too (`SecondOrderDirection3D::materialU/V`), with
+  the base step's lateral weights in the effective shear.
 - **Second-order adjoints** (`AdjointSolver::SecondOrderKernels`, pyslfp's
   `second_order_adjoint_ice_history`): the kernels and their derivative
   along a direction v, the Hessian's action on v, as `KernelDerivatives`
@@ -317,15 +323,28 @@ Deliberately out of scope:
   rounding. Continuous: the second-order adjoint equations with the ocean
   functions held, the derivative state stepped with the continuous drive
   of the adjoint trajectory. A Hessian-vector product costs the forward
-  run, v's tangent-linear run and the second-order sweep.
+  run, v's tangent-linear run and the second-order sweep. With
+  `Options::material_kernels` the material kernels and their derivatives
+  along v are carried too (`KernelDerivatives::kappaKernel/muKernel`), and
+  v may have a part in the moduli (`SecondOrderKernels(..., material)`),
+  by both methods — the derivative of the effective systems on the first
+  duals as a source before the unit-response contraction, and the memory
+  force's variation on the first dual strains; in the continuous sweep v's
+  material forces on the adjoint trajectory, the jump's fingerprint moving
+  with the unrelaxed table (docs/dev/adjoints.md §15).
 - **3D second-order adjoints** (`AdjointSolver3D::SecondOrderKernels`):
   the continuous sweep carrying the derivative adjoint state along v,
   stepped with the continuous drive of the adjoint trajectory through the
   same `AddMemory`; returns `KernelDerivatives3D` (the views' derivatives,
   the itau kernel's derivative and its spherical reduction, and the
   log-viscosity kernel's derivative, the Hessian-vector product of the
-  log parameterisation). Continuous only; the discrete 3D second-order
-  sweep is not built.
+  log parameterisation). Both methods: the discrete sweep carries the
+  derivative dual state through the same transposed fixed point, forced
+  by the derivative of the step's lateral weight on the first dual
+  strain, the Hessian exact to the solvers' tolerance
+  (docs/dev/adjoints.md §14). Material directions and the material
+  kernels' derivatives as in 1D, by both methods, single-process
+  (docs/dev/adjoints.md §15).
 - **Material derivatives** (`MaterialDirection`: δκ, δμ, δρ on the mesh's
   nodes). `Material::Variation` is the exact linearisation of
   `Material::Shifted`, gravity's variation integrated from δρ so that the
@@ -641,9 +660,9 @@ Beyond the fixtures:
 
 What is not built, or holds only within limits:
 
-- **The discrete 3D sweeps.** The discrete 3D adjoint is single-process
-  (refused when distributed), and the discrete 3D second-order sweep is
-  not built (refused; the continuous one serves).
+- **The discrete 3D sweeps.** The discrete 3D adjoint, first and second
+  order, is single-process (refused when distributed); a material
+  direction of either 3D second-order sweep is single-process too.
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
@@ -665,7 +684,7 @@ What is not built, or holds only within limits:
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
   and whether moduli relax on different time-scales — is open.
 - **Bulk relaxation** is not modelled.
-- **Second-order runs and adjoints** take no material directions, and the
+- **Second-order runs and adjoints** take no density direction, and the
   shoreline terms of pyslfp's smoothed flotation rule are not ported
   (sl3dpp has the sharp rule only).
 - **Material derivatives.** The time-stepped material tangents and

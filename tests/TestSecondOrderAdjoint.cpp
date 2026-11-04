@@ -39,6 +39,14 @@ double Pairing(const Scene& setup, const Kernels& kernels,
       total += kernels.itauKernel[0][i] * d.itau[0][i];
     }
   }
+  if (!kernels.kappaKernel.empty()) {
+    for (auto i = std::size_t{0}; i < d.material.kappa.size(); ++i) {
+      total += kernels.kappaKernel[i] * d.material.kappa[i];
+    }
+    for (auto i = std::size_t{0}; i < d.material.mu.size(); ++i) {
+      total += kernels.muKernel[i] * d.material.mu[i];
+    }
+  }
   return total;
 }
 
@@ -313,13 +321,15 @@ TEST(SecondOrderAdjoint, HessianIsSymmetricAndAdjointToTheSecondOrderRun) {
 }
 
 TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
-  // On a slowly relaxing mantle, along directions smooth in time, the
-  // continuous second-order adjoint's derivatives tend to the discrete
-  // ones at the scheme's order as the steps are halved, block by block,
-  // and so does their mismatch with the continuous second-order
-  // tangent-linear run; the discrete pair match to rounding at every
-  // spacing. As for the second-order run, the grids coarser than 17
-  // nodes over 10 kyr sit before the asymptotic regime on this mantle.
+  // On a slowly relaxing mantle, along directions smooth in time in the
+  // thickness, the relaxation times AND the moduli, the continuous
+  // second-order adjoint's derivatives tend to the discrete ones at the
+  // scheme's order as the steps are halved, block by block (ice,
+  // viscosity, material), and so does their mismatch with the continuous
+  // second-order tangent-linear run; the discrete pair match to rounding
+  // at every spacing. As for the second-order run, the grids coarser
+  // than 17 nodes over 10 kyr sit before the asymptotic regime on this
+  // mantle.
   auto setup = Scene::Make(1e22);
   std::mt19937 rng(11);
   const auto fieldT = setup.Smooth(rng, 100.0 * setup.Metre());
@@ -327,9 +337,27 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
   const auto fieldV = setup.Smooth(rng, 20.0 * setup.Metre());
   const auto g = setup.Smooth(rng, 1.0);
   const auto span = 10.0 * setup.Kyr();
-  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& mesh = setup.material.Mesh();
+  const auto [k0, m0] = setup.material.Moduli().KappaMu();
+  auto materialDirection = [&](const std::function<double(double)>& profile) {
+    MaterialDirection d;
+    d.kappa.assign(k0.size(), 0.0);
+    d.mu.assign(m0.size(), 0.0);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (setup.material.IsFluid(e)) continue;
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto p = 0.1 * profile(mesh.Radius(e, q));
+        d.kappa[i] = 0.5 * p * k0[i];
+        d.mu[i] = p * m0[i];
+      }
+    }
+    return d;
+  };
+  ViscoelasticOperator op(setup.rheology, kLmax,
+                          {.memory_points = MemoryPointSet::Gll});
   auto iceGaps = std::vector<double>{}, viscosityGaps = std::vector<double>{},
-       mismatches = std::vector<double>{};
+       materialGaps = std::vector<double>{}, mismatches = std::vector<double>{};
   for (const auto nodes : {17, 33}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
@@ -345,18 +373,23 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
-                                {.rtol = 1e-12, .record_stride = 1});
+                                {.rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
         evolution.Run(times, FrozenLoad(setup, times, thickness)));
     TangentPerturbation u, v;
     u.iceThickness = scaled(fieldU, [](double s) { return s; });
     u.itau = setup.DeltaItau(0.1, [](double r) { return 0.3 + 0.7 * r * r; });
+    u.material = materialDirection(
+        [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
     v.iceThickness = scaled(fieldV, [](double s) { return (1.0 - s) * (1.0 - s); });
     v.itau = setup.DeltaItau(0.1, [](double r) { return 1.0 + r; });
+    v.material = materialDirection([](double r) { return 1.0 - 0.5 * r; });
     auto measurement = std::map<std::size_t, Measurement>{};
     measurement[times.size() - 1].seaLevelDual = g;
     struct Blocks {
-      double ice, viscosity, forward;
+      double ice, viscosity, material, forward;
     };
     auto results = std::map<AdjointMethod, Blocks>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
@@ -364,11 +397,17 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
                                   {.method = method, .rtol = 1e-12, .record = true});
       const auto runV = tangent.Run(times, v, &trajectory);
       const auto runU = tangent.Run(times, u, &trajectory);
-      AdjointSolver adjoint(evolution, {.method = method, .rtol = 1e-12});
-      const auto [kernels, derivatives] =
-          adjoint.SecondOrderKernels(times, measurement, runV, v.itau, trajectory);
-      const auto second = tangent.RunSecondOrder(
-          times, runV, runU, {.itauU = v.itau, .itauV = u.itau}, &trajectory);
+      AdjointSolver adjoint(evolution, {.method = method,
+                                        .rtol = 1e-12,
+                                        .material_kernels = true});
+      const auto [kernels, derivatives] = adjoint.SecondOrderKernels(
+          times, measurement, runV, v.itau, trajectory, {}, v.material);
+      SecondOrderDirection vu;
+      vu.itauU = v.itau;
+      vu.itauV = u.itau;
+      vu.materialU = v.material;
+      vu.materialV = u.material;
+      const auto second = tangent.RunSecondOrder(times, runV, runU, vu, &trajectory);
       auto ice = 0.0;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         ice += setup.Surface(derivatives.thickness[n], u.iceThickness[n]);
@@ -377,20 +416,196 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
       for (auto i = std::size_t{0}; i < u.itau[0].size(); ++i) {
         viscosity += derivatives.itauKernel[0][i] * u.itau[0][i];
       }
-      results[method] = {ice, viscosity, Objective(setup, second, measurement)};
+      auto materialBlock = 0.0;
+      for (auto i = std::size_t{0}; i < u.material.kappa.size(); ++i) {
+        materialBlock += derivatives.kappaKernel[i] * u.material.kappa[i] +
+                         derivatives.muKernel[i] * u.material.mu[i];
+      }
+      results[method] = {ice, viscosity, materialBlock,
+                         Objective(setup, second, measurement)};
     }
     const auto& d = results[AdjointMethod::Discrete];
     const auto& c = results[AdjointMethod::Continuous];
-    EXPECT_NEAR(d.ice + d.viscosity, d.forward, 1e-9 * std::abs(d.forward))
+    EXPECT_NEAR(d.ice + d.viscosity + d.material, d.forward,
+                1e-9 * std::abs(d.forward))
         << "nodes " << nodes;
     iceGaps.push_back(std::abs(d.ice - c.ice) / std::abs(d.ice));
     viscosityGaps.push_back(std::abs(d.viscosity - c.viscosity) /
                             std::abs(d.viscosity));
-    mismatches.push_back(std::abs(c.ice + c.viscosity - c.forward) /
-                         std::abs(c.forward));
+    materialGaps.push_back(std::abs(d.material - c.material) /
+                           std::abs(d.material));
+    mismatches.push_back(
+        std::abs(c.ice + c.viscosity + c.material - c.forward) /
+        std::abs(c.forward));
   }
-  for (const auto* gaps : {&iceGaps, &viscosityGaps, &mismatches}) {
+  for (const auto* gaps : {&iceGaps, &viscosityGaps, &materialGaps, &mismatches}) {
     EXPECT_LT((*gaps)[0], 0.1) << (*gaps)[0] << " " << (*gaps)[1];
     EXPECT_GT((*gaps)[0] / (*gaps)[1], 3.0) << (*gaps)[0] << " " << (*gaps)[1];
+  }
+}
+
+TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
+  // With directions u and w in the ice thickness, the inverse relaxation
+  // times AND the moduli, the discrete second-order sweep along a
+  // material direction with the material kernels on: the carried kernels
+  // (material included) equal the first-order sweep's to rounding;
+  // <H u, w> = <H w, u> to rounding and equals <g, F''[u, w]> from the
+  // second-order tangent-linear run in the material; and central
+  // differences of the gradient along w (the material shifted, the
+  // relaxation times and the thickness moved) paired with u converge at
+  // second order to the derivatives along w paired with u, Richardson
+  // landing on them — both schemes.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(43);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < 6; ++n) times.push_back(2.0 * n * setup.Kyr());
+  const auto thickness = RandomThickness(setup, rng, times.size());
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[3].potentialDual = setup.Smooth(rng, 0.7);
+
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  auto materialDirection = [&](const std::function<double(double)>& profile) {
+    MaterialDirection d;
+    d.kappa.assign(k0.size(), 0.0);
+    d.mu.assign(m0.size(), 0.0);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (material.IsFluid(e)) continue;
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto p = 0.1 * profile(mesh.Radius(e, q));
+        d.kappa[i] = 0.5 * p * k0[i];
+        d.mu[i] = p * m0[i];
+      }
+    }
+    return d;
+  };
+  auto u = Direction(setup, rng, times.size(), false,
+                     [](double r) { return 0.3 + 0.7 * r * r; });
+  u.material = materialDirection(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  auto w = Direction(setup, rng, times.size(), false,
+                     [](double r) { return 0.8 - 0.5 * r; });
+  w.material = materialDirection([](double r) { return 1.0 - 0.5 * r; });
+
+  // The base moved along w by eps: the material shifted (the branch
+  // moduli as the same fractions of the shifted unrelaxed modulus), the
+  // inverse times by eps delta itau_w, the thickness by eps delta I_w.
+  const auto& base = setup.rheology;
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(w.material, eps);
+    const auto muU = base.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      auto branch = base.BranchAt(k);
+      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+        branch.itau[i] += eps * w.itau[k][i];
+      }
+      branches.push_back(std::move(branch));
+    }
+    return Rheology::Create(shifted, branches).value();
+  };
+  auto movedThickness = [&](double eps) {
+    auto out = thickness;
+    for (auto n = std::size_t{0}; n < out.size(); ++n) {
+      for (auto i = std::size_t{0}; i < out[n].size(); ++i) {
+        out[n][i] += eps * w.iceThickness[n][i];
+      }
+    }
+    return out;
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax,
+                            {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.scheme = scheme,
+                                 .rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, FrozenLoad(setup, times, thickness)));
+    TangentLinearSolver tangent(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    const auto runU = tangent.Run(times, u, &trajectory);
+    const auto runW = tangent.Run(times, w, &trajectory);
+    AdjointSolver adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                      .rtol = 1e-12,
+                                      .material_kernels = true});
+    const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
+        times, measurements, runU, u.itau, trajectory, {}, u.material);
+    const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
+        times, measurements, runW, w.itau, trajectory, {}, w.material);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LT(MaxDiff(kernelsU.thickness[n], first.thickness[n]),
+                1e-12 * MaxAbs(first.thickness[n]) + 1e-300);
+    }
+    EXPECT_LT(MaxDiff(kernelsU.itauKernel[0], first.itauKernel[0]),
+              1e-12 * MaxAbs(first.itauKernel[0]));
+    EXPECT_LT(MaxDiff(kernelsU.kappaKernel, first.kappaKernel),
+              1e-12 * MaxAbs(first.kappaKernel));
+    EXPECT_LT(MaxDiff(kernelsU.muKernel, first.muKernel),
+              1e-12 * MaxAbs(first.muKernel));
+    EXPECT_GT(MaxAbs(alongU.kappaKernel), 0.0);
+    EXPECT_GT(MaxAbs(alongU.muKernel), 0.0);
+
+    const auto huW = Pairing(setup, alongU, w);
+    const auto hwU = Pairing(setup, alongW, u);
+    EXPECT_NEAR(huW, hwU, 1e-9 * std::abs(huW)) << "scheme " << static_cast<int>(scheme);
+    SecondOrderDirection uw;
+    uw.itauU = u.itau;
+    uw.itauV = w.itau;
+    uw.materialU = u.material;
+    uw.materialV = w.material;
+    const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
+    const auto forward = Objective(setup, second, measurements);
+    EXPECT_NEAR(forward, huW, 1e-9 * std::abs(forward))
+        << "scheme " << static_cast<int>(scheme);
+
+    auto gradientAt = [&](double eps) {
+      const auto rheology = rheologyAt(eps);
+      ViscoelasticOperator movedOp(rheology, kLmax,
+                                   {.memory_points = MemoryPointSet::Gll});
+      SeaLevelEvolution movedEvolution(movedOp, setup.solver, setup.state,
+                                       {.scheme = scheme,
+                                        .rotation = RotationalFeedback::None,
+                                        .rtol = 1e-12,
+                                        .record_stride = 1});
+      const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
+          movedEvolution.Run(times, FrozenLoad(setup, times, movedThickness(eps))));
+      AdjointSolver movedAdjoint(movedEvolution, {.method = AdjointMethod::Discrete,
+                                                  .rtol = 1e-12,
+                                                  .material_kernels = true});
+      return Pairing(setup,
+                     movedAdjoint.IceHistoryKernels(times, measurements,
+                                                    &movedTrajectory),
+                     u);
+    };
+    const auto predicted = hwU;
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (gradientAt(eps) - gradientAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+
+    // Refusals: a density direction; the continuous sweep.
+    auto withRho = w.material;
+    withRho.rho.assign(k0.size(), 1.0);
+    EXPECT_THROW((void)adjoint.SecondOrderKernels(times, measurements, runW,
+                                                  w.itau, trajectory, {}, withRho),
+                 std::invalid_argument);
   }
 }

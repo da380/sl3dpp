@@ -540,9 +540,9 @@ first-order sweep's at 1e-10, and ⟨H u, w⟩ against ⟨H w, u⟩, against
 uv term accounted for), and against central differences of the
 continuous kernels along u, all agree below 10 % at 9 nodes and improve
 at 17, on the η = 1e22 mantle — the continuous formulation's commute
-level, as the first-order 3D gates. A machine-grade version would need
-a discrete 3D second-order sweep, which is not built; the first-order
-discrete 3D transpose is (§12).
+level, as the first-order 3D gates. The machine-grade version is the
+discrete 3D second-order sweep (§14); the first-order discrete 3D
+transpose is §12.
 
 ## 12. The discrete 3D transpose as built (3 November 2026)
 
@@ -576,8 +576,8 @@ d† = Σ A m̃† pointwise. The start is the transposed instantaneous elastic
 solve on the unrelaxed systems. The column duals carry no halving or
 doubling: the Hermitian column pairing matches the solver's real-field
 coefficient pairing (unlike the 1D real columns, which halve and double).
-Single-process (refused when distributed); the discrete 3D second-order
-adjoint is not built (the continuous one is, §11).
+Single-process (refused when distributed). Its second-order form is §14
+(the continuous one is §11).
 
 GATES (`TestDiscreteAdjoint3D`, lmax 8, lateral structure on): the
 pairing identity with the discrete tangent-linear run at 1e-8 for both
@@ -921,8 +921,177 @@ as responses.
 
 Next: for the benchmark, a driver writing the Born surface response to a
 cap load under a lateral δμ in the exchange format (the 3D elastic
-comparison with AdGIA). Deferred: the discrete 3D second-order adjoint,
-the material in the second-order runs, and distributing the discrete
-sweep (with the rest of the parallelisation pass, which waits until the
-features are complete).
+comparison with AdGIA). Deferred: distributing the discrete sweep (with
+the rest of the parallelisation pass, which waits until the features are
+complete). The discrete 3D second-order adjoint (§14) and the material in
+the second-order runs (§15) followed on 4 November.
+
+## 14. The discrete 3D second-order adjoint (built 4 November 2026)
+
+`AdjointSolver3D::SecondOrderKernels` under `AdjointMethod::Discrete`
+(AdjointDiscrete3D.cpp; the 3D form of the 1D discrete second-order sweep
+of §9): the exact derivative of the exact gradient of §12 along a
+direction v, from v's recorded DISCRETE tangent-linear run and its
+δitau(x). The transposed sweep carries the derivative dual state
+(dm†_k, dd†) beside (m†_k, d†), and every piece of §12 is differentiated
+in place:
+
+- the dual of the end strain: dd† + Σ_k β_k(x) dm†_k + Σ_k dβ_k(x) dh_k(x)
+  m†_k, with dh_k = dt δitau_k(x) and dβ_k the weight's h-derivative
+  (dB of the trapezoid's (E, A, B), −dw for backward Euler);
+- the derivative state's transposed fixed point: the SAME iteration as
+  the first's (reference systems, lateral weight W(x), the SLE adjoint
+  with no measurement duals), with its source dde + dW(x) e, where
+  dW = Σ_k μ_k(r) dβ_k(x) dh_k(x) is the derivative of the step's
+  lateral weight Σ_k μ_k (β_k(x) − β^ref_k(r)) and e the first dual
+  strain — the only term with no 1D counterpart in form (in 1D it is the
+  effective system's derivative acting on the first sweep's solution,
+  Σ_k B_h dh μ_k S y; here the reference is held and the lateral weight
+  carries all of the itau dependence, so the derivative lands pointwise);
+- the dual of the decayed memory, dm̃†_k = dm†_k + μ_k e', with e' the
+  derivative dual strain; the itau pairing's derivative, pointwise in the
+  energy contraction: ⟨dm̃†, dE m + dA d⁰ + dB d¹⟩ + ⟨m̃†, dE vm + dA vd⁰
+  + dB vd¹⟩ + dh ⟨m̃†, d²E m + d²A d⁰ + d²B d¹⟩ with (vm, vd⁰, vd¹) the
+  tangent run's states; and the recursion dm† = E dm̃† + dE dh m̃†,
+  dd† = Σ_k (A dm̃†_k + dA dh m̃†_k);
+- the start: the transposed instantaneous solve for both dual states.
+
+Returns `KernelDerivatives3D` as the continuous sweep does: the thickness
+and initial-sea-level views of the derivative load duals (no lumps, as in
+1D), the itau kernel's derivative with its spherical reduction, and the
+log-viscosity kernel's derivative −(δitau K + itau dK). Cost: two
+transposed fixed points per node instead of one. Single-process; the
+material kernels are refused alongside (their derivative is the deferred
+item).
+
+GATES (`TestSecondOrderAdjoint3D`, lmax 8, prem8):
+`DiscreteZeroLateralMatchesThe1DDiscreteSweep` — with δ = 0 at the GLL
+points the kernels and derivatives equal the 1D discrete second-order
+sweep's at 1e-7 (thickness views, spherical reductions of the itau
+kernel and its derivative). `DiscreteLateralHessianIsExact` — lateral
+structure on (δ of amplitude 0.6, η = 1e22, 9 nodes over 10 kyr, a
+sea-level measurement at the end): the carried kernels equal the
+first-order discrete sweep's bitwise; ⟨H u, w⟩ against ⟨H w, u⟩ agree at
+1.2e-13 (gate 1e-8); against ⟨g, F''[u, w]⟩ from the discrete 3D
+second-order tangent-linear run (the uv term of the log parameterisation
+accounted for) at 1.5e-13 (gate 1e-8); and central differences of the
+discrete first-order kernels along u (δ and the thickness moved
+together, w's itau direction taken at the moved operator) paired with w
+converge at second order (ratio 3.99994 over eps 0.02 → 0.01), Richardson
+landing at 7.6e-11 (gate 1e-6). The continuous sweep's gates (§11) are
+unchanged; the two are the same problem's commute pair, as in 1D.
+
+## 15. The material in the second-order runs (built 4 November 2026)
+
+The directions u, v of the second-order machinery (§8–§12, §14) gain a
+part in the moduli — `MaterialDirection` (1D, nodal) / `MaterialDirection3D`
+(3D, grid values): δκ, δμ with the branch moduli as fixed fractions and
+the relaxation times held, the density refused — so that the Hessian's
+action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
+materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
+`KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
+spherical reductions). New design, no pyslfp counterpart. Everything
+needs the memory points at the GLL nodes and no rotational feedback (the
+material tangent's conditions); the 3D forms are single-process.
+
+**The second-order tangent run** (`TangentLinearSolver::RunSecondOrder`,
+3D alike). The step map is affine in the moduli, so the second variation
+is the bilinear pairing of each direction's material forces with the
+other's tangent trajectory: for the ordered pairs (a, b) = (u, v), (v, u)
+with a material in a, the forces −dK_eff[δm_a] x'_b + Σ_k f_k δμ_a
+⟨m̃'_{k,b} + drive_b⟩ enter each step through `AddForce` (1D) /
+`OpenStep::AddForce` (3D), where x'_b is b's FULL tangent solution at the
+node — recovered from b's recorded snapshot by one unrelaxed solve under
+its loads and memory, plus b's own unrelaxed material force's response
+−K_U⁻¹(dK_U[δm_b] x_n − MemVar(δμ_b, m⁺_n)) on the base when b has one
+(the unrelaxed and effective forms of the material force are equal, the
+end solution satisfying unrelaxed equilibrium with its new memory) — and
+m̃'_b + drive_b is b's decayed tangent memory with b's own itau drive, read
+off a step opened on b's tangent state (`mem_` / `memory_` after
+`AddMemory`): the drive's dB d¹ part is the mixed moduli–relaxation-time
+term ∂²K_eff/∂μ∂h x_n in disguise. The start response is a's unrelaxed
+variation on b's start solution, summed over the pairs. In 3D the shear
+weight is δμ_a (1 − Σ_k f_k β_k(x)) with the BASE step's lateral weights
+and the strain is the recorded tangent strain; `ForwardCursor3D` now
+serves the node before its current one, so the itau and material drives
+of one step may ask for (node − 1, node) in either order (a latent fault
+of the first-order 3D run with both directions).
+
+**The discrete sweeps** (1D `DiscreteSecondOrder`, 3D `DiscreteSweep`).
+By ⟨H v, u⟩ = ⟨λ, forcing''(u, v)⟩: the parts of forcing'' linear in u's
+tangent trajectory transpose into SOURCES of the derivative dual state,
+the rest pair with the first duals directly. Along a material v: the
+dual of the full tangent solution receives −dK_eff[δm_v] y_n (the
+derivative of the effective systems on the first sweep's solution; in 3D
+the Born force on the first dual strain with the step's lateral weights,
+plus the bulk term), added BEFORE the unit-response contraction so that it
+reaches the sea level adjoint — no table derivative is needed, for the
+same reason the forward tangent needs none; the derivative dual of the
+decayed memory receives f_k δμ_v S y_n (the memory force's variation on
+the first dual strain), which then flows through the kernel pairing's
+B-weight terms (written as the decayed-memory duals against the end
+strains) and the E/A recursion; the start likewise with the unrelaxed
+systems. The material kernels' derivatives are the pairings of the
+derivative duals with the forward trajectory plus the first duals with
+v's tangent trajectory — its full solution (recovered as above) and its
+decayed memory with v's full discrete drive (whose dB d¹ part is the
+effective factor's derivative along v's itau) — and the start terms
+alike. Exact: the Hessian symmetric and equal to the second-order run to
+the solvers' tolerance.
+
+**The continuous sweeps** (1D `ContinuousSecondOrder`, 3D `Sweep`). The
+second-order adjoint equations are the derivative of the continuous
+adjoint equations, which have the forward form, so along a material v the
+derivative state is driven by v's material forces on the ADJOINT
+trajectory — the tangent's drive with the adjoint states as the base: on
+each reversed step's end solution and decayed memory (`AddForce` on the
+derivative state's step, the 3D shear weight with the step's own lateral
+weights), on the equilibrium solutions at the observations (an extra
+response channel of the closure), and on the instantaneous jump
+solutions, whose fingerprint moves with the unrelaxed table — carried as
+the response channel of v's unrelaxed variation on the jump solution (the
+forward start's pattern), its sea level the derivative LUMP of the
+derivative duals (a material v is the one direction whose derivative
+duals carry lumps). Three further pieces, each found by a gate: the
+itau pairing's branch weight μ_k moves with δμ (the term δμ_v/μ_U times
+the pairing); the derivative state's strain after a jump must carry v's
+material response (what `StartStep` would regenerate lacks it; the
+trapezoid's α d⁰ reads it — without it the convergence to the discrete
+derivatives drops to first order); and the material kernels' derivatives
+pair the derivative displacement with the forward trajectory and the
+adjoint displacement with v's tangent solution and END memory (no drive:
+the continuous pairing is with the full forward memory). At the commute
+level, falling at the scheme's order under refinement.
+
+GATES. 1D: `TangentLinear.SecondOrderRunInTheMaterial` — u, v in the
+loads, itau and the moduli (1 % of the moduli): the second-order run
+against central differences of the first-order run on the shifted
+material (the rheology rebuilt at the same fractions, the inverse times
+and loads moved), second order with Richardson at 1e-6, both schemes,
+symmetric, the moduli–loads block non-zero;
+`SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric` — the discrete
+sweep with the material kernels on: carried kernels at 1e-12,
+⟨H u, w⟩ = ⟨H w, u⟩ = ⟨g, F''[u, w]⟩ at 1e-9, central differences of the
+full gradient along w (material shifted, itau and thickness moved) paired
+with u at second order, Richardson at 1e-6, both schemes;
+`SecondOrderAdjoint.ContinuousConvergesToDiscrete` now carries the
+material blocks: ice, viscosity and material gaps and the mismatch with
+the continuous second-order run all fall by > 3 from 17 to 33 nodes
+(along a material-only v the gaps are 0.06 %, 0.23 %, 0.04 % at 17 nodes,
+ratio 4 over 17 → 33 → 65). 3D:
+`TangentLinear3D.SecondOrderRunInTheMaterial` (loads, lateral log
+viscosity, angle-uniform moduli; lateral viscosity on; second order,
+Richardson 1e-6, symmetric);
+`SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactAndSymmetric`
+(lateral directions in everything: carried kernels at 1e-10, symmetry and
+the adjoint identity with the discrete second-order run at 1e-8);
+`DiscreteZeroLateralMatchesThe1DDiscreteSweep` and
+`ZeroLateralMatchesThe1DSweep` now with an angle-uniform material v and
+the material kernels (their spherical reductions and derivatives against
+the 1D at 1e-7 / 1e-6); `ContinuousMaterialHessianConverges` (lateral
+directions, the continuous blocks against the discrete and the mismatch
+with the continuous run below 10 % at 9 nodes and smaller at 17).
+
+Not built: a density direction in the time-stepped problem (next), the
+material in the distributed sweeps.
 

@@ -42,6 +42,7 @@
 
 #include <complex>
 #include <functional>
+#include <memory>
 #include <span>
 #include <vector>
 
@@ -51,22 +52,8 @@
 namespace sl3dpp {
 
 /// A direction in the 3D evolution's inputs. Empty members are absent;
-/// `itau` and `logViscosity` may both be given (they add).
-/// A perturbation of the moduli over the coupling's grid values
-/// (material units): delta kappa(x) and delta mu(x) at the memory nodes,
-/// which is where the 3D operator's lateral structure lives (an elastic
-/// region to be perturbed laterally takes a branch of negligible
-/// inverse relaxation time, so that it carries memory nodes). The branch
-/// moduli follow as fixed fractions of the unrelaxed modulus and the
-/// relaxation times are held; compose with a log-viscosity direction for
-/// a viscosity held instead. Either field may be empty.
-struct MaterialDirection3D {
-  std::vector<double> kappa;
-  std::vector<double> mu;
-
-  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
-};
-
+/// `itau` and `logViscosity` may both be given (they add). The material
+/// direction is MaterialDirection3D (Adjoint3D.hpp).
 struct TangentPerturbation3D {
   std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
   std::vector<std::vector<double>> iceThickness;  ///< per node
@@ -88,14 +75,17 @@ struct TangentPerturbation3D {
 };
 
 /// Two directions for a second-order run: the itau perturbations along
-/// u and v over the grid values, and the second variation itau_uv for a
+/// u and v over the grid values, the second variation itau_uv for a
 /// parameterisation that is not linear in itau (itau(x) delta_u delta_v
-/// for the log viscosity, SecondVariationOfLogViscosity); empty for a
-/// linear one.
+/// for the log viscosity, SecondVariationOfLogViscosity; empty for a
+/// linear one), and the perturbations of the moduli along u and v
+/// (TangentPerturbation3D::material).
 struct SecondOrderDirection3D {
   std::vector<std::vector<double>> itauU;
   std::vector<std::vector<double>> itauV;
   std::vector<std::vector<double>> itauUV;
+  MaterialDirection3D materialU;
+  MaterialDirection3D materialV;
 };
 
 class TangentLinearSolver3D {
@@ -138,8 +128,12 @@ class TangentLinearSolver3D {
   /// and the drive the first-order drive taken with v's trajectory and u's
   /// itau perturbation, with u's trajectory and v's, with the forward
   /// trajectory and itau_uv, and, by the discrete method, the weights'
-  /// second derivatives with the forward trajectory and both. Symmetric
-  /// in u and v; the 3D form of TangentLinearSolver::RunSecondOrder.
+  /// second derivatives with the forward trajectory and both; in the
+  /// moduli, the material forces of u's direction on v's tangent
+  /// trajectory (its full solution and its decayed memory with v's itau
+  /// drive) and of v's on u's, the start's alike (docs/dev/adjoints.md
+  /// §15). Symmetric in u and v; the 3D form of
+  /// TangentLinearSolver::RunSecondOrder.
   [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunSecondOrder(
       std::span<const double> times,
       std::span<const SeaLevelEvolution3D::Snapshot> tangentU,
@@ -172,14 +166,25 @@ class TangentLinearSolver3D {
   using Drive = std::function<std::vector<GridCoupling::TensorField>(
       std::size_t node, double dt)>;
 
-  /// The material drive (TangentLinear3D.cpp): the three forces of a
-  /// material direction, from the forward cursor.
+  /// The material forcing of a march (TangentLinear3D.cpp): a start
+  /// response and a force per step, from a direction (MaterialDrive3D:
+  /// the three forces of a material direction, from the forward cursor)
+  /// or from a pair of directions and tangent runs (MaterialSecondDrive3D).
+  struct MaterialForcing3D;
   struct MaterialDrive3D;
+  struct MaterialSecondDrive3D;
+  class ForwardCursor3D;
   [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
-      MaterialDrive3D* material) const;
+      const MaterialForcing3D* material) const;
+  /// A material drive after the checks (the memory nodes at the GLL
+  /// points, no rotational feedback, not distributed, the fields on the
+  /// grid values).
+  [[nodiscard]] std::shared_ptr<MaterialDrive3D> MakeMaterialDrive3D(
+      const MaterialDirection3D& direction,
+      const ForwardTrajectory3D* trajectory, ForwardCursor3D* cursor) const;
 
   [[nodiscard]] static std::vector<GridCoupling::TensorField> SecondWeightDrive(
       const Viscoelastic3D& op, Scheme scheme, double dt,

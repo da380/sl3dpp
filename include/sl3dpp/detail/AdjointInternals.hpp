@@ -13,12 +13,15 @@
 #include <format>
 #include <functional>
 #include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
+#include "sl3dpp/Material.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp::detail {
 
@@ -146,3 +149,241 @@ class TrajectoryCursor {
 };
 
 }  // namespace sl3dpp::detail
+
+namespace sl3dpp {
+
+/**
+ * @brief The material pieces of the 1D second-order sweeps
+ * (AdjointSecondOrder.cpp; docs/dev/adjoints.md §15): a direction v in
+ * the moduli (kappa, mu; may be empty), the branch fractions
+ * f_k = mu_k / mu_U, v's variation of the unrelaxed and of each dt's
+ * effective material (delta mu scaled by 1 - sum_k f_k (1 - w_k), the
+ * material tangent's), v's forces on a full solution and a decayed
+ * memory, and the recovery of v's full tangent solution at a node from
+ * its recorded snapshot.
+ */
+struct AdjointSolver::MaterialTools {
+  using Degree = ViscoelasticOperator::Degree;
+  using Fields = std::map<int, std::vector<double>>;
+
+  const SeaLevelEvolution* ev = nullptr;
+  const ViscoelasticOperator* op = nullptr;
+  MaterialDirection direction;
+  std::vector<std::vector<double>> fractions;
+  /// delta mu_v / mu_U at the nodes (zero where mu_U vanishes); empty
+  /// without a mu direction.
+  std::vector<double> muRatio;
+  std::optional<MaterialVariation> unrelaxed;
+  std::map<double, MaterialVariation> effective;
+
+  MaterialTools(const SeaLevelEvolution& evolution, const MaterialDirection& d)
+      : ev(&evolution), op(&*evolution.op_), direction(d) {
+    const auto& rheology = op->GetRheology();
+    const auto muU = rheology.MuUnrelaxed();
+    for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+      const auto& branch = rheology.BranchAt(k);
+      auto f = std::vector<double>(muU.size(), 0.0);
+      for (auto i = std::size_t{0}; i < f.size(); ++i) {
+        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
+      }
+      fractions.push_back(std::move(f));
+    }
+    if (HasDirection()) {
+      unrelaxed = op->BaseMaterial().Variation(direction);
+      if (!direction.mu.empty()) {
+        muRatio.assign(muU.size(), 0.0);
+        for (auto i = std::size_t{0}; i < muU.size(); ++i) {
+          muRatio[i] = muU[i] > 0.0 ? direction.mu[i] / muU[i] : 0.0;
+        }
+      }
+    }
+  }
+
+  [[nodiscard]] bool HasDirection() const {
+    return !direction.kappa.empty() || !direction.mu.empty();
+  }
+  [[nodiscard]] std::size_t NodeCount() const { return fractions[0].size(); }
+
+  /// v's variation of the effective material of a dt.
+  const MaterialVariation& EffectiveVariation(double dt) {
+    auto found = effective.find(dt);
+    if (found != effective.end()) return found->second;
+    const auto scheme = ev->options_.scheme;
+    const bool implicit = scheme == Scheme::BackwardEuler;
+    const auto& weights = op->SchemeWeightsOf(scheme, dt);
+    MaterialDirection scaled;
+    scaled.kappa = direction.kappa;
+    if (!direction.mu.empty()) {
+      scaled.mu = direction.mu;
+      for (auto i = std::size_t{0}; i < scaled.mu.size(); ++i) {
+        auto factor = 1.0;
+        for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
+          const auto w = implicit ? weights[k].e[i] : 1.0 - weights[k].beta[i];
+          factor -= fractions[k][i] * (1.0 - w);
+        }
+        scaled.mu[i] *= factor;
+      }
+    }
+    return effective
+        .emplace(dt, op->EffectiveMaterial(scheme, dt).Variation(scaled))
+        .first->second;
+  }
+
+  /// The memory force of a memory state (K, 3, ne, np, ncols) with the
+  /// branch moduli's variation delta mu_k = f_k delta mu_v, per degree.
+  [[nodiscard]] std::vector<double> MemoryVariationForce(
+      const Degree& deg, int ncols, const std::vector<double>& mem) const {
+    const auto block = deg.NodalSize(ncols);
+    const auto wc = detail::ScalarWeights(deg.k2);
+    auto weighted = std::vector<double>(3 * block, 0.0);
+    for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto dmu = fractions[k][full] * direction.mu[full];
+            if (dmu == 0.0) continue;
+            const auto factor =
+                wc[s] * dmu * deg.Wq[static_cast<std::size_t>(e) * deg.np + q];
+            const auto node = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto src = (k * 3 + s) * block + node;
+            for (auto c = 0; c < ncols; ++c) {
+              weighted[s * block + node + c] += factor * mem[src + c];
+            }
+          }
+        }
+      }
+    }
+    return deg.DualFromScalars(weighted, ncols);
+  }
+
+  /// v's force on a full solution and a decayed memory under the dt
+  /// flavour: -(dK_eff) x plus the memory force's variation.
+  [[nodiscard]] Fields Force(double dt, const Fields& full, const Fields& mem) {
+    const auto& variation = EffectiveVariation(dt);
+    auto& flavour = op->FlavourOf(ev->options_.scheme, dt);
+    auto out = Fields{};
+    for (const auto& [l, x] : full) {
+      const auto& deg = op->Deg(l);
+      const auto ncols = static_cast<int>(x.size() / deg.ndof);
+      auto force = op->EffectiveSystem(flavour, l).ApplyVariation(variation, x, ncols);
+      for (auto& v : force) v = -v;
+      if (!direction.mu.empty()) {
+        const auto mf = MemoryVariationForce(deg, ncols, mem.at(l));
+        for (auto i = std::size_t{0}; i < force.size(); ++i) force[i] += mf[i];
+      }
+      out.emplace(l, std::move(force));
+    }
+    return out;
+  }
+
+  /// The same on the unrelaxed systems (every weight one): -(dK_U) x
+  /// plus, with a memory state, its force with the branch moduli's
+  /// variation — the form a step's END solution satisfies with its new
+  /// memory.
+  [[nodiscard]] Fields UnrelaxedForce(const Fields& full, const Fields* mem) const {
+    auto out = Fields{};
+    for (const auto& [l, x] : full) {
+      const auto& deg = op->Deg(l);
+      const auto ncols = static_cast<int>(x.size() / deg.ndof);
+      auto force = deg.system.ApplyVariation(*unrelaxed, x, ncols);
+      for (auto& v : force) v = -v;
+      if (mem != nullptr && !direction.mu.empty()) {
+        const auto mf = MemoryVariationForce(deg, ncols, mem->at(l));
+        for (auto i = std::size_t{0}; i < force.size(); ++i) force[i] += mf[i];
+      }
+      out.emplace(l, std::move(force));
+    }
+    return out;
+  }
+
+  /// The unrelaxed systems' response to a force per degree.
+  [[nodiscard]] Fields UnrelaxedResponse(const Fields& force) const {
+    auto out = Fields{};
+    for (const auto& [l, f] : force) {
+      const auto& deg = op->Deg(l);
+      const auto ncols = static_cast<int>(f.size() / deg.ndof);
+      out.emplace(l, deg.system.Solve(f, ncols));
+    }
+    return out;
+  }
+
+  /// Adds the unrelaxed response to v's unrelaxed force on (x, mem) to
+  /// `to` — what v's own material part adds to a tangent solution.
+  void AddUnrelaxedResponse(Fields& to, const Fields& baseFull,
+                            const Fields* baseMem) const {
+    if (!HasDirection()) return;
+    const auto extra = UnrelaxedResponse(UnrelaxedForce(baseFull, baseMem));
+    for (auto& [l, xl] : to) {
+      const auto& add = extra.at(l);
+      for (auto i = std::size_t{0}; i < xl.size(); ++i) xl[i] += add[i];
+    }
+  }
+
+  /// v's full tangent solution at a node from its recorded snapshot: the
+  /// unrelaxed solve under the snapshot's loads and memory, plus v's own
+  /// unrelaxed material force's response on the base solution and memory
+  /// there (empty for the start).
+  [[nodiscard]] Fields TangentSolution(const SeaLevelEvolution::Snapshot& snap,
+                                       const Fields& baseFull,
+                                       const Fields* baseMem) const {
+    auto x = op->SolveElastic(*snap.internalState,
+                              ev->Columns(snap.loadCoefficients, ev->toMatDensity_),
+                              ev->Columns(snap.tideCoefficients, ev->toMatPotential_));
+    AddUnrelaxedResponse(x, baseFull, baseMem);
+    return x;
+  }
+
+  /// The material pairing of a dual solution y (with its strain scalars
+  /// sy) and a base solution x at a degree's points: -(dK/d kappa,
+  /// dK/d mu) of the degree form (DegreeOperator::MaterialGradient), the
+  /// shear scaled by `factor` at the nodes, and, with a memory state, the
+  /// memory force's variation sum_k f_k <sy, memory_k> on the memory
+  /// window (the first-order sweeps' materialTerms).
+  [[nodiscard]] static std::pair<std::vector<double>, std::vector<double>>
+  MaterialPairing(const Degree& deg, int ncols, std::span<const double> y,
+                  std::span<const double> sy, std::span<const double> x,
+                  std::span<const double> factor,
+                  const std::vector<double>* memory,
+                  const std::vector<std::vector<double>>& fractions) {
+    auto [kappa, mu] = deg.system.MaterialGradient(y, x, ncols);
+    for (auto i = std::size_t{0}; i < kappa.size(); ++i) {
+      kappa[i] = -kappa[i];
+      mu[i] = -factor[i] * mu[i];
+    }
+    if (memory != nullptr) {
+      const auto block = deg.NodalSize(ncols);
+      const auto wc = detail::ScalarWeights(deg.k2);
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto p = static_cast<std::size_t>(e) * deg.np + q;
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          const auto node = p * ncols;
+          auto mem = 0.0;
+          for (auto c = 0; c < ncols; ++c) {
+            for (auto s = 0; s < 3; ++s) {
+              const auto sn = s * block + node + c;
+              for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
+                mem += fractions[k][full] * wc[s] * sy[sn] *
+                       (*memory)[(k * 3 + s) * block + node + c];
+              }
+            }
+          }
+          mu[full] += deg.Wq[p] * mem;
+        }
+      }
+    }
+    return std::pair(std::move(kappa), std::move(mu));
+  }
+};
+
+/// Adds a pair of nodal arrays to a pair of kernels.
+inline void AddPairs(std::vector<double>& kappaTo, std::vector<double>& muTo,
+                     const std::pair<std::vector<double>, std::vector<double>>& p) {
+  for (auto i = std::size_t{0}; i < kappaTo.size(); ++i) {
+    kappaTo[i] += p.first[i];
+    muTo[i] += p.second[i];
+  }
+}
+
+}  // namespace sl3dpp

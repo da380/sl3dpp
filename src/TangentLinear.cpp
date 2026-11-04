@@ -260,7 +260,17 @@ TangentLinearSolver::TangentLinearSolver(const SeaLevelEvolution& evolution,
                                          Options options)
     : evolution_(&evolution), options_(std::move(options)) {}
 
-struct TangentLinearSolver::MaterialDrive {
+/// What March takes for the material: a start response and a force per
+/// step, from a direction (MaterialDrive) or from a pair of directions
+/// and tangent runs (MaterialSecondDrive).
+struct TangentLinearSolver::MaterialForcing {
+  virtual ~MaterialForcing() = default;
+  [[nodiscard]] virtual std::map<int, std::vector<double>> StartResponse() = 0;
+  [[nodiscard]] virtual std::map<int, std::vector<double>> Force(
+      std::size_t node, double dt) = 0;
+};
+
+struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing {
   const SeaLevelEvolution* ev = nullptr;
   MaterialDirection direction;  // kappa and mu, nodal
   const ForwardTrajectory* trajectory = nullptr;
@@ -303,45 +313,46 @@ struct TangentLinearSolver::MaterialDrive {
         .first->second;
   }
 
-  /// The start's response: -K_U^-1 (dK_U) x_0 per degree, the unrelaxed
-  /// systems about the base start solution under the recorded loads. Its
-  /// surface values close the start's sea level solve and its strain
-  /// seeds the first step (the trapezoid's alpha d_0).
-  std::map<int, std::vector<double>> StartResponse() {
-    const auto& op = *ev->op_;
-    const auto x0 = op.SolveElastic(
-        cursor->State(0), ev->Columns(trajectory->loads[0], ev->toMatDensity_),
-        ev->Columns(trajectory->tides[0], ev->toMatPotential_));
-    auto out = std::map<int, std::vector<double>>{};
-    for (const auto& [l, x] : x0) {
-      const auto& deg = op.Deg(l);
-      const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = deg.system.ApplyVariation(unrelaxed, x, ncols);
-      for (auto& v : force) v = -v;
-      out.emplace(l, deg.system.Solve(force, ncols));
+  /// The memory force of a memory state with the branch moduli's
+  /// variation, delta mu_k = f_k delta mu at the points, per degree.
+  std::vector<double> MemoryVariationForce(
+      const ViscoelasticOperator::Degree& deg, int ncols,
+      const std::vector<double>& mem) const {
+    const auto K = fractions.size();
+    const auto block = deg.NodalSize(ncols);
+    const auto wc = detail::ScalarWeights(deg.k2);
+    auto weighted = std::vector<double>(3 * block, 0.0);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto s = 0; s < 3; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full_ = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto dmu = fractions[k][full_] * direction.mu[full_];
+            if (dmu == 0.0) continue;
+            const auto factor =
+                wc[s] * dmu * deg.Wq[static_cast<std::size_t>(e) * deg.np + q];
+            const auto node_ = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto src = (k * 3 + s) * block + node_;
+            for (auto c = 0; c < ncols; ++c) {
+              weighted[s * block + node_ + c] += factor * mem[src + c];
+            }
+          }
+        }
+      }
     }
-    return out;
+    return deg.DualFromScalars(weighted, ncols);
   }
 
-  /// The force of the step from node - 1 to node: -(dK_eff) x_full plus
-  /// the base decayed memory's force with the branch moduli's variation.
-  /// Acting on the FULL base solution, it carries the material derivative
-  /// of the load response too, so the sea level closure needs nothing
-  /// beyond the memory surface it already reads.
-  std::map<int, std::vector<double>> Force(std::size_t node, double dt) {
+  /// The direction's force on a full solution and a decayed memory under
+  /// the dt flavour: -(dK_eff) x plus the memory force of the memory with
+  /// the branch moduli's variation.
+  std::map<int, std::vector<double>> ForceOn(
+      double dt, const std::map<int, std::vector<double>>& full,
+      const std::map<int, std::vector<double>>& mem) {
     const auto& op = *ev->op_;
     const auto scheme = ev->options_.scheme;
     const auto& variation = FlavourOf(dt);
-    const auto& prev = cursor->State(node - 1);
-    auto step = op.StartStep(prev, dt, scheme,
-                             ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
-                             ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
-    auto [next, full] = step.Finish(
-        ev->Columns(trajectory->loads[node], ev->toMatDensity_),
-        ev->Columns(trajectory->tides[node], ev->toMatPotential_));
     auto& opFlavour = op.FlavourOf(scheme, dt);
-    const auto K = op.GetRheology().BranchCount();
-    const auto wc3 = [](double k2) { return detail::ScalarWeights(k2); };
     auto out = std::map<int, std::vector<double>>{};
     for (const auto& [l, x] : full) {
       const auto& deg = op.Deg(l);
@@ -349,30 +360,8 @@ struct TangentLinearSolver::MaterialDrive {
       const auto& system = op.EffectiveSystem(opFlavour, l);
       auto force = system.ApplyVariation(variation, x, ncols);
       for (auto& v : force) v = -v;
-      // The memory force with delta mu_k = f_k delta mu at the points.
       if (!direction.mu.empty()) {
-        const auto block = deg.NodalSize(ncols);
-        const auto wc = wc3(deg.k2);
-        auto weighted = std::vector<double>(3 * block, 0.0);
-        const auto& mem = step.mem_.at(l);
-        for (auto k = std::size_t{0}; k < K; ++k) {
-          for (auto s = 0; s < 3; ++s) {
-            for (auto e = 0; e < deg.ne; ++e) {
-              for (auto q = 0; q < deg.np; ++q) {
-                const auto full_ = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
-                const auto dmu = fractions[k][full_] * direction.mu[full_];
-                if (dmu == 0.0) continue;
-                const auto factor = wc[s] * dmu * deg.Wq[static_cast<std::size_t>(e) * deg.np + q];
-                const auto node_ = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-                const auto src = (k * 3 + s) * block + node_;
-                for (auto c = 0; c < ncols; ++c) {
-                  weighted[s * block + node_ + c] += factor * mem[src + c];
-                }
-              }
-            }
-          }
-        }
-        const auto memoryForce = deg.DualFromScalars(weighted, ncols);
+        const auto memoryForce = MemoryVariationForce(deg, ncols, mem.at(l));
         for (auto i = std::size_t{0}; i < force.size(); ++i) {
           force[i] += memoryForce[i];
         }
@@ -382,6 +371,177 @@ struct TangentLinearSolver::MaterialDrive {
     return out;
   }
 
+  /// The same on the unrelaxed systems (every weight one): -(dK_U) x plus,
+  /// with a memory state, its force with the branch moduli's variation —
+  /// the form a step's END solution satisfies with its new memory.
+  std::map<int, std::vector<double>> UnrelaxedForceOn(
+      const std::map<int, std::vector<double>>& full,
+      const std::map<int, std::vector<double>>* mem) {
+    const auto& op = *ev->op_;
+    auto out = std::map<int, std::vector<double>>{};
+    for (const auto& [l, x] : full) {
+      const auto& deg = op.Deg(l);
+      const auto ncols = static_cast<int>(x.size() / deg.ndof);
+      auto force = deg.system.ApplyVariation(unrelaxed, x, ncols);
+      for (auto& v : force) v = -v;
+      if (mem != nullptr && !direction.mu.empty()) {
+        const auto memoryForce = MemoryVariationForce(deg, ncols, mem->at(l));
+        for (auto i = std::size_t{0}; i < force.size(); ++i) {
+          force[i] += memoryForce[i];
+        }
+      }
+      out.emplace(l, std::move(force));
+    }
+    return out;
+  }
+
+  /// The unrelaxed systems' response to a force per degree.
+  std::map<int, std::vector<double>> UnrelaxedResponse(
+      const std::map<int, std::vector<double>>& force) const {
+    const auto& op = *ev->op_;
+    auto out = std::map<int, std::vector<double>>{};
+    for (const auto& [l, f] : force) {
+      const auto& deg = op.Deg(l);
+      const auto ncols = static_cast<int>(f.size() / deg.ndof);
+      out.emplace(l, deg.system.Solve(f, ncols));
+    }
+    return out;
+  }
+
+  /// The start's response: -K_U^-1 (dK_U) x_0 per degree, the unrelaxed
+  /// systems about the base start solution under the recorded loads. Its
+  /// surface values close the start's sea level solve and its strain
+  /// seeds the first step (the trapezoid's alpha d_0).
+  std::map<int, std::vector<double>> StartResponse() override {
+    const auto& op = *ev->op_;
+    const auto x0 = op.SolveElastic(
+        cursor->State(0), ev->Columns(trajectory->loads[0], ev->toMatDensity_),
+        ev->Columns(trajectory->tides[0], ev->toMatPotential_));
+    return UnrelaxedResponse(UnrelaxedForceOn(x0, nullptr));
+  }
+
+  /// The force of the step from node - 1 to node: -(dK_eff) x_full plus
+  /// the base decayed memory's force with the branch moduli's variation.
+  /// Acting on the FULL base solution, it carries the material derivative
+  /// of the load response too, so the sea level closure needs nothing
+  /// beyond the memory surface it already reads.
+  std::map<int, std::vector<double>> Force(std::size_t node,
+                                           double dt) override {
+    const auto& op = *ev->op_;
+    const auto scheme = ev->options_.scheme;
+    const auto& prev = cursor->State(node - 1);
+    auto step = op.StartStep(prev, dt, scheme,
+                             ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
+                             ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
+    auto [next, full] = step.Finish(
+        ev->Columns(trajectory->loads[node], ev->toMatDensity_),
+        ev->Columns(trajectory->tides[node], ev->toMatPotential_));
+    return ForceOn(dt, full, step.mem_);
+  }
+};
+
+/// The material part of a second-order run: for each ordered pair (a, b)
+/// of the two directions with a material part in a, the forces of a's
+/// direction on b's tangent trajectory — b's full tangent solution at the
+/// node (recovered by one unrelaxed solve under b's recorded loads and
+/// memory, plus b's own unrelaxed material force on the base solution
+/// when b has one) and b's decayed tangent memory with b's itau drive
+/// (the mixed moduli–relaxation-time term) — and at the start a's
+/// unrelaxed variation on b's start solution. Symmetric in u and v.
+struct TangentLinearSolver::MaterialSecondDrive
+    : TangentLinearSolver::MaterialForcing {
+  struct Part {
+    std::shared_ptr<MaterialDrive> a;
+    std::span<const SeaLevelEvolution::Snapshot> b;
+    std::shared_ptr<MaterialDrive> bMaterial;  // may be null
+    std::vector<std::vector<double>> bDitauPoints;  // empty: no itau in b
+  };
+  const SeaLevelEvolution* ev = nullptr;
+  AdjointMethod method = AdjointMethod::Continuous;
+  const ForwardTrajectory* trajectory = nullptr;
+  std::vector<Part> parts;
+  std::optional<ForwardCursor> cursor;
+
+  LoadCallable Loads(const std::vector<Complex>& c) const {
+    return ev->Columns(c, ev->toMatDensity_);
+  }
+  LoadCallable Tides(const std::vector<Complex>& c) const {
+    return ev->Columns(c, ev->toMatPotential_);
+  }
+
+  /// b's full tangent solution at a node: the unrelaxed solve under its
+  /// recorded loads and memory, plus its own material force's response
+  /// on the base solution there.
+  std::map<int, std::vector<double>> TangentSolution(
+      const Part& part, std::size_t node,
+      const std::map<int, std::vector<double>>& baseFull,
+      const std::map<int, std::vector<double>>* baseMemory) const {
+    const auto& op = *ev->op_;
+    const auto& snap = part.b[node];
+    auto x = op.SolveElastic(*snap.internalState, Loads(snap.loadCoefficients),
+                             Tides(snap.tideCoefficients));
+    if (part.bMaterial) {
+      const auto extra = part.bMaterial->UnrelaxedResponse(
+          part.bMaterial->UnrelaxedForceOn(baseFull, baseMemory));
+      for (auto& [l, xl] : x) {
+        const auto& add = extra.at(l);
+        for (auto i = std::size_t{0}; i < xl.size(); ++i) xl[i] += add[i];
+      }
+    }
+    return x;
+  }
+
+  std::map<int, std::vector<double>> StartResponse() override {
+    const auto& op = *ev->op_;
+    const auto& base0 = cursor->State(0);
+    const auto x0 = op.SolveElastic(base0, Loads(trajectory->loads[0]),
+                                    Tides(trajectory->tides[0]));
+    auto total = std::map<int, std::vector<double>>{};
+    for (const auto& part : parts) {
+      const auto xb = TangentSolution(part, 0, x0, nullptr);
+      Accumulate(total, part.a->UnrelaxedResponse(
+                            part.a->UnrelaxedForceOn(xb, nullptr)));
+    }
+    return total;
+  }
+
+  std::map<int, std::vector<double>> Force(std::size_t node,
+                                           double dt) override {
+    const auto& op = *ev->op_;
+    const auto scheme = ev->options_.scheme;
+    const ViscoelasticState basePrev = cursor->State(node - 1);
+    const auto& baseN = cursor->State(node);
+    const auto xN = op.SolveElastic(baseN, Loads(trajectory->loads[node]),
+                                    Tides(trajectory->tides[node]));
+    auto total = std::map<int, std::vector<double>>{};
+    for (const auto& part : parts) {
+      const auto xb = TangentSolution(part, node, xN, &baseN.m);
+      const auto& prev = part.b[node - 1];
+      auto step = op.StartStep(*prev.internalState, dt, scheme,
+                               Loads(prev.loadCoefficients),
+                               Tides(prev.tideCoefficients));
+      if (!part.bDitauPoints.empty()) {
+        step.AddMemory(FirstOrderDrive(op, method, scheme, dt, basePrev, baseN,
+                                       part.bDitauPoints));
+      }
+      Accumulate(total, part.a->ForceOn(dt, xb, step.mem_));
+    }
+    return total;
+  }
+
+  static void Accumulate(std::map<int, std::vector<double>>& total,
+                         std::map<int, std::vector<double>> term) {
+    for (auto& [l, value] : term) {
+      auto found = total.find(l);
+      if (found == total.end()) {
+        total.emplace(l, std::move(value));
+      } else {
+        for (auto i = std::size_t{0}; i < value.size(); ++i) {
+          found->second[i] += value[i];
+        }
+      }
+    }
+  }
 };
 
 std::shared_ptr<TangentLinearSolver::MaterialDrive>
@@ -552,10 +712,15 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   if (!direction.itauUV.empty()) {
     parts.push_back({{}, op.ItauPerturbationAtPoints(direction.itauUV)});
   }
-  auto tangents = std::vector<ForwardTrajectory>{};
   auto cursor = std::optional<ForwardCursor>{};
   Drive drive{};
-  if (!parts.empty()) {
+  const bool materialU =
+      !direction.materialU.kappa.empty() || !direction.materialU.mu.empty() ||
+      !direction.materialU.rho.empty();
+  const bool materialV =
+      !direction.materialV.kappa.empty() || !direction.materialV.mu.empty() ||
+      !direction.materialV.rho.empty();
+  auto requireRecorded = [&] {
     for (const auto* run : {&tangentU, &tangentV}) {
       if (run->size() != nodes) {
         throw std::invalid_argument(
@@ -570,6 +735,9 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
       }
     }
     CheckTrajectory(trajectory, nodes);
+  };
+  if (!parts.empty()) {
+    requireRecorded();
     cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
                    LoadColumnsOf(ev), TideColumnsOf(ev));
     auto uPoints = std::vector<std::vector<double>>{};
@@ -611,15 +779,45 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
       return total;
     };
   }
+  // The moduli: a's direction on b's tangent trajectory, for both orders.
+  std::shared_ptr<MaterialSecondDrive> material;
+  if (materialU || materialV) {
+    requireRecorded();
+    material = std::make_shared<MaterialSecondDrive>();
+    material->ev = &ev;
+    material->method = options_.method;
+    material->trajectory = trajectory;
+    material->cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
+                             LoadColumnsOf(ev), TideColumnsOf(ev));
+    const auto driveU =
+        materialU ? MakeMaterialDrive(direction.materialU, *trajectory, times)
+                  : nullptr;
+    const auto driveV =
+        materialV ? MakeMaterialDrive(direction.materialV, *trajectory, times)
+                  : nullptr;
+    auto pointsOf = [&](const std::vector<std::vector<double>>& itau) {
+      return itau.empty() ? std::vector<std::vector<double>>{}
+                          : op.ItauPerturbationAtPoints(itau);
+    };
+    if (materialU) {
+      material->parts.push_back(
+          {driveU, tangentV, driveV, pointsOf(direction.itauV)});
+    }
+    if (materialV) {
+      material->parts.push_back(
+          {driveV, tangentU, driveU, pointsOf(direction.itauU)});
+    }
+  }
   // No direct load under the sharp flotation rule.
   const Direct none = [](std::size_t) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, none, drive, nullptr);
+  return March(times, oceanFunctions, none, drive, material.get());
 }
 
 std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
-    const Direct& directAt, const Drive& drive, MaterialDrive* material) const {
+    const Direct& directAt, const Drive& drive,
+    MaterialForcing* material) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;

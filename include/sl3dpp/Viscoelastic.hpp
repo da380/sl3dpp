@@ -416,6 +416,7 @@ class ViscoelasticStep {
  private:
   friend class ViscoelasticOperator;
   friend class TangentLinearSolver;  // reads the decayed memory
+  friend class AdjointSolver;        // the second-order sweep reads it too
   ViscoelasticStep(const ViscoelasticOperator& op,
                    const ViscoelasticState& state, double dt, Scheme scheme,
                    const LoadCallable& load, const LoadCallable& tide);

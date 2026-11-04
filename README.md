@@ -14,8 +14,10 @@ more. It succeeds the Fortran codes sl3d and gia1d (both in
 [da380/sl3d](https://github.com/da380/sl3d)), written by Ophelia Crawford
 and David Al-Attar with contributions from Andrew Lloyd and Frank Syvret.
 
-Developed partially funded by the grant NE/V010433/1, NSFGEO-NERC: Adjoint tomography
-of mantle viscosity using deglacial sea level observations.
+Development partially funded by the grants:
+- NE/V010433/1, NSFGEO-NERC: Adjoint tomography
+of mantle viscosity using deglacial sea level observations;
+- NE/X013804/1: Next Generation Modelling of Glacial Isostatic Adjustment. 
 
 ## What it computes
 

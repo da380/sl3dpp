@@ -88,16 +88,20 @@ struct TangentPerturbation {
 };
 
 /// A pair of directions for a second-order run: the perturbations of the
-/// inverse relaxation times along u and v, and the second variation
+/// inverse relaxation times along u and v, the second variation
 /// itau_uv along both for a parameterisation that is not linear in them
 /// (itau delta_u chi delta_v chi for the log viscosity; empty for a
-/// linear one). Each as TangentPerturbation::itau. Under the sharp
-/// flotation rule the loads and the initial sea level enter no second
-/// derivative, so they are not taken here.
+/// linear one), each as TangentPerturbation::itau, and the perturbations
+/// of the moduli along u and v (TangentPerturbation::material; the
+/// density refused). Under the sharp flotation rule the loads and the
+/// initial sea level enter no second derivative, so they are not taken
+/// here: their part of u and v is in the recorded tangent runs.
 struct SecondOrderDirection {
   std::vector<std::vector<double>> itauU;
   std::vector<std::vector<double>> itauV;
   std::vector<std::vector<double>> itauUV;
+  MaterialDirection materialU;
+  MaterialDirection materialV;
 };
 
 /**
@@ -145,15 +149,19 @@ class TangentLinearSolver {
   /// trajectory and the recorded tangent-linear runs of u and v about it
   /// (`Run` with `record`). With the ocean functions held the map is
   /// affine in the loads and the initial sea level, so the second
-  /// derivative is non-zero only through the relaxation times: the
-  /// forward problem with no direct load, the shorelines prescribed, and
-  /// the drive of each branch the bilinear term of the first-order run
-  /// taken with v's trajectory and u's itau perturbation, with u's
-  /// trajectory and v's, with the forward trajectory and itau_uv, and, by
-  /// the discrete method, the second derivatives of the scheme weights
-  /// with the forward trajectory and both perturbations. Symmetric in u
-  /// and v. pyslfp's `second_order_tangent_linear_ice_history` under the
-  /// sharp flotation rule.
+  /// derivative is non-zero only through the relaxation times and the
+  /// moduli: the forward problem with no direct load, the shorelines
+  /// prescribed, and the drive of each branch the bilinear term of the
+  /// first-order run taken with v's trajectory and u's itau perturbation,
+  /// with u's trajectory and v's, with the forward trajectory and
+  /// itau_uv, and, by the discrete method, the second derivatives of the
+  /// scheme weights with the forward trajectory and both perturbations;
+  /// in the moduli, the material forces of u's direction on v's tangent
+  /// trajectory (its full solution and its decayed memory with v's itau
+  /// drive, which carries the mixed moduli–relaxation-time term) and of
+  /// v's on u's, the start's alike (docs/dev/adjoints.md §15). Symmetric
+  /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
+  /// the sharp flotation rule, extended to the moduli.
   [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunSecondOrder(
       std::span<const double> times,
       std::span<const SeaLevelEvolution::Snapshot> tangentU,
@@ -179,12 +187,16 @@ class TangentLinearSolver {
 
   /// The loop the runs share: the forward problem with the trajectory's
   /// ocean functions prescribed, the direct load given per node (empty
-  /// where nothing drives it) and a memory increment per step.
+  /// where nothing drives it), a memory increment per step and a material
+  /// forcing (a start response and a force per step).
+  struct MaterialForcing;
   struct MaterialDrive;
+  struct MaterialSecondDrive;
   [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
-      const Direct& directAt, const Drive& drive, MaterialDrive* material) const;
+      const Direct& directAt, const Drive& drive,
+      MaterialForcing* material) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two

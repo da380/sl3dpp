@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <memory>
 #include <random>
 #include <vector>
 
@@ -727,3 +728,146 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
   }
 }
 
+
+TEST(TangentLinear3D, SecondOrderRunInTheMaterial) {
+  // With directions u and v in the loads, the log viscosity (lateral) AND
+  // the moduli (angle-uniform, so that the radial material can be
+  // shifted), with lateral viscosity on, the second-order run is the
+  // derivative at the base point along u of the first-order run along v:
+  // central differences of the latter — the loads moved by eps loads_u,
+  // delta by eps p_u and the material by eps delta m_u — converge to it
+  // at second order and Richardson lands on it; and it is symmetric in u
+  // and v.
+  auto scene = Scene::Make(1e21);
+  std::mt19937 rng(13);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pV = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  auto loadsU = std::vector<std::vector<double>>{};
+  auto loadsV = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loadsU.push_back(scene.Smooth(rng, 20.0 * scene.Sigma()));
+    loadsV.push_back(scene.Smooth(rng, 20.0 * scene.Sigma()));
+  }
+  const auto g = scene.Smooth(rng, 1.0);
+  const auto dU = SmoothMaterialDirection(scene);
+  auto dV = SmoothMaterialDirection(scene);
+  {
+    const auto& mesh = scene.material.Mesh();
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto r = mesh.Radius(e, q);
+        dV.kappa[i] *= (1.0 - 0.5 * r) / 0.7;
+        dV.mu[i] *= (1.0 - 0.5 * r) / 0.7;
+      }
+    }
+  }
+  struct Moved {
+    std::unique_ptr<Viscoelastic3D> op;
+    std::unique_ptr<SeaLevelEvolution3D> evolution;
+    ForwardTrajectory3D trajectory;
+  };
+  auto moved = [&](double eps) {
+    const auto [shifted, rheology] = ShiftedRheology(scene, dU, eps);
+    Moved m;
+    m.op = std::make_unique<Viscoelastic3D>(
+        rheology, kLmax,
+        [&, eps](double r, double theta, double phi) {
+          return baseDelta(r, theta, phi) + eps * pU(theta, phi);
+        },
+        Viscoelastic3D::Options{.memory_points = MemoryPointSet::Gll});
+    m.evolution = std::make_unique<SeaLevelEvolution3D>(
+        *m.op, scene.solver, scene.state,
+        SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::None,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12,
+                                     .record_stride = 1});
+    m.trajectory = ForwardTrajectory3D::FromSnapshots(
+        m.evolution->Run(times, [&](double t) {
+          auto out = iceLoad(t);
+          for (auto n = std::size_t{0}; n < times.size(); ++n) {
+            if (std::abs(t - times[n]) > 1e-12 * times.back()) continue;
+            for (auto i = std::size_t{0}; i < out.size(); ++i) {
+              out[i] += eps * loadsU[n][i];
+            }
+          }
+          return out;
+        }));
+    return m;
+  };
+  auto directionV = [&](const Viscoelastic3D& op) {
+    TangentPerturbation3D v;
+    v.directLoad = loadsV;
+    v.logViscosity = OnCoupling(op.Coupling(), pV);
+    v.material.kappa = UniformOnCoupling(op.Coupling(), scene.material, dV.kappa);
+    v.material.mu = UniformOnCoupling(op.Coupling(), scene.material, dV.mu);
+    return v;
+  };
+  const auto base = moved(0.0);
+  const auto& coupling = base.op->Coupling();
+  TangentLinearSolver3D tangent(
+      *base.evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12,
+                        .coupled_rtol = 1e-12, .record = true});
+  TangentPerturbation3D u;
+  u.directLoad = loadsU;
+  u.logViscosity = OnCoupling(coupling, pU);
+  u.material.kappa = UniformOnCoupling(coupling, scene.material, dU.kappa);
+  u.material.mu = UniformOnCoupling(coupling, scene.material, dU.mu);
+  const auto v = directionV(*base.op);
+  const auto runU = tangent.Run(times, u, &base.trajectory);
+  const auto runV = tangent.Run(times, v, &base.trajectory);
+  const auto fieldU = OnCoupling(coupling, pU);
+  const auto fieldV = OnCoupling(coupling, pV);
+  SecondOrderDirection3D uv;
+  uv.itauU = TangentLinearSolver3D::ItauOfLogViscosity(*base.op, fieldU);
+  uv.itauV = TangentLinearSolver3D::ItauOfLogViscosity(*base.op, fieldV);
+  uv.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(*base.op, fieldU, fieldV);
+  uv.materialU = u.material;
+  uv.materialV = v.material;
+  const auto second = tangent.RunSecondOrder(times, runU, runV, uv, &base.trajectory);
+  const auto predicted = Objective(scene, g, second.back().seaLevelChange);
+
+  auto firstOrderAt = [&](double eps) {
+    const auto m = moved(eps);
+    TangentLinearSolver3D along(*m.evolution, {.method = AdjointMethod::Discrete,
+                                               .rtol = 1e-12,
+                                               .coupled_rtol = 1e-12});
+    return Objective(scene, g,
+                     along.Run(times, directionV(*m.op), &m.trajectory).back().seaLevelChange);
+  };
+  // wide steps (1%, 0.5% of the moduli), as the material tangent's gate
+  auto fd = std::map<double, double>{};
+  for (double eps : {0.1, 0.05}) {
+    fd[eps] = (firstOrderAt(eps) - firstOrderAt(-eps)) / (2.0 * eps);
+  }
+  const auto r1 = std::abs(fd[0.1] - predicted);
+  const auto r2 = std::abs(fd[0.05] - predicted);
+  EXPECT_GT(r1 / r2, 3.0) << fd[0.1] << " " << fd[0.05] << " " << predicted;
+  EXPECT_LT(r1 / r2, 5.0);
+  const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+  EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted));
+
+  SecondOrderDirection3D vu;
+  vu.itauU = uv.itauV;
+  vu.itauV = uv.itauU;
+  vu.itauUV = uv.itauUV;
+  vu.materialU = v.material;
+  vu.materialV = u.material;
+  const auto swapped = tangent.RunSecondOrder(times, runV, runU, vu, &base.trajectory);
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    EXPECT_LT(MaxDiff(swapped[n].seaLevelChange, second[n].seaLevelChange),
+              1e-9 * MaxAbs(second[n].seaLevelChange) + 1e-300)
+        << "node " << n;
+  }
+}

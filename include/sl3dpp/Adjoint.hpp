@@ -163,6 +163,11 @@ struct KernelDerivatives {
   std::vector<std::vector<double>> thickness;
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;
+  /// The derivatives along v of the material kernels (IceKernels::
+  /// kappaKernel, muKernel), in their layout: the material rows of the
+  /// Hessian's action on v. Empty unless Options::material_kernels.
+  std::vector<double> kappaKernel;
+  std::vector<double> muKernel;
 };
 
 namespace detail {
@@ -261,6 +266,18 @@ class AdjointSolver {
    * @param trajectory The recorded forward trajectory; required here.
    * @param oceanFunctions As for IceHistoryKernels, from the same
    * migrating run as the tangent-linear run.
+   * @param material v's perturbation of the moduli
+   * (TangentPerturbation::material, the density refused), which the
+   * tangent run must have been driven by too; empty for none. A
+   * material direction, like Options::material_kernels (which adds the
+   * material kernels' derivatives along v, for any v), needs the memory
+   * points at the GLL nodes and no rotational feedback. Discrete: the
+   * derivative of the effective systems acts on the first sweep's
+   * solutions as a source of the derivative duals, and the memory force's
+   * variation on the first sweep's strains; the material kernels'
+   * derivatives pair the derivative duals with the forward trajectory and
+   * the first duals with v's tangent trajectory (docs/dev/adjoints.md
+   * §15). Not yet in the continuous sweep.
    */
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> SecondOrderKernels(
       std::span<const double> times,
@@ -268,7 +285,8 @@ class AdjointSolver {
       std::span<const SeaLevelEvolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      const MaterialDirection& material = {}) const;
 
  private:
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> DiscreteSecondOrder(
@@ -277,14 +295,16 @@ class AdjointSolver {
       std::span<const SeaLevelEvolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions) const;
+      std::span<const std::vector<double>> oceanFunctions,
+      const MaterialDirection& material) const;
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> ContinuousSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       std::span<const SeaLevelEvolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions) const;
+      std::span<const std::vector<double>> oceanFunctions,
+      const MaterialDirection& material) const;
   [[nodiscard]] IceKernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
@@ -295,6 +315,10 @@ class AdjointSolver {
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
       std::span<const std::vector<double>> oceanFunctions) const;
+  /// The material pieces the second-order sweeps share (the variations
+  /// of a direction, its forces, the tangent solution's recovery):
+  /// detail/AdjointInternals.hpp.
+  struct MaterialTools;
   /// The grounded views and the distributional/quelled assembly shared by
   /// the two sweeps (lumps: the delta amplitudes, by node).
   [[nodiscard]] IceKernels AssembleViews(

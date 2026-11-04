@@ -690,3 +690,173 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   }
 }
 
+
+TEST(TangentLinear, SecondOrderRunInTheMaterial) {
+  // With directions u and v in the loads, the inverse relaxation times
+  // AND the moduli, the second-order run is the derivative at the base
+  // point along u of the first-order run along v: central differences of
+  // the latter — the loads moved by eps delta_u, the rheology by eps
+  // delta itau_u and the material by eps delta m_u (the branch moduli as
+  // the same fractions of the shifted unrelaxed modulus) — converge to it
+  // at second order and Richardson lands on it, both schemes; and it is
+  // symmetric in u and v. Every mixed block is exercised: moduli–moduli,
+  // moduli–loads, moduli–relaxation times.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(41);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+  auto loads = std::vector<std::vector<double>>{};
+  auto deltaU = std::vector<std::vector<double>>{};
+  auto deltaV = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+    deltaU.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
+    deltaV.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[2].potentialDual = setup.Smooth(rng, 0.7);
+  const auto ditauU = setup.DeltaItau(0.1);
+  const auto ditauV =
+      setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+
+  // Smooth directions in kappa and mu on the solid, at 1% of the moduli.
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  auto materialDirection = [&](const std::function<double(double)>& profile) {
+    MaterialDirection d;
+    d.kappa.assign(k0.size(), 0.0);
+    d.mu.assign(m0.size(), 0.0);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (material.IsFluid(e)) continue;
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto p = 0.1 * profile(mesh.Radius(e, q));
+        d.kappa[i] = 0.5 * p * k0[i];
+        d.mu[i] = p * m0[i];
+      }
+    }
+    return d;
+  };
+  const auto dU = materialDirection(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  const auto dV = materialDirection([](double r) { return 1.0 - 0.5 * r; });
+
+  // The base moved along u by eps: the material shifted, the branch
+  // moduli as the same fractions of the shifted unrelaxed modulus, the
+  // inverse times moved by eps delta itau_u.
+  const auto& base = setup.rheology;
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(dU, eps);
+    const auto muU = base.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      auto branch = base.BranchAt(k);
+      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+        branch.itau[i] += eps * ditauU[k][i];
+      }
+      branches.push_back(std::move(branch));
+    }
+    return Rheology::Create(shifted, branches).value();
+  };
+  auto shiftedLoads = [&](double eps) {
+    auto out = loads;
+    for (auto n = std::size_t{0}; n < out.size(); ++n) {
+      for (auto i = std::size_t{0}; i < out[n].size(); ++i) {
+        out[n][i] += eps * deltaU[n][i];
+      }
+    }
+    return out;
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax,
+                            {.memory_points = MemoryPointSet::Gll});
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.scheme = scheme,
+                                 .rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    TangentLinearSolver tangent(
+        evolution,
+        {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    TangentPerturbation u, v;
+    u.directLoad = deltaU;
+    u.itau = ditauU;
+    u.material = dU;
+    v.directLoad = deltaV;
+    v.itau = ditauV;
+    v.material = dV;
+    const auto tangentU = tangent.Run(times, u, &trajectory);
+    const auto tangentV = tangent.Run(times, v, &trajectory);
+    SecondOrderDirection uv;
+    uv.itauU = ditauU;
+    uv.itauV = ditauV;
+    uv.materialU = dU;
+    uv.materialV = dV;
+    const auto second =
+        tangent.RunSecondOrder(times, tangentU, tangentV, uv, &trajectory);
+    const auto predicted = Objective(setup, second, measurements);
+
+    auto firstOrderAt = [&](double eps) {
+      const auto rheology = rheologyAt(eps);
+      ViscoelasticOperator moved(rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gll});
+      SeaLevelEvolution movedEvolution(moved, setup.solver, setup.state,
+                                       {.scheme = scheme,
+                                        .rotation = RotationalFeedback::None,
+                                        .rtol = 1e-12,
+                                        .record_stride = 1});
+      const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
+          movedEvolution.Run(times, History(times, shiftedLoads(eps))));
+      TangentLinearSolver along(
+          movedEvolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+      return Objective(setup, along.Run(times, v, &movedTrajectory),
+                       measurements);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (firstOrderAt(eps) - firstOrderAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+
+    SecondOrderDirection vu;
+    vu.itauU = ditauV;
+    vu.itauV = ditauU;
+    vu.materialU = dV;
+    vu.materialV = dU;
+    const auto swapped =
+        tangent.RunSecondOrder(times, tangentV, tangentU, vu, &trajectory);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LT(MaxDiff(swapped[n].seaLevelChange, second[n].seaLevelChange),
+                1e-10 * MaxAbs(second[n].seaLevelChange) + 1e-300)
+          << "node " << n;
+    }
+
+    // The material alone in one direction and the loads alone in the
+    // other is the moduli–loads block, not zero.
+    TangentPerturbation loadsOnly, materialOnly;
+    loadsOnly.directLoad = deltaV;
+    materialOnly.material = dU;
+    const auto runLoads = tangent.Run(times, loadsOnly, &trajectory);
+    const auto runMaterial = tangent.Run(times, materialOnly, &trajectory);
+    SecondOrderDirection cross;
+    cross.materialU = dU;
+    const auto mixed =
+        tangent.RunSecondOrder(times, runMaterial, runLoads, cross, &trajectory);
+    EXPECT_GT(std::abs(Objective(setup, mixed, measurements)), 0.0);
+  }
+}
