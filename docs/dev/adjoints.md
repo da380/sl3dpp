@@ -914,18 +914,88 @@ for every channel and degree
 the adjoint solution of a surface measurement; gated as the transpose
 of `Force` under the Hermitian pairing at 1e-10 and by the dual solve
 being the adjoint of the surface readout
-(`ElasticPerturbation3D.StaticKernelsAreTheTransposeOfTheForce`).
-The 3D elastic benchmark against AdGIA can thus compare kernels as well
-as responses.
+(`ElasticPerturbation3D.StaticKernelsAreTheTransposeOfTheForce`), and
+under a lateral background with both solutions from the full solve
+(§13j) against central differences of the measurement at 1e-5
+(`KernelsUnderLateralStructureMatchFiniteDifferences`). The 3D elastic
+benchmark against AdGIA can thus compare kernels as well as responses,
+at the heterogeneous model itself.
 
 ### 13i. Next and deferred
 
-Next: for the benchmark, a driver writing the Born surface response to a
-cap load under a lateral δμ in the exchange format (the 3D elastic
-comparison with AdGIA). Deferred: distributing the discrete sweep (with
-the rest of the parallelisation pass, which waits until the features are
+Next: for the benchmark, a driver writing the surface response to a cap
+load under a lateral δμ in the exchange format (the 3D elastic
+comparison with AdGIA), now by the full solve of §13j rather than the
+Born response. Deferred: distributing the discrete sweep (with the rest
+of the parallelisation pass, which waits until the features are
 complete). The discrete 3D second-order adjoint (§14) and the material in
-the second-order runs (§15) followed on 4 November.
+the second-order runs (§15) followed on 4 November, and the full 3D
+static solve (§13j) the same day.
+
+### 13j. The full 3D static solve (built 4 November 2026)
+
+The laterally heterogeneous static problem itself, (K_ref + dK) x = f,
+not only its Born linearisation: `ElasticPerturbation3D::SolveLateral`.
+The method is that of Maitra & Al-Attar (2019) and Myhill, Maitra &
+Al-Attar (2026) for Poisson's equation in aspherical planets, carried
+to the elastic operator: the full operator's action is matrix-free —
+the reference degree systems' `Apply` (banded, per degree and order)
+plus the lateral force of §13b through the grid pipeline (`Apply(x,
+δμ, δκ)`) — and the reference solve K_ref⁻¹, block diagonal over the
+degrees with the factorisations already held, is the preconditioner.
+The operator is symmetric (§13b's gate) and, for perturbations that
+leave the moduli positive, definite, so the iteration is preconditioned
+conjugate gradients, started from the reference response x₀ = K_ref⁻¹
+f; the first preconditioned residual is then the Born correction, so
+the Born response is the method's own first step and the iteration
+continues to the exact answer. The toroidal degree-1 rigid rotations,
+which the pinned reference solve removes and the lateral force never
+excites, stay out. The residual reported is the preconditioned energy
+norm relative to the forcing's, ⟨r, K_ref⁻¹ r⟩/⟨f, K_ref⁻¹ f⟩ under the
+Hermitian pairing; `SolveInfo` carries its history, the count and a
+flag should a curvature come out non-positive (the operator pair then
+not definite, the iteration continued on magnitudes).
+
+The forcing is any `Forces` pair: `LoadForces` (a surface mass load),
+`TideForces` (an external potential of every degree and order through
+`DegreeOperator::Tide(power)` — the static body tide of a laterally
+heterogeneous body, which is what the app will expose),
+`SurfaceDualForces` (a measurement's dual), or their sum, with toroidal
+forces allowed. Because the operator is symmetric, the solve of a
+measurement's dual forces under the lateral structure is the adjoint
+solution at that structure, and `-StaticKernels(y, x)` with both
+solutions from the lateral solve are the measurement's kernels in μ(x)
+and κ(x) at the laterally heterogeneous model: the static path's
+adjoint, discrete-exact, under 3D structure.
+
+GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): the converged
+solution's full, unpreconditioned residual at 1e-9 of the forcing; its
+departure from the reference-plus-Born response second order in the
+contrast (halving a 10% lateral δμ, δκ quarters it: ratios 4.0
+spheroidal, 3.9 toroidal), the first-order check against §13b; an
+angle-uniform 10% shift of an isotropic reference (the Voigt average of
+PREM — the shifted material must keep the reference's anisotropy, so the
+reference is made isotropic) equals the exact 1D solve on the shifted
+material at 1e-9 at every degree and order of a load and of a tide,
+with no toroidal motion; the kernels under a lateral background (10% in
+μ and κ) paired with a lateral direction equal the central difference of
+a surface potential measurement through the full solve at 1e-5 (the
+difference's own error). Convergence to 1e-10 against a degree-2 shear
+pattern of 5, 10, 20 and 40 per cent of the local shear modulus takes
+6, 7, 9 and 15 iterations, geometric throughout; the solve of the
+10% kernel gate converges in about 20. Cost on 16 threads (the
+disabled `TimingAtHigherDegree`, `SL3DPP_LMAX`): a 10% degree-2
+pattern and a cap-like load at lmax 16, 32 and 64 take 0.4, 2.4 and
+15 s for six iterations, the lateral force (the grid transforms) the
+whole of it; the reference solve is 0.07 s at lmax 64. Realistic
+contrasts (10% or less) are well inside what the reference
+preconditioner handles, as the papers found for Poisson's equation.
+
+Not built: aspherical geometry by particle relabelling (the papers'
+mapping ξ, which turns the geometry into laterally varying tensorial
+coefficients of the same form; doable here, low priority), lateral
+δρ (the hydrostatic background does not admit it, §13a), and
+distribution of the static solve (OpenMP over the grid pipeline only).
 
 ## 14. The discrete 3D second-order adjoint (built 4 November 2026)
 

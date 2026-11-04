@@ -1,5 +1,6 @@
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 
+#include <cmath>
 #include <format>
 #include <stdexcept>
 
@@ -203,6 +204,227 @@ ElasticPerturbation3D::Solutions ElasticPerturbation3D::Solve(
   return out;
 }
 
+ElasticPerturbation3D::Forces ElasticPerturbation3D::LoadForces(
+    std::span<const Complex> load) const {
+  const auto& grid = coupling_.Grid();
+  if (load.size() != grid.CoefficientSize()) {
+    throw std::invalid_argument("a load lives on the lmax grid");
+  }
+  Forces out;
+  for (auto l = 0; l <= lmax_; ++l) {
+    const auto& op = Spheroidal(l);
+    const auto ndof = op.DofCount();
+    const auto unit = op.Load();
+    auto b = std::vector<Complex>(static_cast<std::size_t>(ndof) * (l + 1));
+    for (auto m = 0; m <= l; ++m) {
+      const auto amplitude = load[SurfaceGrid::Index(l, m)];
+      for (auto d = 0; d < ndof; ++d) {
+        b[static_cast<std::size_t>(m) * ndof + d] = amplitude * unit[d];
+      }
+    }
+    out.emplace(l, std::move(b));
+  }
+  return out;
+}
+
+namespace {
+
+/// A real symmetric operator applied to complex columns, as real pairs.
+template <class Op>
+std::vector<std::complex<double>> ApplyColumns(
+    const Op& op, const std::vector<std::complex<double>>& x, int columns) {
+  const auto ndof = op.DofCount();
+  auto real = std::vector<double>(static_cast<std::size_t>(ndof) * 2 * columns);
+  for (auto c = 0; c < columns; ++c) {
+    for (auto d = 0; d < ndof; ++d) {
+      real[static_cast<std::size_t>(c) * ndof + d] =
+          x[static_cast<std::size_t>(c) * ndof + d].real();
+      real[static_cast<std::size_t>(columns + c) * ndof + d] =
+          x[static_cast<std::size_t>(c) * ndof + d].imag();
+    }
+  }
+  const auto y = op.Apply(real, 2 * columns);
+  auto out = std::vector<std::complex<double>>(
+      static_cast<std::size_t>(ndof) * columns);
+  for (auto c = 0; c < columns; ++c) {
+    for (auto d = 0; d < ndof; ++d) {
+      out[static_cast<std::size_t>(c) * ndof + d] = {
+          y[static_cast<std::size_t>(c) * ndof + d],
+          y[static_cast<std::size_t>(columns + c) * ndof + d]};
+    }
+  }
+  return out;
+}
+
+using Fields = std::map<int, std::vector<std::complex<double>>>;
+
+void Axpy(Fields& y, double a, const Fields& x) {
+  for (auto& [l, yl] : y) {
+    const auto found = x.find(l);
+    if (found == x.end()) continue;
+    const auto& xl = found->second;
+    for (auto i = std::size_t{0}; i < yl.size(); ++i) yl[i] += a * xl[i];
+  }
+}
+
+}  // namespace
+
+std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
+ElasticPerturbation3D::Apply(const Solutions& x, std::span<const double> dMu,
+                             std::span<const double> dKappa) const {
+  auto [spheroidal, toroidal] = Force(x, dMu, dKappa);
+  for (const auto& [l, xl] : x.spheroidal) {
+    const auto reference = ApplyColumns(Spheroidal(l), xl, l + 1);
+    auto& b = spheroidal.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += reference[i];
+  }
+  for (const auto& [l, wl] : x.toroidal) {
+    if (l < 1) continue;
+    const auto reference = ApplyColumns(Toroidal(l), wl, l + 1);
+    auto& b = toroidal.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += reference[i];
+  }
+  return {std::move(spheroidal), std::move(toroidal)};
+}
+
+ElasticPerturbation3D::Forces ElasticPerturbation3D::TideForces(
+    std::span<const Complex> amplitudes, int power) const {
+  const auto& grid = coupling_.Grid();
+  if (amplitudes.size() != grid.CoefficientSize()) {
+    throw std::invalid_argument("a tidal potential lives on the lmax grid");
+  }
+  Forces out;
+  for (auto l = 0; l <= lmax_; ++l) {
+    const auto& op = Spheroidal(l);
+    const auto ndof = op.DofCount();
+    const auto unit = op.Tide(power);
+    auto b = std::vector<Complex>(static_cast<std::size_t>(ndof) * (l + 1));
+    for (auto m = 0; m <= l; ++m) {
+      const auto amplitude = amplitudes[SurfaceGrid::Index(l, m)];
+      for (auto d = 0; d < ndof; ++d) {
+        b[static_cast<std::size_t>(m) * ndof + d] = amplitude * unit[d];
+      }
+    }
+    out.emplace(l, std::move(b));
+  }
+  return out;
+}
+
+ElasticPerturbation3D::Forces ElasticPerturbation3D::SurfaceDualForces(
+    std::span<const Complex> dual, Component component) const {
+  const auto& grid = coupling_.Grid();
+  if (dual.size() != grid.CoefficientSize()) {
+    throw std::invalid_argument("a surface dual lives on the lmax grid");
+  }
+  Forces forces;
+  for (auto l = 0; l <= lmax_; ++l) {
+    const auto& op = Spheroidal(l);
+    const auto ndof = op.DofCount();
+    const auto dof = op.SurfaceDof(component);
+    auto b = std::vector<Complex>(static_cast<std::size_t>(ndof) * (l + 1), 0.0);
+    if (dof >= 0) {
+      for (auto m = 0; m <= l; ++m) {
+        b[static_cast<std::size_t>(m) * ndof + dof] = dual[SurfaceGrid::Index(l, m)];
+      }
+    }
+    forces.emplace(l, std::move(b));
+  }
+  return forces;
+}
+
+std::pair<ElasticPerturbation3D::Solutions, ElasticPerturbation3D::SolveInfo>
+ElasticPerturbation3D::SolveLateral(std::span<const Complex> load,
+                                    std::span<const double> dMu,
+                                    std::span<const double> dKappa,
+                                    SolveOptions options) const {
+  return SolveLateral(LoadForces(load), {}, dMu, dKappa, options);
+}
+
+std::pair<ElasticPerturbation3D::Solutions, ElasticPerturbation3D::SolveInfo>
+ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
+                                    const Forces& toroidalForces,
+                                    std::span<const double> dMu,
+                                    std::span<const double> dKappa,
+                                    SolveOptions options) const {
+  // Every degree gets a slot, spheroidal and toroidal, so that the
+  // lateral coupling has somewhere to go.
+  Forces fs, ft;
+  for (auto l = 0; l <= lmax_; ++l) {
+    const auto found = spheroidalForces.find(l);
+    if (found != spheroidalForces.end()) {
+      fs.emplace(l, found->second);
+    } else {
+      fs.emplace(l, std::vector<Complex>(
+                        static_cast<std::size_t>(Spheroidal(l).DofCount()) * (l + 1),
+                        0.0));
+    }
+    if (l < 1) continue;
+    const auto foundT = toroidalForces.find(l);
+    if (foundT != toroidalForces.end()) {
+      ft.emplace(l, foundT->second);
+    } else {
+      ft.emplace(l, std::vector<Complex>(
+                        static_cast<std::size_t>(Toroidal(l).DofCount()) * (l + 1),
+                        0.0));
+    }
+  }
+  // The reference response.
+  auto x = Solve(fs, ft, false);
+  SolveInfo info;
+  const auto energy = Pair(x, fs, ft);  // <f, K_ref^-1 f>, the forcing's scale
+  if (dMu.empty() && dKappa.empty()) {
+    info.converged = true;
+    info.residuals.push_back(0.0);
+    return {std::move(x), info};
+  }
+  // r = f - A x: the lateral force of the reference response, negated.
+  auto [rs, rt] = Force(x, dMu, dKappa);
+  for (auto& [l, v] : rs) for (auto& c : v) c = -c;
+  for (auto& [l, v] : rt) for (auto& c : v) c = -c;
+  auto z = Solve(rs, rt, false);
+  auto rz = Pair(z, rs, rt);
+  auto relative = [&](double value) {
+    return energy > 0.0 ? std::sqrt(std::abs(value) / energy) : std::sqrt(std::abs(value));
+  };
+  info.residual = relative(rz);
+  info.residuals.push_back(info.residual);
+  if (rz < 0.0) info.indefinite = true;
+  auto p = z;
+  for (auto iteration = 0; iteration < options.max_iterations; ++iteration) {
+    if (info.residual <= options.rtol) {
+      info.converged = true;
+      break;
+    }
+    auto [as, at] = Apply(p, dMu, dKappa);
+    const auto curvature = Pair(p, as, at);
+    if (curvature <= 0.0) info.indefinite = true;
+    const auto alpha = rz / curvature;
+    Axpy(x.spheroidal, alpha, p.spheroidal);
+    Axpy(x.toroidal, alpha, p.toroidal);
+    Axpy(rs, -alpha, as);
+    Axpy(rt, -alpha, at);
+    z = Solve(rs, rt, false);
+    const auto next = Pair(z, rs, rt);
+    if (next < 0.0) info.indefinite = true;
+    const auto beta = next / rz;
+    rz = next;
+    // p = z + beta p
+    for (auto& [l, pl] : p.spheroidal) {
+      const auto& zl = z.spheroidal.at(l);
+      for (auto i = std::size_t{0}; i < pl.size(); ++i) pl[i] = zl[i] + beta * pl[i];
+    }
+    for (auto& [l, pl] : p.toroidal) {
+      const auto& zl = z.toroidal.at(l);
+      for (auto i = std::size_t{0}; i < pl.size(); ++i) pl[i] = zl[i] + beta * pl[i];
+    }
+    info.iterations = iteration + 1;
+    info.residual = relative(rz);
+    info.residuals.push_back(info.residual);
+  }
+  if (info.residual <= options.rtol) info.converged = true;
+  return {std::move(x), info};
+}
+
 ElasticPerturbation3D::Solutions ElasticPerturbation3D::Respond(
     const Solutions& x, std::span<const double> dMu,
     std::span<const double> dKappa) const {
@@ -296,24 +518,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
 
 ElasticPerturbation3D::Solutions ElasticPerturbation3D::SolveSurfaceDual(
     std::span<const Complex> dual, Component component) const {
-  const auto& grid = coupling_.Grid();
-  if (dual.size() != grid.CoefficientSize()) {
-    throw std::invalid_argument("a surface dual lives on the lmax grid");
-  }
-  Forces forces;
-  for (auto l = 0; l <= lmax_; ++l) {
-    const auto& op = Spheroidal(l);
-    const auto ndof = op.DofCount();
-    const auto dof = op.SurfaceDof(component);
-    auto b = std::vector<Complex>(static_cast<std::size_t>(ndof) * (l + 1), 0.0);
-    if (dof >= 0) {
-      for (auto m = 0; m <= l; ++m) {
-        b[static_cast<std::size_t>(m) * ndof + dof] = dual[SurfaceGrid::Index(l, m)];
-      }
-    }
-    forces.emplace(l, std::move(b));
-  }
-  return Solve(forces, {}, false);
+  return Solve(SurfaceDualForces(dual, component), {}, false);
 }
 
 double ElasticPerturbation3D::Pair(const Solutions& x, const Forces& spheroidal,

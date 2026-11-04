@@ -2,9 +2,13 @@
 
 /**
  * @file ElasticPerturbation3D.hpp
- * @brief The first-order (Born) response of the static gravitating elastic
- * problem to LATERAL perturbations of the shear and bulk moduli, through
- * the grid pipeline of the 3D memory coupling (docs/dev/adjoints.md).
+ * @brief The static gravitating elastic problem under LATERAL
+ * perturbations of the shear and bulk moduli, through the grid pipeline
+ * of the 3D memory coupling (docs/dev/adjoints.md §13b, §13j): its
+ * first-order (Born) response, and the full solve of the laterally
+ * heterogeneous problem by preconditioned conjugate gradients with the
+ * reference systems as the preconditioner (SolveLateral), for loads,
+ * body tides and measurement duals (the adjoint under the structure).
  *
  * The elastic structure of the reference problem is radial, and a lateral
  * delta mu(x) enters its bilinear form exactly as the lateral viscosity
@@ -82,6 +86,71 @@ class ElasticPerturbation3D {
   /// The first-order response -K^-1 (dK) x.
   [[nodiscard]] Solutions Respond(const Solutions& x, std::span<const double> dMu,
                                   std::span<const double> dKappa) const;
+
+  /// The load's forces per degree (what SolveLoad solves): the unit load
+  /// vector times the coefficients, spheroidal.
+  [[nodiscard]] Forces LoadForces(std::span<const Complex> load) const;
+  /// The forces of an external (tidal) potential given by its m >= 0
+  /// coefficients on the lmax grid (material units of potential at the
+  /// surface): per degree DegreeOperator::Tide(power) times the
+  /// coefficient, the power defaulting to the degree (the harmonic body
+  /// tide); a power of 2 at degree 0 is the spherical mean of a
+  /// centrifugal change. Spheroidal.
+  [[nodiscard]] Forces TideForces(std::span<const Complex> amplitudes,
+                                  int power = -1) const;
+  /// The forces of a surface dual (what SolveSurfaceDual solves): the
+  /// dual's coefficients at the component's surface dof.
+  [[nodiscard]] Forces SurfaceDualForces(std::span<const Complex> dual,
+                                         Component component) const;
+  /// The full 3D operator's action (K_ref + dK) x: the reference systems'
+  /// (the degree-1 toroidal unpinned) plus the lateral force, per degree.
+  [[nodiscard]] std::pair<Forces, Forces> Apply(const Solutions& x,
+                                                std::span<const double> dMu,
+                                                std::span<const double> dKappa) const;
+
+  struct SolveOptions {
+    /// The relative residual (in the preconditioned, energy norm,
+    /// relative to the load's) to stop at, and the iteration budget.
+    double rtol = 1e-10;
+    int max_iterations = 200;
+  };
+  struct SolveInfo {
+    int iterations = 0;
+    double residual = 0.0;
+    bool converged = false;
+    /// The relative residual after each iteration (the first entry the
+    /// reference response's).
+    std::vector<double> residuals;
+    /// Whether a curvature <p, A p> or <r, M r> came out non-positive:
+    /// the iteration continued on magnitudes, but the operator pair is
+    /// then not definite and conjugate gradients are not guaranteed.
+    bool indefinite = false;
+  };
+  /// The full response of the laterally heterogeneous static problem,
+  /// (K_ref + dK) x = f, by preconditioned conjugate gradients with the
+  /// reference solve as the preconditioner (Maitra & Al-Attar 2019; the
+  /// lateral action pseudospectral through the grid pipeline), started
+  /// from the reference response so that the first iterate is the Born
+  /// response; the correction is orthogonal to the degree-1 toroidal
+  /// rigid rotations, which the pinned reference solve removes.
+  [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
+      std::span<const Complex> load, std::span<const double> dMu,
+      std::span<const double> dKappa, SolveOptions options) const;
+  [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
+      std::span<const Complex> load, std::span<const double> dMu,
+      std::span<const double> dKappa) const {
+    return SolveLateral(load, dMu, dKappa, SolveOptions{});
+  }
+  /// The same for any forces (a load's, a tide's, a surface dual's or
+  /// their sum; toroidal forces allowed): the operator is symmetric, so
+  /// the solve of a measurement's dual forces under the lateral
+  /// structure is the adjoint solution of that structure, and
+  /// -StaticKernels(y, x) are then the measurement's kernels in the
+  /// moduli at the laterally heterogeneous model.
+  [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
+      const Forces& spheroidal, const Forces& toroidal,
+      std::span<const double> dMu, std::span<const double> dKappa,
+      SolveOptions options) const;
 
   /// The reference systems solving given forces (negated when asked).
   [[nodiscard]] Solutions Solve(const Forces& spheroidal, const Forces& toroidal,

@@ -25,7 +25,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Sensitivity kernels with respect to the ice history and viscosity, by the continuous adjoint or the exact discrete transpose (1D and 3D) | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
-| Material derivatives and kernels in κ, μ and ρ: the static problem's variation operator, Love-number derivatives and kernels (gravity self-consistent in ρ); its first-order (Born) response to lateral δμ(x), δκ(x) and the lateral kernels of a surface measurement; the time-stepped tangent-linear runs along the moduli and (1D) the density; the κ, μ and (1D) ρ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp`, `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
+| Material derivatives and kernels in κ, μ and ρ: the static problem's variation operator, Love-number derivatives and kernels (gravity self-consistent in ρ); its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli and (1D) the density; the κ, μ and (1D) ρ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
@@ -366,6 +366,19 @@ Deliberately out of scope:
   the deviatoric strain, δκ on the dilatation) and solved on the radial
   reference systems; it couples degrees and orders by the products'
   selection rules, and spheroidal to toroidal motion.
+- **The full 3D static solve** (`ElasticPerturbation3D::SolveLateral`):
+  the laterally heterogeneous static problem (K_ref + dK) x = f by
+  preconditioned conjugate gradients, the operator matrix-free (the
+  reference systems' action plus the lateral force) and the reference
+  solve the preconditioner, after Maitra & Al-Attar (2019) and Myhill
+  et al. (2026) for Poisson's equation; started from the reference
+  response so the Born response is its first step. Any forcing: a load,
+  a tidal potential (`TideForces`, the static body tide of a
+  heterogeneous body), a surface dual (`SurfaceDualForces`, the adjoint
+  solution under the structure, whose `StaticKernels` with the forward
+  solution are the measurement's kernels at the heterogeneous model).
+  Realistic contrasts converge in under ten iterations
+  (docs/dev/adjoints.md §13j).
 - **Material kernels** (`Options::material_kernels`): dJ/dκ and dJ/dμ,
   nodal in 1D (`IceKernels::kappaKernel`, `muKernel`) and on the
   coupling's grid in 3D with spherical reductions
@@ -546,6 +559,13 @@ Beyond the fixtures:
   reproducing the 1D Love-number derivatives at 1e-8 through the grid
   pipeline; the perturbation force symmetric at 1e-10; the selection
   rules of a single-harmonic direction, spheroidal and toroidal.
+- **The full 3D static solve.** The converged residual at 1e-9; the
+  departure from reference-plus-Born second order in the contrast
+  (ratio 4 on halving); angle-uniform 10% shifts of an isotropic
+  reference equal to the exact shifted 1D solve at 1e-9 for loads and
+  tides at every degree and order; the kernels under a 10% lateral
+  background against central differences of a measurement through the
+  full solve at 1e-5; 6 to 15 iterations for 5 to 40% contrasts.
 - **Material tangent, 1D.** The time-stepped tangent-linear along a
   direction in κ and μ (branch moduli as fixed fractions, times held)
   against central differences on the shifted material, both schemes,
@@ -662,8 +682,10 @@ Beyond the fixtures:
 
 What is not built, or holds only within limits:
 
-- **The static Born perturbation** (`ElasticPerturbation3D`) is
-  single-process; everything time-stepped is distributed.
+- **The static 3D problem** (`ElasticPerturbation3D`, Born and full
+  solve) is single-process (OpenMP over the grid pipeline); everything
+  time-stepped is distributed. Its geometry is spherical: aspherical
+  bodies by particle relabelling are not built.
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
