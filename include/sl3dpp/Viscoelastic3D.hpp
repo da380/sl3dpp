@@ -126,17 +126,9 @@ class Viscoelastic3D {
     /// Distributed over radial segments like the rest (the start solve's
     /// conjugate gradients pair each process's share; docs/dev/adjoints.md
     /// §13k, §13m).
-    /// A lateral DENSITY, rho(x) = rho(r) (1 + density(r, theta, phi)),
-    /// enters the gravitational couplings of the solid pointwise with
-    /// the gravity, the reference potential and the stratification held
-    /// radial — the hydrostatic reference is then not in equilibrium with
-    /// the density, the convention of the field (docs/dev/adjoints.md
-    /// §13l states the limitation); the inertia moment and the fluid
-    /// keep the radial density.
     struct LateralModuli {
       std::function<double(double, double, double)> shear;
       std::function<double(double, double, double)> bulk;
-      std::function<double(double, double, double)> density;
     };
     LateralModuli moduli{};
     double elastic_rtol = 1e-12;
@@ -205,22 +197,15 @@ class Viscoelastic3D {
   /// absolute unrelaxed shear perturbation delta mu_U(x); empty where
   /// not set.
   [[nodiscard]] bool HasLateralModuli() const {
-    return !shear_.empty() || !bulk_.empty() || !density_.empty();
-  }
-  /// The absolute lateral density perturbation delta rho(x) over the grid
-  /// values; empty where not set.
-  [[nodiscard]] std::span<const double> DensityPerturbation() const {
-    return density_;
+    return !shear_.empty() || !bulk_.empty();
   }
   /// The scalar companions of this operator's iterate: the dilatation's
-  /// block (-1 without a lateral bulk modulus) and the first of the four
-  /// density fields' blocks (-1 without a lateral density).
+  /// block (-1 without a lateral bulk modulus).
   [[nodiscard]] int DilatationBlock() const { return dilatationBlock_; }
-  [[nodiscard]] int DensityBlock() const { return densityBlock_; }
   [[nodiscard]] std::size_t CompanionCount() const { return companions_; }
   /// Weights a grid tensor's scalar companions by the step's negative
-  /// lateral weights (-delta kappa on the dilatation, -delta rho on the
-  /// density fields): what Respond and the transposed passes apply.
+  /// lateral weights (-delta kappa on the dilatation): what Respond and
+  /// the transposed passes apply.
   void WeightCompanions(GridCoupling::TensorField& field) const;
   [[nodiscard]] std::span<const double> ShearPerturbation() const {
     return shear_;
@@ -494,15 +479,6 @@ class Viscoelastic3D {
     mutable bool startForce_ = false;
     /// Per-degree spheroidal forces added after the assembly (AddForce).
     std::map<int, std::vector<Complex>> extraSpheroidal_;
-    /// The tide columns AddChannels last added, per degree: under a
-    /// lateral density StrainOf adds the known potential's fields to the
-    /// iterate's companions, so that rho(x) multiplies phi + psi.
-    mutable std::map<int, std::vector<Complex>> tide_;
-    /// The lateral density's part of the inertia moment, sum over the
-    /// nodes of W r^3 int delta rho U dOmega, formed from the iterate's
-    /// U companion at each Respond (and from the start strain's at
-    /// StartStep): what InertiaMoment adds to the radial row's.
-    mutable double lateralMoment_ = 0.0;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
@@ -576,8 +552,7 @@ class Viscoelastic3D {
     return Toroidal(l);
   }
   /// A zero spectral tensor shaped for this operator's iterate: with the
-  /// scalar companions of its lateral moduli (the dilatation's, the
-  /// density fields').
+  /// scalar companions of its lateral moduli (the dilatation's).
   [[nodiscard]] GridCoupling::SpectralTensor ZeroSpectralFor() const;
   /// The spheroidal forces of a weighted tensor: the deviatoric assembly
   /// plus, where the tensor carries a scalar companion, the dilatation's.
@@ -602,21 +577,6 @@ class Viscoelastic3D {
   [[nodiscard]] Solutions SolveUnrelaxed(
       const std::map<int, std::vector<Complex>>& sphForces,
       const std::map<int, std::vector<Complex>>& torForces) const;
-  /// The tide columns' lateral density force per degree: the density
-  /// pipeline (with the step's negative weight) on the known potential's
-  /// fields — the body force -delta rho(x) grad psi joining the
-  /// reference Tide() forces.
-  [[nodiscard]] std::map<int, std::vector<Complex>> LateralTideForces(
-      const std::map<int, std::vector<Complex>>& tideColumns,
-      const std::function<const DegreeOperator&(int)>& spheroidal) const;
-  /// Adds the known tidal potential's fields to a spectral tensor's
-  /// density companions (AddTidePotentialFields per degree).
-  void AddTideFields(GridCoupling::SpectralTensor& spectral,
-                     const std::map<int, std::vector<Complex>>& tideColumns,
-                     const std::function<const DegreeOperator&(int)>& spheroidal) const;
-  /// The lateral density's inertia moment of a grid tensor's U companion
-  /// (unweighted): sum over the nodes of W r^3 int delta rho U dOmega.
-  [[nodiscard]] double LateralMomentOf(const GridCoupling::TensorField& field) const;
   /// Adds the load/tide channels' forces at time t per degree (the unit
   /// load and tide vectors times the amplitudes) to spheroidal forces.
   void AddChannelForces(
@@ -668,9 +628,8 @@ class Viscoelastic3D {
   /// and its negative (the step's weight) likewise, and the reference's
   /// unrelaxed shear per node; empty where not set.
   std::vector<double> shear_, shearUnrelaxed_, bulk_, negativeBulk_;
-  std::vector<double> density_, negativeDensity_;
   std::vector<double> muUnrelaxed_, kappaAtNodes_;
-  int dilatationBlock_ = -1, densityBlock_ = -1;
+  int dilatationBlock_ = -1;
   std::size_t companions_ = 0;
   mutable ElasticSolveInfo lastElasticSolve_;
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;

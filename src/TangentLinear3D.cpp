@@ -455,32 +455,6 @@ struct TangentLinearSolver3D::MaterialDrive3D
       }
       spheroidal = coupling.DilatationForce(coupling.AnalyseScalar(field), sph);
     }
-    if (!direction.rho.empty()) {
-      // the density pipeline on x: -(dK_rho) x
-      const auto sph = [&](int l) -> const DegreeOperator& {
-        return op.Spheroidal(l);
-      };
-      auto fields = std::vector<std::vector<Complex>>(
-          GridCoupling::kDensityFields,
-          std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0));
-      for (const auto& [l, xl] : x->spheroidal) {
-        coupling.AddDensityFieldsOfSolution(fields, l, op.Spheroidal(l), xl);
-      }
-      auto weighted = std::vector<std::vector<Complex>>{};
-      for (const auto& f : fields) {
-        auto grid = coupling.SynthesiseScalar(f);
-        for (auto i = std::size_t{0}; i < values; ++i) grid[i] *= -direction.rho[i];
-        weighted.push_back(coupling.AnalyseScalar(grid));
-      }
-      for (auto& [l, f] : coupling.DensityForce(weighted, sph)) {
-        auto& b = spheroidal[l];
-        if (b.empty()) {
-          b = std::move(f);
-        } else {
-          for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
-        }
-      }
-    }
     return {std::move(analysed), std::move(spheroidal)};
   }
 
@@ -574,7 +548,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
     Base base;
     const auto load = ev->Columns(trajectory->loads[node], ev->toMatDensity_);
     const auto tide = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
-    if (!direction.kappa.empty() || !direction.rho.empty() || !state.strain) {
+    if (!direction.kappa.empty() || !state.strain) {
       base.x = op.SolveElastic(state, load, tide);
     }
     if (state.strain) {
@@ -783,7 +757,7 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
   const auto& coupling = op.Coupling();
   const auto values = coupling.GridValueCount();
   const auto K = op.GetRheology().BranchCount();
-  for (const auto* field : {&direction.kappa, &direction.mu, &direction.rho}) {
+  for (const auto* field : {&direction.kappa, &direction.mu}) {
     if (!field->empty() && field->size() != values) {
       throw std::invalid_argument(
           "a material direction lives on the coupling's grid values");

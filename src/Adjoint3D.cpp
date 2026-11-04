@@ -78,7 +78,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
   const auto& op = *evolution_->op_;
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
-  for (const auto* field : {&material.kappa, &material.mu, &material.rho}) {
+  for (const auto* field : {&material.kappa, &material.mu}) {
     if (!field->empty() && field->size() != values) {
       throw std::invalid_argument(
           "a material direction lives on the coupling's grid values");
@@ -671,7 +671,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // itau kernel's time quadrature and units constant; at an observation
   // the lumped instantaneous solution pairs without a time weight.
   std::vector<double> kappaKernel, muKernel, dKappaKernel, dMuKernel;
-  std::vector<double> rhoKernel, dRhoKernel;
   auto fractions = std::vector<std::vector<double>>{};
   if (material) {
     if (trajectory == nullptr) {
@@ -684,11 +683,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
     kappaKernel.assign(values, 0.0);
     muKernel.assign(values, 0.0);
-    rhoKernel.assign(values, 0.0);
     if (second) {
       dKappaKernel.assign(values, 0.0);
       dMuKernel.assign(values, 0.0);
-      dRhoKernel.assign(values, 0.0);
     }
   }
   if (material || hasMaterialV) {
@@ -736,21 +733,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
     return coupling.SynthesiseScalar(scalar);
   };
-  // The four density fields of solutions, flat (field k at k * values + i).
-  auto densityFieldsOf = [&](const Viscoelastic3D::Solutions& x) {
-    auto fields = std::vector<std::vector<Complex>>(
-        GridCoupling::kDensityFields,
-        std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0));
-    for (const auto& [l, xl] : x.spheroidal) {
-      coupling.AddDensityFieldsOfSolution(fields, l, op.Spheroidal(l), xl);
-    }
-    auto flat = std::vector<double>(GridCoupling::kDensityFields * values);
-    for (auto k = std::size_t{0}; k < GridCoupling::kDensityFields; ++k) {
-      const auto grid = coupling.SynthesiseScalar(fields[k]);
-      std::ranges::copy(grid, flat.begin() + static_cast<std::ptrdiff_t>(k * values));
-    }
-    return flat;
-  };
   using Tensor = GridCoupling::TensorField;
   // v's forces on a solution with its grid strain (the material tangent's
   // Born force: the shear weight on the deviatoric strain, pointwise, and
@@ -777,28 +759,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       auto field = dilatationOf(*x);
       for (auto i = std::size_t{0}; i < values; ++i) field[i] *= -materialV->kappa[i];
       bulk = coupling.DilatationForce(coupling.AnalyseScalar(field), unrelaxedSph);
-    }
-    if (hasMaterialV && !materialV->rho.empty() && x != nullptr) {
-      auto fields = std::vector<std::vector<Complex>>(
-          GridCoupling::kDensityFields,
-          std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0));
-      for (const auto& [l, xl] : x->spheroidal) {
-        coupling.AddDensityFieldsOfSolution(fields, l, op.Spheroidal(l), xl);
-      }
-      auto weighted = std::vector<std::vector<Complex>>{};
-      for (const auto& f : fields) {
-        auto grid = coupling.SynthesiseScalar(f);
-        for (auto i = std::size_t{0}; i < values; ++i) grid[i] *= -materialV->rho[i];
-        weighted.push_back(coupling.AnalyseScalar(grid));
-      }
-      for (auto& [l, f] : coupling.DensityForce(weighted, unrelaxedSph)) {
-        auto& b = bulk[l];
-        if (b.empty()) {
-          b = std::move(f);
-        } else {
-          for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
-        }
-      }
     }
     return std::pair(std::move(analysed), std::move(bulk));
   };
@@ -866,13 +826,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                               const Viscoelastic3D::Solutions& x,
                               const Tensor& dX, const std::vector<Tensor>& mem,
                               double weight, std::vector<double>& kappaTo,
-                              std::vector<double>& muTo,
-                              std::vector<double>& rhoTo) {
+                              std::vector<double>& muTo) {
     if (weight == 0.0) return;
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    const auto Fy = densityFieldsOf(lambda);
-    const auto Fx = densityFieldsOf(x);
     detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
@@ -886,7 +843,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                  4.0 * (a.c[0][i] * std::conj(b.c[0][i])).real();
         };
         kappaTo[i] -= weight * wq * Dy[i] * Dx[i];
-        rhoTo[i] -= weight * coupling.DensityPairingAt(static_cast<int>(rn), 0.0, Fy, Fx, i);
         auto shear = -contraction(eLambda, dX);
         for (auto k = std::size_t{0}; k < K; ++k) {
           if (fractions[k][rn] == 0.0) continue;
@@ -909,15 +865,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto fwd = forwardState(node);  // a copy: the cache may drop it below
     const auto dFwd = forwardStrain(node);
     const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
-    pairMaterialWith(lambda, eLambda, x, dFwd, fwd.m, weight, kappaKernel, muKernel,
-                     rhoKernel);
+    pairMaterialWith(lambda, eLambda, x, dFwd, fwd.m, weight, kappaKernel, muKernel);
     if (!second) return;
     pairMaterialWith(*dlambda, *eDlambda, x, dFwd, fwd.m, weight, dKappaKernel,
-                     dMuKernel, dRhoKernel);
+                     dMuKernel);
     const auto xv = tangentSolution(node, dFwd, x, node == 0 ? nullptr : &fwd.m);
     pairMaterialWith(lambda, eLambda, xv, *tangentState(node).strain,
-                     tangentState(node).m, weight, dKappaKernel, dMuKernel,
-                     dRhoKernel);
+                     tangentState(node).m, weight, dKappaKernel, dMuKernel);
   };
   auto pairMaterial = [&](const Viscoelastic3D::Solutions& lambda,
                           const GridCoupling::TensorField& eLambda,
@@ -928,8 +882,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    const auto Fy = densityFieldsOf(lambda);
-    const auto Fx = densityFieldsOf(x);
     detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
@@ -944,7 +896,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                  4.0 * (a.c[0][i] * std::conj(b.c[0][i])).real();
         };
         kappaKernel[i] -= weight * wq * Dy[i] * Dx[i];
-        rhoKernel[i] -= weight * coupling.DensityPairingAt(static_cast<int>(rn), 0.0, Fy, Fx, i);
         auto shear = -contraction(eLambda, dFwd);
         for (auto k = std::size_t{0}; k < K; ++k) {
           if (fractions[k][rn] == 0.0) continue;
@@ -1443,10 +1394,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   if (material && second) {
     derivatives.kappaKernel3D = std::move(dKappaKernel);
     derivatives.muKernel3D = std::move(dMuKernel);
-    derivatives.rhoKernel3D = std::move(dRhoKernel);
     derivatives.kappaKernelSpherical.assign(nodeCount, 0.0);
     derivatives.muKernelSpherical.assign(nodeCount, 0.0);
-    derivatives.rhoKernelSpherical.assign(nodeCount, 0.0);
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
       const auto at = coupling.FieldOffset(rn);
       const auto size = coupling.FieldSizeOf(rn);
@@ -1454,17 +1403,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           std::span(derivatives.kappaKernel3D).subspan(at, size));
       derivatives.muKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
           std::span(derivatives.muKernel3D).subspan(at, size));
-      derivatives.rhoKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
-          std::span(derivatives.rhoKernel3D).subspan(at, size));
     }
   }
   if (material) {
     out.kappaKernel3D = std::move(kappaKernel);
     out.muKernel3D = std::move(muKernel);
-    out.rhoKernel3D = std::move(rhoKernel);
     out.kappaKernelSpherical.assign(nodeCount, 0.0);
     out.muKernelSpherical.assign(nodeCount, 0.0);
-    out.rhoKernelSpherical.assign(nodeCount, 0.0);
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
       const auto at = coupling.FieldOffset(rn);
       const auto size = coupling.FieldSizeOf(rn);
@@ -1472,8 +1417,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           std::span(out.kappaKernel3D).subspan(at, size));
       out.muKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
           std::span(out.muKernel3D).subspan(at, size));
-      out.rhoKernelSpherical[rn] = coupling.GridOf(rn).Integrate(
-          std::span(out.rhoKernel3D).subspan(at, size));
     }
   }
   return {std::move(out), std::move(derivatives)};

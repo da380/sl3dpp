@@ -119,7 +119,7 @@ class GridCoupling {
     /// A per-element mask (ElementCount entries, non-zero = carries
     /// nodes) overriding the rheology's activity where given: the
     /// viscous elements and those where a lateral perturbation of the
-    /// moduli or density is non-zero, as Viscoelastic3D samples them, so
+    /// moduli is non-zero, as Viscoelastic3D samples them, so
     /// that a perturbation confined to the mantle costs no lithosphere
     /// or inner-core nodes. Fluid elements and the centre element are
     /// never carried.
@@ -230,9 +230,8 @@ class GridCoupling {
     std::array<std::vector<Complex>, 2> c;
     std::vector<double> r;
     /// Optional real scalar companions over the same grid values (the
-    /// dilatation of a solution under a lateral bulk modulus; its U,
-    /// k^2 V, phi and r d_r phi under a lateral density), carried beside
-    /// the deviatoric strain: empty where not carried.
+    /// dilatation of a solution under a lateral bulk modulus), carried
+    /// beside the deviatoric strain: empty where not carried.
     std::vector<std::vector<double>> scalars;
   };
   [[nodiscard]] TensorField ZeroTensor() const;
@@ -346,45 +345,6 @@ class GridCoupling {
   /// dilatation, say): per degree the complex column right-hand sides of
   /// int w (r div u') dr through the radial quadrature — the bulk term
   /// kappa (X + Y)(X' + Y') of the elastic form, pointwise in angle.
-  /// The density pipeline (docs/dev/adjoints.md §13l): the four scalar
-  /// fields of a spheroidal solution the gravitational couplings are
-  /// pointwise in — U, k^2 V (the tangential divergence's), phi and
-  /// r d_r phi — added to four coefficient fields (each
-  /// ScalarCoefficientCount), and the force of their analysed products
-  /// with a lateral density on the given systems: with g, the reference
-  /// potential and the stratification held radial, the variation of the
-  /// degree form's UU, UV, VP and U-phi terms in rho at each node.
-  static constexpr std::size_t kDensityFields = 4;
-  void AddDensityFieldsOfSolution(std::span<std::vector<Complex>> fields, int l,
-                                  const DegreeOperator& spheroidal,
-                                  std::span<const Complex> x) const;
-  [[nodiscard]] std::map<int, std::vector<Complex>> DensityForce(
-      std::span<const std::vector<Complex>> weighted,
-      const std::function<const DegreeOperator&(int)>& system) const;
-  /// A known external potential psi = amp (r / a)^power per degree (the
-  /// tide channel's, DegreeOperator::Tide) as the density pipeline's
-  /// fields: phi and r d_r phi (the third and fourth) over the degree's
-  /// nodes, added to `fields` — so that a lateral density multiplies the
-  /// TOTAL potential phi + psi, the tide's body force rho(x) grad psi
-  /// included. Columns are the m >= 0 amplitudes of the degree.
-  void AddTidePotentialFields(std::span<std::vector<Complex>> fields, int l,
-                              const DegreeOperator& spheroidal,
-                              std::span<const Complex> columns, int power,
-                              double radius) const;
-  /// A plain pointwise force: a coefficient field over the nodes (the
-  /// spin 0 layout) scattered onto one component's dofs with weight one
-  /// (interpolated at Gauss points) — the transpose of reading that
-  /// component at the nodes (the lateral inertia moment's dual).
-  [[nodiscard]] std::map<int, std::vector<Complex>> PointwiseForce(
-      std::span<const Complex> coefficients, Component component,
-      const std::function<const DegreeOperator&(int)>& system) const;
-  /// The density pairing's node factors, the four fields' products at
-  /// the grid values of a node combined as the force is: the kernel
-  /// density dJ/d rho(x) of a pair (y, x), the radial weight folded in.
-  [[nodiscard]] double DensityPairingAt(int node, double k2Unused,
-                                        std::span<const double> yFields,
-                                        std::span<const double> xFields,
-                                        std::size_t i) const;
   [[nodiscard]] std::map<int, std::vector<Complex>> DilatationForce(
       std::span<const Complex> weighted,
       const std::function<const DegreeOperator&(int)>& system) const;

@@ -58,7 +58,6 @@ std::expected<Material, MaterialError> Material::Create(
   material.G_ = nd.G();
   material.radius_ = mesh.Right(last);
   material.rho_ = mesh.Nodal(model, "rho");
-  material.rhoPotential_ = material.rho_;
   material.drho_ = mesh.Nodal(model, "rho", 1);
   material.g_ = mesh.NodalGravity(model);
   material.surfaceGravity_ = material.g_.back();
@@ -318,7 +317,6 @@ Material Material::Shifted(const MaterialDirection& d, double eps) const {
     other.moduli_.L[i] += eps * v.moduli.L[i];
     other.moduli_.N[i] += eps * v.moduli.N[i];
     other.rho_[i] += eps * v.rho[i];
-    other.rhoPotential_[i] += eps * v.rho[i];  // a self-consistent shift
     other.drho_[i] += eps * v.drho[i];
     other.g_[i] += eps * v.g[i];
   }
@@ -335,18 +333,6 @@ std::expected<Material, MaterialError> Material::WithModuli(
   }
   auto other = *this;
   other.moduli_ = std::move(moduli);
-  return other;
-}
-
-std::expected<Material, MaterialError> Material::WithDensityGravityHeld(
-    std::vector<double> rho) const {
-  if (rho.size() != rho_.size()) {
-    return std::unexpected(MaterialError{
-        std::format("the density has {} nodal values, the mesh {}", rho.size(),
-                    rho_.size())});
-  }
-  auto other = *this;
-  other.rho_ = std::move(rho);  // rhoPotential_, g_, drho_ stay
   return other;
 }
 

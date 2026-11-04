@@ -132,30 +132,6 @@ struct Body {
   }
 };
 
-/// The rheology with the density shifted nodally over the solid elements
-/// above the centre, gravity, stratification and moduli held (the
-/// lateral density's convention in 1D).
-[[nodiscard]] Rheology ShiftedDensity(const Body& body,
-                                      const std::function<double(double)>& f) {
-  const auto& mesh = body.material.Mesh();
-  const auto n = mesh.NGll();
-  auto rho = std::vector<double>(body.material.Rho().begin(), body.material.Rho().end());
-  for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    if (body.material.IsFluid(e) || (e == 0 && mesh.Left(0) == 0.0)) continue;
-    for (auto q = 0; q < n; ++q) {
-      const auto i = static_cast<std::size_t>(e) * n + q;
-      rho[i] *= 1.0 + f(mesh.Radius(e, q));
-    }
-  }
-  auto branches = std::vector<Rheology::Branch>{};
-  for (auto k = std::size_t{0}; k < body.rheology.BranchCount(); ++k) {
-    branches.push_back(body.rheology.BranchAt(k));
-  }
-  return Rheology::Create(body.material.WithDensityGravityHeld(std::move(rho)).value(),
-                          std::move(branches))
-      .value();
-}
-
 /// The steps from rest, both paths, and the worst relative difference of
 /// the surface U, V and phi per (l, m) at the end.
 double CompareSteps(const ViscoelasticOperator& op1, const Viscoelastic3D& op3,
@@ -442,292 +418,10 @@ TEST(LateralModuli3D, CoupledEvolutionMatchesTheShiftedRheology) {
   }
 }
 
-TEST(LateralModuli3D, AngleUniformDensityMatchesThe1DStepperWithGravityHeld) {
-  // A smooth 5% shift of the density over the solid above the centre, at
-  // the GLL memory points, gravity and stratification held: exactly the
-  // 1D stepper on the material with its density replaced and gravity
-  // held (Material::WithDensityGravityHeld), both schemes, two steps
-  // from rest — the stepped forward's density pipeline against the
-  // radial operator.
-  auto body = Body::Make();
-  const auto tau = body.rheology.MinRelaxationTime();
-  const auto density = [](double r) { return 0.05 * (0.3 + 0.7 * r * r); };
-  ViscoelasticOperator op1(ShiftedDensity(body, density), kLmax,
-                           {.memory_points = MemoryPointSet::Gll});
-  Viscoelastic3D op3(
-      body.rheology, kLmax, [](double, double, double) { return 0.0; },
-      {.memory_points = MemoryPointSet::Gll,
-       .moduli = {.density = [&](double r, double, double) { return density(r); }}});
-  EXPECT_EQ(op3.CompanionCount(), 4u);
-  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    auto iterations = 0;
-    const auto worst = CompareSteps(op1, op3, scheme, 0.7 * tau, 2, iterations);
-    EXPECT_LT(worst, 1e-10) << "scheme " << static_cast<int>(scheme);
-    std::cout << "density, scheme " << static_cast<int>(scheme) << ": worst " << worst
-              << ", passes " << iterations << '\n';
-  }
-}
-
-TEST(LateralModuli3D, DISABLED_DensityDiagnostic) {
-  // Not a gate: the stepped density path against the 1D stepper with
-  // gravity held, piece by piece — the elastic start per degree, then
-  // one step — printed.
-  auto body = Body::Make();
-  const auto tau = body.rheology.MinRelaxationTime();
-  const auto density = [](double r) { return 0.05 * (0.3 + 0.7 * r * r); };
-  const auto shiftedRheology = ShiftedDensity(body, density);
-  const auto& shifted = shiftedRheology.BaseMaterial();
-  ViscoelasticOperator op1(shiftedRheology, kLmax, {.memory_points = MemoryPointSet::Gll});
-  Viscoelastic3D op3(
-      body.rheology, kLmax, [](double, double, double) { return 0.0; },
-      {.memory_points = MemoryPointSet::Gll,
-       .moduli = {.density = [&](double r, double, double) { return density(r); }}});
-  const auto load3 = [](int l, double) { return LoadColumns(l); };
-  const auto x3 = op3.SolveElastic(op3.ZeroState(), load3);
-  std::cout << "start solve: " << op3.LastElasticSolve().iterations << " iterations, residual "
-            << op3.LastElasticSolve().residual << '\n';
-  for (auto l = 0; l <= kLmax; ++l) {
-    const DegreeOperator op(shifted, l, DegreeOperator::Options{});
-    const auto ndof = static_cast<std::size_t>(op.DofCount());
-    const auto unit = op.Solve(op.Load(), 1);
-    const auto columns = LoadColumns(l);
-    auto worst = 0.0, scale = 0.0;
-    for (auto m = 0; m <= l; ++m) {
-      for (auto d = std::size_t{0}; d < ndof; ++d) {
-        const auto ref = columns[m] * unit[d];
-        const auto ours = x3.spheroidal.at(l)[static_cast<std::size_t>(m) * ndof + d];
-        scale = std::max(scale, std::abs(ref));
-        worst = std::max(worst, std::abs(ours - ref));
-      }
-    }
-    std::cout << "  start degree " << l << ": " << worst / scale << '\n';
-  }
-  for (auto steps : {1, 2}) {
-    auto iterations = 0;
-    const auto worst = CompareSteps(op1, op3, Scheme::BackwardEuler, 0.7 * tau, steps, iterations);
-    std::cout << "after " << steps << " step(s): worst " << worst << '\n';
-  }
-}
-
-TEST(LateralModuli3D, DISABLED_DensityStaticDiagnostic) {
-  // Not a gate: the stepper's start solve against the static solver's
-  // full solve on the same density field, and the static solver's full
-  // and first-order solves against the 1D shifted operator, per degree.
-  auto body = Body::Make();
-  const auto density = [](double r) { return 0.05 * (0.3 + 0.7 * r * r); };
-  const auto shiftedRheology = ShiftedDensity(body, density);
-  const auto& shifted = shiftedRheology.BaseMaterial();
-  Viscoelastic3D op3(
-      body.rheology, kLmax, [](double, double, double) { return 0.0; },
-      {.memory_points = MemoryPointSet::Gll,
-       .moduli = {.density = [&](double r, double, double) { return density(r); }}});
-  ElasticPerturbation3D born(body.material, kLmax);
-  const auto& grid = born.Coupling().Grid();
-  auto load = grid.ZeroCoefficients();
-  for (auto l = 0; l <= kLmax; ++l) {
-    const auto columns = LoadColumns(l);
-    for (auto m = 0; m <= l; ++m) load[SurfaceGrid::Index(l, m)] = columns[m];
-  }
-  const auto x3 = op3.SolveElastic(op3.ZeroState(), [](int l, double) { return LoadColumns(l); });
-  const auto [xb, info] = born.SolveLateral(load, {}, {}, op3.DensityPerturbation(), {.rtol = 1e-13});
-  const auto x0 = born.SolveLoad(load);
-  const auto dx = born.Respond(x0, {}, {}, op3.DensityPerturbation());
-  std::cout << "static solve: " << info.iterations << " iterations\n";
-  for (auto l = 0; l <= kLmax; ++l) {
-    const DegreeOperator op(shifted, l, DegreeOperator::Options{});
-    const auto ndof = static_cast<std::size_t>(op.DofCount());
-    const auto unit = op.Solve(op.Load(), 1);
-    const auto columns = LoadColumns(l);
-    auto w3 = 0.0, wb = 0.0, w1 = 0.0, scale = 0.0, bornScale = 0.0;
-    for (auto m = 0; m <= l; ++m) {
-      for (auto d = std::size_t{0}; d < ndof; ++d) {
-        const auto i = static_cast<std::size_t>(m) * ndof + d;
-        const auto ref = columns[m] * unit[d];
-        scale = std::max(scale, std::abs(ref));
-        bornScale = std::max(bornScale, std::abs(dx.spheroidal.at(l)[i]));
-        w3 = std::max(w3, std::abs(x3.spheroidal.at(l)[i] - ref));
-        wb = std::max(wb, std::abs(xb.spheroidal.at(l)[i] - ref));
-        w1 = std::max(w1, std::abs(x0.spheroidal.at(l)[i] + dx.spheroidal.at(l)[i] - ref));
-      }
-    }
-    std::cout << "  degree " << l << ": stepper start " << w3 / scale << ", static full "
-              << wb / scale << ", static first order " << w1 / scale
-              << " (born/full " << bornScale / scale << ")\n";
-  }
-}
-
-TEST(LateralModuli3D, CoupledEvolutionMatchesTheShiftedDensity) {
-  // The sea-level-coupled evolution under an angle-uniform lateral
-  // density with the axial rotational feedback on equals the evolution
-  // on the rheology with its density replaced and gravity held, at every
-  // node including the start: the tide's body force rho(x) grad psi and
-  // the inertia moment int rho(x) U r^3 carry the lateral density too.
-  auto body = Body::Make();
-  const auto density = [](double r) { return 0.05 * (0.3 + 0.7 * r * r); };
-  const auto shifted = ShiftedDensity(body, density);
-  ViscoelasticOperator reference(body.rheology, kLmax);
-  SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
-                        SeaLevelParameters{});
-  Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
-  fingerprint.SetAnalyticTestState(0.0);
-  const auto length = solver.SolverScales().Length();
-  auto toNd = [&](std::vector<double> si) {
-    for (auto& v : si) v /= length;
-    return si;
-  };
-  const auto ice = toNd(fingerprint.IceThickness());
-  const auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
-  auto load = std::vector<double>(ice.size());
-  for (auto i = std::size_t{0}; i < load.size(); ++i) {
-    load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) * -0.1 * ice[i];
-  }
-  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
-  auto times = std::vector<double>{};
-  for (auto n = 0; n <= 3; ++n) times.push_back(2.5 * n * kyr);
-  const auto iceLoad = [&](double t) {
-    auto out = load;
-    for (auto& v : out) v *= 0.5 + 0.5 * t / times.back();
-    return out;
-  };
-  auto run = [&](const Rheology& rheology, bool moduli) {
-    Viscoelastic3D::Options options{.memory_points = MemoryPointSet::Gll};
-    if (moduli) {
-      options.moduli = {.density = [&](double r, double, double) { return density(r); }};
-    }
-    Viscoelastic3D op(rheology, kLmax, [](double, double, double) { return 0.0; },
-                      options);
-    SeaLevelEvolution3D evolution(
-        op, solver, state,
-        {.rotation = RotationalFeedback::Axial, .rtol = 1e-12, .coupled_rtol = 1e-12});
-    return evolution.Run(times, iceLoad);
-  };
-  const auto a = run(body.rheology, true);
-  const auto b = run(shifted, false);
-  ASSERT_EQ(a.size(), b.size());
-  for (auto n = std::size_t{0}; n < a.size(); ++n) {
-    for (const auto& [name, fa, fb] :
-         {std::tuple{"sea level", &a[n].seaLevelChange, &b[n].seaLevelChange},
-          std::tuple{"displacement", &a[n].displacement, &b[n].displacement},
-          std::tuple{"potential", &a[n].potential, &b[n].potential}}) {
-      auto scale = 0.0, diff = 0.0;
-      for (auto i = std::size_t{0}; i < fa->size(); ++i) {
-        scale = std::max(scale, std::abs((*fb)[i]));
-        diff = std::max(diff, std::abs((*fa)[i] - (*fb)[i]));
-      }
-      EXPECT_GT(scale, 0.0) << name << " node " << n;
-      EXPECT_LT(diff, 1e-9 * scale) << name << " node " << n << " " << diff / scale;
-    }
-  }
-}
-
-TEST(LateralModuli3D, TideAndMomentTransposesUnderLateralDensity) {
-  // The two rotational pieces of a lateral density and their transposes,
-  // as identities on one operator: (i) the tide's lateral force paired
-  // with solutions y equals the tide amplitudes paired with the
-  // companions' dual of y read along the potential's radial profile;
-  // (ii) the lateral inertia moment of solutions u equals u paired with
-  // the force of the moment's grid weight W r^3 delta rho on the U
-  // companion. What the discrete sweep's channel and moment duals rely on.
-  auto body = Body::Make();
-  Viscoelastic3D op(
-      body.rheology, kLmax, [](double, double, double) { return 0.0; },
-      {.memory_points = MemoryPointSet::Gll,
-       .moduli = {.density = [](double r, double theta, double phi) {
-         return 0.03 * (0.3 + 0.7 * r * r) *
-                (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
-       }}});
-  const auto& coupling = op.Coupling();
-  const auto load3 = [](int l, double) { return LoadColumns(l); };
-  const auto y = op.SolveElastic(op.ZeroState(), load3);
-  const auto u = op.SolveElastic(op.ZeroState(), [](int l, double) {
-    auto c = LoadColumns(l);
-    for (auto& v : c) v *= 0.7 + 0.1 * l;
-    return c;
-  });
-  const auto sph = [&](int l) -> const DegreeOperator& { return op.UnrelaxedSpheroidal(l); };
-  const auto tor = [&](int l) -> const ToroidalOperator& { return op.UnrelaxedToroidal(l); };
-  // (i) the tide
-  auto tide = std::map<int, std::vector<Complex>>{};
-  for (auto l = 0; l <= kLmax; ++l) {
-    auto c = LoadColumns(l);
-    for (auto& v : c) v *= 0.3 * (l + 1);
-    tide.emplace(l, std::move(c));
-  }
-  const auto forces = op.LateralTideForces(tide, sph);
-  auto lhs = 0.0;
-  for (const auto& [l, f] : forces) {
-    const auto& yl = y.spheroidal.at(l);
-    const auto ndof = yl.size() / static_cast<std::size_t>(l + 1);
-    for (auto m = 0; m <= l; ++m) {
-      const auto w = m == 0 ? 1.0 : 2.0;
-      for (auto d = std::size_t{0}; d < ndof; ++d) {
-        const auto i = static_cast<std::size_t>(m) * ndof + d;
-        lhs += w * (yl[i] * std::conj(f[i])).real();
-      }
-    }
-  }
-  // the companions' dual of y: A D S P y
-  auto grid = coupling.Synthesise(op.StrainCoefficients(y, sph, tor));
-  op.WeightCompanions(grid);
-  const auto dual = coupling.Analyse(grid);
-  const auto den = static_cast<std::size_t>(op.DensityBlock());
-  const auto radius = body.material.Radius();
-  auto rhs = 0.0;
-  for (auto l = 0; l <= kLmax; ++l) {
-    const auto p = l == 0 ? 2 : l;
-    for (auto m = 0; m <= l; ++m) {
-      Complex s = 0.0;
-      for (auto node = 0; node < coupling.NodeCount(); ++node) {
-        if (coupling.ElementOfNode(node) < op.UnrelaxedSpheroidal(l).FirstElement()) continue;
-        const auto psi = std::pow(coupling.RadiusOfNode(node) / radius, p);
-        const auto at = coupling.CoefficientOffset(node) + SurfaceGrid::Index(l, m);
-        s += coupling.WeightOfNode(node) * coupling.RadiusOfNode(node) * psi *
-             (static_cast<double>(p) * dual.scalars[den + 0][at] + dual.scalars[den + 1][at]);
-      }
-      const auto w = m == 0 ? 1.0 : 2.0;
-      rhs += w * (tide.at(l)[m] * std::conj(s)).real();
-    }
-  }
-  std::cout << "tide: lhs " << lhs << " rhs " << rhs << '\n';
-  EXPECT_NEAR(lhs, rhs, 1e-10 * std::abs(lhs));
-  EXPECT_NE(lhs, 0.0);
-  // (ii) the moment
-  auto gridU = coupling.Synthesise(op.StrainCoefficients(u, sph, tor));
-  const auto moment = op.LateralMomentOf(gridU);
-  auto field = std::vector<double>(coupling.GridValueCount(), 0.0);
-  {
-    const auto dRho = op.DensityPerturbation();
-    for (auto node = 0; node < coupling.NodeCount(); ++node) {
-      const auto r = coupling.RadiusOfNode(node);
-      const auto factor = coupling.WeightOfNode(node) * r * r * r;
-      const auto at = coupling.FieldOffset(node);
-      for (auto x = std::size_t{0}; x < coupling.FieldSizeOf(node); ++x) {
-        field[at + x] = factor * dRho[at + x];
-      }
-    }
-  }
-  const auto momentForces =
-      coupling.PointwiseForce(coupling.AnalyseScalar(field), Component::U, sph);
-  auto paired = 0.0;
-  for (const auto& [l, f] : momentForces) {
-    const auto& ul = u.spheroidal.at(l);
-    const auto ndof = ul.size() / static_cast<std::size_t>(l + 1);
-    for (auto m = 0; m <= l; ++m) {
-      const auto w = m == 0 ? 1.0 : 2.0;
-      for (auto d = std::size_t{0}; d < ndof; ++d) {
-        const auto i = static_cast<std::size_t>(m) * ndof + d;
-        paired += w * (ul[i] * std::conj(f[i])).real();
-      }
-    }
-  }
-  std::cout << "moment: direct " << moment << " paired " << paired << '\n';
-  EXPECT_NEAR(moment, paired, 1e-10 * std::abs(moment));
-  EXPECT_NE(moment, 0.0);
-}
-
 TEST(LateralModuli3D, DISABLED_StepTiming) {
-  // Not a gate: the cost of a step with lateral viscosity alone, with
-  // lateral moduli, and with density too, at SL3DPP_LMAX (default 32),
+  // Not a gate: the cost of a step with lateral viscosity alone, with a
+  // lateral shear (confined, then everywhere), and with a bulk modulus
+  // too, at SL3DPP_LMAX (default 32),
   // threads from OMP_NUM_THREADS; three steps each, the last timed.
   const auto* env = std::getenv("SL3DPP_LMAX");
   const auto lmax = env ? std::atoi(env) : 32;
@@ -761,9 +455,6 @@ TEST(LateralModuli3D, DISABLED_StepTiming) {
   const auto shear = [](double r, double theta, double phi) {
     return 0.1 * (0.5 + r * r) * std::sin(theta) * std::sin(theta) * std::cos(2 * phi);
   };
-  const auto density = [](double r, double theta, double) {
-    return 0.03 * (0.3 + 0.7 * r * r) * std::cos(theta);
-  };
   struct Case {
     const char* name;
     Viscoelastic3D::Options::LateralModuli moduli;
@@ -775,7 +466,9 @@ TEST(LateralModuli3D, DISABLED_StepTiming) {
   for (const auto& c : {Case{"viscosity only", {}},
                         Case{"+ mantle shear", {.shear = mantleShear}},
                         Case{"+ shear everywhere", {.shear = shear}},
-                        Case{"+ shear + density", {.shear = shear, .density = density}}}) {
+                        Case{"+ shear + bulk", {.shear = shear, .bulk = [](double r, double theta, double) {
+                          return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+                        }}}}) {
     Viscoelastic3D op(rheology, lmax, delta, {.moduli = c.moduli});
     auto state = op.ZeroState();
     using Seconds = std::chrono::duration<double>;

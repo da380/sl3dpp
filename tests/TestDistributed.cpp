@@ -792,7 +792,7 @@ int main(int argc, char** argv) {
 }
 
 TEST(Distributed, LateralModuliStepsMatchTheOneProcessSteps) {
-  // Lateral moduli and density under mpiexec: the conjugate-gradient start
+  // Lateral moduli under mpiexec: the conjugate-gradient start
   // solve pairing each rank's share, two lateral steps, and the static
   // problem on a branchless rheology, against the one process.
   constexpr auto lmax = 16;
@@ -826,10 +826,6 @@ TEST(Distributed, LateralModuliStepsMatchTheOneProcessSteps) {
           },
       .bulk = [](double r, double theta, double) {
         return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
-      },
-      .density = [](double r, double theta, double phi) {
-        return 0.03 * (0.3 + 0.7 * r * r) *
-               (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
       }};
   const auto options = Viscoelastic3D::Options{.eps = eps,
                                                .parallel = false,

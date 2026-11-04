@@ -807,7 +807,7 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
   }
 }
 
-// -- lateral moduli and density over the ranks --------------------------------
+// -- lateral moduli over the ranks --------------------------------------------
 
 namespace {
 
@@ -820,17 +820,13 @@ Viscoelastic3D::Options::LateralModuli RankModuli() {
               },
           .bulk = [](double r, double theta, double) {
             return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
-          },
-          .density = [](double r, double theta, double phi) {
-            return 0.03 * (0.3 + 0.7 * r * r) *
-                   (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
           }};
 }
 
 }  // namespace
 
 TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
-  // Lateral moduli and density on two and three ranks: the start solve
+  // Lateral moduli on two and three ranks: the start solve
   // (the conjugate-gradient solve pairing each rank's share) and two
   // lateral steps, each rank's surface response and memory against the
   // one process's; and the static problem on a branchless rheology.
@@ -861,8 +857,14 @@ TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
     }
     result.U = op.Surface(solutions, Component::U);
     result.phi = op.Surface(solutions, Component::Phi);
-    // the static problem: a branchless rheology's elastic solve
-    const auto x = stat.SolveElastic(stat.ZeroState(), load);
+    // the static problem: a branchless rheology's elastic solve under a
+    // load and a tidal potential (the 3D body tide over the ranks)
+    const auto tide = [](int l, double) {
+      auto c = LoadColumns(l);
+      for (auto& v : c) v *= 0.3 * (l + 1);
+      return c;
+    };
+    const auto x = stat.SolveElastic(stat.ZeroState(), load, tide);
     result.startIterations = stat.LastElasticSolve().iterations;
     result.staticU = stat.Surface(x, Component::U);
     return result;
@@ -925,9 +927,8 @@ TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
 }
 
 TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
-  // The 3D adjoints on three ranks with lateral moduli and density in the
-  // background and the rotational feedback on (the tide's and the
-  // moment's lateral terms and their duals over the ranks), continuous
+  // The 3D adjoints on three ranks with lateral moduli in the background
+  // and the rotational feedback on, continuous
   // and discrete: the ice kernels on every rank, and each rank's slice of
   // the viscosity kernels, against the one process's sweep.
   constexpr auto lmax = 8;

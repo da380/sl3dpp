@@ -904,12 +904,6 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
   const auto vBulk = [](double r, double theta, double phi) {
     return 0.05 * (1.0 - 0.5 * r) * (1.0 + 0.5 * std::sin(theta) * std::sin(phi));
   };
-  const auto density0 = [](double r, double theta, double phi) {
-    return 0.03 * (0.3 + 0.7 * r * r) * (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
-  };
-  const auto vDensity = [](double r, double theta, double phi) {
-    return 0.03 * (0.3 + 0.7 * r * r) * (0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta));
-  };
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     auto functional = [&](double eps) {
       Viscoelastic3D op(
@@ -920,9 +914,6 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
                       },
                       .bulk = [&](double r, double t, double p) {
                         return bulk0(r, t, p) + eps * vBulk(r, t, p);
-                      },
-                      .density = [&](double r, double t, double p) {
-                        return density0(r, t, p) + eps * vDensity(r, t, p);
                       }}});
       SeaLevelEvolution3D evolution(
           op, scene.solver, scene.state,
@@ -932,7 +923,7 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
     };
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                       {.memory_points = MemoryPointSet::Gll,
-                       .moduli = {.shear = shear0, .bulk = bulk0, .density = density0}});
+                       .moduli = {.shear = shear0, .bulk = bulk0}});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationalFeedback::None,
@@ -945,24 +936,16 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
     TangentPerturbation3D direction;
     direction.material.mu.assign(coupling.GridValueCount(), 0.0);
     direction.material.kappa.assign(coupling.GridValueCount(), 0.0);
-    direction.material.rho.assign(coupling.GridValueCount(), 0.0);
-    const auto ngll = scene.material.Mesh().NGll();
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
       const auto r = coupling.RadiusOfNode(rn);
       const auto at = coupling.FieldOffset(rn);
-      const auto rhoNode =
-          scene.material.Rho()[static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
-                               coupling.NodeInElementOf(rn)];
       const auto mu = coupling.GridOf(rn).FromFunction(
           [&](double t, double p) { return vShear(r, t, p) * op.UnrelaxedShearAtNodes()[rn]; });
       const auto kappa = coupling.GridOf(rn).FromFunction(
           [&](double t, double p) { return vBulk(r, t, p) * op.BulkModulusAtNodes()[rn]; });
-      const auto rho = coupling.GridOf(rn).FromFunction(
-          [&](double t, double p) { return vDensity(r, t, p) * rhoNode; });
       for (auto x = std::size_t{0}; x < mu.size(); ++x) {
         direction.material.mu[at + x] = mu[x];
         direction.material.kappa[at + x] = kappa[x];
-        direction.material.rho[at + x] = rho[x];
       }
     }
     const auto run = TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,

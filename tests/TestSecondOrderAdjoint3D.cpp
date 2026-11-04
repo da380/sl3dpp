@@ -1085,10 +1085,6 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
                       },
                   .bulk = [](double r, double theta, double) {
                     return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
-                  },
-                  .density = [](double r, double theta, double phi) {
-                    return 0.03 * (0.3 + 0.7 * r * r) *
-                           (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
                   }}});
   SeaLevelEvolution3D evolution(
       op, scene.solver, scene.state,
@@ -1113,9 +1109,6 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
     d.material.mu = LateralModulus(
         coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
         angular);
-    d.material.rho = LateralModulus(
-        coupling, scene.material, scene.material.Rho(),
-        [](double r) { return 0.03 * (0.3 + 0.7 * r * r); }, angular);
     d.tangent.material = d.material;
     return d;
   };
@@ -1151,15 +1144,10 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
             1e-10 * MaxAbs(first.kappaKernel3D));
   EXPECT_LT(MaxDiff(kernelsU.muKernel3D, first.muKernel3D),
             1e-10 * MaxAbs(first.muKernel3D));
-  EXPECT_LT(MaxDiff(kernelsU.rhoKernel3D, first.rhoKernel3D),
-            1e-10 * MaxAbs(first.rhoKernel3D));
-  EXPECT_GT(MaxAbs(alongU.rhoKernel3D), 0.0);
   const auto huW = Pairing(scene, coupling, alongU.ice, alongU.itauKernel3D, w,
-                           alongU.kappaKernel3D, alongU.muKernel3D) +
-                   FieldPairing(coupling, alongU.rhoKernel3D, w.material.rho);
+                           alongU.kappaKernel3D, alongU.muKernel3D);
   const auto hwU = Pairing(scene, coupling, alongW.ice, alongW.itauKernel3D, u,
-                           alongW.kappaKernel3D, alongW.muKernel3D) +
-                   FieldPairing(coupling, alongW.rhoKernel3D, u.material.rho);
+                           alongW.kappaKernel3D, alongW.muKernel3D);
   std::cout << "huW " << huW << " hwU " << hwU << " diff " << huW - hwU << '\n';
   EXPECT_NEAR(huW, hwU, 1e-8 * std::abs(huW));
   SecondOrderDirection3D uw;
