@@ -57,6 +57,10 @@ struct LateralSystem {
   std::function<Viscoelastic3D::Solutions(const LateralFields&,
                                           const LateralFields&)>
       solve;
+  /// Distributed over radial segments: the pairings are each process's
+  /// part (its solution against the forces' shares) summed by this
+  /// collective; empty undistributed.
+  std::function<void(std::span<double>)> sum{};
 };
 
 inline double LateralPair(const Viscoelastic3D::Solutions& x,
@@ -101,7 +105,13 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
                           bool lateral = true) {
   auto x = system.solve(fs, ft);
   LateralSolveInfo info;
-  const auto energy = LateralPair(x, fs, ft);  // <f, K_ref^-1 f>
+  auto pair = [&](const Viscoelastic3D::Solutions& a, const LateralFields& s,
+                  const LateralFields& t) {
+    auto value = LateralPair(a, s, t);
+    if (system.sum) system.sum(std::span(&value, 1));
+    return value;
+  };
+  const auto energy = pair(x, fs, ft);  // <f, K_ref^-1 f>
   if (!lateral) {
     info.converged = true;
     info.residuals.push_back(0.0);
@@ -114,7 +124,7 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
   for (auto& [l, v] : rs) for (auto& c : v) c = -c;
   for (auto& [l, v] : rt) for (auto& c : v) c = -c;
   auto z = system.solve(rs, rt);
-  auto rz = LateralPair(z, rs, rt);
+  auto rz = pair(z, rs, rt);
   auto relative = [&](double value) {
     return energy > 0.0 ? std::sqrt(std::abs(value) / energy)
                         : std::sqrt(std::abs(value));
@@ -129,7 +139,7 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
       break;
     }
     auto [as, at] = system.apply(p);
-    const auto curvature = LateralPair(p, as, at);
+    const auto curvature = pair(p, as, at);
     if (curvature <= 0.0) info.indefinite = true;
     const auto alpha = rz / curvature;
     LateralAxpy(x.spheroidal, alpha, p.spheroidal);
@@ -137,7 +147,7 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
     LateralAxpy(rs, -alpha, as);
     LateralAxpy(rt, -alpha, at);
     z = system.solve(rs, rt);
-    const auto next = LateralPair(z, rs, rt);
+    const auto next = pair(z, rs, rt);
     if (next < 0.0) info.indefinite = true;
     const auto beta = next / rz;
     rz = next;

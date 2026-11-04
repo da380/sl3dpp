@@ -1,5 +1,6 @@
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <stdexcept>
@@ -127,9 +128,10 @@ ElasticPerturbation3D::Solutions ElasticPerturbation3D::SolveLoad(
 
 std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
 ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
-                             std::span<const double> dKappa) const {
+                             std::span<const double> dKappa,
+                             std::span<const double> dRho) const {
   const auto values = coupling_.GridValueCount();
-  for (const auto d : {dMu, dKappa}) {
+  for (const auto d : {dMu, dKappa, dRho}) {
     if (!d.empty() && d.size() != values) {
       throw std::invalid_argument(
           "a moduli direction lives on the coupling's grid values");
@@ -180,6 +182,24 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
                              [&](std::size_t i) { field[i] *= dKappa[i]; });
     const auto weighted = coupling_.AnalyseScalar(field);
     add(spheroidal, coupling_.DilatationForce(weighted, sph));
+  }
+  if (!dRho.empty()) {
+    // The density pipeline: the four gravitational fields, weighted
+    // pointwise, back as force.
+    auto fields = std::vector<std::vector<Complex>>(
+        GridCoupling::kDensityFields,
+        std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0));
+    for (const auto& [l, xl] : x.spheroidal) {
+      coupling_.AddDensityFieldsOfSolution(fields, l, Spheroidal(l), xl);
+    }
+    auto weighted = std::vector<std::vector<Complex>>{};
+    for (const auto& f : fields) {
+      auto grid = coupling_.SynthesiseScalar(f);
+      detail::ParallelElements(values, true,
+                               [&](std::size_t i) { grid[i] *= dRho[i]; });
+      weighted.push_back(coupling_.AnalyseScalar(grid));
+    }
+    add(spheroidal, coupling_.DensityForce(weighted, sph));
   }
   return {std::move(spheroidal), std::move(toroidal)};
 }
@@ -261,8 +281,9 @@ std::vector<std::complex<double>> ApplyColumns(
 
 std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
 ElasticPerturbation3D::Apply(const Solutions& x, std::span<const double> dMu,
-                             std::span<const double> dKappa) const {
-  auto [spheroidal, toroidal] = Force(x, dMu, dKappa);
+                             std::span<const double> dKappa,
+                             std::span<const double> dRho) const {
+  auto [spheroidal, toroidal] = Force(x, dMu, dKappa, dRho);
   for (const auto& [l, xl] : x.spheroidal) {
     const auto reference = ApplyColumns(Spheroidal(l), xl, l + 1);
     auto& b = spheroidal.at(l);
@@ -335,6 +356,7 @@ ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
                                     const Forces& toroidalForces,
                                     std::span<const double> dMu,
                                     std::span<const double> dKappa,
+                                    std::span<const double> dRho,
                                     SolveOptions options) const {
   // Every degree gets a slot, spheroidal and toroidal, so that the
   // lateral coupling has somewhere to go.
@@ -359,12 +381,12 @@ ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
     }
   }
   const auto system = detail::LateralSystem{
-      .apply = [&](const Solutions& x) { return Apply(x, dMu, dKappa); },
+      .apply = [&](const Solutions& x) { return Apply(x, dMu, dKappa, dRho); },
       .solve = [&](const Forces& s, const Forces& t) { return Solve(s, t, false); }};
   auto [x, info] = detail::LateralConjugateGradients(
       fs, ft, system,
       {.rtol = options.rtol, .max_iterations = options.max_iterations},
-      !(dMu.empty() && dKappa.empty()));
+      !(dMu.empty() && dKappa.empty() && dRho.empty()));
   SolveInfo out;
   out.iterations = info.iterations;
   out.residual = info.residual;
@@ -376,8 +398,8 @@ ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
 
 ElasticPerturbation3D::Solutions ElasticPerturbation3D::Respond(
     const Solutions& x, std::span<const double> dMu,
-    std::span<const double> dKappa) const {
-  const auto [spheroidal, toroidal] = Force(x, dMu, dKappa);
+    std::span<const double> dKappa, std::span<const double> dRho) const {
+  const auto [spheroidal, toroidal] = Force(x, dMu, dKappa, dRho);
   return Solve(spheroidal, toroidal, true);
 }
 
@@ -444,9 +466,27 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
   const auto ex = strainOf(x);
   const auto Dy = dilatationOf(y);
   const auto Dx = dilatationOf(x);
+  // the four density fields of each, flat: field k at [k * values + i]
+  auto densityFieldsOf = [&](const Solutions& s) {
+    auto fields = std::vector<std::vector<Complex>>(
+        GridCoupling::kDensityFields,
+        std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0));
+    for (const auto& [l, sl] : s.spheroidal) {
+      coupling.AddDensityFieldsOfSolution(fields, l, sph(l), sl);
+    }
+    auto flat = std::vector<double>(GridCoupling::kDensityFields * values);
+    for (auto k = std::size_t{0}; k < GridCoupling::kDensityFields; ++k) {
+      const auto grid = coupling.SynthesiseScalar(fields[k]);
+      std::ranges::copy(grid, flat.begin() + static_cast<std::ptrdiff_t>(k * values));
+    }
+    return flat;
+  };
+  const auto fy = densityFieldsOf(y);
+  const auto fx = densityFieldsOf(x);
   Kernels out;
   out.kappa.assign(values, 0.0);
   out.mu.assign(values, 0.0);
+  out.rho.assign(values, 0.0);
   detail::ParallelElements(static_cast<std::size_t>(nodes), true, [&](std::size_t n) {
     const auto rn = static_cast<int>(n);
     const auto base = coupling.FieldOffset(rn);
@@ -460,6 +500,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
                   (12.0 * ey.r[i] * ex.r[i] +
                    8.0 * (ey.c[1][i] * std::conj(ex.c[1][i])).real() +
                    4.0 * (ey.c[0][i] * std::conj(ex.c[0][i])).real());
+      out.rho[i] = coupling.DensityPairingAt(rn, 0.0, fy, fx, i);
     }
   });
   return out;

@@ -871,3 +871,116 @@ TEST(TangentLinear3D, SecondOrderRunInTheMaterial) {
         << "node " << n;
   }
 }
+
+TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
+  // At a laterally heterogeneous elastic background (10% shear, 5% bulk,
+  // angle-varying) with lateral viscosity on: the 3D tangent run along a
+  // LATERAL direction in kappa and mu matches central differences of the
+  // coupled run with the background moduli shifted along it, second
+  // order with Richardson at 1e-6, both schemes.
+  auto scene = Scene::Make(1e21);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto iceLoad = Ramp(load, times.back());
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto g = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  // the background and the (relative) direction
+  const auto shear0 = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+            0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+  };
+  const auto bulk0 = [](double r, double theta, double) {
+    return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+  };
+  const auto vShear = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6));
+  };
+  const auto vBulk = [](double r, double theta, double phi) {
+    return 0.05 * (1.0 - 0.5 * r) * (1.0 + 0.5 * std::sin(theta) * std::sin(phi));
+  };
+  const auto density0 = [](double r, double theta, double phi) {
+    return 0.03 * (0.3 + 0.7 * r * r) * (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
+  };
+  const auto vDensity = [](double r, double theta, double phi) {
+    return 0.03 * (0.3 + 0.7 * r * r) * (0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta));
+  };
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    auto functional = [&](double eps) {
+      Viscoelastic3D op(
+          scene.rheology, kLmax, baseDelta,
+          {.memory_points = MemoryPointSet::Gll,
+           .moduli = {.shear = [&](double r, double t, double p) {
+                        return shear0(r, t, p) + eps * vShear(r, t, p);
+                      },
+                      .bulk = [&](double r, double t, double p) {
+                        return bulk0(r, t, p) + eps * vBulk(r, t, p);
+                      },
+                      .density = [&](double r, double t, double p) {
+                        return density0(r, t, p) + eps * vDensity(r, t, p);
+                      }}});
+      SeaLevelEvolution3D evolution(
+          op, scene.solver, scene.state,
+          {.scheme = scheme, .rotation = RotationalFeedback::None,
+           .rtol = 1e-12, .coupled_rtol = 1e-12});
+      return Objective(scene, g, evolution.Run(times, iceLoad).back().seaLevelChange);
+    };
+    Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
+                      {.memory_points = MemoryPointSet::Gll,
+                       .moduli = {.shear = shear0, .bulk = bulk0, .density = density0}});
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.scheme = scheme, .rotation = RotationalFeedback::None,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+    // the absolute direction over the grid values: the relative one
+    // times the reference moduli at the nodes
+    const auto& coupling = op.Coupling();
+    TangentPerturbation3D direction;
+    direction.material.mu.assign(coupling.GridValueCount(), 0.0);
+    direction.material.kappa.assign(coupling.GridValueCount(), 0.0);
+    direction.material.rho.assign(coupling.GridValueCount(), 0.0);
+    const auto ngll = scene.material.Mesh().NGll();
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto r = coupling.RadiusOfNode(rn);
+      const auto at = coupling.FieldOffset(rn);
+      const auto rhoNode =
+          scene.material.Rho()[static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                               coupling.NodeInElementOf(rn)];
+      const auto mu = coupling.GridOf(rn).FromFunction(
+          [&](double t, double p) { return vShear(r, t, p) * op.UnrelaxedShearAtNodes()[rn]; });
+      const auto kappa = coupling.GridOf(rn).FromFunction(
+          [&](double t, double p) { return vBulk(r, t, p) * op.BulkModulusAtNodes()[rn]; });
+      const auto rho = coupling.GridOf(rn).FromFunction(
+          [&](double t, double p) { return vDensity(r, t, p) * rhoNode; });
+      for (auto x = std::size_t{0}; x < mu.size(); ++x) {
+        direction.material.mu[at + x] = mu[x];
+        direction.material.kappa[at + x] = kappa[x];
+        direction.material.rho[at + x] = rho[x];
+      }
+    }
+    const auto run = TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                                       .rtol = 1e-12,
+                                                       .coupled_rtol = 1e-12})
+                         .Run(times, direction, &trajectory);
+    const auto predicted = Objective(scene, g, run.back().seaLevelChange);
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+  }
+}

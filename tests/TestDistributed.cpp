@@ -790,3 +790,101 @@ int main(int argc, char** argv) {
   MPI_Finalize();
   return failed;
 }
+
+TEST(Distributed, LateralModuliStepsMatchTheOneProcessSteps) {
+  // Lateral moduli and density under mpiexec: the conjugate-gradient start
+  // solve pairing each rank's share, two lateral steps, and the static
+  // problem on a branchless rheology, against the one process.
+  constexpr auto lmax = 16;
+  constexpr auto eps = 1e-2;
+  const auto degrees = std::vector<int>{8, 12};
+  const auto body = Body::Make(lmax);
+  const auto elastic = Rheology::Create(body.material, {}).value();
+  const auto share = ShareMesh(
+      body.material.Mesh(), MPI_COMM_WORLD,
+      GridCoupling::TransformWeights(
+          body.rheology, lmax, {.eps = eps, .transform_degrees = degrees}));
+  const auto tau = body.rheology.MinRelaxationTime();
+  auto noise = [](std::size_t k) {
+    const auto x = std::sin(12.9898 * static_cast<double>(k + 1)) * 43758.5453;
+    return x - std::floor(x) - 0.5;
+  };
+  const auto load = [&](int l, double) {
+    auto columns = std::vector<std::complex<double>>(l + 1);
+    for (auto m = 0; m <= l; ++m) {
+      columns[m] = m == 0 ? std::complex(noise(97 * l), 0.0)
+                          : std::complex(noise(97 * l + m), noise(55 * l + m));
+    }
+    return columns;
+  };
+  const auto moduli = Viscoelastic3D::Options::LateralModuli{
+      .shear =
+          [](double r, double theta, double phi) {
+            return 0.1 * (0.5 + r * r) *
+                   (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                    0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+          },
+      .bulk = [](double r, double theta, double) {
+        return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+      },
+      .density = [](double r, double theta, double phi) {
+        return 0.03 * (0.3 + 0.7 * r * r) *
+               (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
+      }};
+  const auto options = Viscoelastic3D::Options{.eps = eps,
+                                               .parallel = false,
+                                               .max_iterations = 100,
+                                               .rtol = 1e-12,
+                                               .moduli = moduli,
+                                               .radial_cuts = share.cuts,
+                                               .transform_degrees = degrees};
+  struct Result {
+    Viscoelastic3D::State state;
+    std::map<int, std::vector<std::complex<double>>> U, staticU;
+    std::vector<int> iterations;
+    int startIterations = 0;
+  };
+  auto run = [&](const Viscoelastic3D& op, const Viscoelastic3D& stat) {
+    auto result = Result{op.ZeroState()};
+    Viscoelastic3D::Solutions solutions;
+    for (auto i = 0; i < 2; ++i) {
+      auto step = op.Step(result.state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(step.info.converged);
+      result.iterations.push_back(step.info.iterations);
+      result.state = std::move(step.state);
+      solutions = std::move(step.solutions);
+    }
+    result.U = op.Surface(solutions, Component::U);
+    const auto x = stat.SolveElastic(stat.ZeroState(), load);
+    result.startIterations = stat.LastElasticSolve().iterations;
+    result.staticU = stat.Surface(x, Component::U);
+    return result;
+  };
+  const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+  const Viscoelastic3D wholeStatic(elastic, lmax, Peaked, options);
+  const auto want = run(whole, wholeStatic);
+  auto mine = options;
+  mine.segments = share.segments;
+  mine.collectives = share.collectives;
+  const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
+  const Viscoelastic3D stat(elastic, lmax, Peaked, mine);
+  const auto got = run(op, stat);
+  auto surface = 0.0, staticSurface = 0.0;
+  for (const auto& [l, values] : want.U) {
+    surface = std::max(surface, Relative(got.U.at(l), values));
+    staticSurface = std::max(staticSurface, Relative(got.staticU.at(l), want.staticU.at(l)));
+  }
+  // the within-step passes may differ by one under MPI's summation order
+  // when a residual lands at the tolerance (seen: 17 against 16)
+  ASSERT_EQ(got.iterations.size(), want.iterations.size());
+  for (auto i = std::size_t{0}; i < got.iterations.size(); ++i) {
+    EXPECT_LE(std::abs(got.iterations[i] - want.iterations[i]), 1) << i;
+  }
+  EXPECT_LE(std::abs(got.startIterations - want.startIterations), 1);
+  const auto worstSurface = MaxOverRanks(surface);
+  const auto worstStatic = MaxOverRanks(staticSurface);
+  const auto worstMemory = MaxOverRanks(SliceDifference(op, got.state, whole, want.state));
+  EXPECT_LT(worstSurface, 1e-11);
+  EXPECT_LT(worstStatic, 1e-11);
+  EXPECT_LT(worstMemory, 1e-11);
+}

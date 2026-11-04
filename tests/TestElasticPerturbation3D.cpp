@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
+#include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
@@ -708,4 +709,150 @@ TEST(ElasticPerturbation3D, DISABLED_TimingAtHigherDegree) {
             << " iterations (" << coupling.NodeCount() << " nodes, "
             << coupling.GridValueCount() << " grid values)\n";
   EXPECT_TRUE(info.converged);
+}
+
+// -- the lateral density ------------------------------------------------------
+
+TEST(ElasticPerturbation3D, AngleUniformDensityMatchesThe1DOperatorWithGravityHeld) {
+  // Angle-uniform delta rho(r) on the solid above the centre, gravity,
+  // the reference potential and the stratification held: the Born force
+  // of the density pipeline equals the difference of the 1D degree
+  // operators on the material with its density replaced and gravity held
+  // (Material::WithDensityGravityHeld) and on the material, applied to
+  // the same solution — exact, the coupling being linear in the local
+  // density under that convention — through the responses' surface
+  // values at 1e-9, every degree at order zero; no other order and no
+  // toroidal motion.
+  const auto material = MakeMaterial();
+  ElasticPerturbation3D born(material, kLmax);
+  const auto& coupling = born.Coupling();
+  const auto& grid = coupling.Grid();
+  const auto& mesh = material.Mesh();
+  const auto n = mesh.NGll();
+  auto load = grid.ZeroCoefficients();
+  for (auto l = 0; l <= kLmax; ++l) load[SurfaceGrid::Index(l, 0)] = 1.0;
+  const auto x = born.SolveLoad(load);
+  auto rho = std::vector<double>(material.Rho().begin(), material.Rho().end());
+  auto dRhoNodal = std::vector<double>(rho.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e) || (e == 0 && mesh.Left(0) == 0.0)) continue;
+    for (auto q = 0; q < n; ++q) {
+      const auto i = static_cast<std::size_t>(e) * n + q;
+      dRhoNodal[i] = 0.1 * (0.3 + 0.7 * mesh.Radius(e, q) * mesh.Radius(e, q)) * rho[i];
+      rho[i] += dRhoNodal[i];
+    }
+  }
+  const auto shifted = material.WithDensityGravityHeld(rho).value();
+  const auto dRho = Uniform(coupling, material, dRhoNodal);
+  const auto dx = born.Respond(x, {}, {}, dRho);
+  for (const auto component : {Component::U, Component::V, Component::Phi}) {
+    const auto surface = born.Surface(dx, component);
+    // the references first, the checks against the component's scale
+    auto references = std::vector<double>(kLmax + 1, 0.0);
+    auto scale = 0.0;
+    for (auto l = 0; l <= kLmax; ++l) {
+      const auto& op = born.Spheroidal(l);
+      const DegreeOperator shiftedOp(shifted, l, DegreeOperator::Options{});
+      const auto ndof = static_cast<std::size_t>(op.DofCount());
+      ASSERT_EQ(shiftedOp.DofCount(), op.DofCount());
+      auto xr = std::vector<double>(ndof);
+      for (auto d = std::size_t{0}; d < ndof; ++d) xr[d] = x.spheroidal.at(l)[d].real();
+      // -K^-1 (K_shifted - K) x_l
+      const auto a = shiftedOp.Apply(xr, 1);
+      const auto b = op.Apply(xr, 1);
+      auto f = std::vector<double>(ndof);
+      for (auto d = std::size_t{0}; d < ndof; ++d) f[d] = -(a[d] - b[d]);
+      const auto y = op.Solve(f, 1);
+      const auto dof = op.SurfaceDof(component);
+      references[l] = dof >= 0 ? y[static_cast<std::size_t>(dof)] : 0.0;
+      scale = std::max(scale, std::abs(references[l]));
+    }
+    EXPECT_GT(scale, 0.0);
+    for (auto l = 0; l <= kLmax; ++l) {
+      EXPECT_NEAR(surface.at(l)[0].real(), references[l], 1e-9 * scale)
+          << "component " << static_cast<int>(component) << " degree " << l;
+      for (auto m = 1; m <= l; ++m) {
+        EXPECT_LT(std::abs(surface.at(l)[m]), 1e-12 * scale) << l;
+      }
+    }
+  }
+  EXPECT_LT(MaxAbs(born.SurfaceToroidal(dx)), 1e-14);
+}
+
+TEST(ElasticPerturbation3D, DensityForceIsSymmetricAndTheKernelItsTranspose) {
+  // The density force is symmetric under the Hermitian pairing for a
+  // lateral direction, and the rho kernel of a pair pairs with the
+  // direction as the force does; the full lateral solve with a 5%
+  // lateral density converges and its departure from the Born response
+  // is second order.
+  const auto material = MakeMaterial();
+  ElasticPerturbation3D born(material, kLmax);
+  const auto& coupling = born.Coupling();
+  const auto& grid = coupling.Grid();
+  std::mt19937 rng(31);
+  std::normal_distribution<double> normal;
+  auto randomCoefficients = [&] {
+    auto c = grid.ZeroCoefficients();
+    for (auto l = 0; l <= kLmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        c[SurfaceGrid::Index(l, m)] = {normal(rng), m == 0 ? 0.0 : normal(rng)};
+      }
+    }
+    return c;
+  };
+  const auto xa = born.SolveLoad(randomCoefficients());
+  const auto xb = born.SolveLoad(randomCoefficients());
+  // a lateral density direction in units of the local density
+  auto rhoLocal = Uniform(coupling, material, material.Rho());
+  auto dRho = Lateral(
+      coupling, [](double r) { return 0.05 * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return std::sin(theta) * std::cos(theta) * std::cos(phi) +
+               0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta);
+      });
+  for (auto i = std::size_t{0}; i < dRho.size(); ++i) dRho[i] *= rhoLocal[i];
+  const auto [sa, ta] = born.Force(xa, {}, {}, dRho);
+  const auto [sb, tb] = born.Force(xb, {}, {}, dRho);
+  const auto lhs = ElasticPerturbation3D::Pair(xb, sa, ta);
+  const auto rhs = ElasticPerturbation3D::Pair(xa, sb, tb);
+  EXPECT_NEAR(lhs, rhs, 1e-10 * std::abs(lhs));
+  EXPECT_NE(lhs, 0.0);
+  EXPECT_LT(MaxAbs(ta), 1e-300);  // the density couples no toroidal motion
+  const auto kernels = born.StaticKernels(xb, xa);
+  auto paired = 0.0;
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto at = coupling.FieldOffset(rn);
+    const auto size = coupling.FieldSizeOf(rn);
+    auto product = std::vector<double>(size);
+    for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernels.rho[at + i] * dRho[at + i];
+    paired += coupling.GridOf(rn).Integrate(product);
+  }
+  EXPECT_NEAR(paired, lhs, 1e-10 * std::abs(lhs));
+  // the full solve
+  auto load = grid.ZeroCoefficients();
+  load[SurfaceGrid::Index(2, 0)] = 1.0;
+  load[SurfaceGrid::Index(3, 1)] = {0.5, 0.25};
+  const auto x0 = born.SolveLoad(load);
+  auto departure = [&](double factor) {
+    auto d = dRho;
+    for (auto& v : d) v *= factor;
+    const auto dx = born.Respond(x0, {}, {}, d);
+    const auto [x, info] = born.SolveLateral(load, {}, {}, d, {.rtol = 1e-13});
+    EXPECT_TRUE(info.converged);
+    EXPECT_FALSE(info.indefinite);
+    auto worst = 0.0, scale = 0.0;
+    for (const auto& [l, v] : x.spheroidal) {
+      const auto& a = x0.spheroidal.at(l);
+      const auto& b = dx.spheroidal.at(l);
+      for (auto i = std::size_t{0}; i < v.size(); ++i) {
+        worst = std::max(worst, std::abs(v[i] - a[i] - b[i]));
+        scale = std::max(scale, std::abs(a[i]));
+      }
+    }
+    std::cout << "density factor " << factor << ": " << info.iterations
+              << " iterations, departure " << worst / scale << '\n';
+    return worst;
+  };
+  const auto s1 = departure(1.0), s2 = departure(0.5);
+  EXPECT_NEAR(s1 / s2, 4.0, 0.3);
 }

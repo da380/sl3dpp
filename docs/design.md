@@ -386,8 +386,22 @@ Deliberately out of scope:
   the dilatation rides along as a scalar companion of the iterate for
   the bulk term; the unrelaxed start solve is the conjugate-gradient
   solve on the reference systems (docs/dev/adjoints.md §13k). The fluid
-  core carries no lateral moduli. Forward only so far: the sweeps do not
-  yet see them.
+  core carries no lateral moduli. The instantaneous problem under them
+  (the run's start, the sweeps' starts, jumps and equilibria) is a
+  coupled fixed point: a zero-length open step (`StartStep` with dt =
+  0). The tangent, both first-order adjoints and the second-order
+  sweeps carry lateral moduli in the background (the branch moduli's
+  shear factor, the lateral unrelaxed solves, the dilatation's block in
+  the discrete transpose).
+- **Lateral density** (`Options::moduli.density`, `MaterialDirection3D::
+  rho`, `Kernels3D::rhoKernel3D`): ρ(x) in the solid's gravitational
+  couplings, pointwise in four spin-0 fields of the solution (U, k²V,
+  Φ, r∂ᵣΦ) through a scalar pipeline, with gravity, the reference
+  potential, the stratification, the interfaces, the inertia moment
+  and the fluid held at the radial density — the field's convention,
+  which violates hydrostatic equilibrium (docs/dev/adjoints.md §13l
+  states the limitation). Static, stepped, tangent, both adjoints and
+  second order alike.
 - **Material kernels** (`Options::material_kernels`): dJ/dκ and dJ/dμ,
   nodal in 1D (`IceKernels::kappaKernel`, `muKernel`) and on the
   coupling's grid in 3D with spherical reductions
@@ -580,7 +594,20 @@ Beyond the fixtures:
   (GLL points; a per-element constant shift of the Maxwell region at
   Gauss points likewise), both schemes; the unrelaxed start solve
   against the static lateral solve at 1e-9; Δt self-convergence at
-  second order with lateral moduli and viscosity together.
+  second order with lateral moduli and viscosity together; the coupled
+  evolution against the shifted rheology at every node including the
+  start, rotation on, at 1e-9.
+- **The sweeps under lateral moduli.** The discrete sweep's pairing
+  with the tangent (loads, log viscosity, κ and μ directions) at 1e-8;
+  the tangent against central differences on the shifted background at
+  1e-6; the discrete second-order sweep symmetric and adjoint to the
+  second-order run to 1e-21; the continuous sweep's gaps closing under
+  refinement (first order, material kernels, second order).
+- **Lateral density.** The density pipeline's force against the 1D
+  variation operator in ρ (g held) at 1e-9 for angle-uniform δρ;
+  symmetric, its kernel the transpose, second-order departure of the
+  full solve; with a 3% lateral density in the background every
+  lateral-moduli gate holds, the ρ direction and kernel included.
 - **Material tangent, 1D.** The time-stepped tangent-linear along a
   direction in κ and μ (branch moduli as fixed fractions, times held)
   against central differences on the shifted material, both schemes,
@@ -697,14 +724,25 @@ Beyond the fixtures:
 
 What is not built, or holds only within limits:
 
-- **The static 3D problem** (`ElasticPerturbation3D`, Born and full
-  solve) is single-process (OpenMP over the grid pipeline), and so is
-  the stepper under lateral moduli (refused with radial segments);
-  everything else time-stepped is distributed. The geometry is
-  spherical: aspherical bodies by particle relabelling are not built.
+- **A lateral perturbation's cost** is its reach: the coupling carries
+  the viscous elements and those the perturbation touches (sampled), so
+  a mantle-confined field costs no lithosphere or core nodes; a lateral
+  density costs as much again as the strain pipeline (four scalar
+  companions a pass, docs/dev/adjoints.md §13m).
+- **`ElasticPerturbation3D`** (the Born solver and its static full
+  solve) is single-process (OpenMP over the grid pipeline). The
+  distributed static problem is the stepper on a branchless rheology
+  with lateral moduli (docs/dev/adjoints.md §13m); the stepper under
+  lateral moduli and density is distributed like the rest. The geometry
+  is spherical: aspherical bodies by particle relabelling are not
+  built.
 - **Lateral moduli** live in the solid: the fluid core's bulk modulus
-  has no lateral pipeline. The sweeps (tangent, adjoints) do not yet
-  carry lateral moduli in the background.
+  has no lateral pipeline.
+- **Lateral density is not hydrostatically consistent.** The reference
+  gravity, potential and stratification stay radial under ρ(x); the
+  perturbation's self-attraction and pre-stress are neglected, as in
+  every 3D GIA code the programme compares with (docs/dev/adjoints.md
+  §13l). Results that depend on it should say so.
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.

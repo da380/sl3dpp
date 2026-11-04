@@ -10,6 +10,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <iostream>
+#include <cstdlib>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -1029,4 +1031,306 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
     EXPECT_LT((*gaps)[0], 0.1) << (*gaps)[0] << " " << (*gaps)[1];
     EXPECT_LT((*gaps)[1], (*gaps)[0]) << (*gaps)[0] << " " << (*gaps)[1];
   }
+}
+
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
+  // The discrete second-order sweep with lateral elastic moduli in the
+  // background as well as lateral viscosity: the carried kernels equal the
+  // first-order sweep's, <H u, w> = <H w, u>, and both equal the second-
+  // order tangent-linear run's objective less the itau cross term.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(23);
+  const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
+  const auto fieldU = scene.Smooth(rng, 20.0 * scene.Metre());
+  const auto fieldW = scene.Smooth(rng, 20.0 * scene.Metre());
+  const auto g = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  const auto span = 10.0 * scene.Kyr();
+  constexpr auto nodes = 9;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+  auto scaled = [&](const std::vector<double>& field,
+                    const std::function<double(double)>& profile) {
+    auto out = std::vector<std::vector<double>>{};
+    for (auto t : times) {
+      auto f = field;
+      for (auto& x : f) x *= profile(t / span);
+      out.push_back(std::move(f));
+    }
+    return out;
+  };
+  const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = g;
+  measurements[4].displacementDual = scene.Smooth(rng, 0.5);
+  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+
+  Viscoelastic3D op(
+      scene.rheology, kLmax, baseDelta,
+      {.memory_points = MemoryPointSet::Gll,
+       .moduli = {.shear =
+                      [](double r, double theta, double phi) {
+                        return 0.1 * (0.5 + r * r) *
+                               (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                                0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+                      },
+                  .bulk = [](double r, double theta, double) {
+                    return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+                  },
+                  .density = [](double r, double theta, double phi) {
+                    return 0.03 * (0.3 + 0.7 * r * r) *
+                           (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
+                  }}});
+  SeaLevelEvolution3D evolution(
+      op, scene.solver, scene.state,
+      {.rotation = RotationalFeedback::None,
+       .rtol = 1e-12,
+       .coupled_rtol = 1e-12,
+       .record_stride = 1});
+  const auto& coupling = op.Coupling();
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(
+      evolution.Run(times, FrozenLoad(scene, times, thickness)));
+  auto direction = [&](const std::vector<double>& field,
+                       const std::function<double(double)>& profile,
+                       const std::function<double(double, double)>& p,
+                       const std::function<double(double, double)>& angular) {
+    Direction3D d;
+    d.tangent.iceThickness = scaled(field, profile);
+    d.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, p));
+    d.tangent.itau = d.itau;
+    d.material.kappa = LateralModulus(
+        coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+        angular);
+    d.material.mu = LateralModulus(
+        coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+        angular);
+    d.material.rho = LateralModulus(
+        coupling, scene.material, scene.material.Rho(),
+        [](double r) { return 0.03 * (0.3 + 0.7 * r * r); }, angular);
+    d.tangent.material = d.material;
+    return d;
+  };
+  const auto u = direction(
+      fieldU, [](double s) { return s; }, pU,
+      [](double theta, double phi) {
+        return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+      });
+  const auto w = direction(
+      fieldW, [](double s) { return (1.0 - s) * (1.0 - s); }, pW,
+      [](double theta, double phi) {
+        return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6) +
+               0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                            .rtol = 1e-12,
+                                            .coupled_rtol = 1e-12,
+                                            .record = true});
+  const auto runU = tangent.Run(times, u.tangent, &trajectory);
+  const auto runW = tangent.Run(times, w.tangent, &trajectory);
+  AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .material_kernels = true});
+  const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+  const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
+      times, measurements, runU, u.itau, trajectory, {}, u.material);
+  const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
+      times, measurements, runW, w.itau, trajectory, {}, w.material);
+  EXPECT_LT(MaxDiff(kernelsU.itauKernel3D[0], first.itauKernel3D[0]),
+            1e-10 * MaxAbs(first.itauKernel3D[0]));
+  EXPECT_LT(MaxDiff(kernelsU.kappaKernel3D, first.kappaKernel3D),
+            1e-10 * MaxAbs(first.kappaKernel3D));
+  EXPECT_LT(MaxDiff(kernelsU.muKernel3D, first.muKernel3D),
+            1e-10 * MaxAbs(first.muKernel3D));
+  EXPECT_LT(MaxDiff(kernelsU.rhoKernel3D, first.rhoKernel3D),
+            1e-10 * MaxAbs(first.rhoKernel3D));
+  EXPECT_GT(MaxAbs(alongU.rhoKernel3D), 0.0);
+  const auto huW = Pairing(scene, coupling, alongU.ice, alongU.itauKernel3D, w,
+                           alongU.kappaKernel3D, alongU.muKernel3D) +
+                   FieldPairing(coupling, alongU.rhoKernel3D, w.material.rho);
+  const auto hwU = Pairing(scene, coupling, alongW.ice, alongW.itauKernel3D, u,
+                           alongW.kappaKernel3D, alongW.muKernel3D) +
+                   FieldPairing(coupling, alongW.rhoKernel3D, u.material.rho);
+  std::cout << "huW " << huW << " hwU " << hwU << " diff " << huW - hwU << '\n';
+  EXPECT_NEAR(huW, hwU, 1e-8 * std::abs(huW));
+  SecondOrderDirection3D uw;
+  uw.itauU = u.itau;
+  uw.itauV = w.itau;
+  uw.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(
+      op, OnCoupling(coupling, pU), OnCoupling(coupling, pW));
+  uw.materialU = u.material;
+  uw.materialV = w.material;
+  const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
+  auto forward = 0.0;
+  for (const auto& [node, m] : measurements) {
+    if (!m.seaLevelDual.empty()) {
+      forward += scene.Surface(m.seaLevelDual, second[node].seaLevelChange);
+    }
+    if (!m.displacementDual.empty()) {
+      forward += scene.Surface(m.displacementDual, second[node].displacement);
+    }
+  }
+  const auto uvTerm = GridPairing(coupling, first.itauKernel3D, uw.itauUV);
+  std::cout << "forward " << forward << " uvTerm+huW " << uvTerm + huW << " diff "
+            << forward - (uvTerm + huW) << '\n';
+  EXPECT_NEAR(forward, uvTerm + huW, 1e-8 * std::abs(forward));
+}
+
+TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli) {
+  // The continuous second-order sweep at a laterally heterogeneous
+  // elastic background: its derivatives tend to the discrete ones block
+  // by block as the steps are halved, and so does its mismatch with the
+  // continuous second-order run.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(29);
+  const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
+  const auto fieldU = scene.Smooth(rng, 20.0 * scene.Metre());
+  const auto fieldW = scene.Smooth(rng, 20.0 * scene.Metre());
+  const auto g = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  const auto span = 10.0 * scene.Kyr();
+  Viscoelastic3D op(
+      scene.rheology, kLmax, baseDelta,
+      {.memory_points = MemoryPointSet::Gll,
+       .moduli = {.shear =
+                      [](double r, double theta, double phi) {
+                        return 0.1 * (0.5 + r * r) *
+                               (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                                0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+                      },
+                  .bulk = [](double r, double theta, double) {
+                    return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+                  }}});
+  const auto& coupling = op.Coupling();
+  struct Blocks {
+    double ice, viscosity, material, forward;
+  };
+  auto iceGaps = std::vector<double>{}, viscosityGaps = std::vector<double>{},
+       materialGaps = std::vector<double>{}, mismatches = std::vector<double>{};
+  for (const auto nodes : {9, 17}) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    auto scaled = [&](const std::vector<double>& field,
+                      const std::function<double(double)>& profile) {
+      auto out = std::vector<std::vector<double>>{};
+      for (auto t : times) {
+        auto f = field;
+        for (auto& x : f) x *= profile(t / span);
+        out.push_back(std::move(f));
+      }
+      return out;
+    };
+    const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
+    SeaLevelEvolution3D evolution(
+        op, scene.solver, scene.state,
+        {.rotation = RotationalFeedback::None,
+         .rtol = 1e-12,
+         .coupled_rtol = 1e-12,
+         .record_stride = 1});
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(
+        evolution.Run(times, FrozenLoad(scene, times, thickness)));
+    auto direction = [&](const std::vector<double>& field,
+                         const std::function<double(double)>& profile,
+                         const std::function<double(double, double)>& p,
+                         const std::function<double(double, double)>& angular) {
+      Direction3D d;
+      d.tangent.iceThickness = scaled(field, profile);
+      d.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, p));
+      d.tangent.itau = d.itau;
+      d.material.kappa = LateralModulus(
+          coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+          angular);
+      d.material.mu = LateralModulus(
+          coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+          angular);
+      d.tangent.material = d.material;
+      return d;
+    };
+    const auto u = direction(
+        fieldU, [](double s) { return s; }, pU,
+        [](double theta, double phi) {
+          return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+        });
+    const auto w = direction(
+        fieldW, [](double s) { return (1.0 - s) * (1.0 - s); }, pW,
+        [](double theta, double phi) {
+          return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6) +
+                 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        });
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].seaLevelDual = g;
+    SecondOrderDirection3D uw;
+    uw.itauU = u.itau;
+    uw.itauV = w.itau;
+    uw.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(
+        op, OnCoupling(coupling, pU), OnCoupling(coupling, pW));
+    uw.materialU = u.material;
+    uw.materialV = w.material;
+    auto results = std::map<AdjointMethod, Blocks>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      TangentLinearSolver3D tangent(evolution, {.method = method,
+                                                .rtol = 1e-12,
+                                                .coupled_rtol = 1e-12,
+                                                .record = true});
+      const auto runU = tangent.Run(times, u.tangent, &trajectory);
+      const auto runW = tangent.Run(times, w.tangent, &trajectory);
+      AdjointSolver3D adjoint(evolution, {.method = method,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12,
+                                          .material_kernels = true});
+      const auto [kernels, alongU] = adjoint.SecondOrderKernels(
+          times, measurements, runU, u.itau, trajectory, {}, u.material);
+      const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
+      auto ice = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        ice += scene.Surface(alongU.ice.thickness[n], w.tangent.iceThickness[n]);
+      }
+      const auto viscosity = GridPairing(coupling, alongU.itauKernel3D, w.itau);
+      const auto material = FieldPairing(coupling, alongU.kappaKernel3D, w.material.kappa) +
+                            FieldPairing(coupling, alongU.muKernel3D, w.material.mu);
+      const auto uvTerm = GridPairing(coupling, kernels.itauKernel3D, uw.itauUV);
+      const auto forward =
+          scene.Surface(g, second.back().seaLevelChange) - uvTerm;
+      results[method] = {ice, viscosity, material, forward};
+    }
+    const auto& d = results[AdjointMethod::Discrete];
+    const auto& c = results[AdjointMethod::Continuous];
+    EXPECT_NEAR(d.ice + d.viscosity + d.material, d.forward, 1e-8 * std::abs(d.forward))
+        << "nodes " << nodes;
+    iceGaps.push_back(std::abs(d.ice - c.ice) / std::abs(d.ice));
+    viscosityGaps.push_back(std::abs(d.viscosity - c.viscosity) / std::abs(d.viscosity));
+    materialGaps.push_back(std::abs(d.material - c.material) / std::abs(d.material));
+    mismatches.push_back(std::abs(c.ice + c.viscosity + c.material - c.forward) /
+                         std::abs(c.forward));
+  }
+  // the coarse gaps are a little larger than at a radial elastic
+  // background (the viscosity block's 0.105 against 0.09); what is
+  // gated is that each halves at the commute order
+  for (const auto* gaps : {&iceGaps, &viscosityGaps, &materialGaps, &mismatches}) {
+    EXPECT_LT((*gaps)[0], 0.15) << (*gaps)[0] << " " << (*gaps)[1];
+    EXPECT_LT((*gaps)[1], 0.5 * (*gaps)[0]) << (*gaps)[0] << " " << (*gaps)[1];
+  }
+  std::cout << "continuous Hessian gaps under lateral moduli: ice " << iceGaps[0] << " -> "
+            << iceGaps[1] << ", viscosity " << viscosityGaps[0] << " -> " << viscosityGaps[1]
+            << ", material " << materialGaps[0] << " -> " << materialGaps[1]
+            << ", mismatch " << mismatches[0] << " -> " << mismatches[1] << '\n';
 }

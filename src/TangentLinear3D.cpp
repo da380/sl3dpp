@@ -397,6 +397,9 @@ TangentLinearSolver3D::TideColumnsOf() const {
 struct TangentLinearSolver3D::MaterialForcing3D {
   virtual ~MaterialForcing3D() = default;
   [[nodiscard]] virtual Viscoelastic3D::Solutions StartResponse() const = 0;
+  /// The start's forces on a zero-length step instead (the start under
+  /// lateral moduli, where the instantaneous response is a fixed point).
+  virtual void ApplyStart(Viscoelastic3D::OpenStep& step) const = 0;
   virtual void Apply(std::size_t node, double dt, Scheme scheme,
                      Viscoelastic3D::OpenStep& step) const = 0;
 };
@@ -451,6 +454,32 @@ struct TangentLinearSolver3D::MaterialDrive3D
         field[i] *= -direction.kappa[i];
       }
       spheroidal = coupling.DilatationForce(coupling.AnalyseScalar(field), sph);
+    }
+    if (!direction.rho.empty()) {
+      // the density pipeline on x: -(dK_rho) x
+      const auto sph = [&](int l) -> const DegreeOperator& {
+        return op.Spheroidal(l);
+      };
+      auto fields = std::vector<std::vector<Complex>>(
+          GridCoupling::kDensityFields,
+          std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0));
+      for (const auto& [l, xl] : x->spheroidal) {
+        coupling.AddDensityFieldsOfSolution(fields, l, op.Spheroidal(l), xl);
+      }
+      auto weighted = std::vector<std::vector<Complex>>{};
+      for (const auto& f : fields) {
+        auto grid = coupling.SynthesiseScalar(f);
+        for (auto i = std::size_t{0}; i < values; ++i) grid[i] *= -direction.rho[i];
+        weighted.push_back(coupling.AnalyseScalar(grid));
+      }
+      for (auto& [l, f] : coupling.DensityForce(weighted, sph)) {
+        auto& b = spheroidal[l];
+        if (b.empty()) {
+          b = std::move(f);
+        } else {
+          for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+        }
+      }
     }
     return {std::move(analysed), std::move(spheroidal)};
   }
@@ -527,7 +556,8 @@ struct TangentLinearSolver3D::MaterialDrive3D
       auto& b = forces.at(l);
       for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
     }
-    return op.SolveForces(forces, coupling.ToroidalForce(analysed, tor), sph, tor);
+    // under lateral moduli the unrelaxed systems are the lateral ones
+    return op.SolveUnrelaxed(forces, coupling.ToroidalForce(analysed, tor));
   }
 
   /// The full base solutions at a node (the unrelaxed solve under its
@@ -544,7 +574,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
     Base base;
     const auto load = ev->Columns(trajectory->loads[node], ev->toMatDensity_);
     const auto tide = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
-    if (!direction.kappa.empty() || !state.strain) {
+    if (!direction.kappa.empty() || !direction.rho.empty() || !state.strain) {
       base.x = op.SolveElastic(state, load, tide);
     }
     if (state.strain) {
@@ -564,6 +594,13 @@ struct TangentLinearSolver3D::MaterialDrive3D
   Solutions StartResponse() const override {
     const auto base = BaseAt(0);
     return UnrelaxedResponse(*base.strain, base.x ? &*base.x : nullptr, nullptr);
+  }
+
+  void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
+    const auto base = BaseAt(0);
+    auto [analysed, bulk] =
+        Forces(*base.strain, base.x ? &*base.x : nullptr, direction.mu, nullptr);
+    step.AddForce(analysed, bulk);
   }
 
   /// The forces of the step ending at `node`, on the opened step: the
@@ -686,6 +723,21 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
     return total;
   }
 
+  void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
+    const auto& op = *ev->op_;
+    const auto& base0 = cursor->At(0);
+    const auto x0 = op.SolveElastic(base0, Loads(trajectory->loads[0]),
+                                    Tides(trajectory->tides[0]));
+    auto own = std::optional<Tensor>{};
+    const auto& strain0 = BaseStrain(base0, x0, own);
+    for (const auto& part : parts) {
+      const auto xb = TangentSolution(part, 0, strain0, &x0, nullptr);
+      auto [analysed, bulk] = part.a->Forces(*part.b[0].internalState->strain,
+                                             &xb, part.a->direction.mu, nullptr);
+      step.AddForce(analysed, bulk);
+    }
+  }
+
   void Apply(std::size_t node, double dt, Scheme scheme,
              Viscoelastic3D::OpenStep& step) const override {
     const auto& op = *ev->op_;
@@ -731,7 +783,7 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
   const auto& coupling = op.Coupling();
   const auto values = coupling.GridValueCount();
   const auto K = op.GetRheology().BranchCount();
-  for (const auto* field : {&direction.kappa, &direction.mu}) {
+  for (const auto* field : {&direction.kappa, &direction.mu, &direction.rho}) {
     if (!field->empty() && field->size() != values) {
       throw std::invalid_argument(
           "a material direction lives on the coupling's grid values");
@@ -1099,8 +1151,57 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   response.seaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
+  // The coupled pass of a step, shared by the steps and, under lateral
+  // moduli, the start as a zero-length step.
+  auto step = std::optional<Viscoelastic3D::OpenStep>{};
+  const SeaLevelSolver* effectiveSolver = nullptr;
+  auto f = std::vector<double>{};
+  auto node = std::size_t{0};
+  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
+    auto responses = step->Respond(s);
+    SeaLevelSolver::GeneralisedForcing coupled;
+    coupled.directLoad = f;
+    coupled.displacementResponse =
+        ev.Coefficients(op.Surface(responses, Component::U), ev.toNdLength_);
+    coupled.potentialResponse =
+        ev.Coefficients(op.Surface(responses, Component::Phi), ev.toNdPotential_);
+    coupled.inertiaMomentChange = step->InertiaMoment(responses) * ev.toNdMoment_;
+    coupled.rotation = rotation;
+    coupled.oceanFunctionOverride = overrideAt(node);
+    response = effectiveSolver->SolveGeneralised(ev.state_, coupled, sleOptions);
+    sigma = totalLoadCoefficients(f, response.seaLevelChange, node);
+    psi = centrifugal(response);
+    agree();
+    step->AddChannels(responses, ev.Columns(sigma, ev.toMatDensity_),
+                      ev.Columns(psi, ev.toMatPotential_));
+    return step->StrainOf(responses);
+  };
+  const Viscoelastic3D::IterationControl control{
+      .max_iterations = options_.max_coupled_iterations,
+      .rtol = options_.coupled_rtol,
+      .anderson_memory = options_.anderson_memory,
+      .anderson_rate = options_.anderson_rate};
+  auto startInfo = Viscoelastic3D::StepInfo{};
+  const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
-  if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
+  if (lateral) {
+    // The start under lateral moduli: the instantaneous coupled fixed
+    // point of a zero-length step, the material's start forces on it.
+    f = directAt(0);
+    step.emplace(op.StartStep(tstate, 0.0, scheme));
+    if (material != nullptr) material->ApplyStart(*step);
+    effectiveSolver = &solverFor(step->EffectiveLove());
+    auto [strain, info] = step->Converge(coupledPass, control);
+    if (!info.converged || !response.converged) {
+      throw std::runtime_error(std::format(
+          "the tangent-linear coupled fixed point at the start did not "
+          "converge (residual {})",
+          info.residual));
+    }
+    startInfo = info;
+    op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
+    step.reset();
+  } else if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
     SeaLevelSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
     forcing.rotation = rotation;
@@ -1123,11 +1224,11 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     psi = centrifugal(response);
     agree();
   }
-  if (options_.record || material != nullptr) {
+  if (!lateral && (options_.record || material != nullptr)) {
     op.PrimeStrain(tstate, ev.Columns(sigma, ev.toMatDensity_),
                    ev.Columns(psi, ev.toMatPotential_));
   }
-  if (material != nullptr) {
+  if (!lateral && material != nullptr) {
     // The start strain carries the start response too.
     op.AddStrainCoefficients(
         *tstate.strainCoefficients, *startResponse,
@@ -1156,51 +1257,27 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     }
     snapshots.push_back(std::move(snapshot));
   };
-  record(0, response, {});
+  record(0, response, startInfo);
 
-  for (auto node = std::size_t{1}; node < nodes; ++node) {
+  for (node = 1; node < nodes; ++node) {
     if (options_.on_node) options_.on_node(node);
     const auto dt = (times[node] - times[node - 1]) * ev.toMatTime_;
-    auto step = op.StartStep(tstate, dt, scheme,
-                             ev.Columns(sigma, ev.toMatDensity_),
-                             ev.Columns(psi, ev.toMatPotential_));
-    if (drive) step.AddMemory(drive(node, dt));
-    if (material != nullptr) material->Apply(node, dt, scheme, step);
-    const auto& effectiveSolver = solverFor(step.EffectiveLove());
-    const auto f = directAt(node);
-    auto [strain, info] = step.Converge(
-        [&](const GridCoupling::SpectralTensor& s) {
-          auto responses = step.Respond(s);
-          SeaLevelSolver::GeneralisedForcing coupled;
-          coupled.directLoad = f;
-          coupled.displacementResponse = ev.Coefficients(
-              op.Surface(responses, Component::U), ev.toNdLength_);
-          coupled.potentialResponse = ev.Coefficients(
-              op.Surface(responses, Component::Phi), ev.toNdPotential_);
-          coupled.inertiaMomentChange =
-              step.InertiaMoment(responses) * ev.toNdMoment_;
-          coupled.rotation = rotation;
-          coupled.oceanFunctionOverride = overrideAt(node);
-          response =
-              effectiveSolver.SolveGeneralised(ev.state_, coupled, sleOptions);
-          sigma = totalLoadCoefficients(f, response.seaLevelChange, node);
-          psi = centrifugal(response);
-          agree();
-          step.AddChannels(responses, ev.Columns(sigma, ev.toMatDensity_),
-                           ev.Columns(psi, ev.toMatPotential_));
-          return step.StrainOf(responses);
-        },
-        {.max_iterations = options_.max_coupled_iterations,
-         .rtol = options_.coupled_rtol,
-         .anderson_memory = options_.anderson_memory,
-         .anderson_rate = options_.anderson_rate});
+    step.emplace(op.StartStep(tstate, dt, scheme,
+                              ev.Columns(sigma, ev.toMatDensity_),
+                              ev.Columns(psi, ev.toMatPotential_)));
+    if (drive) step->AddMemory(drive(node, dt));
+    if (material != nullptr) material->Apply(node, dt, scheme, *step);
+    effectiveSolver = &solverFor(step->EffectiveLove());
+    f = directAt(node);
+    auto [strain, info] = step->Converge(coupledPass, control);
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
           "the tangent-linear coupled fixed point at node {} did not "
           "converge (residual {})",
           node, info.residual));
     }
-    op.Recycle(std::exchange(tstate, std::move(step).Finish(std::move(strain))));
+    op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
+    step.reset();
     record(node, response, info);
   }
   op.ReleaseScratch();

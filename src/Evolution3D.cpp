@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <format>
+#include <optional>
 #include <span>
 #include <stdexcept>
 #include <utility>
@@ -240,6 +241,53 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     response.converged = converged != 0.0;
     if (migrating) collectives.share(ocean);
   };
+  // The combined fixed point of a step: strain, ocean load and rotation
+  // together — one pass for the steps and, under lateral moduli, for the
+  // instantaneous start as a zero-length step (Viscoelastic3D::StartStep).
+  auto step = std::optional<Viscoelastic3D::OpenStep>{};
+  const SeaLevelSolver* effectiveSolver = nullptr;
+  auto moving = SeaLevelSolver::NonlinearForcing{};
+  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
+    auto responses = step->Respond(s);
+    auto displacement =
+        Coefficients(op.Surface(responses, Component::U), toNdLength_);
+    auto potential =
+        Coefficients(op.Surface(responses, Component::Phi), toNdPotential_);
+    const auto moment = step->InertiaMoment(responses) * toNdMoment_;
+    if (migrating) {
+      moving.displacementResponse = std::move(displacement);
+      moving.potentialResponse = std::move(potential);
+      moving.inertiaMomentChange = moment;
+      auto solved =
+          effectiveSolver->SolveNonlinear(state_, moving, nonlinearOptions);
+      response = std::move(solved.response);
+      sigma_ = detail::MigratedLoadCoefficients(solver, state_, solved.finalState);
+      ocean = std::move(solved.finalState.oceanFunction);
+    } else {
+      SeaLevelSolver::GeneralisedForcing coupled;
+      coupled.directLoad = loadGrid;
+      coupled.displacementResponse = std::move(displacement);
+      coupled.potentialResponse = std::move(potential);
+      coupled.inertiaMomentChange = moment;
+      coupled.rotation = options_.rotation;
+      response = effectiveSolver->SolveGeneralised(state_, coupled, sleOptions);
+      sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+    }
+    psi_ = options_.rotation == RotationalFeedback::None
+               ? grid.ZeroCoefficients()
+               : solver.CentrifugalCoefficients(response.angularVelocity);
+    agree();
+    step->AddChannels(responses, Columns(sigma_, toMatDensity_),
+                      Columns(psi_, toMatPotential_));
+    return step->StrainOf(responses);
+  };
+  const Viscoelastic3D::IterationControl control{
+      .max_iterations = options_.max_coupled_iterations,
+      .rtol = options_.coupled_rtol,
+      .anderson_memory = options_.anderson_memory,
+      .anderson_rate = options_.anderson_rate};
+  auto startInfo = Viscoelastic3D::StepInfo{};
+
   if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
     response.seaLevelChange.assign(fieldSize, 0.0);
@@ -248,6 +296,22 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     sigma_ = grid.ZeroCoefficients();
     psi_ = grid.ZeroCoefficients();
     ocean = state_.oceanFunction;
+  } else if (!resumed && op.HasLateralModuli()) {
+    // The instantaneous elastic response at the start under lateral
+    // moduli: the coupled fixed point of a zero-length step.
+    loadGrid = (*iceLoad)(times[0]);
+    step.emplace(op.StartStep(vstate_, 0.0, options_.scheme));
+    effectiveSolver = &solverFor(step->EffectiveLove());
+    auto [strain, info] = step->Converge(coupledPass, control);
+    if (!info.converged) {
+      throw std::runtime_error(std::format(
+          "the instantaneous coupled fixed point at the start did not "
+          "converge (residual {})",
+          info.residual));
+    }
+    startInfo = info;
+    op.Recycle(std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
+    step.reset();
   } else if (!resumed) {
     // The instantaneous elastic response at the start.
     loadGrid = (*iceLoad)(times[0]);
@@ -301,21 +365,22 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
   if (!resumed) {
-    record(times[0], response, 0, 0.0, true, stride > 0);
+    record(times[0], response, startInfo.iterations, startInfo.residual,
+           true, stride > 0);
     checkpoint(0);
   }
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
-    auto step = op.StartStep(vstate_, dt, options_.scheme,
-                             Columns(sigma_, toMatDensity_),
-                             Columns(psi_, toMatPotential_));
-    const auto& effectiveSolver = solverFor(step.EffectiveLove());
+    step.emplace(op.StartStep(vstate_, dt, options_.scheme,
+                              Columns(sigma_, toMatDensity_),
+                              Columns(psi_, toMatPotential_)));
+    effectiveSolver = &solverFor(step->EffectiveLove());
     // Under migrating shorelines each pass solves the nonlinear equation
     // from the background, the memory and lateral responses entering
     // through the response channels, so the ocean function follows the
     // flotation condition inside the fixed point.
-    auto moving = SeaLevelSolver::NonlinearForcing{};
+    moving = SeaLevelSolver::NonlinearForcing{};
     if (migrating) {
       moving.iceThicknessChange = (*iceThickness)(times[node]);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -327,50 +392,11 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     }
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto [strain, info] = step.Converge(
-        [&](const GridCoupling::SpectralTensor& s) {
-          auto responses = step.Respond(s);
-          auto displacement =
-              Coefficients(op.Surface(responses, Component::U), toNdLength_);
-          auto potential = Coefficients(op.Surface(responses, Component::Phi),
-                                        toNdPotential_);
-          const auto moment = step.InertiaMoment(responses) * toNdMoment_;
-          if (migrating) {
-            moving.displacementResponse = std::move(displacement);
-            moving.potentialResponse = std::move(potential);
-            moving.inertiaMomentChange = moment;
-            auto solved = effectiveSolver.SolveNonlinear(state_, moving,
-                                                         nonlinearOptions);
-            response = std::move(solved.response);
-            sigma_ = detail::MigratedLoadCoefficients(solver, state_,
-                                                      solved.finalState);
-            ocean = std::move(solved.finalState.oceanFunction);
-          } else {
-            SeaLevelSolver::GeneralisedForcing coupled;
-            coupled.directLoad = loadGrid;
-            coupled.displacementResponse = std::move(displacement);
-            coupled.potentialResponse = std::move(potential);
-            coupled.inertiaMomentChange = moment;
-            coupled.rotation = options_.rotation;
-            response =
-                effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-            sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-          }
-          psi_ = options_.rotation == RotationalFeedback::None
-                     ? grid.ZeroCoefficients()
-                     : solver.CentrifugalCoefficients(response.angularVelocity);
-          agree();
-          step.AddChannels(responses, Columns(sigma_, toMatDensity_),
-                           Columns(psi_, toMatPotential_));
-          return step.StrainOf(responses);
-        },
-        {.max_iterations = options_.max_coupled_iterations,
-         .rtol = options_.coupled_rtol,
-         .anderson_memory = options_.anderson_memory,
-         .anderson_rate = options_.anderson_rate});
+    auto [strain, info] = step->Converge(coupledPass, control);
     // the replaced state's tensors go to the next StartStep
     op.Recycle(
-        std::exchange(vstate_, std::move(step).Finish(std::move(strain))));
+        std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
+    step.reset();
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, info.iterations, info.residual,
            info.converged, keep);

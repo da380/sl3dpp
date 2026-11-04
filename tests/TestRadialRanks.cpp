@@ -11,6 +11,8 @@
 
 #include <gtest/gtest.h>
 
+#include <iostream>
+
 #include <algorithm>
 #include <atomic>
 #include <barrier>
@@ -802,5 +804,223 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
     EXPECT_LT(worstIce, 1e-11) << label;
     EXPECT_LT(worstField, 1e-11) << label;
     EXPECT_LT(worstSecond, 1e-11) << label;
+  }
+}
+
+// -- lateral moduli and density over the ranks --------------------------------
+
+namespace {
+
+Viscoelastic3D::Options::LateralModuli RankModuli() {
+  return {.shear =
+              [](double r, double theta, double phi) {
+                return 0.1 * (0.5 + r * r) *
+                       (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                        0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+              },
+          .bulk = [](double r, double theta, double) {
+            return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+          },
+          .density = [](double r, double theta, double phi) {
+            return 0.03 * (0.3 + 0.7 * r * r) *
+                   (std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
+          }};
+}
+
+}  // namespace
+
+TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
+  // Lateral moduli and density on two and three ranks: the start solve
+  // (the conjugate-gradient solve pairing each rank's share) and two
+  // lateral steps, each rank's surface response and memory against the
+  // one process's; and the static problem on a branchless rheology.
+  constexpr auto lmax = 16;
+  constexpr auto eps = 1e-2;
+  const auto degrees = std::vector<int>{8, 12};
+  const auto body = Body::Make(lmax);
+  const auto& mesh = body.material.Mesh();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto elastic = Rheology::Create(body.material, {}).value();
+
+  struct Result {
+    Viscoelastic3D::State state;
+    std::map<int, std::vector<Complex>> U, phi, staticU;
+    std::vector<int> iterations;
+    int startIterations = 0;
+  };
+  auto run = [&](const Viscoelastic3D& op, const Viscoelastic3D& stat) {
+    auto result = Result{op.ZeroState()};
+    Viscoelastic3D::Solutions solutions;
+    for (auto i = 0; i < 2; ++i) {
+      auto step = op.Step(result.state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(step.info.converged);
+      result.iterations.push_back(step.info.iterations);
+      result.state = std::move(step.state);
+      solutions = std::move(step.solutions);
+    }
+    result.U = op.Surface(solutions, Component::U);
+    result.phi = op.Surface(solutions, Component::Phi);
+    // the static problem: a branchless rheology's elastic solve
+    const auto x = stat.SolveElastic(stat.ZeroState(), load);
+    result.startIterations = stat.LastElasticSolve().iterations;
+    result.staticU = stat.Surface(x, Component::U);
+    return result;
+  };
+
+  for (const auto count : {2, 3}) {
+    const auto cuts = mesh.BalancedCuts(
+        count,
+        GridCoupling::TransformWeights(
+            body.rheology, lmax, {.eps = eps, .transform_degrees = degrees}));
+    ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+    const auto options = Viscoelastic3D::Options{.eps = eps,
+                                                 .parallel = false,
+                                                 .max_iterations = 100,
+                                                 .rtol = 1e-12,
+                                                 .moduli = RankModuli(),
+                                                 .radial_cuts = cuts,
+                                                 .transform_degrees = degrees};
+    const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+    const Viscoelastic3D wholeStatic(elastic, lmax, Peaked, options);
+    const auto want = run(whole, wholeStatic);
+
+    ThreadRanks ranks(count);
+    auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+    auto statics = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+    for (auto rank = 0; rank < count; ++rank) {
+      auto mine = options;
+      mine.segments = {rank};
+      mine.collectives = ranks.For(rank);
+      ops.push_back(std::make_unique<Viscoelastic3D>(body.rheology, lmax, Peaked, mine));
+      statics.push_back(std::make_unique<Viscoelastic3D>(elastic, lmax, Peaked, mine));
+    }
+    auto nodes = 0;
+    for (const auto& op : ops) nodes += op->Coupling().NodeCount();
+    EXPECT_EQ(nodes, whole.Coupling().NodeCount());
+    auto got = std::vector<Result>(count);
+    ranks.Run([&](int rank) { got[rank] = run(*ops[rank], *statics[rank]); });
+
+    auto worstSurface = 0.0, worstMemory = 0.0, worstStatic = 0.0;
+    for (auto rank = 0; rank < count; ++rank) {
+      EXPECT_EQ(got[rank].iterations, got[0].iterations);
+      EXPECT_EQ(got[rank].startIterations, want.startIterations) << rank;
+      for (const auto& [l, values] : want.U) {
+        worstSurface =
+            std::max({worstSurface, Relative(got[rank].U.at(l), values),
+                      Relative(got[rank].phi.at(l), want.phi.at(l))});
+        worstStatic = std::max(worstStatic,
+                               Relative(got[rank].staticU.at(l), want.staticU.at(l)));
+      }
+      worstMemory = std::max(
+          worstMemory, SliceDifference(*ops[rank], got[rank].state, whole, want.state));
+    }
+    RecordProperty(std::format("ranks{}_surface", count), std::format("{:.3e}", worstSurface));
+    RecordProperty(std::format("ranks{}_memory", count), std::format("{:.3e}", worstMemory));
+    RecordProperty(std::format("ranks{}_static", count), std::format("{:.3e}", worstStatic));
+    EXPECT_LT(worstSurface, 1e-11) << count << " ranks";
+    EXPECT_LT(worstMemory, 1e-11) << count << " ranks";
+    EXPECT_LT(worstStatic, 1e-11) << count << " ranks";
+  }
+}
+
+TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
+  // The 3D adjoints on three ranks with lateral moduli and density in the
+  // background and the rotational feedback on (the tide's and the
+  // moment's lateral terms and their duals over the ranks), continuous
+  // and discrete: the ice kernels on every rank, and each rank's slice of
+  // the viscosity kernels, against the one process's sweep.
+  constexpr auto lmax = 8;
+  constexpr auto count = 3;
+  const auto body = Body::Make(lmax, 1e22);
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  auto solvers = std::vector<SeaLevelSolver>{};
+  for (auto rank = 0; rank <= count; ++rank) {
+    solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                         SeaLevelParameters{});
+  }
+  const auto length = solvers[0].SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solvers[0].MakeState(ice, toNd(fingerprint.SeaLevel()));
+  const auto kyr = 1000.0 * 3.15576e7 / solvers[0].SolverScales().Time();
+  const auto times = std::vector<double>{0.0, 2.5 * kyr, 5.0 * kyr, 7.5 * kyr, 10.0 * kyr};
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] = -0.1 * solvers[0].IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
+  }
+  const auto iceLoad = [&](double t) {
+    auto out = melt;
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual =
+      solvers[0].Grid().FromFunction([](double theta, double phi) {
+        return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+      });
+  measurements[2].seaLevelDual = measurements[times.size() - 1].seaLevelDual;
+  const auto cuts = body.material.Mesh().BalancedCuts(
+      count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .moduli = RankModuli(), .radial_cuts = cuts};
+  const auto evolutionOptions =
+      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::Axial,
+                                   .rtol = 1e-12,
+                                   .max_coupled_iterations = 100,
+                                   .coupled_rtol = 1e-11,
+                                   .record_stride = 1};
+  for (auto method : {AdjointMethod::Continuous, AdjointMethod::Discrete}) {
+    const auto adjointOptions = AdjointSolver3D::Options{
+        .method = method, .rtol = 1e-12, .max_coupled_iterations = 100,
+        .coupled_rtol = 1e-11};
+    auto sweep = [&](const Viscoelastic3D& op, const SeaLevelSolver& solver) {
+      SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+      const auto snapshots = evolution.Run(times, iceLoad);
+      const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+      AdjointSolver3D adjoint(evolution, adjointOptions);
+      return adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    };
+    const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+    const auto want = sweep(whole, solvers[count]);
+
+    ThreadRanks ranks(count);
+    auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+    for (auto rank = 0; rank < count; ++rank) {
+      auto mine = options;
+      mine.segments = {rank};
+      mine.collectives = ranks.For(rank);
+      ops.push_back(std::make_unique<Viscoelastic3D>(body.rheology, lmax, Peaked, mine));
+    }
+    auto got = std::vector<Kernels3D>(count);
+    ranks.Run([&](int rank) { got[rank] = sweep(*ops[rank], solvers[rank]); });
+
+    auto worstIce = 0.0, worstViscosity = 0.0;
+    for (auto rank = 0; rank < count; ++rank) {
+      const auto& kernels = got[rank];
+      ASSERT_EQ(kernels.ice.loadDuals.size(), want.ice.loadDuals.size());
+      for (auto n = std::size_t{0}; n < want.ice.loadDuals.size(); ++n) {
+        worstIce = std::max(worstIce, Relative(kernels.ice.loadDuals[n],
+                                               want.ice.loadDuals[n]));
+      }
+      const auto& part = ops[rank]->Coupling();
+      ASSERT_EQ(kernels.logViscosityKernel3D[0].size(), part.GridValueCount());
+      worstViscosity = std::max(
+          worstViscosity,
+          FieldSliceDifference(part, kernels.logViscosityKernel3D[0],
+                               whole.Coupling(), want.logViscosityKernel3D[0]));
+    }
+    const auto label = method == AdjointMethod::Discrete ? "discrete" : "continuous";
+    RecordProperty(std::format("{}_ice", label), std::format("{:.3e}", worstIce));
+    RecordProperty(std::format("{}_viscosity", label), std::format("{:.3e}", worstViscosity));
+    EXPECT_LT(worstIce, 1e-10) << label;
+    EXPECT_LT(worstViscosity, 1e-10) << label;
+    std::cout << label << ": ice " << worstIce << ", viscosity " << worstViscosity << '\n';
   }
 }

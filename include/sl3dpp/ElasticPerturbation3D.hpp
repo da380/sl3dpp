@@ -23,7 +23,10 @@
  * the reference (radial, unrelaxed) systems solving the negated force,
  * spheroidal and toroidal degrees alike (a lateral perturbation couples
  * them, and couples the degrees by the selection rules of the products).
- * No lateral density: the hydrostatic background does not admit it.
+ * A lateral delta rho(x) is offered too, in the field's convention: it
+ * enters the gravitational couplings pointwise while the reference
+ * gravity, potential and stratification stay radial (not
+ * hydrostatically consistent; docs/dev/adjoints.md §13l).
  *
  * Conventions: directions over the coupling's grid values
  * ([FieldOffset(node) + x]), material units; the nodes are the GLL nodes
@@ -79,13 +82,18 @@ class ElasticPerturbation3D {
 
   /// (dK) x: the force of a moduli perturbation on a solution, spheroidal
   /// and toroidal per degree; either direction may be empty.
+  /// A lateral delta rho(x) (the optional fourth direction) enters the
+  /// gravitational couplings pointwise with g, the reference potential
+  /// and the stratification held radial (GridCoupling's density
+  /// pipeline; docs/dev/adjoints.md §13l on the hydrostatic caveat).
   [[nodiscard]] std::pair<Forces, Forces> Force(
       const Solutions& x, std::span<const double> dMu,
-      std::span<const double> dKappa) const;
+      std::span<const double> dKappa, std::span<const double> dRho = {}) const;
 
   /// The first-order response -K^-1 (dK) x.
   [[nodiscard]] Solutions Respond(const Solutions& x, std::span<const double> dMu,
-                                  std::span<const double> dKappa) const;
+                                  std::span<const double> dKappa,
+                                  std::span<const double> dRho = {}) const;
 
   /// The load's forces per degree (what SolveLoad solves): the unit load
   /// vector times the coefficients, spheroidal.
@@ -106,7 +114,8 @@ class ElasticPerturbation3D {
   /// (the degree-1 toroidal unpinned) plus the lateral force, per degree.
   [[nodiscard]] std::pair<Forces, Forces> Apply(const Solutions& x,
                                                 std::span<const double> dMu,
-                                                std::span<const double> dKappa) const;
+                                                std::span<const double> dKappa,
+                                                std::span<const double> dRho = {}) const;
 
   struct SolveOptions {
     /// The relative residual (in the preconditioned, energy norm,
@@ -150,7 +159,20 @@ class ElasticPerturbation3D {
   [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
       const Forces& spheroidal, const Forces& toroidal,
       std::span<const double> dMu, std::span<const double> dKappa,
-      SolveOptions options) const;
+      SolveOptions options) const {
+    return SolveLateral(spheroidal, toroidal, dMu, dKappa, {}, options);
+  }
+  /// With a lateral density as well.
+  [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
+      const Forces& spheroidal, const Forces& toroidal,
+      std::span<const double> dMu, std::span<const double> dKappa,
+      std::span<const double> dRho, SolveOptions options) const;
+  [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
+      std::span<const Complex> load, std::span<const double> dMu,
+      std::span<const double> dKappa, std::span<const double> dRho,
+      SolveOptions options) const {
+    return SolveLateral(LoadForces(load), {}, dMu, dKappa, dRho, options);
+  }
 
   /// The reference systems solving given forces (negated when asked).
   [[nodiscard]] Solutions Solve(const Forces& spheroidal, const Forces& toroidal,
@@ -179,6 +201,8 @@ class ElasticPerturbation3D {
   struct Kernels {
     std::vector<double> kappa;
     std::vector<double> mu;
+    /// dJ/d rho(x) with g held (the density pipeline's pairing).
+    std::vector<double> rho;
   };
   [[nodiscard]] Kernels StaticKernels(const Solutions& y,
                                       const Solutions& x) const;

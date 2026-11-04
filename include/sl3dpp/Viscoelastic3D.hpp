@@ -113,18 +113,30 @@ class Viscoelastic3D {
     /// theta, phi)), every branch modulus scaled alike (the branch
     /// fractions and the relaxation times held, as the material
     /// derivatives hold them), and kappa(x) = kappa(r) (1 + bulk(r, theta,
-    /// phi)); either may be empty. With either set the coupling carries
-    /// every solid element (GridCoupling::Options::all_solid), the
+    /// phi)); either may be empty. With any set the coupling carries,
+    /// beside the viscous elements, every solid element where a
+    /// perturbation is non-zero at some memory point (the functions are
+    /// sampled on a probe of the whole solid first), the
     /// unrelaxed start solve is the preconditioned conjugate-gradient
     /// solve of detail/LateralSolve.hpp on the reference systems
     /// (elastic_rtol, elastic_max_iterations), and the within-step
     /// iterate carries the dilatation beside the deviatoric strain (the
     /// lateral bulk term). The step itself stays one fixed point: the
     /// lateral moduli join the lateral viscosity in its pointwise weight.
-    /// Not yet distributed (docs/dev/adjoints.md §13k).
+    /// Distributed over radial segments like the rest (the start solve's
+    /// conjugate gradients pair each process's share; docs/dev/adjoints.md
+    /// §13k, §13m).
+    /// A lateral DENSITY, rho(x) = rho(r) (1 + density(r, theta, phi)),
+    /// enters the gravitational couplings of the solid pointwise with
+    /// the gravity, the reference potential and the stratification held
+    /// radial — the hydrostatic reference is then not in equilibrium with
+    /// the density, the convention of the field (docs/dev/adjoints.md
+    /// §13l states the limitation); the inertia moment and the fluid
+    /// keep the radial density.
     struct LateralModuli {
       std::function<double(double, double, double)> shear;
       std::function<double(double, double, double)> bulk;
+      std::function<double(double, double, double)> density;
     };
     LateralModuli moduli{};
     double elastic_rtol = 1e-12;
@@ -164,6 +176,12 @@ class Viscoelastic3D {
   Viscoelastic3D(const Rheology& rheology, int lmax, const SurfaceGrid& grid,
                  const std::function<double(double, double, double)>& delta,
                  Options options);
+  /// The elements a coupling must carry for these lateral moduli: the
+  /// viscous ones and those where a perturbation is non-zero at some
+  /// memory point (empty when no moduli are set: the rheology's rule).
+  [[nodiscard]] static std::vector<char> ActiveElementsFor(
+      const Rheology& rheology, int lmax, const SurfaceGrid& grid,
+      const Options& options);
   ~Viscoelastic3D();  // out of line: unique_ptr of an incomplete type
   Viscoelastic3D(Viscoelastic3D&&) noexcept;
   Viscoelastic3D& operator=(Viscoelastic3D&&) noexcept;
@@ -187,8 +205,23 @@ class Viscoelastic3D {
   /// absolute unrelaxed shear perturbation delta mu_U(x); empty where
   /// not set.
   [[nodiscard]] bool HasLateralModuli() const {
-    return !shear_.empty() || !bulk_.empty();
+    return !shear_.empty() || !bulk_.empty() || !density_.empty();
   }
+  /// The absolute lateral density perturbation delta rho(x) over the grid
+  /// values; empty where not set.
+  [[nodiscard]] std::span<const double> DensityPerturbation() const {
+    return density_;
+  }
+  /// The scalar companions of this operator's iterate: the dilatation's
+  /// block (-1 without a lateral bulk modulus) and the first of the four
+  /// density fields' blocks (-1 without a lateral density).
+  [[nodiscard]] int DilatationBlock() const { return dilatationBlock_; }
+  [[nodiscard]] int DensityBlock() const { return densityBlock_; }
+  [[nodiscard]] std::size_t CompanionCount() const { return companions_; }
+  /// Weights a grid tensor's scalar companions by the step's negative
+  /// lateral weights (-delta kappa on the dilatation, -delta rho on the
+  /// density fields): what Respond and the transposed passes apply.
+  void WeightCompanions(GridCoupling::TensorField& field) const;
   [[nodiscard]] std::span<const double> ShearPerturbation() const {
     return shear_;
   }
@@ -203,6 +236,15 @@ class Viscoelastic3D {
   /// points).
   [[nodiscard]] std::span<const double> UnrelaxedShearAtNodes() const {
     return muUnrelaxed_;
+  }
+  /// The reference's bulk modulus at each memory node, likewise.
+  [[nodiscard]] std::span<const double> BulkModulusAtNodes() const {
+    return kappaAtNodes_;
+  }
+  /// The factor 1 + s(x) every branch modulus carries at a grid value
+  /// under the lateral shear (1 without).
+  [[nodiscard]] double ShearFactor(std::size_t gridValue) const {
+    return shear_.empty() ? 1.0 : 1.0 + shear_[gridValue];
   }
   /// The diagnostics of the last unrelaxed start solve under lateral
   /// moduli (SolveElastic / ElasticStrain / PrimeStrain / a StartStep
@@ -452,10 +494,25 @@ class Viscoelastic3D {
     mutable bool startForce_ = false;
     /// Per-degree spheroidal forces added after the assembly (AddForce).
     std::map<int, std::vector<Complex>> extraSpheroidal_;
+    /// The tide columns AddChannels last added, per degree: under a
+    /// lateral density StrainOf adds the known potential's fields to the
+    /// iterate's companions, so that rho(x) multiplies phi + psi.
+    mutable std::map<int, std::vector<Complex>> tide_;
+    /// The lateral density's part of the inertia moment, sum over the
+    /// nodes of W r^3 int delta rho U dOmega, formed from the iterate's
+    /// U companion at each Respond (and from the start strain's at
+    /// StartStep): what InertiaMoment adds to the radial row's.
+    mutable double lateralMoment_ = 0.0;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
-  /// consistent solve under the start-time channels. Its grid-sized
+  /// consistent solve under the start-time channels. A step of length
+  /// ZERO is the instantaneous (unrelaxed) problem as an open step: the
+  /// weights are the identity (beta = 0, m~ = m, the effective systems
+  /// the unrelaxed ones) and the within-step fixed point closes the
+  /// instantaneous elastic response under lateral moduli — what the
+  /// evolution's start, the sweeps' starts, equilibria and jumps need
+  /// there (docs/dev/adjoints.md §13k). Its grid-sized
   /// arrays (the decayed memory, the weights, the workspace) come from the
   /// arrays recycled since the last StartStep where there are any, and are
   /// allocated otherwise.
@@ -509,8 +566,18 @@ class Viscoelastic3D {
   [[nodiscard]] GridCoupling::SpectralTensor ElasticStrainCoefficients(
       const State& state, const LoadCallable3D& load,
       const LoadCallable3D& tide) const;
+ public:
+  /// The unrelaxed reference systems (the Love-number operators of the
+  /// rheology's material), built on first use.
+  [[nodiscard]] const DegreeOperator& UnrelaxedSpheroidal(int l) const {
+    return Spheroidal(l);
+  }
+  [[nodiscard]] const ToroidalOperator& UnrelaxedToroidal(int l) const {
+    return Toroidal(l);
+  }
   /// A zero spectral tensor shaped for this operator's iterate: with the
-  /// dilatation's coefficients under a lateral bulk modulus.
+  /// scalar companions of its lateral moduli (the dilatation's, the
+  /// density fields').
   [[nodiscard]] GridCoupling::SpectralTensor ZeroSpectralFor() const;
   /// The spheroidal forces of a weighted tensor: the deviatoric assembly
   /// plus, where the tensor carries a scalar companion, the dilatation's.
@@ -529,6 +596,27 @@ class Viscoelastic3D {
   [[nodiscard]] Solutions LateralElasticSolve(
       const std::map<int, std::vector<Complex>>& sphForces,
       const std::map<int, std::vector<Complex>>& torForces) const;
+  /// The UNRELAXED systems solving per-degree forces: the reference
+  /// systems alone, or under lateral moduli the conjugate-gradient solve
+  /// (the symmetric operator, so the transposed solve as well).
+  [[nodiscard]] Solutions SolveUnrelaxed(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces) const;
+  /// The tide columns' lateral density force per degree: the density
+  /// pipeline (with the step's negative weight) on the known potential's
+  /// fields — the body force -delta rho(x) grad psi joining the
+  /// reference Tide() forces.
+  [[nodiscard]] std::map<int, std::vector<Complex>> LateralTideForces(
+      const std::map<int, std::vector<Complex>>& tideColumns,
+      const std::function<const DegreeOperator&(int)>& spheroidal) const;
+  /// Adds the known tidal potential's fields to a spectral tensor's
+  /// density companions (AddTidePotentialFields per degree).
+  void AddTideFields(GridCoupling::SpectralTensor& spectral,
+                     const std::map<int, std::vector<Complex>>& tideColumns,
+                     const std::function<const DegreeOperator&(int)>& spheroidal) const;
+  /// The lateral density's inertia moment of a grid tensor's U companion
+  /// (unweighted): sum over the nodes of W r^3 int delta rho U dOmega.
+  [[nodiscard]] double LateralMomentOf(const GridCoupling::TensorField& field) const;
   /// Adds the load/tide channels' forces at time t per degree (the unit
   /// load and tide vectors times the amplitudes) to spheroidal forces.
   void AddChannelForces(
@@ -545,6 +633,7 @@ class Viscoelastic3D {
       GridCoupling::SpectralTensor& spectral, const Solutions& solutions,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
+ private:
   /// Solve all degrees of both blocks for a combined weighted tensor.
   [[nodiscard]] Solutions SolveAll(
       const GridCoupling::SpectralTensor& weighted,
@@ -579,7 +668,10 @@ class Viscoelastic3D {
   /// and its negative (the step's weight) likewise, and the reference's
   /// unrelaxed shear per node; empty where not set.
   std::vector<double> shear_, shearUnrelaxed_, bulk_, negativeBulk_;
-  std::vector<double> muUnrelaxed_;
+  std::vector<double> density_, negativeDensity_;
+  std::vector<double> muUnrelaxed_, kappaAtNodes_;
+  int dilatationBlock_ = -1, densityBlock_ = -1;
+  std::size_t companions_ = 0;
   mutable ElasticSolveInfo lastElasticSolve_;
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;
   mutable std::map<int, std::unique_ptr<ToroidalOperator>> toroidal_;

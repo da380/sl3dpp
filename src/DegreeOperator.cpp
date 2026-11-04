@@ -152,6 +152,7 @@ DegreeOperator::Coefficients DegreeOperator::BaseCoefficients() const {
   const auto G = material_->G();
   const auto& moduli = material_->Moduli();
   const auto rho = material_->Rho();
+  const auto rhoPot = material_->PotentialDensity();
   const auto drho = material_->DRho();
   const auto g = material_->Gravity();
   const auto size = rho.size();
@@ -169,7 +170,9 @@ DegreeOperator::Coefficients DegreeOperator::BaseCoefficients() const {
   for (auto i = std::size_t{0}; i < size; ++i) {
     const auto r = mesh.Radii()[i];
     c.AN[i] = moduli.A[i] - moduli.N[i];
-    c.UU[i] = 4.0 * rho[i] * (kPi * G * rho[i] * r - g[i]) * r;
+    // rho r^2 (g' - 2 g / r) with g' = 4 pi G rho_pot - 2 g / r the
+    // reference potential's: linear in the density, the potential's held
+    c.UU[i] = 4.0 * rho[i] * (kPi * G * rhoPot[i] * r - g[i]) * r;
     c.UV[i] = k2 * rho[i] * g[i] * r;
     c.VP[i] = k2 * rho[i] * r;
     c.UPhi[i] = rho[i] * r * r;

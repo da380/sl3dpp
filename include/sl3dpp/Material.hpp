@@ -113,6 +113,13 @@ class Material {
   // Nodal arrays, row-major (element, node), as RadialMesh::Nodal lays
   // them out.
   [[nodiscard]] std::span<const double> Rho() const { return rho_; }
+  /// The density of the REFERENCE POTENTIAL: what Poisson's equation
+  /// puts into the gravity gradient's 4 pi G rho piece of the UU
+  /// coupling. The density itself, except for WithDensityGravityHeld,
+  /// which holds it with the gravity (the lateral density's convention).
+  [[nodiscard]] std::span<const double> PotentialDensity() const {
+    return rhoPotential_;
+  }
   [[nodiscard]] std::span<const double> DRho() const { return drho_; }
   [[nodiscard]] std::span<const double> Gravity() const { return g_; }
   [[nodiscard]] const NodalModuli& Moduli() const { return moduli_; }
@@ -129,6 +136,14 @@ class Material {
   /// rheology); the replacement must have the mesh's nodal size.
   [[nodiscard]] std::expected<Material, MaterialError> WithModuli(
       NodalModuli moduli) const;
+  /// The same material with the nodal density replaced and EVERYTHING
+  /// ELSE HELD: gravity, its surface value, the density gradient (the
+  /// stratification) and the moduli stay as they were. Not a
+  /// self-consistent body — it is the 1D image of the lateral density's
+  /// convention (docs/dev/adjoints.md §13l), for gating the 3D density
+  /// pipeline against the radial operator.
+  [[nodiscard]] std::expected<Material, MaterialError> WithDensityGravityHeld(
+      std::vector<double> rho) const;
 
   /// The scales carried from the model, for dimensionalising outputs.
   [[nodiscard]] const Scales& ModelScales() const { return scales_; }
@@ -157,6 +172,7 @@ class Material {
 
   RadialMesh mesh_;
   std::vector<double> rho_;
+  std::vector<double> rhoPotential_;
   std::vector<double> drho_;
   std::vector<double> g_;
   std::vector<char> fluid_;  // per element

@@ -27,7 +27,7 @@ std::vector<std::span<double>> RealSegments(GridCoupling::SpectralTensor& t) {
     return std::span<double>(reinterpret_cast<double*>(v.data()), 2 * v.size());
   };
   auto out = std::vector{pairs(t.c[0]), pairs(t.c[1]), pairs(t.r)};
-  if (!t.scalar.empty()) out.push_back(pairs(t.scalar));
+  for (auto& s : t.scalars) out.push_back(pairs(s));
   return out;
 }
 
@@ -38,23 +38,23 @@ std::vector<std::span<const double>> RealSegments(
                                    2 * v.size());
   };
   auto out = std::vector{pairs(t.c[0]), pairs(t.c[1]), pairs(t.r)};
-  if (!t.scalar.empty()) out.push_back(pairs(t.scalar));
+  for (const auto& s : t.scalars) out.push_back(pairs(s));
   return out;
 }
 
 // The coefficient blocks of a spectral tensor (three, and the scalar
-// companion where carried), for loops that treat them alike.
+// companions where carried), for loops that treat them alike.
 std::vector<std::vector<std::complex<double>>*> Blocks(
     GridCoupling::SpectralTensor& t) {
   auto out = std::vector{&t.c[0], &t.c[1], &t.r};
-  if (!t.scalar.empty()) out.push_back(&t.scalar);
+  for (auto& s : t.scalars) out.push_back(&s);
   return out;
 }
 
 std::vector<const std::vector<std::complex<double>>*> Blocks(
     const GridCoupling::SpectralTensor& t) {
   auto out = std::vector{&t.c[0], &t.c[1], &t.r};
-  if (!t.scalar.empty()) out.push_back(&t.scalar);
+  for (const auto& s : t.scalars) out.push_back(&s);
   return out;
 }
 
@@ -70,10 +70,10 @@ void AddSpectral(GridCoupling::SpectralTensor& out,
     detail::ParallelElements(o.size(), parallel,
                              [&](std::size_t i) { o[i] += f[i]; });
   }
-  if (!out.scalar.empty() && !in.scalar.empty()) {
-    detail::ParallelElements(out.scalar.size(), parallel, [&](std::size_t i) {
-      out.scalar[i] += in.scalar[i];
-    });
+  for (auto k = std::size_t{0}; k < out.scalars.size() && k < in.scalars.size(); ++k) {
+    auto& o = out.scalars[k];
+    const auto& f = in.scalars[k];
+    detail::ParallelElements(o.size(), parallel, [&](std::size_t i) { o[i] += f[i]; });
   }
 }
 
@@ -159,6 +159,51 @@ Viscoelastic3D::Viscoelastic3D(
                              .matrix_kernel = options.matrix_kernel}),
           delta, options) {}
 
+std::vector<char> Viscoelastic3D::ActiveElementsFor(const Rheology& rheology,
+                                                     int lmax,
+                                                     const SurfaceGrid& grid,
+                                                     const Options& options) {
+  const auto& moduli = options.moduli;
+  if (!moduli.shear && !moduli.bulk && !moduli.density) return {};
+  // A probe over the whole solid: the functions sampled at every memory
+  // point's grid; an element is carried if viscous or perturbed there.
+  const GridCoupling probe(rheology, lmax, grid,
+                           {.eps = options.eps,
+                            .truncation = options.truncation,
+                            .oversampling = options.oversampling,
+                            .parallel = options.parallel,
+                            .matrix_kernel = options.matrix_kernel,
+                            .memory_points = options.memory_points,
+                            .transform_degrees = options.transform_degrees,
+                            .all_solid = true});
+  const auto& mesh = rheology.BaseMaterial().Mesh();
+  const auto n = mesh.NGll();
+  auto active = std::vector<char>(static_cast<std::size_t>(mesh.ElementCount()), 0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto i = 0; i < n; ++i) {
+      if (rheology.IsActive(static_cast<std::size_t>(e) * n + i)) active[e] = 1;
+    }
+  }
+  for (auto node = 0; node < probe.NodeCount(); ++node) {
+    const auto e = probe.ElementOfNode(node);
+    if (active[e] != 0) continue;
+    const auto r = probe.RadiusOfNode(node);
+    const auto& sampling = probe.GridOf(node);
+    auto perturbed = false;
+    for (auto theta : sampling.CoLatitudes()) {
+      for (auto phi : sampling.Longitudes()) {
+        for (const auto* f : {&moduli.shear, &moduli.bulk, &moduli.density}) {
+          if (*f && (*f)(r, theta, phi) != 0.0) perturbed = true;
+        }
+        if (perturbed) break;
+      }
+      if (perturbed) break;
+    }
+    if (perturbed) active[e] = 1;
+  }
+  return active;
+}
+
 Viscoelastic3D::Viscoelastic3D(
     const Rheology& rheology, int lmax, const SurfaceGrid& grid,
     const std::function<double(double, double, double)>& delta, Options options)
@@ -175,8 +220,7 @@ Viscoelastic3D::Viscoelastic3D(
            .memory_points = options.memory_points,
            .transform_degrees = options.transform_degrees,
            .elements = OwnedElements(rheology.BaseMaterial().Mesh(), options),
-           .all_solid = static_cast<bool>(options.moduli.shear) ||
-                        static_cast<bool>(options.moduli.bulk)}),
+           .active_elements = ActiveElementsFor(rheology, lmax, grid, options)}),
       reference_(*rheology_, lmax,
                  {.eps = options.eps,
                   .truncation = options.truncation,
@@ -227,11 +271,7 @@ Viscoelastic3D::Viscoelastic3D(
   // shear at the points as the operators carry it), and the perturbation
   // functions sampled on each node's grid.
   const auto& moduli = options.moduli;
-  if (moduli.shear || moduli.bulk) {
-    if (options.collectives.Distributed()) {
-      throw std::invalid_argument(
-          "lateral moduli are not yet distributed over radial segments");
-    }
+  if (moduli.shear || moduli.bulk || moduli.density) {
     const auto& material = rheology_->BaseMaterial();
     const auto& mesh = material.Mesh();
     const auto n = mesh.NGll();
@@ -240,7 +280,8 @@ Viscoelastic3D::Viscoelastic3D(
     const auto longTerm = rheology_->MuLongTerm();
     const auto kappaNodal = rheology_->Kappa();
     muUnrelaxed_.assign(nodes, 0.0);
-    auto kappaAtNodes = std::vector<double>(nodes, 0.0);
+    auto& kappaAtNodes = kappaAtNodes_;
+    kappaAtNodes.assign(nodes, 0.0);
     for (auto node = 0; node < nodes; ++node) {
       const auto e = coupling_.ElementOfNode(node);
       const auto q = coupling_.NodeInElementOf(node);
@@ -286,6 +327,50 @@ Viscoelastic3D::Viscoelastic3D(
       sample(moduli.bulk, kappaAtNodes, bulk_, nullptr);
       negativeBulk_.resize(bulk_.size());
       for (auto i = std::size_t{0}; i < bulk_.size(); ++i) negativeBulk_[i] = -bulk_[i];
+      dilatationBlock_ = static_cast<int>(companions_);
+      companions_ += 1;
+    }
+    if (moduli.density) {
+      // the reference density at the memory points (nodal at the GLL
+      // points, interpolated at Gauss points)
+      const auto rhoNodal = material.Rho();
+      auto rhoAtNodes = std::vector<double>(nodes, 0.0);
+      for (auto node = 0; node < nodes; ++node) {
+        const auto e = coupling_.ElementOfNode(node);
+        const auto q = coupling_.NodeInElementOf(node);
+        if (gll) {
+          rhoAtNodes[node] = rhoNodal[static_cast<std::size_t>(e) * n + q];
+        } else {
+          for (auto i = 0; i < n; ++i) {
+            rhoAtNodes[node] +=
+                points.Value(q, i) * rhoNodal[static_cast<std::size_t>(e) * n + i];
+          }
+        }
+      }
+      sample(moduli.density, rhoAtNodes, density_, nullptr);
+      negativeDensity_.resize(density_.size());
+      for (auto i = std::size_t{0}; i < density_.size(); ++i) {
+        negativeDensity_[i] = -density_[i];
+      }
+      densityBlock_ = static_cast<int>(companions_);
+      companions_ += GridCoupling::kDensityFields;
+    }
+  }
+}
+
+void Viscoelastic3D::WeightCompanions(GridCoupling::TensorField& field) const {
+  if (field.scalars.size() != companions_) {
+    throw std::invalid_argument(
+        "a grid tensor's scalar companions match the operator's layout");
+  }
+  if (dilatationBlock_ >= 0) {
+    coupling_.MultiplyScalar(field, static_cast<std::size_t>(dilatationBlock_),
+                             negativeBulk_);
+  }
+  if (densityBlock_ >= 0) {
+    for (auto k = std::size_t{0}; k < GridCoupling::kDensityFields; ++k) {
+      coupling_.MultiplyScalar(field, static_cast<std::size_t>(densityBlock_) + k,
+                               negativeDensity_);
     }
   }
 }
@@ -370,9 +455,8 @@ std::shared_ptr<Viscoelastic3D::Flavour> Viscoelastic3D::FlavourOf(
 
 GridCoupling::SpectralTensor Viscoelastic3D::ZeroSpectralFor() const {
   auto spectral = coupling_.ZeroSpectral();
-  if (!bulk_.empty()) {
-    spectral.scalar.assign(coupling_.ScalarCoefficientCount(), 0.0);
-  }
+  spectral.scalars.assign(companions_,
+                          std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0));
   return spectral;
 }
 
@@ -390,13 +474,90 @@ Viscoelastic3D::SpheroidalForces(
     const GridCoupling::SpectralTensor& weighted,
     const std::function<const DegreeOperator&(int)>& spheroidal) const {
   auto forces = coupling_.SpheroidalForce(weighted, spheroidal);
-  if (weighted.scalar.empty()) return forces;
-  const auto bulk = coupling_.DilatationForce(weighted.scalar, spheroidal);
-  for (auto& [l, b] : forces) {
-    const auto& extra = bulk.at(l);
-    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += extra[i];
+  if (weighted.scalars.empty()) return forces;
+  if (weighted.scalars.size() < companions_) {
+    throw std::invalid_argument(
+        "a weighted tensor's scalar companions match the operator's layout");
+  }
+  auto add = [&](const std::map<int, std::vector<Complex>>& extra) {
+    for (auto& [l, b] : forces) {
+      const auto& f = extra.at(l);
+      for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+    }
+  };
+  if (dilatationBlock_ >= 0) {
+    add(coupling_.DilatationForce(
+        weighted.scalars[static_cast<std::size_t>(dilatationBlock_)], spheroidal));
+  }
+  if (densityBlock_ >= 0) {
+    add(coupling_.DensityForce(
+        std::span(weighted.scalars)
+            .subspan(static_cast<std::size_t>(densityBlock_),
+                     GridCoupling::kDensityFields),
+        spheroidal));
   }
   return forces;
+}
+
+void Viscoelastic3D::AddTideFields(
+    GridCoupling::SpectralTensor& spectral,
+    const std::map<int, std::vector<Complex>>& tideColumns,
+    const std::function<const DegreeOperator&(int)>& spheroidal) const {
+  if (densityBlock_ < 0 || tideColumns.empty()) return;
+  const auto fields =
+      std::span(spectral.scalars)
+          .subspan(static_cast<std::size_t>(densityBlock_), GridCoupling::kDensityFields);
+  const auto radius = rheology_->BaseMaterial().Radius();
+  for (const auto& [l, columns] : tideColumns) {
+    coupling_.AddTidePotentialFields(fields, l, spheroidal(l), columns,
+                                     l == 0 ? 2 : -1, radius);
+  }
+}
+
+std::map<int, std::vector<Viscoelastic3D::Complex>>
+Viscoelastic3D::LateralTideForces(
+    const std::map<int, std::vector<Complex>>& tideColumns,
+    const std::function<const DegreeOperator&(int)>& spheroidal) const {
+  auto out = std::map<int, std::vector<Complex>>{};
+  if (densityBlock_ < 0 || tideColumns.empty()) return out;
+  auto fields = std::vector<std::vector<Complex>>(
+      GridCoupling::kDensityFields,
+      std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0));
+  const auto radius = rheology_->BaseMaterial().Radius();
+  for (const auto& [l, columns] : tideColumns) {
+    coupling_.AddTidePotentialFields(fields, l, spheroidal(l), columns,
+                                     l == 0 ? 2 : -1, radius);
+  }
+  auto weighted = std::vector<std::vector<Complex>>{};
+  for (auto k = std::size_t{0}; k < GridCoupling::kDensityFields; ++k) {
+    if (k < 2) {
+      weighted.emplace_back(coupling_.ScalarCoefficientCount(), 0.0);
+      continue;
+    }
+    auto grid = coupling_.SynthesiseScalar(fields[k]);
+    detail::ParallelElements(grid.size(), options_.parallel,
+                             [&](std::size_t i) { grid[i] *= negativeDensity_[i]; });
+    weighted.push_back(coupling_.AnalyseScalar(grid));
+  }
+  return coupling_.DensityForce(weighted, spheroidal);
+}
+
+double Viscoelastic3D::LateralMomentOf(const GridCoupling::TensorField& field) const {
+  if (densityBlock_ < 0 || field.scalars.size() != companions_) return 0.0;
+  const auto& U = field.scalars[static_cast<std::size_t>(densityBlock_)];
+  auto moment = 0.0;
+  for (auto node = 0; node < coupling_.NodeCount(); ++node) {
+    const auto at = coupling_.FieldOffset(node);
+    const auto size = coupling_.FieldSizeOf(node);
+    auto product = std::vector<double>(size);
+    for (auto x = std::size_t{0}; x < size; ++x) {
+      product[x] = density_[at + x] * U[at + x];
+    }
+    const auto r = coupling_.RadiusOfNode(node);
+    moment += coupling_.WeightOfNode(node) * r * r * r *
+              coupling_.GridOf(node).Integrate(product);
+  }
+  return moment;
 }
 
 std::pair<std::map<int, std::vector<Viscoelastic3D::Complex>>,
@@ -415,7 +576,16 @@ Viscoelastic3D::LateralElasticForce(const Solutions& x) const {
   } else {
     coupling_.Multiply(grid, std::vector<double>(coupling_.GridValueCount(), 0.0));
   }
-  if (!grid.scalar.empty()) coupling_.MultiplyScalar(grid, bulk_);
+  // the companions weighted by the positive perturbations: +(dK) x
+  if (dilatationBlock_ >= 0) {
+    coupling_.MultiplyScalar(grid, static_cast<std::size_t>(dilatationBlock_), bulk_);
+  }
+  if (densityBlock_ >= 0) {
+    for (auto k = std::size_t{0}; k < GridCoupling::kDensityFields; ++k) {
+      coupling_.MultiplyScalar(grid, static_cast<std::size_t>(densityBlock_) + k,
+                               density_);
+    }
+  }
   const auto weighted = coupling_.Analyse(grid);
   return {SpheroidalForces(weighted, spheroidal),
           coupling_.ToroidalForce(weighted, toroidal)};
@@ -431,9 +601,14 @@ Viscoelastic3D::Solutions Viscoelastic3D::LateralElasticSolve(
     return Toroidal(l);
   };
   // The full unrelaxed operator: the reference systems' action on the
-  // complex columns as real pairs, plus the lateral force.
-  auto applyColumns = [](const auto& op, const std::vector<Complex>& x,
-                         int columns) {
+  // complex columns as real pairs, plus the lateral force. Distributed,
+  // each process's solution holds its segments and the cut nodes: the
+  // whole vector is assembled from the held shares (one collective per
+  // degree), the band applied, and the product masked back to this
+  // process's share, the layout the forces' shares have.
+  const auto& collectives = options_.collectives;
+  auto applyColumns = [&](const auto& op, const std::vector<Complex>& x,
+                          int columns) {
     const auto ndof = op.DofCount();
     auto real = std::vector<double>(static_cast<std::size_t>(ndof) * 2 * columns);
     for (auto c = 0; c < columns; ++c) {
@@ -444,7 +619,12 @@ Viscoelastic3D::Solutions Viscoelastic3D::LateralElasticSolve(
             x[static_cast<std::size_t>(c) * ndof + d].imag();
       }
     }
-    const auto y = op.Apply(real, 2 * columns);
+    if (collectives.Distributed()) {
+      op.MaskToShare(real, 2 * columns);
+      collectives.sum(real);
+    }
+    auto y = op.Apply(real, 2 * columns);
+    if (collectives.Distributed()) op.MaskToShare(y, 2 * columns);
     auto out = std::vector<Complex>(static_cast<std::size_t>(ndof) * columns);
     for (auto c = 0; c < columns; ++c) {
       for (auto d = 0; d < ndof; ++d) {
@@ -476,7 +656,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::LateralElasticSolve(
           [&](const std::map<int, std::vector<Complex>>& s,
               const std::map<int, std::vector<Complex>>& t) {
             return SolveForces(s, t, spheroidal, toroidal);
-          }};
+          },
+      .sum = collectives.Distributed() ? collectives.sum : nullptr};
   auto [x, info] = detail::LateralConjugateGradients(
       sphForces, torForces, system,
       {.rtol = options_.elastic_rtol,
@@ -491,6 +672,16 @@ Viscoelastic3D::Solutions Viscoelastic3D::LateralElasticSolve(
   return std::move(x);
 }
 
+Viscoelastic3D::Solutions Viscoelastic3D::SolveUnrelaxed(
+    const std::map<int, std::vector<Complex>>& sphForces,
+    const std::map<int, std::vector<Complex>>& torForces) const {
+  if (HasLateralModuli()) return LateralElasticSolve(sphForces, torForces);
+  return SolveForces(
+      sphForces, torForces,
+      [&](int l) -> const DegreeOperator& { return Spheroidal(l); },
+      [&](int l) -> const ToroidalOperator& { return Toroidal(l); });
+}
+
 void Viscoelastic3D::AddChannelForces(
     std::map<int, std::vector<Complex>>& forces, double t,
     const LoadCallable3D& load, const LoadCallable3D& tide,
@@ -500,8 +691,10 @@ void Viscoelastic3D::AddChannelForces(
     const auto& system = spheroidal(l);
     const auto ndof = system.DofCount();
     auto add = [&](const std::optional<std::vector<Complex>>& columns,
-                   const std::vector<double>& unit) {
+                   std::vector<double> unit) {
       if (!columns) return;
+      // distributed, the unit vector as this process's share
+      if (options_.collectives.Distributed()) system.MaskToShare(unit, 1);
       for (auto c = 0; c <= l; ++c) {
         const auto amplitude = (*columns)[c];
         if (amplitude == 0.0) continue;
@@ -542,9 +735,17 @@ void Viscoelastic3D::AddStrainCoefficients(
         spectral, task.l, *task.sph, *task.x, task.tor,
         task.w == nullptr ? std::span<const Complex>{}
                           : std::span<const Complex>(*task.w));
-    if (!spectral.scalar.empty()) {
-      coupling_.AddDilatationOfSolution(spectral.scalar, task.l, *task.sph,
-                                        *task.x);
+    if (dilatationBlock_ >= 0 && !spectral.scalars.empty()) {
+      coupling_.AddDilatationOfSolution(
+          spectral.scalars[static_cast<std::size_t>(dilatationBlock_)], task.l,
+          *task.sph, *task.x);
+    }
+    if (densityBlock_ >= 0 && !spectral.scalars.empty()) {
+      coupling_.AddDensityFieldsOfSolution(
+          std::span(spectral.scalars)
+              .subspan(static_cast<std::size_t>(densityBlock_),
+                       GridCoupling::kDensityFields),
+          task.l, *task.sph, *task.x);
     }
   });
 }
@@ -708,6 +909,16 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveElastic(
   auto sph = coupling_.SpheroidalForce(weighted, spheroidal);
   auto tor = coupling_.ToroidalForce(weighted, toroidal);
   AddChannelForces(sph, state.t, load, tide, spheroidal);
+  if (tide && densityBlock_ >= 0) {
+    auto columns = std::map<int, std::vector<Complex>>{};
+    for (auto l = 0; l <= lmax_; ++l) {
+      if (auto c = tide(l, state.t)) columns.emplace(l, std::move(*c));
+    }
+    for (const auto& [l, f] : LateralTideForces(columns, spheroidal)) {
+      auto& b = sph.at(l);
+      for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+    }
+  }
   return LateralElasticSolve(sph, tor);
 }
 
@@ -908,7 +1119,7 @@ Viscoelastic3D::OpenStep::~OpenStep() {
 Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     const State& state, double dt, Scheme scheme, const LoadCallable3D& load,
     const LoadCallable3D& tide) const {
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   if (scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument(
         "the 3D step is implicit: ExponentialTrapezoid or BackwardEuler");
@@ -928,10 +1139,10 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   // half made from the other), or a consistent solve under the start-time
   // channels.
   if (state.strainCoefficients.has_value() &&
-      (bulk_.empty() || !state.strainCoefficients->scalar.empty())) {
+      state.strainCoefficients->scalars.size() == companions_) {
     step.s0_ = *state.strainCoefficients;
   } else if (state.strain.has_value() &&
-             (bulk_.empty() || !state.strain->scalar.empty())) {
+             state.strain->scalars.size() == companions_) {
     step.s0_ = coupling_.Analyse(*state.strain);
   } else {
     step.s0_ = ElasticStrainCoefficients(state, load, tide);
@@ -1030,7 +1241,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
       }
     });
   }
-  fixed.scalar.clear();
+  fixed.scalars.clear();
   step.fixed_ = coupling_.Analyse(fixed);
 
   // The first pass's force, from the grid strain already in hand, so that
@@ -1041,15 +1252,14 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
     fixed.c[1][i] = step.weight_[i] * d0.c[1][i];
     fixed.r[i] = step.weight_[i] * d0.r[i];
   });
-  if (!bulk_.empty()) {
-    if (d0.scalar.empty()) {
+  if (companions_ > 0) {
+    if (d0.scalars.size() != companions_) {
       throw std::invalid_argument(
-          "under a lateral bulk modulus a strain cache carries the dilatation");
+          "under lateral moduli a strain cache carries the scalar companions");
     }
-    fixed.scalar.resize(values);
-    detail::ParallelElements(values, options_.parallel, [&](std::size_t i) {
-      fixed.scalar[i] = negativeBulk_[i] * d0.scalar[i];
-    });
+    step.lateralMoment_ = LateralMomentOf(d0);
+    fixed.scalars = d0.scalars;
+    WeightCompanions(fixed);
   }
   coupling_.Analyse(fixed, step.analysed_);
   AddSpectral(step.analysed_, step.fixed_, options_.parallel);
@@ -1076,7 +1286,10 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   if (!formed) {
     coupling.Synthesise(strain, grid_);
     coupling.Multiply(grid_, weight_);
-    if (!grid_.scalar.empty()) coupling.MultiplyScalar(grid_, op.negativeBulk_);
+    if (!grid_.scalars.empty()) {
+      lateralMoment_ = op.LateralMomentOf(grid_);
+      op.WeightCompanions(grid_);
+    }
     coupling.Analyse(grid_, analysed_);
     AddSpectral(analysed_, fixed_, op.options_.parallel);
   }
@@ -1086,7 +1299,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   const auto toroidal = [&](int l) -> const ToroidalOperator& {
     return op.FlavourToroidal(flavour, l);
   };
-  if (extraSpheroidal_.empty() && analysed_.scalar.empty()) {
+  if (extraSpheroidal_.empty() && analysed_.scalars.empty()) {
     return op.SolveAll(analysed_, spheroidal, toroidal);
   }
   auto sph = op.SpheroidalForces(analysed_, spheroidal);
@@ -1146,6 +1359,13 @@ void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,
         return op.FlavourSpheroidal(flavour, l);
       },
       flavour.units);
+  // the tide columns, for the iterate's density companions
+  tide_.clear();
+  if (tide && op.densityBlock_ >= 0) {
+    for (auto l = 0; l <= op.lmax_; ++l) {
+      if (auto c = tide(l, t_)) tide_.emplace(l, std::move(*c));
+    }
+  }
 }
 
 GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
@@ -1163,14 +1383,16 @@ GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
                                [&](std::size_t i) { b[i] = 0.0; });
     }
   }
-  op.AddStrainCoefficients(
-      spectral, solutions,
-      [&](int l) -> const DegreeOperator& {
-        return op.FlavourSpheroidal(flavour, l);
-      },
-      [&](int l) -> const ToroidalOperator& {
-        return op.FlavourToroidal(flavour, l);
-      });
+  const auto spheroidal = [&](int l) -> const DegreeOperator& {
+    return op.FlavourSpheroidal(flavour, l);
+  };
+  op.AddStrainCoefficients(spectral, solutions, spheroidal,
+                           [&](int l) -> const ToroidalOperator& {
+                             return op.FlavourToroidal(flavour, l);
+                           });
+  // under a lateral density the known tidal potential rides along, so
+  // that rho(x) multiplies phi + psi
+  op.AddTideFields(spectral, tide_, spheroidal);
   return spectral;
 }
 
@@ -1186,6 +1408,9 @@ double Viscoelastic3D::OpenStep::InertiaMoment(
     const auto lock = op_->LockCaches();
     moment = op_->reference_.InertiaMoment(column, 1)[0];
   }
+  // the lateral density's part, from the iterate's U companion (this
+  // process's nodes'), summed with the row's over the processes
+  moment += lateralMoment_;
   if (op_->options_.collectives.Distributed()) {
     op_->options_.collectives.sum(std::span(&moment, 1));
   }
@@ -1249,12 +1474,13 @@ void Viscoelastic3D::OpenStep::AddMemory(
       const auto size = coupling.FieldSizeOf(static_cast<int>(node));
       for (auto x = std::size_t{0}; x < size; ++x) {
         const auto at = base + x;
+        const auto muAt = mu[node] * op.ShearFactor(at);
         for (auto c = 0; c < 2; ++c) {
           memory.c[c][at] += add.c[c][at];
-          force.c[c][at] += mu[node] * add.c[c][at];
+          force.c[c][at] += muAt * add.c[c][at];
         }
         memory.r[at] += add.r[at];
-        force.r[at] += mu[node] * add.r[at];
+        force.r[at] += muAt * add.r[at];
       }
     });
   }

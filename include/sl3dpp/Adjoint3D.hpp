@@ -124,6 +124,12 @@ struct Kernels3D {
   std::vector<double> muKernel3D;
   std::vector<double> kappaKernelSpherical;
   std::vector<double> muKernelSpherical;
+  /// dJ / d rho(x) likewise, with gravity, the reference potential and
+  /// the stratification held radial (the lateral density's convention,
+  /// docs/dev/adjoints.md §13l): the transpose of
+  /// MaterialDirection3D::rho.
+  std::vector<double> rhoKernel3D;
+  std::vector<double> rhoKernelSpherical;
 };
 
 /// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
@@ -156,8 +162,13 @@ struct Kernels3D {
 struct MaterialDirection3D {
   std::vector<double> kappa;
   std::vector<double> mu;
+  /// A lateral density perturbation delta rho(x), entering the
+  /// gravitational couplings pointwise with g held (the solid only).
+  std::vector<double> rho;
 
-  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
+  [[nodiscard]] bool Empty() const {
+    return kappa.empty() && mu.empty() && rho.empty();
+  }
 };
 
 /**
@@ -181,6 +192,8 @@ struct KernelDerivatives3D {
   std::vector<double> muKernel3D;
   std::vector<double> kappaKernelSpherical;
   std::vector<double> muKernelSpherical;
+  std::vector<double> rhoKernel3D;
+  std::vector<double> rhoKernelSpherical;
 };
 
 class AdjointSolver3D {
