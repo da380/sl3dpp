@@ -1202,9 +1202,8 @@ that direction with the kernels' derivatives — the ice views on every
 rank and each rank's slices of the 3D kernels and derivatives against
 the one process on the same cuts, all at 1e-11 on the first run.
 `Distributed.DerivativesMatchTheOneProcess` is the same under mpiexec
-(TestDistributed), written alongside but NOT RUN on the laptop: its MPI
-install lacks the development headers (mpicxx without
-`/usr/lib/x86_64-linux-gnu/openmpi/include`), so the MPI build does not
-configure there; run it where `SL3DPP_WITH_MPI` builds (the server).
+(TestDistributed), on 2, 3 and 4 ranks (the MPI build against David's own
+MPICH under ~/dev/petsc-install, `-DMPI_CXX_COMPILER=<its mpicxx>`, not
+the distribution's packages).
 Not distributed: the static Born perturbation (`ElasticPerturbation3D`),
 a small static problem run at benchmark size on one process.
