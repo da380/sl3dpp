@@ -219,9 +219,11 @@ class Viscoelastic3D {
   /// absolute bulk perturbation delta kappa(x) (material units), and the
   /// absolute unrelaxed shear perturbation delta mu_U(x); empty where
   /// not set.
-  [[nodiscard]] bool HasLateralModuli() const {
-    return !shear_.empty() || !bulk_.empty();
-  }
+  /// Whether lateral moduli were given: the same on every rank of a
+  /// distributed run, whose segment may hold no node where they are
+  /// non-zero (its sampled arrays then empty), since the solve's route
+  /// is collective.
+  [[nodiscard]] bool HasLateralModuli() const { return lateralModuli_; }
   /// The scalar companions of this operator's iterate: the dilatation's
   /// block (-1 without a lateral bulk modulus).
   [[nodiscard]] int DilatationBlock() const { return dilatationBlock_; }
@@ -753,6 +755,7 @@ class Viscoelastic3D {
   /// perturbation and delta mu_U(x) over the grid values, delta kappa(x)
   /// and its negative (the step's weight) likewise, and the reference's
   /// unrelaxed shear per node; empty where not set.
+  bool lateralModuli_ = false;
   std::vector<double> shear_, shearUnrelaxed_, bulk_, negativeBulk_;
   std::vector<double> muUnrelaxed_, kappaAtNodes_;
   int dilatationBlock_ = -1;

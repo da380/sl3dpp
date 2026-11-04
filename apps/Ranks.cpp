@@ -1,6 +1,9 @@
 #include "Ranks.hpp"
 
 #include <format>
+#include <execinfo.h>
+#include <iostream>
+#include <cstdlib>
 #include <limits>
 #include <stdexcept>
 #include <utility>
@@ -43,20 +46,28 @@ RanksOverride::~RanksOverride() { Current() = std::move(saved_); }
 
 Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
                                         const Rheology& rheology) {
+  return OperatorOptions(input.lmax, input.transform_degrees, rheology);
+}
+
+Viscoelastic3D::Options OperatorOptions(int lmax,
+                                        const std::vector<int>& transform_degrees,
+                                        const Rheology& rheology,
+                                        const std::vector<char>& active_elements) {
   auto options = Viscoelastic3D::Options{};
-  options.transform_degrees = input.transform_degrees;
+  options.transform_degrees = transform_degrees;
   const auto& ranks = TheRanks();
   if (!ranks.Distributed()) return options;
 #ifdef SL3DPP_HAVE_MPI
   // The coupling the operator builds from these options, and so the work
   // its cuts balance.
   const auto weights = GridCoupling::TransformWeights(
-      rheology, input.lmax,
+      rheology, lmax,
       {.eps = options.eps,
        .truncation = options.truncation,
        .oversampling = options.oversampling,
        .memory_points = options.memory_points,
-       .transform_degrees = options.transform_degrees});
+       .transform_degrees = options.transform_degrees,
+       .active_elements = active_elements});
   const auto share =
       ShareMesh(rheology.BaseMaterial().Mesh(), MPI_COMM_WORLD, weights);
   options.radial_cuts = share.cuts;

@@ -50,6 +50,8 @@ constexpr auto kUsage =
     "  kernel         adjoint sensitivity kernels of configured\n"
     "                 measurements, 3D lateral viscosity\n"
     "  kernel1d       its 1D counterpart\n"
+    "  static         the instantaneous elastic response of a laterally\n"
+    "                 heterogeneous Earth to a surface load and a tide\n"
     "\n"
     "sl3d --version prints the library versions. Every command's config\n"
     "is documented in docs/sl3d-configs.md, also at\n"
@@ -68,6 +70,7 @@ constexpr auto kCommands = std::array{
     Command{"evolve1d", sl3dpp::app::RunEvolve, false},
     Command{"kernel", sl3dpp::app::RunKernel3D, true},
     Command{"kernel1d", sl3dpp::app::RunKernel1D, false},
+    Command{"static", sl3dpp::app::RunStatic3D, true},
 };
 
 /// MPI from the start of main to its end (nothing without MPI).

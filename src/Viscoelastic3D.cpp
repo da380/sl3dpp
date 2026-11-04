@@ -271,7 +271,8 @@ Viscoelastic3D::Viscoelastic3D(
   // shear at the points as the operators carry it), and the perturbation
   // functions sampled on each node's grid.
   const auto& moduli = options.moduli;
-  if (moduli.shear || moduli.bulk) {
+  lateralModuli_ = static_cast<bool>(moduli.shear) || static_cast<bool>(moduli.bulk);
+  if (lateralModuli_) {
     const auto& material = rheology_->BaseMaterial();
     const auto& mesh = material.Mesh();
     const auto n = mesh.NGll();

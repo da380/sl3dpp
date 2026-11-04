@@ -337,6 +337,13 @@ class GridCoupling {
   /// Adds the dilatation r div u = r d_r U + 2 U - k^2 V of degree
   /// solutions (the X + Y of the degree form) at the nodes to a scalar's
   /// coefficients, column by column.
+  /// Adds a solution's radial displacement U at every memory node to a
+  /// scalar companion's coefficients (the same layout as the
+  /// dilatation's): a scalar field of the solution over the nodes, for
+  /// writing or plotting a 3D response (io::WriteNodeFields).
+  void AddDisplacementOfSolution(std::vector<Complex>& spectral, int l,
+                                 const DegreeOperator& spheroidal,
+                                 std::span<const Complex> x) const;
   void AddDilatationOfSolution(std::vector<Complex>& spectral, int l,
                                const DegreeOperator& spheroidal,
                                std::span<const Complex> x) const;

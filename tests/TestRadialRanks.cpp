@@ -929,6 +929,68 @@ TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
   }
 }
 
+TEST(RadialRanks, ConfinedLateralModuliMatchTheOneProcessStatic) {
+  // Lateral moduli confined to the top of the mantle, so that an inner
+  // rank's segment holds no element where they are non-zero and its
+  // coupling no node at all: the static solve over two and three ranks
+  // still routes every rank through the lateral solve and lands on the
+  // one process's answer.
+  constexpr auto lmax = 8;
+  const auto body = Body::Make(lmax);
+  const auto& mesh = body.material.Mesh();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto elastic = Rheology::Create(body.material, {}).value();
+  const auto moduli = Viscoelastic3D::Options::LateralModuli{
+      .shear =
+          [](double r, double theta, double phi) {
+            return r > 0.93 ? 0.1 * std::sin(theta) * std::cos(theta) * std::cos(phi) : 0.0;
+          },
+      .bulk = [](double r, double theta, double) {
+        return r > 0.93 ? 0.05 * std::cos(theta) : 0.0;
+      }};
+  auto solve = [&](const Viscoelastic3D& stat) {
+    const auto x = stat.SolveElastic(stat.ZeroState(), load);
+    return std::pair{stat.Surface(x, Component::U), stat.LastElasticSolve().iterations};
+  };
+  for (const auto count : {2, 3}) {
+    const auto cuts = mesh.BalancedCuts(
+        count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
+    ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+    const auto options = Viscoelastic3D::Options{
+        .parallel = false,
+        .solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients,
+        .solve_rtol = 1e-12,
+        .moduli = moduli,
+        .elastic_rtol = 1e-12,
+        .radial_cuts = cuts};
+    const Viscoelastic3D whole(elastic, lmax, Peaked, options);
+    const auto [wantU, wantIterations] = solve(whole);
+
+    ThreadRanks ranks(count);
+    auto statics = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+    for (auto rank = 0; rank < count; ++rank) {
+      auto mine = options;
+      mine.segments = {rank};
+      mine.collectives = ranks.For(rank);
+      statics.push_back(std::make_unique<Viscoelastic3D>(elastic, lmax, Peaked, mine));
+    }
+    auto empty = 0;
+    for (const auto& stat : statics) empty += stat->Coupling().NodeCount() == 0 ? 1 : 0;
+    EXPECT_GT(empty, 0) << count << " ranks: some rank should hold no node";
+    auto got = std::vector<std::pair<std::map<int, std::vector<Complex>>, int>>(count);
+    ranks.Run([&](int rank) { got[rank] = solve(*statics[rank]); });
+    auto worst = 0.0;
+    for (auto rank = 0; rank < count; ++rank) {
+      EXPECT_TRUE(statics[rank]->HasLateralModuli()) << rank;
+      EXPECT_EQ(got[rank].second, wantIterations) << rank;
+      for (const auto& [l, values] : wantU) {
+        worst = std::max(worst, Relative(got[rank].first.at(l), values));
+      }
+    }
+    EXPECT_LT(worst, 1e-10) << count << " ranks";
+  }
+}
+
 TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
   // The 3D adjoints on three ranks with lateral moduli in the background
   // and the rotational feedback on, continuous

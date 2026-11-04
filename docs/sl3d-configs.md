@@ -34,8 +34,9 @@ sl3d <command> <config.json>
 
 ### Over MPI ranks
 
-Built with the CMake option `SL3DPP_WITH_MPI`, `evolve` and `kernel` run
-under `mpiexec` over several ranks, the same config on every rank:
+Built with the CMake option `SL3DPP_WITH_MPI`, `evolve`, `kernel` and
+`static` run under `mpiexec` over several ranks, the same config on every
+rank:
 
 ```
 OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
@@ -529,6 +530,80 @@ is read at the window's end alone.
 ```
 
 The first is an `evolve1d` config; the second needs `evolve`.
+
+## static
+
+The instantaneous (elastic) response of a laterally heterogeneous elastic
+Earth to a surface load and a tidal potential, with no sea level: the 3D
+static problem (docs/dev/adjoints.md §13j) closed by preconditioned
+conjugate gradients on the radial systems, over MPI ranks like `evolve`.
+The radial model's response to the same forcing is written beside it.
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `model` | path | required | the deck |
+| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
+| `lmax` | integer >= 1 | required | the degree of the solve and of its grid |
+| `moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli (below); absent, the radial model alone |
+| `moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
+| `load.latitude`, `load.longitude` | number | required with `load` | the cap's centre, degrees |
+| `load.width_deg` | number > 0 | required with `load` | the Gaussian cap's width, degrees |
+| `load.amplitude_kg_m2` | number | required with `load` | the surface mass density at the cap's centre |
+| `tide.degree` | integer in [2, lmax] | required with `tide` | the tidal potential's degree |
+| `tide.order` | integer in [0, degree] | 0 | its order (m >= 0: the field is real) |
+| `tide.amplitude_m2_s2`, `tide.imaginary_m2_s2` | number | required / 0 | the coefficient's real and imaginary parts (imaginary zero at order 0) |
+| `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual |
+| `solver.max_iterations` | integer >= 1 | 200 | their budget |
+| `transform_degrees` | integers in [2, lmax] | absent | the transforms cut with depth, as `evolve`'s |
+| `output` | path | required | the surface file to write |
+| `exchange_output` | path | absent | the surface coefficients as a cross-code exchange table |
+| `volume_output` | path | absent | the response inside the body as a planetmodel model file |
+
+At least one of `load` and `tide` is needed. The cap is Gaussian in
+great-circle distance d from its centre, weighted exp(-d^2 / (2 w^2))
+with no cut-off. The moduli file holds absolute moduli (planetmodel's
+`mu` and `kappa`, Pa), as planetmodel's conversion of a tomography model
+or `io::WriteModuli` writes them; the command takes their RELATIVE
+lateral perturbations, mu(x) / mu_ref(r) - 1, about the chosen
+reference, and applies them to the deck's own radial moduli — so the
+file should be built from the deck's radial model, and its lateral mean
+is not checked against the deck. A fluid layer takes no shear
+perturbation (the fluid form has no grid pipeline).
+
+The surface file holds `load` (kg m^-2), `displacement` (the radial
+displacement, m), `tangential_potential` (V, m: the tangential
+displacement is its surface gradient), `potential` (m^2 s^-2) and, under
+lateral moduli, `displacement_radial_model` and `potential_radial_model`,
+the radial model's under the same forcing; the metadata carry the
+forcing, the solve's iterations and residual and `lateral`. The exchange
+table is the format of AdGIA's benchmarks: `#` provenance lines, named
+scalars (`radius`, `surface_gravity`, `lmax`, `lateral`, the cap and the
+tide) and `columns l m U_re U_im Phi_re Phi_im`, the m >= 0 coefficients
+of the surface displacement (m) and potential (m^2 s^-2) in real
+orthonormal harmonics with f_(l,-m) = (-1)^m conj(f_lm), SI, `%.17g`.
+The volume file holds `radial_displacement` (m), `deviatoric_strain`
+(sqrt(e:e), dimensionless) and, under lateral moduli, `mu_relative` and
+`kappa_relative` (the perturbations applied) at the memory nodes of every
+solid element but the one holding the centre, with the model's density
+as the radial reference; planetmodel's `slices.cutaway` and
+`plotting.cutaway` draw it (`examples/python/plot_static_3d.py`).
+
+Summary: `wrote <output> [and <exchange_output>] [and <volume_output>] (<n>
+conjugate-gradient iterations, residual <r>)`, or `(radial model)`.
+
+```json
+{
+  "model": "prem8.elastic.deck",
+  "model_format": "elastic",
+  "lmax": 64,
+  "moduli": {"file": "s40rts_moduli.nc"},
+  "load": {"latitude": 60.0, "longitude": -85.0, "width_deg": 10.0,
+           "amplitude_kg_m2": 1.834e6},
+  "output": "out/static.nc",
+  "exchange_output": "out/static.txt",
+  "volume_output": "out/static_volume.nc"
+}
+```
 
 ## kernel1d and kernel
 

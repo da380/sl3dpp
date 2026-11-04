@@ -60,6 +60,13 @@ class RanksOverride {
 /// and, on several ranks, this rank's radial segment (ShareMesh over
 /// MPI_COMM_WORLD, balanced on GridCoupling::TransformWeights) and the
 /// collectives.
+/// With `active_elements` (GridCoupling::Options::active_elements), the
+/// cuts balance the transform work of those elements rather than the
+/// rheology's viscous ones: the static problem on a branchless rheology
+/// under lateral moduli, whose work is where the moduli are.
+[[nodiscard]] Viscoelastic3D::Options OperatorOptions(
+    int lmax, const std::vector<int>& transform_degrees,
+    const Rheology& rheology, const std::vector<char>& active_elements = {});
 [[nodiscard]] Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
                                                       const Rheology& rheology);
 

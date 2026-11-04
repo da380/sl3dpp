@@ -365,6 +365,36 @@ void GridCoupling::AddDilatationOfSolution(std::vector<Complex>& spectral,
   }
 }
 
+void GridCoupling::AddDisplacementOfSolution(std::vector<Complex>& spectral,
+                                             int l,
+                                             const DegreeOperator& spheroidal,
+                                             std::span<const Complex> x) const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  const auto n = mesh.NGll();
+  const auto columns = static_cast<std::size_t>(l + 1);
+  const auto ndof = spheroidal.DofCount();
+  const auto first = FirstNodeFor(spheroidal.FirstElement(), l);
+  const auto gll = points_.set == MemoryPointSet::Gll;
+  auto gather = [&](int e, int i, std::size_t column) -> Complex {
+    const auto d = spheroidal.Dof(mesh.GlobalIndex(e, i), Component::U);
+    return d >= 0 ? x[column * ndof + d] : Complex{};
+  };
+  for (auto node = first; node < NodeCount(); ++node) {
+    const auto e = nodes_[node].element;
+    const auto q = nodes_[node].nodeInElement;
+    for (auto column = std::size_t{0}; column < columns; ++column) {
+      Complex U{};
+      if (gll) {
+        U = gather(e, q, column);
+      } else {
+        for (auto i = 0; i < n; ++i) U += points_.Value(q, i) * gather(e, i, column);
+      }
+      spectral[coefficientOffset_[node] +
+               SurfaceGrid::Index(l, static_cast<int>(column))] += U;
+    }
+  }
+}
+
 std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::DilatationForce(
     std::span<const Complex> weighted,
     const std::function<const DegreeOperator&(int)>& system) const {

@@ -5,6 +5,9 @@
 // through the sea level equation and writes the fingerprint back as one.
 
 #include <gtest/gtest.h>
+#include "sl3dpp/EarthModel.hpp"
+#include <planetmodel/modelfile.hpp>
+#include "sl3dpp/io/ModelModuli.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -212,6 +215,73 @@ TEST_F(AppsTest, FingerprintRunsAToyStateEndToEnd) {
 }
 
 using sl3dpp::test::WriteToyHistory;
+
+TEST_F(AppsTest, StaticRespondsOnAToyModuliFile) {
+  // The static command on the homogeneous ball with a 10% lateral shear
+  // modulus from a model file written by io::WriteModuli: a polar cap
+  // load and a degree-2 tide, the surface file, the exchange table and
+  // the volume file all written; the 3D displacement departs from the
+  // radial model's by a few per cent, as a 10% modulus should move it.
+  const auto deck = Deck();
+  const auto read = sl3dpp::Deck::Read(deck, app::FormatOf(app::ModelFormat::Gia));
+  ASSERT_TRUE(read) << read.error().message;
+  const auto model = EarthModel::FromDeck(*read);
+  ASSERT_TRUE(model) << model.error().message;
+  const SurfaceGrid grid(8);
+  const auto written = io::WriteModuli(
+      dir_ / "moduli.nc", *model, grid,
+      [](double, double theta, double) { return 0.1 * std::cos(theta); }, {},
+      {.name = "toy moduli", .elementMetres = 500e3});
+  ASSERT_TRUE(written) << written.error().message;
+
+  const auto config = Write("static.json", R"({
+    "model": "ball.deck",
+    "lmax": 8,
+    "moduli": {"file": "moduli.nc"},
+    "load": {"latitude": 90, "longitude": 0, "width_deg": 20,
+             "amplitude_kg_m2": 1.0e6},
+    "tide": {"degree": 2, "order": 0, "amplitude_m2_s2": 1.0},
+    "output": "out/static.nc",
+    "exchange_output": "out/static.txt",
+    "volume_output": "out/static_volume.nc"})");
+  const auto summary = app::RunStatic3D(config);
+  EXPECT_NE(summary.find("wrote"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("conjugate-gradient"), std::string::npos) << summary;
+
+  namespace pm = planetmodel;
+  const auto result = pm::ReadSurfaceFile(dir_ / "out" / "static.nc");
+  for (const auto name : {"load", "displacement", "tangential_potential",
+                          "potential", "displacement_radial_model",
+                          "potential_radial_model"}) {
+    EXPECT_TRUE(result.variables.contains(name)) << name;
+  }
+  const auto& u = result.variables.at("displacement").values;
+  const auto& u1 = result.variables.at("displacement_radial_model").values;
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < u.size(); ++i) {
+    scale = std::max(scale, std::abs(u1[i]));
+    diff = std::max(diff, std::abs(u[i] - u1[i]));
+  }
+  EXPECT_GT(scale, 0.0);
+  EXPECT_GT(diff, 1e-3 * scale);
+  EXPECT_LT(diff, 0.2 * scale);
+
+  auto exchange = std::ifstream(dir_ / "out" / "static.txt");
+  auto lines = std::vector<std::string>{};
+  for (std::string line; std::getline(exchange, line);) lines.push_back(line);
+  ASSERT_GT(lines.size(), 10u);
+  EXPECT_EQ(lines[0].substr(0, 1), "#");
+  EXPECT_NE(std::ranges::find_if(lines, [](const std::string& l) {
+              return l.rfind("columns l m U_re U_im Phi_re Phi_im", 0) == 0;
+            }),
+            lines.end());
+  const auto volume = pm::ReadModelFile(dir_ / "out" / "static_volume.nc");
+  for (const auto name : {"radial_displacement", "deviatoric_strain",
+                          "mu_relative"}) {
+    EXPECT_TRUE(volume.HasField(0, name)) << name;
+  }
+}
+
 
 TEST_F(AppsTest, EvolveRunsAndARestartedRunMatchesAnUninterruptedOne) {
   namespace pm = planetmodel;

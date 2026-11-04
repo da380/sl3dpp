@@ -997,6 +997,19 @@ coefficients of the same form; doable here, low priority), lateral
 δρ (the hydrostatic background does not admit it, §13a), and
 distribution of the static solve (OpenMP over the grid pipeline only).
 
+The program: `sl3d static` (apps/StaticCommand.cpp, 5 November 2026)
+runs this problem on a model file's lateral moduli (io::ModelModuli:
+the relative perturbations of its `mu` and `kappa` about their lateral
+means or a stored radial reference) through the stepper's conjugate
+gradients on a branchless rheology, distributed over radial segments,
+with the radial model's response from ElasticPerturbation3D beside it;
+it writes the surface fields, the surface coefficients in the
+benchmarks' exchange form, and the response at the memory nodes as a
+model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
+planetmodel's cutaways. ExampleStatic3D and `configs/static.json` run
+it on the synthetic 3D elastic Earth the build writes
+(MakeSyntheticModuli, io::WriteModuli).
+
 ### 13k. Lateral moduli in the 3D stepper (built 4 November 2026)
 
 The same lateral δμ(x), δκ(x) in the quasi-static viscoelastic
@@ -1208,6 +1221,20 @@ active_elements`), so a perturbation confined to the mantle costs no
 lithosphere or inner-core nodes. What would cut the pass's cost further
 is a transform that fuses the pointwise product — GSHTrans matters,
 recorded in `~/dev/planning/gshtrans-notes-2026-11-04.md`.
+
+Two things the program's `static` command taught about distribution
+(5 November 2026). Whether an operator has lateral moduli is a
+property of the RUN, not of a rank: with the moduli confined to the
+upper mantle, an inner rank's segment holds no element where they are
+non-zero, its coupling no node, and its sampled arrays are empty — but
+every rank must take the lateral route, since the solve is collective
+(`HasLateralModuli` now reports the option, not the samples;
+`RadialRanks.ConfinedLateralModuliMatchTheOneProcessStatic` holds a
+node-less rank to the one-process answer). And the rank cuts balance
+the transform work of the coupling's nodes, which for a branchless
+rheology the rheology does not know: the static command weights the
+active elements the moduli make (`OperatorOptions` takes them), or the
+partition is degenerate and the conjugate gradients stall.
 
 ### 13n. The step by conjugate gradients, and the nested closure (built 5 November 2026)
 

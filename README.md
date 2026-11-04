@@ -144,6 +144,10 @@ sl3d kernel run.json           # adjoint kernels of configured measurements
                                #   ("trajectory": {"directory": ...} spills
                                #    the recorded states to disk for large lmax)
 sl3d kernel1d run.json         # its 1D counterpart
+sl3d static run.json           # the static response of a laterally
+                               #   heterogeneous elastic Earth to a cap
+                               #   load and a tide, with the radial
+                               #   model's beside it
 ```
 
 Every config member is documented in the configuration reference,
@@ -192,7 +196,11 @@ metadata. For example:
 velocity in their metadata; `kernel` and `kernel1d` write a directory per
 run: the ice-history kernels of each measurement as surface files, its
 viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
-measured values. Every output records the program, its version and the
+measured values; `static` writes the surface response as a surface file
+and, on request, the surface coefficients as a cross-code exchange table
+and the response inside the body as a planetmodel model file (its lateral
+moduli come from a model file's `mu` and `kappa`, as planetmodel's
+conversion of a tomography model writes them). Every output records the program, its version and the
 config that made it, and planetmodel's Python readers read the surface and
 model files (see below).
 
