@@ -876,13 +876,16 @@ TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
         GridCoupling::TransformWeights(
             body.rheology, lmax, {.eps = eps, .transform_degrees = degrees}));
     ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
-    const auto options = Viscoelastic3D::Options{.eps = eps,
-                                                 .parallel = false,
-                                                 .max_iterations = 100,
-                                                 .rtol = 1e-12,
-                                                 .moduli = RankModuli(),
-                                                 .radial_cuts = cuts,
-                                                 .transform_degrees = degrees};
+    const auto options = Viscoelastic3D::Options{
+        .eps = eps,
+        .parallel = false,
+        .max_iterations = 100,
+        .rtol = 1e-12,
+        .solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients,
+        .solve_rtol = 1e-12,
+        .moduli = RankModuli(),
+        .radial_cuts = cuts,
+        .transform_degrees = degrees};
     const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
     const Viscoelastic3D wholeStatic(elastic, lmax, Peaked, options);
     const auto want = run(whole, wholeStatic);
@@ -970,7 +973,12 @@ TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
       count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
   ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
   const auto options = Viscoelastic3D::Options{
-      .parallel = false, .rtol = 1e-12, .moduli = RankModuli(), .radial_cuts = cuts};
+      .parallel = false,
+      .rtol = 1e-12,
+      .solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients,
+      .solve_rtol = 1e-12,
+      .moduli = RankModuli(),
+      .radial_cuts = cuts};
   const auto evolutionOptions =
       SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::Axial,
                                    .rtol = 1e-12,

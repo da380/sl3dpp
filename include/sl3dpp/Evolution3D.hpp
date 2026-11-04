@@ -54,6 +54,9 @@ class SeaLevelEvolution3D {
     std::array<double, 3> angularVelocity{};
     int coupledIterations = 0;
     double coupledResidual = 0.0;
+    /// Under the conjugate-gradient step solver, its iterations over the
+    /// node's passes (Viscoelastic3D::StepInfo::solveIterations).
+    int solveIterations = 0;
     /// Whether the combined fixed point and its last pass's sea level
     /// solve met their tolerances.
     bool converged = true;

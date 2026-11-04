@@ -872,12 +872,15 @@ TEST(TangentLinear3D, SecondOrderRunInTheMaterial) {
   }
 }
 
-TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
-  // At a laterally heterogeneous elastic background (10% shear, 5% bulk,
-  // angle-varying) with lateral viscosity on: the 3D tangent run along a
-  // LATERAL direction in kappa and mu matches central differences of the
-  // coupled run with the background moduli shifted along it, second
-  // order with Richardson at 1e-6, both schemes.
+/// At a laterally heterogeneous elastic background (10% shear, 5% bulk,
+/// angle-varying) with lateral viscosity on: the 3D tangent run along a
+/// LATERAL direction in kappa and mu matches central differences of the
+/// coupled run with the background moduli shifted along it, second
+/// order with Richardson at 1e-6, both schemes; the steps closed by the
+/// given solver (the coupled fixed point, or the nested conjugate-
+/// gradient solves) in the runs and the tangent alike.
+void MaterialDirectionMatchesDifferencesUnderLateralModuli(
+    Viscoelastic3D::Options::StepSolver solver) {
   auto scene = Scene::Make(1e21);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
@@ -908,7 +911,9 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
     auto functional = [&](double eps) {
       Viscoelastic3D op(
           scene.rheology, kLmax, baseDelta,
-          {.memory_points = MemoryPointSet::Gll,
+          {.solver = solver,
+           .solve_rtol = 1e-12,
+           .memory_points = MemoryPointSet::Gll,
            .moduli = {.shear = [&](double r, double t, double p) {
                         return shear0(r, t, p) + eps * vShear(r, t, p);
                       },
@@ -922,7 +927,9 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
       return Objective(scene, g, evolution.Run(times, iceLoad).back().seaLevelChange);
     };
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
-                      {.memory_points = MemoryPointSet::Gll,
+                      {.solver = solver,
+                       .solve_rtol = 1e-12,
+                       .memory_points = MemoryPointSet::Gll,
                        .moduli = {.shear = shear0, .bulk = bulk0}});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
@@ -966,4 +973,14 @@ TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
         << "scheme " << static_cast<int>(scheme);
   }
+}
+
+TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderLateralModuli) {
+  MaterialDirectionMatchesDifferencesUnderLateralModuli(
+      Viscoelastic3D::Options::StepSolver::FixedPoint);
+}
+
+TEST(TangentLinear3D, MaterialDirectionMatchesDifferencesUnderConjugateGradientSteps) {
+  MaterialDirectionMatchesDifferencesUnderLateralModuli(
+      Viscoelastic3D::Options::StepSolver::ConjugateGradients);
 }

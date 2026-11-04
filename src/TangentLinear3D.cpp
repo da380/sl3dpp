@@ -125,15 +125,7 @@ class TangentLinearSolver3D::ForwardCursor3D {
       }
       auto step = op.StartStep(state_, dts_[node_], scheme_, LoadsAt(node_),
                                TidesAt(node_));
-      const auto load = LoadsAt(target);
-      const auto tide = TidesAt(target);
-      auto [strain, info] = step.Converge(
-          [&](const GridCoupling::SpectralTensor& s) {
-            auto solutions = step.Respond(s);
-            step.AddChannels(solutions, load, tide);
-            return step.StrainOf(solutions);
-          },
-          control_);
+      auto [strain, info] = step.Close(LoadsAt(target), TidesAt(target), control_);
       if (!info.converged) {
         throw std::runtime_error(std::format(
             "rebuilding the forward state at node {} did not converge",
@@ -1131,8 +1123,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   const SeaLevelSolver* effectiveSolver = nullptr;
   auto f = std::vector<double>{};
   auto node = std::size_t{0};
-  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
-    auto responses = step->Respond(s);
+  auto closure = [&](const Viscoelastic3D::Solutions& responses) {
     SeaLevelSolver::GeneralisedForcing coupled;
     coupled.directLoad = f;
     coupled.displacementResponse =
@@ -1146,8 +1137,13 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     sigma = totalLoadCoefficients(f, response.seaLevelChange, node);
     psi = centrifugal(response);
     agree();
-    step->AddChannels(responses, ev.Columns(sigma, ev.toMatDensity_),
-                      ev.Columns(psi, ev.toMatPotential_));
+    return std::pair{ev.Columns(sigma, ev.toMatDensity_),
+                     ev.Columns(psi, ev.toMatPotential_)};
+  };
+  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
+    auto responses = step->Respond(s);
+    const auto [load, tide] = closure(responses);
+    step->AddChannels(responses, load, tide);
     return step->StrainOf(responses);
   };
   const Viscoelastic3D::IterationControl control{
@@ -1155,6 +1151,12 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
       .rtol = options_.coupled_rtol,
       .anderson_memory = options_.anderson_memory,
       .anderson_rate = options_.anderson_rate};
+  const bool nested = op.GetOptions().solver ==
+                      Viscoelastic3D::Options::StepSolver::ConjugateGradients;
+  auto close = [&] {
+    return nested ? step->Nest(closure, control)
+                  : step->Converge(coupledPass, control);
+  };
   auto startInfo = Viscoelastic3D::StepInfo{};
   const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
@@ -1165,7 +1167,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     step.emplace(op.StartStep(tstate, 0.0, scheme));
     if (material != nullptr) material->ApplyStart(*step);
     effectiveSolver = &solverFor(step->EffectiveLove());
-    auto [strain, info] = step->Converge(coupledPass, control);
+    auto [strain, info] = close();
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
           "the tangent-linear coupled fixed point at the start did not "
@@ -1222,6 +1224,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.coupledIterations = info.iterations;
     snapshot.coupledResidual = info.residual;
+    snapshot.solveIterations = info.solveIterations;
     snapshot.converged = info.converged && r.converged;
     snapshot.oceanFunction = overrideAt(node);
     if (options_.record) {
@@ -1243,7 +1246,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     if (material != nullptr) material->Apply(node, dt, scheme, *step);
     effectiveSolver = &solverFor(step->EffectiveLove());
     f = directAt(node);
-    auto [strain, info] = step->Converge(coupledPass, control);
+    auto [strain, info] = close();
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
           "the tangent-linear coupled fixed point at node {} did not "

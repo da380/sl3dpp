@@ -240,14 +240,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
       auto step =
           op.StartStep(*previous, dt, scheme, loadsAt(j - 1), tidesAt(j - 1));
-      const auto load = loadsAt(j);
-      const auto tide = tidesAt(j);
-      auto [strain, info] = step.Converge(
-          [&](const GridCoupling::SpectralTensor& s) {
-            auto solutions = step.Respond(s);
-            step.AddChannels(solutions, load, tide);
-            return step.StrainOf(solutions);
-          },
+      auto [strain, info] = step.Close(
+          loadsAt(j), tidesAt(j),
           {.max_iterations = ev.options_.max_coupled_iterations,
            .rtol = ev.options_.coupled_rtol,
            .anderson_memory = ev.options_.anderson_memory,

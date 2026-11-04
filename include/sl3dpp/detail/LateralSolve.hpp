@@ -5,8 +5,9 @@
  * degree systems: (K_ref + dK) x = f with the radial reference solve as
  * the preconditioner (Maitra & Al-Attar 2019; Myhill, Maitra & Al-Attar
  * 2026), the operator matrix-free. Shared by the static solve
- * (ElasticPerturbation3D::SolveLateral) and the 3D stepper's unrelaxed
- * start solve under lateral moduli (docs/dev/adjoints.md §13j).
+ * (ElasticPerturbation3D::SolveLateral), the 3D stepper's unrelaxed
+ * start solve under lateral moduli (docs/dev/adjoints.md §13j) and its
+ * implicit step's solve (Viscoelastic3D::OpenStep::Solve, §13n).
  *
  * The unknown is a Viscoelastic3D::Solutions (per-degree complex m >= 0
  * columns, spheroidal and toroidal); the forces have the same layout. The
@@ -32,6 +33,10 @@ struct LateralSolveOptions {
   /// the forcing's) to stop at, and the iteration budget.
   double rtol = 1e-10;
   int max_iterations = 200;
+  /// Set, the solve also stops once the residual is this fraction of
+  /// the initial one (an inexact solve inside an outer iteration: each
+  /// solve reduces what its start left by at least this factor).
+  double reduction = 0.0;
 };
 
 struct LateralSolveInfo {
@@ -97,12 +102,16 @@ inline void LateralAxpy(LateralFields& y, double a, const LateralFields& x) {
 }
 
 /// The solve, started from the reference response x0 = K_ref^-1 f (so
-/// the first preconditioned residual is the Born correction).
+/// the first preconditioned residual is the Born correction), or from a
+/// given start (a warm start: the previous solution of a nearby system,
+/// whose residual the iteration then reduces; the reference response is
+/// still formed, for the relative residual's scale).
 inline std::pair<Viscoelastic3D::Solutions, LateralSolveInfo>
 LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
                           const LateralSystem& system,
                           const LateralSolveOptions& options,
-                          bool lateral = true) {
+                          bool lateral = true,
+                          const Viscoelastic3D::Solutions* start = nullptr) {
   auto x = system.solve(fs, ft);
   LateralSolveInfo info;
   auto pair = [&](const Viscoelastic3D::Solutions& a, const LateralFields& s,
@@ -117,6 +126,7 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
     info.residuals.push_back(0.0);
     return {std::move(x), info};
   }
+  if (start != nullptr) x = *start;
   // r = f - A x
   auto [rs, rt] = system.apply(x);
   LateralAxpy(rs, -1.0, fs);
@@ -132,9 +142,12 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
   info.residual = relative(rz);
   info.residuals.push_back(info.residual);
   if (rz < 0.0) info.indefinite = true;
+  const auto target = options.reduction > 0.0
+                          ? std::max(options.rtol, options.reduction * info.residual)
+                          : options.rtol;
   auto p = z;
   for (auto iteration = 0; iteration < options.max_iterations; ++iteration) {
-    if (info.residual <= options.rtol) {
+    if (info.residual <= target) {
       info.converged = true;
       break;
     }
@@ -163,7 +176,7 @@ LateralConjugateGradients(const LateralFields& fs, const LateralFields& ft,
     info.residual = relative(rz);
     info.residuals.push_back(info.residual);
   }
-  if (info.residual <= options.rtol) info.converged = true;
+  if (info.residual <= target) info.converged = true;
   return {std::move(x), info};
 }
 

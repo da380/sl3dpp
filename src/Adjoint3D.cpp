@@ -164,6 +164,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto lmax = op.LMax();
   const auto K = op.GetRheology().BranchCount();
   const bool lateral = op.HasLateralModuli();
+  const bool nested = op.GetOptions().solver ==
+                      Viscoelastic3D::Options::StepSolver::ConjugateGradients;
   const auto N = times.size() - 1;
 
   for (const auto& [node, m] : measurements) {
@@ -555,14 +557,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
       auto step =
           op.StartStep(*previous, dt, scheme, loadsAt(j - 1), tidesAt(j - 1));
-      const auto load = loadsAt(j);
-      const auto tide = tidesAt(j);
-      auto [strain, info] = step.Converge(
-          [&](const GridCoupling::SpectralTensor& s) {
-            auto solutions = step.Respond(s);
-            step.AddChannels(solutions, load, tide);
-            return step.StrainOf(solutions);
-          },
+      auto [strain, info] = step.Close(
+          loadsAt(j), tidesAt(j),
           {.max_iterations = ev.options_.max_coupled_iterations,
            .rtol = ev.options_.coupled_rtol,
            .anderson_memory = ev.options_.anderson_memory,
@@ -1027,41 +1023,45 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
     const auto& Cn = oceanAt(to);
     SeaLevelSolver::Response response;
-    auto [strain, info] = step.Converge(
-        [&](const GridCoupling::SpectralTensor& s) {
-          auto responses = step.Respond(s);
-          SeaLevelSolver::GeneralisedForcing coupled;
-          coupled.displacementResponse = ev.Coefficients(
-              op.Surface(responses, Component::U), ev.toNdLength_);
-          coupled.potentialResponse = ev.Coefficients(
-              op.Surface(responses, Component::Phi), ev.toNdPotential_);
-          coupled.inertiaMomentChange =
-              step.InertiaMoment(responses) * ev.toNdMoment_;
-          coupled.rotation = rotation;
-          coupled.oceanFunctionOverride = overrideAt(to);
-          response =
-              effectiveSolver.SolveGeneralised(ev.state_, coupled, sleOptions);
-          auto sig = std::vector<double>(fieldSize);
-          for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-            sig[i] = rhoW * Cn[i] * response.seaLevelChange[i];
-          }
-          carried.sigma = grid.Expand(sig);
-          carried.psi = rotation != RotationalFeedback::None
-                            ? solver.CentrifugalCoefficients(
-                                  response.angularVelocity)
-                            : grid.ZeroCoefficients();
-          agree(carried.sigma);
-          agree(carried.psi);
-          agree(response.seaLevelChange);
-          step.AddChannels(responses,
-                           ev.Columns(carried.sigma, ev.toMatDensity_),
-                           ev.Columns(carried.psi, ev.toMatPotential_));
-          return step.StrainOf(responses);
-        },
-        {.max_iterations = options_.max_coupled_iterations,
-         .rtol = options_.coupled_rtol,
-         .anderson_memory = options_.anderson_memory,
-         .anderson_rate = options_.anderson_rate});
+    auto closure = [&](const Viscoelastic3D::Solutions& responses) {
+      SeaLevelSolver::GeneralisedForcing coupled;
+      coupled.displacementResponse = ev.Coefficients(
+          op.Surface(responses, Component::U), ev.toNdLength_);
+      coupled.potentialResponse = ev.Coefficients(
+          op.Surface(responses, Component::Phi), ev.toNdPotential_);
+      coupled.inertiaMomentChange = step.InertiaMoment(responses) * ev.toNdMoment_;
+      coupled.rotation = rotation;
+      coupled.oceanFunctionOverride = overrideAt(to);
+      response = effectiveSolver.SolveGeneralised(ev.state_, coupled, sleOptions);
+      auto sig = std::vector<double>(fieldSize);
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        sig[i] = rhoW * Cn[i] * response.seaLevelChange[i];
+      }
+      carried.sigma = grid.Expand(sig);
+      carried.psi = rotation != RotationalFeedback::None
+                        ? solver.CentrifugalCoefficients(response.angularVelocity)
+                        : grid.ZeroCoefficients();
+      agree(carried.sigma);
+      agree(carried.psi);
+      agree(response.seaLevelChange);
+      return std::pair{ev.Columns(carried.sigma, ev.toMatDensity_),
+                       ev.Columns(carried.psi, ev.toMatPotential_)};
+    };
+    const Viscoelastic3D::IterationControl control{
+        .max_iterations = options_.max_coupled_iterations,
+        .rtol = options_.coupled_rtol,
+        .anderson_memory = options_.anderson_memory,
+        .anderson_rate = options_.anderson_rate};
+    auto [strain, info] =
+        nested ? step.Nest(closure, control)
+               : step.Converge(
+                     [&](const GridCoupling::SpectralTensor& s) {
+                       auto responses = step.Respond(s);
+                       const auto [load, tide] = closure(responses);
+                       step.AddChannels(responses, load, tide);
+                       return step.StrainOf(responses);
+                     },
+                     control);
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the reversed lateral fixed point at node {} did not converge "
@@ -1105,35 +1105,43 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto& elastic = solverFor(step.EffectiveLove());
     const auto& Cn = oceanAt(node);
     Instantaneous out;
-    auto [strain, info] = step.Converge(
-        [&](const GridCoupling::SpectralTensor& s) {
-          auto responses = step.Respond(s);
-          auto f = base;
-          f.displacementResponse = ev.Coefficients(
-              op.Surface(responses, Component::U), ev.toNdLength_);
-          f.potentialResponse = ev.Coefficients(
-              op.Surface(responses, Component::Phi), ev.toNdPotential_);
-          f.inertiaMomentChange = step.InertiaMoment(responses) * ev.toNdMoment_;
-          out.response = elastic.SolveGeneralised(ev.state_, f, sleOptions);
-          auto lamGrid = std::vector<double>(fieldSize);
-          for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-            lamGrid[i] = (base.directLoad.empty() ? 0.0 : base.directLoad[i]) +
-                         rhoW * Cn[i] * out.response.seaLevelChange[i];
-          }
-          const auto lam = grid.Expand(lamGrid);
-          const auto psiA =
-              rotation != RotationalFeedback::None
-                  ? solver.CentrifugalCoefficients(out.response.angularVelocity)
-                  : grid.ZeroCoefficients();
-          step.AddChannels(responses, ev.Columns(lam, ev.toMatDensity_),
-                           ev.Columns(psiA, ev.toMatPotential_));
-          out.x = responses;
-          return step.StrainOf(responses);
-        },
-        {.max_iterations = options_.max_coupled_iterations,
-         .rtol = options_.coupled_rtol,
-         .anderson_memory = options_.anderson_memory,
-         .anderson_rate = options_.anderson_rate});
+    auto closure = [&](const Viscoelastic3D::Solutions& responses) {
+      auto f = base;
+      f.displacementResponse = ev.Coefficients(
+          op.Surface(responses, Component::U), ev.toNdLength_);
+      f.potentialResponse = ev.Coefficients(
+          op.Surface(responses, Component::Phi), ev.toNdPotential_);
+      f.inertiaMomentChange = step.InertiaMoment(responses) * ev.toNdMoment_;
+      out.response = elastic.SolveGeneralised(ev.state_, f, sleOptions);
+      auto lamGrid = std::vector<double>(fieldSize);
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        lamGrid[i] = (base.directLoad.empty() ? 0.0 : base.directLoad[i]) +
+                     rhoW * Cn[i] * out.response.seaLevelChange[i];
+      }
+      const auto lam = grid.Expand(lamGrid);
+      const auto psiA =
+          rotation != RotationalFeedback::None
+              ? solver.CentrifugalCoefficients(out.response.angularVelocity)
+              : grid.ZeroCoefficients();
+      return std::pair{ev.Columns(lam, ev.toMatDensity_),
+                       ev.Columns(psiA, ev.toMatPotential_)};
+    };
+    const Viscoelastic3D::IterationControl control{
+        .max_iterations = options_.max_coupled_iterations,
+        .rtol = options_.coupled_rtol,
+        .anderson_memory = options_.anderson_memory,
+        .anderson_rate = options_.anderson_rate};
+    auto [strain, info] =
+        nested ? step.Nest(closure, control, &out.x)
+               : step.Converge(
+                     [&](const GridCoupling::SpectralTensor& s) {
+                       auto responses = step.Respond(s);
+                       const auto [load, tide] = closure(responses);
+                       step.AddChannels(responses, load, tide);
+                       out.x = responses;
+                       return step.StrainOf(responses);
+                     },
+                     control);
     if (!info.converged || !out.response.converged) {
       throw std::runtime_error(std::format(
           "the instantaneous adjoint fixed point at node {} did not converge",

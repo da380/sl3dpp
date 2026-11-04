@@ -10,7 +10,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <format>
 #include <complex>
 #include <filesystem>
 #include <limits>
@@ -468,6 +470,176 @@ TEST(Lateral, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
   EXPECT_GT(slow.info.mixedPasses, 0);
   EXPECT_LT(slow.info.iterations, slowPicard.info.iterations);
   EXPECT_LT(gap(slow.solutions, always.solutions), 1e-9);
+}
+
+/// The worst relative difference of two solutions' spheroidal columns.
+double SolutionsGap(const Viscoelastic3D::Solutions& a,
+                    const Viscoelastic3D::Solutions& b) {
+  auto scale = 0.0, diff = 0.0;
+  for (const auto* pair : {&a.spheroidal, &a.toroidal}) {
+    const auto& other = pair == &a.spheroidal ? b.spheroidal : b.toroidal;
+    for (const auto& [l, x] : *pair) {
+      const auto& y = other.at(l);
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(y[i]));
+        diff = std::max(diff, std::abs(x[i] - y[i]));
+      }
+    }
+  }
+  return diff / scale;
+}
+
+TEST(Lateral, ConjugateGradientStepMatchesTheFixedPoint) {
+  // The step's linear system closed by preconditioned conjugate gradients
+  // on the degree solutions (OpenStep::Forces / Solve) lands where the
+  // within-step fixed point on the strain does, at a 10x contrast over
+  // two steps of 2 tau, with the operator checked against the fixed
+  // point's own residual: at the fixed point's solution the step's
+  // operator returns its forces.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto amplitude = 0.5 * std::log(10.0);
+  const auto delta = [amplitude](double, double theta, double phi) {
+    return amplitude * std::sin(theta) * std::cos(phi);
+  };
+  auto make = [&](Viscoelastic3D::Options::StepSolver solver) {
+    Viscoelastic3D::Options options;
+    options.max_iterations = 200;
+    options.rtol = 1e-12;
+    options.solve_rtol = 1e-12;
+    options.solver = solver;
+    return Viscoelastic3D(body.rheology, kLmax, delta, options);
+  };
+  auto run = [&](const Viscoelastic3D& op) {
+    auto first = op.Step(op.ZeroState(), 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+    EXPECT_TRUE(first.info.converged);
+    auto second = op.Step(first.state, 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+    EXPECT_TRUE(second.info.converged);
+    return std::pair{std::move(first), std::move(second)};
+  };
+  const auto opFixed = make(Viscoelastic3D::Options::StepSolver::FixedPoint);
+  const auto opCg = make(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+  const auto [fixed1, fixed2] = run(opFixed);
+  const auto [cg1, cg2] = run(opCg);
+  EXPECT_LT(SolutionsGap(cg1.solutions, fixed1.solutions), 1e-9);
+  EXPECT_LT(SolutionsGap(cg2.solutions, fixed2.solutions), 1e-9);
+  EXPECT_EQ(cg2.info.mixedPasses, 0);
+  std::cout << "step 2: " << fixed2.info.iterations << " fixed-point passes ("
+            << fixed2.info.mixedPasses << " mixed), " << cg2.info.iterations
+            << " conjugate-gradient iterations\n";
+
+  // the operator on the fixed point's solution returns the step's forces
+  const auto step = opFixed.StartStep(fixed1.state, 2.0 * tau,
+                                      Scheme::ExponentialTrapezoid, load);
+  const auto [fs, ft] = step.Forces(load, {});
+  const auto [as, at] = step.Apply(fixed2.solutions);
+  auto scale = 0.0, diff = 0.0;
+  for (const auto& [l, f] : fs) {
+    const auto& a = as.at(l);
+    for (auto i = std::size_t{0}; i < f.size(); ++i) {
+      scale = std::max(scale, std::abs(f[i]));
+      diff = std::max(diff, std::abs(f[i] - a[i]));
+    }
+  }
+  for (const auto& [l, f] : ft) {
+    if (l < 1) continue;
+    const auto& a = at.at(l);
+    for (auto i = std::size_t{0}; i < f.size(); ++i) {
+      scale = std::max(scale, std::abs(f[i]));
+      diff = std::max(diff, std::abs(f[i] - a[i]));
+    }
+  }
+  EXPECT_LT(diff / scale, 1e-9) << "the operator against the forces";
+}
+
+TEST(Lateral, DISABLED_StepSolverProfile) {
+  // Not a gate: what one conjugate-gradient iteration costs against one
+  // fixed-point pass, piece by piece, at lmax 16 and a 10x contrast.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  const auto amplitude = 0.5 * std::log(10.0);
+  const auto delta = [amplitude](double, double theta, double phi) {
+    return amplitude * std::sin(theta) * std::cos(phi);
+  };
+  Viscoelastic3D::Options options;
+  options.max_iterations = 200;
+  const auto op = Viscoelastic3D(body.rheology, 16, delta, options);
+  const auto first = op.Step(op.ZeroState(), 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+  const auto step = op.StartStep(first.state, 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+  auto time = [](const char* what, int repeats, const auto& f) {
+    const auto started = std::chrono::steady_clock::now();
+    for (auto i = 0; i < repeats; ++i) f();
+    const auto seconds =
+        std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+    std::cout << std::format("{:40} {:8.2f} ms\n", what, 1e3 * seconds / repeats);
+  };
+  const auto s = step.StartStrain();
+  auto x = step.Respond(s);
+  step.AddChannels(x, load, {});
+  time("pass: Respond", 10, [&] { (void)step.Respond(s); });
+  time("pass: AddChannels + StrainOf", 10, [&] {
+    auto y = step.Respond(s);
+    step.AddChannels(y, load, {});
+    (void)step.StrainOf(y);
+  });
+  time("StrainOf", 10, [&] { (void)step.StrainOf(x); });
+  time("Apply (lateral force + band)", 10, [&] { (void)step.Apply(x); });
+  const auto [fs, ft] = step.Forces(load, {});
+  time("Forces", 10, [&] { (void)step.Forces(load, {}); });
+  time("Solve, 0 iterations (two solves + apply)", 5, [&] {
+    (void)step.Solve(fs, ft, &x, 1e30);
+  });
+  auto one = options;
+  one.solve_max_iterations = 1;
+  const auto opOne = Viscoelastic3D(body.rheology, 16, delta, one);
+  const auto stepOne =
+      opOne.StartStep(first.state, 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+  time("Solve, 1 iteration (three solves, two applies)", 5, [&] {
+    (void)stepOne.Solve(fs, ft, nullptr, 1e-30);
+  });
+}
+
+TEST(Lateral, DISABLED_StepSolverLadder) {
+  // Not a gate: the contrast ladder of docs/dev/lateral-coupling.md §5a
+  // (lmax 16, a sin(theta) cos(phi) log-viscosity of amplitude A, unit
+  // loads on all degrees, trapezoid steps), the second step's passes
+  // under the default fixed point against the conjugate-gradient
+  // iterations, to 1e-11.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  std::cout << "contrast dt/tau | fixed point passes (mixed) time | conjugate gradients time\n";
+  for (const auto contrast : {3.0, 10.0, 100.0, 1000.0}) {
+    const auto amplitude = 0.5 * std::log(contrast);
+    const auto delta = [amplitude](double, double theta, double phi) {
+      return amplitude * std::sin(theta) * std::cos(phi);
+    };
+    for (const auto h : {0.5, 2.0, 10.0}) {
+      auto second = [&](Viscoelastic3D::Options::StepSolver solver) {
+        Viscoelastic3D::Options options;
+        options.max_iterations = 200;
+        options.solver = solver;
+        const auto op = Viscoelastic3D(body.rheology, 16, delta, options);
+        const auto first =
+            op.Step(op.ZeroState(), h * tau, Scheme::ExponentialTrapezoid, load);
+        if (!first.info.converged) return std::tuple{-1, 0, 0.0};
+        const auto started = std::chrono::steady_clock::now();
+        const auto result =
+            op.Step(first.state, h * tau, Scheme::ExponentialTrapezoid, load);
+        const auto seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
+        return std::tuple{result.info.converged ? result.info.iterations : -1,
+                          result.info.mixedPasses, seconds};
+      };
+      const auto [fp, mixed, fpSeconds] = second(Viscoelastic3D::Options::StepSolver::FixedPoint);
+      const auto [cg, unused, cgSeconds] = second(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+      std::cout << std::format("{:8.0f}x {:6.1f} | {:5} ({:3}) {:6.1f} s | {:5} {:6.1f} s\n",
+                               contrast, h, fp, mixed, fpSeconds, cg, cgSeconds)
+                << std::flush;
+    }
+  }
 }
 
 TEST(Lateral, NonFinitePassEndsTheIteration) {

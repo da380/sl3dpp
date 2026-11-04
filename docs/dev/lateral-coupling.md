@@ -252,6 +252,49 @@ bulk pipeline of the static perturbation. The unrelaxed start solve
 becomes a preconditioned conjugate-gradient solve on the reference
 systems. Gates and the within-step cost are in adjoints.md §13k.
 
+## 5a''. The step by conjugate gradients (5 November 2026)
+
+The step is a symmetric positive definite system in the degree
+solutions (adjoints.md §13n), and `Viscoelastic3D::Options::solver =
+ConjugateGradients` closes it by preconditioned conjugate gradients
+with the reference effective solve as the preconditioner, from the
+Picard iterate. The §5a ladder (lmax 16, the second step, to 1e-11 in
+each method's own measure), the default fixed point's passes (Anderson-
+mixed ones in brackets) and the conjugate-gradient iterations, with the
+second step's wall-clock time on the idle laptop (16 threads):
+
+    contrast dt/tau | fixed point passes (mixed)  time | conjugate gradients  time
+         3x    0.5  |    12 (  0)               0.1 s  |     8               0.1 s
+         3x    2.0  |    21 (  0)               0.1 s  |    13               0.1 s
+         3x   10.0  |    21 ( 13)               0.1 s  |    17               0.1 s
+        10x    0.5  |    20 (  0)               0.1 s  |    12               0.1 s
+        10x    2.0  |    29 ( 22)               0.2 s  |    23               0.1 s
+        10x   10.0  |    50 ( 48)               0.3 s  |    34               0.2 s
+       100x    0.5  |    26 ( 21)               0.1 s  |    23               0.1 s
+       100x    2.0  |    65 ( 62)               0.5 s  |    46               0.3 s
+       100x   10.0  |    FAIL (step 1)                 |    90               0.5 s
+      1000x    0.5  |    49 ( 46)               0.3 s  |    42               0.3 s
+      1000x    2.0  |   138 (136)               0.7 s  |    83               0.5 s
+      1000x   10.0  |    FAIL (step 1)                 |   183               1.0 s
+
+Fewer iterations than passes everywhere, less time at every row, and
+convergent where the fixed point's first step diverges. The iteration
+count grows like the square root of the contrast's effect on the
+conditioning, as conjugate gradients should; nothing here needs a
+better reference profile. An iteration is a pass's grid pipeline plus
+the reference band products on the columns (hand-written, threaded
+over the degrees), the preconditioner's solve and the Krylov algebra:
+at this size (a 4 ms pipeline) about 1.3 passes
+(`Lateral.DISABLED_StepSolverProfile` times the pieces), and at
+production sizes, where the pipeline is 0.6 s a pass, the two cost
+alike. With
+sea level the engine's closure runs as an outer iteration around
+warm-started inexact solves (`OpenStep::Nest`), which at weak contrasts
+costs about 1.4 times the fixed point (adjoints.md §13n for the
+numbers), so the fixed point stays the default and the conjugate-
+gradient step is the choice for strong contrasts. Probe:
+`Lateral.DISABLED_StepSolverLadder`.
+
 ## 5b. The Fortran gate (visco_test)
 
 The old code's `visco_test` is the weak-contrast external gate: PREM

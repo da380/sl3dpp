@@ -444,6 +444,9 @@ std::vector<double> DegreeOperator::ApplyBand(const std::vector<double>& band,
     throw std::invalid_argument(
         std::format("expected {} x {} values, got {}", n, nrhs, x.size()));
   }
+  // Hand-written (not BLAS dsbmv): a BLAS call inside the threaded
+  // degree loops starts the BLAS library's own threads on the server
+  // and the two thread pools fight.
   const auto ldab = kd_ + 1;
   auto y = std::vector<double>(x.size(), 0.0);
   for (auto k = 0; k < nrhs; ++k) {

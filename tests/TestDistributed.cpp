@@ -827,13 +827,16 @@ TEST(Distributed, LateralModuliStepsMatchTheOneProcessSteps) {
       .bulk = [](double r, double theta, double) {
         return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
       }};
-  const auto options = Viscoelastic3D::Options{.eps = eps,
-                                               .parallel = false,
-                                               .max_iterations = 100,
-                                               .rtol = 1e-12,
-                                               .moduli = moduli,
-                                               .radial_cuts = share.cuts,
-                                               .transform_degrees = degrees};
+  const auto options = Viscoelastic3D::Options{
+      .eps = eps,
+      .parallel = false,
+      .max_iterations = 100,
+      .rtol = 1e-12,
+      .solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients,
+      .solve_rtol = 1e-12,
+      .moduli = moduli,
+      .radial_cuts = share.cuts,
+      .transform_degrees = degrees};
   struct Result {
     Viscoelastic3D::State state;
     std::map<int, std::vector<std::complex<double>>> U, staticU;

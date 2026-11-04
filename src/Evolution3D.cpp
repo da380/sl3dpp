@@ -247,8 +247,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
   auto step = std::optional<Viscoelastic3D::OpenStep>{};
   const SeaLevelSolver* effectiveSolver = nullptr;
   auto moving = SeaLevelSolver::NonlinearForcing{};
-  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
-    auto responses = step->Respond(s);
+  auto closure = [&](const Viscoelastic3D::Solutions& responses) {
     auto displacement =
         Coefficients(op.Surface(responses, Component::U), toNdLength_);
     auto potential =
@@ -277,8 +276,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(response.angularVelocity);
     agree();
-    step->AddChannels(responses, Columns(sigma_, toMatDensity_),
-                      Columns(psi_, toMatPotential_));
+    return std::pair{Columns(sigma_, toMatDensity_), Columns(psi_, toMatPotential_)};
+  };
+  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
+    auto responses = step->Respond(s);
+    const auto [load, tide] = closure(responses);
+    step->AddChannels(responses, load, tide);
     return step->StrainOf(responses);
   };
   const Viscoelastic3D::IterationControl control{
@@ -286,6 +289,14 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
       .rtol = options_.coupled_rtol,
       .anderson_memory = options_.anderson_memory,
       .anderson_rate = options_.anderson_rate};
+  // The step's closure: the fixed point on the strain, or (Viscoelastic3D
+  // ::Options::solver) the closure nested over conjugate-gradient solves.
+  const bool nested = op.GetOptions().solver ==
+                      Viscoelastic3D::Options::StepSolver::ConjugateGradients;
+  auto close = [&] {
+    return nested ? step->Nest(closure, control)
+                  : step->Converge(coupledPass, control);
+  };
   auto startInfo = Viscoelastic3D::StepInfo{};
 
   if (!resumed && migrating) {
@@ -302,7 +313,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     loadGrid = (*iceLoad)(times[0]);
     step.emplace(op.StartStep(vstate_, 0.0, options_.scheme));
     effectiveSolver = &solverFor(step->EffectiveLove());
-    auto [strain, info] = step->Converge(coupledPass, control);
+    auto [strain, info] = close();
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the instantaneous coupled fixed point at the start did not "
@@ -330,16 +341,18 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
                                  Columns(psi_, toMatPotential_));
 
   auto snapshots = std::vector<Snapshot>{};
-  auto record = [&](double t, SeaLevelSolver::Response& r, int iterations,
-                    double residual, bool converged, bool keepState) {
+  auto record = [&](double t, SeaLevelSolver::Response& r,
+                    const Viscoelastic3D::StepInfo& info, bool converged,
+                    bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
     snapshot.seaLevelChange = std::move(r.seaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;
-    snapshot.coupledIterations = iterations;
-    snapshot.coupledResidual = residual;
+    snapshot.coupledIterations = info.iterations;
+    snapshot.coupledResidual = info.residual;
+    snapshot.solveIterations = info.solveIterations;
     snapshot.converged = converged && r.converged;
     snapshot.oceanFunction = std::move(ocean);
     // The internal variables, and the strain only on request: an adjoint
@@ -365,8 +378,7 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
   if (!resumed) {
-    record(times[0], response, startInfo.iterations, startInfo.residual,
-           true, stride > 0);
+    record(times[0], response, startInfo, true, stride > 0);
     checkpoint(0);
   }
 
@@ -392,14 +404,13 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     }
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto [strain, info] = step->Converge(coupledPass, control);
+    auto [strain, info] = close();
     // the replaced state's tensors go to the next StartStep
     op.Recycle(
         std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
     step.reset();
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
-    record(times[node], response, info.iterations, info.residual,
-           info.converged, keep);
+    record(times[node], response, info, info.converged, keep);
     checkpoint(node);
   }
   op.ReleaseScratch();

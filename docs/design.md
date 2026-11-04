@@ -212,6 +212,17 @@ Deliberately out of scope:
   rest of the step once a pass shrinks the residual by less than half
   (`IterationControl::anderson_rate`); defaults: relative tolerance 1e-11,
   at most 40 passes. A non-finite pass ends the iteration unconverged.
+- **The step by conjugate gradients.** The same step is a symmetric
+  positive definite system in the degree solutions, and
+  `Viscoelastic3D::Options::solver = ConjugateGradients` closes it by the
+  preconditioned conjugate gradients of the static solve (the reference
+  effective solve the preconditioner), an iteration costing a pass:
+  fewer iterations than passes everywhere measured, and convergent where
+  the fixed point fails (100x at Δt = 10τ). With sea level the engine's
+  closure runs outside as an outer iteration with warm-started, inexact
+  solves inside (`OpenStep::Nest`; docs/dev/adjoints.md §13n); the
+  evolution, the tangent and the continuous sweep use it, the discrete
+  transpose stays a fixed point. The fixed point remains the default.
 - **With sea level.** `SeaLevelEvolution3D` folds the ocean load and
   rotation into one combined fixed point per step (`coupled_rtol`,
   `max_coupled_iterations`); a node that does not converge is reported in
@@ -704,9 +715,11 @@ What is not built, or holds only within limits:
   docs/dev/adjoints.md §13l says why and where it belongs: AdGIA's
   non-hydrostatic theory). The radial density derivatives (gravity
   self-consistent) stay.
-- **Strong lateral contrasts at long steps.** The within-step iteration's
-  envelope (§6); a better reference profile (per degree, or worst case) or
-  an implicit–explicit split would extend it, and neither is built.
+- **Strong lateral contrasts at long steps.** The within-step fixed
+  point's envelope (§6) binds the default solver and the discrete
+  transpose; the conjugate-gradient step (`Options::solver`) has no such
+  envelope for the forward, tangent and continuous runs, and the discrete
+  transpose could be given the same solve (docs/dev/adjoints.md §13n).
 - **Shoreline flips inside the 3D fixed point.** Under migrating
   shorelines the 3D combined fixed point re-derives the ocean function in
   every pass, so a cell sitting at the flotation threshold can flip between

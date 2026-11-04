@@ -343,6 +343,55 @@ TEST(LateralModuli3D, StepSelfConvergesAtSecondOrderWithModuliAndViscosity) {
             << " passes a step\n";
 }
 
+TEST(LateralModuli3D, ConjugateGradientStepMatchesTheFixedPointUnderModuli) {
+  // The conjugate-gradient closure of a step under lateral viscosity,
+  // shear and bulk modulus (the bulk companion in the operator) lands
+  // where the fixed point does, over two steps of 2 tau.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto run = [&](Viscoelastic3D::Options::StepSolver solver) {
+    Viscoelastic3D::Options options;
+    options.max_iterations = 200;
+    options.rtol = 1e-12;
+    options.solve_rtol = 1e-12;
+    options.solver = solver;
+    options.moduli = {.shear =
+                          [](double, double theta, double phi) {
+                            return 0.1 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+                          },
+                      .bulk = [](double, double theta, double) {
+                        return 0.05 * std::cos(theta);
+                      }};
+    const auto op = Viscoelastic3D(
+        body.rheology, kLmax,
+        [](double, double theta, double phi) { return 0.6 * std::sin(theta) * std::sin(phi); },
+        options);
+    auto first = op.Step(op.ZeroState(), 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+    EXPECT_TRUE(first.info.converged);
+    auto second = op.Step(first.state, 2.0 * tau, Scheme::ExponentialTrapezoid, load);
+    EXPECT_TRUE(second.info.converged);
+    return std::pair{std::move(first), std::move(second)};
+  };
+  const auto [fixed1, fixed2] = run(Viscoelastic3D::Options::StepSolver::FixedPoint);
+  const auto [cg1, cg2] = run(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+  auto gap = [](const Viscoelastic3D::Solutions& a, const Viscoelastic3D::Solutions& b) {
+    auto scale = 0.0, diff = 0.0;
+    for (const auto& [l, x] : a.spheroidal) {
+      const auto& y = b.spheroidal.at(l);
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
+        scale = std::max(scale, std::abs(y[i]));
+        diff = std::max(diff, std::abs(x[i] - y[i]));
+      }
+    }
+    return diff / scale;
+  };
+  EXPECT_LT(gap(cg1.solutions, fixed1.solutions), 1e-9);
+  EXPECT_LT(gap(cg2.solutions, fixed2.solutions), 1e-9);
+  std::cout << "step 2: " << fixed2.info.iterations << " fixed-point passes, "
+            << cg2.info.iterations << " conjugate-gradient iterations\n";
+}
+
 TEST(LateralModuli3D, CoupledEvolutionMatchesTheShiftedRheology) {
   // The sea-level-coupled evolution under angle-uniform lateral moduli
   // equals the evolution on the shifted rheology with no lateral moduli,
@@ -415,6 +464,92 @@ TEST(LateralModuli3D, CoupledEvolutionMatchesTheShiftedRheology) {
           << "node " << n;
     }
     std::cout << "node " << n << ": " << a[n].coupledIterations << " passes\n";
+  }
+}
+
+TEST(LateralModuli3D, NestedConjugateGradientEvolutionMatchesTheFixedPoint) {
+  // The sea-level-coupled evolution closed by the nested conjugate-
+  // gradient solves (the sea level closure outside, the step's solve
+  // inside, warm-started and solved to the outer progress) equals the
+  // evolution closed by the combined fixed point, under a 3x lateral
+  // viscosity and lateral moduli with the rotational feedback on, at the
+  // start (the zero-length step) and at every node: sea level,
+  // displacement, potential and angular velocity.
+  auto body = Body::Make();
+  ViscoelasticOperator reference(body.rheology, kLmax);
+  SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+                        SeaLevelParameters{});
+  Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  const auto length = solver.SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+  auto load = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < load.size(); ++i) {
+    load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) * -0.1 * ice[i];
+  }
+  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(2.5 * n * kyr);
+  const auto iceLoad = [&](double t) {
+    auto out = load;
+    for (auto& v : out) v *= 0.5 + 0.5 * t / times.back();
+    return out;
+  };
+  auto run = [&](Viscoelastic3D::Options::StepSolver stepSolver) {
+    Viscoelastic3D::Options options;
+    options.solver = stepSolver;
+    options.rtol = 1e-12;
+    options.solve_rtol = 1e-12;
+    options.max_iterations = 200;
+    options.moduli = {.shear =
+                          [](double, double theta, double phi) {
+                            return 0.1 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+                          },
+                      .bulk = [](double, double theta, double) {
+                        return 0.05 * std::cos(theta);
+                      }};
+    const auto amplitude = 0.5 * std::log(3.0);
+    Viscoelastic3D op(
+        body.rheology, kLmax,
+        [=](double, double theta, double phi) { return amplitude * std::sin(theta) * std::sin(phi); },
+        options);
+    SeaLevelEvolution3D evolution(op, solver, state,
+                                  {.rtol = 1e-12, .max_coupled_iterations = 200,
+                                   .coupled_rtol = 1e-11});
+    return evolution.Run(times, iceLoad);
+  };
+  const auto a = run(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+  const auto b = run(Viscoelastic3D::Options::StepSolver::FixedPoint);
+  ASSERT_EQ(a.size(), b.size());
+  for (auto n = std::size_t{0}; n < a.size(); ++n) {
+    EXPECT_TRUE(a[n].converged) << n;
+    EXPECT_TRUE(b[n].converged) << n;
+    for (const auto& [name, fa, fb] :
+         {std::tuple{"sea level", &a[n].seaLevelChange, &b[n].seaLevelChange},
+          std::tuple{"displacement", &a[n].displacement, &b[n].displacement},
+          std::tuple{"potential", &a[n].potential, &b[n].potential}}) {
+      auto scale = 0.0, diff = 0.0;
+      for (auto i = std::size_t{0}; i < fa->size(); ++i) {
+        scale = std::max(scale, std::abs((*fb)[i]));
+        diff = std::max(diff, std::abs((*fa)[i] - (*fb)[i]));
+      }
+      EXPECT_GT(scale, 0.0) << name << " node " << n;
+      EXPECT_LT(diff, 1e-9 * scale) << name << " node " << n;
+    }
+    for (auto j = 0; j < 3; ++j) {
+      EXPECT_NEAR(a[n].angularVelocity[j], b[n].angularVelocity[j],
+                  1e-9 * std::abs(b[n].angularVelocity[j]) + 1e-16)
+          << "node " << n;
+    }
+    std::cout << "node " << n << ": nested " << a[n].coupledIterations
+              << " passes, " << a[n].solveIterations
+              << " conjugate-gradient iterations; fixed point "
+              << b[n].coupledIterations << " passes\n";
   }
 }
 

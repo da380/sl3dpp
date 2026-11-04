@@ -965,11 +965,15 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
             << ", viscosity " << viscosityGaps[0] << " -> " << viscosityGaps[1] << '\n';
 }
 
-TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderLateralModuli) {
-  // The continuous material kernels at a laterally heterogeneous elastic
-  // background (the equilibria and jumps now zero-length steps) against
-  // the exact discrete ones: a few per cent at 2.5 kyr steps, falling
-  // under refinement, both schemes.
+/// The continuous material kernels at a laterally heterogeneous elastic
+/// background (the equilibria and jumps now zero-length steps) against
+/// the exact discrete ones: a few per cent at 2.5 kyr steps, falling
+/// under refinement, both schemes; the forward steps, the continuous
+/// sweep's reversed steps and the discrete sweep's regenerations closed
+/// by the given solver (the discrete transpose is a fixed point either
+/// way).
+void ContinuousMaterialKernelsAgreeUnderLateralModuli(
+    Viscoelastic3D::Options::StepSolver solver) {
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(29);
   const auto load = scene.MeltLoad(-0.1);
@@ -990,7 +994,10 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderLateralModuli) {
     measurements[npts / 2].seaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
-                      {.memory_points = MemoryPointSet::Gll, .moduli = TestModuli()});
+                      {.solver = solver,
+                       .solve_rtol = 1e-12,
+                       .memory_points = MemoryPointSet::Gll,
+                       .moduli = TestModuli()});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationalFeedback::None,
@@ -1031,6 +1038,16 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderLateralModuli) {
     std::cout << "continuous material gap under lateral moduli, scheme "
               << static_cast<int>(scheme) << ": " << coarse << " -> " << fine << '\n';
   }
+}
+
+TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderLateralModuli) {
+  ContinuousMaterialKernelsAgreeUnderLateralModuli(
+      Viscoelastic3D::Options::StepSolver::FixedPoint);
+}
+
+TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderConjugateGradientSteps) {
+  ContinuousMaterialKernelsAgreeUnderLateralModuli(
+      Viscoelastic3D::Options::StepSolver::ConjugateGradients);
 }
 
 TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {

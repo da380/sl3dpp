@@ -1209,6 +1209,130 @@ lithosphere or inner-core nodes. What would cut the pass's cost further
 is a transform that fuses the pointwise product — GSHTrans matters,
 recorded in `~/dev/planning/gshtrans-notes-2026-11-04.md`.
 
+### 13n. The step by conjugate gradients, and the nested closure (built 5 November 2026)
+
+A 3D step is a linear system in the degree solutions,
+
+    (K_eff − Pᵀ W S) x = f,
+
+K_eff the reference effective systems of the (scheme, dt), W(x) the
+step's pointwise lateral weight (the viscosity's Σ μ̄_k(β_k(x) −
+β_ref,k) and the moduli's −s μ̄_eff, with the bulk companion −κ̄ b on
+the dilatation), S the strain of the solutions, Pᵀ the assembly, and
+f the fixed memory force plus any added forces and the channels'. The
+operator is the 3D effective stiffness: symmetric positive definite
+whatever the contrast, since the effective modulus μ_U(1+s) −
+Σ μ_k(1+s)β_k(x) is positive pointwise. The within-step fixed point
+(§13k, lateral-coupling.md §5) iterates it as x = K_eff⁻¹(f + Pᵀ W S x)
+on the strain — Picard, Anderson-mixed — which contracts only as fast
+as the lateral term is small against the reference: at 100x contrasts
+and dt ≥ 2τ it takes 65–150 passes, and at dt = 10τ it fails.
+`Viscoelastic3D::Options::solver = ConjugateGradients` closes the same
+system by the preconditioned conjugate gradients of §13j instead
+(`detail/LateralSolve.hpp`, the routine the static solve and the
+unrelaxed start solve use), K_eff⁻¹ the preconditioner, from the
+Picard iterate (the reference response, or a warm start): guaranteed
+to converge, and in practice in fewer iterations than the fixed point
+takes passes everywhere measured. An iteration is one grid pipeline
+(synthesis, weight, analysis, assembly) like a pass, plus the reference
+band products on the columns (hand-written, threaded over the degrees:
+a BLAS call inside the OpenMP loops starts a second thread pool on the
+server)
+and the preconditioner's reference solve, plus the Krylov vector
+algebra; at lmax 16, where the pipeline is 4 ms, an iteration costs
+about 1.3 passes, and the ladder's second steps still take less time
+at every contrast (lateral-coupling.md §5a''); at production sizes the
+pipeline dominates both. `OpenStep::Forces` builds
+f, `OpenStep::Apply` the operator, `OpenStep::Solve` the solve
+(`solve_rtol` on the relative residual in the preconditioned energy
+norm √(⟨r, K_eff⁻¹ r⟩/⟨f, K_eff⁻¹ f⟩), `solve_max_iterations` the
+budget), `OpenStep::Close` a step under known channels either way, and
+`Step` reads the option. Distributed, the operator is the §13m one
+(shares assembled by the sum collective per degree, the band applied,
+the product masked back; pairings summed), so the step's solve runs
+over radial segments like the start solve.
+
+**The closure outside.** The sea level equation makes the loads depend
+on the solutions. The fixed point folded both into one iteration on
+the strain. With the solve inside, `OpenStep::Nest` runs the driver's
+closure (the sea level engine on the surface response, as before: a
+`Closure` maps the CHANNEL-FREE solutions to the next channels) as an
+outer iteration: pass n hands the closure the last solution less its
+channels, solves the step under the new channels warm-started from the
+last solution WITH the new channels (the Picard iterate, which already
+carries the 1D Love-number response to the load change), and the
+outer residual is that warm start's residual before the solve — how
+far the last solutions with the new channels are from solving the
+step, relative to its forces, in the solve's own measure. Converged
+when it is at most `coupled_rtol`. The inner solves are inexact: each
+reduces its start's residual by `solve_outer_factor` (1e-2) at least,
+never below `solve_rtol`, so the inner work follows the outer
+progress. The outer map is Picard, Anderson-mixed on the channel-free
+solutions by the same adaptive rule as the strain fixed point (the
+`IterationControl`'s memory and rate); in the cases measured the outer
+map contracts by ~1e-3 a pass and Picard never hands over. The outer
+contraction is the 3D departure of the load response from the 1D Love
+numbers the engine closes with, times the ocean's feedback — small
+unless the lateral structure is strong at the surface.
+
+A lesson from the first version, kept here because it is the obvious
+mistake: measuring the outer change as the difference between the
+iterate and its image, with the inner tolerance tied to that change,
+is circular. A loose inner solve starting from the Picard iterate can
+stop at zero iterations (its start is already within the loose
+tolerance), so the image equals the iterate, the change reads 1e-15,
+the next pass tightens to the final tolerance, the change reads the
+real correction, the next loosens again — a two-cycle Anderson then
+mixes into a limit cycle at 5e-10, never meeting the tolerance. The
+warm start's own initial residual is the right outer measure: it is
+the residual of the current iterate against the current system, and
+does not depend on how well the previous pass was solved.
+
+**Who uses what.** The evolution's steps and its lateral start (the
+zero-length step), the tangent-linear run's steps and start, the
+continuous sweep's reversed steps and its instantaneous problems
+(equilibria, jumps) all go through `Nest` under the option; the
+forward regenerations in the sweeps (a kept trajectory's steps rebuilt
+under recorded loads) through `Close`. The DISCRETE transpose stays
+the transposed fixed point: it transposes the converged linear solve,
+which is the same system whichever way the forward solved it (the
+machine-grade pairings hold with the forward on conjugate gradients),
+and its own iteration is the operator's transpose — the same
+symmetric operator — so it could be a conjugate-gradient solve on the
+dual solutions with the sea level adjoint as the closure, with the
+same nesting; that is the one place the fixed point's envelope still
+binds, and the next thing to do if a strong-contrast adjoint needs it.
+
+**Measured (lateral-coupling.md §5a'').** The §5a ladder at lmax 16,
+the second step: at 3x, 8/13/17 iterations against 12/21/21 passes at
+dt/τ = 0.5/2/10; at 10x, 12/23/34 against 20/29/50; at 100x, 23/46/90
+against 26/65/fail; at 1000x, 42/83/183 against 49/138/fail. The
+nested evolution at a 3x viscosity contrast with 10%/5% moduli and the
+full rotational feedback (`LateralModuli3D.NestedConjugateGradient
+EvolutionMatchesTheFixedPoint`, agreement to 1e-9 at every node): 5
+passes and 8 iterations at the start against the fixed point's 10
+passes, 7 passes and 20–22 iterations a step against 20 — the nested
+closure costs about 1.4 passes' worth per fixed-point pass at this
+weak contrast (each outer pass also pays one operator application for
+its residual and one reference solve for its scale), and the fixed
+point stays the default. Where the fixed point grinds or fails, the
+conjugate-gradient step is the one to use.
+
+GATES: `Lateral.ConjugateGradientStepMatchesTheFixedPoint` (10x,
+dt = 2τ, two steps, solutions to 1e-9, and the operator applied to the
+fixed point's solution returns the step's forces to 1e-9),
+`LateralModuli3D.ConjugateGradientStepMatchesTheFixedPointUnderModuli`
+(viscosity, shear and bulk together), the nested evolution gate above,
+`TangentLinear3D.MaterialDirectionMatchesDifferencesUnderConjugate
+GradientSteps` (the tangent along a lateral material direction against
+central differences of nested runs, Richardson at 1e-6),
+`DiscreteAdjoint3D.ContinuousMaterialKernelsAgreeUnderConjugate
+GradientSteps` (the continuous sweep's reversed steps and instantaneous
+problems nested, the discrete transpose on the fixed point, the gap
+closing under refinement), and the two radial-rank gates and the
+mpiexec lateral gate now run the steps and the evolution on the
+conjugate-gradient solver. Probe: `Lateral.DISABLED_StepSolverLadder`.
+
 ## 14. The discrete 3D second-order adjoint (built 4 November 2026)
 
 `AdjointSolver3D::SecondOrderKernels` under `AdjointMethod::Discrete`
