@@ -4,6 +4,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
 
@@ -173,7 +174,8 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
       coupling_.AddDilatationOfSolution(scalar, l, Spheroidal(l), xl);
     }
     auto field = coupling_.SynthesiseScalar(scalar);
-    for (auto i = std::size_t{0}; i < values; ++i) field[i] *= dKappa[i];
+    detail::ParallelElements(values, true,
+                             [&](std::size_t i) { field[i] *= dKappa[i]; });
     const auto weighted = coupling_.AnalyseScalar(field);
     add(spheroidal, coupling_.DilatationForce(weighted, sph));
   }
@@ -274,7 +276,8 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
   Kernels out;
   out.kappa.assign(values, 0.0);
   out.mu.assign(values, 0.0);
-  for (auto rn = 0; rn < nodes; ++rn) {
+  detail::ParallelElements(static_cast<std::size_t>(nodes), true, [&](std::size_t n) {
+    const auto rn = static_cast<int>(n);
     const auto base = coupling.FieldOffset(rn);
     const auto size = coupling.FieldSizeOf(rn);
     const auto rr = coupling.RadiusOfNode(rn);
@@ -287,7 +290,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
                    8.0 * (ey.c[1][i] * std::conj(ex.c[1][i])).real() +
                    4.0 * (ey.c[0][i] * std::conj(ex.c[0][i])).real());
     }
-  }
+  });
   return out;
 }
 

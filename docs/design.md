@@ -250,7 +250,8 @@ Deliberately out of scope:
   solved by the same iteration, with the force assembly as the transpose
   of the strain evaluation under the energy pairing; exact against the 3D
   tangent-linear run at 1e-8 and second order to solver precision in the
-  Taylor test. The discrete 3D sweep is single-process.
+  Taylor test. Distributed over radius like the continuous sweep
+  (docs/dev/adjoints.md §17).
 - **Measurements.** Linear functionals of one node's outputs,
   J = a² ∫ g ξ dΩ + a² ∫ g_u u dΩ + a² ∫ g_φ φ dΩ + g_ω·ω, keyed by node
   index into the time grid. `Measurements.hpp` builds the duals: cap means,
@@ -343,8 +344,8 @@ Deliberately out of scope:
   by the derivative of the step's lateral weight on the first dual
   strain, the Hessian exact to the solvers' tolerance
   (docs/dev/adjoints.md §14). Material directions and the material
-  kernels' derivatives as in 1D, by both methods, single-process
-  (docs/dev/adjoints.md §15).
+  kernels' derivatives as in 1D, by both methods, distributed
+  (docs/dev/adjoints.md §15, §17).
 - **Material derivatives** (`MaterialDirection`: δκ, δμ, δρ on the mesh's
   nodes). `Material::Variation` is the exact linearisation of
   `Material::Shifted`, gravity's variation integrated from δρ so that the
@@ -615,8 +616,9 @@ Beyond the fixtures:
   communicator. The sea level equation is solved on every rank alike and
   the first rank's solution shared. The continuous 3D adjoint and the 3D
   tangent-linear runs run the same way, each rank sweeping its own nodes
-  over its own trajectory; the discrete 3D sweep, the material tangent and
-  the material kernels are single-process. `sl3d`'s `evolve` and `kernel`
+  over its own trajectory, as do the discrete 3D sweep, the material
+  tangent and the material kernels (docs/dev/adjoints.md §17). `sl3d`'s
+  `evolve` and `kernel`
   run under `mpiexec` with per-rank checkpoints
   ([sl3d-configs.md](sl3d-configs.md)).
 
@@ -660,9 +662,8 @@ Beyond the fixtures:
 
 What is not built, or holds only within limits:
 
-- **The discrete 3D sweeps.** The discrete 3D adjoint, first and second
-  order, is single-process (refused when distributed); a material
-  direction of either 3D second-order sweep is single-process too.
+- **The static Born perturbation** (`ElasticPerturbation3D`) is
+  single-process; everything time-stepped is distributed.
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.
@@ -673,7 +674,7 @@ What is not built, or holds only within limits:
   reported unconverged rather than accepted. The tests' marine caps converge
   at 1e-12. The 3D gradient calibration uses the continuous adjoint by
   default (`CalibrationOptions::adjoint3D`; the discrete sweep serves
-  single-process), whose kernel is exact only as the step goes to zero;
+  too), whose kernel is exact only as the step goes to zero;
   the iteration's fixed point is still the calibrated state, since the
   kernel is linear in the residual.
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold

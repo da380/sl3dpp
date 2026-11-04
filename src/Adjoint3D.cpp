@@ -231,10 +231,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       throw std::invalid_argument(
           "a material direction takes no rotational feedback");
     }
-    if (op.GetOptions().collectives.Distributed()) {
-      throw std::invalid_argument(
-          "a material direction of the sweep is not distributed");
-    }
   }
 
   SeaLevelSolver::Options sleOptions;
@@ -681,9 +677,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
           "the material kernels take no rotational feedback");
-    }
-    if (collectives.Distributed()) {
-      throw std::invalid_argument("the material kernels are not distributed");
     }
     kappaKernel.assign(values, 0.0);
     muKernel.assign(values, 0.0);

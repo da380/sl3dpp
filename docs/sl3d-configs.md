@@ -535,15 +535,14 @@ The first is an `evolve1d` config; the second needs `evolve`.
 Adjoint sensitivity kernels of configured measurements. The forward run is
 the evolve run of the same run members; then, for each measurement, one
 reverse (adjoint) sweep gives its sensitivity to the ice history and to the
-viscosity. `kernel1d` runs the 1D problem, by the continuous adjoint or the
-exact discrete transpose; `kernel` runs the 3D problem by the continuous
-adjoint.
+viscosity. `kernel1d` runs the 1D problem and `kernel` the 3D one, each by
+the continuous adjoint or the exact discrete transpose.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | the run members | | | as for evolve, above |
 | `record_stride` | integer >= 1 | 1 | record the forward state at every `record_stride`-th node (and the last); the sweep rebuilds the states in between |
-| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"`; `kernel` takes `"continuous"` alone: sl3d's 3D kernels use the continuous adjoint, and the library's discrete 3D sweep is not exposed by the app |
+| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map; in 3D since 4 November 2026, distributed like the continuous sweep) |
 | `trajectory.directory` | path | none | `kernel` alone: spill the recorded states to this directory instead of holding them in memory |
 | `measurements` | array | required | the measurements, at least one (below) |
 | `output` | path | required | the directory the kernel files go into |

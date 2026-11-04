@@ -189,8 +189,8 @@ class AdjointSolver3D {
     /// Continuous (the default and preferred path) or Discrete: the
     /// exact transpose of the coupled time-stepped map, the transposed
     /// within-step fixed point solved by the same iteration. Both carry
-    /// the second-order sweep (SecondOrderKernels). Discrete is not
-    /// distributed.
+    /// the second-order sweep (SecondOrderKernels) and both are
+    /// distributed over radius (docs/dev/adjoints.md §17).
     AdjointMethod method = AdjointMethod::Continuous;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
@@ -209,7 +209,7 @@ class AdjointSolver3D {
     /// observations, at the commute level of the viscosity kernels. Both
     /// need the trajectory, the memory nodes at the GLL points and no
     /// rotational feedback; one unrelaxed solve per node (two for the
-    /// continuous form), not distributed.
+    /// continuous form). Distributed like the sweeps.
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
@@ -255,7 +255,8 @@ class AdjointSolver3D {
    * beside the first, its transposed fixed point forced by the derivative
    * of the step's lateral weight acting on the first dual strain, and the
    * itau pairing and the weight recursion differentiated along v (the
-   * Hessian symmetric to the solvers' tolerance); not distributed. With
+   * Hessian symmetric to the solvers' tolerance); distributed like the
+   * first-order sweep. With
    * Options::material_kernels the material kernels and their
    * derivatives along v are formed too, and v may have a direction in
    * the moduli (`material`; docs/dev/adjoints.md §15) — Discrete only

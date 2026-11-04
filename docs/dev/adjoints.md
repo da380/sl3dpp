@@ -576,8 +576,8 @@ d† = Σ A m̃† pointwise. The start is the transposed instantaneous elastic
 solve on the unrelaxed systems. The column duals carry no halving or
 doubling: the Hermitian column pairing matches the solver's real-field
 coefficient pairing (unlike the 1D real columns, which halve and double).
-Single-process (refused when distributed). Its second-order form is §14
-(the continuous one is §11).
+Distributed over radius since 4 November (§17). Its second-order form is
+§14 (the continuous one is §11).
 
 GATES (`TestDiscreteAdjoint3D`, lmax 8, lateral structure on): the
 pairing identity with the discrete tangent-linear run at 1e-8 for both
@@ -844,7 +844,8 @@ tensors:
   need), paired with the base start solution.
 
 Discrete exact, continuous at the commute level (below, §13g); needs the
-trajectory, GLL memory nodes and no rotational feedback; single-process.
+trajectory, GLL memory nodes and no rotational feedback; distributed
+since 4 November (§17).
 
 GATES (`TestDiscreteAdjoint3D`): `MaterialKernelsPairWithTheTangent` —
 with lateral viscosity on, the kernels paired with LATERAL directions in
@@ -960,9 +961,9 @@ Returns `KernelDerivatives3D` as the continuous sweep does: the thickness
 and initial-sea-level views of the derivative load duals (no lumps, as in
 1D), the itau kernel's derivative with its spherical reduction, and the
 log-viscosity kernel's derivative −(δitau K + itau dK). Cost: two
-transposed fixed points per node instead of one. Single-process; the
-material kernels are refused alongside (their derivative is the deferred
-item).
+transposed fixed points per node instead of one. Distributed since 4
+November (§17); the material kernels and their derivatives alongside
+since §15.
 
 GATES (`TestSecondOrderAdjoint3D`, lmax 8, prem8):
 `DiscreteZeroLateralMatchesThe1DDiscreteSweep` — with δ = 0 at the GLL
@@ -992,7 +993,8 @@ materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
 `KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
 spherical reductions). New design, no pyslfp counterpart. Everything
 needs the memory points at the GLL nodes and no rotational feedback (the
-material tangent's conditions); the 3D forms are single-process.
+material tangent's conditions); the 3D forms are distributed since 4
+November (§17).
 
 **The second-order tangent run** (`TangentLinearSolver::RunSecondOrder`,
 3D alike). The step map is affine in the moduli, so the second variation
@@ -1146,7 +1148,7 @@ wanted. Not built: a density direction in a SECOND-order run or sweep
 needed), lateral density in 3D (excluded by the hydrostatic equations,
 §13a).
 
-GATES: `MaterialDerivatives.DensityDualsAreTheTransposeOfTheVariation`
+GATES (§16): `MaterialDerivatives.DensityDualsAreTheTransposeOfTheVariation`
 (random solution pairs and column amplitudes at every degree: the
 density gradient of the accumulated duals paired with a direction
 against y^T(dK)x and y^T(dF)a for the load, tangential, tide and
@@ -1161,3 +1163,48 @@ with ρ; `SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric` now
 checks the density kernel's derivative along a (κ, μ, itau, ice)
 direction against central differences of the density kernel.
 
+## 17. The parallel pass (4 November 2026)
+
+With the features complete, the serial derivative paths were brought
+under the radial distribution of docs/radial-partitioning.md, which the
+forward step, the continuous 3D adjoint and the 3D tangent-linear runs
+already followed. Nothing in the pattern was new:
+
+- **The discrete 3D transpose** (first and second order, §12, §14, with
+  the material of §15): each rank transposes its own memory nodes' part
+  of every pass; the duals of the load and centrifugal coefficients are
+  the ranks' PARTIAL contractions of the unit responses (whole) with the
+  forces (held in shares, each rank its own rows) summed over the ranks;
+  every rank solves the sea level adjoint alike from them and rank 0's
+  answers serve all, a failure failing on all; the surface duals and the
+  degree-0 moment row join the forces on the rank holding their rows
+  (`DegreeOperator::Holds`); the transposed fixed point's residual is the
+  ranks' maximum, as the forward's. The forward step's conventions
+  (`SeaLevelEvolution3D::March`) transposed.
+- **The 3D material tangent, the 3D material kernels of both sweeps and
+  the material directions of the 3D second-order sweeps** needed no
+  change: their pieces — the Born force assembled on the rank's own
+  nodes, the bulk term's dilatation through the scalar companion, the
+  unrelaxed responses through `SolveForces`, the closures' extra response
+  channels through the collective `Surface` and the summed moment — were
+  already the forward step's. Their refusals were lifted.
+- **Threads.** The derivative loops were already threaded through
+  `detail::ParallelElements` / `ParallelFor` (the 3D sweeps over nodes
+  and grid values, the 1D sweeps over degrees); the static Born
+  perturbation's pointwise loops were the gap and are threaded now.
+
+GATES: `RadialRanks.DerivativesMatchTheOneProcess` (threads as ranks,
+three ranks, the 1e22 mantle with lateral viscosity, GLL memory nodes):
+the 3D tangent-linear runs of both methods along loads, a lateral log
+viscosity and lateral moduli; the first-order sweeps of both methods
+with the material kernels; the second-order sweeps of both methods along
+that direction with the kernels' derivatives — the ice views on every
+rank and each rank's slices of the 3D kernels and derivatives against
+the one process on the same cuts, all at 1e-11 on the first run.
+`Distributed.DerivativesMatchTheOneProcess` is the same under mpiexec
+(TestDistributed), written alongside but NOT RUN on the laptop: its MPI
+install lacks the development headers (mpicxx without
+`/usr/lib/x86_64-linux-gnu/openmpi/include`), so the MPI build does not
+configure there; run it where `SL3DPP_WITH_MPI` builds (the server).
+Not distributed: the static Born perturbation (`ElasticPerturbation3D`),
+a small static problem run at benchmark size on one process.

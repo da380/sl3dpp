@@ -19,11 +19,13 @@
 // differentiated along v.
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <functional>
 #include <optional>
 #include <tuple>
+#include <type_traits>
 #include <map>
 #include <span>
 #include <stdexcept>
@@ -90,10 +92,33 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       throw std::invalid_argument("times must be increasing");
     }
   }
-  if (op.GetOptions().collectives.Distributed()) {
-    throw std::invalid_argument(
-        "the discrete 3D adjoint is not distributed: use Continuous");
-  }
+  // Distributed over radius (Viscoelastic3D::Options::collectives): each
+  // rank transposes its own memory nodes' part of every pass, the duals
+  // of the load and centrifugal coefficients are the ranks' partial
+  // contractions summed, every rank solves the sea level adjoint alike
+  // from them and rank 0's answers serve all (the ranks' transforms may
+  // round differently), the surface duals and the moment row join the
+  // forces on the rank holding their rows, and a solve that fails fails
+  // on all — the forward step's conventions (SeaLevelEvolution3D::March)
+  // transposed.
+  const auto& collectives = op.GetOptions().collectives;
+  auto agree = [&](auto& values) {
+    if (!collectives.Distributed() || values.empty()) return;
+    using Value = typename std::remove_reference_t<decltype(values)>::value_type;
+    collectives.share(std::span(reinterpret_cast<double*>(values.data()),
+                                values.size() * sizeof(Value) / sizeof(double)));
+  };
+  auto agreeAdjoint = [&](SeaLevelSolver::AdjointResponse& adj) {
+    if (!collectives.Distributed()) return;
+    agree(adj.directLoadDual);
+    agree(adj.displacementResponseDual);
+    agree(adj.potentialResponseDual);
+    auto scalars = std::array{adj.inertiaMomentDual, adj.converged ? 0.0 : 1.0};
+    collectives.max(std::span(&scalars[1], 1));
+    collectives.share(std::span(&scalars[0], 1));
+    adj.inertiaMomentDual = scalars[0];
+    adj.converged = scalars[1] == 0.0;
+  };
   const bool material = options_.material_kernels;
   if (second) {
     if (trajectory == nullptr) {
@@ -292,6 +317,18 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         psiDual[SurfaceGrid::Index(l, m)] = ev.toMatPotential_ * p;
       }
     }
+    if (collectives.Distributed()) {
+      // the forces are held in shares (each rank its own rows), the unit
+      // responses whole: the ranks' partial contractions sum
+      auto all = sigmaDual;
+      all.insert(all.end(), psiDual.begin(), psiDual.end());
+      collectives.sum(std::span(reinterpret_cast<double*>(all.data()),
+                                2 * all.size()));
+      std::copy(all.begin(), all.begin() + static_cast<std::ptrdiff_t>(sigmaDual.size()),
+                sigmaDual.begin());
+      std::copy(all.begin() + static_cast<std::ptrdiff_t>(sigmaDual.size()), all.end(),
+                psiDual.begin());
+    }
     return std::pair(std::move(sigmaDual), std::move(psiDual));
   };
   // The engine-adjoint inputs at a node: the duals carried by the node's
@@ -340,20 +377,25 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           const auto ndof = system.DofCount();
           const auto su = system.SurfaceDof(Component::U);
           const auto sphi = system.SurfaceDof(Component::Phi);
+          // the rows join the shares on the rank holding them
+          const bool holdU = su >= 0 && system.Holds(su);
+          const bool holdPhi = sphi >= 0 && system.Holds(sphi);
           for (auto m = 0; m <= l; ++m) {
             const auto i = SurfaceGrid::Index(l, m);
-            if (su >= 0) {
+            if (holdU) {
               bl[static_cast<std::size_t>(m) * ndof + su] +=
                   ev.toNdLength_ * adj.displacementResponseDual[i];
             }
-            if (sphi >= 0) {
+            if (holdPhi) {
               bl[static_cast<std::size_t>(m) * ndof + sphi] +=
                   ev.toNdPotential_ * adj.potentialResponseDual[i];
             }
           }
           if (l == 0) {
             const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
-            for (auto d = 0; d < ndof; ++d) bl[d] += momentRow[d] * jd;
+            for (auto d = 0; d < ndof; ++d) {
+              if (system.Holds(d)) bl[d] += momentRow[d] * jd;
+            }
           }
         }
       };
@@ -702,6 +744,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto [sigmaDual, psiDual] = channelDuals(sphForces, units);
         auto [duals, synth] = engineDuals(sigmaDual, psiDual, n, measured);
         auto adj = effectiveSolver.SolveAdjoint(ev.state_, duals, sleOptions);
+        agreeAdjoint(adj);
         if (!adj.converged) {
           throw std::runtime_error(std::format(
               "the adjoint sea level solve at node {} did not converge", n));
@@ -995,8 +1038,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     auto [sphForces, torForces] = entry(coupling.Analyse(ddual), sph, tor);
     const auto [sigmaDual, psiDual] = channelDuals(sphForces, units);
     auto [duals, synth] = engineDuals(sigmaDual, psiDual, 0, true);
-    const auto adj =
+    auto adj =
         solverFor(op.ElasticLove()).SolveAdjoint(ev.state_, duals, sleOptions);
+    agreeAdjoint(adj);
     if (!adj.converged) {
       throw std::runtime_error(
           "the adjoint elastic sea level solve did not converge");
@@ -1029,8 +1073,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
       const auto [dsigmaDual, dpsiDual] = channelDuals(dsph, units);
       auto [dduals, dsynth] = engineDuals(dsigmaDual, dpsiDual, 0, false);
-      const auto dadj = solverFor(op.ElasticLove())
-                            .SolveAdjoint(ev.state_, dduals, sleOptions);
+      auto dadj = solverFor(op.ElasticLove())
+                      .SolveAdjoint(ev.state_, dduals, sleOptions);
+      agreeAdjoint(dadj);
       if (!dadj.converged) {
         throw std::runtime_error(
             "the adjoint elastic sea level solve of the derivative state "
@@ -1073,8 +1118,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
-    const auto adj =
+    auto adj =
         solverFor(op.ElasticLove()).SolveAdjoint(ev.state_, duals, sleOptions);
+    agreeAdjoint(adj);
     if (!adj.converged) {
       throw std::runtime_error(
           "the instantaneous adjoint fingerprint did not converge");

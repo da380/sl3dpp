@@ -746,9 +746,6 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
     throw std::invalid_argument(
         "the material tangent takes no rotational feedback");
   }
-  if (op.GetOptions().collectives.Distributed()) {
-    throw std::invalid_argument("the material tangent is not distributed");
-  }
   auto material = std::make_shared<MaterialDrive3D>();
   material->ev = &ev;
   material->direction = direction;

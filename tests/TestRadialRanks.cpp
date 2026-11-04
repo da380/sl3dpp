@@ -28,6 +28,7 @@
 #include <vector>
 
 #include "sl3dpp/Adjoint3D.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
@@ -571,5 +572,235 @@ TEST(RadialRanks, AdjointKernelsMatchTheOneProcessSweep) {
     EXPECT_LT(worstIce, 1e-12) << label;
     EXPECT_LT(worstViscosity, 1e-12) << label;
     EXPECT_LT(worstSpherical, 1e-12) << label;
+  }
+}
+
+namespace {
+
+/// A rank's slice of a field over the one process's grid values.
+std::vector<double> Slice(const GridCoupling& part, const GridCoupling& all,
+                          std::span<const double> field) {
+  if (part.NodeCount() == 0) return {};
+  auto first = 0;
+  while (all.ElementOfNode(first) != part.ElementOfNode(0)) ++first;
+  const auto at = all.FieldOffset(first);
+  return std::vector<double>(field.begin() + static_cast<std::ptrdiff_t>(at),
+                             field.begin() + static_cast<std::ptrdiff_t>(
+                                                 at + part.GridValueCount()));
+}
+
+/// A radial profile times an angular function over a coupling's grid
+/// values, in units of a nodal modulus.
+std::vector<double> LateralModulus(const GridCoupling& coupling,
+                                   const Material& material,
+                                   std::span<const double> modulus,
+                                   const std::function<double(double)>& radial,
+                                   const std::function<double(double, double)>& angular) {
+  const auto ngll = material.Mesh().NGll();
+  auto out = std::vector<double>(coupling.GridValueCount(), 0.0);
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto full = static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+                      coupling.NodeInElementOf(rn);
+    const auto r = coupling.RadiusOfNode(rn);
+    const auto values = coupling.GridOf(rn).FromFunction(
+        [&](double theta, double phi) {
+          return modulus[full] * radial(r) * angular(theta, phi);
+        });
+    const auto at = coupling.FieldOffset(rn);
+    for (auto x = std::size_t{0}; x < values.size(); ++x) out[at + x] = values[x];
+  }
+  return out;
+}
+
+double Cap(double theta, double phi, double colat0, double lon0, double width) {
+  const double c = std::cos(theta) * std::cos(colat0) +
+                   std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
+  const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+  return std::exp(-0.5 * std::pow(d / width, 2));
+}
+
+}  // namespace
+
+TEST(RadialRanks, DerivativesMatchTheOneProcess) {
+  // The derivative machinery on three ranks against the one process on
+  // the same cuts: the 3D tangent-linear runs (both methods) along loads,
+  // a lateral log viscosity and lateral moduli; the first-order sweeps
+  // with the material kernels, discrete (the transposed fixed point's
+  // partial contractions summed, the surface duals on their holding
+  // rank) and continuous; and the second-order sweeps of both methods
+  // along a direction in all of those, the kernels' derivatives included
+  // — the ice views on every rank, each rank's slices of the 3D kernels.
+  constexpr auto lmax = 8;
+  constexpr auto count = 3;
+  const auto body = Body::Make(lmax, 1e22);
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  auto solvers = std::vector<SeaLevelSolver>{};
+  for (auto rank = 0; rank <= count; ++rank) {
+    solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                         SeaLevelParameters{});
+  }
+  const auto length = solvers[0].SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solvers[0].MakeState(ice, toNd(fingerprint.SeaLevel()));
+  const auto kyr = 1000.0 * 3.15576e7 / solvers[0].SolverScales().Time();
+  const auto times =
+      std::vector<double>{0.0, 2.5 * kyr, 5.0 * kyr, 7.5 * kyr, 10.0 * kyr};
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] = -0.1 * solvers[0].IceDensity() * (1.0 - state.oceanFunction[i]) *
+              ice[i];
+  }
+  const auto iceLoad = [&](double t) {
+    auto out = melt;
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual =
+      solvers[0].Grid().FromFunction([](double theta, double phi) {
+        return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+      });
+  measurements[2].displacementDual = measurements[times.size() - 1].seaLevelDual;
+  // the direction: a thickness history, a lateral log viscosity, lateral
+  // moduli — over the one process's grid values, sliced per rank
+  auto deltaIce = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    auto field = solvers[0].Grid().FromFunction([n](double theta, double phi) {
+      return 20.0 * (0.3 + 0.1 * n) * Cap(theta, phi, 1.0 + 0.2 * n, 0.5, 0.6);
+    });
+    for (auto& v : field) v /= length;
+    deltaIce.push_back(std::move(field));
+  }
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  const auto [k0, m0] = body.material.Moduli().KappaMu();
+  const auto cuts = body.material.Mesh().BalancedCuts(
+      count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gll,
+      .radial_cuts = cuts};
+  const auto evolutionOptions =
+      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::None,
+                                   .rtol = 1e-12,
+                                   .max_coupled_iterations = 100,
+                                   .coupled_rtol = 1e-11,
+                                   .record_stride = 1};
+  const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+  const auto& all = whole.Coupling();
+  auto wholeDirection = TangentPerturbation3D{};
+  wholeDirection.iceThickness = deltaIce;
+  auto logField = std::vector<double>(all.GridValueCount(), 0.0);
+  for (auto rn = 0; rn < all.NodeCount(); ++rn) {
+    const auto values = all.GridOf(rn).FromFunction(pU);
+    const auto at = all.FieldOffset(rn);
+    for (auto x = std::size_t{0}; x < values.size(); ++x) logField[at + x] = values[x];
+  }
+  wholeDirection.logViscosity = logField;
+  wholeDirection.material.kappa = LateralModulus(
+      all, body.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+      [](double theta, double phi) {
+        return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+      });
+  wholeDirection.material.mu = LateralModulus(
+      all, body.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6);
+      });
+  auto directionFor = [&](const GridCoupling& part) {
+    auto d = wholeDirection;
+    d.logViscosity = Slice(part, all, wholeDirection.logViscosity);
+    d.material.kappa = Slice(part, all, wholeDirection.material.kappa);
+    d.material.mu = Slice(part, all, wholeDirection.material.mu);
+    return d;
+  };
+
+  struct Result {
+    std::map<AdjointMethod, std::vector<SeaLevelEvolution3D::Snapshot>> tangent;
+    std::map<AdjointMethod, Kernels3D> kernels;
+    std::map<AdjointMethod, std::pair<Kernels3D, KernelDerivatives3D>> second;
+  };
+  auto run = [&](const Viscoelastic3D& op, const SeaLevelSolver& solver) {
+    SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+    const auto direction = directionFor(op.Coupling());
+    const auto itau = TangentLinearSolver3D::ItauOfLogViscosity(op, direction.logViscosity);
+    Result out;
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      TangentLinearSolver3D tangent(evolution, {.method = method,
+                                                .rtol = 1e-12,
+                                                .max_coupled_iterations = 100,
+                                                .coupled_rtol = 1e-11,
+                                                .record = true});
+      out.tangent[method] = tangent.Run(times, direction, &trajectory);
+      AdjointSolver3D adjoint(evolution, {.method = method,
+                                          .rtol = 1e-12,
+                                          .max_coupled_iterations = 100,
+                                          .coupled_rtol = 1e-11,
+                                          .material_kernels = true});
+      out.kernels[method] = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+      out.second[method] = adjoint.SecondOrderKernels(
+          times, measurements, out.tangent[method], itau, trajectory, {},
+          direction.material);
+    }
+    return out;
+  };
+  const auto want = run(whole, solvers[count]);
+
+  ThreadRanks ranks(count);
+  auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+  for (auto rank = 0; rank < count; ++rank) {
+    auto mine = options;
+    mine.segments = {rank};
+    mine.collectives = ranks.For(rank);
+    ops.push_back(std::make_unique<Viscoelastic3D>(body.rheology, lmax, Peaked, mine));
+  }
+  auto got = std::vector<Result>(count);
+  ranks.Run([&](int rank) { got[rank] = run(*ops[rank], solvers[rank]); });
+
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto label = method == AdjointMethod::Discrete ? "discrete" : "continuous";
+    auto worstTangent = 0.0, worstIce = 0.0, worstField = 0.0, worstSecond = 0.0;
+    for (auto rank = 0; rank < count; ++rank) {
+      const auto& part = ops[rank]->Coupling();
+      const auto& r = got[rank];
+      const auto& w = want;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        worstTangent = std::max(
+            worstTangent, Relative(r.tangent.at(method)[n].seaLevelChange,
+                                   w.tangent.at(method)[n].seaLevelChange));
+        worstIce = std::max(worstIce, Relative(r.kernels.at(method).ice.loadDuals[n],
+                                               w.kernels.at(method).ice.loadDuals[n]));
+        worstSecond = std::max(
+            worstSecond, Relative(r.second.at(method).second.ice.thickness[n],
+                                  w.second.at(method).second.ice.thickness[n]));
+      }
+      const auto& k = r.kernels.at(method);
+      const auto& wk = w.kernels.at(method);
+      worstField = std::max(
+          {worstField,
+           FieldSliceDifference(part, k.logViscosityKernel3D[0], all, wk.logViscosityKernel3D[0]),
+           FieldSliceDifference(part, k.kappaKernel3D, all, wk.kappaKernel3D),
+           FieldSliceDifference(part, k.muKernel3D, all, wk.muKernel3D)});
+      const auto& d = r.second.at(method).second;
+      const auto& wd = w.second.at(method).second;
+      worstSecond = std::max(
+          {worstSecond,
+           FieldSliceDifference(part, d.itauKernel3D[0], all, wd.itauKernel3D[0]),
+           FieldSliceDifference(part, d.kappaKernel3D, all, wd.kappaKernel3D),
+           FieldSliceDifference(part, d.muKernel3D, all, wd.muKernel3D)});
+    }
+    EXPECT_LT(worstTangent, 1e-11) << label;
+    EXPECT_LT(worstIce, 1e-11) << label;
+    EXPECT_LT(worstField, 1e-11) << label;
+    EXPECT_LT(worstSecond, 1e-11) << label;
   }
 }

@@ -269,8 +269,11 @@ rank its segment.
   tangent-linear runs. Each rank sweeps its own nodes back over its own
   forward trajectory, and its viscosity kernels are its own nodes'; laid
   end to end in rank order they are the mesh's. The ice kernels are every
-  rank's alike. The discrete 3D sweep, the material tangent and the
-  material kernels are single-process.
+  rank's alike. The discrete 3D sweep (first and second order), the
+  material tangent and the material kernels run the same way since 4
+  November 2026 (docs/dev/adjoints.md §17): the discrete transpose sums
+  the ranks' partial contractions for the load duals and places the
+  surface duals on their holding rank.
 - **The `sl3d` program** runs `evolve` and `kernel` under `mpiexec`.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A
