@@ -65,6 +65,7 @@ inline void PutTensor(std::ofstream& out,
   PutComplex(out, tensor.c[0]);
   PutComplex(out, tensor.c[1]);
   PutVector(out, tensor.r);
+  PutVector(out, tensor.scalar);
 }
 
 inline GridCoupling::TensorField GetTensor(std::ifstream& in) {
@@ -72,6 +73,7 @@ inline GridCoupling::TensorField GetTensor(std::ifstream& in) {
   tensor.c[0] = GetComplex(in);
   tensor.c[1] = GetComplex(in);
   tensor.r = GetVector(in);
+  tensor.scalar = GetVector(in);
   return tensor;
 }
 
@@ -80,6 +82,7 @@ inline void PutSpectral(std::ofstream& out,
   PutComplex(out, spectral.c[0]);
   PutComplex(out, spectral.c[1]);
   PutComplex(out, spectral.r);
+  PutComplex(out, spectral.scalar);
 }
 
 inline GridCoupling::SpectralTensor GetSpectral(std::ifstream& in) {
@@ -87,6 +90,7 @@ inline GridCoupling::SpectralTensor GetSpectral(std::ifstream& in) {
   spectral.c[0] = GetComplex(in);
   spectral.c[1] = GetComplex(in);
   spectral.r = GetComplex(in);
+  spectral.scalar = GetComplex(in);
   return spectral;
 }
 

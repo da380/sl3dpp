@@ -997,6 +997,74 @@ coefficients of the same form; doable here, low priority), lateral
 δρ (the hydrostatic background does not admit it, §13a), and
 distribution of the static solve (OpenMP over the grid pipeline only).
 
+### 13k. Lateral moduli in the 3D stepper (built 4 November 2026)
+
+The same lateral δμ(x), δκ(x) in the quasi-static viscoelastic
+problem: `Viscoelastic3D::Options::moduli`, relative perturbations
+sampled like the log-viscosity — μ_U(x) = μ̄_U(r)(1 + s(x)) with every
+branch modulus scaled alike (fractions and relaxation times held, the
+material derivatives' convention), κ(x) = κ̄(r)(1 + b(x)). With them
+set the coupling carries every solid element above the centre
+(`GridCoupling::Options::all_solid`; an elastic element's memory is
+inert), so a perturbation can live in the lithosphere or the inner
+core as well as the Maxwell mantle. The fluid is not covered: the
+fluid form (κ, ρ, g; no deviatoric strain) has no grid pipeline, so a
+lateral κ in the outer core is not representable — the shifted-1D gate
+had to leave the core alone to see this, and the documentation says so.
+
+The step is one fixed point still (§5 of lateral-coupling.md): the
+lateral moduli join the lateral viscosity in its pointwise weight. The
+effective shear of the shifted body is (1 + s)(μ̄_U − Σ_k μ̄_k β_k(x)),
+so the weight gains −s(x) μ̄_eff(x) with μ̄_eff(x) = μ̄_U − Σ_k μ̄_k β_k(x)
+the reference moduli under the LOCAL weights (`StartStep`), the fixed
+memory force gains the factor (1 + s(x)) on every branch modulus, and
+m⁺ = m̃ + β d is as before (β is the relaxation time's). The bulk term
+is new in kind: a lateral δκ weights the dilatation, which the
+deviatoric iterate does not carry, so `SpectralTensor`/`TensorField`
+gained an optional scalar companion (`scalar`: the dilatation's
+coefficients and grid values), which `Synthesise`/`Analyse` carry when
+present, `StrainOf` fills (`AddDilatationOfSolution` beside the strain),
+`Respond` weights by −δκ(x) and assembles through `DilatationForce`
+(`Viscoelastic3D::SpheroidalForces`), and the mixer and residual treat
+as a fourth block. A strain cache under a lateral bulk modulus must
+carry it (a cache without it is rebuilt by a solve); the serialiser
+writes it.
+
+The UNRELAXED solve (a step's start without a cache, `SolveElastic`,
+`ElasticStrain`, `PrimeStrain`) is laterally heterogeneous now, so it
+is the preconditioned conjugate-gradient solve of §13j on the
+unrelaxed reference systems — shared code, `detail/LateralSolve.hpp`,
+which `ElasticPerturbation3D::SolveLateral` now also uses — with the
+memory and channel forces as the right-hand side
+(`LateralElasticSolve`, `AddChannelForces`; `elastic_rtol` 1e-12;
+`LastElasticSolve` reports it). Where the material is anisotropic the
+perturbation is an isotropic increment of its Voigt shear; at the
+memory points the reference's unrelaxed shear is the interpolated
+long-term modulus plus the branches' at the points (`UnrelaxedShearAtNodes`).
+
+GATES (`TestLateralModuli3D`, PREM's Voigt average with a Maxwell
+mantle, lmax 6): smooth 10% shifts of shear and bulk over the whole
+solid above the centre element at the GLL points equal the 1D stepper
+on the shifted rheology at 8e-12 (U, V, φ at every degree and order,
+no toroidal motion), both schemes, two steps from rest; at Gauss
+points a per-element constant 10% shift of the Maxwell region (where
+every shear term is a point term) is exact likewise at 9e-12; the
+unrelaxed solve of a zero state under a load with angle-varying shear
+and bulk equals the static lateral solve on the same fields at 1e-9,
+toroidal motion included; with lateral moduli and lateral viscosity on
+together the step self-converges at second order (ratio 3.98). The
+within-step passes grow from 2 (zero lateral) to about 10 at 10%
+moduli contrast — the lateral elastic term is a stronger coupling than
+mild viscosity and contracts under Picard at roughly 0.1 a pass; the
+conjugate-gradient alternative for the step is the optimisation pass's
+business.
+
+Not yet: the lateral moduli in the sweeps (the tangent, the discrete
+and continuous adjoints, second order) — the forward path is in and
+the transposes follow; distribution over radial segments (refused);
+lateral δκ in the fluid; lateral δρ (§13l, planned under the
+hydrostatic caveat).
+
 ## 14. The discrete 3D second-order adjoint (built 4 November 2026)
 
 `AdjointSolver3D::SecondOrderKernels` under `AdjointMethod::Discrete`

@@ -60,13 +60,16 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
     for (auto i = 0; i < n && !active; ++i) {
       active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
     }
+    if (options.all_solid) {
+      active = !material.IsFluid(e) && !(e == 0 && mesh.Left(0) == 0.0);
+    }
     if (!active) continue;
     for (auto p = 0; p < points_.count; ++p) {
       nodes_.push_back({e, p, points_.RadiusAt(mesh, e, p)});
     }
   }
   const auto whole = firstElement == 0 && end == mesh.ElementCount();
-  if (nodes_.empty() && whole) {
+  if (nodes_.empty() && whole && !options.all_solid) {
     throw std::invalid_argument(
         "the rheology has no active branch anywhere: nothing for the grid "
         "coupling to carry");
@@ -145,6 +148,10 @@ std::vector<int> GridCoupling::TransformDegrees(const Rheology& rheology,
     auto active = false;
     for (auto i = 0; i < n && !active; ++i) {
       active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
+    }
+    if (options.all_solid) {
+      active = !rheology.BaseMaterial().IsFluid(e) &&
+               !(e == 0 && mesh.Left(0) == 0.0);
     }
     if (!active) continue;
     auto reach = 0;
@@ -227,6 +234,11 @@ GridCoupling::TensorField GridCoupling::Synthesise(
 void GridCoupling::Synthesise(const SpectralTensor& spectral,
                               TensorField& field) const {
   if (field.r.empty()) field = ZeroTensor();
+  if (spectral.scalar.empty()) {
+    field.scalar.clear();
+  } else {
+    field.scalar = SynthesiseScalar(spectral.scalar);
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -251,6 +263,11 @@ GridCoupling::SpectralTensor GridCoupling::Analyse(
 void GridCoupling::Analyse(const TensorField& field,
                            SpectralTensor& spectral) const {
   if (spectral.r.empty()) spectral = ZeroSpectral();
+  if (field.scalar.empty()) {
+    spectral.scalar.clear();
+  } else {
+    spectral.scalar = AnalyseScalar(field.scalar);
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -412,6 +429,17 @@ void GridCoupling::Multiply(TensorField& field,
     field.c[1][i] *= weight[i];
     field.r[i] *= weight[i];
   });
+}
+
+void GridCoupling::MultiplyScalar(TensorField& field,
+                                  std::span<const double> weight) const {
+  const auto size = GridValueCount();
+  if (weight.size() != size || field.scalar.size() != size) {
+    throw std::invalid_argument(
+        "the scalar companion and its weight span every node's grid");
+  }
+  detail::ParallelElements(size, options_.parallel,
+                           [&](std::size_t i) { field.scalar[i] *= weight[i]; });
 }
 
 void GridCoupling::ScaleByNode(SpectralTensor& spectral,

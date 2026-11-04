@@ -109,6 +109,13 @@ class GridCoupling {
     /// its own elements' rows. The whole mesh by default. A range without
     /// viscous elements holds no nodes.
     std::pair<int, int> elements{0, -1};
+    /// Every SOLID element of the range carries memory nodes, viscous or
+    /// not (the element holding the centre excepted: the spherical strain
+    /// components divide by r), so that a lateral perturbation of the
+    /// elastic moduli can live anywhere solid; the memory of an elastic
+    /// element is inert (no active branch). False: the viscous elements
+    /// alone.
+    bool all_solid = false;
   };
 
   /// The rheology is borrowed and must outlive the coupling.
@@ -214,6 +221,10 @@ class GridCoupling {
   struct TensorField {
     std::array<std::vector<Complex>, 2> c;
     std::vector<double> r;
+    /// An optional real scalar companion over the same grid values (the
+    /// dilatation of a solution, carried beside the deviatoric strain
+    /// under a lateral bulk modulus): empty where not carried.
+    std::vector<double> scalar;
   };
   [[nodiscard]] TensorField ZeroTensor() const;
 
@@ -226,6 +237,10 @@ class GridCoupling {
   struct SpectralTensor {
     std::array<std::vector<Complex>, 2> c;
     std::vector<Complex> r;
+    /// The scalar companion's coefficients (ScalarCoefficientCount, the
+    /// spin 0 layout): empty where not carried. Synthesise and Analyse
+    /// carry it when present.
+    std::vector<Complex> scalar;
   };
   [[nodiscard]] SpectralTensor ZeroSpectral() const;
 
@@ -246,8 +261,10 @@ class GridCoupling {
   void Analyse(const TensorField& field, SpectralTensor& spectral) const;
 
   /// Pointwise multiplication by a real weight field over the nodes
-  /// (FieldOffset(node) + x), all components alike.
+  /// (FieldOffset(node) + x), all tensor components alike (not the
+  /// scalar companion: MultiplyScalar).
   void Multiply(TensorField& field, std::span<const double> weight) const;
+  void MultiplyScalar(TensorField& field, std::span<const double> weight) const;
 
   // -- degree-basis entry and exit
   // -----------------------------------------------

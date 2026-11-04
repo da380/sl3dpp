@@ -5,6 +5,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/LateralSolve.hpp"
 #include "sl3dpp/detail/ParallelFor.hpp"
 
 namespace sl3dpp {
@@ -256,17 +257,6 @@ std::vector<std::complex<double>> ApplyColumns(
   return out;
 }
 
-using Fields = std::map<int, std::vector<std::complex<double>>>;
-
-void Axpy(Fields& y, double a, const Fields& x) {
-  for (auto& [l, yl] : y) {
-    const auto found = x.find(l);
-    if (found == x.end()) continue;
-    const auto& xl = found->second;
-    for (auto i = std::size_t{0}; i < yl.size(); ++i) yl[i] += a * xl[i];
-  }
-}
-
 }  // namespace
 
 std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
@@ -368,61 +358,20 @@ ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
                         0.0));
     }
   }
-  // The reference response.
-  auto x = Solve(fs, ft, false);
-  SolveInfo info;
-  const auto energy = Pair(x, fs, ft);  // <f, K_ref^-1 f>, the forcing's scale
-  if (dMu.empty() && dKappa.empty()) {
-    info.converged = true;
-    info.residuals.push_back(0.0);
-    return {std::move(x), info};
-  }
-  // r = f - A x: the lateral force of the reference response, negated.
-  auto [rs, rt] = Force(x, dMu, dKappa);
-  for (auto& [l, v] : rs) for (auto& c : v) c = -c;
-  for (auto& [l, v] : rt) for (auto& c : v) c = -c;
-  auto z = Solve(rs, rt, false);
-  auto rz = Pair(z, rs, rt);
-  auto relative = [&](double value) {
-    return energy > 0.0 ? std::sqrt(std::abs(value) / energy) : std::sqrt(std::abs(value));
-  };
-  info.residual = relative(rz);
-  info.residuals.push_back(info.residual);
-  if (rz < 0.0) info.indefinite = true;
-  auto p = z;
-  for (auto iteration = 0; iteration < options.max_iterations; ++iteration) {
-    if (info.residual <= options.rtol) {
-      info.converged = true;
-      break;
-    }
-    auto [as, at] = Apply(p, dMu, dKappa);
-    const auto curvature = Pair(p, as, at);
-    if (curvature <= 0.0) info.indefinite = true;
-    const auto alpha = rz / curvature;
-    Axpy(x.spheroidal, alpha, p.spheroidal);
-    Axpy(x.toroidal, alpha, p.toroidal);
-    Axpy(rs, -alpha, as);
-    Axpy(rt, -alpha, at);
-    z = Solve(rs, rt, false);
-    const auto next = Pair(z, rs, rt);
-    if (next < 0.0) info.indefinite = true;
-    const auto beta = next / rz;
-    rz = next;
-    // p = z + beta p
-    for (auto& [l, pl] : p.spheroidal) {
-      const auto& zl = z.spheroidal.at(l);
-      for (auto i = std::size_t{0}; i < pl.size(); ++i) pl[i] = zl[i] + beta * pl[i];
-    }
-    for (auto& [l, pl] : p.toroidal) {
-      const auto& zl = z.toroidal.at(l);
-      for (auto i = std::size_t{0}; i < pl.size(); ++i) pl[i] = zl[i] + beta * pl[i];
-    }
-    info.iterations = iteration + 1;
-    info.residual = relative(rz);
-    info.residuals.push_back(info.residual);
-  }
-  if (info.residual <= options.rtol) info.converged = true;
-  return {std::move(x), info};
+  const auto system = detail::LateralSystem{
+      .apply = [&](const Solutions& x) { return Apply(x, dMu, dKappa); },
+      .solve = [&](const Forces& s, const Forces& t) { return Solve(s, t, false); }};
+  auto [x, info] = detail::LateralConjugateGradients(
+      fs, ft, system,
+      {.rtol = options.rtol, .max_iterations = options.max_iterations},
+      !(dMu.empty() && dKappa.empty()));
+  SolveInfo out;
+  out.iterations = info.iterations;
+  out.residual = info.residual;
+  out.converged = info.converged;
+  out.residuals = std::move(info.residuals);
+  out.indefinite = info.indefinite;
+  return {std::move(x), std::move(out)};
 }
 
 ElasticPerturbation3D::Solutions ElasticPerturbation3D::Respond(

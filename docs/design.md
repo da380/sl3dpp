@@ -379,6 +379,15 @@ Deliberately out of scope:
   solution are the measurement's kernels at the heterogeneous model).
   Realistic contrasts converge in under ten iterations
   (docs/dev/adjoints.md §13j).
+- **Lateral moduli in the 3D stepper** (`Viscoelastic3D::Options::
+  moduli`): relative δμ_U(x), δκ(x) over every solid element above the
+  centre (the branch moduli scaled with the unrelaxed shear, times
+  held), joining the lateral viscosity in the step's pointwise weight;
+  the dilatation rides along as a scalar companion of the iterate for
+  the bulk term; the unrelaxed start solve is the conjugate-gradient
+  solve on the reference systems (docs/dev/adjoints.md §13k). The fluid
+  core carries no lateral moduli. Forward only so far: the sweeps do not
+  yet see them.
 - **Material kernels** (`Options::material_kernels`): dJ/dκ and dJ/dμ,
   nodal in 1D (`IceKernels::kappaKernel`, `muKernel`) and on the
   coupling's grid in 3D with spherical reductions
@@ -566,6 +575,12 @@ Beyond the fixtures:
   tides at every degree and order; the kernels under a 10% lateral
   background against central differences of a measurement through the
   full solve at 1e-5; 6 to 15 iterations for 5 to 40% contrasts.
+- **Lateral moduli in the stepper.** Angle-uniform 10% shifts of shear
+  and bulk against the 1D stepper on the shifted rheology at 8e-12
+  (GLL points; a per-element constant shift of the Maxwell region at
+  Gauss points likewise), both schemes; the unrelaxed start solve
+  against the static lateral solve at 1e-9; Δt self-convergence at
+  second order with lateral moduli and viscosity together.
 - **Material tangent, 1D.** The time-stepped tangent-linear along a
   direction in κ and μ (branch moduli as fixed fractions, times held)
   against central differences on the shifted material, both schemes,
@@ -683,9 +698,13 @@ Beyond the fixtures:
 What is not built, or holds only within limits:
 
 - **The static 3D problem** (`ElasticPerturbation3D`, Born and full
-  solve) is single-process (OpenMP over the grid pipeline); everything
-  time-stepped is distributed. Its geometry is spherical: aspherical
-  bodies by particle relabelling are not built.
+  solve) is single-process (OpenMP over the grid pipeline), and so is
+  the stepper under lateral moduli (refused with radial segments);
+  everything else time-stepped is distributed. The geometry is
+  spherical: aspherical bodies by particle relabelling are not built.
+- **Lateral moduli** live in the solid: the fluid core's bulk modulus
+  has no lateral pipeline. The sweeps (tangent, adjoints) do not yet
+  carry lateral moduli in the background.
 - **Strong lateral contrasts at long steps.** The within-step iteration's
   envelope (§6); a better reference profile (per degree, or worst case) or
   an implicit–explicit split would extend it, and neither is built.

@@ -241,6 +241,17 @@ the pseudospectral products alias and the solution needs a higher lmax,
 and a delta supplied as a truncated expansion overshoots (exaggerating
 the contrast, though exp keeps it positive).
 
+## 5a'. Lateral elastic moduli in the same fixed point (4 November 2026)
+
+A lateral perturbation of the unrelaxed shear, s(x) relative, and of the
+bulk modulus, b(x) relative, enters the step through the same weight as
+the viscosity: W(x) = Σ_k μ̄_k (β_k(x) − β_ref,k(r)) − s(x) (μ̄_U − Σ_k
+μ̄_k β_k(x)), the fixed memory force Σ_k μ̄_k (1 + s(x)) m̃_k, and a
+scalar companion −κ̄ b(x) D(u) on the dilatation, assembled through the
+bulk pipeline of the static perturbation. The unrelaxed start solve
+becomes a preconditioned conjugate-gradient solve on the reference
+systems. Gates and the within-step cost are in adjoints.md §13k.
+
 ## 5b. The Fortran gate (visco_test)
 
 The old code's `visco_test` is the weak-contrast external gate: PREM
