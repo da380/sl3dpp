@@ -84,7 +84,7 @@ def main() -> None:
     ice, sl = ice_model.get_ice_thickness_and_sea_level(
         0.0, LMAX, grid=earth.grid_name, sampling=earth.sampling,
         extend=earth.extend)
-    state = EarthState(ice, sl, earth, exclude_caspian=False)
+    state = EarthState(ice, sl, earth)
     evolution = SeaLevelEvolution(op, state)
     scales = earth.parameters.scales
 
@@ -116,8 +116,8 @@ def main() -> None:
         float(dates[3]): grid_of(1.0, 0.9, 1.2, 0.5),
         float(dates[NODES - 1]): Measurement(
             displacement=grid_of(0.7, 2.4, 0.3, 0.6),
-            gravity_potential=grid_of(0.4 * pot_conv, 1.4, 3.3, 0.7),
-            angular_velocity=om_conv * np.array([0.2, -0.4, 0.8]),
+            potential_change=grid_of(0.4 * pot_conv, 1.4, 3.3, 0.7),
+            angular_velocity_change=om_conv * np.array([0.2, -0.4, 0.8]),
         ),
     }
 

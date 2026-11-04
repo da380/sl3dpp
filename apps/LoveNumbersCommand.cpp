@@ -31,7 +31,8 @@ namespace {
 ModelFormat ReadFormat(const Json& top) {
   if (!Has(top, "model_format")) return ModelFormat::Gia;
   return Choice<ModelFormat>(top.At("model_format"),
-                             {{"gia", ModelFormat::Gia},
+                             {{"maxwell", ModelFormat::Gia},
+                              {"gia", ModelFormat::Gia},
                               {"mineos", ModelFormat::Mineos},
                               {"elastic", ModelFormat::Elastic}});
 }

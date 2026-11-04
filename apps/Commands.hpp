@@ -37,6 +37,8 @@ namespace sl3dpp::app {
 /// The deck formats a config may name: planetmodel's GIA and MINEOS
 /// tables, and the library's six-column elastic table (rho, vpv, vsv,
 /// vph, vsh, eta; no header), the test and example decks' format.
+/// Gia is planetmodel's Maxwell deck (`"maxwell"` in a config; `"gia"`, the
+/// format's old name, is kept as an alias).
 enum class ModelFormat { Gia, Mineos, Elastic };
 
 /// The format a `ModelFormat` stands for.

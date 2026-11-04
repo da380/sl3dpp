@@ -26,7 +26,8 @@ void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
   out.model = PathOf(top, "model", directory);
   if (Has(top, "model_format")) {
     out.format = Choice<ModelFormat>(top.At("model_format"),
-                                     {{"gia", ModelFormat::Gia},
+                                     {{"maxwell", ModelFormat::Gia},
+                                      {"gia", ModelFormat::Gia},
                                       {"mineos", ModelFormat::Mineos},
                                       {"elastic", ModelFormat::Elastic}});
   }

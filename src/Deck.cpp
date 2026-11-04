@@ -31,7 +31,7 @@ DeckFormat MineosFormat() {
 }
 
 DeckFormat GiaFormat() {
-  return DeckFormat("gia", planetmodel::GIA_COLUMNS, 2);
+  return DeckFormat("gia", planetmodel::MAXWELL_COLUMNS, 2);
 }
 
 std::expected<Deck, DeckError> Deck::Create(

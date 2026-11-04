@@ -102,14 +102,14 @@ radius marks a layer boundary. `model_format` says which kind:
 
 | `model_format` | Header lines | Columns after the radius |
 | --- | --- | --- |
-| `"gia"` (the default) | 2 | `rho vpv vsv vph vsh eta viscosity`, planetmodel's GIA deck; viscosity `nan` in elastic and fluid layers |
+| `"maxwell"` (the default; `"gia"` is the same, the format's old name) | 2 | `rho vpv vsv vph vsh eta viscosity`, planetmodel's Maxwell deck; viscosity `nan` in elastic and fluid layers |
 | `"mineos"` | 3 | `rho vpv vsv qkappa qmu vph vsh eta`, or `rho vp vs qkappa qmu` for an isotropic model |
 | `"elastic"` | 0 | `rho vpv vsv vph vsh eta`, the six-column elastic table of the test and example decks |
 
 All values are SI. Blank lines and lines starting with `#` in the table are
 skipped. The elastic structure always comes from the deck. `evolve1d` and
 `kernel1d` take the viscosity from the deck's `viscosity` column, so they
-need a deck that has one (`"gia"`): each layer holding a viscosity is a
+need a deck that has one (`"maxwell"`): each layer holding a viscosity is a
 Maxwell body, and a deck with no viscosity at all is refused. `evolve` and
 `kernel` take the viscosity from the model file named by `viscosity`
 instead, and ignore any viscosity column.
@@ -173,7 +173,7 @@ et al. 2024).
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model` | path | required | the deck |
-| `model_format` | word | `"gia"` | `"gia"`, `"mineos"` or `"elastic"` |
+| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
 | `lmax` | integer >= 0 | required | the largest degree |
 | `output` | path | required | the table to write |
 | `conventional_output` | path | absent | where to write the conventional dimensionless numbers too (below); not `output`'s file |
@@ -245,7 +245,7 @@ the deck's elastic structure at `lmax`.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model` | path | required | the deck |
-| `model_format` | word | `"gia"` | `"gia"`, `"mineos"` or `"elastic"` |
+| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
 | `lmax` | integer >= 1 | required | the degree of the solve and of its grid |
 | `state.file` | path | required | a surface file holding `ice_thickness` and `topography` |
 | `state.date_kyr_bp` | number | 0 | the date at which the state is read, kyr BP |
@@ -298,7 +298,7 @@ Summary: `wrote <output> (<n> SLE iterations)`.
 ```json
 {
   "model": "earth.deck",
-  "model_format": "gia",
+  "model_format": "maxwell",
   "lmax": 256,
   "state": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
   "change": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
@@ -354,7 +354,7 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model` | path | required | the deck |
-| `model_format` | word | `"gia"` | `"gia"`, `"mineos"` or `"elastic"` |
+| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
 | `lmax` | integer >= 1 | required | the degree of the run and of its grid |
 | `viscosity.file` | path | required by `evolve` and `kernel`, refused by `evolve1d` and `kernel1d` | the planetmodel model file of the 3D viscosity |
 | `viscosity.reference` | word | `"geometric_mean"` | `"geometric_mean"` or `"file_radial"`: the radial reference (3D viscosity models, above) |

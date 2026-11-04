@@ -187,7 +187,7 @@ def main() -> None:
     ice, sea_level = ice_model.get_ice_thickness_and_sea_level(
         0.0, LMAX, grid=model.grid_name, sampling=model.sampling,
         extend=model.extend)
-    state = EarthState(ice, sea_level, model, exclude_caspian=False)
+    state = EarthState(ice, sea_level, model)
     ice_change = -0.1 * state.ice_thickness
     load = state.direct_load_from_ice_thickness_change(ice_change)
     slc, disp, phi, omega = sle.solve_sea_level_equation(

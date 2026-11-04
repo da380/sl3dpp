@@ -70,7 +70,7 @@ def build(data: pathlib.Path, gridname: str):
     ice, sl = ice_model.get_ice_thickness_and_sea_level(
         0.0, LMAX, grid=earth.grid_name, sampling=earth.sampling,
         extend=earth.extend)
-    state = EarthState(ice, sl, earth, exclude_caspian=False)
+    state = EarthState(ice, sl, earth)
     evolution = SeaLevelEvolution(op, state)
     scales = earth.parameters.scales
     times_si = np.linspace(0.0, T_FINAL, NODES)
@@ -86,8 +86,8 @@ def build(data: pathlib.Path, gridname: str):
     length = scales.factor(units.LENGTH)
     out = []
     for t_si, snap in zip(times_si, snapshots):
-        slc_si = earth.expand_field(snap.sea_level_change).coeffs * length
-        omega_si = snap.angular_velocity_change / scales.factor(units.TIME)
+        slc_si = earth.expand_field(snap.response.field("relative_sea_level_change")).coeffs * length
+        omega_si = snap.response.angular_velocity_change / scales.factor(units.TIME)
         out.append((t_si, slc_si, omega_si))
     return out
 

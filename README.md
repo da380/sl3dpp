@@ -174,9 +174,9 @@ metadata. For example:
 
 ### Inputs
 
-- **Earth models** are tabulated decks: planetmodel's GIA format (with a
-  viscosity column, which the 1D commands use), MINEOS, or a six-column
-  elastic table.
+- **Earth models** are tabulated decks: planetmodel's Maxwell format (with
+  a viscosity column, which the 1D commands use; `"gia"`, its old name, is
+  still accepted), MINEOS, or a six-column elastic table.
 - **Present-day states and ice histories** are planetmodel surface files
   holding `ice_thickness` and `topography`. pyslfp's `export_ice_history`
   writes them from ICE-5G, ICE-6G or ICE-7G (`get_ice7g.py` in the examples
