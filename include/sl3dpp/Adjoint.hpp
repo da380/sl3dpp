@@ -4,10 +4,10 @@
  * @file Adjoint.hpp
  * @brief Ice-history sensitivity kernels of the coupled evolution, by the
  * continuous adjoint (the preferred path) or the exact discrete transpose
- * — one interface and result type for both, so every gate and driver is
- * formulation-blind. A port of pyslfp's `adjoint_ice_history` /
+ * — one interface and result type for both, so every test and driver is
+ * formulation-blind. Corresponds to pyslfp's `adjoint_ice_history` /
  * `continuous_adjoint_ice_history` (whose docstrings, with Yu et al. 2025,
- * are the authoritative statements); the design record is docs/dev/adjoints.md.
+ * are the authoritative statements); see docs/dev/adjoints.md.
  *
  * The discrete adjoint transposes the time-stepped forward map exactly:
  * the gradient identity holds to solver tolerance for any load
@@ -37,6 +37,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Evolution.hpp"
@@ -83,7 +84,7 @@ struct Measurement {
 
 /**
  * @brief Sensitivity kernels of one objective with respect to the ice
- * history, in three views (docs/dev/adjoints.md §4; Yu et al. 2025 §3.7).
+ * history, in three views (docs/dev/adjoints.md; Yu et al. 2025 §3.7).
  *
  * DISCRETE view: `loadDuals[n]` is the dual of the direct ice-load grid
  * at time node n — delta J = sum_n int loadDuals[n] delta f_n dS, exact
@@ -133,9 +134,46 @@ struct IceKernels {
   /// parameterisation. eta in material units.
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
+
+  /// dJ / d kappa(r), dJ / d mu(r) and dJ / d rho(r): nodal arrays over
+  /// the material's full mesh, material units, pairing with a
+  /// MaterialDirection by the plain nodal sum — the transpose of
+  /// TangentPerturbation::material (the branch moduli as fixed fractions
+  /// of the unrelaxed modulus, the relaxation times held; the density
+  /// with its gravity and the forcings, the sea level engine's gravity
+  /// held; docs/dev/adjoints.md). Empty unless Options::material_kernels
+  /// asked for them (with a trajectory; Discrete exact, Continuous at the
+  /// commute level).
+  std::vector<double> kappaKernel;
+  std::vector<double> muKernel;
+  std::vector<double> rhoKernel;
 };
 
 enum class AdjointMethod { Continuous, Discrete };
+
+/**
+ * @brief The derivative of an objective's kernels along a direction v of
+ * the model parameters: what the second-order adjoint returns, the
+ * components of the Hessian's action on v. `thickness` and
+ * `initialSeaLevel` are the derivatives of IceKernels' thickness and
+ * initial-sea-level views (the same pairings; the thickness view's
+ * baseline folded into node 0 as there), `itauKernel` that of the
+ * inverse-relaxation-time kernels (per branch, nodal, material units).
+ * pyslfp's `KernelDerivatives`.
+ */
+struct KernelDerivatives {
+  std::vector<double> times;
+  std::vector<std::vector<double>> thickness;
+  std::vector<double> initialSeaLevel;
+  std::vector<std::vector<double>> itauKernel;
+  /// The derivatives along v of the material kernels (IceKernels::
+  /// kappaKernel, muKernel, rhoKernel), in their layout: the material
+  /// rows of the Hessian's action on v. Empty unless
+  /// Options::material_kernels.
+  std::vector<double> kappaKernel;
+  std::vector<double> muKernel;
+  std::vector<double> rhoKernel;
+};
 
 namespace detail {
 /// The grounded views and the distributional/quelled assembly shared by
@@ -170,6 +208,17 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
+    /// Also form the material kernels (IceKernels::kappaKernel, muKernel,
+    /// rhoKernel). Discrete: the pairing of each step's dual solution with
+    /// the material derivative of the step's force, the exact transpose
+    /// of the material tangent. Continuous: the time quadrature of the
+    /// continuous adjoint displacement's pairing with the forward
+    /// solution and memory, plus the lumped pairings at the observations
+    /// — the commute error of the viscosity kernels, falling under
+    /// refinement. Both need the trajectory, the memory points at the
+    /// GLL nodes and no rotational feedback, and cost one unrelaxed solve
+    /// per node (two for the continuous form).
+    bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.
@@ -198,7 +247,69 @@ class AdjointSolver {
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /**
+   * @brief The second-order adjoint: the kernels of the objective and
+   * their derivative along a direction v, the action of the objective's
+   * Hessian on v (pyslfp's `second_order_adjoint_ice_history`, Yu et al.
+   * 2025 §4). The sweep that gives the kernels is itself a function of
+   * the parameters, through the forward trajectory and the relaxation
+   * times; differentiating it along v gives a second sweep of the same
+   * form, forced not by the measurement but by the first sweep's state
+   * and v's perturbation of the relaxation times, with v's tangent-linear
+   * trajectory entering where the forward one enters the kernels. By the
+   * discrete method this is the exact derivative of the exact gradient,
+   * so the Hessian it gives is symmetric to rounding; by the continuous
+   * method it discretises the second-order adjoint equations with the
+   * ocean functions held (the terms of shoreline motion omitted).
+   *
+   * @param tangent v's tangent-linear run about the forward run, recorded
+   * at every node (TangentLinearSolver::Options::record), by the same
+   * method as this sweep.
+   * @param itau v's perturbation of the inverse relaxation times, nodal
+   * per branch over the material's mesh (TangentPerturbation::itau);
+   * empty for none.
+   * @param trajectory The recorded forward trajectory; required here.
+   * @param oceanFunctions As for IceHistoryKernels, from the same
+   * migrating run as the tangent-linear run.
+   * @param material v's perturbation of the moduli
+   * (TangentPerturbation::material, the density refused), which the
+   * tangent run must have been driven by too; empty for none. A
+   * material direction, like Options::material_kernels (which adds the
+   * material kernels' derivatives along v, for any v), needs the memory
+   * points at the GLL nodes and no rotational feedback. Discrete: the
+   * derivative of the effective systems acts on the first sweep's
+   * solutions as a source of the derivative duals, and the memory force's
+   * variation on the first sweep's strains; the material kernels'
+   * derivatives pair the derivative duals with the forward trajectory and
+   * the first duals with v's tangent trajectory (docs/dev/adjoints.md
+   * §15). Not yet in the continuous sweep.
+   */
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> SecondOrderKernels(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& itau,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions = {},
+      const MaterialDirection& material = {}) const;
+
  private:
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> DiscreteSecondOrder(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& ditauPoints,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions,
+      const MaterialDirection& material) const;
+  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> ContinuousSecondOrder(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      const std::vector<std::vector<double>>& ditauPoints,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions,
+      const MaterialDirection& material) const;
   [[nodiscard]] IceKernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
@@ -209,6 +320,10 @@ class AdjointSolver {
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
       std::span<const std::vector<double>> oceanFunctions) const;
+  /// The material pieces the second-order sweeps share (the variations
+  /// of a direction, its forces, the tangent solution's recovery):
+  /// detail/AdjointInternals.hpp.
+  struct MaterialTools;
   /// The grounded views and the distributional/quelled assembly shared by
   /// the two sweeps (lumps: the delta amplitudes, by node).
   [[nodiscard]] IceKernels AssembleViews(

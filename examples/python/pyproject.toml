@@ -17,8 +17,8 @@ python = ">=3.12"
 numpy = ">=2.0"
 matplotlib = ">=3.9"
 cartopy = ">=0.24"
-pyslfp = ">=3.0.0,<4"
-planetmodel = {version = ">=1.3.2,<2", extras = ["netcdf", "plot"]}
+pyslfp = ">=4.0.0,<5"
+planetmodel = {version = ">=1.5.0,<2", extras = ["netcdf", "plot"]}
 
 [build-system]
 requires = ["poetry-core"]

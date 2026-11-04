@@ -1,10 +1,13 @@
-# Walkthrough: one 3D (lateral-viscosity) step, as the code stands
+# Walkthrough: one 3D (lateral-viscosity) step, as of 17 October 2026 (commit 88c58b5)
 
-*Written 17 October 2026 against commit 88c58b5 (develop). This is a map
-of what the code DOES, with file:line pointers, so it can be checked
-against intent. The algebra and its derivation are in `lateral-coupling.md`; this
-document does not repeat them. Where the code and the docs disagree, or
-where something is correct but costly, it is flagged in §8.*
+*Written 17 October 2026 against commit 88c58b5 (develop): a map of what
+the code did then, so that it could be checked against intent. A dated
+record: the code has moved since, the file:line pointers it carried had
+drifted and are removed (the names still locate the pieces), and the
+current account of the code is [design.md](../design.md). The algebra and
+its derivation are in `lateral-coupling.md`; this document does not
+repeat them. Where the code and the docs disagreed, or where something
+was correct but costly, it is flagged in §8.*
 
 ## 1. Who owns what
 
@@ -22,11 +25,13 @@ where something is correct but costly, it is flagged in §8.*
 
 ## 2. The data, its layout and its size
 
-**Memory nodes.** The GLL nodes of every element where any rheology
-branch is active, kept per (element, node-in-element), so a node shared
-by two elements appears twice with its one-sided values
-(`src/GridCoupling.cpp:30-41`). The elastic lithosphere and the fluid
-core have no memory nodes: they appear in the linear systems only.
+**Memory nodes.** The memory points of every element where any rheology
+branch is active: the Gauss points by default (`MemoryPointSet::Gauss`,
+since chunk 7, §8 item 19) or the GLL nodes, kept per (element,
+node-in-element), so that a GLL node shared by two elements appears twice
+with its one-sided values (`src/GridCoupling.cpp`). The elastic
+lithosphere and the fluid core have no memory nodes: they appear in the
+linear systems only.
 
 **The angular grid.** Gauss–Legendre, built by `ForBand` with
 oversampling 1.5. It resolves degree ceil(1.5 L), so it has
@@ -64,7 +69,7 @@ complex in coefficients.
 
 ## 3. Construction: what is built when
 
-`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp:69-119`):
+`Viscoelastic3D::Viscoelastic3D` (`src/Viscoelastic3D.cpp`):
 
 1. Builds the `GridCoupling`, on a shared `SurfaceGrid` if one is passed,
    otherwise a new one with spins to 2 and oversampling 1.5, and the 1D
@@ -77,12 +82,12 @@ complex in coefficients.
 Nothing is factorised here. The degree operators are built lazily on
 first use and cached in `mutable` maps:
 
-- `Spheroidal(l)` / `Toroidal(l)` (`:133`, `:147`): the UNRELAXED
+- `Spheroidal(l)` / `Toroidal(l)`: the UNRELAXED
   reference systems, used by `SolveElastic`.
-- `FlavourOf(scheme, dt)` (`:163`): a reference EFFECTIVE material,
+- `FlavourOf(scheme, dt)`: a reference EFFECTIVE material,
   mu_inf + Σ_k (1 − beta_ref,k(r)) mu_k, keyed by the exact
   (scheme, dt) pair. Its per-degree operators (`FlavourSpheroidal` /
-  `FlavourToroidal`, `:355`, `:370`) and its unit load/tide responses
+  `FlavourToroidal`) and its unit load/tide responses
   (`flavour.units`) are built on first use too.
 
 The elastic moduli stay 1D. Lateral variation enters ONLY through the
@@ -91,7 +96,7 @@ banded system. The lateral part is moved to the right-hand side.
 
 ## 4. One step, phase by phase
 
-`Step` (`src/Viscoelastic3D.cpp:700`) is `StartStep`, then the
+`Step` (`src/Viscoelastic3D.cpp`) is `StartStep`, then the
 iteration (`OpenStep::Converge`), then `Finish`. `OpenStep` exposes the
 same phases so the sea-level loop (§5) can close the step itself.
 
@@ -107,16 +112,16 @@ a time. Every loop of its own runs threaded under `Options::parallel`
 (element-wise loops through `detail::ParallelElements`, a static
 schedule).
 
-### 4.1 StartStep (`:457`)
+### 4.1 StartStep
 
 - **The start strain.** From the state's strain cache if present: since
   chunk 10 a state from a step carries the converged coefficients
   (`State::strainCoefficients`) beside the grid values d0, and s0 is
   those, with no analysis; a cache of grid values alone is analysed once
   for s0, and coefficients alone are synthesised once for d0. Otherwise
-  from `SolveElastic` (`:330`), the memory
+  from `SolveElastic`, the memory
   force of Σ_k mu_k m_k through the unrelaxed reference operators plus
-  the load channels (`AddUnitChannels`, `:360`, through unit responses
+  the load channels (`AddUnitChannels`, through unit responses
   cached once per degree), whose strain coefficients are s0 and whose
   synthesis is d0. No iteration is needed there, because the unrelaxed
   operator is laterally uniform.
@@ -166,24 +171,24 @@ and a pass maps strain coefficients s to the next ones.
                                                         r∂r; Scatter)
 ```
 
-**Respond** (`:538`):
+**Respond**:
 
-1. *Synthesise* (→ `src/GridCoupling.cpp:90`). Three batched inverse
+1. *Synthesise* (→ `src/GridCoupling.cpp`). Three batched inverse
    transforms (spins −2, −1, 0), each with ALL memory nodes as one
    contiguous batch, into the step's `grid_` (overwritten, not
    reallocated: a fresh 0.74 GB tensor cost 0.12 s a pass at lmax 64).
 2. *Pointwise weight*. `GridCoupling::Multiply` by `weight_`, in place.
-3. *Analyse* (→ `src/GridCoupling.cpp:107`). Three batched forward
+3. *Analyse* (→ `src/GridCoupling.cpp`). Three batched forward
    transforms into `analysed_`, then `fixed_` is added.
-4. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp:245`;
-   `ToroidalForce`, `:295`). For each degree, each node in the degree's
+4. *Force assembly* (`SpheroidalForce`, `src/GridCoupling.cpp`;
+   `ToroidalForce`). For each degree, each node in the degree's
    depth subset, and each m ≥ 0: `Gather` reads the five components,
-   reconstructing spins +1 and +2 by reality (`:176`).
+   reconstructing spins +1 and +2 by reality.
    `ForceRowsFromComponents` gives the rows. They are added into the
    degree's right-hand side at the node's own dofs (the pointwise rows,
    weight jac·w_q·r) and at every node of its element (the derivative
    rows, through D(q, j)).
-5. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp:255`). Per degree, the
+5. *Solves* (`SolveAll`, `src/Viscoelastic3D.cpp`). Per degree, the
    complex columns are split into real pairs and solved as 2(l+1) real
    right-hand sides through the FLAVOUR operator: `dpbtrs` (banded
    Cholesky) or `dgbtrs` (the LU fallback).
@@ -196,13 +201,13 @@ every degree's operator serially, filling the lazy caches, so the tasks
 only read shared data and each writes only its own degree's outputs.
 The results are therefore bitwise the same at any thread count.
 
-**AddChannels** (`:566` → `AddUnitChannels`, `:360`). The load and
+**AddChannels** (through `AddUnitChannels`). The load and
 tide enter by linearity: amplitude × the cached unit response of the
 flavour operator (solved once per degree per flavour). `SolveElastic`
 goes through the same path with the unrelaxed operators' responses.
 
-**StrainOf → AddStrainCoefficients** (`:580` → `:217`). Per degree,
-`AddStrainOfSolution` (`src/GridCoupling.cpp:223`) gathers U, V, W at
+**StrainOf → AddStrainCoefficients**. Per degree,
+`AddStrainOfSolution` (`src/GridCoupling.cpp`) gathers U, V, W at
 each node through the operators' dof maps and forms r∂r through the
 element's derivative matrix. `DeviatoricComponents` gives the five
 components, and `Scatter` writes them into the (l, m) and (l, −m)
@@ -210,11 +215,13 @@ slots of the spent iterate, zeroed: the next iterate, with no
 transform.
 
 **Degree truncation.** Each degree acts only on its element subset
-(`firstElementOf_`, `src/GridCoupling.cpp:48`; `FirstNodeFor`). Deep
+(`firstElementOf_`, `src/GridCoupling.cpp`; `FirstNodeFor`). Deep
 nodes therefore carry zero spectral content at high degrees. The
-transforms still run every node at full lmax.
+transforms still ran every node at full lmax (built since:
+`transform_degrees`, each block of nodes transformed at its own degree;
+[radial-partitioning.md](../radial-partitioning.md) §6).
 
-### 4.3 Convergence and mixing (`OpenStep::Converge`, `:648`)
+### 4.3 Convergence and mixing (`OpenStep::Converge`)
 
 One loop serves all three drivers: `Step` here, the sea-level loop (§5)
 and the adjoint's reverse sweep (`src/Adjoint3D.cpp`). Each supplies its
@@ -259,7 +266,7 @@ an `IterationControl`.
   iterate read as no change and a diverged step could report itself
   converged.
 
-### 4.4 Finish (`:618`, `:632`)
+### 4.4 Finish
 
 The final coefficients are synthesised to the grid strain d, then
 m⁺_k = m̃_k + beta_k(x) d, pointwise and threaded. d and the coefficients
@@ -294,18 +301,18 @@ now the bulk of it.
 
 ## 5. The coupled loop with sea level (`SeaLevelEvolution3D::Run`)
 
-`src/Evolution3D.cpp:63-199`. Per time step (`:158`):
+`src/Evolution3D.cpp`. Per time step:
 
 1. `StartStep` under the previous step's total load σ and centrifugal
    potential ψ as channels.
-2. Outer passes, through `OpenStep::Converge` (`:167-191`). The pass:
+2. Outer passes, through `OpenStep::Converge`. The pass:
    `Respond(s)` gives the zero-channel solutions. Their surface U and Φ
    per degree and the inertia moment feed a full SLE solve,
-   `SolveGeneralised` (`:180`), under the step's effective Love numbers,
+   `SolveGeneralised`, under the step's effective Love numbers,
    and that solve runs its OWN inner Anderson iteration. The new σ and ψ
-   go back in through `AddChannels` (`:185`), and `StrainOf` gives s'.
+   go back in through `AddChannels`, and `StrainOf` gives s'.
    Residual and mixing are §4.3's.
-3. `Finish` (`:192`).
+3. `Finish`.
 
 So strain, ocean load and rotation converge together in one outer fixed
 point, and each outer pass contains a complete inner SLE solve.
@@ -481,8 +488,9 @@ expensive.
    `Finish` on a moved step turns its buffers into the new state. Still
    allocated per step: `StartStep`'s decayed memory and `grid_` (two
    tensors, ~0.25 s at lmax 64), its weight fields, and the mixer's
-   buffers. Recycling the previous state's tensors would need a
-   `StartStep` that takes the state by value; not done.
+   buffers. Built since: `Viscoelastic3D::Recycle` hands a replaced
+   state's tensors back for the next `StartStep` (multicore-scaling.md
+   §6).
 6. **Fixed (17 Oct, chunk 3): the fixed part was recombined every
    pass.** Σ_k mu_k m̃_k is now analysed once per step (`fixed_`), and a
    pass multiplies d by the single weight field W(x).
@@ -527,8 +535,10 @@ expensive.
     sqrt(N), for one more forward step per node not kept. The kernels
     agree with a full recording's to 1.5e-12 at strides 2 and 4. At 60
     steps a stride of 8 holds ~15 states: ~320 GB at lmax 256, ~1.5 TB
-    at 512, where states on disk or a memory-budgeted schedule (revolve)
-    would be next; both would reuse the rebuild.
+    at 512. States on disk are built since
+    (`SeaLevelEvolution3D::Options::on_state`, sl3d's
+    `trajectory.directory`), reusing the rebuild; a memory-budgeted
+    schedule (revolve) is not.
 13. **Cost (deferred): force-assembly access pattern.** For each degree,
     the force loop walks node by node through the node-major spectral
     layout, jumping one coefficient block per node, and the strain
@@ -543,7 +553,8 @@ expensive.
     surface. It is a reasonable choice, but it is a choice.
 15. **Choice (recorded): full lmax at every node.** Depth-variable lmax
     was considered and declined (`lateral-coupling.md` §8); deep nodes run full
-    transforms for content that is truncated to zero there.
+    transforms for content that is truncated to zero there. Built since,
+    as `transform_degrees` ([radial-partitioning.md](../radial-partitioning.md) §6).
 16. **Behaviour (accepted): threaded runs are not bitwise
     reproducible.** With more than one thread, the step's results vary
     from run to run at round-off. The cause (found 17 Oct, chunk 4) is

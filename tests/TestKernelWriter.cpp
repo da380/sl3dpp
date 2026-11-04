@@ -3,7 +3,7 @@
  * @brief Kernels out: Kernels3D-layout values written as
  * a planetmodel model file and read back.
  *
- * The gates read the file back at the memory nodes and grid points,
+ * The tests read the file back at the memory nodes and grid points,
  * where the writing is exact to rounding for ARBITRARY values — the
  * file stores a shared element-edge radius once per side, so piecewise
  * fields pass as they are; deterministic noise is the hardest case for
@@ -11,9 +11,8 @@
  * element above, which the round trip accounts for. The pairing
  * dJ = sum_node int K p dOmega computed from the file's content then
  * matches the in-memory pairing to rounding; that in-memory pairing is
- * the directional derivative by TestAdjoint3D's Taylor gate, which
- * closes the loop. Both memory point sets are written, the Gauss
- * default and GLL.
+ * the directional derivative by TestAdjoint3D's Taylor test. Both memory
+ * point sets are written, the Gauss default and GLL.
  *
  * With SL3DPP_KERNEL_FILE_OUT set, a smooth kernel is also written
  * to that path with its pairing in the meta, for the Python's own
@@ -212,7 +211,7 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
     EXPECT_LT(worst, 1e-11 * scale);
 
     // The pairing against a perturbation survives the file. The nodal
-    // quadrature reads each node's own side, so this gate runs on the
+    // quadrature reads each node's own side, so this check runs on the
     // Gauss set, whose memory radii are strictly interior; the GLL
     // data's integrity is the round trip above (a side-aware quadrature
     // pairs it the same way).

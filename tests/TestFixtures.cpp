@@ -1,7 +1,8 @@
-// The fixture gates: sl3dpp against planetmodel and pyslfp on the committed
-// fixtures (tests/data). The reference gravity is held to planetmodel on the
-// identical deck file, read by both codes with the same (not-a-knot)
-// interpolation, so agreement is expected near machine precision.
+// The fixture comparisons: sl3dpp against planetmodel and pyslfp on the
+// committed fixtures (tests/data). The reference gravity is held to
+// planetmodel on the identical deck file, read by both codes with the same
+// (not-a-knot) interpolation, so agreement is expected near machine
+// precision.
 
 #include <gtest/gtest.h>
 
@@ -207,7 +208,7 @@ TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
   // The true flotation ocean function is a step function sampled on each
   // code's own grid, so agreement is limited by the coastline quadrature,
   // not by either implementation; the comparison is correspondingly
-  // coarse (docs/design.md §10).
+  // coarse (docs/design.md).
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   constexpr auto lmax = 32;
   auto table =

@@ -4,7 +4,7 @@
  * @file Viscoelastic3D.hpp
  * @brief The 3D-viscosity stepper: grid-held internal variables, pointwise
  * step weights from laterally varying relaxation times, and the
- * within-step lateral iteration (docs/dev/lateral-coupling.md §5).
+ * within-step lateral iteration (docs/dev/lateral-coupling.md).
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)): the base (radial)
  * Rheology is the REFERENCE, whose per-(scheme, dt) effective operators
@@ -26,20 +26,33 @@
  *   K_ref u = F + b( m~_k(x) + (beta_k(x) - beta_ref_k(r)) d(u) ),
  *
  * so each pass of the within-step iteration is one trip through the
- * (gated) GridCoupling pipeline plus the reference banded back-solves,
+ * GridCoupling pipeline plus the reference banded back-solves,
  * spheroidal and toroidal. The iteration is Anderson-accelerated
  * (memory 5 by default; 0 gives plain Picard, optionally damped), and
  * one loop, OpenStep::Converge, serves this class's Step, the sea level
  * coupling and the adjoint sweep. Its convergence against viscosity
- * contrast is measured in docs/dev/lateral-coupling.md §5a.
+ * contrast is measured in docs/dev/lateral-coupling.md. The same step is
+ * a symmetric positive definite system in u, and Options::solver =
+ * ConjugateGradients closes it by preconditioned conjugate gradients
+ * instead (K_ref the preconditioner; OpenStep::Solve), with a driver's
+ * sea level closure as an outer iteration around warm-started inexact
+ * solves (OpenStep::Nest): fewer iterations than passes everywhere
+ * measured and no contrast envelope (docs/dev/adjoints.md §13n).
  *
- * With delta = 0 the lateral term vanishes identically and a step
- * reproduces the 1D two-phase stepper exactly — the zero-lateral step
- * gate. The memory nodes are the Gauss points of the viscous elements or,
- * with Options::memory_points, their GLL nodes (MemoryPoints.hpp);
- * the 1D reference takes the same set, so the gate holds for either. Load
- * channels are prescribed here (complex m >= 0 columns of real fields); the
- * sea-level coupling drives this class through the same channels.
+ * Lateral ELASTIC moduli (Options::moduli) enter the same weight: the
+ * shear's relative perturbation s(x) adds -s mu_eff(x) to it and scales
+ * the memory force's branch moduli by (1 + s), and a bulk perturbation
+ * weights the dilatation, carried as the iterate's scalar companion;
+ * the unrelaxed start solve is then the conjugate-gradient solve of
+ * detail/LateralSolve.hpp (docs/dev/adjoints.md §13k).
+ *
+ * With delta = 0 and no lateral moduli the lateral term vanishes
+ * identically and a step reproduces the 1D two-phase stepper exactly. The memory nodes are the
+ * Gauss points of the viscous elements or, with Options::memory_points,
+ * their GLL nodes (MemoryPoints.hpp); the 1D reference takes the same
+ * set, so the identity holds for either. Load channels are prescribed
+ * here (complex m >= 0 columns of real fields); the sea-level coupling
+ * drives this class through the same channels.
  */
 
 #include <complex>
@@ -91,6 +104,23 @@ class Viscoelastic3D {
     double damping = 1.0;
     int anderson_memory = 5;
     double anderson_rate = 0.5;
+    /// How Step closes a step's linear system: the within-step fixed
+    /// point above (Picard, Anderson), or preconditioned conjugate
+    /// gradients on the laterally weighted effective systems with the
+    /// reference effective solve as the preconditioner (OpenStep::Solve;
+    /// solve_rtol on the relative residual in the preconditioned energy
+    /// norm, solve_max_iterations the budget; docs/dev/adjoints.md §13n).
+    /// Drivers that close a step themselves (the evolutions, the sweeps)
+    /// read the same choice.
+    enum class StepSolver { FixedPoint, ConjugateGradients };
+    StepSolver solver = StepSolver::FixedPoint;
+    double solve_rtol = 1e-11;
+    int solve_max_iterations = 200;
+    /// A driver's outer iteration with the solve inside (OpenStep::Nest)
+    /// solves each pass inexactly: to solve_outer_factor times the
+    /// residual its warm start had (never below solve_rtol), so the inner
+    /// work follows the outer progress.
+    double solve_outer_factor = 1e-2;
     /// The degree-1 toroidal gauge (ToroidalOperator::Options::
     /// pin_fraction): where in each solid region the pinned dof sits.
     /// Nothing well defined depends on it; it is here so that tests can
@@ -101,6 +131,31 @@ class Viscoelastic3D {
     /// the step an exact elimination still; MemoryPoints.hpp), or GLL
     /// nodes.
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
+    /// Lateral perturbations of the ELASTIC moduli, relative and sampled
+    /// like delta: the unrelaxed shear mu_U(x) = mu_U(r) (1 + shear(r,
+    /// theta, phi)), every branch modulus scaled alike (the branch
+    /// fractions and the relaxation times held, as the material
+    /// derivatives hold them), and kappa(x) = kappa(r) (1 + bulk(r, theta,
+    /// phi)); either may be empty. With any set the coupling carries,
+    /// beside the viscous elements, every solid element where a
+    /// perturbation is non-zero at some memory point (the functions are
+    /// sampled on a probe of the whole solid first), the
+    /// unrelaxed start solve is the preconditioned conjugate-gradient
+    /// solve of detail/LateralSolve.hpp on the reference systems
+    /// (elastic_rtol, elastic_max_iterations), and the within-step
+    /// iterate carries the dilatation beside the deviatoric strain (the
+    /// lateral bulk term). The step itself stays one fixed point: the
+    /// lateral moduli join the lateral viscosity in its pointwise weight.
+    /// Distributed over radial segments like the rest (the start solve's
+    /// conjugate gradients pair each process's share; docs/dev/adjoints.md
+    /// §13k, §13m).
+    struct LateralModuli {
+      std::function<double(double, double, double)> shear;
+      std::function<double(double, double, double)> bulk;
+    };
+    LateralModuli moduli{};
+    double elastic_rtol = 1e-12;
+    int elastic_max_iterations = 200;
     /// Radial cuts for every degree system, the reference operator's
     /// included (ViscoelasticOperator::Options::radial_cuts).
     std::vector<int> radial_cuts{};
@@ -136,6 +191,12 @@ class Viscoelastic3D {
   Viscoelastic3D(const Rheology& rheology, int lmax, const SurfaceGrid& grid,
                  const std::function<double(double, double, double)>& delta,
                  Options options);
+  /// The elements a coupling must carry for these lateral moduli: the
+  /// viscous ones and those where a perturbation is non-zero at some
+  /// memory point (empty when no moduli are set: the rheology's rule).
+  [[nodiscard]] static std::vector<char> ActiveElementsFor(
+      const Rheology& rheology, int lmax, const SurfaceGrid& grid,
+      const Options& options);
   ~Viscoelastic3D();  // out of line: unique_ptr of an incomplete type
   Viscoelastic3D(Viscoelastic3D&&) noexcept;
   Viscoelastic3D& operator=(Viscoelastic3D&&) noexcept;
@@ -152,6 +213,62 @@ class Viscoelastic3D {
   /// The unrelaxed solid's Love numbers (SI), cached.
   [[nodiscard]] const LoveNumbers& ElasticLove() const {
     return reference_.ElasticLoveNumbers();
+  }
+  /// Whether lateral moduli are set, and their sampled fields over the
+  /// coupling's grid values: the relative shear perturbation, the
+  /// absolute bulk perturbation delta kappa(x) (material units), and the
+  /// absolute unrelaxed shear perturbation delta mu_U(x); empty where
+  /// not set.
+  /// Whether lateral moduli were given: the same on every rank of a
+  /// distributed run, whose segment may hold no node where they are
+  /// non-zero (its sampled arrays then empty), since the solve's route
+  /// is collective.
+  [[nodiscard]] bool HasLateralModuli() const { return lateralModuli_; }
+  /// The scalar companions of this operator's iterate: the dilatation's
+  /// block (-1 without a lateral bulk modulus).
+  [[nodiscard]] int DilatationBlock() const { return dilatationBlock_; }
+  [[nodiscard]] std::size_t CompanionCount() const { return companions_; }
+  /// Weights a grid tensor's scalar companions by the step's negative
+  /// lateral weights (-delta kappa on the dilatation): what Respond and
+  /// the transposed passes apply.
+  void WeightCompanions(GridCoupling::TensorField& field) const;
+  [[nodiscard]] std::span<const double> ShearPerturbation() const {
+    return shear_;
+  }
+  [[nodiscard]] std::span<const double> BulkPerturbation() const {
+    return bulk_;
+  }
+  [[nodiscard]] std::span<const double> UnrelaxedShearPerturbation() const {
+    return shearUnrelaxed_;
+  }
+  /// The unrelaxed shear modulus at each memory node of the reference
+  /// (the long-term modulus interpolated plus the branches' at the
+  /// points).
+  [[nodiscard]] std::span<const double> UnrelaxedShearAtNodes() const {
+    return muUnrelaxed_;
+  }
+  /// The reference's bulk modulus at each memory node, likewise.
+  [[nodiscard]] std::span<const double> BulkModulusAtNodes() const {
+    return kappaAtNodes_;
+  }
+  /// The factor 1 + s(x) every branch modulus carries at a grid value
+  /// under the lateral shear (1 without).
+  [[nodiscard]] double ShearFactor(std::size_t gridValue) const {
+    return shear_.empty() ? 1.0 : 1.0 + shear_[gridValue];
+  }
+  /// The diagnostics of the last unrelaxed start solve under lateral
+  /// moduli (SolveElastic / ElasticStrain / PrimeStrain / a StartStep
+  /// without a cache): its iteration count and residual.
+  struct ElasticSolveInfo {
+    int iterations = 0;
+    double residual = 0.0;
+    bool converged = true;
+    /// The relative residual of the start (the reference response's, or
+    /// a warm start's) before the first iteration.
+    double initial = 0.0;
+  };
+  [[nodiscard]] ElasticSolveInfo LastElasticSolve() const {
+    return lastElasticSolve_;
   }
 
   /// The grid-held state: one five-component tensor per branch, plus the
@@ -213,6 +330,10 @@ class Viscoelastic3D {
     bool converged = true;
     /// The passes Anderson mixed.
     int mixedPasses = 0;
+    /// Under StepSolver::ConjugateGradients, the conjugate-gradient
+    /// iterations in all (the step's one solve, or a nested closure's
+    /// solves summed).
+    int solveIterations = 0;
   };
 
   /// The within-step fixed point's controls: at most max_iterations
@@ -224,7 +345,7 @@ class Viscoelastic3D {
   /// by less than anderson_rate (0.5 by default, about where Anderson's
   /// fewer passes start to pay for its dearer ones), Anderson mixing with
   /// anderson_memory differences takes over for the rest of the step
-  /// (docs/dev/lateral-coupling.md §5a). anderson_rate <= 0 mixes from the
+  /// (docs/dev/lateral-coupling.md). anderson_rate <= 0 mixes from the
   /// first pass; anderson_memory 0 never mixes.
   struct IterationControl {
     int max_iterations = 40;
@@ -263,6 +384,16 @@ class Viscoelastic3D {
    * m~(x), the weight fields and the memory force they fix are set on
    * construction, and the driver alternates Respond / its own load
    * closure, then finishes.
+   *
+   * A step is a linear system in the degree solutions, (K_eff -
+   * P^T W S) x = f: the reference effective systems K_eff, the lateral
+   * weight W(x) of the viscosity's and the moduli's departures from the
+   * reference applied pointwise to the strain S x (and the bulk
+   * companion), the forces f the fixed memory force, any added, and the
+   * channels'. Respond / StrainOf iterate it as a fixed point on the
+   * strain; Forces / Solve close it by conjugate gradients on x, the
+   * operator symmetric positive definite (the 3D effective stiffness)
+   * and K_eff^-1 the preconditioner.
    *
    * The within-step iterate is the strain's COEFFICIENTS (a
    * SpectralTensor, 5 L^2 reals per node), not its values on the
@@ -311,11 +442,67 @@ class Viscoelastic3D {
     [[nodiscard]] GridCoupling::SpectralTensor StrainOf(
         const Solutions& solutions) const;
 
+    using Fields = std::map<int, std::vector<Complex>>;
+    /// The step's degree forces f: the fixed memory force (and the forces
+    /// added) assembled through the effective systems, plus the load and
+    /// tide channels' at the end time; spheroidal and toroidal, every
+    /// degree present (distributed, this process's shares).
+    [[nodiscard]] std::pair<Fields, Fields> Forces(
+        const LoadCallable3D& load, const LoadCallable3D& tide) const;
+    /// The step's operator on solutions, (K_eff - P^T W S) x.
+    [[nodiscard]] std::pair<Fields, Fields> Apply(const Solutions& x) const;
+    /// The step's solutions for given forces by preconditioned conjugate
+    /// gradients (Options::solve_rtol, solve_max_iterations), from the
+    /// reference response or, given, a start (the previous solution of a
+    /// nearby system: a driver's outer iteration warm-starts each
+    /// solve). The solutions carry whatever channels the forces did.
+    /// Unconverged, the last iterate is returned with converged false.
+    [[nodiscard]] std::pair<Solutions, ElasticSolveInfo> Solve(
+        const Fields& spheroidal, const Fields& toroidal,
+        const Solutions* start = nullptr, double rtol = 0.0,
+        double reduction = 0.0) const;
+
+    /// A driver's own closure on the step's solutions (the sea level
+    /// equation on the surface response, say): given the CHANNEL-FREE
+    /// solutions it sets its loads and returns the step's load and tide
+    /// channels for the next solve.
+    using Closure = std::function<std::pair<LoadCallable3D, LoadCallable3D>(
+        const Solutions& responses)>;
+    /// The coupled problem with the solve inside: each pass strips the
+    /// last solution's channels, hands the closure the channel-free
+    /// solutions, and solves the step under the channels it returns,
+    /// warm-started from the last solution with the new channels (the
+    /// Picard iterate) and inexactly (Options::solve_outer_factor). The
+    /// outer residual is the warm start's: how far the last solutions
+    /// with the new channels are from solving the step, relative to its
+    /// forces in the solve's measure; converged when it is at most
+    /// control.rtol. The outer map is Picard, Anderson-mixed on the
+    /// channel-free solutions as Converge mixes the strain (the control's
+    /// memory and rate). The first pass's channel-free solutions are the
+    /// start strain's response. The closure runs once per pass, so
+    /// whatever it records is from the last pass, consistent with the
+    /// returned strain to the tolerance.
+    [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Nest(
+        const Closure& closure, const IterationControl& control,
+        Solutions* solutions = nullptr) const;
+    /// The step under KNOWN channels, closed as Options::solver says: the
+    /// fixed point of Respond / AddChannels / StrainOf under the control,
+    /// or the one conjugate-gradient solve.
+    [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Close(
+        const LoadCallable3D& load, const LoadCallable3D& tide,
+        const IterationControl& control) const;
+
     /// One pass of a driver's within-step iteration: the strain
     /// coefficients the step's solutions take for given ones (Respond, the
     /// driver's own load closure, AddChannels, StrainOf).
     using Pass = std::function<GridCoupling::SpectralTensor(
         const GridCoupling::SpectralTensor&)>;
+
+    /// The relative sup-norm change of the coefficients from now to next
+    /// (Converge's measure: maxima of squared magnitudes, the same on any
+    /// thread count; collective), or NaN where next is not finite.
+    [[nodiscard]] double RelativeChange(const GridCoupling::SpectralTensor& next,
+                                        const GridCoupling::SpectralTensor& now) const;
 
     /// The within-step fixed point s = pass(s) from the start strain,
     /// Anderson-mixed in place: the converged (or, when the budget runs
@@ -323,7 +510,8 @@ class Viscoelastic3D {
     /// runs once per iteration, so whatever it records is from the final
     /// pass.
     [[nodiscard]] std::pair<GridCoupling::SpectralTensor, StepInfo> Converge(
-        const Pass& pass, const IterationControl& control) const;
+        const Pass& pass, const IterationControl& control,
+        const GridCoupling::SpectralTensor* start = nullptr) const;
 
     /// The inertia moment of the degree-0, m = 0 column of solutions;
     /// distributed, collective (each process's share summed).
@@ -331,6 +519,25 @@ class Viscoelastic3D {
 
     /// The effective Love numbers of this step's reference solid (SI).
     [[nodiscard]] const LoveNumbers& EffectiveLove() const;
+
+    /// Adds an increment to the step's decayed memory, one tensor per
+    /// branch on the grid: it joins the fixed memory force and the end
+    /// state alike — the drive of a tangent-linear step (the 1D
+    /// ViscoelasticStep::AddMemory, pointwise). The first pass's force is
+    /// rebuilt on the next Respond.
+    void AddMemory(const std::vector<GridCoupling::TensorField>& increment);
+
+    /// Adds a force to the step: an analysed tensor (the spectral
+    /// coefficients of a weighted grid tensor, as the fixed memory force
+    /// is) joining the fixed force, and per-degree spheroidal forces
+    /// (the solutions' layout) added after the assembly — the drive of a
+    /// tangent-linear step in the material (TangentLinearSolver3D): the
+    /// effective system's variation and the memory force of the branch
+    /// moduli's variation as the tensor, a bulk modulus perturbation as
+    /// the degree forces. The first pass's force is rebuilt on the next
+    /// Respond.
+    void AddForce(const GridCoupling::SpectralTensor& analysed,
+                  const std::map<int, std::vector<Complex>>& spheroidal);
 
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
@@ -343,6 +550,16 @@ class Viscoelastic3D {
 
    private:
     friend class Viscoelastic3D;
+    friend class AdjointSolver3D;  // the discrete transpose reads the weights
+    friend class TangentLinearSolver3D;  // the material drive reads the memory
+    /// P^T W S x: the lateral force of solutions through the step's
+    /// weight (the fixed force excluded), in the step's buffers.
+    [[nodiscard]] std::pair<Fields, Fields> LateralForce(const Solutions& x) const;
+    /// The step's effective systems and their unit responses (cached in
+    /// the flavour), for the discrete transpose.
+    [[nodiscard]] const DegreeOperator& Spheroidal(int l) const;
+    [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
+    [[nodiscard]] const std::vector<double>& Units(int l) const;
     const Viscoelastic3D* op_ = nullptr;
     std::shared_ptr<Flavour> flavour_;
     Scheme scheme_{};
@@ -361,10 +578,18 @@ class Viscoelastic3D {
     /// Whether analysed_ holds the start strain's force, formed in
     /// StartStep from the grid strain it had, for the first Respond.
     mutable bool startForce_ = false;
+    /// Per-degree spheroidal forces added after the assembly (AddForce).
+    std::map<int, std::vector<Complex>> extraSpheroidal_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
-  /// consistent solve under the start-time channels. Its grid-sized
+  /// consistent solve under the start-time channels. A step of length
+  /// ZERO is the instantaneous (unrelaxed) problem as an open step: the
+  /// weights are the identity (beta = 0, m~ = m, the effective systems
+  /// the unrelaxed ones) and the within-step fixed point closes the
+  /// instantaneous elastic response under lateral moduli — what the
+  /// evolution's start, the sweeps' starts, equilibria and jumps need
+  /// there (docs/dev/adjoints.md §13k). Its grid-sized
   /// arrays (the decayed memory, the weights, the workspace) come from the
   /// arrays recycled since the last StartStep where there are any, and are
   /// allocated otherwise.
@@ -377,7 +602,7 @@ class Viscoelastic3D {
   /// StartStep reuses its tensors instead of allocating and zero-filling
   /// fresh ones: an evolution recycles each state a step replaces (a
   /// closed step hands back its own arrays itself). A state merely dropped
-  /// is freed as before; arrays of another shape are dropped. Thread-safe.
+  /// is simply freed; arrays of another shape are dropped. Thread-safe.
   void Recycle(State&& state) const;
 
   /// Frees the arrays kept for reuse, as at the end of a run.
@@ -385,6 +610,7 @@ class Viscoelastic3D {
 
  private:
   friend class AdjointSolver3D;  // the sweeps transpose these internals
+  friend class TangentLinearSolver3D;  // the forward-mode drives
 
   /// The arrays kept for reuse by StartStep (Recycle, ~OpenStep): at most
   /// one step's worth, under their own lock.
@@ -417,6 +643,74 @@ class Viscoelastic3D {
   [[nodiscard]] GridCoupling::SpectralTensor ElasticStrainCoefficients(
       const State& state, const LoadCallable3D& load,
       const LoadCallable3D& tide) const;
+ public:
+  /// The unrelaxed reference systems (the Love-number operators of the
+  /// rheology's material), built on first use.
+  [[nodiscard]] const DegreeOperator& UnrelaxedSpheroidal(int l) const {
+    return Spheroidal(l);
+  }
+  [[nodiscard]] const ToroidalOperator& UnrelaxedToroidal(int l) const {
+    return Toroidal(l);
+  }
+  /// A zero spectral tensor shaped for this operator's iterate: with the
+  /// scalar companions of its lateral moduli (the dilatation's).
+  [[nodiscard]] GridCoupling::SpectralTensor ZeroSpectralFor() const;
+  /// The spheroidal forces of a weighted tensor: the deviatoric assembly
+  /// plus, where the tensor carries a scalar companion, the dilatation's.
+  [[nodiscard]] std::map<int, std::vector<Complex>> SpheroidalForces(
+      const GridCoupling::SpectralTensor& weighted,
+      const std::function<const DegreeOperator&(int)>& spheroidal) const;
+  /// The lateral part of the UNRELAXED operator on solutions: the force
+  /// of delta mu_U(x) on the deviatoric strain and of delta kappa(x) on
+  /// the dilatation (per degree, spheroidal and toroidal).
+  [[nodiscard]] std::pair<std::map<int, std::vector<Complex>>,
+                          std::map<int, std::vector<Complex>>>
+  LateralElasticForce(const Solutions& x) const;
+  /// The unrelaxed systems under the lateral moduli solving the given
+  /// forces (every degree present): the preconditioned conjugate-gradient
+  /// solve, recording LastElasticSolve.
+  [[nodiscard]] Solutions LateralElasticSolve(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces) const;
+  /// (K - L) x for reference systems K and a lateral force L x: the bands
+  /// on the complex columns as real pairs, threaded over the degrees;
+  /// distributed, the shares assembled in one collective and the
+  /// products masked back to shares.
+  [[nodiscard]] std::pair<std::map<int, std::vector<Complex>>,
+                          std::map<int, std::vector<Complex>>>
+  ApplyLateralOperator(
+      const Solutions& x,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal,
+      const std::function<std::pair<std::map<int, std::vector<Complex>>,
+                                    std::map<int, std::vector<Complex>>>(
+          const Solutions&)>& lateralForce) const;
+  /// Preconditioned conjugate gradients on (K - L) x = f for reference
+  /// systems K (the preconditioner, solving shares) and a lateral force
+  /// L x, distributed like the rest (each process's shares, the pairings
+  /// summed): what the unrelaxed solve and the step's solve share.
+  [[nodiscard]] std::pair<Solutions, ElasticSolveInfo> ConjugateGradients(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal,
+      const std::function<std::pair<std::map<int, std::vector<Complex>>,
+                                    std::map<int, std::vector<Complex>>>(
+          const Solutions&)>& lateralForce,
+      double rtol, int maxIterations, const Solutions* start,
+      double reduction = 0.0) const;
+  /// The UNRELAXED systems solving per-degree forces: the reference
+  /// systems alone, or under lateral moduli the conjugate-gradient solve
+  /// (the symmetric operator, so the transposed solve as well).
+  [[nodiscard]] Solutions SolveUnrelaxed(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces) const;
+  /// Adds the load/tide channels' forces at time t per degree (the unit
+  /// load and tide vectors times the amplitudes) to spheroidal forces.
+  void AddChannelForces(
+      std::map<int, std::vector<Complex>>& forces, double t,
+      const LoadCallable3D& load, const LoadCallable3D& tide,
+      const std::function<const DegreeOperator&(int)>& spheroidal) const;
   /// The strain coefficients of per-degree solutions, fresh or added to
   /// a spectral tensor.
   [[nodiscard]] GridCoupling::SpectralTensor StrainCoefficients(
@@ -427,9 +721,17 @@ class Viscoelastic3D {
       GridCoupling::SpectralTensor& spectral, const Solutions& solutions,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
+ private:
   /// Solve all degrees of both blocks for a combined weighted tensor.
   [[nodiscard]] Solutions SolveAll(
       const GridCoupling::SpectralTensor& weighted,
+      const std::function<const DegreeOperator&(int)>& spheroidal,
+      const std::function<const ToroidalOperator&(int)>& toroidal) const;
+  /// The solves alone: per-degree spheroidal and toroidal forces (complex
+  /// m >= 0 columns) through the given systems.
+  [[nodiscard]] Solutions SolveForces(
+      const std::map<int, std::vector<Complex>>& sphForces,
+      const std::map<int, std::vector<Complex>>& torForces,
       const std::function<const DegreeOperator&(int)>& spheroidal,
       const std::function<const ToroidalOperator&(int)>& toroidal) const;
   /// Adds load/tide channels at time t by linearity, through the
@@ -449,6 +751,16 @@ class Viscoelastic3D {
   std::vector<std::vector<double>> itau_;  // per branch, (node x grid)
   std::vector<std::vector<double>> muBranch_;  // per branch, per node
   std::vector<std::vector<double>> itauRef_;   // per branch, per node
+  /// The lateral moduli (Options::moduli), sampled: the relative shear
+  /// perturbation and delta mu_U(x) over the grid values, delta kappa(x)
+  /// and its negative (the step's weight) likewise, and the reference's
+  /// unrelaxed shear per node; empty where not set.
+  bool lateralModuli_ = false;
+  std::vector<double> shear_, shearUnrelaxed_, bulk_, negativeBulk_;
+  std::vector<double> muUnrelaxed_, kappaAtNodes_;
+  int dilatationBlock_ = -1;
+  std::size_t companions_ = 0;
+  mutable ElasticSolveInfo lastElasticSolve_;
   mutable std::map<int, std::unique_ptr<DegreeOperator>> spheroidal_;
   mutable std::map<int, std::unique_ptr<ToroidalOperator>> toroidal_;
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;  // (ndof x 2)

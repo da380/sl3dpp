@@ -3,7 +3,7 @@
 /**
  * @file Evolution3D.hpp
  * @brief Forward GIA with lateral viscosity: the coupled loop of docs/design.md
- * §6 — one combined within-step fixed point over the ocean load, the rotational
+ * — one combined within-step fixed point over the ocean load, the rotational
  * feedback and the lateral viscosity term, under one Anderson mixer.
  *
  * Per step, the opened 3D step (Viscoelastic3D::OpenStep) holds the
@@ -15,8 +15,7 @@
  * and centrifugal channels from the SLE's answer, and updates the strain
  * through the step's reference solves. With no lateral perturbation the
  * channels are strain-independent, the loop converges on its first pass,
- * and the history equals the 1D coupled evolution's — the coupled
- * zero-lateral gate.
+ * and the history equals the 1D coupled evolution's.
  *
  * Units follow SeaLevelEvolution: times, the ice-load callable and the
  * returned fields are in the SLE solver's non-dimensional scheme; the
@@ -55,6 +54,9 @@ class SeaLevelEvolution3D {
     std::array<double, 3> angularVelocity{};
     int coupledIterations = 0;
     double coupledResidual = 0.0;
+    /// Under the conjugate-gradient step solver, its iterations over the
+    /// node's passes (Viscoelastic3D::StepInfo::solveIterations).
+    int solveIterations = 0;
     /// Whether the combined fixed point and its last pass's sea level
     /// solve met their tolerances.
     bool converged = true;
@@ -190,6 +192,7 @@ class SeaLevelEvolution3D {
 
  private:
   friend class AdjointSolver3D;  // reuses the operator/solver/state/ratios
+  friend class TangentLinearSolver3D;  // likewise, forwards
 
   using Complex = std::complex<double>;
 

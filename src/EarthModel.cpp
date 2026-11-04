@@ -107,7 +107,7 @@ std::expected<EarthModel, ModelError> EarthModel::FromDeck(const Deck& deck,
       // Two knots give a straight line under every kind, and not-a-knot
       // needs interior knots to constrain, so short layers fall back to
       // Natural (which reproduces the line exactly; a three-knot layer
-      // then differs from scipy's parabola — accepted, documented here).
+      // then differs from scipy's parabola).
       const auto condition = (options.spline == SplineKind::Cubic && n >= 4)
                                  ? Interpolation::BoundaryCondition::NotAKnot
                                  : Interpolation::BoundaryCondition::Natural;

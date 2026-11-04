@@ -2,9 +2,12 @@
 
 /**
  * @file KernelWriter.hpp
- * @brief Kernels out: the 3D sensitivity kernels of Kernels3D written
- * as a planetmodel model file, for the Python to read
- * back, draw and integrate.
+ * @brief Fields over the memory nodes out: the 3D sensitivity kernels of
+ * Kernels3D, and any other scalar field a 3D run holds at the coupling's
+ * nodes (a response's radial displacement, a strain invariant, the
+ * lateral structure itself), written as a planetmodel model file for
+ * the Python to read back, draw (planetmodel's cutaways and sections)
+ * and integrate.
  *
  * A kernel arrives as Kernels3D holds it: an angular density on the
  * coupling's grid at each radial memory node, the radial quadrature
@@ -37,6 +40,7 @@
 
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <map>
 #include <span>
 #include <string>
@@ -66,6 +70,53 @@ struct KernelFileOptions {
   /// Numeric meta_<key> attributes, for a reader's cross-checks.
   std::map<std::string, double> meta = {};
 };
+
+/// Any scalar field over the memory nodes to write: a value per grid
+/// point of every node in the Kernels3D layout, non-dimensional under
+/// the model's scales, written in SI with the dimensions given. With
+/// per_volume the values are an angular density with the radial
+/// quadrature folded in (a kernel's), and the file stores them per unit
+/// volume (divided by the node's radial weight and r^2, the dimensions
+/// then stated less three powers of length); otherwise they are
+/// pointwise values written as they are.
+struct NodeField {
+  std::string name;
+  std::string meaning;
+  Dimensions dimensions = {};
+  std::span<const double> values;
+  bool per_volume = false;
+};
+
+/// A function of (r, theta, phi), r non-dimensional, sampled at every
+/// grid point of every memory node of a coupling, in the NodeField
+/// layout: a lateral structure beside the response it shapes.
+[[nodiscard]] std::vector<double> SampleNodeField(
+    const GridCoupling& coupling,
+    const std::function<double(double, double, double)>& f);
+
+/// The fields of degree solutions at the memory nodes of a coupling, in
+/// the NodeField layout, non-dimensional: the radial displacement U,
+/// and the deviatoric strain's magnitude sqrt(e:e). The operators give
+/// the dof layout the solutions use (a static solver's or the
+/// stepper's unrelaxed systems, at the coupling's lmax).
+struct ResponseNodeFields {
+  std::vector<double> radialDisplacement;
+  std::vector<double> deviatoricStrain;
+};
+[[nodiscard]] ResponseNodeFields ResponseFieldsAtNodes(
+    const GridCoupling& coupling,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    const Viscoelastic3D::Solutions& x);
+
+/// Writes fields over the memory nodes of a coupling as a model file
+/// (the layout the file comment describes); refused when a field's size
+/// does not match the coupling or the file cannot be written.
+[[nodiscard]] std::expected<void, IoError> WriteNodeFields(
+    const std::filesystem::path& path, const GridCoupling& coupling,
+    const RadialMesh& mesh, const EarthModel& model,
+    const std::vector<NodeField>& fields,
+    const KernelFileOptions& options = {});
 
 /// Writes the kernels of `op`'s memory nodes over `model`'s geometry;
 /// refused when a kernel's size does not match the coupling or the file

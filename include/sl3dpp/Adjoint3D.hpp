@@ -3,11 +3,12 @@
 /**
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
- * evolution by the CONTINUOUS adjoint — the preferred path
- * (docs/dev/adjoints.md §1, §6): ice-history kernels, and the full 3D
- * inverse-relaxation-time kernel on the (memory node × angular grid) together
- * with its spherical reduction. The discrete transpose of the reduced pipeline
- * is not built: in 3D the continuous adjoint is the only sweep.
+ * evolution: by the CONTINUOUS adjoint — the preferred path for the
+ * viscosity (docs/dev/adjoints.md) — or by the DISCRETE transpose of the
+ * coupled time-stepped map (AdjointDiscrete3D.cpp): ice-history kernels,
+ * the full 3D inverse-relaxation-time kernel on the (memory node ×
+ * angular grid) with its spherical reduction, and, on request, the
+ * lateral bulk and shear modulus kernels in the same layout.
  *
  * The continuous adjoint equations have the forward problem's form, so
  * between observations the adjoint state is stepped by the SAME coupled
@@ -20,9 +21,8 @@
  * and memory node, the null-basis tensor contraction of the adjoint
  * state with the forward (d - m), over itau, with the branch modulus
  * and radial quadrature — the metric weights are fixed by requiring the
- * angle-uniform limit to reproduce the (gated) 1D force weights
- * (4/3, k^2, k^2 (k^2 - 2)) exactly, which is also the zero-lateral
- * gate's identity.
+ * angle-uniform limit to reproduce the 1D force weights
+ * (4/3, k^2, k^2 (k^2 - 2)) exactly.
  *
  * Conventions follow Adjoint.hpp: times increasing in SLE units,
  * measurements keyed by node index, duals paired by the surface
@@ -35,6 +35,7 @@
 #include <map>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -112,6 +113,17 @@ struct Kernels3D {
   std::vector<std::vector<double>> itauKernel3D;
   std::vector<std::vector<double>> itauKernelSpherical;
   std::vector<std::vector<double>> logViscosityKernel3D;
+  /// dJ / d kappa(x) and dJ / d mu(x) in the itauKernel3D layout (an
+  /// angular density per memory node, the radial quadrature folded in),
+  /// material units — the transpose of TangentPerturbation3D::material
+  /// (docs/dev/adjoints.md) — and their angular integrals per node,
+  /// which pair with angle-uniform directions as the 1D kappaKernel and
+  /// muKernel do at that node. Empty unless Options::material_kernels
+  /// (with a trajectory; Discrete exact, Continuous at the commute level).
+  std::vector<double> kappaKernel3D;
+  std::vector<double> muKernel3D;
+  std::vector<double> kappaKernelSpherical;
+  std::vector<double> muKernelSpherical;
 };
 
 /// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
@@ -133,9 +145,53 @@ struct Kernels3D {
 [[nodiscard]] std::vector<double> RadialDensity(const GridCoupling& coupling,
                                                 std::span<const double> kernel);
 
+/// A perturbation of the moduli over the coupling's grid values
+/// (material units): delta kappa(x) and delta mu(x) at the memory nodes,
+/// which is where the 3D operator's lateral structure lives (an elastic
+/// region to be perturbed laterally takes a branch of negligible
+/// inverse relaxation time, so that it carries memory nodes). The branch
+/// moduli follow as fixed fractions of the unrelaxed modulus and the
+/// relaxation times are held; compose with a log-viscosity direction for
+/// a viscosity held instead. Either field may be empty.
+struct MaterialDirection3D {
+  std::vector<double> kappa;
+  std::vector<double> mu;
+
+  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
+};
+
+/**
+ * @brief The derivative of the 3D kernels along a direction v of the
+ * model parameters: what the 3D second-order adjoint returns, the
+ * components of the Hessian's action on v. `ice` carries the thickness
+ * and initial-sea-level views' derivatives (its 1D `itauKernel` stays
+ * empty); the 3D fields are the derivatives of Kernels3D's, in its
+ * layouts — `logViscosityKernel3D` the derivative along v of the
+ * log-viscosity kernel −itau K, which for v a log-viscosity direction is
+ * the Hessian-vector product of the log parameterisation; the material
+ * kernels' derivatives (with their spherical reductions) only with
+ * Options::material_kernels.
+ */
+struct KernelDerivatives3D {
+  KernelDerivatives ice;
+  std::vector<std::vector<double>> itauKernel3D;
+  std::vector<std::vector<double>> itauKernelSpherical;
+  std::vector<std::vector<double>> logViscosityKernel3D;
+  std::vector<double> kappaKernel3D;
+  std::vector<double> muKernel3D;
+  std::vector<double> kappaKernelSpherical;
+  std::vector<double> muKernelSpherical;
+};
+
 class AdjointSolver3D {
  public:
   struct Options {
+    /// Continuous (the default and preferred path) or Discrete: the
+    /// exact transpose of the coupled time-stepped map, the transposed
+    /// within-step fixed point solved by the same iteration. Both carry
+    /// the second-order sweep (SecondOrderKernels) and both are
+    /// distributed over radius (docs/dev/adjoints.md §17).
+    AdjointMethod method = AdjointMethod::Continuous;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
@@ -144,6 +200,17 @@ class AdjointSolver3D {
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
+    /// Also form the material kernels (Kernels3D::kappaKernel3D,
+    /// muKernel3D). Discrete: the pairing of each step's dual solution
+    /// with the material derivative of the step's forces, the exact
+    /// transpose of the 3D material tangent. Continuous: the time
+    /// quadrature of the continuous adjoint displacement's pairing with
+    /// the forward solution and memory plus the lumped pairings at the
+    /// observations, at the commute level of the viscosity kernels. Both
+    /// need the trajectory, the memory nodes at the GLL points and no
+    /// rotational feedback; one unrelaxed solve per node (two for the
+    /// continuous form). Distributed like the sweeps.
+    bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.
@@ -156,7 +223,7 @@ class AdjointSolver3D {
   explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution)
       : AdjointSolver3D(evolution, Options{}) {}
 
-  /// The continuous-adjoint kernels over the forward time grid; with a
+  /// The kernels over the forward time grid, by Options::method; with a
   /// fully recorded `trajectory` the viscosity kernels are carried too.
   /// With `oceanFunctions`, one grid per node from a migrating run
   /// (OceanFunctionsOf its snapshots), the kernels linearise about that
@@ -172,7 +239,74 @@ class AdjointSolver3D {
       const ForwardTrajectory3D* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
 
+  /**
+   * @brief The 3D second-order adjoint, by Options::method: the kernels
+   * and their derivative along a direction v — the Hessian's action on v
+   * (the 3D form of AdjointSolver::SecondOrderKernels;
+   * docs/dev/adjoints.md). Continuous: the adjoint state and its
+   * derivative are both stepped by the reversed coupled machinery; the
+   * derivative state's step carries the continuous first-order drive
+   * built from the adjoint trajectory (pointwise, as the tangent-linear
+   * runs'), both jump at observations by the instantaneous adjoint strain
+   * — over itau(x) and by v's delta itau(x) — and the viscosity pairing
+   * is differentiated with the derivative state and v's tangent
+   * trajectory in place. Discrete: the exact derivative of the exact
+   * gradient — the transposed sweep carries the derivative dual state
+   * beside the first, its transposed fixed point forced by the derivative
+   * of the step's lateral weight acting on the first dual strain, and the
+   * itau pairing and the weight recursion differentiated along v (the
+   * Hessian symmetric to the solvers' tolerance); distributed like the
+   * first-order sweep. With
+   * Options::material_kernels the material kernels and their
+   * derivatives along v are formed too, and v may have a direction in
+   * the moduli (`material`; docs/dev/adjoints.md §15) — Discrete only
+   * for now.
+   *
+   * @param tangent v's tangent-linear run about the forward run, recorded
+   * at every node (TangentLinearSolver3D::Options::record), by the SAME
+   * method as Options::method.
+   * @param itau v's perturbation of itau over the grid values, per
+   * branch (TangentPerturbation3D::itau; a log-viscosity direction maps
+   * to it by TangentLinearSolver3D::ItauOfLogViscosity); empty for none.
+   * @param trajectory The recorded forward trajectory; required here.
+   * @param material v's perturbation of the moduli over the grid values
+   * (TangentPerturbation3D::material), which the tangent run must have
+   * been driven by too; empty for none.
+   */
+  [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> SecondOrderKernels(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      const std::vector<std::vector<double>>& itau,
+      const ForwardTrajectory3D& trajectory,
+      std::span<const std::vector<double>> oceanFunctions = {},
+      const MaterialDirection3D& material = {}) const;
+
  private:
+  /// The discrete transpose (AdjointDiscrete3D.cpp), carrying the
+  /// derivative dual state along v when a tangent run is given
+  /// (IceHistoryKernels and SecondOrderKernels share it).
+  [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> DiscreteSweep(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory3D* trajectory,
+      std::span<const std::vector<double>> oceanFunctions,
+      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      const std::vector<std::vector<double>>* ditau,
+      const MaterialDirection3D* material) const;
+
+  /// The continuous sweep, carrying the derivative state along v when a
+  /// tangent run is given (IceHistoryKernels and SecondOrderKernels
+  /// share it).
+  [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> Sweep(
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory3D* trajectory,
+      std::span<const std::vector<double>> oceanFunctions,
+      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      const std::vector<std::vector<double>>* ditau,
+      const MaterialDirection3D* material) const;
+
   const SeaLevelEvolution3D* evolution_;
   Options options_;
 };

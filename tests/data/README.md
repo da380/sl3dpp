@@ -37,7 +37,7 @@ anything back.
 | `decay_time.txt` | `make_decay_fixtures.py` | `TestMeasurements` | the decay-time estimator on a deterministic noisy series |
 | `e1_homogeneous.deck`, `e1_two_solid.deck` | `make_e1_fixtures.py` | `TestTractionNumbers` | the solid models of AdGIA's benchmark ladder, full precision |
 | `e1_traction_numbers.txt` | `make_e1_fixtures.py` | `TestTractionNumbers` | their traction numbers, without and with gravity |
-| `viscosity_log.nc`, `viscosity_mean.nc`, `viscosity_full3d.nc`, `viscosity_radial.nc` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` (and `viscosity_log.nc` `TestApps`) | the `TestViscoelastic3D` body's viscosity as planetmodel model files: a zero-mean log perturbation, one with a lateral mean, stored fully 3D, and radial alone |
+| `viscosity_log.nc`, `viscosity_mean.nc`, `viscosity_full3d.nc`, `viscosity_radial.nc` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` (and `viscosity_log.nc` `TestApps`, `TestAppsDistributed` and the 3D examples) | the `TestViscoelastic3D` body's viscosity as planetmodel model files: a zero-mean log perturbation, one with a lateral mean, stored fully 3D, and radial alone |
 | `viscosity_probes_log.txt`, `viscosity_probes_mean.txt`, `viscosity_probes_full3d.txt` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` | planetmodel's own reading of those files at fixed off-grid points |
 
 ## From the Fortran sl3d

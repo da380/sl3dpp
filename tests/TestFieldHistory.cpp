@@ -69,7 +69,7 @@ class FieldHistoryTest : public ::testing::Test {
  protected:
   static void SetUpTestSuite() {
     // One file per process: ctest runs each test in a process of its own,
-    // and a shared name let one test's teardown delete another's file.
+    // and a shared name would let one test's teardown delete another's file.
     path_ = new std::filesystem::path(
         std::filesystem::temp_directory_path() /
         ("sl3dpp_test_field_history_" + std::to_string(::getpid()) + ".nc"));

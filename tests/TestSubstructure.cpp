@@ -1,4 +1,4 @@
-// Radial substructuring, step 1 of docs/dev/radial-substructuring.md: the
+// Radial substructuring (docs/radial-partitioning.md): the
 // degree systems solved segment by segment, the cut nodes' dofs together,
 // against the direct banded solves. A synthetic spectral-element band
 // system; every spheroidal and toroidal degree of the prem8 systems at
@@ -222,8 +222,8 @@ TEST(Substructure, EverySpheroidalDegreeMatchesTheDirectSolve) {
 
 TEST(Substructure, CutsAtTheSolidFluidBoundariesToo) {
   // Algebraically any element boundary separates; the fluid core's own
-  // boundaries, where the dofs change, included. (The radial plan keeps
-  // cuts inside layers, which BalancedCuts does.)
+  // boundaries, where the dofs change, included. (BalancedCuts keeps
+  // cuts inside layers.)
   constexpr auto lmax = 32;
   const auto prem = Prem8(lmax);
   const auto& material = prem.material;

@@ -172,6 +172,243 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   return out;
 }
 
+namespace {
+
+/// The inertia moment integrand with a given density: sqrt(4 pi) int rho
+/// U r^3 dr over the mesh (InertiaMoment with the material's density).
+double InertiaMomentWith(const RadialMesh& mesh, std::span<const double> rho,
+                         std::span<const double> U) {
+  const auto n = mesh.NGll();
+  const auto w = mesh.Weights();
+  auto sum = 0.0;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto jac = mesh.Jacobian(e);
+    for (auto q = 0; q < n; ++q) {
+      const auto i = static_cast<std::size_t>(e) * n + q;
+      if (!std::isfinite(U[i])) continue;
+      const auto r = mesh.Radius(e, q);
+      sum += w[q] * jac * rho[i] * U[i] * r * r * r;
+    }
+  }
+  return std::sqrt(4.0 * std::numbers::pi) * sum;
+}
+
+}  // namespace
+
+LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
+                                         const MaterialDirection& direction,
+                                         LoveNumberOptions options) {
+  if (lmax < 0) {
+    throw std::invalid_argument("lmax must be non-negative");
+  }
+  const auto dm = material.Variation(direction);
+  const auto& scales = material.ModelScales();
+  LoveNumbers out;
+  out.degrees.resize(lmax + 1);
+  for (auto l = 0; l <= lmax; ++l) out.degrees[l] = l;
+  for (auto* v :
+       {&out.h_u, &out.l_u, &out.k_u, &out.h_phi, &out.l_phi, &out.k_phi,
+        &out.h_v, &out.l_v, &out.k_v, &out.h_t, &out.l_t, &out.k_t}) {
+    v->assign(lmax + 1, 0.0);
+  }
+  out.radius = 0.0;
+  out.surface_gravity =
+      dm.surfaceGravity * scales.Factor(AccelerationDimensions);
+  out.gravitational_constant = 0.0;
+
+  const auto hLoad = scales.Factor(kHPerLoad);
+  const auto kLoad = scales.Factor(kKPerLoad);
+  const auto hPot = scales.Factor(kHPerPotential);
+  const auto kPot = scales.Factor(kKPerPotential);
+
+#pragma omp parallel for schedule(dynamic)
+  for (auto l = 0; l <= lmax; ++l) {
+    DegreeOperator op(material, l,
+                      {.eps = options.eps,
+                       .truncation = options.truncation,
+                       .point_shear = options.point_shear});
+    const auto n = op.DofCount();
+    const auto nrhs = l == 0 ? 5 : 4;
+    auto rhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
+    auto drhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
+    const auto columns = {op.Load(LoadPart::Force),
+                          op.Load(LoadPart::Potential), op.Tangential(),
+                          op.Tide()};
+    const auto dcolumns = {op.LoadVariation(dm, LoadPart::Force),
+                           op.LoadVariation(dm, LoadPart::Potential),
+                           op.TangentialVariation(dm), op.TideVariation(dm)};
+    auto k = 0;
+    for (const auto& column : columns) {
+      std::ranges::copy(column, rhs.begin() + (k++) * n);
+    }
+    k = 0;
+    for (const auto& column : dcolumns) {
+      std::ranges::copy(column, drhs.begin() + (k++) * n);
+    }
+    if (l == 0) {
+      std::ranges::copy(op.Tide(2), rhs.begin() + 4 * n);
+      std::ranges::copy(op.TideVariation(dm, 2), drhs.begin() + 4 * n);
+    }
+    // x = K^-1 b, then dx = K^-1 (db - dK x).
+    const auto x = op.Solve(rhs, nrhs);
+    const auto dKx = op.ApplyVariation(dm, x, nrhs);
+    for (auto i = std::size_t{0}; i < drhs.size(); ++i) drhs[i] -= dKx[i];
+    const auto dx = op.Solve(drhs, nrhs);
+
+    const auto iU = op.SurfaceDof(Component::U);
+    const auto iV = op.SurfaceDof(Component::V);
+    const auto iP = op.SurfaceDof(Component::Phi);
+    auto value = [&](const std::vector<double>& y, int dof, int column) {
+      return dof >= 0 ? y[static_cast<std::size_t>(column) * n + dof] : 0.0;
+    };
+    struct Channel {
+      int column;
+      std::vector<double>* h;
+      std::vector<double>* l;
+      std::vector<double>* k;
+      double hFactor;
+      double kFactor;
+    };
+    const Channel channels[4] = {
+        {0, &out.h_u, &out.l_u, &out.k_u, hLoad, kLoad},
+        {1, &out.h_phi, &out.l_phi, &out.k_phi, hLoad, kLoad},
+        {2, &out.h_v, &out.l_v, &out.k_v, hLoad, kLoad},
+        {3, &out.h_t, &out.l_t, &out.k_t, hPot, kPot},
+    };
+    for (const auto& c : channels) {
+      (*c.h)[l] = value(dx, iU, c.column) * c.hFactor;
+      (*c.l)[l] = value(dx, iV, c.column) * c.hFactor;
+      (*c.k)[l] = value(dx, iP, c.column) * c.kFactor;
+    }
+
+    if (l == 0) {
+      out.h_c = value(dx, iU, 4) * hPot;
+      out.k_c = value(dx, iP, 4) * kPot;
+      const auto mLoad = scales.Factor(kMomentPerLoad);
+      const auto mPot = scales.Factor(kMomentPerPotential);
+      const auto& mesh = material.Mesh();
+      for (const auto& [name, column, factor] :
+           {std::tuple{&out.m_u, 0, mLoad}, std::tuple{&out.m_phi, 1, mLoad},
+            std::tuple{&out.m_c, 4, mPot}}) {
+        const auto nodal =
+            op.Expand({x.data() + static_cast<std::size_t>(column) * n,
+                       static_cast<std::size_t>(n)});
+        const auto dnodal =
+            op.Expand({dx.data() + static_cast<std::size_t>(column) * n,
+                       static_cast<std::size_t>(n)});
+        *name = (InertiaMomentWith(mesh, material.Rho(), dnodal.U) +
+                 InertiaMomentWith(mesh, dm.rho, nodal.U)) *
+                factor;
+      }
+    }
+  }
+  return out;
+}
+
+LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
+                                           LoveNumberOptions options) {
+  if (lmax < 0) {
+    throw std::invalid_argument("lmax must be non-negative");
+  }
+  const auto& scales = material.ModelScales();
+  const auto size = material.Rho().size();
+  const auto hLoad = scales.Factor(kHPerLoad);
+  const auto kLoad = scales.Factor(kKPerLoad);
+  const auto hPot = scales.Factor(kHPerPotential);
+  const auto kPot = scales.Factor(kKPerPotential);
+  LoveNumberKernels out;
+  for (auto* channel : {&out.load, &out.potential, &out.tangential, &out.tide}) {
+    for (auto* v : {&channel->h_kappa, &channel->h_mu, &channel->h_rho,
+                    &channel->l_kappa, &channel->l_mu, &channel->l_rho,
+                    &channel->k_kappa, &channel->k_mu, &channel->k_rho}) {
+      v->assign(lmax + 1, std::vector<double>(size, 0.0));
+    }
+  }
+
+#pragma omp parallel for schedule(dynamic)
+  for (auto l = 0; l <= lmax; ++l) {
+    DegreeOperator op(material, l,
+                      {.eps = options.eps,
+                       .truncation = options.truncation,
+                       .point_shear = options.point_shear});
+    const auto n = op.DofCount();
+    constexpr auto nrhs = 4;
+    auto rhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
+    const auto columns = {op.Load(LoadPart::Force),
+                          op.Load(LoadPart::Potential), op.Tangential(),
+                          op.Tide()};
+    auto k = 0;
+    for (const auto& column : columns) {
+      std::ranges::copy(column, rhs.begin() + (k++) * n);
+    }
+    const auto x = op.Solve(rhs, nrhs);
+    // The unit surface duals' solutions, U, V and phi.
+    const int dofs[3] = {op.SurfaceDof(Component::U), op.SurfaceDof(Component::V),
+                         op.SurfaceDof(Component::Phi)};
+    auto duals = std::vector<double>(static_cast<std::size_t>(n) * 3, 0.0);
+    for (auto c = 0; c < 3; ++c) {
+      if (dofs[c] >= 0) duals[static_cast<std::size_t>(c) * n + dofs[c]] = 1.0;
+    }
+    const auto y = op.Solve(duals, 3);
+    struct Target {
+      LoveNumberKernels::Channel* channel;
+      int column;
+      double hFactor, kFactor;
+    };
+    const Target targets[4] = {{&out.load, 0, hLoad, kLoad},
+                               {&out.potential, 1, hLoad, kLoad},
+                               {&out.tangential, 2, hLoad, kLoad},
+                               {&out.tide, 3, hPot, kPot}};
+    for (const auto& t : targets) {
+      const auto xc = std::span(x).subspan(
+          static_cast<std::size_t>(t.column) * n, static_cast<std::size_t>(n));
+      std::vector<std::vector<double>>* kappas[3] = {
+          &t.channel->h_kappa, &t.channel->l_kappa, &t.channel->k_kappa};
+      std::vector<std::vector<double>>* mus[3] = {&t.channel->h_mu, &t.channel->l_mu,
+                                                  &t.channel->k_mu};
+      std::vector<std::vector<double>>* rhos[3] = {
+          &t.channel->h_rho, &t.channel->l_rho, &t.channel->k_rho};
+      const double factors[3] = {t.hFactor, t.hFactor, t.kFactor};
+      const double one[1] = {1.0};
+      for (auto c = 0; c < 3; ++c) {
+        if (dofs[c] < 0) continue;
+        const auto yc = std::span(y).subspan(static_cast<std::size_t>(c) * n,
+                                             static_cast<std::size_t>(n));
+        auto [gk, gm] = op.MaterialGradient(yc, xc, 1);
+        auto& kappa = (*kappas[c])[l];
+        auto& mu = (*mus[c])[l];
+        for (auto i = std::size_t{0}; i < size; ++i) {
+          kappa[i] = -factors[c] * gk[i];
+          mu[i] = -factors[c] * gm[i];
+        }
+        // The density: -<y, (dK) x> plus the forcing's own variation
+        // (the load's traction piece through the surface gravity, the
+        // tangential's alike, the tide's through the density, its
+        // derivative, gravity and the interfaces).
+        DensityDuals duals;
+        op.AddDensityDuals(yc, xc, 1, -1.0, duals);
+        switch (t.column) {
+          case 0:
+            op.AddLoadDensityDuals(yc, one, LoadPart::Force, 1.0, duals);
+            break;
+          case 2:
+            op.AddTangentialDensityDuals(yc, one, 1.0, duals);
+            break;
+          case 3:
+            op.AddTideDensityDuals(yc, one, -1, 1.0, duals);
+            break;
+          default:
+            break;
+        }
+        auto& rho = (*rhos[c])[l];
+        const auto gr = material.DensityGradient(duals);
+        for (auto i = std::size_t{0}; i < size; ++i) rho[i] = factors[c] * gr[i];
+      }
+    }
+  }
+  return out;
+}
+
 LoveNumbers LoveNumbers::ConvertedTo(const Scales& scales) const {
   auto out = *this;
   const auto hLoad = scales.Factor(kHPerLoad);

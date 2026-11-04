@@ -5,7 +5,7 @@
  * @brief The sea level engine: the gravitationally consistent sea level
  * equation — linear, generalised, or nonlinear with migrating shorelines,
  * with the rotational feedbacks — for whatever Love numbers it is given.
- * A port of pyslfp's `core.sea_level` (its docstrings and
+ * Corresponds to pyslfp's `core.sea_level` (its docstrings and
  * `pyslfp_theory.tex` are the authoritative statements), on GSHTrans
  * fields.
  *
@@ -45,9 +45,13 @@
 namespace sl3dpp {
 
 /// Physical parameters of the rotating body, SI (pyslfp's
-/// `EarthModelParameters` defaults). The sea-floor radius, surface gravity
-/// and G are replaced by the Love table's values on construction of the
-/// solver (pyslfp's `with_body`), so the body and its response agree.
+/// `EarthModelParameters` defaults). With `body_from_table` (the default)
+/// the sea-floor radius and surface gravity are replaced by the Love
+/// table's values on construction of the solver (pyslfp's `with_body`),
+/// so the body and its response agree; without it they are the
+/// parameters given — the engine's gravity an independent parameter, as
+/// the material derivatives in the density treat it (docs/dev/adjoints.md
+/// §16).
 struct SeaLevelParameters {
   double equatorial_radius = 6378137.0;
   double polar_radius = 6356752.0;
@@ -61,6 +65,7 @@ struct SeaLevelParameters {
   double rotation_frequency = 7.27220521664304e-05;
   double water_density = 1000.0;
   double ice_density = 917.0;
+  bool body_from_table = true;
 };
 
 /// The parameters with the difference of the principal moments set from a

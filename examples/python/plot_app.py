@@ -351,6 +351,29 @@ def kernels3d() -> None:
     print("wrote app_kernels3d.png")
 
 
+def static() -> None:
+    path = OUT / "static.nc"
+    if not path.exists():
+        return
+    ex = surface(path, ["displacement", "displacement_radial_model", "potential"])
+    ex.fields["difference"] = (ex.fields["displacement"]
+                               - ex.fields["displacement_radial_model"])
+    fig = plt.figure(figsize=(12, 4))
+    extent = (-140.0, -30.0, 25.0, 85.0)
+    for k, (name, title) in enumerate((
+            ("displacement", "surface displacement, 3D model (m)"),
+            ("difference", "3D minus radial model (m)"))):
+        ax = world_map(fig, 1, 2, k + 1, central_longitude=-85.0, extent=extent)
+        mesh = plot_field(ax, ex, name, title=title)
+        mark_sites(ax, [HUDSON_BAY])
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+    fig.suptitle("sl3d static: a cap load over Hudson Bay on the synthetic 3D "
+                 "elastic Earth")
+    fig.tight_layout()
+    fig.savefig("app_static.png", dpi=150)
+    print("wrote app_static.png")
+
+
 if __name__ == "__main__":
     love_numbers()
     fingerprint("fingerprint", "sl3d fingerprint: 10% of the synthetic "
@@ -371,3 +394,4 @@ if __name__ == "__main__":
     evolve_ice7g()
     kernels1d()
     kernels3d()
+    static()

@@ -1,6 +1,6 @@
 # sl3dpp examples
 
-Seven small drivers, one per capability of the library, each paired with a
+Eight small drivers, one per capability of the library, each paired with a
 Python plotting script, and an example config for every command of the
 `sl3d` program:
 
@@ -13,6 +13,7 @@ Python plotting script, and an example config for every command of the
 | `ExampleModelViscosity` | the route from real tomography: a 3D viscosity read from a planetmodel model file (`io::ModelViscosity`), run through the whole deglaciation against the file's own radial reference | lmax 32, 20 s | `plot_model_viscosity.py` |
 | `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
 | `ExampleViscosityKernels3D` | 3D adjoint kernels: the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 31 s | `plot_kernels_3d.py` |
+| `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
 
 The defaults keep each run under a minute on 8 threads, the times shown;
 the largest peak memory is 11 GB, for `ExampleIceKernels`. The
@@ -24,6 +25,12 @@ sized for a laptop; CI runs each at a small one) and the Earth's state.
 
 ## The inputs
 
+- **The synthetic 3D elastic Earth**, `synthetic_moduli.nc`, which the
+  build writes too (`MakeSyntheticModuli`): a planetmodel model file of
+  the PREM-like deck's density and moduli with a lateral perturbation of
+  the upper mantle — a stiff craton under the Canadian shield, a soft
+  ridge under the eastern Pacific — in the form planetmodel's conversion
+  of a tomography model writes, for `ExampleStatic3D` and `static.json`.
 - **The synthetic Earth**, `synthetic_earth.nc`, which the build writes
   (`MakeSyntheticEarth`): a planetmodel surface file of `ice_thickness` and
   `topography` on a 1° grid over a toy glacial cycle — smooth continents on
@@ -67,6 +74,15 @@ member is documented in the configuration reference
 `evolve1d.json` writes checkpoints into `out/`, and a run refuses another
 run's checkpoints, so after changing it set `"restart": false` (or delete
 `out/`) for the first rerun.
+
+## Outputs generated in the build
+
+`cmake --build build -t sl3dpp_example_outputs` runs every driver at the
+small degree CI uses (seconds each) in `build/examples`, and with
+`-DSL3DPP_RUN_EXAMPLES=ON` the build does so by itself; `-t
+sl3dpp_example_figures` then draws every figure through the poetry
+environment there (`poetry install` in `build/examples` first). The
+full-size runs are the drivers' own defaults.
 
 ## Everything runs in the build tree
 

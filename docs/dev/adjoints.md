@@ -5,8 +5,10 @@
 continuous adjoints, quelling, 1D viscous kernels, checkpointing) and
 Yu et al. 2025 (equation references below are to that paper). pyslfp is
 the porting template for the 1D path; the 3D path is sl3dpp's own.
-Sections 6a and 6b record what is built in 3D and what is designed but
-not built.*
+Sections 6a and 6b record the 3D continuous sweep and the design of the
+discrete 3D transpose; §8–§13 the tangent-linear runs, the second-order
+adjoints, the discrete 3D transpose as built (§12) and the material
+derivatives and kernels.*
 
 ## 1. Both formulations, continuous preferred (decided 16 Oct 2026)
 
@@ -44,21 +46,19 @@ one interface and one result type so every gate runs on both alike.
    steps); the kernel views of §4.
 2. **3D kernels**: the continuous adjoint of the coupled 3D
    evolution and the grid viscosity kernel μ_k m†:(d − m)/itau (§6,
-   §6a); the discrete transpose of the reduced pipeline is designed
-   (§6b) but not built.
+   §6a), and the discrete transpose of the reduced pipeline, designed in
+   §6b and built (§12).
    **Both kernel granularities are deliverables** (David, 16 Oct 2026):
    the full 3D viscosity kernel on the (memory nodes × angular grid),
    AND the spherically averaged 1D radial kernel as pyslfp provides —
    the latter both from the 1D sweeps directly and as the spherical
    average of the 3D kernel, whose agreement in the zero-lateral limit
    is a free consistency gate between the two pipelines.
-3. Deferred when this was drafted: linearisation about a
-   migrating-shoreline trajectory (pyslfp's `ocean_functions`), until
-   sl3dpp's forward evolution grew migration. It was built on 25 October
-   2026 with the migrating evolutions, 1D and 3D: the sweeps'
-   `oceanFunctions` argument (design.md §7). Decay-time functionals (pyslfp
-   `functionals.py`), a front end over Measurement, were ported later
-   (`DecayTimeMeasurements` in `Measurements.hpp`).
+3. Linearisation about a migrating-shoreline trajectory (pyslfp's
+   `ocean_functions`), 1D and 3D: the sweeps' `oceanFunctions` argument
+   (design.md §7). Decay-time functionals (pyslfp `functionals.py`), a
+   front end over Measurement: `DecayTimeMeasurements` in
+   `Measurements.hpp`.
 
 ## 3. The 1D sweeps (pyslfp's algebra, verbatim)
 
@@ -103,10 +103,10 @@ code; what follows fixes the sl3dpp mapping only.
   internal state every stride-th node and the per-node load/tide
   coefficients always; a `TrajectoryCursor` serves states strictly
   backwards, reconstructing gaps by `StepBack` under the recorded
-  loads. *(17 Oct 2026: recordings keep the internal variables only, as
-  in pyslfp and AdGIA; the cursor regenerates each stored state's strain
-  by one elastic solve under that node's recorded loads, and the 3D
-  sweep does the same per node.)* Roundoff grows as exp(Σh) across a gap — the stride buys
+  loads. Recordings keep the internal variables only, as in pyslfp and
+  AdGIA; the cursor regenerates each stored state's strain by one elastic
+  solve under that node's recorded loads, and the 3D sweep does the same
+  per node. Roundoff grows as exp(Σh) across a gap — the stride buys
   memory at the price of trailing digits (pyslfp `_TrajectoryCursor`).
 
 ## 4. Result type and views
@@ -138,22 +138,35 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 ## 5. Architecture
 
-- `include/sl3dpp/Adjoint.hpp` + `src/Adjoint.cpp`: `Measurement`,
-  `IceKernels`, `ForwardTrajectory` (built from recorded snapshots),
-  and the sweeps as methods of `SeaLevelEvolution`
-  (`AdjointIceHistory`, `ContinuousAdjointIceHistory`), mirroring
-  pyslfp's placement — the evolution already holds the operator,
-  solver, state and unit ratios both sweeps need.
-- Internals access: `ViscoelasticOperator` befriends a single
-  `detail::AdjointAccess` defined in Adjoint.cpp (the pattern of
-  `ViscoelasticStep`); nothing speculative is made public. The degree
-  workspace already has the transposes (`DualFromScalars`,
-  `momentRow`); it grows `ApplyWeights` (factored out of
-  `MemoryForce`) and a surface-dual placement; the operator grows
-  cached split unit responses and nodal weight derivatives beside
-  `SchemeWeightsOf`.
-- The 3D sweeps follow in `Evolution3D`/`Viscoelastic3D` once 1D is
-  gated (§6).
+- `Adjoint.hpp`: `Measurement`, `IceKernels`, `KernelDerivatives`,
+  `ForwardTrajectory` (built from recorded snapshots) and
+  `AdjointSolver`, which borrows a `SeaLevelEvolution` (the operator,
+  solver, state and unit ratios the sweeps need). Its
+  `IceHistoryKernels` runs either 1D sweep by `Options::method`
+  (`Adjoint.cpp`); its `SecondOrderKernels` the second-order sweeps
+  (`AdjointSecondOrder.cpp`, §9). The pieces they share (the reverse
+  trajectory cursor, the dual packers, the node weights, the measurement
+  check) are in `detail/AdjointInternals.hpp`.
+- `Adjoint3D.hpp`: `ForwardTrajectory3D`, `Kernels3D`,
+  `KernelDerivatives3D` and `AdjointSolver3D` over a
+  `SeaLevelEvolution3D`. `IceHistoryKernels` and `SecondOrderKernels` run
+  the continuous sweep, one core in `Adjoint3D.cpp` (§6a, §11);
+  `Options::method = Discrete` the discrete transpose in
+  `AdjointDiscrete3D.cpp` (§12).
+- `TangentLinear.hpp`, `TangentLinear3D.hpp`: `TangentLinearSolver` and
+  `TangentLinearSolver3D`, the forward mode (§8, §10).
+- Internals access is by friendship; nothing speculative is made
+  public. `ViscoelasticOperator` befriends `AdjointSolver`,
+  `AdjointSolver3D` (the 3D continuous sweep's jump) and
+  `TangentLinearSolver`, and `ViscoelasticStep` befriends
+  `TangentLinearSolver` (`Viscoelastic.hpp`); `Viscoelastic3D` and its
+  `OpenStep` befriend `AdjointSolver3D` and `TangentLinearSolver3D`
+  (`Viscoelastic3D.hpp`); each evolution befriends its adjoint and
+  tangent-linear solvers. The degree workspace
+  (`detail/ViscoelasticDegree.hpp`) carries the transposes
+  (`DualFromScalars`, `momentRow`, `ApplyWeights`); the operator caches
+  the split unit responses (`SplitUnitResponses`) and the scheme weights
+  with their h-derivatives (`SchemeWeightsOf`, `WeightsOfOrder`).
 
 ## 6. The 3D path
 
@@ -166,12 +179,11 @@ dual by the dot product; densities/rates are per unit SLE time.
   2025's multiplier integral, as in pyslfp and the 1D sweep (not the
   Fortran's rate-form kernel expression): per branch and memory point,
   μ_k m†:(d − m)/itau, accumulated over the reversed nodes with the
-  split trapezoid. *(Corrected 17 Oct 2026: this paragraph first planned
-  the contraction μ s (d − m):(d† − m†) with metric signs from
-  GSHTrans's tensor types; as built, §6a, the contraction pairs the
-  adjoint memory with the forward d − m, and its metric on the reduced
-  storage is fixed by the 1D limit.)* The reality reduction gives the derived spins by sign·conj for
-  free at the contraction, and the adjoint fields are real tensors too.
+  split trapezoid. The contraction pairs the adjoint memory with the
+  forward d − m, and its metric on the reduced storage is fixed by the 1D
+  limit (§6a), not taken from GSHTrans's tensor types. The reality
+  reduction gives the derived spins by sign·conj for free at the
+  contraction, and the adjoint fields are real tensors too.
 - **Discrete option**: the exact transpose of the reduced pipeline —
   Scatter/batched-synthesis/pointwise-multiply/analysis/force-rows in
   reverse, the m ≥ 0 column reduction and the spin orbit relation
@@ -190,12 +202,10 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 ## 6a. The 3D continuous sweep as built
 
-`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (continuous only; the discrete
-transpose is not built, §6b), `ForwardTrajectory3D` (full recording via
-`SeaLevelEvolution3D::Options::record_stride` — no 3D backward
-reconstruction yet, so the viscosity kernels demand stride 1; since 17
-Oct, performance chunk 10, the sweep rebuilds the gaps by forward steps
-from the kept states, so any stride serves), and
+`Adjoint3D.hpp/cpp`: `AdjointSolver3D` (the continuous sweep; the
+discrete transpose is built too, §12), `ForwardTrajectory3D` (a recording
+at any `SeaLevelEvolution3D::Options::record_stride`: the sweep rebuilds
+the gaps by forward steps from the kept states), and
 `Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, an
 ANGULAR DENSITY over memory node × coupling grid, radial quadrature
 folded in), its angular integral `itauKernelSpherical` (the 1D bridge),
@@ -224,15 +234,14 @@ reduction equal the 1D continuous sweep's at 1e-6 through the whole
 pipeline; lateral — the full 3D log-viscosity kernel against central
 differences of the coupled forward along an analytic direction, at the
 commute level (< 10%) in the resolved regime and improving under step
-refinement; and the canonical TAYLOR TEST (added 16 Oct 2026 at
-David's prompt): |J(δ+hp) − J| = O(h) and the gradient-corrected
-remainder |J(δ+hp) − J − h⟨K,p⟩| at second order on the
-curvature-dominated end of the h-sweep, monotone, and inside the
+refinement; and the canonical Taylor test: |J(δ+hp) − J| = O(h) and the
+gradient-corrected remainder |J(δ+hp) − J − h⟨K,p⟩| at second order on
+the curvature-dominated end of the h-sweep, monotone, and inside the
 commute floor (0.1·h·|⟨K,p⟩|) everywhere. The machine-grade Taylor
-test — second order to solver precision at every h — belongs to the
-discrete transpose (§6b).
+test, second order to solver precision at every h, is the discrete
+transpose's (§12).
 
-## 6b. The discrete 3D transpose: design (not built)
+## 6b. The discrete 3D transpose: design (built, §12)
 
 The step is LINEAR throughout, so its exact transpose is mechanical
 once the pairings are fixed. Write the forward within-step pass (the
@@ -244,15 +253,14 @@ code of Evolution3D::Run and OpenStep) as d' = Exit K⁻¹ [Entry(m̃ +
 - K the reference effective systems (symmetric), S the surface reads,
   closure the (linear) generalised SLE, Δβ = diag(β_k(x) − β_ref_k(r)).
 
-*Note (17 Oct 2026, performance chunk 3; `walkthrough-3d-step.md` §4).*
-The forward code now iterates on the strain's COEFFICIENTS s, not its
-grid values d. A pass is s' = AddStrainOfSolution(K⁻¹[fixed +
-Analyse(W · Synthesise(s)) + channels]), where fixed = Analyse(Σ_k μ_k
-m̃_k) is formed once per step and W = Σ_k μ_k Δβ_k(x) is a single weight
-field. The step map, and so everything in this section, is unchanged.
-Only the code's split has moved: Exit now stops at the coefficients,
-Synthesise opens the next pass, and Entry's constant part is applied
-once per step. A transposed iteration can likewise run on coefficient
+*Note* (`walkthrough-3d-step.md` §4). The forward code iterates on the
+strain's COEFFICIENTS s, not its grid values d. A pass is
+s' = AddStrainOfSolution(K⁻¹[fixed + Analyse(W · Synthesise(s)) +
+channels]), where fixed = Analyse(Σ_k μ_k m̃_k) is formed once per step
+and W = Σ_k μ_k Δβ_k(x) is a single weight field. The step map, and so
+everything in this section, is the same; only the code's split differs:
+Exit stops at the coefficients, Synthesise opens the next pass, and
+Entry's constant part is applied once per step. A transposed iteration can likewise run on coefficient
 duals.
 
 **The load-bearing duality**: Entry = Exitᵀ under the ENERGY pairing
@@ -295,6 +303,8 @@ Scatter/Gather and must be verified, not trusted):
 
 ## 7. Implementation order and gates
 
+All five are built: a–d as §3 and §6a record, e as §12 does.
+
 a. **Discrete 1D sweep** (ice kernels, full Measurement). GATES:
    dot-product/gradient identity at solver tolerance against the
    forward driver for random perturbations on the time grid; pyslfp
@@ -308,8 +318,1325 @@ c. **itau/viscosity kernels + checkpointing**, both sweeps. GATES: FD
    pyslfp fixtures.
 d. **3D continuous sweep + grid viscosity kernel** (§6). GATES:
    zero-lateral limit; FD checks; Δt refinement.
-e. **3D discrete transpose**. GATES: dot-product at machine precision;
-   zero-lateral == 1D discrete; the contrast-ladder diagnostic.
+e. **3D discrete transpose** (§12). GATES: dot-product at machine
+   precision; zero-lateral == 1D discrete; the contrast-ladder
+   diagnostic.
 
 Fixtures: `scripts/make_kernel_fixtures.py` driving pyslfp, committed
 under `tests/data/` with provenance headers, like the other fixtures.
+
+## 8. The tangent-linear runs (built 3 November 2026)
+
+The forward mode, ported from pyslfp's `tangent_linear_ice_history`
+(its docstring and `docs/planning/viscoelastic_operator_plan.md`, "The
+tangent-linear problem", are the authoritative statements; the
+second-derivative work follows pyslfp's plan). With the
+trajectory's ocean functions held the forward problem is linear in its
+loads, so the derivative along (δf, δI, δS₀, δitau) is the forward
+problem once more:
+
+- the shorelines prescribed from the trajectory (`oceanFunctionOverride`
+  on every generalised solve, as the sweeps do);
+- the direct load δfₙ + ρ_i (1 − Cₙ) δIₙ − ρ_i (1 − C₀) δI₀ +
+  ρ_w (Cₙ − C₀) δS₀, with the start the instantaneous elastic response to
+  its first node (zero for thickness and sea level directions);
+- per step, the opened step's decayed memory state shifted by a drive
+  (`ViscoelasticStep::AddMemory`), bilinear in the trajectory's (m, d) at
+  the step's ends and δitau at the memory points (the forward map of
+  `ItauKernelsAtNodes`' transpose, `ItauPerturbationAtPoints`):
+  - Discrete: dh (de m⁰ + dα d⁰ + dβ d¹) for the trapezoid, dw dh (m⁰ − d¹)
+    for backward Euler, dh = dt δitau — the forward mode of the scheme
+    weights, whose reverse mode is the discrete sweep's itau pairing;
+  - Continuous: α q⁰ + β q¹ (trapezoid) or (1 − w) q¹ (backward Euler)
+    with qⁿ = (dⁿ − mⁿ_k) δitau_k/itau_k — the continuous drive entering
+    like the strain, whose transpose is the continuous sweep.
+
+The two coincide in the loads and differ in itau by the order of the
+scheme. The forward trajectory is served forwards by `ForwardCursor`:
+stored states where the recording kept them (strain regenerated by one
+elastic solve under the recorded loads), exact forward steps under the
+recorded loads between — which amplify nothing, unlike the reverse
+cursor's backward reconstruction. With `Options::record` every snapshot
+keeps the tangent-linear state with its strain and the node's load and
+centrifugal coefficients: what the second-order runs read.
+
+Weights: `StepWeights.hpp` carries the second h-derivatives (d2e = e,
+d2α = d2φ₁ − e, d2β = −d2φ₁ with d2φ₁ = −(e + 2 dφ₁)/h and its series
+below the switch; 2/(1 + h)³ for backward Euler), cached by the operator
+beside the weights and their first derivatives (`WeightsOfOrder`).
+
+GATES (`TestTangentLinear`): linear in the loads at 1e-8 against the
+difference of two forward runs; the discrete pair exact transposes — the
+objective of the run along (δf, δitau) equals the pairing of the load
+duals (node 0 included) and the itau kernel at 1e-8, each argument alone
+too, and a stride-2 trajectory reproduces the full one at 1e-10; the
+continuous drive converging to the discrete at the scheme's order (gap
+< 0.2, falling by > 3 as the steps halve, η = 1e22 Pa s, 10 kyr ramp);
+about a migrating marine-cap trajectory, the run along thickness and
+initial-sea-level perturbations that flip no flotation cell equal to
+central differences of migrating runs at 1e-7, both methods, and the
+kernels' thickness and initial-sea-level views pairing to the same
+number; the initial sea level inert under frozen shorelines.
+
+**The second-order run** (`RunSecondOrder`; pyslfp's
+`second_order_tangent_linear_ice_history` under the sharp flotation
+rule): F''(x)[u, v] as the forward problem with no direct load, the
+shorelines prescribed, and the drive the sum of the first-order drive
+taken with v's recorded tangent trajectory and u's δitau, with u's
+trajectory and v's δitau, with the forward trajectory and the second
+variation itau_uv (empty for a parameterisation linear in itau), and, by
+the discrete method, the second derivatives of the scheme weights with
+the forward trajectory and both perturbations (dh_u dh_v (d2e m⁰ +
+d2α d⁰ + d2β d¹), or d2w dh_u dh_v (m⁰ − d¹)). With the ocean functions
+held the map is affine in the loads and the initial sea level, so those
+directions enter only through the tangent trajectories. The smoothed
+flotation rule's shoreline terms (pyslfp's `flotation_curvature`) are
+not ported: sl3dpp has no smoothed rule. Both runs share one loop
+(`March`: prescribed shorelines, a direct load per node, a memory
+increment per step).
+
+GATES: the second-order run along (u, v) is the derivative, at the base
+point along u, of the first-order run along v — central differences
+with the loads moved by ε δu and the rheology by ε δitau_u converge at
+second order (ratio in 3–5) and Richardson lands on it at 1e-6, both
+schemes — and is symmetric in u and v at 1e-10; it vanishes identically
+without a viscosity perturbation, about frozen and migrating runs alike;
+by the continuous method it converges to the discrete one at the
+scheme's order (gap 0.11 → 0.027 from 17 to 33 nodes over 10 kyr at
+η = 1e22; the coarser grids, h ≈ 1, are pre-asymptotic); unrecorded
+tangent runs are refused.
+
+## 9. The second-order adjoint (built 3 November 2026)
+
+`AdjointSolver::SecondOrderKernels` (`AdjointSecondOrder.cpp`; pyslfp's
+`second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
+under the sharp flotation rule, Yu et al. 2025 §4): the kernels of the
+objective and their derivative along a direction v — the action of the
+objective's Hessian on v, returned as `KernelDerivatives` (the thickness
+and initial-sea-level views' derivatives in the kernels' own pairings,
+and the itau kernel's). Inputs: the recorded forward trajectory, v's
+tangent-linear run recorded at every node by the same method, v's
+δitau, and a migrating run's ocean functions. The sweep that gives the
+kernels is itself a function of the parameters, through the forward
+trajectory and the relaxation times; differentiating it along v gives a
+second sweep of the same form, forced by the first sweep's state and
+δitau, with v's tangent trajectory entering where the forward one enters
+the kernels.
+
+- **Discrete** (the exact derivative of the exact gradient; the Hessian
+  symmetric to rounding): per reversed step, beside the first sweep's
+  (m†, d†), the derivative duals (dm†, dd†). The first sweep's solve is
+  the first-order one; the second sweep's dual of the step's solution is
+  dd† + Σ B dm† + Bh dh m† through the strain transpose plus the source
+  Σ Bh dh W s_y (the effective system's derivative acting on the first
+  sweep's solution), contracted with the unit responses into load and
+  tide duals and passed through the SLE adjoint with no measurement; its
+  radial solve closes dm̃† = dm† + W d s_y. The pairings g (the itau
+  kernel) and dg (its derivative: the same expression with each factor
+  replaced in turn by its derivative — the dual state's, the tangent
+  trajectory's (v m⁰, v d⁰, v d¹), and the weights' second derivatives
+  times dh) accumulate at the memory points; the recursion closes both
+  states (dm† = E dm̃† + Eh dh m̃†, dd† = Σ A dm̃† + Ah dh m̃†). The start
+  is the transposed instantaneous solve for both dual states. Weights in
+  the trapezoid's (E, A, B) form, backward Euler as (w, 0, 1 − w).
+- **Continuous**: the adjoint state and its derivative are both stepped
+  by the forward machinery in reversed time; the derivative state's step
+  carries the continuous first-order drive built from the adjoint
+  trajectory (`TangentLinearSolver::FirstOrderDrive` with the primed
+  pre-step state and the post-step state); at an observation both jump
+  by the instantaneous adjoint strain, over itau for the state and by
+  δitau for its derivative; the viscosity pairing is differentiated with
+  the derivative state and v's tangent trajectory in place, less
+  (δitau/itau) times the first-order pairing. Assembly as the first
+  sweep's (split node weights, lumps on the kernels only).
+
+The shoreline terms of pyslfp's smoothed flotation rule are not ported.
+The sweeps' shared pieces (the trajectory cursor, dual packers, node
+weights, measurement check) are in `detail/AdjointInternals.hpp`.
+
+GATES (`TestSecondOrderAdjoint`): the kernels the second-order sweep
+carries equal the first-order sweep's at 1e-12, both methods, about
+frozen and migrating runs; along v, central differences of the gradient
+paired with u converge at second order to the derivatives paired with u
+and Richardson lands on them at 1e-6, both schemes; ⟨H u, w⟩ = ⟨H w, u⟩
+at 1e-9 and equals ⟨g, F''[u, w]⟩ from the second-order tangent-linear
+run at 1e-9, frozen and migrating; the continuous derivatives converge
+to the discrete block by block (ice, viscosity) and their mismatch with
+the continuous second-order run falls at the scheme's order (17 → 33
+nodes, η = 1e22), the discrete pair matching at 1e-9 at every spacing.
+
+## 10. The 3D tangent-linear runs (built 3 November 2026)
+
+`TangentLinearSolver3D` (`TangentLinear3D.hpp/cpp`; sl3dpp's own — pyslfp
+has no 3D): the derivative of the coupled lateral-viscosity evolution
+along a direction in the direct load, the ice thickness, the initial sea
+level and the laterally varying inverse relaxation times, and the
+second-order run along two directions. The direction in itau is per
+branch over the coupling's grid values (the layout of
+`Kernels3D::itauKernel3D`), or a log-viscosity field δδ(x) which maps
+to it by δitau_k = −itau_k(x) δδ (`ItauOfLogViscosity`; the second
+variation of the log parameterisation, itau u v, by
+`SecondVariationOfLogViscosity`).
+
+The algebra is the 1D one pointwise. The coupled step is linear in its
+loads and its memory with coefficients that depend on itau(x) through
+the pointwise weights alone: the decayed memory e(x) m + α(x) d⁰, the
+lateral weight Σ μ_k (β_k(x) − β_ref) in the fixed point's force, and
+the finish m⁺ = m̃ + β(x) d. Differentiating each in itau(x) gives
+terms that together are exactly the 1D drive dh (de m⁰ + dα d⁰ + dβ d¹)
+added to the decayed memory — `OpenStep::AddMemory`, which raises the
+fixed memory force Σ μ_k m̃_k and the end state alike, so the within-step
+iteration, the reference effective systems and the sea level closure
+run unchanged (the lateral weight W δd is the trajectory's). The
+continuous drive α q⁰ + β q¹, q = (d − m) δitau/itau, is pointwise too.
+The forward trajectory is served forwards by `ForwardCursor3D`: kept
+states as recorded, the gaps rebuilt by forward coupled steps under the
+recorded loads with the run's own iteration (the adjoint's rebuild, in
+the forward direction). Snapshots are `SeaLevelEvolution3D`'s, recording
+the tangent state with its strain for the second-order run.
+
+GATES (`TestTangentLinear3D`, lmax 8): zero-lateral — with δ = 0 at the
+GLL memory points the 3D run equals the 1D run along loads and an
+angle-uniform itau perturbation at 1e-7, both methods; with lateral
+structure on, linear in the loads at 1e-8 against two coupled runs; the
+discrete run along a log-viscosity direction p is the exact derivative
+of the coupled forward (central differences with the operator's δ moved
+by ε p converge at second order, Richardson to 1e-6), and the continuous
+run pairs with the continuous 3D kernel ⟨K_δ, p⟩ at the commute level
+(< 10 %); the second-order run along loads and log-viscosity directions
+(with itau_uv) is the derivative along u of the first-order run along v
+at the moved operator (second order, Richardson to 1e-6), symmetric at
+1e-9, and zero without a viscosity perturbation.
+
+## 11. The 3D second-order adjoint (built 3 November 2026)
+
+`AdjointSolver3D::SecondOrderKernels`: the continuous sweep of §6a runs
+as one core (`Sweep`) that carries, when given v's recorded 3D
+tangent run and δitau(x), a second carried state — the derivative of
+the adjoint state along v — beside the first. The derivative state is
+stepped by the same reversed coupled machinery, its step driven by the
+continuous first-order drive of the adjoint trajectory
+(`TangentLinearSolver3D::FirstOrderDrive` with the primed pre-step
+adjoint state and the post-step one, through `OpenStep::AddMemory`);
+both states jump at an observation by the instantaneous adjoint strain,
+over itau(x) and by δitau(x); and the pointwise pairing is
+differentiated — the derivative state against the forward d − m, the
+adjoint state against v's tangent d − m, less (δitau/itau) times the
+pairing itself — with the same null-basis metric. The result is
+`KernelDerivatives3D`: the thickness and initial-sea-level views'
+derivatives, the itau kernel's derivative on the grid and its spherical
+reduction, and the log-viscosity kernel's derivative
+−(δitau K + itau dK), the Hessian-vector product of the log
+parameterisation. `IceHistoryKernels` is the same sweep with no
+tangent run, so the first-order gates guard it too.
+
+GATES (`TestSecondOrderAdjoint3D`, lmax 8): zero-lateral — with δ = 0 at
+the GLL points the kernels and the derivatives (thickness views,
+spherical reductions of the itau kernel and its derivative) equal the
+1D continuous second-order sweep's at 1e-6 along a direction
+angle-uniform in itau; lateral — the carried kernels equal the
+first-order sweep's at 1e-10, and ⟨H u, w⟩ against ⟨H w, u⟩, against
+⟨g, F''[u, w]⟩ from the 3D second-order run (the log parameterisation's
+uv term accounted for), and against central differences of the
+continuous kernels along u, all agree below 10 % at 9 nodes and improve
+at 17, on the η = 1e22 mantle — the continuous formulation's commute
+level, as the first-order 3D gates. The machine-grade version is the
+discrete 3D second-order sweep (§14); the first-order discrete 3D
+transpose is §12.
+
+## 12. The discrete 3D transpose as built (3 November 2026)
+
+`AdjointSolver3D` with `Options::method = Discrete`
+(`AdjointDiscrete3D.cpp`): the exact transpose of the coupled
+lateral-viscosity time-stepped map, the §6b design realised with no new
+low-level transposes. The load-bearing duality holds as stated there:
+under the energy pairing ⟨S, T⟩ = Σ_node Wq r² ∫dΩ [12 S₀T₀ +
+8 Re(S₋₁T̄₋₁) + 4 Re(S₋₂T̄₋₂)] on grid tensors and the Hermitian m ≥ 0
+pairing (m > 0 weighted twice) on degree columns, Entry (force assembly
+of a tensor's analysis) is Exitᵀ (synthesis of the strain of a
+solution), the pointwise weight W and the reference systems K are
+self-adjoint, and the sea level equation has its exact adjoint. So the
+transposed pass is the forward pass with the force and strain legs
+swapped and the SLE solve replaced by its adjoint:
+
+    z ↦ A( d_e† + W ⊙ Exit( K⁻¹ [ Entry(z) + Surfᵀ SLE_adj( Uᵀ Entry(z), g ) ] ) ),
+
+run on the spectral dual z = A(y) by the step's own iteration
+(`OpenStep::Converge` with a start, opened on the forward step's start
+state for its weight field, effective systems and unit responses),
+with the measurement duals g a constant source in every pass as the
+direct load is in the forward; one more pass at the converged dual gives
+the byproducts. Per reversed step: d_e† = d† + Σ β_k(x) m†_k (the finish
+transposed); the transposed fixed point; the load dual f† =
+directLoadDual + synth(σ†)/r²; m̃†_k = m†_k + μ_k Exit(x†) (the fixed
+memory force transposed); the itau kernel as the energy pairing of m̃†
+with dt (dE m + dA d⁰ + dB d¹) — the tangent-linear drive's derivative —
+as an angular density (Wq r² folded in); and the recursion m† = E m̃†,
+d† = Σ A m̃† pointwise. The start is the transposed instantaneous elastic
+solve on the unrelaxed systems. The column duals carry no halving or
+doubling: the Hermitian column pairing matches the solver's real-field
+coefficient pairing (unlike the 1D real columns, which halve and double).
+Distributed over radius since 4 November (§17). Its second-order form is
+§14 (the continuous one is §11).
+
+GATES (`TestDiscreteAdjoint3D`, lmax 8, lateral structure on): the
+pairing identity with the discrete tangent-linear run at 1e-8 for both
+schemes, along loads (node 0 included) and a log-viscosity direction,
+each alone and together, and a stride-2 trajectory giving the same at
+1e-9; zero-lateral at the GLL points equal to the 1D discrete sweep at
+1e-8 (load duals and the spherical reduction of the itau kernel); the
+machine-grade Taylor test — |J(δ + h p) − J − h⟨K_δ, p⟩| falls at second
+order (rate in 1.9–2.1) at every h from 0.2 to 0.025, Richardson on
+central differences landing at 1e-7; and the continuous sweep's gap to
+the discrete one falling by > 2.5 as the steps halve, in the loads and
+in the log-viscosity kernel (the resolution diagnostic in 3D).
+
+## 13. Material derivatives and kernels (3 November 2026)
+
+New design, not a port (pyslfp has no material derivatives): the static
+elastic problem (§13a), its lateral Born response (§13b), the
+time-stepped tangents in the moduli (§13c, §13d), their exact transposes,
+the material kernels (§13e, §13f), the continuous kernels (§13g) and the
+static kernels (§13h).
+
+### 13a. The static elastic problem
+
+The parameters are the material's nodal fields — `MaterialDirection`:
+δκ, δμ, δρ on the mesh's (element, gll) nodes in material units, any
+empty — and the derivative is taken of the computed map through
+`Material::Shifted(d, ε)`, whose linearisation `Material::Variation(d)`
+is exact: the moduli's variation (A, C, F, L, N from δκ, δμ), the
+density's, its radial derivative's (the element differentiation of δρ,
+one-sided at interfaces) and gravity's, δg = 4πG r⁻² ∫ δρ r² dr from the
+bottom of the mesh by the exact integrals of the GLL Lagrange basis
+(the integral of the interpolant of δρ r², consistent with the GLL
+quadrature on whole elements; spectral integration through the
+differentiation matrix is wrong at the top degree). The density
+derivative is self-consistent in 1D — the background gravity, the
+stratification and the interface terms move with δρ; lateral δρ is
+excluded in 3D (incompatible with the hydrostatic
+equations used, and it opens the rotation question AdGIA's generalised
+theory fixes; sl3dpp carries the traditional theory only).
+
+`DegreeOperator` assembles its band from a `Coefficients` set
+(`AssembleBand`), the base one from the material and the variation's
+from `VariationCoefficients`: the elastic block's moduli replaced by
+their variations, and the density terms differentiated — the U-U
+coupling 4ρ(πGρr − g)r, the U-V coupling k²ρgr, the V-φ coupling k²ρr,
+the U-φ gradient ρr², the fluid stratification r²ρ'/g and the
+fluid-solid interface terms ρ_f g r², ρ_f r² — with the exterior
+closures and the point shear (fixed branches) carrying none.
+`ApplyVariation(dm, x)` is (dK·dm) x; `LoadVariation` (the traction
+piece through δg(a)), `TangentialVariation` and `TideVariation` (through
+δρ, δρ', δg and the interfaces) are the forcings'.
+`ComputeLoveNumberDerivatives(material, lmax, direction)` solves
+dx = K⁻¹(db − dK x) per degree and forcing and reads the surface off as
+the numbers are, the axial inertia moments carrying ∫δρ U r³ too; it
+returns a LoveNumbers-shaped table of derivatives (surface_gravity =
+δg(a), radius and G zero).
+
+GATES (`TestMaterialDerivatives`, prem8 at lmax 6): gravity's variation
+exact for constant and quadratic density directions (4πGr/3, 4πGr³/5);
+the variation operator against central differences of K(m ± εd)x,
+Richardson to 1e-9 at every degree; the Love-number derivatives against
+central differences of the shifted material's numbers for directions in
+μ, κ, ρ alone and together, Richardson to 1e-7 per kind of number for
+every channel, degree and axial number and the surface gravity, the
+differences second order where resolved; the reciprocity identities
+differentiated (δg h_φ + g δh_φ = δk_u and the two others) at 1e-10; an
+empty direction gives zeros.
+
+### 13b. The lateral Born response
+
+`ElasticPerturbation3D` (`ElasticPerturbation3D.hpp/cpp`): the
+first-order (Born) response of the static gravitating elastic problem to
+lateral δμ(x) and δκ(x) over the grid values. A lateral δμ enters the
+bilinear form exactly as the lateral viscosity weight enters a step —
+a pointwise weight on the deviatoric strain, fed back through the force
+assembly (`Entry(δμ ⊙ Exit(x))`), which in the angle-uniform limit is
+the 1D shear block exactly — and δκ weights the dilatation r div u =
+X + Y, carried by a scalar companion of `GridCoupling`
+(`SynthesiseScalar`/`AnalyseScalar` in the spin-0 layouts,
+`AddDilatationOfSolution`, `DilatationForce`: the bulk term κ(X+Y)(X'+Y')
+of the degree form, pointwise in angle). Then δx = −K⁻¹ (dK) x with the
+reference (radial, unrelaxed) systems, spheroidal and toroidal: a
+lateral perturbation couples the degrees by the selection rules of the
+products and couples spheroidal to toroidal motion. The nodes are the
+GLL nodes of every solid element above the one holding the centre (the
+spherical strain components divide by r); they come from a throwaway
+Maxwell rheology over the isotropic Voigt average of the material (a
+branch may not be active where the material is anisotropic), while the
+reference systems and the perturbation's meaning — an isotropic
+increment of whatever anisotropy the material has — are the material's
+own. `SolveLoad` gives the reference response to a surface mass load by
+its m ≥ 0 coefficients; `Force`, `Respond`, `Solve`, `Surface`,
+`SurfaceToroidal` and the Hermitian `Pair` complete the interface. No
+lateral δρ (§13a).
+
+GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): angle-uniform
+δμ(r) and δκ(r) reproduce §13a's exact 1D Love-number derivatives
+(U, V, φ at the surface, every degree) at 1e-8 through the whole
+pipeline, with no coupling into other orders or toroidal motion; the
+perturbation force is symmetric under the Hermitian pairing at 1e-10 for
+lateral μ and κ directions, alone and together; a single-harmonic
+direction f(r) P_L^M cos Mφ couples a degree-l order-m load only to the
+degrees |l − L|..l + L and orders m ± M, spheroidal and toroidal alike,
+with the toroidal response present. The lateral response beyond the
+angle-uniform limit rests on the pipeline (gated through the viscosity
+path) and these structural identities; its independent check is the
+cross-code comparison with AdGIA, which is what this is for.
+
+### 13c. The material tangent, 1D
+
+`TangentPerturbation::material` (a `MaterialDirection` in κ and μ; ρ
+refused) runs the 1D tangent-linear along a direction of the moduli with
+the branch moduli as fixed fractions f_k = μ_k/μ_U of the unrelaxed
+modulus and the relaxation times held (compose with `itau` for a
+viscosity held instead). The material enters a step in two places
+and the start in one, and each is a force on the step's own systems:
+
+- the effective system K_eff of a step (the effective material, whose
+  shear is μ_U − Σ_k μ_k (1 − w_k) with w_k the scheme's weight at the
+  GLL memory points): its variation along δμ_eff = δμ (1 − Σ_k f_k
+  (1 − w_k)), δκ, applied to the FULL base solution x_n of the step
+  (`DegreeOperator::ApplyVariation`, §13a), negated;
+- the memory force Σ_k μ_k ⟨m̃_k, ·⟩ of the base decayed memory m̃ =
+  e m + α d₀ with δμ_k = f_k δμ in place of μ_k;
+- the start's unrelaxed solve: −K_U⁻¹ (δK_U) x₀ about the base start
+  solution, whose surface values close the start's sea level solve and
+  whose strain is added to the primed start strain (the trapezoid's
+  α d₀ reads it).
+
+Both step terms go in through `ViscoelasticStep::AddForce` (a force per
+degree added to the memory force before the effective solve; the cached
+memory solutions invalidated), so the step's memory surface — what the
+sea level closure already reads — carries them, and the closure needs no
+Love-table derivative: acting on the full solution, the first term holds
+the material derivative of the load response too (adding δh_eff σ as a
+response channel would double count). The scheme weights depend on itau
+and dt only, so the memory recursion is unchanged. Refused: a density direction, memory points away
+from the GLL nodes (no effective material there), rotational feedback
+(the inertia and the rotational Love numbers would move too).
+
+GATE (`TangentLinear.MaterialDirectionMatchesDifferences`): along
+a smooth direction in κ and μ on the solid, both schemes, the tangent
+run matches central differences of the coupled run on the shifted
+material — `Material::Shifted` with its rheology rebuilt at the same
+fractions and times — at second order (ratio in (3, 5)) with Richardson
+landing at 1e-6 of the derivative. The steps are 1% and 0.5% of the
+moduli, wide enough for the truncation error to stand above the solves'
+1e-12 noise: the functional moves by parts in 1e-12 per unit step, and
+at narrower steps the ratio check reads noise.
+
+### 13d. The material tangent, 3D
+
+`TangentPerturbation3D::material` (`MaterialDirection3D`: δκ(x), δμ(x)
+over the coupling's grid values, material units) runs the 3D tangent-linear along a lateral direction of
+the moduli, with the same meaning as in 1D (branch moduli as fixed
+fractions, relaxation times held). The direction lives on the memory
+nodes, which is where the operator's lateral structure lives: an
+elastic region to be perturbed laterally takes a branch of negligible
+inverse relaxation time, so that it carries memory nodes. The three
+terms are the 1D ones through the grid pipeline, entering the opened
+step by `OpenStep::AddForce` (an analysed tensor joining the fixed
+memory force, and per-degree spheroidal forces added after the
+assembly), so the within-step fixed point and the sea level closure
+carry them as they carry the memory force:
+
+- the effective system's variation on the full base solution — the
+  Born force of §13b with the weight δμ_eff(x) = δμ(x)(1 − Σ_k f_k
+  β_k(x)), the step's OWN lateral weights β_k(x) (a lateral viscosity
+  makes the effective modulus's variation lateral even for a radial δμ)
+  — on the base node's grid strain (the cursor's state carries it; a
+  step's converged solution satisfies the unrelaxed equilibrium with its
+  new memory, so the base solutions a bulk direction needs come from one
+  unrelaxed solve under the recorded loads);
+- the memory force of the BASE step's decayed memory m̃ = e m + α d₀
+  with δμ_k = f_k δμ: a base step opened on the cursor's previous state
+  (the tangent's own step holds the tangent's memory, which is not it);
+- the bulk term through the scalar pipeline (`DilatationForce` of
+  −δκ times the dilatation of the base solutions);
+
+and the start's unrelaxed response −K_U⁻¹ (δK_U) x₀ by the same
+pipeline, closing the start's sea level solve and seeding the start
+strain. Refused: memory points away from the GLL nodes, rotational
+feedback, distribution.
+
+GATES (`TestTangentLinear3D`): `MaterialDirectionMatchesDifferences`
+— with lateral viscosity ON, along an angle-uniform direction in κ and
+μ on the memory nodes, the 3D tangent matches central differences of
+the coupled 3D run on the shifted material at second order with
+Richardson at 1e-6, both schemes (the lateral β_k(x) factor exercised);
+`ZeroLateralMaterialMatchesThe1DRun` — with δ = 0 the 3D run equals the
+1D material tangent at 1e-7 (it lands at 1e-12), both schemes, and a
+lateral direction of the same angular mean is a different run. The
+lateral part of the shear term is the pipeline of §13b and of the
+viscosity path; its exact gate is the pairing identity with the discrete
+3D material kernels (`DiscreteAdjoint3D.MaterialKernelsPairWithTheTangent`,
+§13f).
+
+### 13e. The material kernels, 1D
+
+`AdjointSolver::Options::material_kernels` has the discrete sweep form
+`IceKernels::kappaKernel` and `muKernel` — dJ/dκ(r), dJ/dμ(r), nodal
+over the full mesh in material units, pairing with a `MaterialDirection`
+by the plain nodal sum: the exact transpose of
+`TangentPerturbation::material`. The sweep already solves, per step,
+the transposed effective system for the dual y_n of the step's full
+solution (the duals of the next memory through the strain transpose,
+the sea level closure's response duals, the inertia dual); the material
+enters the tangent as forces on that solve, so the kernels are the
+pairings of y_n with each force's material derivative:
+
+- −(dK_eff) x_n: the nodal gradient of the degree form in the moduli
+  for the pair (y_n, x_n), `DegreeOperator::MaterialGradient` — the
+  band assembly's elastic integrands pointwise at the GLL nodes over
+  EVERY element of the system (the bulk product (X+Y)(X'+Y') for κ, the
+  combination 4/3 XX' + 1/3 YY' − 2/3(XY'+YX') + k²SS' + k²(k²−2)VV'
+  for μ, which is the deviatoric-scalar form the memory force uses), the
+  shear scaled by the effective factor 1 − Σ_k f_k (1 − w_k); x_n from
+  one unrelaxed solve under the node's memory and recorded loads;
+- the memory force of the base decayed memory m̃ with δμ_k = f_k δμ:
+  Σ_k f_k W_q Σ_s w_s d_s(y_n) m̃_{k,s}, on the memory window;
+- the start: the transposed unrelaxed solve under the start duals and
+  the start's response duals, paired with the base start solution.
+
+The gradient lives on `DegreeOperator`, not on the operator's per-degree
+workspace, because that workspace covers the memory window only (the
+relaxing elements) and the kernels span the elastic lithosphere too.
+Discrete exact, continuous at the commute level (below, §13g); needs the
+trajectory, GLL memory points, no rotational feedback; the bulk pairing
+costs one unrelaxed solve per step.
+
+GATES (`TestAdjoint`): `MaterialGradientIsTheTransposeOfTheVariation`
+— for random solution pairs of every degree the gradient paired with a
+random direction equals the pair's product with §13a's variation
+operator at 1e-12; `MaterialKernelsAreTheTangentTranspose` — the
+kernels paired with a smooth direction in κ and μ equal the material
+tangent's objective change at 1e-10 (they land at 1e-13), both
+schemes, and central differences on the shifted material land on them
+at second order with Richardson at 1e-6; the refusals.
+
+### 13f. The material kernels, 3D
+
+`AdjointSolver3D::Options::material_kernels` has the discrete 3D sweep
+form `Kernels3D::kappaKernel3D` and `muKernel3D` — dJ/dκ(x), dJ/dμ(x)
+in the itau kernel's layout (an angular density per memory node, the
+radial quadrature folded in) — and their spherical reductions, the
+exact transpose of `TangentPerturbation3D::material`. The transposed
+fixed point already yields, per step, the dual solution y_n of the
+step's full solution (the force of the end strain's dual, the lateral
+weight's transpose and the closure's response duals through the
+effective systems); the material tangent adds its forces to that very
+solve (an analysed tensor into the fixed force, per-degree bulk
+forces), so the kernels are the pairings of y_n with the tangent's grid
+tensors:
+
+- the shear: W_q r² [−(1 − Σ_k f_k β_k(x)) C(e_n, d_n) + Σ_k f_k C(e_n,
+  m̃_k)] with C the (12, 8, 4) energy contraction the itau kernel uses,
+  e_n the dual solution's grid strain, d_n the recorded forward strain
+  and m̃_k the base decayed memory the opened step holds;
+- the bulk: −W_q D(y_n) D(x_n), the dilatations through the scalar
+  companion (`AddDilatationOfSolution`, `SynthesiseScalar`), x_n from
+  one unrelaxed solve under the node's memory and recorded loads;
+- the start: the transposed unrelaxed solve under the start duals and
+  the start's response duals (one more solve than the ice kernels
+  need), paired with the base start solution.
+
+Discrete exact, continuous at the commute level (below, §13g); needs the
+trajectory, GLL memory nodes and no rotational feedback; distributed
+since 4 November (§17).
+
+GATES (`TestDiscreteAdjoint3D`): `MaterialKernelsPairWithTheTangent` —
+with lateral viscosity on, the kernels paired with LATERAL directions in
+κ and μ (a radial profile times caps and harmonics) equal the 3D
+material tangent's objective change at 1e-8, κ alone, μ alone and
+together, both schemes: the exact gate of the lateral shear term of
+tangent and kernel alike; the spherical reductions pair with
+angle-uniform directions as the full kernels do; the refusals.
+`ZeroLateralMaterialKernelsMatchThe1D` — with δ = 0 the spherical
+reductions equal the 1D discrete material kernels at the memory nodes
+at 1e-7, both schemes.
+
+The derivative machinery in the material is closed in both dimensions:
+Love-number derivatives (§13a), the lateral Born response (§13b), the
+time-stepped tangents (§13c, §13d) and their exact transposes, the κ and
+μ kernels (§13e, §13f), each gated against the previous rung.
+
+### 13g. The continuous material kernels, 1D and 3D
+
+`material_kernels` works under `AdjointMethod::Continuous` too. The
+continuous adjoint problem has the forward form, so at a node the
+adjoint displacement λ is the unrelaxed solve under the adjoint
+memory and the closed adjoint load (what `smoothEquilibrium` closes),
+and the true multiplier is λ times the itau kernel's units constant
+(and, in 1D, its Hermitian column weights: m = 0 real once, its
+imaginary part not at all, m > 0 twice — derived from the itau pairing,
+whose calibration fixes the multiplier). The kernels are then
+
+- the time quadrature, with the itau kernel's trapezoid half-weights on
+  both sides of each node, of −(the material gradient of λ and the
+  forward solution x_n) + (the memory force's variation with the FULL
+  forward memory m_n): no effective factor and no decayed memory, those
+  being the discrete form's;
+- plus, at each observation, the lumped pairing of the instantaneous
+  adjoint solution (the jump's, kept from `applyJump`) with x_n and m_n,
+  without a time weight: the delta the adjoint displacement carries
+  there, whose jump in the adjoint memory the viscosity path already
+  took.
+
+In 3D the same with the grid strains' energy contraction and the
+dilatations through the scalar companion (as the discrete 3D kernels),
+no column weights (the grid pairing is the full real one). Cost: one
+more unrelaxed solve per node than the discrete form.
+
+GATES: `Adjoint.ContinuousMaterialKernelsAgreeAndConverge` and
+`DiscreteAdjoint3D.ContinuousMaterialKernelsAgreeAndConverge` — ONE
+problem at every resolution (a ramp of fixed fields, measurements at the
+same times), against the exact discrete kernels paired with a direction
+(lateral in 3D, lateral viscosity on): at 2.5 kyr steps the gap is 0.9%
+(trapezoid) and 5.6% / 0.5% (backward Euler, 1D / 3D), falling under
+refinement at the schemes' orders (1D trapezoid 0.95% → 0.24% → 0.06%
+over 5, 9, 17 nodes; backward Euler 5.6% → 2.9% → 1.5%).
+
+### 13h. The static kernels
+
+For the static elastic problem the kernel is the start term alone.
+`ComputeLoveNumberKernels` (`LoveNumbers.hpp`): per channel (load force and potential pieces,
+tangential, tide) and degree, dh_l/dκ(r), dh_l/dμ(r) and the l and k
+alike, nodal over the full mesh, by the unit surface duals' solutions
+paired with the forcings' through `DegreeOperator::MaterialGradient`;
+gated against `ComputeLoveNumberDerivatives` along a direction at 1e-10
+for every channel and degree
+(`MaterialDerivatives.LoveNumberKernelsPairToTheDerivatives`). In 3D
+`ElasticPerturbation3D::StaticKernels(y, x)` (the transpose of its
+`Force`, as angular densities on its grid) with `SolveSurfaceDual` for
+the adjoint solution of a surface measurement; gated as the transpose
+of `Force` under the Hermitian pairing at 1e-10 and by the dual solve
+being the adjoint of the surface readout
+(`ElasticPerturbation3D.StaticKernelsAreTheTransposeOfTheForce`), and
+under a lateral background with both solutions from the full solve
+(§13j) against central differences of the measurement at 1e-5
+(`KernelsUnderLateralStructureMatchFiniteDifferences`). The 3D elastic
+benchmark against AdGIA can thus compare kernels as well as responses,
+at the heterogeneous model itself.
+
+### 13i. Next and deferred
+
+Next: for the benchmark, a driver writing the surface response to a cap
+load under a lateral δμ in the exchange format (the 3D elastic
+comparison with AdGIA), now by the full solve of §13j rather than the
+Born response. Deferred: distributing the discrete sweep (with the rest
+of the parallelisation pass, which waits until the features are
+complete). The discrete 3D second-order adjoint (§14) and the material in
+the second-order runs (§15) followed on 4 November, and the full 3D
+static solve (§13j) the same day.
+
+### 13j. The full 3D static solve (built 4 November 2026)
+
+The laterally heterogeneous static problem itself, (K_ref + dK) x = f,
+not only its Born linearisation: `ElasticPerturbation3D::SolveLateral`.
+The method is that of Maitra & Al-Attar (2019) and Myhill, Maitra &
+Al-Attar (2026) for Poisson's equation in aspherical planets, carried
+to the elastic operator: the full operator's action is matrix-free —
+the reference degree systems' `Apply` (banded, per degree and order)
+plus the lateral force of §13b through the grid pipeline (`Apply(x,
+δμ, δκ)`) — and the reference solve K_ref⁻¹, block diagonal over the
+degrees with the factorisations already held, is the preconditioner.
+The operator is symmetric (§13b's gate) and, for perturbations that
+leave the moduli positive, definite, so the iteration is preconditioned
+conjugate gradients, started from the reference response x₀ = K_ref⁻¹
+f; the first preconditioned residual is then the Born correction, so
+the Born response is the method's own first step and the iteration
+continues to the exact answer. The toroidal degree-1 rigid rotations,
+which the pinned reference solve removes and the lateral force never
+excites, stay out. The residual reported is the preconditioned energy
+norm relative to the forcing's, ⟨r, K_ref⁻¹ r⟩/⟨f, K_ref⁻¹ f⟩ under the
+Hermitian pairing; `SolveInfo` carries its history, the count and a
+flag should a curvature come out non-positive (the operator pair then
+not definite, the iteration continued on magnitudes).
+
+The forcing is any `Forces` pair: `LoadForces` (a surface mass load),
+`TideForces` (an external potential of every degree and order through
+`DegreeOperator::Tide(power)` — the static body tide of a laterally
+heterogeneous body, which is what the app will expose),
+`SurfaceDualForces` (a measurement's dual), or their sum, with toroidal
+forces allowed. Because the operator is symmetric, the solve of a
+measurement's dual forces under the lateral structure is the adjoint
+solution at that structure, and `-StaticKernels(y, x)` with both
+solutions from the lateral solve are the measurement's kernels in μ(x)
+and κ(x) at the laterally heterogeneous model: the static path's
+adjoint, discrete-exact, under 3D structure.
+
+GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): the converged
+solution's full, unpreconditioned residual at 1e-9 of the forcing; its
+departure from the reference-plus-Born response second order in the
+contrast (halving a 10% lateral δμ, δκ quarters it: ratios 4.0
+spheroidal, 3.9 toroidal), the first-order check against §13b; an
+angle-uniform 10% shift of an isotropic reference (the Voigt average of
+PREM — the shifted material must keep the reference's anisotropy, so the
+reference is made isotropic) equals the exact 1D solve on the shifted
+material at 1e-9 at every degree and order of a load and of a tide,
+with no toroidal motion; the kernels under a lateral background (10% in
+μ and κ) paired with a lateral direction equal the central difference of
+a surface potential measurement through the full solve at 1e-5 (the
+difference's own error). Convergence to 1e-10 against a degree-2 shear
+pattern of 5, 10, 20 and 40 per cent of the local shear modulus takes
+6, 7, 9 and 15 iterations, geometric throughout; the solve of the
+10% kernel gate converges in about 20. Cost on 16 threads (the
+disabled `TimingAtHigherDegree`, `SL3DPP_LMAX`): a 10% degree-2
+pattern and a cap-like load at lmax 16, 32 and 64 take 0.4, 2.4 and
+15 s for six iterations, the lateral force (the grid transforms) the
+whole of it; the reference solve is 0.07 s at lmax 64. Realistic
+contrasts (10% or less) are well inside what the reference
+preconditioner handles, as the papers found for Poisson's equation.
+
+Not built: aspherical geometry by particle relabelling (the papers'
+mapping ξ, which turns the geometry into laterally varying tensorial
+coefficients of the same form; doable here, low priority), lateral
+δρ (the hydrostatic background does not admit it, §13a), and
+distribution of the static solve (OpenMP over the grid pipeline only).
+
+The program: `sl3d static` (apps/StaticCommand.cpp, 5 November 2026)
+runs this problem on a model file's lateral moduli (io::ModelModuli:
+the relative perturbations of its `mu` and `kappa` about their lateral
+means or a stored radial reference) through the stepper's conjugate
+gradients on a branchless rheology, distributed over radial segments,
+with the radial model's response from ElasticPerturbation3D beside it;
+it writes the surface fields, the surface coefficients in the
+benchmarks' exchange form, and the response at the memory nodes as a
+model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
+planetmodel's cutaways. ExampleStatic3D and `configs/static.json` run
+it on the synthetic 3D elastic Earth the build writes
+(MakeSyntheticModuli, io::WriteModuli).
+
+### 13k. Lateral moduli in the 3D stepper (built 4 November 2026)
+
+The same lateral δμ(x), δκ(x) in the quasi-static viscoelastic
+problem: `Viscoelastic3D::Options::moduli`, relative perturbations
+sampled like the log-viscosity — μ_U(x) = μ̄_U(r)(1 + s(x)) with every
+branch modulus scaled alike (fractions and relaxation times held, the
+material derivatives' convention), κ(x) = κ̄(r)(1 + b(x)). With them
+set the coupling carries every solid element above the centre
+(`GridCoupling::Options::all_solid`; an elastic element's memory is
+inert), so a perturbation can live in the lithosphere or the inner
+core as well as the Maxwell mantle. The fluid is not covered: the
+fluid form (κ, ρ, g; no deviatoric strain) has no grid pipeline, so a
+lateral κ in the outer core is not representable — the shifted-1D gate
+had to leave the core alone to see this, and the documentation says so.
+
+The step is one fixed point still (§5 of lateral-coupling.md): the
+lateral moduli join the lateral viscosity in its pointwise weight. The
+effective shear of the shifted body is (1 + s)(μ̄_U − Σ_k μ̄_k β_k(x)),
+so the weight gains −s(x) μ̄_eff(x) with μ̄_eff(x) = μ̄_U − Σ_k μ̄_k β_k(x)
+the reference moduli under the LOCAL weights (`StartStep`), the fixed
+memory force gains the factor (1 + s(x)) on every branch modulus, and
+m⁺ = m̃ + β d is as before (β is the relaxation time's). The bulk term
+is new in kind: a lateral δκ weights the dilatation, which the
+deviatoric iterate does not carry, so `SpectralTensor`/`TensorField`
+gained an optional scalar companion (`scalar`: the dilatation's
+coefficients and grid values), which `Synthesise`/`Analyse` carry when
+present, `StrainOf` fills (`AddDilatationOfSolution` beside the strain),
+`Respond` weights by −δκ(x) and assembles through `DilatationForce`
+(`Viscoelastic3D::SpheroidalForces`), and the mixer and residual treat
+as a fourth block. A strain cache under a lateral bulk modulus must
+carry it (a cache without it is rebuilt by a solve); the serialiser
+writes it.
+
+The UNRELAXED solve (a step's start without a cache, `SolveElastic`,
+`ElasticStrain`, `PrimeStrain`) is laterally heterogeneous now, so it
+is the preconditioned conjugate-gradient solve of §13j on the
+unrelaxed reference systems — shared code, `detail/LateralSolve.hpp`,
+which `ElasticPerturbation3D::SolveLateral` now also uses — with the
+memory and channel forces as the right-hand side
+(`LateralElasticSolve`, `AddChannelForces`; `elastic_rtol` 1e-12;
+`LastElasticSolve` reports it). Where the material is anisotropic the
+perturbation is an isotropic increment of its Voigt shear; at the
+memory points the reference's unrelaxed shear is the interpolated
+long-term modulus plus the branches' at the points (`UnrelaxedShearAtNodes`).
+
+GATES (`TestLateralModuli3D`, PREM's Voigt average with a Maxwell
+mantle, lmax 6): smooth 10% shifts of shear and bulk over the whole
+solid above the centre element at the GLL points equal the 1D stepper
+on the shifted rheology at 8e-12 (U, V, φ at every degree and order,
+no toroidal motion), both schemes, two steps from rest; at Gauss
+points a per-element constant 10% shift of the Maxwell region (where
+every shear term is a point term) is exact likewise at 9e-12; the
+unrelaxed solve of a zero state under a load with angle-varying shear
+and bulk equals the static lateral solve on the same fields at 1e-9,
+toroidal motion included; with lateral moduli and lateral viscosity on
+together the step self-converges at second order (ratio 3.98). The
+within-step passes grow from 2 (zero lateral) to about 10 at 10%
+moduli contrast — the lateral elastic term is a stronger coupling than
+mild viscosity and contracts under Picard at roughly 0.1 a pass; the
+conjugate-gradient alternative for the step is the optimisation pass's
+business.
+
+**The sweeps under lateral moduli (same day).** Three things change
+for the tangent, the adjoints and the second-order sweeps, and nothing
+else: every branch modulus the sweeps pair with or differentiate
+through carries the shear factor 1 + s(x) (`Viscoelastic3D::
+ShearFactor`: the itau kernels' μ_k m†:(d − m), the discrete
+recursion's μ_k e† terms, the derivative dual's, the lateral weight's
+derivative Σ μ_k dβ dh; the fractions f_k are unchanged, so every
+material drive and pairing is); every unrelaxed solve of forces is the
+lateral one (`SolveUnrelaxed`: the material drives' responses, the
+tangent solutions, the start duals); and the discrete transposed fixed
+point carries the dilatation's block (its `entry` adds the dilatation's
+force where the iterate carries the scalar companion, its `exit`'s
+strain carries the dilatation, weighted by −δκ(x) in the pass).
+
+The one structural change is the INSTANTANEOUS problem. The unrelaxed
+operator is laterally heterogeneous now, so the elastic sea-level
+problem at a node — the forward run's start, the tangent's node 0, the
+discrete sweep's start transpose, the continuous sweep's jumps and
+equilibria — is a coupled fixed point like a step's, not a Love-number
+closure with response channels. `Viscoelastic3D::StartStep` accepts
+dt = 0: a zero-length step (β = 0, m̃ = m, the effective systems the
+unrelaxed ones, the lateral weight −δμ_U), whose within-step fixed point
+with the sea level engine IS the instantaneous coupled solve. Under
+lateral moduli the evolution's start is such a step (`SeaLevelEvolution3D::
+March`, one `coupledPass` for the start and the steps), the tangent's
+node 0 likewise with the material drive's start forces on it
+(`MaterialForcing3D::ApplyStart`), the discrete sweep runs its step
+transpose down to n = 0 with dt = 0 instead of its start block (the
+channel duals at a lateral start are the unit load and tide vectors
+paired with the lateral solution, `lateralChannelDuals`), and the
+continuous sweep's jumps and equilibria are zero-length reversed steps
+(`instantaneous`, `lateralJump`, `lateralJumpDerivative`, and
+`reversedStep(…, 0.0, …)` for the equilibria, the derivative state's
+with v's material source). Without lateral moduli every old path is
+taken, bitwise.
+
+GATES under lateral moduli (10% shear, 5% bulk, angle-varying, with
+lateral viscosity): the coupled evolution with angle-uniform moduli
+equals the evolution on the shifted rheology at every node including
+the start, rotation on, at 1e-9 (`LateralModuli3D.
+CoupledEvolutionMatchesTheShiftedRheology`); the discrete sweep pairs
+with the tangent-linear run at 1e-8 for loads and a log-viscosity
+direction, both schemes (`DiscreteAdjoint3D.PairsWithTheTangentUnderLateralModuli`);
+the discrete κ(x), μ(x) kernels pair with the material tangent at 1e-8
+(`MaterialKernelsPairWithTheTangentUnderLateralModuli`); the tangent
+along a lateral material direction matches central differences of the
+coupled run with the background moduli shifted, Richardson at 1e-6
+(`TangentLinear3D.MaterialDirectionMatchesDifferencesUnderLateralModuli`);
+the discrete second-order sweep is symmetric and adjoint to the
+second-order run to 1e-21 relative (`SecondOrderAdjoint3D.
+DiscreteMaterialHessianIsExactUnderLateralModuli` — the one term found
+by this gate was the derivative dual's memory term missing its shear
+factor, a 0.7% asymmetry); the continuous sweep's gap to the discrete
+closes under refinement at ratio 4 for loads and log viscosity
+(`ContinuousGapClosesUnderLateralModuli`: before the instantaneous
+fixed point the gap did not close at all, 0.18 → 0.15, which is how
+the Love-number closures were found), and the continuous material
+kernels and continuous second-order sweep converge likewise
+(`ContinuousMaterialKernelsAgreeUnderLateralModuli`,
+`ContinuousMaterialHessianConvergesUnderLateralModuli`).
+
+Not yet: lateral δκ in the fluid. Distribution over radial segments:
+§13m.
+
+### 13l. Lateral density: not offered (decided 5 November 2026)
+
+A lateral density was built on 4 November and removed the next morning,
+and the reasons are worth keeping. The equations sl3dpp solves are
+those of a hydrostatically pre-stressed body: the reference gravity
+g(r), the reference potential and its Hessian, and the stratification
+r²(dρ/dr)/g all come from a radial density in equilibrium. A laterally
+varying density is not in hydrostatic equilibrium with a radial gravity
+field. What the field does — ρ(x) multiplying the displacement in the
+gravitational couplings while g, the reference potential and the
+stratification stay radial, the self-attraction and the pre-stress of
+δρ neglected — is a modelling choice with no consistent limit inside a
+spherically layered reference: making the gravity self-consistent
+(carrying Φ as a variable of the whole problem, equilibrium and
+first-order together) still leaves the pressure wrong, because ∇p =
+ρ∇φ₀ has no solution on a spherically layered reference with a lateral
+ρ; the consistent routes are an aspherical figure (particle
+relabelling, planned but parked: `~/dev/planning/relabelling-sl3dpp-2026-11-04.md`)
+or a non-hydrostatic pre-stress, which is AdGIA's new theory. So 3D
+density belongs on the AdGIA side, and sl3dpp says only what it can
+defend: the moduli laterally, the density radially, with the
+self-consistent radial density derivatives of §13a and §16 intact.
+
+What the exercise taught, for whoever revisits it: the UU coupling
+4ρ(πGρr − g)r is ρ r²(g′ − 2g/r) with g′ the reference potential's
+Hessian, so holding the reference potential makes it LINEAR in the
+local density with the reference's density inside g′ (a FEM with a 1D
+reference potential assembles exactly this), and differentiating the
+closed formula instead is wrong by 4πGρ̄δρ r² — the stepped gate
+against a 1D stepper with gravity held caught it at 1%; and with the
+rotational feedback on, the density must also multiply the centrifugal
+body force ρ∇ψ and the inertia moment ∫ρ U r³, or the rotational
+coupling loses its reciprocity and the continuous sweep's viscosity
+kernel no longer converges to the discrete one (0.014 → 0.010 → 0.016
+under refinement against 0.034 → 0.0086 → 0.0022 with both terms).
+Every one of those pieces had an exact transpose and gates to 1e-10
+to 1e-20 before removal; the machinery that stays — the scalar
+companions of the iterate, their duals in the discrete transpose, the
+zero-length step — is what the bulk modulus needs and is unchanged.
+
+### 13m. The lateral solves over radial segments (built 4 November 2026)
+
+The stepper's lateral moduli run over radial segments like the rest
+of it (docs/radial-partitioning.md). The grid pipeline was already
+local to each process's nodes — the lateral weights and the companions
+are per node — so what needed distributing was the conjugate-gradient
+start solve:
+its operator's reference part assembles the whole vector from the
+held shares (`MaskToShare` then the sum collective, one per degree),
+applies the band and masks the product back to the share, the layout
+the force shares have; its pairings are each process's part (its
+solution, holding its segments and the cut nodes, against the shares)
+summed by the collective (`detail::LateralSystem::sum`); the channel
+forces take the unit vectors as shares. The static 3D problem over ranks
+is the stepper on a branchless rheology (`Rheology::Create(material,
+{})` with `moduli` set; `SolveElastic` is then the static lateral
+solve); `ElasticPerturbation3D` itself stays single-process.
+
+GATES: two and three threads-as-ranks (`RadialRanks.
+LateralModuliStepsMatchTheOneProcessSteps`): the start solve's
+iteration count, two lateral steps' surface responses and memory
+slices, and the branchless static solve, against the one process at
+1e-11 (measured 1e-13); the continuous and discrete sweeps on three
+ranks with lateral moduli and the axial rotational feedback
+(`LateralModuliAdjointsMatchTheOneProcessSweeps`): ice kernels and
+viscosity-kernel slices at 1e-10 (measured 6e-13 and 2e-13); under
+mpiexec on two and three ranks
+(`Distributed.LateralModuliStepsMatchTheOneProcessSteps`), likewise.
+
+**Cost, and the active elements (same day).** A step's pass on 16
+threads at lmax 64 (prem8, Maxwell mantle, the `DISABLED_StepTiming`
+probe of `TestLateralModuli3D`): 0.66 s with lateral viscosity alone
+(1108 memory nodes), 0.96 s with a lateral shear over the whole solid
+(1700 nodes: the lithosphere, crust and inner core join); the one
+scalar companion of a lateral bulk modulus adds two scalar transforms a
+pass, and a scalar transform costs about as much as a spin one (a
+four-companion pipeline, built and removed with the density, cost as
+much again as the strain pipeline). The coupling therefore carries, beside the viscous
+elements, only the solid elements where a perturbation is non-zero at
+some memory point (`Viscoelastic3D::ActiveElementsFor`, a probe of the
+whole solid sampling the functions; `GridCoupling::Options::
+active_elements`), so a perturbation confined to the mantle costs no
+lithosphere or inner-core nodes. What would cut the pass's cost further
+is a transform that fuses the pointwise product — GSHTrans matters,
+recorded in `~/dev/planning/gshtrans-notes-2026-11-04.md`.
+
+Two things the program's `static` command taught about distribution
+(5 November 2026). Whether an operator has lateral moduli is a
+property of the RUN, not of a rank: with the moduli confined to the
+upper mantle, an inner rank's segment holds no element where they are
+non-zero, its coupling no node, and its sampled arrays are empty — but
+every rank must take the lateral route, since the solve is collective
+(`HasLateralModuli` now reports the option, not the samples;
+`RadialRanks.ConfinedLateralModuliMatchTheOneProcessStatic` holds a
+node-less rank to the one-process answer). And the rank cuts balance
+the transform work of the coupling's nodes, which for a branchless
+rheology the rheology does not know: the static command weights the
+active elements the moduli make (`OperatorOptions` takes them), or the
+partition is degenerate and the conjugate gradients stall.
+
+### 13n. The step by conjugate gradients, and the nested closure (built 5 November 2026)
+
+A 3D step is a linear system in the degree solutions,
+
+    (K_eff − Pᵀ W S) x = f,
+
+K_eff the reference effective systems of the (scheme, dt), W(x) the
+step's pointwise lateral weight (the viscosity's Σ μ̄_k(β_k(x) −
+β_ref,k) and the moduli's −s μ̄_eff, with the bulk companion −κ̄ b on
+the dilatation), S the strain of the solutions, Pᵀ the assembly, and
+f the fixed memory force plus any added forces and the channels'. The
+operator is the 3D effective stiffness: symmetric positive definite
+whatever the contrast, since the effective modulus μ_U(1+s) −
+Σ μ_k(1+s)β_k(x) is positive pointwise. The within-step fixed point
+(§13k, lateral-coupling.md §5) iterates it as x = K_eff⁻¹(f + Pᵀ W S x)
+on the strain — Picard, Anderson-mixed — which contracts only as fast
+as the lateral term is small against the reference: at 100x contrasts
+and dt ≥ 2τ it takes 65–150 passes, and at dt = 10τ it fails.
+`Viscoelastic3D::Options::solver = ConjugateGradients` closes the same
+system by the preconditioned conjugate gradients of §13j instead
+(`detail/LateralSolve.hpp`, the routine the static solve and the
+unrelaxed start solve use), K_eff⁻¹ the preconditioner, from the
+Picard iterate (the reference response, or a warm start): guaranteed
+to converge, and in practice in fewer iterations than the fixed point
+takes passes everywhere measured. An iteration is one grid pipeline
+(synthesis, weight, analysis, assembly) like a pass, plus the reference
+band products on the columns (hand-written, threaded over the degrees:
+a BLAS call inside the OpenMP loops starts a second thread pool on the
+server)
+and the preconditioner's reference solve, plus the Krylov vector
+algebra; at lmax 16, where the pipeline is 4 ms, an iteration costs
+about 1.3 passes, and the ladder's second steps still take less time
+at every contrast (lateral-coupling.md §5a''); at production sizes the
+pipeline dominates both. `OpenStep::Forces` builds
+f, `OpenStep::Apply` the operator, `OpenStep::Solve` the solve
+(`solve_rtol` on the relative residual in the preconditioned energy
+norm √(⟨r, K_eff⁻¹ r⟩/⟨f, K_eff⁻¹ f⟩), `solve_max_iterations` the
+budget), `OpenStep::Close` a step under known channels either way, and
+`Step` reads the option. Distributed, the operator is the §13m one
+(shares assembled by the sum collective per degree, the band applied,
+the product masked back; pairings summed), so the step's solve runs
+over radial segments like the start solve.
+
+**The closure outside.** The sea level equation makes the loads depend
+on the solutions. The fixed point folded both into one iteration on
+the strain. With the solve inside, `OpenStep::Nest` runs the driver's
+closure (the sea level engine on the surface response, as before: a
+`Closure` maps the CHANNEL-FREE solutions to the next channels) as an
+outer iteration: pass n hands the closure the last solution less its
+channels, solves the step under the new channels warm-started from the
+last solution WITH the new channels (the Picard iterate, which already
+carries the 1D Love-number response to the load change), and the
+outer residual is that warm start's residual before the solve — how
+far the last solutions with the new channels are from solving the
+step, relative to its forces, in the solve's own measure. Converged
+when it is at most `coupled_rtol`. The inner solves are inexact: each
+reduces its start's residual by `solve_outer_factor` (1e-2) at least,
+never below `solve_rtol`, so the inner work follows the outer
+progress. The outer map is Picard, Anderson-mixed on the channel-free
+solutions by the same adaptive rule as the strain fixed point (the
+`IterationControl`'s memory and rate); in the cases measured the outer
+map contracts by ~1e-3 a pass and Picard never hands over. The outer
+contraction is the 3D departure of the load response from the 1D Love
+numbers the engine closes with, times the ocean's feedback — small
+unless the lateral structure is strong at the surface.
+
+A lesson from the first version, kept here because it is the obvious
+mistake: measuring the outer change as the difference between the
+iterate and its image, with the inner tolerance tied to that change,
+is circular. A loose inner solve starting from the Picard iterate can
+stop at zero iterations (its start is already within the loose
+tolerance), so the image equals the iterate, the change reads 1e-15,
+the next pass tightens to the final tolerance, the change reads the
+real correction, the next loosens again — a two-cycle Anderson then
+mixes into a limit cycle at 5e-10, never meeting the tolerance. The
+warm start's own initial residual is the right outer measure: it is
+the residual of the current iterate against the current system, and
+does not depend on how well the previous pass was solved.
+
+**Who uses what.** The evolution's steps and its lateral start (the
+zero-length step), the tangent-linear run's steps and start, the
+continuous sweep's reversed steps and its instantaneous problems
+(equilibria, jumps) all go through `Nest` under the option; the
+forward regenerations in the sweeps (a kept trajectory's steps rebuilt
+under recorded loads) through `Close`. The DISCRETE transpose stays
+the transposed fixed point: it transposes the converged linear solve,
+which is the same system whichever way the forward solved it (the
+machine-grade pairings hold with the forward on conjugate gradients),
+and its own iteration is the operator's transpose — the same
+symmetric operator — so it could be a conjugate-gradient solve on the
+dual solutions with the sea level adjoint as the closure, with the
+same nesting; that is the one place the fixed point's envelope still
+binds, and the next thing to do if a strong-contrast adjoint needs it.
+
+**Measured (lateral-coupling.md §5a'').** The §5a ladder at lmax 16,
+the second step: at 3x, 8/13/17 iterations against 12/21/21 passes at
+dt/τ = 0.5/2/10; at 10x, 12/23/34 against 20/29/50; at 100x, 23/46/90
+against 26/65/fail; at 1000x, 42/83/183 against 49/138/fail. The
+nested evolution at a 3x viscosity contrast with 10%/5% moduli and the
+full rotational feedback (`LateralModuli3D.NestedConjugateGradient
+EvolutionMatchesTheFixedPoint`, agreement to 1e-9 at every node): 5
+passes and 8 iterations at the start against the fixed point's 10
+passes, 7 passes and 20–22 iterations a step against 20 — the nested
+closure costs about 1.4 passes' worth per fixed-point pass at this
+weak contrast (each outer pass also pays one operator application for
+its residual and one reference solve for its scale), and the fixed
+point stays the default. Where the fixed point grinds or fails, the
+conjugate-gradient step is the one to use.
+
+GATES: `Lateral.ConjugateGradientStepMatchesTheFixedPoint` (10x,
+dt = 2τ, two steps, solutions to 1e-9, and the operator applied to the
+fixed point's solution returns the step's forces to 1e-9),
+`LateralModuli3D.ConjugateGradientStepMatchesTheFixedPointUnderModuli`
+(viscosity, shear and bulk together), the nested evolution gate above,
+`TangentLinear3D.MaterialDirectionMatchesDifferencesUnderConjugate
+GradientSteps` (the tangent along a lateral material direction against
+central differences of nested runs, Richardson at 1e-6),
+`DiscreteAdjoint3D.ContinuousMaterialKernelsAgreeUnderConjugate
+GradientSteps` (the continuous sweep's reversed steps and instantaneous
+problems nested, the discrete transpose on the fixed point, the gap
+closing under refinement), and the two radial-rank gates and the
+mpiexec lateral gate now run the steps and the evolution on the
+conjugate-gradient solver. Probe: `Lateral.DISABLED_StepSolverLadder`.
+
+## 14. The discrete 3D second-order adjoint (built 4 November 2026)
+
+`AdjointSolver3D::SecondOrderKernels` under `AdjointMethod::Discrete`
+(AdjointDiscrete3D.cpp; the 3D form of the 1D discrete second-order sweep
+of §9): the exact derivative of the exact gradient of §12 along a
+direction v, from v's recorded DISCRETE tangent-linear run and its
+δitau(x). The transposed sweep carries the derivative dual state
+(dm†_k, dd†) beside (m†_k, d†), and every piece of §12 is differentiated
+in place:
+
+- the dual of the end strain: dd† + Σ_k β_k(x) dm†_k + Σ_k dβ_k(x) dh_k(x)
+  m†_k, with dh_k = dt δitau_k(x) and dβ_k the weight's h-derivative
+  (dB of the trapezoid's (E, A, B), −dw for backward Euler);
+- the derivative state's transposed fixed point: the SAME iteration as
+  the first's (reference systems, lateral weight W(x), the SLE adjoint
+  with no measurement duals), with its source dde + dW(x) e, where
+  dW = Σ_k μ_k(r) dβ_k(x) dh_k(x) is the derivative of the step's
+  lateral weight Σ_k μ_k (β_k(x) − β^ref_k(r)) and e the first dual
+  strain — the only term with no 1D counterpart in form (in 1D it is the
+  effective system's derivative acting on the first sweep's solution,
+  Σ_k B_h dh μ_k S y; here the reference is held and the lateral weight
+  carries all of the itau dependence, so the derivative lands pointwise);
+- the dual of the decayed memory, dm̃†_k = dm†_k + μ_k e', with e' the
+  derivative dual strain; the itau pairing's derivative, pointwise in the
+  energy contraction: ⟨dm̃†, dE m + dA d⁰ + dB d¹⟩ + ⟨m̃†, dE vm + dA vd⁰
+  + dB vd¹⟩ + dh ⟨m̃†, d²E m + d²A d⁰ + d²B d¹⟩ with (vm, vd⁰, vd¹) the
+  tangent run's states; and the recursion dm† = E dm̃† + dE dh m̃†,
+  dd† = Σ_k (A dm̃†_k + dA dh m̃†_k);
+- the start: the transposed instantaneous solve for both dual states.
+
+Returns `KernelDerivatives3D` as the continuous sweep does: the thickness
+and initial-sea-level views of the derivative load duals (no lumps, as in
+1D), the itau kernel's derivative with its spherical reduction, and the
+log-viscosity kernel's derivative −(δitau K + itau dK). Cost: two
+transposed fixed points per node instead of one. Distributed since 4
+November (§17); the material kernels and their derivatives alongside
+since §15.
+
+GATES (`TestSecondOrderAdjoint3D`, lmax 8, prem8):
+`DiscreteZeroLateralMatchesThe1DDiscreteSweep` — with δ = 0 at the GLL
+points the kernels and derivatives equal the 1D discrete second-order
+sweep's at 1e-7 (thickness views, spherical reductions of the itau
+kernel and its derivative). `DiscreteLateralHessianIsExact` — lateral
+structure on (δ of amplitude 0.6, η = 1e22, 9 nodes over 10 kyr, a
+sea-level measurement at the end): the carried kernels equal the
+first-order discrete sweep's bitwise; ⟨H u, w⟩ against ⟨H w, u⟩ agree at
+1.2e-13 (gate 1e-8); against ⟨g, F''[u, w]⟩ from the discrete 3D
+second-order tangent-linear run (the uv term of the log parameterisation
+accounted for) at 1.5e-13 (gate 1e-8); and central differences of the
+discrete first-order kernels along u (δ and the thickness moved
+together, w's itau direction taken at the moved operator) paired with w
+converge at second order (ratio 3.99994 over eps 0.02 → 0.01), Richardson
+landing at 7.6e-11 (gate 1e-6). The continuous sweep's gates (§11) are
+unchanged; the two are the same problem's commute pair, as in 1D.
+
+## 15. The material in the second-order runs (built 4 November 2026)
+
+The directions u, v of the second-order machinery (§8–§12, §14) gain a
+part in the moduli — `MaterialDirection` (1D, nodal) / `MaterialDirection3D`
+(3D, grid values): δκ, δμ with the branch moduli as fixed fractions and
+the relaxation times held, the density refused — so that the Hessian's
+action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
+materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
+`KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
+spherical reductions). New design, no pyslfp counterpart. Everything
+needs the memory points at the GLL nodes and no rotational feedback (the
+material tangent's conditions); the 3D forms are distributed since 4
+November (§17).
+
+**The second-order tangent run** (`TangentLinearSolver::RunSecondOrder`,
+3D alike). The step map is affine in the moduli, so the second variation
+is the bilinear pairing of each direction's material forces with the
+other's tangent trajectory: for the ordered pairs (a, b) = (u, v), (v, u)
+with a material in a, the forces −dK_eff[δm_a] x'_b + Σ_k f_k δμ_a
+⟨m̃'_{k,b} + drive_b⟩ enter each step through `AddForce` (1D) /
+`OpenStep::AddForce` (3D), where x'_b is b's FULL tangent solution at the
+node — recovered from b's recorded snapshot by one unrelaxed solve under
+its loads and memory, plus b's own unrelaxed material force's response
+−K_U⁻¹(dK_U[δm_b] x_n − MemVar(δμ_b, m⁺_n)) on the base when b has one
+(the unrelaxed and effective forms of the material force are equal, the
+end solution satisfying unrelaxed equilibrium with its new memory) — and
+m̃'_b + drive_b is b's decayed tangent memory with b's own itau drive, read
+off a step opened on b's tangent state (`mem_` / `memory_` after
+`AddMemory`): the drive's dB d¹ part is the mixed moduli–relaxation-time
+term ∂²K_eff/∂μ∂h x_n in disguise. The start response is a's unrelaxed
+variation on b's start solution, summed over the pairs. In 3D the shear
+weight is δμ_a (1 − Σ_k f_k β_k(x)) with the BASE step's lateral weights
+and the strain is the recorded tangent strain; `ForwardCursor3D` now
+serves the node before its current one, so the itau and material drives
+of one step may ask for (node − 1, node) in either order (a latent fault
+of the first-order 3D run with both directions).
+
+**The discrete sweeps** (1D `DiscreteSecondOrder`, 3D `DiscreteSweep`).
+By ⟨H v, u⟩ = ⟨λ, forcing''(u, v)⟩: the parts of forcing'' linear in u's
+tangent trajectory transpose into SOURCES of the derivative dual state,
+the rest pair with the first duals directly. Along a material v: the
+dual of the full tangent solution receives −dK_eff[δm_v] y_n (the
+derivative of the effective systems on the first sweep's solution; in 3D
+the Born force on the first dual strain with the step's lateral weights,
+plus the bulk term), added BEFORE the unit-response contraction so that it
+reaches the sea level adjoint — no table derivative is needed, for the
+same reason the forward tangent needs none; the derivative dual of the
+decayed memory receives f_k δμ_v S y_n (the memory force's variation on
+the first dual strain), which then flows through the kernel pairing's
+B-weight terms (written as the decayed-memory duals against the end
+strains) and the E/A recursion; the start likewise with the unrelaxed
+systems. The material kernels' derivatives are the pairings of the
+derivative duals with the forward trajectory plus the first duals with
+v's tangent trajectory — its full solution (recovered as above) and its
+decayed memory with v's full discrete drive (whose dB d¹ part is the
+effective factor's derivative along v's itau) — and the start terms
+alike. Exact: the Hessian symmetric and equal to the second-order run to
+the solvers' tolerance.
+
+**The continuous sweeps** (1D `ContinuousSecondOrder`, 3D `Sweep`). The
+second-order adjoint equations are the derivative of the continuous
+adjoint equations, which have the forward form, so along a material v the
+derivative state is driven by v's material forces on the ADJOINT
+trajectory — the tangent's drive with the adjoint states as the base: on
+each reversed step's end solution and decayed memory (`AddForce` on the
+derivative state's step, the 3D shear weight with the step's own lateral
+weights), on the equilibrium solutions at the observations (an extra
+response channel of the closure), and on the instantaneous jump
+solutions, whose fingerprint moves with the unrelaxed table — carried as
+the response channel of v's unrelaxed variation on the jump solution (the
+forward start's pattern), its sea level the derivative LUMP of the
+derivative duals (a material v is the one direction whose derivative
+duals carry lumps). Three further pieces, each found by a gate: the
+itau pairing's branch weight μ_k moves with δμ (the term δμ_v/μ_U times
+the pairing); the derivative state's strain after a jump must carry v's
+material response (what `StartStep` would regenerate lacks it; the
+trapezoid's α d⁰ reads it — without it the convergence to the discrete
+derivatives drops to first order); and the material kernels' derivatives
+pair the derivative displacement with the forward trajectory and the
+adjoint displacement with v's tangent solution and END memory (no drive:
+the continuous pairing is with the full forward memory). At the commute
+level, falling at the scheme's order under refinement.
+
+GATES. 1D: `TangentLinear.SecondOrderRunInTheMaterial` — u, v in the
+loads, itau and the moduli (1 % of the moduli): the second-order run
+against central differences of the first-order run on the shifted
+material (the rheology rebuilt at the same fractions, the inverse times
+and loads moved), second order with Richardson at 1e-6, both schemes,
+symmetric, the moduli–loads block non-zero;
+`SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric` — the discrete
+sweep with the material kernels on: carried kernels at 1e-12,
+⟨H u, w⟩ = ⟨H w, u⟩ = ⟨g, F''[u, w]⟩ at 1e-9, central differences of the
+full gradient along w (material shifted, itau and thickness moved) paired
+with u at second order, Richardson at 1e-6, both schemes;
+`SecondOrderAdjoint.ContinuousConvergesToDiscrete` now carries the
+material blocks: ice, viscosity and material gaps and the mismatch with
+the continuous second-order run all fall by > 3 from 17 to 33 nodes
+(along a material-only v the gaps are 0.06 %, 0.23 %, 0.04 % at 17 nodes,
+ratio 4 over 17 → 33 → 65). 3D:
+`TangentLinear3D.SecondOrderRunInTheMaterial` (loads, lateral log
+viscosity, angle-uniform moduli; lateral viscosity on; second order,
+Richardson 1e-6, symmetric);
+`SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactAndSymmetric`
+(lateral directions in everything: carried kernels at 1e-10, symmetry and
+the adjoint identity with the discrete second-order run at 1e-8);
+`DiscreteZeroLateralMatchesThe1DDiscreteSweep` and
+`ZeroLateralMatchesThe1DSweep` now with an angle-uniform material v and
+the material kernels (their spherical reductions and derivatives against
+the 1D at 1e-7 / 1e-6); `ContinuousMaterialHessianConverges` (lateral
+directions, the continuous blocks against the discrete and the mismatch
+with the continuous run below 10 % at 9 nodes and smaller at 17).
+
+Not built: the material in the distributed sweeps. The density direction
+followed (§16).
+
+## 16. The density in the time-stepped problem (built 4 November 2026)
+
+`MaterialDirection::rho` now drives the 1D time-stepped tangent and the
+1D sweeps form the density kernel `IceKernels::rhoKernel` (and its
+derivative along ice, itau, κ and μ directions,
+`KernelDerivatives::rhoKernel`), the static Love-number kernels gaining
+`h_rho, l_rho, k_rho`. The static problem's variation (§13a) was already
+self-consistent in the density — the moduli unchanged, gravity moving as
+the integral of δρ r², the stratification, the interfaces and the
+forcings (the load's traction piece through g(a), the tide through ρ, ρ',
+g and the interfaces) — so the time-stepped extension is: the effective
+systems' variation along δρ on the full base solution (the density terms
+are the base material's in every flavour; the per-dt effective variation
+must carry δρ, which it did not — found by the gate), plus the FORCINGS'
+variations times the node's recorded load and centrifugal amplitudes,
+dF σ_n + dTide ψ_n, through the same `AddForce` (1D
+`MaterialDrive::AddForcingVariation`); the memory force carries no
+density. The transposes, new: `DensityDuals` (duals of the variation's
+ρ, ρ', g and g(a)), accumulated by `DegreeOperator::AddDensityDuals`
+(the form's density, gravity and stratification terms and the
+interfaces, pointwise, with the U–φ gradient coupling's sum over the
+element) and the forcings' (`AddLoadDensityDuals`,
+`AddTangentialDensityDuals`, `AddTideDensityDuals`), and mapped to a
+nodal density gradient by `Material::DensityGradient` — the transpose of
+`Material::Variation` in ρ: the density's own dual, the element
+differentiation's transpose and the transposed cumulative integral
+(each node's partial-integral weights within its element plus the
+element's full-integral weight times the duals of every node above),
+times r², the surface gravity's dual joining g's at the top node. The
+sweeps pair with the node's recorded loads (`MaterialTools::
+DensityPairing`): the kernel is −⟨y, dK_ρ x_n⟩ + ⟨y, dF σ_n + dTide ψ_n⟩
+summed over the steps and the start, discrete exact, continuous at the
+commute level with the same quadrature as the moduli; the derivative
+along v pairs the derivative duals with the base and the first duals with
+v's tangent solution AND v's tangent loads.
+
+**The sea level engine's gravity is held.** The engine takes its surface
+gravity and sea-floor radius from the Love table (pyslfp's `with_body`),
+so on a shifted density the engine's own g would move too, and its
+sensitivity (the geoid Φ/g in the closures) is not part of these
+derivatives: they are taken with the engine's parameters as parameters,
+exactly as the static derivative reports δg(a) separately. The new
+`SeaLevelParameters::body_from_table` (default true) makes the engine's
+gravity an explicit parameter when false, which is how the gates hold it;
+a run whose engine follows the table and whose density moves differs by
+the engine term, computable as the derivative in one scalar if ever
+wanted. Not built: a density direction in a SECOND-order run or sweep
+(the form is quadratic in ρ through ρ g(ρ), so its second variation is
+needed), lateral density in 3D (excluded by the hydrostatic equations,
+§13a).
+
+GATES (§16): `MaterialDerivatives.DensityDualsAreTheTransposeOfTheVariation`
+(random solution pairs and column amplitudes at every degree: the
+density gradient of the accumulated duals paired with a direction
+against y^T(dK)x and y^T(dF)a for the load, tangential, tide and
+degree-0 centrifugal forcings, at 1e-12);
+`LoveNumberKernelsPairToTheDerivatives` now with ρ (every channel and
+degree at 1e-10); `TangentLinear.MaterialDirectionMatchesDifferences`
+now along (κ, μ, ρ) with the engine held (second order, Richardson at
+1e-6, both schemes); `Adjoint.MaterialKernelsAreTheTangentTranspose`
+now with ρ (the pairing identity at 1e-10 and the finite differences at
+1e-6, both schemes); `ContinuousMaterialKernelsAgreeAndConverge` now
+with ρ; `SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric` now
+checks the density kernel's derivative along a (κ, μ, itau, ice)
+direction against central differences of the density kernel.
+
+## 17. The parallel pass (4 November 2026)
+
+With the features complete, the serial derivative paths were brought
+under the radial distribution of docs/radial-partitioning.md, which the
+forward step, the continuous 3D adjoint and the 3D tangent-linear runs
+already followed. Nothing in the pattern was new:
+
+- **The discrete 3D transpose** (first and second order, §12, §14, with
+  the material of §15): each rank transposes its own memory nodes' part
+  of every pass; the duals of the load and centrifugal coefficients are
+  the ranks' PARTIAL contractions of the unit responses (whole) with the
+  forces (held in shares, each rank its own rows) summed over the ranks;
+  every rank solves the sea level adjoint alike from them and rank 0's
+  answers serve all, a failure failing on all; the surface duals and the
+  degree-0 moment row join the forces on the rank holding their rows
+  (`DegreeOperator::Holds`); the transposed fixed point's residual is the
+  ranks' maximum, as the forward's. The forward step's conventions
+  (`SeaLevelEvolution3D::March`) transposed.
+- **The 3D material tangent, the 3D material kernels of both sweeps and
+  the material directions of the 3D second-order sweeps** needed no
+  change: their pieces — the Born force assembled on the rank's own
+  nodes, the bulk term's dilatation through the scalar companion, the
+  unrelaxed responses through `SolveForces`, the closures' extra response
+  channels through the collective `Surface` and the summed moment — were
+  already the forward step's. Their refusals were lifted.
+- **Threads.** The derivative loops were already threaded through
+  `detail::ParallelElements` / `ParallelFor` (the 3D sweeps over nodes
+  and grid values, the 1D sweeps over degrees); the static Born
+  perturbation's pointwise loops were the gap and are threaded now.
+
+GATES: `RadialRanks.DerivativesMatchTheOneProcess` (threads as ranks,
+three ranks, the 1e22 mantle with lateral viscosity, GLL memory nodes):
+the 3D tangent-linear runs of both methods along loads, a lateral log
+viscosity and lateral moduli; the first-order sweeps of both methods
+with the material kernels; the second-order sweeps of both methods along
+that direction with the kernels' derivatives — the ice views on every
+rank and each rank's slices of the 3D kernels and derivatives against
+the one process on the same cuts, all at 1e-11 on the first run.
+`Distributed.DerivativesMatchTheOneProcess` is the same under mpiexec
+(TestDistributed), on 2, 3 and 4 ranks (the MPI build against David's own
+MPICH under ~/dev/petsc-install, `-DMPI_CXX_COMPILER=<its mpicxx>`, not
+the distribution's packages).
+Not distributed: the static Born perturbation (`ElasticPerturbation3D`),
+a small static problem run at benchmark size on one process.

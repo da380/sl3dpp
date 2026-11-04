@@ -2,11 +2,11 @@
 
 /**
  * @file GridCoupling.hpp
- * @brief The grid side of the 3D memory coupling (docs/dev/lateral-coupling.md
- * §2–3, §7a): tensor fields over (viscous radial node × angular grid), the
- * transforms between them and their per-degree spectral components, and
- * the assembly of the memory force onto the spheroidal and toroidal
- * degree systems.
+ * @brief The grid side of the 3D memory coupling
+ * (docs/dev/lateral-coupling.md): tensor fields over (viscous radial node
+ * × angular grid), the transforms between them and their per-degree
+ * spectral components, and the assembly of the memory force onto the
+ * spheroidal and toroidal degree systems.
  *
  * The radial memory nodes are the memory points (MemoryPoints.hpp) of the
  * elements where any rheology branch is active: by default their
@@ -39,8 +39,8 @@
  * branch moduli mu_k(r) — the elastic structure stays 1D — scale the
  * analysed components per node, and the force assembly applies only the
  * quadrature factors. With angle-uniform weights the whole pipeline
- * reduces exactly to the 1D degree-basis memory force: the zero-lateral
- * gate (LateralGate in the tests).
+ * reduces exactly to the 1D degree-basis memory force (the LateralGate
+ * tests).
  *
  * Reality: the pipeline carries REAL tensors, so only the spin -2 and -1
  * components are stored as complex fields and the spin 0 component as a
@@ -109,6 +109,21 @@ class GridCoupling {
     /// its own elements' rows. The whole mesh by default. A range without
     /// viscous elements holds no nodes.
     std::pair<int, int> elements{0, -1};
+    /// Every SOLID element of the range carries memory nodes, viscous or
+    /// not (the element holding the centre excepted: the spherical strain
+    /// components divide by r), so that a lateral perturbation of the
+    /// elastic moduli can live anywhere solid; the memory of an elastic
+    /// element is inert (no active branch). False: the viscous elements
+    /// alone.
+    bool all_solid = false;
+    /// A per-element mask (ElementCount entries, non-zero = carries
+    /// nodes) overriding the rheology's activity where given: the
+    /// viscous elements and those where a lateral perturbation of the
+    /// moduli is non-zero, as Viscoelastic3D samples them, so
+    /// that a perturbation confined to the mantle costs no lithosphere
+    /// or inner-core nodes. Fluid elements and the centre element are
+    /// never carried.
+    std::vector<char> active_elements{};
   };
 
   /// The rheology is borrowed and must outlive the coupling.
@@ -214,6 +229,10 @@ class GridCoupling {
   struct TensorField {
     std::array<std::vector<Complex>, 2> c;
     std::vector<double> r;
+    /// Optional real scalar companions over the same grid values (the
+    /// dilatation of a solution under a lateral bulk modulus), carried
+    /// beside the deviatoric strain: empty where not carried.
+    std::vector<std::vector<double>> scalars;
   };
   [[nodiscard]] TensorField ZeroTensor() const;
 
@@ -226,6 +245,10 @@ class GridCoupling {
   struct SpectralTensor {
     std::array<std::vector<Complex>, 2> c;
     std::vector<Complex> r;
+    /// The scalar companions' coefficients (each ScalarCoefficientCount,
+    /// the spin 0 layout): empty where not carried. Synthesise and
+    /// Analyse carry them when present.
+    std::vector<std::vector<Complex>> scalars;
   };
   [[nodiscard]] SpectralTensor ZeroSpectral() const;
 
@@ -246,8 +269,11 @@ class GridCoupling {
   void Analyse(const TensorField& field, SpectralTensor& spectral) const;
 
   /// Pointwise multiplication by a real weight field over the nodes
-  /// (FieldOffset(node) + x), all components alike.
+  /// (FieldOffset(node) + x), all tensor components alike (not the
+  /// scalar companions: MultiplyScalar, one companion at a time).
   void Multiply(TensorField& field, std::span<const double> weight) const;
+  void MultiplyScalar(TensorField& field, std::size_t companion,
+                      std::span<const double> weight) const;
 
   // -- degree-basis entry and exit
   // -----------------------------------------------
@@ -288,6 +314,47 @@ class GridCoupling {
   /// (a radial branch modulus, say).
   void ScaleByNode(SpectralTensor& spectral,
                    std::span<const double> factor) const;
+
+  // -- the scalar companion
+  // ---------------------------------------------------
+
+  /// A real scalar field per node, in the spin-0 layouts: grid values at
+  /// [FieldOffset(node) + x], coefficients (m >= 0) at
+  /// [CoefficientOffset(node) + SurfaceGrid::Index(l, m)]. What the
+  /// dilatation of a solution and a bulk-modulus perturbation need, which
+  /// the trace-free tensors above do not carry.
+  [[nodiscard]] std::size_t CoefficientOffset(int node) const {
+    return coefficientOffset_[node];
+  }
+  [[nodiscard]] std::size_t ScalarCoefficientCount() const {
+    return coefficientOffset_.back();
+  }
+  [[nodiscard]] std::vector<double> SynthesiseScalar(
+      std::span<const Complex> spectral) const;
+  [[nodiscard]] std::vector<Complex> AnalyseScalar(
+      std::span<const double> field) const;
+
+  /// Adds the dilatation r div u = r d_r U + 2 U - k^2 V of degree
+  /// solutions (the X + Y of the degree form) at the nodes to a scalar's
+  /// coefficients, column by column.
+  /// Adds a solution's radial displacement U at every memory node to a
+  /// scalar companion's coefficients (the same layout as the
+  /// dilatation's): a scalar field of the solution over the nodes, for
+  /// writing or plotting a 3D response (io::WriteNodeFields).
+  void AddDisplacementOfSolution(std::vector<Complex>& spectral, int l,
+                                 const DegreeOperator& spheroidal,
+                                 std::span<const Complex> x) const;
+  void AddDilatationOfSolution(std::vector<Complex>& spectral, int l,
+                               const DegreeOperator& spheroidal,
+                               std::span<const Complex> x) const;
+
+  /// The force of a weighted dilatation's coefficients (kappa times the
+  /// dilatation, say): per degree the complex column right-hand sides of
+  /// int w (r div u') dr through the radial quadrature — the bulk term
+  /// kappa (X + Y)(X' + Y') of the elastic form, pointwise in angle.
+  [[nodiscard]] std::map<int, std::vector<Complex>> DilatationForce(
+      std::span<const Complex> weighted,
+      const std::function<const DegreeOperator&(int)>& system) const;
 
  private:
   struct Node {

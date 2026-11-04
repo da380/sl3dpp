@@ -1,7 +1,7 @@
 /**
  * @file TestTractionNumbers.cpp
  * @brief The non-gravitating degree operator and the traction numbers:
- * the E1 gate against pyslfp (identical discrete problem, agreement near
+ * the E1 comparison with pyslfp (identical discrete problem, agreement near
  * machine precision), the degree-0 closed form, reciprocity, and the
  * refusals. Fixtures from scripts/make_e1_fixtures.py.
  */

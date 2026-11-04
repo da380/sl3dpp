@@ -1,4 +1,4 @@
-// Memory points and the point shear (docs/design.md §5): the GLL set is the
+// Memory points and the point shear (docs/design.md): the GLL set is the
 // nodes themselves and the Gauss set interpolates and integrates exactly to
 // its polynomial degrees; with GLL points the long-term material plus the
 // branches' unrelaxed shear at the points reproduces the operators
@@ -150,7 +150,7 @@ TEST(MemoryPoints, GllIsTheNodesAndGaussInterpolatesExactly) {
 }
 
 TEST(PointShear, GllReproducesTheRelaxedModuli) {
-  // The decisive gate: with internal variables at the GLL nodes the
+  // The decisive check: with internal variables at the GLL nodes the
   // long-term material plus the point shear is the relaxed-moduli
   // assembly, so the effective operators agree to round-off, spheroidal
   // (by their solves) and toroidal (by their matrices).

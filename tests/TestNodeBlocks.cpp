@@ -303,7 +303,7 @@ TEST(NodeBlocks, SmoothLateralStepMatchesTheSingleGrid) {
   const auto mild = differenceFor(0.3);
   RecordProperty("difference_strong", std::format("{:.3e}", strong));
   RecordProperty("difference_mild", std::format("{:.3e}", mild));
-  EXPECT_LT(strong, 1e-7);  // 3.8e-9 when written
+  EXPECT_LT(strong, 1e-7);  // measured 3.8e-9
   EXPECT_LT(mild, strong);  // 4.9e-12, the iteration's tolerance
 }
 
@@ -412,7 +412,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     EXPECT_LT(spherical, tolerance) << label;
     EXPECT_LT(loadDual, tolerance) << label;
   };
-  // 4e-14 to 6e-14, and 3e-10 to 1.3e-9, when written
+  // measured 4e-14 to 6e-14, and 3e-10 to 1.3e-9
   compare([](double, double, double) { return 0.0; }, 1e-12, "zero_lateral");
   compare(
       [](double, double theta, double phi) {

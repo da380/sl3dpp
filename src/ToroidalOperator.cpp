@@ -302,6 +302,7 @@ std::vector<double> ToroidalOperator::Apply(std::span<const double> x,
     throw std::invalid_argument(
         std::format("expected {} x {} values, got {}", n, nrhs, x.size()));
   }
+  // Hand-written, not BLAS (DegreeOperator::ApplyBand says why).
   const auto ldab = kd_ + 1;
   auto y = std::vector<double>(x.size(), 0.0);
   for (auto k = 0; k < nrhs; ++k) {

@@ -37,6 +37,8 @@ namespace sl3dpp::app {
 /// The deck formats a config may name: planetmodel's GIA and MINEOS
 /// tables, and the library's six-column elastic table (rho, vpv, vsv,
 /// vph, vsh, eta; no header), the test and example decks' format.
+/// Gia is planetmodel's Maxwell deck (`"maxwell"` in a config; `"gia"`, the
+/// format's old name, is kept as an alias).
 enum class ModelFormat { Gia, Mineos, Elastic };
 
 /// The format a `ModelFormat` stands for.
@@ -206,5 +208,48 @@ struct KernelInput {
 
 /// Runs a 3D (lateral-viscosity) kernel config.
 [[nodiscard]] std::string RunKernel3D(const std::filesystem::path& config);
+
+/// The config of `sl3d static`: the instantaneous (elastic) response of
+/// a laterally heterogeneous elastic Earth to a surface load and a
+/// tidal potential, no sea level (docs/dev/adjoints.md §13j), with the
+/// radial model's response beside it.
+struct StaticInput {
+  std::filesystem::path model;
+  ModelFormat format = ModelFormat::Gia;
+  int lmax = 0;
+  /// A planetmodel model file whose `mu` and `kappa` fields supply the
+  /// lateral perturbations of the moduli (io/ModelModuli); empty for
+  /// the radial model alone.
+  std::filesystem::path moduli;
+  bool moduli_file_radial = false;  ///< the file's own radial reference
+  /// A Gaussian cap of surface mass density: kg m^-2 at its centre.
+  struct Cap {
+    bool set = false;
+    GeographicPoint site;
+    double width = 0.0;      ///< radians
+    double amplitude = 0.0;  ///< kg m^-2
+  } load;
+  /// One coefficient of an external tidal potential, m^2 s^-2.
+  struct Tide {
+    bool set = false;
+    int degree = 2;
+    int order = 0;
+    double amplitude = 0.0;
+    double imaginary = 0.0;
+  } tide;
+  /// The conjugate-gradient solve under lateral moduli.
+  double rtol = 1e-10;
+  int max_iterations = 200;
+  std::vector<int> transform_degrees;
+  std::filesystem::path output;           ///< the surface file
+  std::filesystem::path exchange_output;  ///< the coefficient table, optional
+  std::filesystem::path volume_output;    ///< the model file, optional
+};
+
+/// Reads a static config, relative paths against its directory.
+[[nodiscard]] StaticInput ReadStaticInput(const std::filesystem::path& config);
+
+/// Runs a static config and returns the summary line.
+[[nodiscard]] std::string RunStatic3D(const std::filesystem::path& config);
 
 }  // namespace sl3dpp::app

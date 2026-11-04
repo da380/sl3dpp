@@ -9,6 +9,7 @@ add_library(sl3d_app STATIC
   KernelCommand.cpp
   LoveNumbersCommand.cpp
   FingerprintCommand.cpp
+  StaticCommand.cpp
   Ranks.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sl3d_app PUBLIC sl3dpp::sl3dpp)

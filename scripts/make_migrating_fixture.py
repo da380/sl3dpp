@@ -95,14 +95,14 @@ def main() -> None:
 
     ice_model = MeltingCap(length_scale=earth.parameters.length_scale)
     dates = np.linspace(START, 0.0, NODES)
-    truth = EarthState(ice0, sea0, earth, exclude_caspian=False)
+    truth = EarthState(ice0, sea0, earth)
     evolution = SeaLevelEvolution(op, truth)
     snapshots, _ = evolution.run_ice_history(
         dates, ice_model, shorelines="migrating", rtol=RTOL)
     flipped = int(np.sum(snapshots[-1].ocean_function.data
                          != truth.ocean_function.data))
     final = SHGrid.from_array(
-        sea0.data + snapshots[-1].sea_level_change.data, grid=earth.grid)
+        sea0.data + snapshots[-1].response.field("relative_sea_level_change").data, grid=earth.grid)
 
     # The misfit's gradient against a target off the reached sea level.
     target = SHGrid.from_array(
@@ -113,7 +113,7 @@ def main() -> None:
     # The calibration from the final sea level as the guess.
     histories = {}
     for method in ("fixed_point", "gradient"):
-        guess = EarthState(ice0, final, earth, exclude_caspian=False)
+        guess = EarthState(ice0, final, earth)
         calibration = SeaLevelEvolution(op, guess).calibrate_initial_sea_level(
             dates, ice_model, final, shorelines="migrating", method=method,
             iterations=12, rtol=1e-9, solver_rtol=RTOL)
@@ -154,12 +154,12 @@ def main() -> None:
     lines += rows(earth.expand_field(sea0).coeffs * length)
     for node, snap in enumerate(snapshots):
         t_si = (START - snap.date) * 1e3 * 365.25 * 86400.0
-        omega = snap.angular_velocity_change * frequency
+        omega = snap.response.angular_velocity_change * frequency
         ocean_area = earth.integrate(snap.ocean_function) * area
         lines.append(f"node {node} {t_si:.17g} "
                      + " ".join(f"{x:.17g}" for x in omega)
                      + f" {ocean_area:.17g}")
-        lines += rows(earth.expand_field(snap.sea_level_change).coeffs * length)
+        lines += rows(earth.expand_field(snap.response.field("relative_sea_level_change")).coeffs * length)
         lines.append(f"ocean {node}")
         lines += rows(earth.expand_field(snap.ocean_function).coeffs)
     lines.append("gradient")

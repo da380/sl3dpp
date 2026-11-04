@@ -1,5 +1,5 @@
 // EarthModel: structure, fields, classification, and the reference gravity
-// against closed forms (the analytic gates).
+// against closed forms.
 
 #include <gtest/gtest.h>
 

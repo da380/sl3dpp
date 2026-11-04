@@ -1,175 +1,37 @@
-# Radial substructuring: a plan for distributing the 3D step
+# Radial substructuring: building and measuring the distributed 3D step
 
 *Written 25 October 2026 against commit 6205daa (develop), with the
-measurements of [multicore-scaling.md](multicore-scaling.md). A plan; the
-code then was a serial prototype of the per-degree solve
-(`benchmarks/substructure_prototype.cpp`, §4). Step 1 of §5 was built the
-same day (§7), the distributed solve over MPI (§8) and, on David's
-direction, the transforms cut with depth (§10), the distributed 3D
-step (§11), and the distributed adjoint and sl3d (§12).*
+measurements of [multicore-scaling.md](multicore-scaling.md). A dated
+record of how the radial distribution was built and what it measured;
+the maintained account is
+[radial-partitioning.md](../radial-partitioning.md).*
 
-## 1. Why radius
+## The plan, in summary
 
-On the two-socket server a 3D step at lmax 128 is fastest on one socket's
-32 cores, and the second socket makes it slower (multicore-scaling.md §3).
-Within a pass the transforms take about three quarters of the time and the
-banded solves a few per cent; once per step `StartStep` takes about a
-fifth. Memory is the other limit: one recorded 3D state is about 21 GB at
-lmax 256 and 98 GB at lmax 512.
+On the two-socket server a 3D step at lmax 128 is fastest on one socket,
+and GSHTrans keeps one level of threading, so one process cannot run a
+group of row-threaded transforms per socket (multicore-scaling.md §3,
+§6). Every large array of the step is indexed by radial memory node and
+only the per-degree solves couple the nodes, along a band, so the plan
+cut the radial mesh into contiguous segments, one per MPI rank with
+OpenMP threads inside, each rank holding and transforming its own nodes,
+and solved the degree systems by substructuring: each segment eliminates
+its interior, and the cut nodes' Schur system couples them
+(radial-partitioning.md §1–§4). A serial prototype on a synthetic system
+with the degree systems' structure (`benchmarks/substructure_prototype.cpp`:
+240 elements, 258 right-hand sides) agreed with the direct solve at
+rounding, its work summed over the parts about 1.3 times the direct
+solve's. The plan and the proposal that mapped it onto the code are built
+as §7, §8 and §10–§12 record. As built, every rank solves the sea level
+equation and rank 0's results are shared to all (not the top rank
+solving and broadcasting), and the cuts balance the transform work, not
+the memory nodes.
 
-Every large array of the step is indexed by radial memory node first:
-the memory tensors m_k, the grid strain, the weights beta_k and W, the
-inverse relaxation times, the spectral strain and forces. The transforms
-act node by node (a batch over nodes), the pointwise products point by
-point, and the force assembly and strain recovery element by element. Only
-the per-degree solves couple the nodes, and they couple them along a band.
-Cutting the radial mesh into P contiguous segments therefore divides the
-transform work, the pointwise work and the memory by P, with the solves the
-one place where segments must talk. That is the case for MPI over radius,
-with one rank per socket (or per node) and OpenMP inside each rank, as now.
-
-It also answers the one-socket limit directly. GSHTrans threads each
-transform over colatitude rows, and keeps one level of threading (its
-`Execution::TeamSize`: no threads inside an active parallel region), so a
-single process cannot run "one group of rows-threaded transforms per
-socket". Threading the transforms over node blocks within a process was
-measured on 25 October and is 45% slower than rows at lmax 64 on 8 threads
-(multicore-scaling.md §6): every thread then streams the whole stored
-Wigner table. A rank per socket gives each socket its own nodes, its own
-copy of the table in its own L3 and memory, and GSHTrans its rows inside.
-
-## 2. What each rank owns
-
-- **Its elements and their memory nodes**: m_k, the strain on the grid and
-  in coefficients, beta_k, W, itau(x), delta(x); the recorded states of
-  its nodes (the adjoint's `on_state` store writes one file per rank).
-- **Its rows of every degree system**: the dofs of its elements, the node
-  shared with the segment below (a separator) belonging to both.
-- **The surface** belongs to the top segment's rank: the surface dofs (U,
-  V, phi at r = a), the load and tide channels enter there, and the sea
-  level solver runs there. Its inputs from the rest are the inertia moment
-  (the degree-0 moment row runs over every radial dof: a sum over ranks)
-  and nothing else; its outputs (the load and centrifugal coefficients,
-  (lmax + 1)(lmax + 2) / 2 complex values each) go to every rank.
-
-Contiguous ranges of elements are chosen to balance memory nodes (the
-transforms and the memory both scale with them), cut at element
-boundaries inside a layer — never at a layer or solid–fluid boundary,
-where the dofs are split or constrained (`DegreeOperator::Interfaces`).
-
-## 3. One pass, distributed
-
-1. Synthesise the strain, multiply by W, analyse: each rank its own
-   nodes. No communication.
-2. Assemble each degree's force: element-local; a separator's row receives
-   contributions from both sides.
-3. Solve each degree by substructuring (§4): one exchange of the reduced
-   right-hand sides at the separators and of the separator solutions.
-4. The sea level coupling on the top rank: surface values are already
-   there; the inertia moment is one all-reduce of a scalar; the channel
-   coefficients are broadcast back.
-5. Add the channels (each rank holds its part of each degree's unit
-   responses) and recover the strain: element-local.
-6. Mix and test: the Anderson mixer's Gram system and residual norms are
-   all-reduces of a few numbers; the update itself is local.
-
-Per pass that is one exchange at the separators, a broadcast of the channel
-coefficients and a handful of scalar reductions. At lmax 128 the separator
-exchange is 3 (lmax + 1)(lmax + 2) real values per separator for the
-spheroidal systems, about 0.4 MB, against a pass of about 3 s: the
-communication is negligible on any interconnect. `StartStep` is local
-except that it ends with a pass's first force (no extra communication).
-
-## 4. The degree solve by substructuring, and the prototype
-
-Number a segment's dofs as interior (I) and separator (Γ: the one shared
-node at each internal cut, 3 dofs for the spheroidal systems, 1 for the
-toroidal). Each segment eliminates its interior,
-
-    S_p = K_ΓΓ^p − K_ΓI^p (K_II^p)⁻¹ K_IΓ^p,   g_p = b_Γ^p − K_ΓI^p (K_II^p)⁻¹ b_I^p,
-
-the separators solve the assembled S x_Γ = g (block tridiagonal, 3 × 3
-blocks, size 3(P − 1)), and each segment back-substitutes,
-
-    x_I = (K_II^p)⁻¹ b_I − ((K_II^p)⁻¹ K_IΓ^p) x_Γ,
-
-with both terms kept from the reduction, so each right-hand side costs one
-interior solve. The interior factorisations and the coupling columns
-(K_II⁻¹ K_IΓ, at most six) are per (degree, scheme, dt), cached exactly
-as the effective systems are now.
-
-`benchmarks/substructure_prototype.cpp` does this serially on a synthetic
-system with the degree systems' structure: a 1D spectral-element assembly,
-five GLL nodes per element, three coupled components per node in node-major
-order (band 14, as `DegreeOperator`'s), each element a random symmetric
-positive definite block scaled over ten decades across the radius (the real
-systems' condition numbers reach 2.5e11 at degree 1). With 240 elements
-(2883 dofs) and 258 right-hand sides (degree 128's 2(l + 1) columns), on
-this laptop, one thread:
-
-| Parts | max \|x − x_direct\| / max \|x_direct\| | residual (direct 3.9e-15) | Schur dofs | solves per part |
-|---|---|---|---|---|
-| 1 | 0 | 3.9e-15 | 0 | 38 ms |
-| 2 | 3e-20 | 3.9e-15 | 3 | 28 ms |
-| 8 | 1.3e-16 | 3.9e-15 | 21 | 7.6 ms |
-| 32 | 9.8e-16 | 4.2e-15 | 93 | 1.3 ms |
-
-The direct solve takes 31–45 ms (timing noise at this size). The
-substructured work summed over parts is about 1.3 times the direct solve,
-and the per-part time falls as 1/P; the interface system is tiny (the
-prototype solves it densely, which is fine to P ≈ 32; a block-tridiagonal
-elimination is linear in P beyond that). Agreement is at rounding: the
-Schur complement of a positive definite matrix is positive definite and no
-worse conditioned, and the elimination is the banded Cholesky's own
-arithmetic regrouped.
-
-What the real systems add, each local:
-
-- **Degree-dependent truncation.** Degree l uses the elements from
-  `FirstElement(l)` up, so at high degree the deep segments hold no dofs
-  and drop out of that degree's Schur system. The solves are a few per
-  cent of a pass, so the imbalance costs little; the transforms, which do
-  not truncate, stay balanced.
-- **The fluid core.** Systems whose Cholesky fails fall back to banded LU
-  now; a segment does the same, and the Schur system is then solved by LU.
-  Cuts stay out of the fluid regions' boundaries (§2).
-- **Degree one.** The centre-of-mass frame removes the surface phi dof
-  (the top segment's); the toroidal pins remove one dof per solid region,
-  in whichever segment holds it.
-
-## 5. Order of work
-
-1. **Substructured `DegreeOperator::Solve`, serial**, behind an option (the
-   segment cuts), gated against the direct solve on the real systems at
-   lmax 64 for every degree (agreement to 1e-13 relative, residuals equal)
-   and through the 3D step's fingerprint. This is where the assembly,
-   the LU fall-back and the pins meet the algebra above; it needs nothing
-   from MPI.
-2. **Segment-offset data in GridCoupling and Viscoelastic3D**: the node
-   arrays and the per-degree solutions addressed by segment, still in one
-   process. Bitwise against the current step.
-3. **MPI**: one rank per segment, the loops over segments replaced by
-   ranks, the collectives of §3. The 1D code stays as it is.
-4. **The server**: 2 ranks × 32 threads on one node against 1 × 32 and
-   1 × 64 (multicore-scaling.md's sweep), then two nodes.
-
-Alongside: the adjoints reuse the step and inherit the distribution; the
-checkpoint and trajectory stores become per rank, with the root writing
-the run's metadata.
-
-## 6. What it leaves
-
-The sea level solve stays on one rank: two-dimensional and cheap now, it
-should be measured at lmax 512 before it is distributed. Within a rank the
-transforms keep GSHTrans's row threading, which scales on one socket; the
-forward transform's per-thread accumulators (GSHTrans `docs/open-issues.md`
-§4) still matter there, and a decomposition over orders m would serve both
-designs.
-
-## 7. Step 1, built (25 October 2026, against 7a14aaa)
+## 7. The substructured solve, built (25 October 2026, against 7a14aaa)
 
 `detail::BandSubstructure` (`include/sl3dpp/detail/BandSubstructure.hpp`)
-is §4's algebra on any symmetric band matrix given its separators: each
+is the substructuring algebra (radial-partitioning.md §3) on any
+symmetric band matrix given its separators: each
 segment's interior factorised on its own (banded Cholesky, falling back to
 banded LU as `DegreeOperator` does), the coupling columns K_II⁻¹ K_IΓ kept,
 the separators' system assembled and factorised at its own bandwidth, and a
@@ -191,9 +53,9 @@ weights)` picks cuts at element boundaries inside layers, balancing summed
 element weights. `DegreeOperator::Apply` (the assembled operator) gives
 residuals.
 
-The gate (`tests/TestSubstructure.cpp`) found that this plan's "1e-13
-relative" target was optimistic. The two solves have the same residuals,
-but the degree systems determine their solutions only to their
+Agreement with the direct solve to 1e-13 relative, the plan's target, is
+not to be had (`tests/TestSubstructure.cpp`). The two solves have the
+same residuals, but the degree systems determine their solutions only to their
 conditioning, and the direct solve's own error is as large. At lmax 64 the
 substructured and direct solutions differ by up to 1.4e-10 at degree 1,
 1e-11 at the lowest degrees and below 1e-12 from degree 10. The gate is
@@ -222,10 +84,9 @@ of a perfect split that the rank holding the largest segment carries,
 weighted by columns. Cutting into equal element counts balances the
 solves poorly, about 0.55: the high degrees, which carry the most columns,
 keep only the upper segments. The solves are a few per cent of a pass, and
-the cuts must balance the memory nodes (the transforms, the pointwise work
-and the memory, §2), which do not truncate, so the solves' imbalance is
-accepted. A rank's interior solves fall with its share of the dofs either
-way.
+the cuts are set by the transforms, the pointwise work and the memory
+(radial-partitioning.md §7), so the solves' imbalance is accepted. A
+rank's interior solves fall with its share of the dofs either way.
 
 MPI on this laptop: the system OpenMPI (4.1.6) has no development headers
 (`libopenmpi-dev` is not installed). `~/miniforge` has OpenMPI 5.0.10,
@@ -250,12 +111,11 @@ fluid core gets an empty separator, so the segment numbering stays one per
 cut. `Distributed.hpp` supplies `SumOver(comm)` (MPI_Allreduce) and
 `ShareMesh(mesh, comm)`: one segment per rank, from `BalancedCuts`.
 
-Every process passes the whole right-hand side; only its own rows and the
-separators' (from segment 0's owner) are read. When the 3D step's force
-assembly is distributed, each rank will have its own elements'
-contributions at its cut nodes, partial sums. Then the separators' right-hand
-side should be combined as shares rather than taken from one owner: a
-small change in `Solve`, to make when step 2 lands.
+Here every process passes the whole right-hand side; only its own rows
+and the separators' (from segment 0's owner) are read. In the distributed
+3D step (§11) each rank's force holds its own elements' contributions at
+its cut nodes, partial sums, and the separators' right-hand side is
+combined as shares (`RightHandSide::Shares`).
 
 `TestDistributed` runs under `mpiexec` on 2, 3 and 4 ranks. It gathers each
 rank's part of the solution of every spheroidal and toroidal degree to lmax
@@ -290,85 +150,14 @@ FindMPI was therefore pointed at a directory of links to `mpi*.h` and
 `libmpi*.so` alone (README, *Building in detail*), so the run path finds
 the system netCDF.
 
-What remains is §5's steps 2 and 3: each rank holding its own memory
-nodes, transforms, force assembly and strain recovery; the sea level
-solve on the top rank; and the per-pass collectives of §3.
-
-## 9. Steps 2–3 against the code: a proposal (25 October 2026)
-
-What the 3D step does today, with the places a distributed one changes.
-Line numbers are against the working tree of 25 October (after §8).
-
-**The memory nodes.** `GridCoupling`'s constructor makes one node per
-memory point of every element with an active branch
-(`src/GridCoupling.cpp:37-46`). Every grid-sized array is
-`[node * FieldSize + x]`: the tensors (`TensorField`, `SpectralTensor`),
-`Viscoelastic3D::itau_` and `muBranch_` (built at
-`src/Viscoelastic3D.cpp:120-160`), the step's weights, memory and buffers
-(`StartStep`, `src/Viscoelastic3D.cpp:576`). Proposal: a
-`GridCoupling::Options` element range [first, end), the nodes of those
-elements alone. Every node loop then runs over the rank's own nodes
-without further change: transforms, pointwise products, `AdvanceMemory`,
-the itau kernels. The whole range is today's coupling, bitwise.
-
-**The force and the solves.** `SolveAll` (`src/Viscoelastic3D.cpp:276`)
-takes the forces from `SpheroidalForce` / `ToroidalForce`
-(`src/GridCoupling.cpp:279`), which sum over the nodes into each degree's
-rows. On a rank these are its own elements' rows, partial at the cut
-nodes, where both sides contribute. `BandSubstructure::Solve` therefore
-needs the separators' right-hand side as shares, summed by the combine,
-rather than taken from segment 0's owner (§8): a flag. The solves are §8's.
-`AddStrainOfSolution` (`src/GridCoupling.cpp:223`) reads the solution at
-its own elements' dofs, which a rank has: its interiors and every cut node.
-
-**The channels.** `AddUnitChannels` adds the load and tide responses by
-linearity from unit solves cached per degree. Those are distributed solves
-too, with the load at the surface rows (the top rank's interior).
-
-**What must be summed or maximised over the ranks.**
-- `OpenStep::InertiaMoment` (`src/Viscoelastic3D.cpp:772`): the degree-0
-  moment row against the solution. Each rank sums its own dofs, the cut
-  nodes counted once, then a sum.
-- `Surface` (`src/Viscoelastic3D.cpp:914`): the top dofs belong to the
-  top rank. A sum of the per-degree surface columns, zeros elsewhere,
-  gives them to every rank: (lmax + 1)(lmax + 2) complex values per
-  component.
-- `OpenStep::Converge` (`src/Viscoelastic3D.cpp:818`): the convergence
-  test is a sup-norm ratio (a max over the ranks), and the Anderson mixer
-  (`detail/AndersonMixer.hpp`) needs its Gram matrix and right-hand side
-  summed over the ranks; the update itself is local.
-- `SeaLevelEvolution3D::March`'s pass (`src/Evolution3D.cpp:302-340`):
-  with the surface columns and the moment on every rank, every rank can
-  run the sea level solve redundantly. It is 2D, cheap and deterministic,
-  so the ranks agree without a broadcast. That is simpler than solving on
-  the top rank and broadcasting the load and centrifugal coefficients,
-  and costs nothing measurable.
-
-So the solver core needs a sum and a max over the ranks, not only §8's
-sum. Proposal: replace `combine` with a small struct of the two
-callbacks, `{sum, max}`, which `Distributed.hpp` fills from a
-communicator. The alternative is MPI calls in the core under
-`#ifdef SL3DPP_HAVE_MPI`. The callbacks keep every MPI line in one file,
-and they let a single-process test pass an identity (or a two-"rank"
-emulation) and check bitwise identity with today's step.
-
-**Order.** (a) The share flag in `BandSubstructure::Solve`. (b) The
-`GridCoupling` element range, with the whole range bitwise as now.
-(c) `Viscoelastic3D::Options` gains the range, segments and reductions;
-`InertiaMoment`, `Surface`, `Converge` and the unit channels use them.
-(d) `SeaLevelEvolution3D` runs as is on every rank. (e) An MPI test: a
-lateral evolution on 2–4 ranks equal to the one-process one to the fixed
-point's tolerance. (f) The step on the server: 2 ranks × 32 threads
-against 1 × 64. Then the 3D adjoint (`src/Adjoint3D.cpp`: its jump, the
-reference's unit responses and the kernel accumulation over nodes, which
-is local) and the per-rank checkpoint and trajectory stores.
+The step itself followed: the transforms cut with depth (§10) and the
+distributed step (§11).
 
 ## 10. Transforms cut with depth: the node blocks (25 October 2026)
 
-The first of the steps agreed after §9 (David, 25 October): a transform
-degree per radial partition, chosen so that nothing is lost, with the cuts
-later balanced on the transform work rather than on node counts. Built on
-one process first; the MPI distribution of §9 follows it.
+A transform degree per radial partition, chosen so that nothing is lost,
+with the cuts balanced on the transform work rather than on node counts.
+Built on one process first; the MPI distribution (§11) follows it.
 
 **Why nothing is lost.** Degree l's system has dofs only above its
 truncation radius, (r/a)^(l + 1) = eps under the default graded rule
@@ -445,9 +234,9 @@ spherical kernels, ice kernels and the pairing of its log-viscosity kernel
 with a smooth direction to 6e-14 without lateral viscosity and 1.3e-9
 with it.
 
-**Next** (step 2 of the agreed order): `ShareMesh` balanced on
-`TransformWeights` rather than one per element, then the element range
-per rank (step 3). Computed on 25 October for prem.simp.vm1, with every
+**Balancing the cuts.** `ShareMesh` balances the cuts on
+`TransformWeights` rather than on elements (built with the distributed
+step, §11). Computed for prem.simp.vm1, with every
 element at its own degree L(e) and the cuts at whole elements: the
 busiest rank's transform work over the mean, and the separator values
 the redundant Schur solves sum per pass (4 dofs per separator node,
@@ -472,11 +261,11 @@ small cut-node system redundantly; a distributed solve of that
 block-tridiagonal system (cyclic reduction, neighbour exchanges) would
 replace it there.
 
-## 11. The 3D step distributed (step 3, 25 October 2026)
+## 11. The 3D step distributed (25 October 2026)
 
-Built on David's answers to §9's questions: callbacks rather than MPI in
-the core (Q2), the sea level equation solved on every rank (Q3), per-rank
-checkpoints (Q4, for the app layer, not built yet).
+Built with callbacks rather than MPI calls in the core, the sea level
+equation solved on every rank, and per-rank checkpoints in the app layer
+(§12).
 
 **The pieces.**
 - `Collectives` (`Collectives.hpp`): `sum`, `max` and `share` (the first
@@ -541,11 +330,12 @@ On one socket the ranks cannot be faster: they share its cores and
 memory. What they show: the memory per rank falls with the ranks, each
 keeping a fixed part of roughly half a gigabyte at lmax 64 (libraries,
 tables, the 1D reference operator, MPI's buffers; not itemised yet); the
-transform work balances (the deep rank holds more,
-cheaper nodes); and two ranks of four threads cost nothing. Pure MPI is
-slower here for two reasons: one-thread ranks stream the whole Wigner
-table each (the §1 node-block pattern), and the high degrees, whose dofs
-lie near the surface, are solved by the top rank alone on its one thread.
+transform work balances (the deep rank holds more, cheaper nodes); and
+two ranks of four threads cost nothing. Pure MPI is slower here for two
+reasons: one-thread ranks stream the whole Wigner table each (the
+node-block pattern of multicore-scaling.md §6), and the high degrees,
+whose dofs lie near the surface, are solved by the top rank alone on its
+one thread.
 
 **Not yet.** The measurement that matters, on the server: 2 x 32 against
 1 x 64 on one node, then across nodes. The top rank's share of the
@@ -575,7 +365,7 @@ commands run over the ranks of MPI_COMM_WORLD; the others refuse several
 ranks. `OperatorOptions` gives the rank its segment (ShareMesh balanced on
 the transform work) and the collectives. Rank 0 writes every output and
 prints; a failure on any rank calls MPI_Abort, since the others would
-wait at their next collective. Checkpoints, per Q4: each rank writes its
+wait at their next collective. Checkpoints: each rank writes its
 own into `rank_RRRR` of the checkpoint directory (rank 0's with the
 histories), the rank count enters the checkpoints' hash, a run resumes
 from the newest node every rank has (rank 0's newest two shared, each

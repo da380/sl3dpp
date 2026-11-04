@@ -7,7 +7,7 @@
  *
  * On several ranks the 3D commands (evolve, kernel) distribute their run
  * over radius, one radial segment per rank balanced on the transform
- * work (docs/dev/radial-substructuring.md §11-12): every rank reads the
+ * work (docs/radial-partitioning.md; the measurements in docs/dev/radial-substructuring.md): every rank reads the
  * config and the inputs, steps its own memory nodes, and solves the sea
  * level equation alike; rank 0 alone writes the outputs and prints. Each
  * rank checkpoints its own state into its own subdirectory of the
@@ -60,6 +60,13 @@ class RanksOverride {
 /// and, on several ranks, this rank's radial segment (ShareMesh over
 /// MPI_COMM_WORLD, balanced on GridCoupling::TransformWeights) and the
 /// collectives.
+/// With `active_elements` (GridCoupling::Options::active_elements), the
+/// cuts balance the transform work of those elements rather than the
+/// rheology's viscous ones: the static problem on a branchless rheology
+/// under lateral moduli, whose work is where the moduli are.
+[[nodiscard]] Viscoelastic3D::Options OperatorOptions(
+    int lmax, const std::vector<int>& transform_degrees,
+    const Rheology& rheology, const std::vector<char>& active_elements = {});
 [[nodiscard]] Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
                                                       const Rheology& rheology);
 

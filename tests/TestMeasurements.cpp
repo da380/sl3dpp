@@ -196,7 +196,7 @@ TEST(DecayTime, RefusesUncertaintiesOutOfScale) {
 TEST(DecayTime, MatchesPyslfpOnTheFixture) {
   // tests/data/decay_time.txt, written by scripts/make_decay_fixtures.py
   // from pyslfp's fit_decay_time: the two estimators are the same
-  // construction, so the port is held to the Python's numbers.
+  // construction, so the C++ is held to the Python's numbers.
   auto in = std::ifstream(std::string(SL3DPP_TEST_DATA_DIR) +
                           "/decay_time.txt");
   ASSERT_TRUE(in) << "run scripts/make_decay_fixtures.py from pyslfp";

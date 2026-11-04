@@ -3,8 +3,8 @@
 /**
  * @file Viscoelastic.hpp
  * @brief The radial viscoelastic core: state, slaved degree solves,
- * steppers. A port of pyslfp's `viscoelastic/operator.py`, non-dimensional
- * throughout.
+ * steppers. Corresponds to pyslfp's `viscoelastic/operator.py`;
+ * non-dimensional throughout.
  *
  * The state is the internal variables alone; the displacement is slaved
  * through elastic solves (AdGIA's layering). Per branch and degree the
@@ -91,7 +91,7 @@ class ViscoelasticOperator {
     bool parallel = true;
     /// Where the internal variables live within each element
     /// (MemoryPoints.hpp): the interior Gauss points (the default, ~20%
-    /// fewer, docs/design.md §5) or the GLL nodes (pyslfp's and the Fortran's,
+    /// fewer, docs/design.md) or the GLL nodes (pyslfp's and the Fortran's,
     /// for like-for-like comparisons).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
     /// Radial cuts for every degree system (DegreeOperator::Options::cuts,
@@ -215,6 +215,15 @@ class ViscoelasticOperator {
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;
 
+  /// The nodal gradients of a degree's bilinear form in the bulk and
+  /// shear moduli for a pair of solutions (DegreeOperator::MaterialGradient
+  /// of the degree's system; the effective systems share it). Needs the
+  /// memory points at the GLL nodes, where the effective solid is a
+  /// material.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  MaterialGradient(int l, std::span<const double> y, std::span<const double> x,
+                   int ncols) const;
+
   /// The explicit stability scale of the rheology.
   [[nodiscard]] double MinRelaxationTime() const {
     return rheology_->MinRelaxationTime();
@@ -261,6 +270,14 @@ class ViscoelasticOperator {
   [[nodiscard]] std::vector<std::vector<double>> ItauKernelsAtNodes(
       std::vector<std::vector<double>> atPoints) const;
 
+  /// Nodal perturbations of each branch's itau, (element, gll) over the
+  /// whole mesh, carried to the memory points, (element, point): the
+  /// forward map whose transpose ItauKernelsAtNodes applies — the
+  /// interpolant where the clamp at zero did not act, zero where it did;
+  /// the arrays themselves at the GLL points.
+  [[nodiscard]] std::vector<std::vector<double>> ItauPerturbationAtPoints(
+      const std::vector<std::vector<double>>& nodal) const;
+
   /// The inertia moment sqrt(4 pi) int rho U r^3 dr of a degree-0
   /// solution array, per column.
   [[nodiscard]] std::vector<double> InertiaMoment(
@@ -270,6 +287,7 @@ class ViscoelasticOperator {
   friend class ViscoelasticStep;
   friend class AdjointSolver;    // the sweeps transpose these internals
   friend class AdjointSolver3D;  // and the 3D continuous sweep's jump
+  friend class TangentLinearSolver;  // the forward-mode drives
 
   /// Per-degree workspace: the unrelaxed system over the degree's element
   /// subset, and the strain operators and branch data over its memory
@@ -309,6 +327,16 @@ class ViscoelasticOperator {
   /// viscosity sensitivity pairs them with dh = dt d(itau).
   [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightDerivativesOf(
       Scheme scheme, double dt) const;
+  /// The second h-derivatives of the scheme weights, nodal per branch
+  /// (d2w kept in e for backward Euler; d2e, d2alpha, d2beta for the
+  /// trapezoid): what a second derivative in the viscosity pairs with
+  /// dh_u dh_v.
+  [[nodiscard]] const std::vector<BranchWeights>& SchemeWeightSecondDerivativesOf(
+      Scheme scheme, double dt) const;
+  /// The weights (order 0) or their first or second h-derivatives, built
+  /// and cached per (scheme, dt).
+  [[nodiscard]] const std::vector<BranchWeights>& WeightsOfOrder(
+      Scheme scheme, double dt, int order) const;
 
   std::shared_ptr<const Rheology> rheology_;  ///< owned, immutable
   int lmax_;
@@ -332,6 +360,8 @@ class ViscoelasticOperator {
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>> weights_;
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
       weightDerivatives_;
+  mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
+      weightSecondDerivatives_;
   mutable std::map<std::pair<int, double>, LoveNumbers> effectiveLove_;
   mutable std::vector<double> unitUnrelaxed_;  // placeholder, see cpp
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;
@@ -363,6 +393,21 @@ class ViscoelasticStep {
   /// The Love numbers characterising this step's instantaneous response.
   [[nodiscard]] const LoveNumbers& EffectiveLove() const;
 
+  /// Adds an increment to the step's decayed memory state, in the state's
+  /// own layout per degree (degrees absent from the increment are left as
+  /// they are): the drive of a tangent-linear step, which enters the
+  /// memory force and the end state alike. Invalidates the cached memory
+  /// solutions.
+  void AddMemory(const std::map<int, std::vector<double>>& increment);
+
+  /// Adds a force per degree (ndof x ncols, column-major, the solutions'
+  /// layout) to the step's memory force before the effective solve: the
+  /// drive of a tangent-linear step in the material (the derivative of
+  /// the effective system on the base solution, and the memory force of
+  /// the base memory with the branch moduli's variation). Degrees absent
+  /// are left as they are. Invalidates the cached memory solutions.
+  void AddForce(const std::map<int, std::vector<double>>& force);
+
   /// Completes the step under the end-time loads: one effective solve per
   /// degree, the state update, and solutions consistent with it.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
@@ -370,6 +415,8 @@ class ViscoelasticStep {
 
  private:
   friend class ViscoelasticOperator;
+  friend class TangentLinearSolver;  // reads the decayed memory
+  friend class AdjointSolver;        // the second-order sweep reads it too
   ViscoelasticStep(const ViscoelasticOperator& op,
                    const ViscoelasticState& state, double dt, Scheme scheme,
                    const LoadCallable& load, const LoadCallable& tide);
@@ -380,6 +427,7 @@ class ViscoelasticStep {
   double t_;
   std::map<int, int> ncols_;
   std::map<int, std::vector<double>> mem_;  // the decayed memory state
+  std::map<int, std::vector<double>> extraForce_;  // AddForce
   mutable std::map<int, std::vector<double>> memorySolutions_;
 };
 

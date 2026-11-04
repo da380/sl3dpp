@@ -265,10 +265,15 @@ rank its segment.
 - **Convergence.** The residual's maximum and the Anderson Gram system's
   sum are taken over the ranks, so the iteration takes the same course
   everywhere.
-- **The 3D adjoint** runs the same way. Each rank sweeps its own nodes
-  back over its own forward trajectory, and its viscosity kernels are its
-  own nodes'; laid end to end in rank order they are the mesh's. The ice
-  kernels are every rank's alike.
+- **The continuous 3D adjoint** runs the same way, as do the 3D
+  tangent-linear runs. Each rank sweeps its own nodes back over its own
+  forward trajectory, and its viscosity kernels are its own nodes'; laid
+  end to end in rank order they are the mesh's. The ice kernels are every
+  rank's alike. The discrete 3D sweep (first and second order), the
+  material tangent and the material kernels run the same way since 4
+  November 2026 (docs/dev/adjoints.md §17): the discrete transpose sums
+  the ranks' partial contractions for the load duals and places the
+  surface duals on their holding rank.
 - **The `sl3d` program** runs `evolve` and `kernel` under `mpiexec`.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A

@@ -592,9 +592,6 @@ std::string RunKernel3D(const std::filesystem::path& config) {
     Fail(top, "needs a viscosity section: a planetmodel model file whose "
               "viscosity drives the 3D run");
   }
-  if (input.method == AdjointMethod::Discrete) {
-    Fail(top.At("adjoint"), "the 3D sweep is the continuous adjoint alone");
-  }
   auto earth = BuildEarth(input.run, top);
   auto mv_options = io::ModelViscosityOptions{};
   mv_options.reference = input.run.viscosity_file_radial

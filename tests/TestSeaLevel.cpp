@@ -1,6 +1,6 @@
 // The sea level engine: structural identities that need no external
 // reference — conventions, conservation, the adjoint dot-product test, the
-// nonlinear mass budget. The pyslfp comparison gates live in TestFixtures.
+// nonlinear mass budget. The pyslfp comparisons live in TestFixtures.
 
 #include <gtest/gtest.h>
 

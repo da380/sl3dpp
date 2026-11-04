@@ -3,8 +3,8 @@
 /**
  * @file SpinComponents.hpp
  * @brief The degree <-> spin-component algebra of the 3D memory coupling
- * (docs/dev/lateral-coupling.md §2–3), extracted from the Fortran's
- * `memdot_bvec_all` and kept in its ordering and normalisation.
+ * (docs/dev/lateral-coupling.md), in the ordering and normalisation of the
+ * Fortran's `memdot_bvec_all`.
  *
  * A trace-free symmetric tensor on the sphere is carried as five complex
  * components at spins (-2, -1, 0, +1, +2):
@@ -28,9 +28,9 @@
  * A(-+) is real; the tests pin these down.
  *
  * In the 1D spheroidal limit (W = 0, uniform weights) the composition of
- * the two maps reproduces the degree-basis memory force of the ported
+ * the two maps reproduces the degree-basis memory force of the 1D
  * stepper exactly — the reduction identity the tests pin down constant by
- * constant, and the heart of the zero-lateral gate.
+ * constant.
  */
 
 #include <array>

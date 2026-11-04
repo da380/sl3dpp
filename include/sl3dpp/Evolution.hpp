@@ -3,7 +3,7 @@
 /**
  * @file Evolution.hpp
  * @brief Forward GIA: ice history in, sea level, displacement, potential
- * and rotation histories out. A port of pyslfp's
+ * and rotation histories out. Corresponds to pyslfp's
  * `viscoelastic.evolution.SeaLevelEvolution`: each implicit step is opened
  * before its end-time loads are known, its memory responses and inertia
  * moment enter the sea level equation through the generalised response
@@ -171,6 +171,7 @@ class SeaLevelEvolution {
 
  private:
   friend class AdjointSolver;  // reuses the operator/solver/state/ratios
+  friend class TangentLinearSolver;  // likewise, forwards
 
   /// A degree-column callable over a coefficient vector in material
   /// units: degree l maps to its 2 (l + 1) columns, the real block then

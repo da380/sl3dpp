@@ -4,7 +4,10 @@
 sl3dpp on a large shared-memory node, what they show, and the plans that
 follow. Nothing here is implemented beyond §1; the plans are for later
 work, each to be measured before and after with the sweeps below. §6 adds
-the work of 25 October: plan 1 built, plan 3's node blocks measured.*
+the work of 25 October: plan 1 built, plan 3's node blocks measured. The
+process per socket that §6 points to is built since
+([radial-partitioning.md](../radial-partitioning.md)). A dated record: the
+code has moved, and the file:line pointers it carried are removed.*
 
 ## 1. The machines, and the OpenBLAS crash (fixed)
 
@@ -84,7 +87,7 @@ same state, as they place the threads alike.)
   private accumulator over the whole coefficient array for its colatitudes
   and then reduces them (in parallel, block by block), so the accumulators
   and the reduction's reads grow with the thread count. GSHTrans expects
-  this: its comment at `GSHTrans/SphericalGrid.hpp:1242` (at the pinned
+  this: its comment in `GSHTrans/SphericalGrid.hpp` (at the pinned
   commit) and its `docs/open-issues.md` §4, "Open questions for the
   64-core target", say the shape stops scaling well before 128 threads and
   leave the replacement, and the chunk rule on multi-socket machines, to
@@ -97,14 +100,14 @@ the node does no better than one socket.
 
 ## 4. Why `StartStep` does not scale
 
-`Viscoelastic3D::StartStep` (`src/Viscoelastic3D.cpp:493`), once per step:
+`Viscoelastic3D::StartStep` (`src/Viscoelastic3D.cpp`), once per step:
 
 1. copies the start strain's coefficients (`s0_`, spectral, small);
 2. allocates and zero-fills, on one thread, `weight_` (nodes × grid
    doubles, 0.8 GB at lmax 128), the grid workspace `grid_`
    (`coupling_.ZeroTensor()`, 4.13 GB) and, per relaxing branch,
    `memory_[k]` (4.13 GB) and `beta_[k]` (0.8 GB): about 10 GB for the one
-   Maxwell branch of these runs. `ZeroTensor` (`src/GridCoupling.cpp:64`)
+   Maxwell branch of these runs. `ZeroTensor` (`src/GridCoupling.cpp`)
    is `std::vector::assign`, serial;
 3. computes the step weights, the decayed memory and the fixed memory force
    per grid point (`ParallelElements`, threaded);
@@ -113,7 +116,7 @@ the node does no better than one socket.
    analyses it (`analysed_`): a second transform, which is the first
    pass's own analysis moved here (that pass then skips its synthesis).
 
-`Finish` (`src/Viscoelastic3D.cpp:696`) moves `memory_` and `grid_` into
+`Finish` (`src/Viscoelastic3D.cpp`) moves `memory_` and `grid_` into
 the new state, so nothing is copied there, but the old state's arrays are
 freed when it is replaced, and the next `StartStep` allocates fresh ones.
 
@@ -216,7 +219,8 @@ unchanged (the arrays the old code freed and reallocated are the ones kept).
 faulted once per run, not per step; placing them by socket still needs
 `TensorField`'s vectors to skip value-initialisation (a type change through
 the coupling), and matters only for runs spanning sockets — which §3 says
-to avoid, and which radial substructuring (below) would replace.
+to avoid, and which one process per socket replaces (built since:
+[radial-partitioning.md](../radial-partitioning.md)).
 
 **Plan 3: node blocks lose.** Threading the tensor transforms over blocks
 of radial nodes (each block one sequential GSHTrans call, GSHTrans's
@@ -230,12 +234,13 @@ consequences: a "rows inside, groups of nodes per socket" hybrid cannot be
 built inside one process, because GSHTrans keeps one level of threading
 (`Execution::TeamSize`: no threads inside an active parallel region); and
 the natural way to give each socket its own nodes and its own copy of the
-table is a process per socket — see
-[radial-substructuring.md](radial-substructuring.md). Within a socket the
-open question stays GSHTrans's (its `docs/open-issues.md` §4): the forward
-transform's per-thread accumulators, where a decomposition over orders m
-would write disjoint coefficients and read only its own orders' Wigner
-values.
+table is a process per socket — built since
+([radial-partitioning.md](../radial-partitioning.md); the building and
+measurements in [radial-substructuring.md](radial-substructuring.md)).
+Within a socket the open question stays GSHTrans's (its
+`docs/open-issues.md` §4): the forward transform's per-thread
+accumulators, where a decomposition over orders m would write disjoint
+coefficients and read only its own orders' Wigner values.
 
 **Plan 5: thread counts.** On the laptop the 3D example (`evolve.json`,
 lmax 16) takes 9.5 s on one thread, 4.9 s on 4, 4.3 s on 8 and 5.9 s on 16

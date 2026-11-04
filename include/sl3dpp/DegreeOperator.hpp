@@ -3,8 +3,8 @@
 /**
  * @file DegreeOperator.hpp
  * @brief The degree-l system of the loading problem: dofs, band assembly,
- * factorisation, right-hand sides. A port of pyslfp's
- * `love_numbers.assembly.DegreeSystem`, non-dimensional throughout.
+ * factorisation, right-hand sides. Corresponds to pyslfp's
+ * `love_numbers.assembly.DegreeSystem`; non-dimensional throughout.
  *
  * For one spherical-harmonic degree l, with k^2 = l(l + 1), the unknowns
  * are the radial and tangential displacement scalars U, V and the
@@ -27,7 +27,7 @@
  * centre-of-mass frame); for l = 0 there is no tangential dof, fluid
  * regions are mu = 0 elastic media, and U(0) = 0 is imposed at a centre.
  * Degrees above zero act on the element subset of the one global mesh
- * where the solution is not negligible (docs/design.md §3).
+ * where the solution is not negligible (docs/design.md).
  *
  * The system is symmetric, stored as an upper band, scaled symmetrically
  * by its diagonal and factorised on construction: banded Cholesky, falling
@@ -36,7 +36,7 @@
  * system is solved by substructuring (detail/BandSubstructure.hpp): each
  * segment of the mesh between cuts eliminates its interior on its own, and
  * the cut nodes' dofs solve together, the algebra of a solve distributed
- * over radial segments (docs/dev/radial-substructuring.md).
+ * over radial segments (docs/radial-partitioning.md).
  *
  * With `gravitating = false` the same discretisation solves the
  * non-gravitating problem of the cross-code benchmark hierarchy: the
@@ -78,7 +78,7 @@ class DegreeOperator {
     /// The relative level below which a degree's solution is truncated
     /// with depth.
     double eps = 1e-8;
-    /// The truncation-radius rule (docs/design.md §3).
+    /// The truncation-radius rule (docs/design.md).
     TruncationRule truncation = TruncationRule::Graded;
     /// A shear modulus at the memory points to add (MemoryPoints.hpp):
     /// with the long-term material, the elastic or a step's effective
@@ -193,6 +193,59 @@ class DegreeOperator {
 
   /// A x for `nrhs` column-major columns: the assembled (unscaled)
   /// operator, for residuals.
+  /// The derivative of the system along a material variation, applied to
+  /// one or several vectors: the bilinear form with each coefficient
+  /// replaced by its variation — the moduli's, and the density's with
+  /// gravity, the stratification and the fluid-solid interface terms
+  /// differentiated (the self-consistent density derivative). The point
+  /// shear (fixed branches) and the exterior closures carry no variation.
+  /// Non-gravitating: the moduli alone.
+  [[nodiscard]] std::vector<double> ApplyVariation(const MaterialVariation& dm,
+                                                   std::span<const double> x,
+                                                   int nrhs = 1) const;
+
+  /// The transpose of ApplyVariation in the isotropic moduli: nodal
+  /// arrays (kappa, mu) over the full mesh with
+  /// sum_i kappa_i dkappa_i + mu_i dmu_i = y^T (dK) x for the isotropic
+  /// variation (dkappa, dmu), for solutions y and x of nrhs columns
+  /// each, summed over the columns — the band assembly's elastic
+  /// integrands pointwise at the GLL nodes, over every element of the
+  /// system (the fluid core's bulk term at degree 0 included). The
+  /// gradient of the effective system of a step is the same function,
+  /// the form's shape not depending on the moduli.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  MaterialGradient(std::span<const double> y, std::span<const double> x,
+                   int nrhs) const;
+  /// The variations of the forcings along the same: the load's traction
+  /// piece and the tangential traction through the surface gravity, the
+  /// tide through the density, its derivative, gravity and the interfaces;
+  /// the attraction piece and the unit tractions carry none.
+  [[nodiscard]] std::vector<double> LoadVariation(
+      const MaterialVariation& dm, LoadPart part = LoadPart::Both) const;
+  [[nodiscard]] std::vector<double> TangentialVariation(
+      const MaterialVariation& dm) const;
+  [[nodiscard]] std::vector<double> TideVariation(const MaterialVariation& dm,
+                                                  int power = -1) const;
+
+  /// The transposes in the DENSITY of ApplyVariation and of the forcings'
+  /// variations: the pairings' dependence on the nodal density, its radial
+  /// derivative, gravity and the surface gravity, accumulated as duals
+  /// (times `scale`) that Material::DensityGradient maps to a nodal
+  /// density gradient — y^T (dK) x for solutions of nrhs columns, summed
+  /// over the columns, and y^T (dF) a for a forcing's variation with the
+  /// column amplitudes a (one per column of y). Nothing non-gravitating.
+  void AddDensityDuals(std::span<const double> y, std::span<const double> x,
+                       int nrhs, double scale, DensityDuals& duals) const;
+  void AddLoadDensityDuals(std::span<const double> y,
+                           std::span<const double> amplitudes, LoadPart part,
+                           double scale, DensityDuals& duals) const;
+  void AddTangentialDensityDuals(std::span<const double> y,
+                                 std::span<const double> amplitudes,
+                                 double scale, DensityDuals& duals) const;
+  void AddTideDensityDuals(std::span<const double> y,
+                           std::span<const double> amplitudes, int power,
+                           double scale, DensityDuals& duals) const;
+
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 
@@ -221,12 +274,30 @@ class DegreeOperator {
  private:
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
+  /// The per-node coefficients one band assembly integrates: the base
+  /// system's from the material, or their variation along a direction.
+  struct Coefficients;
+  /// Assembles the bilinear form of the coefficients into a band of this
+  /// system's layout (the exterior closures and the k^2 potential term
+  /// only with `closures`).
+  void AssembleBand(std::vector<double>& band, const Coefficients& c,
+                    const PointShear* pointShear, bool closures) const;
+  [[nodiscard]] Coefficients BaseCoefficients() const;
+  [[nodiscard]] Coefficients VariationCoefficients(
+      const MaterialVariation& dm) const;
+  [[nodiscard]] std::vector<double> ApplyBand(const std::vector<double>& band,
+                                              std::span<const double> x,
+                                              int nrhs) const;
   /// The dof ranges of the cut nodes above the first element, and the
   /// count of cuts at or below it.
   [[nodiscard]] std::pair<std::vector<std::pair<int, int>>, int> Separators(
       std::span<const int> cuts) const;
   void Factorise(const Options& options);
 
+  [[nodiscard]] static double& BandOf(std::vector<double>& band, int kd, int i,
+                                      int j) {
+    return band[static_cast<std::size_t>(j) * (kd + 1) + (kd + i - j)];
+  }
   [[nodiscard]] double& Band(int i, int j) {
     return band_[static_cast<std::size_t>(j) * (kd_ + 1) + (kd_ + i - j)];
   }

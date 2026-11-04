@@ -137,7 +137,7 @@ std::array<double, 3> InitialGuess(std::span<const double> t,
 }
 
 /// Levenberg-Marquardt on the whitened residual, to stationarity; the
-/// caller's exactness check on the Newton step is the gate behind it.
+/// caller verifies stationarity by the size of a full Newton step.
 std::vector<double> Minimise(const FitProblem& problem,
                              std::vector<double> q) {
   const auto rows = problem.Rows();

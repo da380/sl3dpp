@@ -3,10 +3,9 @@
 /**
  * @file StepWeights.hpp
  * @brief The per-step weight algebra of the viscoelastic time-stepping
- * schemes: a port of pyslfp's `viscoelastic.weights`, itself a port of
- * AdGIA's `detail::ExponentialTrapezoidWeights`. The three must stay
- * algebraically identical for the cross-benchmarks to isolate spatial
- * discretisation.
+ * schemes, algebraically identical to pyslfp's `viscoelastic.weights` and
+ * AdGIA's `detail::ExponentialTrapezoidWeights`, so that the
+ * cross-benchmarks isolate the spatial discretisation.
  *
  * Everything is a function of h = dt / tau, evaluated per node and per
  * branch. The exponential trapezoid update of an internal variable m
@@ -71,6 +70,15 @@ inline double DPhi1(double h, double e, double phi1) {
   return (e - phi1) / h;
 }
 
+/// d^2 phi1 / dh^2 = -(e + 2 dphi1) / h, likewise.
+inline double D2Phi1(double h, double e, double dphi1) {
+  if (std::abs(h) < kSeriesSwitch) {
+    return 1.0 / 3.0 - h / 4.0 + h * h / 10.0 - h * h * h / 36.0 +
+           h * h * h * h / 168.0;
+  }
+  return -(e + 2.0 * dphi1) / h;
+}
+
 }  // namespace detail
 
 /// The exponential trapezoid weights at h = dt / tau; negative h gives the
@@ -104,6 +112,25 @@ inline double DPhi1(double h, double e, double phi1) {
 [[nodiscard]] inline double BackwardEulerWeightDerivative(double h) {
   if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
   return -1.0 / ((1.0 + h) * (1.0 + h));
+}
+
+/// (d2e, d2alpha, d2beta), the second h-derivatives of the trapezoid
+/// weights at h >= 0: d2e = e, d2alpha = d2phi1 - e, d2beta = -d2phi1. A
+/// second derivative in the viscosity needs these at fixed dt.
+[[nodiscard]] inline TrapezoidWeights ExponentialTrapezoidWeightSecondDerivatives(
+    double h) {
+  if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
+  const auto e = std::exp(-h);
+  const auto phi1 = detail::Phi1(h, e);
+  const auto dphi1 = detail::DPhi1(h, e, phi1);
+  const auto d2phi1 = detail::D2Phi1(h, e, dphi1);
+  return {e, d2phi1 - e, -d2phi1};
+}
+
+/// d^2/dh^2 of the backward Euler weight: 2 / (1 + h)^3.
+[[nodiscard]] inline double BackwardEulerWeightSecondDerivative(double h) {
+  if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
+  return 2.0 / ((1.0 + h) * (1.0 + h) * (1.0 + h));
 }
 
 }  // namespace sl3dpp

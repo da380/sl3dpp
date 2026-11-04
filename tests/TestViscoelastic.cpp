@@ -1,7 +1,7 @@
 // The viscoelastic stepper: weight algebra, rheology construction, the
 // elastic and long-term limits, measured order of accuracy, the exact
 // inverse step, and the effective-operator limits. The pyslfp comparison
-// gate lives in TestFixtures.
+// lives in TestFixtures.
 
 #include <gtest/gtest.h>
 
