@@ -77,6 +77,31 @@ struct MaterialVariation {
   double surfaceGravity = 0.0;
 };
 
+/// The duals of a density variation's fields — what pairs with a
+/// MaterialVariation's rho, drho and g (nodal) and its surfaceGravity —
+/// which Material::DensityGradient maps to a nodal density gradient: the
+/// transpose of Variation in the density. DegreeOperator::AddDensityDuals
+/// and the forcings' accumulators fill them.
+struct DensityDuals {
+  std::vector<double> rho, drho, g;
+  double surfaceGravity = 0.0;
+
+  void Resize(std::size_t size) {
+    rho.assign(size, 0.0);
+    drho.assign(size, 0.0);
+    g.assign(size, 0.0);
+    surfaceGravity = 0.0;
+  }
+  void Add(const DensityDuals& other, double scale = 1.0) {
+    for (auto i = std::size_t{0}; i < rho.size(); ++i) {
+      rho[i] += scale * other.rho[i];
+      drho[i] += scale * other.drho[i];
+      g[i] += scale * other.g[i];
+    }
+    surfaceGravity += scale * other.surfaceGravity;
+  }
+};
+
 class Material {
  public:
   /// The nodal arrays of a model on a mesh; the mesh is copied in.
@@ -117,6 +142,15 @@ class Material {
   /// eps = 0 the material derivatives are, exactly. The fluid flags, the
   /// mesh and the scales stay.
   [[nodiscard]] Material Shifted(const MaterialDirection& d, double eps) const;
+
+  /// The transpose of Variation in the density: the nodal density
+  /// gradient of a pairing whose duals with the density, its radial
+  /// derivative, gravity and the surface gravity are given — the density's
+  /// own dual, the element differentiation's transpose, and the
+  /// transposed cumulative integral of 4 pi G (dual of g) / r^2 times
+  /// r^2 (the surface gravity's dual joining g's at the top node).
+  [[nodiscard]] std::vector<double> DensityGradient(
+      const DensityDuals& duals) const;
 
  private:
   explicit Material(RadialMesh mesh) : mesh_(std::move(mesh)) {}

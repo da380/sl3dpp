@@ -778,14 +778,20 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
 
 TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   // The discrete material kernels: their nodal pairing with a direction
-  // in kappa and mu equals the material tangent's objective change (the
-  // exact transpose, at solver precision), both schemes; and central
-  // differences of the objective on the shifted material (the rheology
-  // rebuilt at the same fractions and times) land on them at second
-  // order with Richardson at 1e-6. Refused by the continuous sweep and
-  // without a trajectory.
+  // in kappa, mu AND rho equals the material tangent's objective change
+  // (the exact transpose, at solver precision), both schemes; and
+  // central differences of the objective on the shifted material (the
+  // rheology rebuilt at the same fractions and times, the sea level
+  // engine's gravity held) land on them at second order with Richardson
+  // at 1e-6. Refused without a trajectory.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
+  const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const SeaLevelSolver solver(SurfaceGrid(kLmax), baseTable, held);
   const auto& scales = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto times = std::vector<double>{};
@@ -806,12 +812,14 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
+  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    if (material.IsFluid(e)) continue;
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.rho[i] = 0.5 * profile * material.Rho()[i];
+      if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
     }
@@ -835,7 +843,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax,
                             {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
@@ -848,9 +856,11 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel.size(), k0.size());
     ASSERT_EQ(kernels.muKernel.size(), m0.size());
+    ASSERT_EQ(kernels.rhoKernel.size(), k0.size());
     auto paired = 0.0;
     for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-      paired += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i];
+      paired += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i] +
+                kernels.rhoKernel[i] * d.rho[i];
     }
 
     TangentPerturbation direction;
@@ -867,7 +877,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
       const auto [shifted, rheology] = rheologyAt(eps);
       ViscoelasticOperator moved(rheology, kLmax,
                                  {.memory_points = MemoryPointSet::Gll});
-      SeaLevelEvolution movedEvolution(moved, setup.solver, setup.state,
+      SeaLevelEvolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = RotationalFeedback::None,
                                         .rtol = 1e-12});
@@ -906,12 +916,14 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
+  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    if (material.IsFluid(e)) continue;
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.rho[i] = 0.5 * profile * material.Rho()[i];
+      if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
     }
@@ -965,7 +977,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
               .IceHistoryKernels(times, measurements, &trajectory);
       auto sum = 0.0;
       for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-        sum += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i];
+        sum += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i] +
+               kernels.rhoKernel[i] * d.rho[i];
       }
       paired[method] = sum;
     }

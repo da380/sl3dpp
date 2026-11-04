@@ -72,11 +72,14 @@ struct TangentPerturbation {
   /// over the material's mesh in its units; needs the recorded forward
   /// trajectory.
   std::vector<std::vector<double>> itau;
-  /// A perturbation of the material's moduli, delta kappa and delta mu
-  /// nodal over the mesh (MaterialDirection; its density is refused
-  /// here), the branch moduli following as fixed fractions of the
-  /// unrelaxed modulus and the relaxation times held (compose with `itau`
-  /// for a viscosity held instead). Needs the recorded trajectory, the
+  /// A perturbation of the material's moduli and density, delta kappa,
+  /// delta mu and delta rho nodal over the mesh (MaterialDirection), the
+  /// branch moduli following as fixed fractions of the unrelaxed modulus
+  /// and the relaxation times held (compose with `itau` for a viscosity
+  /// held instead); a density direction moves the gravity
+  /// self-consistently and the forcings with it, the sea level engine's
+  /// own gravity and radius held (SeaLevelParameters::body_from_table;
+  /// docs/dev/adjoints.md §16). Needs the recorded trajectory, the
   /// internal variables at the GLL nodes and no rotational feedback.
   MaterialDirection material;
 

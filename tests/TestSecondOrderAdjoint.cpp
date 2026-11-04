@@ -46,6 +46,9 @@ double Pairing(const Scene& setup, const Kernels& kernels,
     for (auto i = std::size_t{0}; i < d.material.mu.size(); ++i) {
       total += kernels.muKernel[i] * d.material.mu[i];
     }
+    for (auto i = std::size_t{0}; i < d.material.rho.size(); ++i) {
+      total += kernels.rhoKernel[i] * d.material.rho[i];
+    }
   }
   return total;
 }
@@ -487,6 +490,17 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
                      [](double r) { return 0.3 + 0.7 * r * r; });
   u.material = materialDirection(
       [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  // u with a density part too, for the PAIRINGS only (a density direction
+  // drives no second-order run): the density kernel's derivative along w.
+  auto uPair = u;
+  uPair.material.rho.assign(k0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      uPair.material.rho[i] = 0.05 * (0.6 + 0.4 * r) * setup.material.Rho()[i];
+    }
+  }
   auto w = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.8 - 0.5 * r; });
   w.material = materialDirection([](double r) { return 1.0 - 0.5 * r; });
@@ -552,8 +566,11 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
               1e-12 * MaxAbs(first.kappaKernel));
     EXPECT_LT(MaxDiff(kernelsU.muKernel, first.muKernel),
               1e-12 * MaxAbs(first.muKernel));
+    EXPECT_LT(MaxDiff(kernelsU.rhoKernel, first.rhoKernel),
+              1e-12 * MaxAbs(first.rhoKernel));
     EXPECT_GT(MaxAbs(alongU.kappaKernel), 0.0);
     EXPECT_GT(MaxAbs(alongU.muKernel), 0.0);
+    EXPECT_GT(MaxAbs(alongU.rhoKernel), 0.0);
 
     const auto huW = Pairing(setup, alongU, w);
     const auto hwU = Pairing(setup, alongW, u);
@@ -585,9 +602,12 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
       return Pairing(setup,
                      movedAdjoint.IceHistoryKernels(times, measurements,
                                                     &movedTrajectory),
-                     u);
+                     uPair);
     };
-    const auto predicted = hwU;
+    // The derivatives along w paired with u and its density part: the
+    // density kernel's derivative along a direction in the moduli, the
+    // relaxation times and the thickness is checked here too.
+    const auto predicted = Pairing(setup, alongW, uPair);
     auto fd = std::map<double, double>{};
     for (double eps : {0.1, 0.05}) {
       fd[eps] = (gradientAt(eps) - gradientAt(-eps)) / (2.0 * eps);

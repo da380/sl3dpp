@@ -1092,6 +1092,72 @@ the 1D at 1e-7 / 1e-6); `ContinuousMaterialHessianConverges` (lateral
 directions, the continuous blocks against the discrete and the mismatch
 with the continuous run below 10 % at 9 nodes and smaller at 17).
 
-Not built: a density direction in the time-stepped problem (next), the
-material in the distributed sweeps.
+Not built: the material in the distributed sweeps. The density direction
+followed (§16).
+
+## 16. The density in the time-stepped problem (built 4 November 2026)
+
+`MaterialDirection::rho` now drives the 1D time-stepped tangent and the
+1D sweeps form the density kernel `IceKernels::rhoKernel` (and its
+derivative along ice, itau, κ and μ directions,
+`KernelDerivatives::rhoKernel`), the static Love-number kernels gaining
+`h_rho, l_rho, k_rho`. The static problem's variation (§13a) was already
+self-consistent in the density — the moduli unchanged, gravity moving as
+the integral of δρ r², the stratification, the interfaces and the
+forcings (the load's traction piece through g(a), the tide through ρ, ρ',
+g and the interfaces) — so the time-stepped extension is: the effective
+systems' variation along δρ on the full base solution (the density terms
+are the base material's in every flavour; the per-dt effective variation
+must carry δρ, which it did not — found by the gate), plus the FORCINGS'
+variations times the node's recorded load and centrifugal amplitudes,
+dF σ_n + dTide ψ_n, through the same `AddForce` (1D
+`MaterialDrive::AddForcingVariation`); the memory force carries no
+density. The transposes, new: `DensityDuals` (duals of the variation's
+ρ, ρ', g and g(a)), accumulated by `DegreeOperator::AddDensityDuals`
+(the form's density, gravity and stratification terms and the
+interfaces, pointwise, with the U–φ gradient coupling's sum over the
+element) and the forcings' (`AddLoadDensityDuals`,
+`AddTangentialDensityDuals`, `AddTideDensityDuals`), and mapped to a
+nodal density gradient by `Material::DensityGradient` — the transpose of
+`Material::Variation` in ρ: the density's own dual, the element
+differentiation's transpose and the transposed cumulative integral
+(each node's partial-integral weights within its element plus the
+element's full-integral weight times the duals of every node above),
+times r², the surface gravity's dual joining g's at the top node. The
+sweeps pair with the node's recorded loads (`MaterialTools::
+DensityPairing`): the kernel is −⟨y, dK_ρ x_n⟩ + ⟨y, dF σ_n + dTide ψ_n⟩
+summed over the steps and the start, discrete exact, continuous at the
+commute level with the same quadrature as the moduli; the derivative
+along v pairs the derivative duals with the base and the first duals with
+v's tangent solution AND v's tangent loads.
+
+**The sea level engine's gravity is held.** The engine takes its surface
+gravity and sea-floor radius from the Love table (pyslfp's `with_body`),
+so on a shifted density the engine's own g would move too, and its
+sensitivity (the geoid Φ/g in the closures) is not part of these
+derivatives: they are taken with the engine's parameters as parameters,
+exactly as the static derivative reports δg(a) separately. The new
+`SeaLevelParameters::body_from_table` (default true) makes the engine's
+gravity an explicit parameter when false, which is how the gates hold it;
+a run whose engine follows the table and whose density moves differs by
+the engine term, computable as the derivative in one scalar if ever
+wanted. Not built: a density direction in a SECOND-order run or sweep
+(the form is quadratic in ρ through ρ g(ρ), so its second variation is
+needed), lateral density in 3D (excluded by the hydrostatic equations,
+§13a).
+
+GATES: `MaterialDerivatives.DensityDualsAreTheTransposeOfTheVariation`
+(random solution pairs and column amplitudes at every degree: the
+density gradient of the accumulated duals paired with a direction
+against y^T(dK)x and y^T(dF)a for the load, tangential, tide and
+degree-0 centrifugal forcings, at 1e-12);
+`LoveNumberKernelsPairToTheDerivatives` now with ρ (every channel and
+degree at 1e-10); `TangentLinear.MaterialDirectionMatchesDifferences`
+now along (κ, μ, ρ) with the engine held (second order, Richardson at
+1e-6, both schemes); `Adjoint.MaterialKernelsAreTheTangentTranspose`
+now with ρ (the pairing identity at 1e-10 and the finite differences at
+1e-6, both schemes); `ContinuousMaterialKernelsAgreeAndConverge` now
+with ρ; `SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric` now
+checks the density kernel's derivative along a (κ, μ, itau, ice)
+direction against central differences of the density kernel.
 

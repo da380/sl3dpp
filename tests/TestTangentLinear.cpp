@@ -581,15 +581,25 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
 // -- the material ------------------------------------------------------------
 
 TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
-  // Along a direction in the material's kappa and mu — the branch moduli
-  // as fixed fractions of the unrelaxed one, the relaxation times held —
-  // the tangent-linear run matches central differences of the coupled run
-  // on the shifted material (its rheology rebuilt with the same fractions
-  // and times), at second order with Richardson landing at 1e-6, both
-  // schemes; the start's instantaneous response moves with the material
-  // too (the trapezoid's first step reads its strain).
+  // Along a direction in the material's kappa, mu AND rho — the branch
+  // moduli as fixed fractions of the unrelaxed one, the relaxation times
+  // held, the gravity moving with the density — the tangent-linear run
+  // matches central differences of the coupled run on the shifted
+  // material (its rheology rebuilt with the same fractions and times, the
+  // sea level engine's gravity held), at second order with Richardson
+  // landing at 1e-6, both schemes; the start's instantaneous response
+  // moves with the material too (the trapezoid's first step reads its
+  // strain).
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
+  // The engine's body held: the density direction's derivative is taken
+  // with the sea level solver's gravity and radius as parameters.
+  const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const SeaLevelSolver solver(SurfaceGrid(kLmax), baseTable, held);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
   auto loads = std::vector<std::vector<double>>{};
@@ -610,12 +620,14 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
+  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    if (material.IsFluid(e)) continue;
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.rho[i] = 0.5 * profile * material.Rho()[i];
+      if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
     }
@@ -641,7 +653,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax,
                             {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
@@ -659,7 +671,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
       const auto [shifted, rheology] = rheologyAt(eps);
       ViscoelasticOperator moved(rheology, kLmax,
                                  {.memory_points = MemoryPointSet::Gll});
-      SeaLevelEvolution movedEvolution(moved, setup.solver, setup.state,
+      SeaLevelEvolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = RotationalFeedback::None,
                                         .rtol = 1e-12});
@@ -682,10 +694,13 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
         << "scheme " << static_cast<int>(scheme);
 
-    // Refusals: a density direction, rotation on, Gauss memory points.
-    TangentPerturbation withRho = direction;
-    withRho.material.rho.assign(k0.size(), 1.0);
-    EXPECT_THROW((void)tangent.Run(times, withRho, &trajectory),
+    // Refusal: a density direction in a second-order run.
+    TangentLinearSolver recording(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    const auto run = recording.Run(times, direction, &trajectory);
+    SecondOrderDirection withRho;
+    withRho.materialU = d;
+    EXPECT_THROW((void)recording.RunSecondOrder(times, run, run, withRho, &trajectory),
                  std::invalid_argument);
   }
 }

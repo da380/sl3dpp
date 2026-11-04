@@ -148,11 +148,11 @@ std::pair<std::vector<double>, std::vector<double>> GaussLegendre(int n) {
 /// GLL basis functions, P(i, j) = int_{-1}^{xi_i} l_j, by Gauss-Legendre
 /// quadrature on each part), the elements' totals accumulated below (the
 /// last row of P is the GLL weights, so the totals are the quadrature's).
-std::vector<double> CumulativeIntegral(const RadialMesh& mesh,
-                                       std::span<const double> f) {
+/// P(i, j) = int_{-1}^{xi_i} l_j dt on the reference element: the partial
+/// integrals of the Lagrange basis up to each GLL point, by Gauss-Legendre.
+std::vector<double> PartialIntegrals(const RadialMesh& mesh) {
   const auto n = mesh.NGll();
   const auto xi = mesh.Points();
-  // The Lagrange basis on the GLL points.
   auto lagrange = [&](int j, double t) {
     auto v = 1.0;
     for (auto k = 0; k < n; ++k) {
@@ -163,7 +163,6 @@ std::vector<double> CumulativeIntegral(const RadialMesh& mesh,
   const auto [gx, gw] = GaussLegendre(n);
   auto P = std::vector<double>(static_cast<std::size_t>(n) * n, 0.0);
   for (auto i = 0; i < n; ++i) {
-    // int_{-1}^{xi_i} l_j dt, by Gauss-Legendre on [-1, xi_i].
     const auto half = 0.5 * (xi[i] + 1.0);
     const auto mid = 0.5 * (xi[i] - 1.0);
     for (auto j = 0; j < n; ++j) {
@@ -172,6 +171,39 @@ std::vector<double> CumulativeIntegral(const RadialMesh& mesh,
       P[static_cast<std::size_t>(i) * n + j] = half * sum;
     }
   }
+  return P;
+}
+
+/// The transpose of CumulativeIntegral: for duals v of the cumulative
+/// integral at every node, the nodal array t with sum_i v_i out_i =
+/// sum_j t_j f_j — each node's partial-integral weights within its
+/// element, plus the element's full-integral weight times the duals of
+/// every node above the element.
+std::vector<double> CumulativeIntegralTranspose(const RadialMesh& mesh,
+                                                std::span<const double> v) {
+  const auto n = mesh.NGll();
+  const auto P = PartialIntegrals(mesh);
+  auto out = std::vector<double>(v.size(), 0.0);
+  auto tail = 0.0;  // the duals of every node above the element
+  for (auto e = mesh.ElementCount() - 1; e >= 0; --e) {
+    const auto base = static_cast<std::size_t>(e) * n;
+    const auto jac = mesh.Jacobian(e);
+    for (auto j = 0; j < n; ++j) {
+      auto sum = tail * P[static_cast<std::size_t>(n - 1) * n + j];
+      for (auto i = 0; i < n; ++i) {
+        sum += v[base + i] * P[static_cast<std::size_t>(i) * n + j];
+      }
+      out[base + j] = jac * sum;
+    }
+    for (auto i = 0; i < n; ++i) tail += v[base + i];
+  }
+  return out;
+}
+
+std::vector<double> CumulativeIntegral(const RadialMesh& mesh,
+                                       std::span<const double> f) {
+  const auto n = mesh.NGll();
+  const auto P = PartialIntegrals(mesh);
   auto out = std::vector<double>(f.size(), 0.0);
   auto below = 0.0;
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
@@ -232,6 +264,46 @@ MaterialVariation Material::Variation(const MaterialDirection& d) const {
   }
   out.surfaceGravity = out.g.back();
   return out;
+}
+
+std::vector<double> Material::DensityGradient(const DensityDuals& duals) const {
+  const auto& mesh = mesh_;
+  const auto size = rho_.size();
+  for (const auto* a : {&duals.rho, &duals.drho, &duals.g}) {
+    if (a->size() != size) {
+      throw std::invalid_argument(std::format(
+          "the density duals have the mesh's {} nodal values", size));
+    }
+  }
+  auto grad = duals.rho;
+  // The element differentiation's transpose.
+  const auto n = mesh.NGll();
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto base = static_cast<std::size_t>(e) * n;
+    const auto jac = mesh.Jacobian(e);
+    for (auto i = 0; i < n; ++i) {
+      const auto w = duals.drho[base + i] / jac;
+      if (w == 0.0) continue;
+      for (auto j = 0; j < n; ++j) grad[base + j] += w * mesh.Derivative(i, j);
+    }
+  }
+  // Gravity: g_i = 4 pi G mass_i / r_i^2 with mass the cumulative integral
+  // of rho r^2; the surface gravity's dual joins g's at the top node.
+  auto v = std::vector<double>(size, 0.0);
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    const auto r = mesh.Radii()[i];
+    v[i] = r > 0.0 ? 4.0 * std::numbers::pi * G_ * duals.g[i] / (r * r) : 0.0;
+  }
+  {
+    const auto r = mesh.Radii()[size - 1];
+    v[size - 1] += 4.0 * std::numbers::pi * G_ * duals.surfaceGravity / (r * r);
+  }
+  const auto t = CumulativeIntegralTranspose(mesh, v);
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    const auto r = mesh.Radii()[i];
+    grad[i] += t[i] * r * r;
+  }
+  return grad;
 }
 
 Material Material::Shifted(const MaterialDirection& d, double eps) const {

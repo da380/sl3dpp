@@ -232,6 +232,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   const bool material = options_.material_kernels;
   auto fractions = std::vector<std::vector<double>>{};
   std::vector<double> kappaKernel, muKernel;
+  DensityDuals densityDuals;  // the density kernel's, summed over the sweep
   auto x0 = std::map<int, std::vector<double>>{};  // the base start solution
   if (material) {
     if (trajectory == nullptr) {
@@ -258,6 +259,7 @@ IceKernels AdjointSolver::DiscreteSweep(
     }
     kappaKernel.assign(muU.size(), 0.0);
     muKernel.assign(muU.size(), 0.0);
+    densityDuals.Resize(muU.size());
   }
   // The pairing of a dual solution with a base one at a degree's points:
   // -(dK/d kappa, dK/d mu) of the step's system (the bulk product and
@@ -471,6 +473,11 @@ IceKernels AdjointSolver::DiscreteSweep(
     auto materialByDegree =
         std::vector<std::pair<std::vector<double>, std::vector<double>>>(
             material ? lmax + 1 : 0);
+    auto densityByDegree = std::vector<DensityDuals>(material ? lmax + 1 : 0);
+    const auto loadsN = material ? ev.Columns(trajectory->loads[n], ev.toMatDensity_)
+                                 : LoadCallable{};
+    const auto tidesN = material ? ev.Columns(trajectory->tides[n], ev.toMatPotential_)
+                                 : LoadCallable{};
     detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
@@ -523,6 +530,8 @@ IceKernels AdjointSolver::DiscreteSweep(
         }
         materialByDegree[l] =
             materialTerms(deg, ncols, y, sy, xn.at(l), factor, &decayed);
+        MaterialTools::DensityPairing(deg, ncols, y, xn.at(l), loadsN, tidesN, 1.0,
+                                      densityByDegree[l]);
       }
       // The forward pairings of this degree's itau sensitivity.
       const std::vector<double>* mPrev = nullptr;
@@ -599,6 +608,7 @@ IceKernels AdjointSolver::DiscreteSweep(
         muKernel[i] += mu[i];
       }
     }
+    for (const auto& duals : densityByDegree) densityDuals.Add(duals);
   }
 
   // The start: the transposed instantaneous elastic solve at times[0].
@@ -641,6 +651,8 @@ IceKernels AdjointSolver::DiscreteSweep(
       // the start duals and the start's response duals, paired with the
       // base start solution (every weight one, no memory).
       const auto ones = std::vector<double>(fractions[0].size(), 1.0);
+      const auto loads0 = ev.Columns(trajectory->loads[0], ev.toMatDensity_);
+      const auto tides0 = ev.Columns(trajectory->tides[0], ev.toMatPotential_);
       for (auto l = 0; l <= lmax; ++l) {
         const auto& deg = op.Deg(l);
         const auto ncols = 2 * (l + 1);
@@ -669,6 +681,8 @@ IceKernels AdjointSolver::DiscreteSweep(
           kappaKernel[i] += kappa[i];
           muKernel[i] += mu[i];
         }
+        MaterialTools::DensityPairing(deg, ncols, y, x0.at(l), loads0, tides0, 1.0,
+                                      densityDuals);
       }
     }
   }
@@ -711,6 +725,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   out.kappaKernel = std::move(kappaKernel);
   out.muKernel = std::move(muKernel);
+  if (material) out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
   return out;
 }
 
@@ -1058,19 +1073,21 @@ IceKernels AdjointSolver::ContinuousSweep(
   // The pairing of adjoint degree solutions (natural columns) with the
   // forward state at a node, scaled by `weight` (the time weight times
   // the units constant), added to the kernels.
+  DensityDuals densityDuals;
+  if (material) densityDuals.Resize(fractions[0].size());
   auto pairMaterial = [&](const std::map<int, std::vector<double>>& lambda,
                           std::size_t node, double weight) {
     if (weight == 0.0) return;
     const auto& fwd = cursor->State(node);
-    const auto x = op.SolveElastic(fwd, ev.Columns(trajectory->loads[node],
-                                                   ev.toMatDensity_),
-                                   ev.Columns(trajectory->tides[node],
-                                              ev.toMatPotential_));
+    const auto loads = ev.Columns(trajectory->loads[node], ev.toMatDensity_);
+    const auto tides = ev.Columns(trajectory->tides[node], ev.toMatPotential_);
+    const auto x = op.SolveElastic(fwd, loads, tides);
     auto tasks = std::vector<int>{};
     for (const auto& [l, y] : lambda) tasks.push_back(l);
     auto terms =
         std::vector<std::pair<std::vector<double>, std::vector<double>>>(
             tasks.size());
+    auto duals = std::vector<DensityDuals>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
     detail::ParallelFor(count, op.options_.parallel, [&](int i) {
       const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
@@ -1117,6 +1134,8 @@ IceKernels AdjointSolver::ContinuousSweep(
       }
       terms[static_cast<std::size_t>(count - 1 - i)] = {std::move(kappa),
                                                          std::move(mu)};
+      MaterialTools::DensityPairing(deg, ncols, y, x.at(l), loads, tides, weight,
+                                    duals[static_cast<std::size_t>(count - 1 - i)]);
     });
     for (const auto& [kappa, mu] : terms) {
       for (auto j = std::size_t{0}; j < kappaKernel.size(); ++j) {
@@ -1124,6 +1143,7 @@ IceKernels AdjointSolver::ContinuousSweep(
         muKernel[j] += mu[j];
       }
     }
+    for (const auto& d : duals) densityDuals.Add(d);
   };
   // The regular adjoint displacement at a node, under the current
   // adjoint memory and closed load.
@@ -1291,6 +1311,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   out.kappaKernel = std::move(kappaKernel);
   out.muKernel = std::move(muKernel);
+  if (material) out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
   return out;
 }
 

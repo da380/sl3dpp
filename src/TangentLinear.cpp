@@ -296,6 +296,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     // GLL nodes (the memory points).
     MaterialDirection effective;
     effective.kappa = direction.kappa;
+    effective.rho = direction.rho;
     if (!direction.mu.empty()) {
       effective.mu = direction.mu;
       for (auto i = std::size_t{0}; i < effective.mu.size(); ++i) {
@@ -343,12 +344,39 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     return deg.DualFromScalars(weighted, ncols);
   }
 
+  /// Adds the forcings' variations along a density direction, times the
+  /// node's load and centrifugal column amplitudes: dF sigma + dTide psi
+  /// (the load's traction piece through the surface gravity, the tide
+  /// through the density, its derivative, gravity and the interfaces).
+  void AddForcingVariation(const DegreeOperator& system, int l, int ncols,
+                           const MaterialVariation& variation,
+                           const LoadCallable* loads, const LoadCallable* tides,
+                           std::vector<double>& force) const {
+    if (direction.rho.empty() || loads == nullptr) return;
+    const auto ndof = static_cast<std::size_t>(system.DofCount());
+    const auto dLoad = system.LoadVariation(variation, LoadPart::Both);
+    const auto dTide = system.TideVariation(variation, l == 0 ? 2 : -1);
+    const auto sigma = (*loads)(l, 0.0);
+    const auto psi = tides != nullptr ? (*tides)(l, 0.0) : std::nullopt;
+    for (auto c = 0; c < ncols; ++c) {
+      const auto s = sigma ? (*sigma)[c] : 0.0;
+      const auto p = psi ? (*psi)[c] : 0.0;
+      if (s == 0.0 && p == 0.0) continue;
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
+        force[static_cast<std::size_t>(c) * ndof + d] += dLoad[d] * s + dTide[d] * p;
+      }
+    }
+  }
+
   /// The direction's force on a full solution and a decayed memory under
   /// the dt flavour: -(dK_eff) x plus the memory force of the memory with
-  /// the branch moduli's variation.
+  /// the branch moduli's variation, plus — along a density direction —
+  /// the forcings' variations with the node's load and centrifugal
+  /// amplitudes.
   std::map<int, std::vector<double>> ForceOn(
       double dt, const std::map<int, std::vector<double>>& full,
-      const std::map<int, std::vector<double>>& mem) {
+      const std::map<int, std::vector<double>>& mem,
+      const LoadCallable* loads = nullptr, const LoadCallable* tides = nullptr) {
     const auto& op = *ev->op_;
     const auto scheme = ev->options_.scheme;
     const auto& variation = FlavourOf(dt);
@@ -366,6 +394,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
           force[i] += memoryForce[i];
         }
       }
+      AddForcingVariation(system, l, ncols, variation, loads, tides, force);
       out.emplace(l, std::move(force));
     }
     return out;
@@ -373,10 +402,12 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
 
   /// The same on the unrelaxed systems (every weight one): -(dK_U) x plus,
   /// with a memory state, its force with the branch moduli's variation —
-  /// the form a step's END solution satisfies with its new memory.
+  /// the form a step's END solution satisfies with its new memory — and
+  /// the forcings' variations with the node's amplitudes.
   std::map<int, std::vector<double>> UnrelaxedForceOn(
       const std::map<int, std::vector<double>>& full,
-      const std::map<int, std::vector<double>>* mem) {
+      const std::map<int, std::vector<double>>* mem,
+      const LoadCallable* loads = nullptr, const LoadCallable* tides = nullptr) {
     const auto& op = *ev->op_;
     auto out = std::map<int, std::vector<double>>{};
     for (const auto& [l, x] : full) {
@@ -390,6 +421,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
           force[i] += memoryForce[i];
         }
       }
+      AddForcingVariation(deg.system, l, ncols, unrelaxed, loads, tides, force);
       out.emplace(l, std::move(force));
     }
     return out;
@@ -414,10 +446,10 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
   /// seeds the first step (the trapezoid's alpha d_0).
   std::map<int, std::vector<double>> StartResponse() override {
     const auto& op = *ev->op_;
-    const auto x0 = op.SolveElastic(
-        cursor->State(0), ev->Columns(trajectory->loads[0], ev->toMatDensity_),
-        ev->Columns(trajectory->tides[0], ev->toMatPotential_));
-    return UnrelaxedResponse(UnrelaxedForceOn(x0, nullptr));
+    const auto loads = ev->Columns(trajectory->loads[0], ev->toMatDensity_);
+    const auto tides = ev->Columns(trajectory->tides[0], ev->toMatPotential_);
+    const auto x0 = op.SolveElastic(cursor->State(0), loads, tides);
+    return UnrelaxedResponse(UnrelaxedForceOn(x0, nullptr, &loads, &tides));
   }
 
   /// The force of the step from node - 1 to node: -(dK_eff) x_full plus
@@ -433,10 +465,10 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     auto step = op.StartStep(prev, dt, scheme,
                              ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
                              ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
-    auto [next, full] = step.Finish(
-        ev->Columns(trajectory->loads[node], ev->toMatDensity_),
-        ev->Columns(trajectory->tides[node], ev->toMatPotential_));
-    return ForceOn(dt, full, step.mem_);
+    const auto loads = ev->Columns(trajectory->loads[node], ev->toMatDensity_);
+    const auto tides = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
+    auto [next, full] = step.Finish(loads, tides);
+    return ForceOn(dt, full, step.mem_, &loads, &tides);
   }
 };
 
@@ -550,10 +582,6 @@ TangentLinearSolver::MakeMaterialDrive(const MaterialDirection& d,
                                        std::span<const double> times) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
-  if (!d.rho.empty()) {
-    throw std::invalid_argument(
-        "the material tangent takes kappa and mu, not the density");
-  }
   if (op.options_.memory_points != MemoryPointSet::Gll) {
     throw std::invalid_argument(
         "the material tangent needs the internal variables at the GLL "
@@ -715,11 +743,14 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   auto cursor = std::optional<ForwardCursor>{};
   Drive drive{};
   const bool materialU =
-      !direction.materialU.kappa.empty() || !direction.materialU.mu.empty() ||
-      !direction.materialU.rho.empty();
+      !direction.materialU.kappa.empty() || !direction.materialU.mu.empty();
   const bool materialV =
-      !direction.materialV.kappa.empty() || !direction.materialV.mu.empty() ||
-      !direction.materialV.rho.empty();
+      !direction.materialV.kappa.empty() || !direction.materialV.mu.empty();
+  if (!direction.materialU.rho.empty() || !direction.materialV.rho.empty()) {
+    throw std::invalid_argument(
+        "the second-order run takes no density direction (the form's second "
+        "variation in the density is not built)");
+  }
   auto requireRecorded = [&] {
     for (const auto* run : {&tangentU, &tangentV}) {
       if (run->size() != nodes) {

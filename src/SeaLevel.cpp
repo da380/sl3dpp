@@ -117,9 +117,12 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
                     table.degrees.empty() ? -1 : table.degrees.back(), lmax));
   }
 
-  // The body of the parameters is the Love table's (pyslfp's with_body).
-  parameters.mean_sea_floor_radius = table.radius;
-  parameters.gravitational_acceleration = table.surface_gravity;
+  // The body of the parameters is the Love table's (pyslfp's with_body),
+  // unless the caller holds its own.
+  if (parameters.body_from_table) {
+    parameters.mean_sea_floor_radius = table.radius;
+    parameters.gravitational_acceleration = table.surface_gravity;
+  }
 
   // The one conversion to the internal non-dimensional scheme.
   scales_ = Scales::Geophysical(parameters.mean_radius);

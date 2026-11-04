@@ -11,6 +11,8 @@
 #include <gtest/gtest.h>
 
 #include <cmath>
+#include <functional>
+#include <random>
 #include <filesystem>
 #include <map>
 #include <string>
@@ -269,17 +271,92 @@ TEST(MaterialDerivatives, ReciprocityDifferentiated) {
   for (const auto& [name, v] : Entries(none)) EXPECT_EQ(v, 0.0) << name;
 }
 
+TEST(MaterialDerivatives, DensityDualsAreTheTransposeOfTheVariation) {
+  // The density transposes: for random solution pairs of every degree,
+  // the density gradient of the duals accumulated by AddDensityDuals
+  // paired with a density direction equals y^T (dK) x for the
+  // variation along it (the gravity chain through the cumulative
+  // integral and the differentiation included), and likewise the
+  // forcings' (load, tangential, tide, the degree-0 centrifugal tide) —
+  // at 1e-12 of the pairings' scale.
+  const auto material = MakeMaterial();
+  const auto d = SmoothDirection(material, false, false, true);
+  const auto dm = material.Variation(d);
+  const auto size = material.Rho().size();
+  std::mt19937 rng(5);
+  std::normal_distribution<double> normal;
+  auto pair = [&](const std::vector<double>& grad) {
+    auto total = 0.0;
+    for (auto i = std::size_t{0}; i < size; ++i) total += grad[i] * d.rho[i];
+    return total;
+  };
+  for (auto l = 0; l <= kLmax; ++l) {
+    DegreeOperator op(material, l, {});
+    const auto n = op.DofCount();
+    constexpr auto nrhs = 2;
+    std::vector<double> x(static_cast<std::size_t>(n) * nrhs),
+        y(static_cast<std::size_t>(n) * nrhs);
+    for (auto& v : x) v = normal(rng);
+    for (auto& v : y) v = normal(rng);
+    // the form
+    {
+      const auto dKx = op.ApplyVariation(dm, x, nrhs);
+      auto direct = 0.0;
+      for (auto i = std::size_t{0}; i < y.size(); ++i) direct += y[i] * dKx[i];
+      DensityDuals duals;
+      op.AddDensityDuals(y, x, nrhs, 1.0, duals);
+      const auto transposed = pair(material.DensityGradient(duals));
+      EXPECT_NEAR(transposed, direct, 1e-12 * std::abs(direct) + 1e-300)
+          << "form, degree " << l;
+      EXPECT_NE(direct, 0.0) << "degree " << l;
+    }
+    // the forcings, with random column amplitudes
+    std::vector<double> amps(nrhs);
+    for (auto& v : amps) v = normal(rng);
+    auto forcing = [&](const char* name, const std::vector<double>& db,
+                       const std::function<void(DensityDuals&)>& add) {
+      auto direct = 0.0;
+      for (auto c = 0; c < nrhs; ++c) {
+        for (auto i = 0; i < n; ++i) {
+          direct += y[static_cast<std::size_t>(c) * n + i] * db[i] * amps[c];
+        }
+      }
+      DensityDuals duals;
+      add(duals);
+      const auto transposed = pair(material.DensityGradient(duals));
+      EXPECT_NEAR(transposed, direct, 1e-12 * std::abs(direct) + 1e-300)
+          << name << ", degree " << l;
+    };
+    forcing("load", op.LoadVariation(dm), [&](DensityDuals& duals) {
+      op.AddLoadDensityDuals(y, amps, LoadPart::Both, 1.0, duals);
+    });
+    forcing("tangential", op.TangentialVariation(dm), [&](DensityDuals& duals) {
+      op.AddTangentialDensityDuals(y, amps, 1.0, duals);
+    });
+    forcing("tide", op.TideVariation(dm), [&](DensityDuals& duals) {
+      op.AddTideDensityDuals(y, amps, -1, 1.0, duals);
+    });
+    if (l == 0) {
+      forcing("centrifugal", op.TideVariation(dm, 2), [&](DensityDuals& duals) {
+        op.AddTideDensityDuals(y, amps, 2, 1.0, duals);
+      });
+    }
+  }
+}
+
 TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
-  // The static kernels: for every channel and degree, the kappa and mu
-  // kernels paired with a smooth direction in the moduli equal the
-  // Love-number derivatives along it (the exact linearisation) at
-  // 1e-10 — the adjoint of the static problem against its tangent.
+  // The static kernels: for every channel and degree, the kappa, mu and
+  // rho kernels paired with a smooth direction in the moduli and the
+  // density equal the Love-number derivatives along it (the exact
+  // linearisation) at 1e-10 — the adjoint of the static problem against
+  // its tangent, the forcings' variations and the gravity chain included.
   const auto material = MakeMaterial();
   const auto& mesh = material.Mesh();
   const auto [k0, m0] = material.Moduli().KappaMu();
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
+  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
@@ -287,14 +364,16 @@ TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
       d.kappa[i] = 0.5 * profile * k0[i];
       if (!material.IsFluid(e)) d.mu[i] = profile * m0[i];
+      d.rho[i] = 0.5 * profile * material.Rho()[i];
     }
   }
   const auto derivatives = ComputeLoveNumberDerivatives(material, kLmax, d);
   const auto kernels = ComputeLoveNumberKernels(material, kLmax);
-  auto pair = [&](const std::vector<double>& kappa, const std::vector<double>& mu) {
+  auto pair = [&](const std::vector<double>& kappa, const std::vector<double>& mu,
+                  const std::vector<double>& rho) {
     auto total = 0.0;
     for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-      total += kappa[i] * d.kappa[i] + mu[i] * d.mu[i];
+      total += kappa[i] * d.kappa[i] + mu[i] * d.mu[i] + rho[i] * d.rho[i];
     }
     return total;
   };
@@ -320,14 +399,14 @@ TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
     }
     ASSERT_GT(scale, 0.0) << c.name;
     for (auto l = 0; l <= kLmax; ++l) {
-      EXPECT_NEAR(pair(c.channel->h_kappa[l], c.channel->h_mu[l]), (*c.h)[l],
-                  1e-10 * scale)
+      EXPECT_NEAR(pair(c.channel->h_kappa[l], c.channel->h_mu[l], c.channel->h_rho[l]),
+                  (*c.h)[l], 1e-10 * scale)
           << c.name << " h degree " << l;
-      EXPECT_NEAR(pair(c.channel->l_kappa[l], c.channel->l_mu[l]), (*c.l)[l],
-                  1e-10 * scale)
+      EXPECT_NEAR(pair(c.channel->l_kappa[l], c.channel->l_mu[l], c.channel->l_rho[l]),
+                  (*c.l)[l], 1e-10 * scale)
           << c.name << " l degree " << l;
-      EXPECT_NEAR(pair(c.channel->k_kappa[l], c.channel->k_mu[l]), (*c.k)[l],
-                  1e-10 * scale)
+      EXPECT_NEAR(pair(c.channel->k_kappa[l], c.channel->k_mu[l], c.channel->k_rho[l]),
+                  (*c.k)[l], 1e-10 * scale)
           << c.name << " k degree " << l;
     }
   }

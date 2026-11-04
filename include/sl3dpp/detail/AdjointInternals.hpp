@@ -213,6 +213,7 @@ struct AdjointSolver::MaterialTools {
     const auto& weights = op->SchemeWeightsOf(scheme, dt);
     MaterialDirection scaled;
     scaled.kappa = direction.kappa;
+    scaled.rho = direction.rho;
     if (!direction.mu.empty()) {
       scaled.mu = direction.mu;
       for (auto i = std::size_t{0}; i < scaled.mu.size(); ++i) {
@@ -374,6 +375,27 @@ struct AdjointSolver::MaterialTools {
       }
     }
     return std::pair(std::move(kappa), std::move(mu));
+  }
+
+  /// The density pairing of a dual solution y and a base solution x at a
+  /// node, with the node's load and centrifugal column amplitudes:
+  /// -y^T (dK/d rho) x + y^T (dF/d rho) sigma + y^T (dTide/d rho) psi as
+  /// density duals (times `scale`), which Material::DensityGradient maps
+  /// to the nodal density kernel; the transpose of the material tangent's
+  /// forcing variation.
+  static void DensityPairing(const Degree& deg, int ncols,
+                             std::span<const double> y, std::span<const double> x,
+                             const LoadCallable& loads, const LoadCallable& tides,
+                             double scale, DensityDuals& duals) {
+    deg.system.AddDensityDuals(y, x, ncols, -scale, duals);
+    const auto sigma = loads(deg.l, 0.0);
+    const auto psi = tides(deg.l, 0.0);
+    if (sigma) {
+      deg.system.AddLoadDensityDuals(y, *sigma, LoadPart::Both, scale, duals);
+    }
+    if (psi) {
+      deg.system.AddTideDensityDuals(y, *psi, deg.l == 0 ? 2 : -1, scale, duals);
+    }
   }
 };
 

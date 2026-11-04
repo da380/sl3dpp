@@ -227,6 +227,25 @@ class DegreeOperator {
   [[nodiscard]] std::vector<double> TideVariation(const MaterialVariation& dm,
                                                   int power = -1) const;
 
+  /// The transposes in the DENSITY of ApplyVariation and of the forcings'
+  /// variations: the pairings' dependence on the nodal density, its radial
+  /// derivative, gravity and the surface gravity, accumulated as duals
+  /// (times `scale`) that Material::DensityGradient maps to a nodal
+  /// density gradient — y^T (dK) x for solutions of nrhs columns, summed
+  /// over the columns, and y^T (dF) a for a forcing's variation with the
+  /// column amplitudes a (one per column of y). Nothing non-gravitating.
+  void AddDensityDuals(std::span<const double> y, std::span<const double> x,
+                       int nrhs, double scale, DensityDuals& duals) const;
+  void AddLoadDensityDuals(std::span<const double> y,
+                           std::span<const double> amplitudes, LoadPart part,
+                           double scale, DensityDuals& duals) const;
+  void AddTangentialDensityDuals(std::span<const double> y,
+                                 std::span<const double> amplitudes,
+                                 double scale, DensityDuals& duals) const;
+  void AddTideDensityDuals(std::span<const double> y,
+                           std::span<const double> amplitudes, int power,
+                           double scale, DensityDuals& duals) const;
+
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 

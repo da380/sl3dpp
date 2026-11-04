@@ -25,7 +25,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Sensitivity kernels with respect to the ice history and viscosity, by the continuous adjoint or the exact discrete transpose (1D and 3D) | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
-| Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives (in ρ too, gravity self-consistent) and Love-number kernels; its first-order (Born) response to lateral δμ(x), δκ(x) and the lateral kernels of a surface measurement; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions, 1D and 3D, by both sweeps (discrete exact, continuous at the commute level) | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp`, `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
+| Material derivatives and kernels in κ, μ and ρ: the static problem's variation operator, Love-number derivatives and kernels (gravity self-consistent in ρ); its first-order (Born) response to lateral δμ(x), δκ(x) and the lateral kernels of a surface measurement; the time-stepped tangent-linear runs along the moduli and (1D) the density; the κ, μ and (1D) ρ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp`, `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
@@ -684,13 +684,16 @@ What is not built, or holds only within limits:
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
   and whether moduli relax on different time-scales — is open.
 - **Bulk relaxation** is not modelled.
-- **Second-order runs and adjoints** take no density direction, and the
+- **Second-order runs and adjoints** take no density direction (the
+  form's second variation in the density is not built), and the
   shoreline terms of pyslfp's smoothed flotation rule are not ported
   (sl3dpp has the sharp rule only).
 - **Material derivatives.** The time-stepped material tangents and
   kernels need the memory points at the GLL nodes and no rotational
-  feedback; density directions are refused in the time-stepped tangent,
-  and lateral density variations are excluded in 3D.
+  feedback; a density direction is taken with the sea level engine's
+  gravity and radius held (`SeaLevelParameters::body_from_table`;
+  docs/dev/adjoints.md §16), and lateral density variations are excluded
+  in 3D.
 - **The `sl3d` program** exposes none of the discrete 3D kernels, the
   tangent-linear runs, the Hessian products and the material kernels;
   they are library calls.

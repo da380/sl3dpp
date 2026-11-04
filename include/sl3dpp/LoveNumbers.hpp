@@ -128,24 +128,25 @@ struct LoveNumberOptions {
     LoveNumberOptions options = {});
 
 /// The sensitivity kernels of the Love numbers in the bulk and shear
-/// moduli: for every channel of LoveNumbers (the load's force and
-/// potential pieces, the tangential load, the tide) and every degree, the
-/// nodal arrays dh_l/d kappa(r), dh_l/d mu(r) and so on over the
-/// material's full mesh — the number's SI units per unit modulus in the
-/// material's units, pairing with a MaterialDirection in kappa and mu by
-/// the plain nodal sum to ComputeLoveNumberDerivatives' entry. The
-/// adjoint of the static elastic problem: per degree the forcings'
-/// solutions x and the unit surface duals' solutions y, paired through
-/// DegreeOperator::MaterialGradient, so dh = -<y_U, (dK) x>. The
-/// density is not a kernel here (its variation moves the forcings and
-/// the gravity; ComputeLoveNumberDerivatives carries it); the degree-0
+/// moduli and the density: for every channel of LoveNumbers (the load's
+/// force and potential pieces, the tangential load, the tide) and every
+/// degree, the nodal arrays dh_l/d kappa(r), dh_l/d mu(r), dh_l/d rho(r)
+/// and so on over the material's full mesh — the number's SI units per
+/// unit modulus or density in the material's units, pairing with a
+/// MaterialDirection by the plain nodal sum to
+/// ComputeLoveNumberDerivatives' entry. The adjoint of the static elastic
+/// problem: per degree the forcings' solutions x and the unit surface
+/// duals' solutions y, paired through DegreeOperator::MaterialGradient
+/// (the moduli) and the density duals (DegreeOperator::AddDensityDuals
+/// and the forcings', Material::DensityGradient — the gravity chain
+/// included), so dh = -<y_U, (dK) x> + <y_U, dF>. The degree-0
 /// centrifugal channel and the inertia moments are not formed.
 struct LoveNumberKernels {
   struct Channel {
     /// [degree][node]
-    std::vector<std::vector<double>> h_kappa, h_mu;
-    std::vector<std::vector<double>> l_kappa, l_mu;
-    std::vector<std::vector<double>> k_kappa, k_mu;
+    std::vector<std::vector<double>> h_kappa, h_mu, h_rho;
+    std::vector<std::vector<double>> l_kappa, l_mu, l_rho;
+    std::vector<std::vector<double>> k_kappa, k_mu, k_rho;
   };
   Channel load;        ///< h_u, l_u, k_u
   Channel potential;   ///< h_phi, l_phi, k_phi

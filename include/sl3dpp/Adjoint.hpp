@@ -135,15 +135,18 @@ struct IceKernels {
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
 
-  /// dJ / d kappa(r) and dJ / d mu(r): nodal arrays over the material's
-  /// full mesh, material units, pairing with a MaterialDirection by the
-  /// plain nodal sum — the transpose of TangentPerturbation::material
-  /// (the branch moduli as fixed fractions of the unrelaxed modulus, the
-  /// relaxation times held; docs/dev/adjoints.md). Empty unless
-  /// Options::material_kernels asked for them (with a trajectory;
-  /// Discrete exact, Continuous at the commute level).
+  /// dJ / d kappa(r), dJ / d mu(r) and dJ / d rho(r): nodal arrays over
+  /// the material's full mesh, material units, pairing with a
+  /// MaterialDirection by the plain nodal sum — the transpose of
+  /// TangentPerturbation::material (the branch moduli as fixed fractions
+  /// of the unrelaxed modulus, the relaxation times held; the density
+  /// with its gravity and the forcings, the sea level engine's gravity
+  /// held; docs/dev/adjoints.md). Empty unless Options::material_kernels
+  /// asked for them (with a trajectory; Discrete exact, Continuous at the
+  /// commute level).
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
+  std::vector<double> rhoKernel;
 };
 
 enum class AdjointMethod { Continuous, Discrete };
@@ -164,10 +167,12 @@ struct KernelDerivatives {
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;
   /// The derivatives along v of the material kernels (IceKernels::
-  /// kappaKernel, muKernel), in their layout: the material rows of the
-  /// Hessian's action on v. Empty unless Options::material_kernels.
+  /// kappaKernel, muKernel, rhoKernel), in their layout: the material
+  /// rows of the Hessian's action on v. Empty unless
+  /// Options::material_kernels.
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
+  std::vector<double> rhoKernel;
 };
 
 namespace detail {
@@ -203,10 +208,10 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// Also form the material kernels (IceKernels::kappaKernel, muKernel).
-    /// Discrete: the pairing of each step's dual solution with the
-    /// material derivative of the step's force, the exact transpose of
-    /// the material tangent. Continuous: the time quadrature of the
+    /// Also form the material kernels (IceKernels::kappaKernel, muKernel,
+    /// rhoKernel). Discrete: the pairing of each step's dual solution with
+    /// the material derivative of the step's force, the exact transpose
+    /// of the material tangent. Continuous: the time quadrature of the
     /// continuous adjoint displacement's pairing with the forward
     /// solution and memory, plus the lumped pairings at the observations
     /// — the commute error of the viscosity kernels, falling under
