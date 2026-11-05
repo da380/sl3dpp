@@ -722,12 +722,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto unrelaxedTor = [&](int l) -> const ToroidalOperator& {
     return op.Toroidal(l);
   };
-  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x) {
+  auto dilatationCoefficients = [&](const Viscoelastic3D::Solutions& x) {
     auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
     for (const auto& [l, xl] : x.spheroidal) {
       coupling.AddDilatationOfSolution(scalar, l, op.Spheroidal(l), xl);
     }
-    return coupling.SynthesiseScalar(scalar);
+    return scalar;
+  };
+  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x) {
+    return coupling.SynthesiseScalar(dilatationCoefficients(x));
   };
   using Tensor = GridCoupling::TensorField;
   // v's forces on a solution with its grid strain (the material tangent's
@@ -752,9 +755,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto analysed = coupling.Analyse(gridForce);
     auto bulk = std::map<int, std::vector<Complex>>{};
     if (hasMaterialV && !materialV->kappa.empty() && x != nullptr) {
-      auto field = dilatationOf(*x);
+      // Through gridForce's real component, analysed (done with it), and
+      // back over the dilatation's coefficients.
+      auto scalar = dilatationCoefficients(*x);
+      auto& field = gridForce.r;
+      coupling.SynthesiseScalar(scalar, field);
       for (auto i = std::size_t{0}; i < values; ++i) field[i] *= -materialV->kappa[i];
-      bulk = coupling.DilatationForce(coupling.AnalyseScalar(field), unrelaxedSph);
+      coupling.AnalyseScalar(field, scalar);
+      bulk = coupling.DilatationForce(scalar, unrelaxedSph);
     }
     return std::pair(std::move(analysed), std::move(bulk));
   };

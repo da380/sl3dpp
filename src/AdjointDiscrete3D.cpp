@@ -509,14 +509,21 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
     }
   }
-  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x,
-                          const std::function<const DegreeOperator&(int)>& sph) {
-    auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
-    for (const auto& [l, xl] : x.spheroidal) {
-      coupling.AddDilatationOfSolution(scalar, l, sph(l), xl);
-    }
-    return coupling.SynthesiseScalar(scalar);
-  };
+  auto dilatationCoefficients =
+      [&](const Viscoelastic3D::Solutions& x,
+          const std::function<const DegreeOperator&(int)>& sph) {
+        auto scalar =
+            std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
+        for (const auto& [l, xl] : x.spheroidal) {
+          coupling.AddDilatationOfSolution(scalar, l, sph(l), xl);
+        }
+        return scalar;
+      };
+  auto dilatationOf =
+      [&](const Viscoelastic3D::Solutions& x,
+          const std::function<const DegreeOperator&(int)>& sph) {
+        return coupling.SynthesiseScalar(dilatationCoefficients(x, sph));
+      };
   // The bulk pairing -Wq D(y) D(x) and the shear pairing
   // -Wq r^2 factor C(e(y), e(x)) + Wq r^2 sum_k f_k C(e(y), m~_k), over
   // the grid values; `factor` and `memory` empty for the start.
@@ -573,12 +580,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto analysed = coupling.Analyse(gridForce);
         auto sphForces = coupling.SpheroidalForce(analysed, sph);
         if (!materialV->kappa.empty() && x != nullptr) {
-          auto field = dilatationOf(*x, sph);
+          // Through gridForce's real component, analysed (done with it),
+          // and back over the dilatation's coefficients.
+          auto scalar = dilatationCoefficients(*x, sph);
+          auto& field = gridForce.r;
+          coupling.SynthesiseScalar(scalar, field);
           for (auto i = std::size_t{0}; i < values; ++i) {
             field[i] *= -materialV->kappa[i];
           }
-          for (const auto& [l, f] :
-               coupling.DilatationForce(coupling.AnalyseScalar(field), sph)) {
+          coupling.AnalyseScalar(field, scalar);
+          for (const auto& [l, f] : coupling.DilatationForce(scalar, sph)) {
             auto& b = sphForces.at(l);
             for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
           }

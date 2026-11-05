@@ -441,11 +441,15 @@ struct TangentLinearSolver3D::MaterialDrive3D
       for (const auto& [l, xl] : x->spheroidal) {
         coupling.AddDilatationOfSolution(scalar, l, op.Spheroidal(l), xl);
       }
-      auto field = coupling.SynthesiseScalar(scalar);
+      // Through grid's real component, analysed (done with it), and back
+      // over the dilatation's coefficients.
+      auto& field = grid.r;
+      coupling.SynthesiseScalar(scalar, field);
       for (auto i = std::size_t{0}; i < values; ++i) {
         field[i] *= -direction.kappa[i];
       }
-      spheroidal = coupling.DilatationForce(coupling.AnalyseScalar(field), sph);
+      coupling.AnalyseScalar(field, scalar);
+      spheroidal = coupling.DilatationForce(scalar, sph);
     }
     return {std::move(analysed), std::move(spheroidal)};
   }

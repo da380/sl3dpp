@@ -329,6 +329,13 @@ class GridCoupling {
   [[nodiscard]] std::size_t ScalarCoefficientCount() const {
     return coefficientOffset_.back();
   }
+  /// A scalar's transforms, node block by node block, into storage the
+  /// caller holds (every value overwritten; nothing allocated), or into a
+  /// new vector. The field may alias nothing the coefficients hold.
+  void SynthesiseScalar(std::span<const Complex> spectral,
+                        std::span<double> field) const;
+  void AnalyseScalar(std::span<const double> field,
+                     std::span<Complex> spectral) const;
   [[nodiscard]] std::vector<double> SynthesiseScalar(
       std::span<const Complex> spectral) const;
   [[nodiscard]] std::vector<Complex> AnalyseScalar(

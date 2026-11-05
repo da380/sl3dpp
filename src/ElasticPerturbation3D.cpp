@@ -199,17 +199,22 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
     add(toroidal, coupling_.ToroidalForce(weighted, tor));
   }
   if (!dKappa.empty()) {
-    // The scalar companion: the dilatation, weighted, back as force.
+    // The scalar companion: the dilatation, weighted, back as force. The
+    // field goes in the workspace's real component (the tensor pipeline
+    // above is done with it), and its analysis over the dilatation's
+    // coefficients: no grid-sized allocation per call.
     auto scalar = std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0);
     detail::ForEachTask(options_.parallel, count, [&](int i) {
       const auto& g = gathers[count - 1 - i];
       coupling_.AddDilatationOfSolution(scalar, g.l, *g.sph, *g.x);
     });
-    auto field = coupling_.SynthesiseScalar(scalar);
+    auto& field = grid.r;
+    field.resize(values);
+    coupling_.SynthesiseScalar(scalar, field);
     detail::ForEach(options_.parallel, values,
                     [&](std::size_t i) { field[i] *= dKappa[i]; });
-    const auto weighted = coupling_.AnalyseScalar(field);
-    add(spheroidal, coupling_.DilatationForce(weighted, sph));
+    coupling_.AnalyseScalar(field, scalar);
+    add(spheroidal, coupling_.DilatationForce(scalar, sph));
   }
   return {std::move(spheroidal), std::move(toroidal)};
 }

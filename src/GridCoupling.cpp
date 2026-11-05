@@ -243,9 +243,12 @@ GridCoupling::TensorField GridCoupling::Synthesise(
 void GridCoupling::Synthesise(const SpectralTensor& spectral,
                               TensorField& field) const {
   if (field.r.empty()) field = ZeroTensor();
+  // Into the companions' own storage when it is the right size (a
+  // workspace reused across passes); every value is overwritten.
   field.scalars.resize(spectral.scalars.size());
   for (auto k = std::size_t{0}; k < spectral.scalars.size(); ++k) {
-    field.scalars[k] = SynthesiseScalar(spectral.scalars[k]);
+    field.scalars[k].resize(GridValueCount());
+    SynthesiseScalar(spectral.scalars[k], field.scalars[k]);
   }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
@@ -273,7 +276,8 @@ void GridCoupling::Analyse(const TensorField& field,
   if (spectral.r.empty()) spectral = ZeroSpectral();
   spectral.scalars.resize(field.scalars.size());
   for (auto k = std::size_t{0}; k < field.scalars.size(); ++k) {
-    spectral.scalars[k] = AnalyseScalar(field.scalars[k]);
+    spectral.scalars[k].resize(ScalarCoefficientCount());
+    AnalyseScalar(field.scalars[k], spectral.scalars[k]);
   }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
@@ -289,12 +293,14 @@ void GridCoupling::Analyse(const TensorField& field,
   }
 }
 
-std::vector<double> GridCoupling::SynthesiseScalar(
-    std::span<const Complex> spectral) const {
+void GridCoupling::SynthesiseScalar(std::span<const Complex> spectral,
+                                    std::span<double> field) const {
   if (spectral.size() != ScalarCoefficientCount()) {
     throw std::invalid_argument("a scalar's coefficients span every node");
   }
-  auto field = std::vector<double>(GridValueCount(), 0.0);
+  if (field.size() != GridValueCount()) {
+    throw std::invalid_argument("a scalar field spans every node's grid");
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -303,15 +309,23 @@ std::vector<double> GridCoupling::SynthesiseScalar(
                          coefficientOffset_[last] - coefficientOffset_[first]),
         block.nodeCount, Nodes(field, fieldOffset_, first, last));
   }
+}
+
+std::vector<double> GridCoupling::SynthesiseScalar(
+    std::span<const Complex> spectral) const {
+  auto field = std::vector<double>(GridValueCount());
+  SynthesiseScalar(spectral, field);
   return field;
 }
 
-std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
-    std::span<const double> field) const {
+void GridCoupling::AnalyseScalar(std::span<const double> field,
+                                 std::span<Complex> spectral) const {
   if (field.size() != GridValueCount()) {
     throw std::invalid_argument("a scalar field spans every node's grid");
   }
-  auto spectral = std::vector<Complex>(ScalarCoefficientCount(), 0.0);
+  if (spectral.size() != ScalarCoefficientCount()) {
+    throw std::invalid_argument("a scalar's coefficients span every node");
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -319,6 +333,12 @@ std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
         field.subspan(fieldOffset_[first], fieldOffset_[last] - fieldOffset_[first]),
         block.nodeCount, Nodes(spectral, coefficientOffset_, first, last));
   }
+}
+
+std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
+    std::span<const double> field) const {
+  auto spectral = std::vector<Complex>(ScalarCoefficientCount());
+  AnalyseScalar(field, spectral);
   return spectral;
 }
 
