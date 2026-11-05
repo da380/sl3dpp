@@ -335,8 +335,11 @@ nodes.
   grep -H "per pass" step_*.txt
   ```
 
-- **Reproducibility.** One-thread runs are bitwise reproducible; threaded
-  runs agree with them to round-off.
+- **Reproducibility.** Runs are bitwise reproducible, and threaded runs
+  reproduce one-thread runs bitwise: `step_timing`'s state fingerprint is
+  the same at 1, 4, 16 and 32 threads, with and without Anderson mixing.
+  This holds for the default loop kernel; with `matrix_kernel` the sums are
+  the BLAS's, whose grouping may depend on its thread count.
 - **BLAS.** Any BLAS works on any number of cores, OpenBLAS's pthread and
   OpenMP builds alike, with no environment variables to set: the library's
   threaded loops make no BLAS calls (the per-degree banded solves are its

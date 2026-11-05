@@ -11,7 +11,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
 
@@ -262,7 +262,7 @@ std::vector<GridCoupling::TensorField> TangentLinearSolver3D::FirstOrderDrive(
     const auto& mPrev = prev.m[k];
     const auto& mNext = next.m[k];
     const auto& delta = ditau[k];
-    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+    detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
       if (delta[i] == 0.0) return;
       const auto h = dt * itauK[i];
       if (discrete) {
@@ -322,7 +322,7 @@ std::vector<GridCoupling::TensorField> TangentLinearSolver3D::SecondWeightDrive(
     auto extra = coupling.ZeroTensor();
     const auto& itauK = op.itau_[k];
     const auto& mPrev = prev.m[k];
-    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+    detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
       const auto dh2 = dt * dt * ditauU[k][i] * ditauV[k][i];
       if (dh2 == 0.0) return;
       const auto h = dt * itauK[i];
@@ -423,7 +423,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
     const auto& coupling = op.coupling_;
     const auto values = coupling.GridValueCount();
     auto grid = coupling.ZeroTensor();
-    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+    detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
       const auto w = shear.empty() ? 0.0 : -shear[i];
       for (auto c = 0; c < 2; ++c) {
         grid.c[c][i] = w * strain.c[c][i] +
@@ -457,7 +457,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
     const auto& coupling = op.coupling_;
     const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
     auto out = coupling.ZeroTensor();
-    detail::ParallelElements(nodes, op.options_.parallel, [&](std::size_t n) {
+    detail::ForEach(op.options_.parallel, nodes, [&](std::size_t n) {
       const auto first = coupling.FieldOffset(static_cast<int>(n));
       const auto last = first + coupling.FieldSizeOf(static_cast<int>(n));
       for (auto i = first; i < last; ++i) {
@@ -483,7 +483,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
     const auto& coupling = op.coupling_;
     const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
     auto shear = std::vector<double>(coupling.GridValueCount(), 0.0);
-    detail::ParallelElements(nodes, op.options_.parallel, [&](std::size_t n) {
+    detail::ForEach(op.options_.parallel, nodes, [&](std::size_t n) {
       const auto first = coupling.FieldOffset(static_cast<int>(n));
       const auto last = first + coupling.FieldSizeOf(static_cast<int>(n));
       for (auto i = first; i < last; ++i) {

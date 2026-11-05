@@ -91,9 +91,11 @@ class Viscoelastic3D {
     /// (OMP_NUM_THREADS; 1 for a serial run): the transforms (GSHTrans)
     /// and the per-degree loops of force assembly, solves and strain
     /// recovery. false forces serial, for a caller already inside its own
-    /// parallel region, say. The degree loops are bitwise independent of
-    /// the thread count; the threaded transforms agree only to round-off
-    /// (each thread plans its own FFTs, by FFTW_MEASURE).
+    /// parallel region, say. With the loop kernel (matrix_kernel false) the
+    /// step is bitwise independent of the thread count: the loops write
+    /// only what their index owns, the transforms are thread-count
+    /// independent, and the mixer's sums run over blocks fixed by the
+    /// vector's length.
     bool parallel = true;
     bool matrix_kernel = false;
     /// The within-step iteration (IterationControl): Picard, Anderson-

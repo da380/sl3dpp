@@ -43,10 +43,9 @@
 // compare with the uncut run.
 //
 // Options::parallel is set when OMP_NUM_THREADS > 1, as in fortran_gate:
-// the transforms and the per-degree loops (force, solves, strain) then run
-// threaded; the pointwise loops and the mixing stay serial. The
-// fingerprint is reproducible run to run on one thread; on several,
-// GSHTrans's per-thread FFTW plans (FFTW_MEASURE) can differ at round-off.
+// the transforms, the per-degree loops (force, solves, strain), the
+// pointwise loops and the mixing then run threaded. With the loop kernel
+// the fingerprint is the same on any thread count, one included.
 
 #include <omp.h>
 #include <sys/resource.h>
@@ -329,7 +328,7 @@ int main(int argc, char** argv) {
     for (const auto& v : columns) sumPhi += std::abs(v);
   }
   std::printf("\n  surface sums |U| %.15e  |phi| %.15e\n", sumU, sumPhi);
-  std::printf("  state fingerprint %016llx (bitwise check; one thread)\n",
+  std::printf("  state fingerprint %016llx (bitwise check)\n",
               static_cast<unsigned long long>(Fingerprint(state)));
   std::printf("  peak RSS %.2f GB\n", PeakRssGb());
   return 0;

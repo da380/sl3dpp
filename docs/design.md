@@ -623,15 +623,16 @@ Beyond the fixtures:
   force a component serial for a caller already inside a parallel region.
   The parallel axes: degree loops (independent factorisations and solves),
   element and latitude loops for pointwise grid work, and GSHTrans's
-  threaded transforms. The Anderson mixer threads its sweeps with
-  per-thread partial sums added in thread order.
+  threaded transforms. The loops are GSHTrans's (`ForEach`, static blocks;
+  `ForEachTask`, dynamic). The Anderson mixer threads its sweeps, its sums
+  formed over blocks fixed by the vector's length and added in block order.
 - **No BLAS inside the threads.** The banded factorisations and solves
   are the library's own (`detail/BandSolvers.hpp`, LAPACK's unblocked
   algorithms with its storage and pivoting), because a BLAS called from
   every thread of a degree loop at once fails on many-core nodes; README,
   *Running*, has the detail.
-- **Reproducibility.** One-thread runs are bitwise reproducible; threaded
-  runs agree with them to round-off.
+- **Reproducibility.** Threaded runs reproduce one-thread runs bitwise
+  (loop kernel; measured on the 3D step at 1 to 32 threads).
 - **Distributed over radius (MPI, optional).** A production 3D problem
   (lmax 256) fits one large node, but a step is fastest on one socket, and
   larger problems want the memory of several nodes. With the CMake option

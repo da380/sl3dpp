@@ -12,7 +12,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -614,8 +614,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       const auto* delta = second ? &(*ditau)[k] : nullptr;
       auto* dKernel = second ? &dItauKernel[k] : nullptr;
       // Node by node, each writing only its own grid values.
-      detail::ParallelElements(
-          nodeCount, op.options_.parallel, [&](std::size_t rn) {
+      detail::ForEach(
+          op.options_.parallel, nodeCount, [&](std::size_t rn) {
             if (mu[rn] <= 0.0) return;
             const auto r = coupling.RadiusOfNode(static_cast<int>(rn));
             const auto wq = coupling.WeightOfNode(static_cast<int>(rn));
@@ -741,7 +741,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                                std::span<const double> shear,
                                const Tensor* memoryForce) {
     auto gridForce = coupling.ZeroTensor();
-    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+    detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
       const auto w = shear.empty() ? 0.0 : -shear[i];
       for (auto c = 0; c < 2; ++c) {
         gridForce.c[c][i] =
@@ -763,7 +763,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   auto memoryVariationV = [&](const std::vector<Tensor>& memory) {
     auto out = coupling.ZeroTensor();
     if (dmuV.empty()) return out;
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base_ = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -826,7 +826,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (weight == 0.0) return;
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));
@@ -878,7 +878,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));

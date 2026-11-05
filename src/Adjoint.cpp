@@ -1,7 +1,5 @@
 #include "sl3dpp/Adjoint.hpp"
 
-#include "sl3dpp/detail/AdjointInternals.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -9,7 +7,8 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/AdjointInternals.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -365,7 +364,7 @@ IceKernels AdjointSolver::DiscreteSweep(
     auto xd = std::vector<std::vector<double>>(lmax + 1);
     auto sigByDegree = std::vector<std::vector<double>>(lmax + 1);
     auto psiByDegree = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -478,7 +477,7 @@ IceKernels AdjointSolver::DiscreteSweep(
                                  : LoadCallable{};
     const auto tidesN = material ? ev.Columns(trajectory->tides[n], ev.toMatPotential_)
                                  : LoadCallable{};
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -491,7 +490,8 @@ IceKernels AdjointSolver::DiscreteSweep(
       const auto su = deg.system.SurfaceDof(Component::U);
       const auto sphi = deg.system.SurfaceDof(Component::Phi);
       for (auto c = 0; c < ncols; ++c) {
-        if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
+        if (su >= 0)
+          rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
         if (sphi >= 0) {
           rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
         }
@@ -928,7 +928,7 @@ IceKernels AdjointSolver::ContinuousSweep(
       // the entries made before the parallel loop fills them
       for (const auto& task : tasks) lumpSolutions[task.l].clear();
     }
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto& task = tasks[count - 1 - i];
       const auto l = task.l;
       auto& m = *task.m;
@@ -1089,7 +1089,7 @@ IceKernels AdjointSolver::ContinuousSweep(
             tasks.size());
     auto duals = std::vector<DensityDuals>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
       const auto& deg = op.Deg(l);
       const auto ncols = 2 * (l + 1);
@@ -1168,7 +1168,7 @@ IceKernels AdjointSolver::ContinuousSweep(
     }
     auto terms = std::vector<std::vector<double>>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
       const auto l = tasks[j].first;
       const auto& mdual = *tasks[j].second;

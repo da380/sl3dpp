@@ -24,12 +24,12 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
-#include <optional>
-#include <tuple>
-#include <type_traits>
 #include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 
 #include "sl3dpp/Adjoint3D.hpp"
@@ -38,7 +38,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -522,11 +522,12 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   // the grid values; `factor` and `memory` empty for the start.
   auto addMaterialPairing = [&](std::span<const double> Dy,
                                 std::span<const double> Dx, const Tensor& ey,
-                                const Tensor& ex, std::span<const double> factor,
+                                const Tensor& ex,
+                                std::span<const double> factor,
                                 const std::vector<Tensor>* memory,
                                 std::vector<double>& kappaTo,
                                 std::vector<double>& muTo) {
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));
@@ -561,7 +562,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           const std::function<const DegreeOperator&(int)>& sph,
           const std::function<const ToroidalOperator&(int)>& tor) {
         auto gridForce = coupling.ZeroTensor();
-        detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+        detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
           const auto w = shear.empty() ? 0.0 : -shear[i];
           for (auto c = 0; c < 2; ++c) {
             gridForce.c[c][i] = w * strain.c[c][i] +
@@ -589,7 +590,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   auto memoryVariationV = [&](const std::vector<Tensor>& memory) {
     auto out = coupling.ZeroTensor();
     if (dmuV.empty()) return out;
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base_ = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -688,7 +689,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     auto de = ddual;
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& beta = step.beta_[k];
-      detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+      detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
         de.c[0][i] += beta[i] * mdual[k].c[0][i];
         de.c[1][i] += beta[i] * mdual[k].c[1][i];
         de.r[i] += beta[i] * mdual[k].r[i];
@@ -706,7 +707,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto& delta = (*ditau)[k];
         const auto& md = mdual[k];
         const auto& dmd = dmdual[k];
-        detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+        detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
           const auto base = coupling.FieldOffset(static_cast<int>(rn));
           const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
           for (auto x = std::size_t{0}; x < size; ++x) {
@@ -764,7 +765,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         auto y = e;
         coupling.Multiply(y, W);
         if (!y.scalars.empty()) op.WeightCompanions(y);
-        detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+        detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
           y.c[0][i] += src.c[0][i];
           y.c[1][i] += src.c[1][i];
           y.r[i] += src.r[i];
@@ -816,7 +817,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     if (second) {
       auto src = last.e;
       coupling.Multiply(src, dW);
-      detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+      detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
         src.c[0][i] += dde.c[0][i];
         src.c[1][i] += dde.c[1][i];
         src.r[i] += dde.r[i];
@@ -911,7 +912,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       auto* dmd = second ? &dmdual[k] : nullptr;
       auto* dkernel = second ? &dItauKernel[k] : nullptr;
       const auto* delta = second ? &(*ditau)[k] : nullptr;
-      detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+      detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
         const auto base = coupling.FieldOffset(static_cast<int>(rn));
         const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
         const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));

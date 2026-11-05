@@ -6,10 +6,10 @@
  * sea level solvers and the within-step lateral iteration. Internal.
  */
 
-#include <omp.h>
-
+#include <GSHTrans/Parallel.hpp>
 #include <algorithm>
 #include <array>
+#include <cstddef>
 #include <format>
 #include <functional>
 #include <span>
@@ -37,9 +37,10 @@ namespace sl3dpp::detail {
 /// memory traffic.
 ///
 /// With `parallel`, the sweeps over the vector run threaded on OpenMP's
-/// thread count, the sums as per-thread partials added in thread order:
-/// reproducible at a given thread count, and at one thread bitwise the
-/// serial update. With `sum`, the vector is distributed (each process
+/// thread count. The sums are formed over blocks of the vector fixed by its
+/// length alone and added in block order (GSHTrans::Reduce's grouping), so
+/// the update is bitwise the same on any thread count, one included. With
+/// `sum`, the vector is distributed (each process
 /// holding its own part) and the Gram system's entries are summed over
 /// the processes, which then mix alike: each update is collective.
 class AndersonMixer {
@@ -78,19 +79,35 @@ class AndersonMixer {
       offset[s + 1] = offset[s] + x[s].size();
     }
     const auto n = offset.back();
-    // body(s, j, at) over every value, segment by segment, each thread
-    // taking the same static block of every segment.
-    auto sweep = [&](auto&& body) {
-#pragma omp parallel if (parallel_)
-      {
-        for (auto s = std::size_t{0}; s < x.size(); ++s) {
-          const auto size = x[s].size();
-#pragma omp for schedule(static) nowait
-          for (auto j = std::size_t{0}; j < size; ++j) {
-            body(s, j, offset[s] + j);
-          }
-        }
+    const auto policy = parallel_ ? GSHTrans::Execution::Parallel()
+                                  : GSHTrans::Execution::Sequential();
+    // piece(s, j0, j1, at0) over the parts of the segments that the range
+    // [begin, end) of the concatenation covers, in order: values j0 to j1
+    // of segment s, the first of them at at0 in the concatenation.
+    auto pieces = [&](std::size_t begin, std::size_t end, auto&& piece) {
+      auto s = static_cast<std::size_t>(
+          std::upper_bound(offset.begin(), offset.end(), begin) -
+          offset.begin() - 1);
+      for (; s < x.size() && offset[s] < end; ++s) {
+        const auto from = std::max(begin, offset[s]);
+        const auto to = std::min(end, offset[s + 1]);
+        piece(s, from - offset[s], to - offset[s], from);
       }
+    };
+    // body(s, j, at) over every value, each thread taking a static block of
+    // the concatenation.
+    auto sweep = [&](auto&& body) {
+      GSHTrans::ForEachBlock(policy, static_cast<std::ptrdiff_t>(n),
+                             [&](std::ptrdiff_t begin, std::ptrdiff_t end) {
+                               pieces(static_cast<std::size_t>(begin),
+                                      static_cast<std::size_t>(end),
+                                      [&](std::size_t s, std::size_t j0,
+                                          std::size_t j1, std::size_t at0) {
+                                        for (auto j = j0; j < j1; ++j) {
+                                          body(s, j, at0 + (j - j0));
+                                        }
+                                      });
+                             });
     };
     auto takeImage = [&] {
       sweep([&](std::size_t s, std::size_t j, std::size_t) {
@@ -118,43 +135,46 @@ class AndersonMixer {
 
     // One sweep forms the new differences, stores the iterate and its
     // residual, and accumulates the new Gram column and the least-squares
-    // right-hand side: per thread, then the partials in thread order.
+    // right-hand side: per block of the concatenation, the blocks fixed by
+    // n alone, then the partials in block order.
     const int slot = slot_;
     const int m = std::min(count_ + 1, memory_);
     auto dF = std::vector<const double*>(m);
     for (auto i = 0; i < m; ++i) dF[i] = dF_[i].data();
     auto* dGs = dG_[slot].data();
     auto* dFs = dF_[slot].data();
-    const auto threads = parallel_ ? omp_get_max_threads() : 1;
-    auto partial =
-        std::vector<double>(static_cast<std::size_t>(threads) * 2 * m, 0.0);
-#pragma omp parallel if (parallel_) num_threads(threads)
-    {
-      auto* column = partial.data() +
-                     static_cast<std::size_t>(omp_get_thread_num()) * 2 * m;
-      auto* gamma = column + m;
-      for (auto s = std::size_t{0}; s < x.size(); ++s) {
-        const auto size = x[s].size();
-        const auto xs = x[s];
-        const auto gs = gx[s];
-#pragma omp for schedule(static) nowait
-        for (auto j = std::size_t{0}; j < size; ++j) {
-          const auto at = offset[s] + j;
-          const auto f = gs[j] - xs[j];
-          const auto dx = xs[j] - xPrev_[at];
-          dFs[at] = f - fPrev_[at];
-          dGs[at] = dx + dFs[at];
-          xPrev_[at] = xs[j];
-          fPrev_[at] = f;
-          for (auto i = 0; i < m; ++i) {
-            column[i] += dF[i][at] * dFs[at];
-            gamma[i] += dF[i][at] * f;
-          }
-        }
-      }
-    }
-    for (auto t = 1; t < threads; ++t) {
-      const auto* p = partial.data() + static_cast<std::size_t>(t) * 2 * m;
+    const auto blocks =
+        std::min(n, static_cast<std::size_t>(GSHTrans::ReduceBlocks));
+    auto partial = std::vector<double>((blocks + 1) * 2 * m, 0.0);
+    GSHTrans::ForEach(
+        policy, static_cast<std::ptrdiff_t>(blocks), [&](std::ptrdiff_t b) {
+          auto* column =
+              partial.data() + static_cast<std::size_t>(b + 1) * 2 * m;
+          auto* gamma = column + m;
+          const auto block = static_cast<std::size_t>(b);
+          pieces(n * block / blocks, n * (block + 1) / blocks,
+                 [&](std::size_t s, std::size_t j0, std::size_t j1,
+                     std::size_t at0) {
+                   const auto xs = x[s];
+                   const auto gs = gx[s];
+                   for (auto j = j0; j < j1; ++j) {
+                     const auto at = at0 + (j - j0);
+                     const auto f = gs[j] - xs[j];
+                     const auto dx = xs[j] - xPrev_[at];
+                     dFs[at] = f - fPrev_[at];
+                     dGs[at] = dx + dFs[at];
+                     xPrev_[at] = xs[j];
+                     fPrev_[at] = f;
+                     for (auto i = 0; i < m; ++i) {
+                       column[i] += dF[i][at] * dFs[at];
+                       gamma[i] += dF[i][at] * f;
+                     }
+                   }
+                 });
+        });
+    // The total in partial's first 2m entries.
+    for (auto b = std::size_t{1}; b <= blocks; ++b) {
+      const auto* p = partial.data() + b * 2 * m;
       for (auto i = 0; i < 2 * m; ++i) partial[i] += p[i];
     }
     if (sum_) sum_(std::span(partial).first(static_cast<std::size_t>(2 * m)));

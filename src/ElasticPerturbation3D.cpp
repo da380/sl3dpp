@@ -7,7 +7,7 @@
 
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/LateralSolve.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
 
@@ -182,7 +182,7 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
   if (!dMu.empty()) {
     // The deviatoric pipeline: strain, weighted pointwise, back as force.
     auto spectral = coupling_.ZeroSpectral();
-    detail::ParallelFor(count, options_.parallel, [&](int i) {
+    detail::ForEachTask(options_.parallel, count, [&](int i) {
       const auto& g = gathers[count - 1 - i];
       coupling_.AddStrainOfSolution(
           spectral, g.l, *g.sph, *g.x, g.tor,
@@ -201,13 +201,13 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
   if (!dKappa.empty()) {
     // The scalar companion: the dilatation, weighted, back as force.
     auto scalar = std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0);
-    detail::ParallelFor(count, options_.parallel, [&](int i) {
+    detail::ForEachTask(options_.parallel, count, [&](int i) {
       const auto& g = gathers[count - 1 - i];
       coupling_.AddDilatationOfSolution(scalar, g.l, *g.sph, *g.x);
     });
     auto field = coupling_.SynthesiseScalar(scalar);
-    detail::ParallelElements(values, true,
-                             [&](std::size_t i) { field[i] *= dKappa[i]; });
+    detail::ForEach(options_.parallel, values,
+                    [&](std::size_t i) { field[i] *= dKappa[i]; });
     const auto weighted = coupling_.AnalyseScalar(field);
     add(spheroidal, coupling_.DilatationForce(weighted, sph));
   }
@@ -243,7 +243,7 @@ ElasticPerturbation3D::Solutions ElasticPerturbation3D::Solve(
     tasks.push_back({.l = l, .in = &b, .tor = &Toroidal(l),
                      .out = &out.toroidal[l]});
   }
-  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel,
+  detail::ForEachTask(options_.parallel, static_cast<int>(tasks.size()),
                       [&](int i) {
                         const auto& task = tasks[i];
                         auto rhs = *task.in;
@@ -335,7 +335,7 @@ ElasticPerturbation3D::Apply(const Solutions& x, std::span<const double> dMu,
     tasks.push_back({.l = l, .in = &wl, .tor = &Toroidal(l),
                      .out = &toroidal.at(l)});
   }
-  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel,
+  detail::ForEachTask(options_.parallel, static_cast<int>(tasks.size()),
                       [&](int i) {
                         const auto& task = tasks[i];
                         const auto reference =
@@ -522,7 +522,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
   Kernels out;
   out.kappa.assign(values, 0.0);
   out.mu.assign(values, 0.0);
-  detail::ParallelElements(static_cast<std::size_t>(nodes), true, [&](std::size_t n) {
+  detail::ForEach(options_.parallel, nodes, [&](std::size_t n) {
     const auto rn = static_cast<int>(n);
     const auto base = coupling.FieldOffset(rn);
     const auto size = coupling.FieldSizeOf(rn);

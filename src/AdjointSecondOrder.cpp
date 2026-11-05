@@ -17,7 +17,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -440,7 +440,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     auto xd = std::vector<std::vector<double>>(lmax + 1);
     auto sigBy = std::vector<std::vector<double>>(lmax + 1);
     auto psiBy = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -479,7 +479,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     auto sys = std::vector<std::vector<double>>(lmax + 1);
     auto wsys = std::vector<std::vector<double>>(lmax + 1);
     auto dxd = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -547,7 +547,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto tidesN = material ? tidesOf(trajectory.tides[n]) : LoadCallable{};
     const auto loadsV = material ? loadsOf(tangent[n].loadCoefficients) : LoadCallable{};
     const auto tidesV = material ? tidesOf(tangent[n].tideCoefficients) : LoadCallable{};
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -1288,7 +1288,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
             tasks.size());
     auto duals = std::vector<DensityDuals>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
       const auto& deg = op.Deg(l);
       const auto ncols = 2 * (l + 1);
