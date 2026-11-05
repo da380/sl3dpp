@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The cross-code benchmark against the Fortran sl3d
-# (docs/dev/lateral-coupling.md §5b): builds the original Fortran code and this
+# (docs/lateral-coupling.md §5b): builds the original Fortran code and this
 # repo side by side, runs visco_test at a chosen lmax, replays the same
 # setup through sl3dpp, and prints the coefficient-space comparison.
 # Intended for a server; lmax 32 takes minutes, lmax 128 (the code's

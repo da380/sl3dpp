@@ -4,7 +4,7 @@
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
  * evolution: by the CONTINUOUS adjoint — the preferred path for the
- * viscosity (docs/dev/adjoints.md) — or by the DISCRETE transpose of the
+ * viscosity (docs/adjoints.md) — or by the DISCRETE transpose of the
  * coupled time-stepped map (AdjointDiscrete3D.cpp): ice-history kernels,
  * the full 3D inverse-relaxation-time kernel on the (memory node ×
  * angular grid) with its spherical reduction, and, on request, the
@@ -116,7 +116,7 @@ struct Kernels3D {
   /// dJ / d kappa(x) and dJ / d mu(x) in the itauKernel3D layout (an
   /// angular density per memory node, the radial quadrature folded in),
   /// material units — the transpose of TangentPerturbation3D::material
-  /// (docs/dev/adjoints.md) — and their angular integrals per node,
+  /// (docs/adjoints.md) — and their angular integrals per node,
   /// which pair with angle-uniform directions as the 1D kappaKernel and
   /// muKernel do at that node. Empty unless Options::material_kernels
   /// (with a trajectory; Discrete exact, Continuous at the commute level).
@@ -190,7 +190,7 @@ class AdjointSolver3D {
     /// exact transpose of the coupled time-stepped map, the transposed
     /// within-step fixed point solved by the same iteration. Both carry
     /// the second-order sweep (SecondOrderKernels) and both are
-    /// distributed over radius (docs/dev/adjoints.md §17).
+    /// distributed over radius (docs/adjoints.md §17).
     AdjointMethod method = AdjointMethod::Continuous;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
@@ -243,7 +243,7 @@ class AdjointSolver3D {
    * @brief The 3D second-order adjoint, by Options::method: the kernels
    * and their derivative along a direction v — the Hessian's action on v
    * (the 3D form of AdjointSolver::SecondOrderKernels;
-   * docs/dev/adjoints.md). Continuous: the adjoint state and its
+   * docs/adjoints.md). Continuous: the adjoint state and its
    * derivative are both stepped by the reversed coupled machinery; the
    * derivative state's step carries the continuous first-order drive
    * built from the adjoint trajectory (pointwise, as the tangent-linear
@@ -259,7 +259,7 @@ class AdjointSolver3D {
    * first-order sweep. With
    * Options::material_kernels the material kernels and their
    * derivatives along v are formed too, and v may have a direction in
-   * the moduli (`material`; docs/dev/adjoints.md §15) — Discrete only
+   * the moduli (`material`; docs/adjoints.md §15) — Discrete only
    * for now.
    *
    * @param tangent v's tangent-linear run about the forward run, recorded

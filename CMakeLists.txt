@@ -226,7 +226,7 @@ target_compile_options(sl3dpp PRIVATE
 
 # MPI is optional: with SL3DPP_WITH_MPI the distributed parts are compiled
 # in and SL3DPP_HAVE_MPI is defined for the library and its users, whose
-# MPI sections it guards (docs/dev/radial-substructuring.md). Point CMake
+# MPI sections it guards (docs/radial-partitioning.md). Point CMake
 # at an MPI with -DMPI_CXX_COMPILER=<its mpicxx> when several are installed.
 if(SL3DPP_WITH_MPI)
   find_package(MPI REQUIRED COMPONENTS CXX)

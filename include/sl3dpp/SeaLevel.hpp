@@ -50,7 +50,7 @@ namespace sl3dpp {
 /// table's values on construction of the solver (pyslfp's `with_body`),
 /// so the body and its response agree; without it they are the
 /// parameters given — the engine's gravity an independent parameter, as
-/// the material derivatives in the density treat it (docs/dev/adjoints.md
+/// the material derivatives in the density treat it (docs/adjoints.md
 /// §16).
 struct SeaLevelParameters {
   double equatorial_radius = 6378137.0;

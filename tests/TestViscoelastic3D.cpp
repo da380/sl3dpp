@@ -2,7 +2,7 @@
 // the grid machinery equals the 1D two-phase stepper at machine
 // precision), the onset of spheroidal-toroidal coupling under lateral
 // viscosity, and the dt self-convergence of the laterally varying step —
-// measurements in docs/dev/lateral-coupling.md — and the threaded step
+// measurements in docs/lateral-coupling.md — and the threaded step
 // against the serial one.
 
 #include <gtest/gtest.h>
@@ -602,7 +602,7 @@ TEST(Lateral, DISABLED_StepSolverProfile) {
 }
 
 TEST(Lateral, DISABLED_StepSolverLadder) {
-  // Not a gate: the contrast ladder of docs/dev/lateral-coupling.md §5a
+  // Not a gate: the contrast ladder of docs/lateral-coupling.md §5a
   // (lmax 16, a sin(theta) cos(phi) log-viscosity of amplitude A, unit
   // loads on all degrees, trapezoid steps), the second step's passes
   // under the default fixed point against the conjugate-gradient

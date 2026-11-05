@@ -4,7 +4,7 @@
  * a cap load over Hudson Bay on the synthetic 3D moduli of
  * synthetic_moduli.nc (MakeSyntheticModuli), solved exactly by the
  * stepper's conjugate gradients on a branchless rheology — the 3D static
- * problem of docs/dev/adjoints.md §13j — against the radial model's
+ * problem of docs/adjoints.md §13j — against the radial model's
  * response to the same load.
  *
  * The lateral moduli come in through io::ModelModuli (the perturbations

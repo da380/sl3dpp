@@ -1,5 +1,5 @@
-// The radially substructured degree solves on the real systems, step 1 of
-// docs/dev/radial-substructuring.md: every spheroidal and toroidal degree
+// The radially substructured degree solves on the real systems
+// (docs/radial-partitioning.md §3): every spheroidal and toroidal degree
 // system of a model at lmax, factorised and solved directly and with the
 // mesh cut into P segments (RadialMesh::BalancedCuts), 2(l + 1) columns
 // per degree as a 3D pass solves them. One thread throughout. Per P:

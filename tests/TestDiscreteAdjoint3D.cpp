@@ -3,7 +3,7 @@
 // direction alike), the zero-lateral limit equal to the 1D discrete
 // sweep, the machine-grade Taylor test of the 3D log-viscosity kernel
 // (second order to solver precision at every step), and the continuous
-// sweep's gap closing under refinement — docs/dev/adjoints.md.
+// sweep's gap closing under refinement — docs/adjoints.md.
 
 #include <gtest/gtest.h>
 

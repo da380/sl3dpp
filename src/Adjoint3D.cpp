@@ -659,7 +659,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
   };
 
-  // -- the material pairing (continuous; docs/dev/adjoints.md)
+  // -- the material pairing (continuous; docs/adjoints.md)
   // The continuous adjoint displacement at a node (the unrelaxed solve
   // under the adjoint memory and closed load) paired with the forward
   // solution and memory there: the energy contraction of the grid

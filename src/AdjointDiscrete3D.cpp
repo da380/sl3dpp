@@ -1,5 +1,5 @@
 // The discrete 3D adjoint: the exact transpose of the coupled
-// lateral-viscosity time-stepped map (docs/dev/adjoints.md). Under the
+// lateral-viscosity time-stepped map (docs/adjoints.md). Under the
 // energy pairing the force assembly is the transpose of the strain
 // evaluation (Entry = Exit^T), the pointwise weight and the reference
 // systems are self-adjoint, and the sea level equation has its exact

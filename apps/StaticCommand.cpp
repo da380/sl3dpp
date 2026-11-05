@@ -3,7 +3,7 @@
  * @brief `sl3d static`: the instantaneous (elastic) response of a
  * laterally heterogeneous elastic Earth to a surface load and a tidal
  * potential, with no sea level: the 3D static problem of
- * docs/dev/adjoints.md §13j closed by the stepper's conjugate-gradient
+ * docs/adjoints.md §13j closed by the stepper's conjugate-gradient
  * solve on a branchless rheology (distributed over radial segments like
  * the evolutions), the radial model's response beside it, written as a
  * planetmodel surface file, an exchange table of the surface

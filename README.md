@@ -306,7 +306,7 @@ nodes.
   Built with `SL3DPP_WITH_MPI`, `sl3d evolve` and `kernel` can instead
   spread one run over the node, one MPI rank per socket with its threads
   inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
-  ranks"); the timing of that shape on a two-socket server is not yet
+  ranks"); the timing of that shape on a two-socket server is not
   measured.
 - **Small problems want fewer threads.** The parallel loops run over
   degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
@@ -596,7 +596,7 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   solves substructured over radial segments against the direct ones, and
   `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
   `SL3DPP_WITH_MPI`) the same solves distributed over ranks
-  ([docs/dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+  ([docs/radial-partitioning.md](docs/radial-partitioning.md)).
 - `mpiexec -n <ranks> distributed_step <deck> <lmax> [repeats] [degrees]`
   (with `SL3DPP_WITH_MPI`) times the phases of the 3D step distributed
   over ranks, one radial segment each, with OpenMP threads inside: run it
@@ -614,6 +614,14 @@ The API reference and these pages are published at
 - [docs/design.md](docs/design.md): what sl3dpp is built on and how it
   works: formulation, discretisation, the adjoints, units, the comparison
   rules for cross-code work, validation and known limitations.
+- [docs/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/lateral-coupling.md):
+  the 3D coupling: the algebra of the pseudospectral lateral term, the
+  toroidal operator, the within-step convergence over a contrast ladder
+  and the gate against the Fortran sl3d.
+- [docs/adjoints.md](https://github.com/da380/sl3dpp/blob/main/docs/adjoints.md):
+  the discrete and continuous adjoints and kernels, 1D and 3D, the
+  discrete 3D transpose, the tangent-linear runs, the second-order
+  adjoints and the material derivatives and kernels, with their gates.
 - [docs/radial-partitioning.md](docs/radial-partitioning.md): the 3D
   problem split over radial segments: the substructured degree solves and
   their distributed form, the transforms cut with depth, the balance of
@@ -621,20 +629,6 @@ The API reference and these pages are published at
   MPI ranks.
 - [docs/conventions.md](docs/conventions.md): code style and testing
   conventions.
-- [docs/status.md](docs/status.md): where the code stands and what it
-  is for: its role beside AdGIA and pyslfp, what is built and decided,
-  what is not, and the aims in order.
-
-The developer notes in [docs/dev](https://github.com/da380/sl3dpp/blob/main/docs/dev) are dated records kept from
-the code's development, not maintained as reference: the derivations and
-convergence measurements of [the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md)
-and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md), a
-[walkthrough of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md) through the
-code as it then stood, with its costs, the first
-[multicore scaling measurements](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) with the
-plans that followed from them, the building and measurements of
-[the radial distribution](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md),
-and a plan for [inverse problems through pygeoinf](https://github.com/da380/sl3dpp/blob/main/docs/dev/pygeoinf-integration.md).
 
 ## Licence
 

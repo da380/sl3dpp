@@ -211,7 +211,7 @@ struct KernelInput {
 
 /// The config of `sl3d static`: the instantaneous (elastic) response of
 /// a laterally heterogeneous elastic Earth to a surface load and a
-/// tidal potential, no sea level (docs/dev/adjoints.md §13j), with the
+/// tidal potential, no sea level (docs/adjoints.md §13j), with the
 /// radial model's response beside it.
 struct StaticInput {
   std::filesystem::path model;

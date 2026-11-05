@@ -3,7 +3,7 @@
 /**
  * @file SpinComponents.hpp
  * @brief The degree <-> spin-component algebra of the 3D memory coupling
- * (docs/dev/lateral-coupling.md), in the ordering and normalisation of the
+ * (docs/lateral-coupling.md), in the ordering and normalisation of the
  * Fortran's `memdot_bvec_all`.
  *
  * A trace-free symmetric tensor on the sphere is carried as five complex

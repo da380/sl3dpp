@@ -4,7 +4,7 @@
 // gradient) and by the continuous one (the second-order adjoint equations
 // discretised by the forward stepper), as pyslfp's
 // `second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
-// under the sharp flotation rule; see docs/dev/adjoints.md.
+// under the sharp flotation rule; see docs/adjoints.md.
 
 #include <algorithm>
 #include <cmath>
@@ -245,7 +245,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     return ev.Columns(c, ev.toMatPotential_);
   };
 
-  // -- the material (docs/dev/adjoints.md §15)
+  // -- the material (docs/adjoints.md §15)
   // v's direction in the moduli enters the derivative sweep as the
   // derivative of the effective systems on the first sweep's solutions
   // (a source of the derivative duals before the unit-response
@@ -877,7 +877,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     return ev.Columns(c, ev.toMatPotential_);
   };
 
-  // -- the material (docs/dev/adjoints.md §15)
+  // -- the material (docs/adjoints.md §15)
   // The second-order adjoint equations are the derivative of the
   // continuous adjoint equations, which have the forward form: along a
   // material direction v the derivative state is driven by v's material

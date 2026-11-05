@@ -4,7 +4,7 @@
  * @file Viscoelastic3D.hpp
  * @brief The 3D-viscosity stepper: grid-held internal variables, pointwise
  * step weights from laterally varying relaxation times, and the
- * within-step lateral iteration (docs/dev/lateral-coupling.md).
+ * within-step lateral iteration (docs/lateral-coupling.md).
  *
  * The viscosity is eta(x) = eta_bar(r) exp(delta(x)): the base (radial)
  * Rheology is the REFERENCE, whose per-(scheme, dt) effective operators
@@ -31,20 +31,20 @@
  * (memory 5 by default; 0 gives plain Picard, optionally damped), and
  * one loop, OpenStep::Converge, serves this class's Step, the sea level
  * coupling and the adjoint sweep. Its convergence against viscosity
- * contrast is measured in docs/dev/lateral-coupling.md. The same step is
+ * contrast is measured in docs/lateral-coupling.md. The same step is
  * a symmetric positive definite system in u, and Options::solver =
  * ConjugateGradients closes it by preconditioned conjugate gradients
  * instead (K_ref the preconditioner; OpenStep::Solve), with a driver's
  * sea level closure as an outer iteration around warm-started inexact
  * solves (OpenStep::Nest): fewer iterations than passes everywhere
- * measured and no contrast envelope (docs/dev/adjoints.md §13n).
+ * measured and no contrast envelope (docs/adjoints.md §13n).
  *
  * Lateral ELASTIC moduli (Options::moduli) enter the same weight: the
  * shear's relative perturbation s(x) adds -s mu_eff(x) to it and scales
  * the memory force's branch moduli by (1 + s), and a bulk perturbation
  * weights the dilatation, carried as the iterate's scalar companion;
  * the unrelaxed start solve is then the conjugate-gradient solve of
- * detail/LateralSolve.hpp (docs/dev/adjoints.md §13k).
+ * detail/LateralSolve.hpp (docs/adjoints.md §13k).
  *
  * With delta = 0 and no lateral moduli the lateral term vanishes
  * identically and a step reproduces the 1D two-phase stepper exactly. The memory nodes are the
@@ -113,7 +113,7 @@ class Viscoelastic3D {
     /// gradients on the laterally weighted effective systems with the
     /// reference effective solve as the preconditioner (OpenStep::Solve;
     /// solve_rtol on the relative residual in the preconditioned energy
-    /// norm, solve_max_iterations the budget; docs/dev/adjoints.md §13n).
+    /// norm, solve_max_iterations the budget; docs/adjoints.md §13n).
     /// Drivers that close a step themselves (the evolutions, the sweeps)
     /// read the same choice.
     enum class StepSolver { FixedPoint, ConjugateGradients };
@@ -151,7 +151,7 @@ class Viscoelastic3D {
     /// lateral bulk term). The step itself stays one fixed point: the
     /// lateral moduli join the lateral viscosity in its pointwise weight.
     /// Distributed over radial segments like the rest (the start solve's
-    /// conjugate gradients pair each process's share; docs/dev/adjoints.md
+    /// conjugate gradients pair each process's share; docs/adjoints.md
     /// §13k, §13m).
     struct LateralModuli {
       std::function<double(double, double, double)> shear;
@@ -349,7 +349,7 @@ class Viscoelastic3D {
   /// by less than anderson_rate (0.5 by default, about where Anderson's
   /// fewer passes start to pay for its dearer ones), Anderson mixing with
   /// anderson_memory differences takes over for the rest of the step
-  /// (docs/dev/lateral-coupling.md). anderson_rate <= 0 mixes from the
+  /// (docs/lateral-coupling.md). anderson_rate <= 0 mixes from the
   /// first pass; anderson_memory 0 never mixes.
   struct IterationControl {
     int max_iterations = 40;
@@ -598,7 +598,7 @@ class Viscoelastic3D {
   /// the unrelaxed ones) and the within-step fixed point closes the
   /// instantaneous elastic response under lateral moduli — what the
   /// evolution's start, the sweeps' starts, equilibria and jumps need
-  /// there (docs/dev/adjoints.md §13k). Its grid-sized
+  /// there (docs/adjoints.md §13k). Its grid-sized
   /// arrays (the decayed memory, the weights, the workspace) come from the
   /// arrays recycled since the last StartStep where there are any, and are
   /// allocated otherwise.

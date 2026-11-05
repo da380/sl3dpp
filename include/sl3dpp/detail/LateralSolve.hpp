@@ -6,7 +6,7 @@
  * the preconditioner (Maitra & Al-Attar 2019; Myhill, Maitra & Al-Attar
  * 2026), the operator matrix-free. Shared by the static solve
  * (ElasticPerturbation3D::SolveLateral), the 3D stepper's unrelaxed
- * start solve under lateral moduli (docs/dev/adjoints.md §13j) and its
+ * start solve under lateral moduli (docs/adjoints.md §13j) and its
  * implicit step's solve (Viscoelastic3D::OpenStep::Solve, §13n).
  *
  * The unknown is a Viscoelastic3D::Solutions (per-degree complex m >= 0

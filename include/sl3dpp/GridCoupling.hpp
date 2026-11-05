@@ -3,7 +3,7 @@
 /**
  * @file GridCoupling.hpp
  * @brief The grid side of the 3D memory coupling
- * (docs/dev/lateral-coupling.md): tensor fields over (viscous radial node
+ * (docs/lateral-coupling.md): tensor fields over (viscous radial node
  * × angular grid), the transforms between them and their per-degree
  * spectral components, and the assembly of the memory force onto the
  * spheroidal and toroidal degree systems.

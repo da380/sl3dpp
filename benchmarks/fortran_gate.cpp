@@ -1,5 +1,5 @@
 // The cross-code benchmark against the original Fortran
-// (docs/dev/lateral-coupling.md §5b): replays sl3d's `visco_test` setup through
+// (docs/lateral-coupling.md §5b): replays sl3d's `visco_test` setup through
 // Viscoelastic3D and compares surface coefficients, SI, per output time.
 //
 // The physical setup is visco_test's, fixed: PREM (prem.simp.vm1, natural

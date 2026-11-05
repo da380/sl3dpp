@@ -1,4 +1,4 @@
-// The zero-lateral limit (docs/dev/lateral-coupling.md): a random
+// The zero-lateral limit (docs/lateral-coupling.md): a random
 // degree-basis internal-variable state, pushed through the FULL grid
 // pipeline — components, spin synthesis, a pointwise (here uniform)
 // multiply, spin analysis, force assembly, degree solves — must reproduce

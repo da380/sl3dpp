@@ -603,7 +603,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
   }
 };
 
-/// The material part of a second-order run (docs/dev/adjoints.md §15): for
+/// The material part of a second-order run (docs/adjoints.md §15): for
 /// each ordered pair (a, b) of the two directions with a material part in
 /// a, the forces of a's direction on b's tangent trajectory — b's full
 /// tangent solution at the node (recovered by one unrelaxed solve under

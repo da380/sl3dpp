@@ -535,7 +535,7 @@ The first is an `evolve1d` config; the second needs `evolve`.
 
 The instantaneous (elastic) response of a laterally heterogeneous elastic
 Earth to a surface load and a tidal potential, with no sea level: the 3D
-static problem (docs/dev/adjoints.md §13j) closed by preconditioned
+static problem (docs/adjoints.md §13j) closed by preconditioned
 conjugate gradients on the radial systems, over MPI ranks like `evolve`.
 The radial model's response to the same forcing is written beside it.
 
@@ -617,7 +617,7 @@ the continuous adjoint or the exact discrete transpose.
 | --- | --- | --- | --- |
 | the run members | | | as for evolve, above |
 | `record_stride` | integer >= 1 | 1 | record the forward state at every `record_stride`-th node (and the last); the sweep rebuilds the states in between |
-| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map; in 3D since 4 November 2026, distributed like the continuous sweep) |
+| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map; in 3D distributed like the continuous sweep) |
 | `trajectory.directory` | path | none | `kernel` alone: spill the recorded states to this directory instead of holding them in memory |
 | `measurements` | array | required | the measurements, at least one (below) |
 | `output` | path | required | the directory the kernel files go into |

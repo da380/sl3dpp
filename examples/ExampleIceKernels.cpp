@@ -20,7 +20,7 @@
  * - the radial viscosity kernels dJ / d eta(r), from the recorded
  *   forward trajectory, by BOTH the continuous adjoint (the preferred
  *   path) and the exact discrete transpose: their agreement is the
- *   resolution diagnostic (docs/dev/adjoints.md §1).
+ *   resolution diagnostic (docs/adjoints.md §1).
  *
  *   ExampleIceKernels [--lmax N] [--state FILE]
  *

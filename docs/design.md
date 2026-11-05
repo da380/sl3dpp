@@ -1,11 +1,11 @@
 # sl3dpp design
 
 What sl3dpp is and how it works: the formulation, the discretisation, the
-numerical choices and the rules its results are held to. This page states
-the design as it stands. The derivations and convergence measurements of
-[the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/dev/adjoints.md),
-and a [code map of one 3D step](https://github.com/da380/sl3dpp/blob/main/docs/dev/walkthrough-3d-step.md), are dated
-developer notes in `docs/dev`; code style and testing conventions are in
+numerical choices and the rules its results are held to. The
+derivations, gates and convergence measurements of
+[the 3D coupling](https://github.com/da380/sl3dpp/blob/main/docs/lateral-coupling.md)
+and [the adjoints](https://github.com/da380/sl3dpp/blob/main/docs/adjoints.md)
+are method notes of their own; code style and testing conventions are in
 [conventions.md](conventions.md).
 
 ## 1. Scope
@@ -221,7 +221,7 @@ Deliberately out of scope:
   fewer iterations than passes everywhere measured, and convergent where
   the fixed point fails (100x at Δt = 10τ). With sea level the engine's
   closure runs outside as an outer iteration with warm-started, inexact
-  solves inside (`OpenStep::Nest`; docs/dev/adjoints.md §13n); the
+  solves inside (`OpenStep::Nest`; docs/adjoints.md §13n); the
   evolution, the tangent and the continuous sweep use it, the discrete
   transpose stays a fixed point. The fixed point remains the default.
 - **With sea level.** `SeaLevelEvolution3D` folds the ocean load and
@@ -234,7 +234,7 @@ Deliberately out of scope:
   converged state's load relative to the background. With no lateral
   perturbation this is the 1D migrating run, shorelines included.
 - **Envelope.** Measured on a smooth degree-1 pattern
-  ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §5a): peak-to-peak contrasts
+  ([lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/lateral-coupling.md) §5a): peak-to-peak contrasts
   up to 1000x converge at Δt/τ up to 2 (in about 150 passes at the hard
   end); at Δt/τ = 10, 10x converges and 100x does not within 200 passes.
   The pass counts do not depend on lmax, so the hard cases are hard in the
@@ -263,7 +263,7 @@ Deliberately out of scope:
   of the strain evaluation under the energy pairing; exact against the 3D
   tangent-linear run at 1e-8 and second order to solver precision in the
   Taylor test. Distributed over radius like the continuous sweep
-  (docs/dev/adjoints.md §17).
+  (docs/adjoints.md §17).
 - **Measurements.** Linear functionals of one node's outputs,
   J = a² ∫ g ξ dΩ + a² ∫ g_u u dΩ + a² ∫ g_φ φ dΩ + g_ω·ω, keyed by node
   index into the time grid. `Measurements.hpp` builds the duals: cap means,
@@ -314,7 +314,7 @@ Deliberately out of scope:
   the moduli (`SecondOrderDirection::materialU/V`): each direction's
   material forces on the other's tangent trajectory, its full solution
   recovered from the recorded snapshot and its decayed memory with its
-  own itau drive (docs/dev/adjoints.md §15).
+  own itau drive (docs/adjoints.md §15).
 - **3D tangent-linear runs** (`TangentLinearSolver3D`): the same
   derivative of the coupled lateral-viscosity evolution, along loads,
   thickness, initial sea level and the laterally varying itau(x) (or a
@@ -344,7 +344,7 @@ Deliberately out of scope:
   duals as a source before the unit-response contraction, and the memory
   force's variation on the first dual strains; in the continuous sweep v's
   material forces on the adjoint trajectory, the jump's fingerprint moving
-  with the unrelaxed table (docs/dev/adjoints.md §15).
+  with the unrelaxed table (docs/adjoints.md §15).
 - **3D second-order adjoints** (`AdjointSolver3D::SecondOrderKernels`):
   the continuous sweep carrying the derivative adjoint state along v,
   stepped with the continuous drive of the adjoint trajectory through the
@@ -355,9 +355,9 @@ Deliberately out of scope:
   derivative dual state through the same transposed fixed point, forced
   by the derivative of the step's lateral weight on the first dual
   strain, the Hessian exact to the solvers' tolerance
-  (docs/dev/adjoints.md §14). Material directions and the material
+  (docs/adjoints.md §14). Material directions and the material
   kernels' derivatives as in 1D, by both methods, distributed
-  (docs/dev/adjoints.md §15, §17).
+  (docs/adjoints.md §15, §17).
 - **Material derivatives** (`MaterialDirection`: δκ, δμ, δρ on the mesh's
   nodes). `Material::Variation` is the exact linearisation of
   `Material::Shifted`, gravity's variation integrated from δρ so that the
@@ -390,14 +390,14 @@ Deliberately out of scope:
   solution under the structure, whose `StaticKernels` with the forward
   solution are the measurement's kernels at the heterogeneous model).
   Realistic contrasts converge in under ten iterations
-  (docs/dev/adjoints.md §13j).
+  (docs/adjoints.md §13j).
 - **Lateral moduli in the 3D stepper** (`Viscoelastic3D::Options::
   moduli`): relative δμ_U(x), δκ(x) over every solid element above the
   centre (the branch moduli scaled with the unrelaxed shear, times
   held), joining the lateral viscosity in the step's pointwise weight;
   the dilatation rides along as a scalar companion of the iterate for
   the bulk term; the unrelaxed start solve is the conjugate-gradient
-  solve on the reference systems (docs/dev/adjoints.md §13k). The fluid
+  solve on the reference systems (docs/adjoints.md §13k). The fluid
   core carries no lateral moduli. The instantaneous problem under them
   (the run's start, the sweeps' starts, jumps and equilibria) is a
   coupled fixed point: a zero-length open step (`StartStep` with dt =
@@ -639,8 +639,7 @@ Beyond the fixtures:
   `SL3DPP_WITH_MPI` (which defines `SL3DPP_HAVE_MPI` and guards the MPI
   sections) the 3D step runs over contiguous radial segments, one per
   rank, with OpenMP threads inside each
-  ([radial-partitioning.md](radial-partitioning.md); the measurements in
-  [dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md)).
+  ([radial-partitioning.md](radial-partitioning.md)).
   Every large array is indexed by radial node and the pseudospectral
   products are pointwise within a node, so each rank holds and transforms
   its own segment's memory nodes alone, and no global transposes are
@@ -654,7 +653,7 @@ Beyond the fixtures:
   the first rank's solution shared. The continuous 3D adjoint and the 3D
   tangent-linear runs run the same way, each rank sweeping its own nodes
   over its own trajectory, as do the discrete 3D sweep, the material
-  tangent and the material kernels (docs/dev/adjoints.md §17). `sl3d`'s
+  tangent and the material kernels (docs/adjoints.md §17). `sl3d`'s
   `evolve` and `kernel`
   run under `mpiexec` with per-rank checkpoints
   ([sl3d-configs.md](sl3d-configs.md)).
@@ -702,26 +701,25 @@ What is not built, or holds only within limits:
 - **A lateral perturbation's cost** is its reach: the coupling carries
   the viscous elements and those the perturbation touches (sampled), so
   a mantle-confined field costs no lithosphere or core nodes
-  (docs/dev/adjoints.md §13m).
+  (docs/adjoints.md §13m).
 - **`ElasticPerturbation3D`** (the Born solver and its static full
   solve) is single-process (OpenMP over the grid pipeline). The
   distributed static problem is the stepper on a branchless rheology
-  with lateral moduli (docs/dev/adjoints.md §13m); the stepper under
+  with lateral moduli (docs/adjoints.md §13m); the stepper under
   lateral moduli is distributed like the rest. The geometry
   is spherical: aspherical bodies by particle relabelling are not
   built.
 - **Lateral moduli** live in the solid: the fluid core's bulk modulus
   has no lateral pipeline.
 - **No lateral density.** The hydrostatic reference does not admit one
-  (a lateral density in the field's convention was built and removed;
-  docs/dev/adjoints.md §13l says why and where it belongs: AdGIA's
+  (docs/adjoints.md §13l says why, and where it belongs: AdGIA's
   non-hydrostatic theory). The radial density derivatives (gravity
   self-consistent) stay.
 - **Strong lateral contrasts at long steps.** The within-step fixed
   point's envelope (§6) binds the default solver and the discrete
   transpose; the conjugate-gradient step (`Options::solver`) has no such
   envelope for the forward, tangent and continuous runs, and the discrete
-  transpose could be given the same solve (docs/dev/adjoints.md §13n).
+  transpose could be given the same solve (docs/adjoints.md §13n).
 - **Shoreline flips inside the 3D fixed point.** Under migrating
   shorelines the 3D combined fixed point re-derives the ocean function in
   every pass, so a cell sitting at the flotation threshold can flip between
@@ -733,8 +731,7 @@ What is not built, or holds only within limits:
   the iteration's fixed point is still the calibrated state, since the
   kernel is linear in the residual.
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold
-  into the same within-step fixed point
-  ([dev/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/lateral-coupling.md) §7a).
+  into the same within-step fixed point.
 - **Transversely isotropic relaxation.** The elastic structure may be
   transversely isotropic, but the material must be isotropic wherever a
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
@@ -748,7 +745,7 @@ What is not built, or holds only within limits:
   kernels need the memory points at the GLL nodes and no rotational
   feedback; a density direction is taken with the sea level engine's
   gravity and radius held (`SeaLevelParameters::body_from_table`;
-  docs/dev/adjoints.md §16), and lateral density variations are excluded
+  docs/adjoints.md §16), and lateral density variations are excluded
   in 3D.
 - **The `sl3d` program** exposes none of the discrete 3D kernels, the
   tangent-linear runs, the Hessian products and the material kernels;
@@ -769,11 +766,10 @@ What is not built, or holds only within limits:
   socket (they are reused from step to step, so allocated once per run,
   but not first touched in the threads that use them), and the once-per-step
   start (`StartStep`) is mostly two analyses, which carry the transforms'
-  limit. README, *Running*, has the advice that follows, and
-  [dev/multicore-scaling.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/multicore-scaling.md) the
-  measurements. One process per socket, over MPI, is built (§12,
-  [radial-partitioning.md](radial-partitioning.md)); its timing on the
-  server is still to be measured.
+  limit. README, *Running*, has the advice that follows. One process per
+  socket, over MPI, is built (§12,
+  [radial-partitioning.md](radial-partitioning.md)); its timing on a
+  two-socket node is not measured.
 - **Memory at lmax 512.** A 3D run there needs the recorded states on disk
   (the `on_state` store) and a large node.
 - **Inversion.** There are no inversion drivers or optimiser interface: the

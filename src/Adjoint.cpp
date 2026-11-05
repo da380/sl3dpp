@@ -226,7 +226,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   // The material kernels: the dual solution of each step's effective
   // solve paired with the material derivative of the step's force — the
-  // transpose of the material tangent (docs/dev/adjoints.md). The
+  // transpose of the material tangent (docs/adjoints.md). The
   // branch fractions f_k = mu_k / mu_U carry the branch moduli.
   const bool material = options_.material_kernels;
   auto fractions = std::vector<std::vector<double>>{};
@@ -827,7 +827,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   };
 
   // The instantaneous adjoint fingerprint of a measurement, through the
-  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md):
+  // forward channel mapping of the elastic adjoint (docs/adjoints.md):
   // its sea level (the delta amplitude), and the converged channel coefficients
   // that drive the radial jump.
   struct Jump {
@@ -1060,7 +1060,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   const double pairing =
       r2 * ev.toNdLength_ /
       (aMat * aMat * ev.toMatDensity_ * op.BaseMaterial().SurfaceGravity());
-  // -- the material pairing (continuous; docs/dev/adjoints.md)
+  // -- the material pairing (continuous; docs/adjoints.md)
   // The continuous adjoint displacement lambda at a node — the unrelaxed
   // solve under the adjoint memory and the closed adjoint load, the
   // adjoint problem having the forward form — paired with the forward

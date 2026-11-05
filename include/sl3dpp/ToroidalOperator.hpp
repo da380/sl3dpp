@@ -4,7 +4,7 @@
  * @file ToroidalOperator.hpp
  * @brief The degree-l toroidal system: the W block of the loading problem,
  * needed once lateral viscosity couples spheroidal and toroidal motion
- * (docs/dev/lateral-coupling.md). Non-dimensional, like every internal
+ * (docs/lateral-coupling.md). Non-dimensional, like every internal
  * component.
  *
  * For one degree l >= 1, with k^2 = l(l + 1), the unknown is the toroidal

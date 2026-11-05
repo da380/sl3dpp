@@ -8,7 +8,7 @@
  * inverse relaxation times, about a recorded trajectory, and the
  * second-order run along two such directions. The 3D form of
  * TangentLinear.hpp (pyslfp has no 3D counterpart); see
- * docs/dev/adjoints.md.
+ * docs/adjoints.md.
  *
  * With the ocean functions held the coupled step is linear in its loads
  * and its memory, so the tangent-linear step is the forward step once
@@ -62,7 +62,7 @@ struct TangentPerturbation3D {
   std::vector<std::vector<double>> itau;
   /// Over the grid values: delta itau_k = -itau_k(x) logViscosity(x).
   std::vector<double> logViscosity;
-  /// The moduli (docs/dev/adjoints.md); needs the recorded
+  /// The moduli (docs/adjoints.md); needs the recorded
   /// trajectory, memory nodes at the GLL points and no rotational
   /// feedback. Distributed like the run.
   MaterialDirection3D material;
@@ -131,7 +131,7 @@ class TangentLinearSolver3D {
   /// second derivatives with the forward trajectory and both; in the
   /// moduli, the material forces of u's direction on v's tangent
   /// trajectory (its full solution and its decayed memory with v's itau
-  /// drive) and of v's on u's, the start's alike (docs/dev/adjoints.md
+  /// drive) and of v's on u's, the start's alike (docs/adjoints.md
   /// §15). Symmetric in u and v; the 3D form of
   /// TangentLinearSolver::RunSecondOrder.
   [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunSecondOrder(

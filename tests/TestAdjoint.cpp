@@ -277,7 +277,7 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
 }
 
 TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
-  // The comparison (docs/dev/adjoints.md): the discrete
+  // The comparison (docs/adjoints.md): the discrete
   // transpose is exact at any step; the continuous adjoint carries the
   // discretise/transpose commute error — at the per-cent level or better
   // once the steps resolve the relaxation, falling under refinement.

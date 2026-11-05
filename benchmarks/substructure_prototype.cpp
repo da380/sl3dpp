@@ -1,5 +1,5 @@
-// A serial prototype of the radially substructured per-degree solve that an
-// MPI version of the 3D step would use (docs/dev/radial-substructuring.md):
+// A serial prototype of the radially substructured per-degree solve that
+// the distributed 3D step uses (docs/radial-partitioning.md §3):
 // the radial mesh cut into P contiguous segments at element boundaries, the
 // interior dofs of each segment eliminated by its own banded Cholesky, and
 // the separators (the one shared node between neighbouring segments, three
