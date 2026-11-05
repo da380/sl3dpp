@@ -129,6 +129,14 @@ ElasticPerturbation3D::Solutions ElasticPerturbation3D::SolveLoad(
 std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
 ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
                              std::span<const double> dKappa) const {
+  auto workspace = GridCoupling::TensorField{};
+  return Force(x, dMu, dKappa, workspace);
+}
+
+std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
+ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
+                             std::span<const double> dKappa,
+                             GridCoupling::TensorField& grid) const {
   const auto values = coupling_.GridValueCount();
   for (const auto d : {dMu, dKappa}) {
     if (!d.empty() && d.size() != values) {
@@ -153,18 +161,38 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
       for (auto i = std::size_t{0}; i < t.size(); ++i) t[i] += f[i];
     }
   };
+  // The degrees' gathers, threaded as the stepper's (each degree writes
+  // only its own coefficients), the largest degrees first; the operators
+  // resolved serially before.
+  struct Gather {
+    int l;
+    const std::vector<Complex>* x;
+    const DegreeOperator* sph;
+    const ToroidalOperator* tor;
+    const std::vector<Complex>* w;
+  };
+  auto gathers = std::vector<Gather>{};
+  for (const auto& [l, xl] : x.spheroidal) {
+    const auto torIt = x.toroidal.find(l);
+    const auto hasTor = torIt != x.toroidal.end();
+    gathers.push_back({l, &xl, &Spheroidal(l), hasTor ? &Toroidal(l) : nullptr,
+                       hasTor ? &torIt->second : nullptr});
+  }
+  const auto count = static_cast<int>(gathers.size());
   if (!dMu.empty()) {
     // The deviatoric pipeline: strain, weighted pointwise, back as force.
     auto spectral = coupling_.ZeroSpectral();
-    for (const auto& [l, xl] : x.spheroidal) {
-      const auto torIt = x.toroidal.find(l);
+    detail::ParallelFor(count, options_.parallel, [&](int i) {
+      const auto& g = gathers[count - 1 - i];
       coupling_.AddStrainOfSolution(
-          spectral, l, Spheroidal(l), xl,
-          torIt != x.toroidal.end() ? &Toroidal(l) : nullptr,
-          torIt != x.toroidal.end() ? std::span<const Complex>(torIt->second)
-                                    : std::span<const Complex>{});
-    }
-    auto grid = coupling_.Synthesise(spectral);
+          spectral, g.l, *g.sph, *g.x, g.tor,
+          g.w == nullptr ? std::span<const Complex>{}
+                         : std::span<const Complex>(*g.w));
+    });
+    // Into the caller's workspace: every value is overwritten, so a
+    // workspace kept across calls (the conjugate gradients') is neither
+    // reallocated nor zeroed.
+    coupling_.Synthesise(spectral, grid);
     coupling_.Multiply(grid, dMu);
     const auto weighted = coupling_.Analyse(grid);
     add(spheroidal, coupling_.SpheroidalForce(weighted, sph));
@@ -173,9 +201,10 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
   if (!dKappa.empty()) {
     // The scalar companion: the dilatation, weighted, back as force.
     auto scalar = std::vector<Complex>(coupling_.ScalarCoefficientCount(), 0.0);
-    for (const auto& [l, xl] : x.spheroidal) {
-      coupling_.AddDilatationOfSolution(scalar, l, Spheroidal(l), xl);
-    }
+    detail::ParallelFor(count, options_.parallel, [&](int i) {
+      const auto& g = gathers[count - 1 - i];
+      coupling_.AddDilatationOfSolution(scalar, g.l, *g.sph, *g.x);
+    });
     auto field = coupling_.SynthesiseScalar(scalar);
     detail::ParallelElements(values, true,
                              [&](std::size_t i) { field[i] *= dKappa[i]; });
@@ -185,24 +214,46 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
   return {std::move(spheroidal), std::move(toroidal)};
 }
 
+namespace {
+
+/// One degree's columns through a reference system: the operator (built
+/// before the threaded loop, the caches not being thread-safe), the
+/// columns in, and the slot they go to (made before the loop, so the
+/// threads only write existing map entries).
+struct DegreeTask {
+  int l = 0;
+  const std::vector<std::complex<double>>* in = nullptr;
+  const DegreeOperator* sph = nullptr;
+  const ToroidalOperator* tor = nullptr;
+  std::vector<std::complex<double>>* out = nullptr;
+};
+
+}  // namespace
+
 ElasticPerturbation3D::Solutions ElasticPerturbation3D::Solve(
     const Forces& spheroidal, const Forces& toroidal, bool negate) const {
   Solutions out;
+  auto tasks = std::vector<DegreeTask>{};
   for (const auto& [l, b] : spheroidal) {
-    auto rhs = b;
-    if (negate) {
-      for (auto& v : rhs) v = -v;
-    }
-    out.spheroidal.emplace(l, SolveColumns(Spheroidal(l), rhs, l + 1));
+    tasks.push_back({.l = l, .in = &b, .sph = &Spheroidal(l),
+                     .out = &out.spheroidal[l]});
   }
   for (const auto& [l, b] : toroidal) {
     if (l < 1) continue;
-    auto rhs = b;
-    if (negate) {
-      for (auto& v : rhs) v = -v;
-    }
-    out.toroidal.emplace(l, SolveColumns(Toroidal(l), rhs, l + 1));
+    tasks.push_back({.l = l, .in = &b, .tor = &Toroidal(l),
+                     .out = &out.toroidal[l]});
   }
+  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel,
+                      [&](int i) {
+                        const auto& task = tasks[i];
+                        auto rhs = *task.in;
+                        if (negate) {
+                          for (auto& v : rhs) v = -v;
+                        }
+                        *task.out = task.tor != nullptr
+                                        ? SolveColumns(*task.tor, rhs, task.l + 1)
+                                        : SolveColumns(*task.sph, rhs, task.l + 1);
+                      });
   return out;
 }
 
@@ -263,18 +314,39 @@ std::vector<std::complex<double>> ApplyColumns(
 std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
 ElasticPerturbation3D::Apply(const Solutions& x, std::span<const double> dMu,
                              std::span<const double> dKappa) const {
-  auto [spheroidal, toroidal] = Force(x, dMu, dKappa);
+  auto workspace = GridCoupling::TensorField{};
+  return Apply(x, dMu, dKappa, workspace);
+}
+
+std::pair<ElasticPerturbation3D::Forces, ElasticPerturbation3D::Forces>
+ElasticPerturbation3D::Apply(const Solutions& x, std::span<const double> dMu,
+                             std::span<const double> dKappa,
+                             GridCoupling::TensorField& grid) const {
+  auto [spheroidal, toroidal] = Force(x, dMu, dKappa, grid);
+  // the reference bands, threaded over the degrees, each added to its
+  // own degree's force
+  auto tasks = std::vector<DegreeTask>{};
   for (const auto& [l, xl] : x.spheroidal) {
-    const auto reference = ApplyColumns(Spheroidal(l), xl, l + 1);
-    auto& b = spheroidal.at(l);
-    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += reference[i];
+    tasks.push_back({.l = l, .in = &xl, .sph = &Spheroidal(l),
+                     .out = &spheroidal.at(l)});
   }
   for (const auto& [l, wl] : x.toroidal) {
     if (l < 1) continue;
-    const auto reference = ApplyColumns(Toroidal(l), wl, l + 1);
-    auto& b = toroidal.at(l);
-    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += reference[i];
+    tasks.push_back({.l = l, .in = &wl, .tor = &Toroidal(l),
+                     .out = &toroidal.at(l)});
   }
+  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel,
+                      [&](int i) {
+                        const auto& task = tasks[i];
+                        const auto reference =
+                            task.tor != nullptr
+                                ? ApplyColumns(*task.tor, *task.in, task.l + 1)
+                                : ApplyColumns(*task.sph, *task.in, task.l + 1);
+                        auto& b = *task.out;
+                        for (auto k = std::size_t{0}; k < b.size(); ++k) {
+                          b[k] += reference[k];
+                        }
+                      });
   return {std::move(spheroidal), std::move(toroidal)};
 }
 
@@ -359,8 +431,10 @@ ElasticPerturbation3D::SolveLateral(const Forces& spheroidalForces,
                         0.0));
     }
   }
+  // one grid workspace for every iteration's lateral force
+  auto workspace = GridCoupling::TensorField{};
   const auto system = detail::LateralSystem{
-      .apply = [&](const Solutions& x) { return Apply(x, dMu, dKappa); },
+      .apply = [&](const Solutions& x) { return Apply(x, dMu, dKappa, workspace); },
       .solve = [&](const Forces& s, const Forces& t) { return Solve(s, t, false); }};
   auto [x, info] = detail::LateralConjugateGradients(
       fs, ft, system,

@@ -196,6 +196,16 @@ class ElasticPerturbation3D {
   [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
 
  private:
+  /// Force and Apply synthesising into a caller's grid workspace, which a
+  /// caller iterating (SolveLateral) keeps across calls: wholly
+  /// overwritten, so neither reallocated nor zeroed after the first.
+  [[nodiscard]] std::pair<Forces, Forces> Force(
+      const Solutions& x, std::span<const double> dMu,
+      std::span<const double> dKappa, GridCoupling::TensorField& grid) const;
+  [[nodiscard]] std::pair<Forces, Forces> Apply(
+      const Solutions& x, std::span<const double> dMu,
+      std::span<const double> dKappa, GridCoupling::TensorField& grid) const;
+
   /// The material itself (the reference systems' and the perturbation's
   /// meaning: an isotropic increment of whatever anisotropy it has), and
   /// the throwaway rheology over its isotropic Voigt average, whose only

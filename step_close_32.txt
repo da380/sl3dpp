@@ -1,0 +1,25 @@
+step_timing: lmax 128, 32 threads, loop kernel, Gauss points
+  memory nodes 1388, grid 193 x 385, one TensorField 4.13 GB
+  construction 4.229 s
+  warm-up (2 steps) 44.809 s
+
+  one pass, phase by phase (best of 2) [s]
+    analyse        1.4968
+    synthesise     0.7433
+    pointwise      0.0287
+    force          0.0308
+    solves         0.0803  (respond less its other parts)
+    respond        2.3799  (synthesise + pointwise + analyse + force + solves)
+    channels       0.2014
+    strainOf       0.1290  (strain recovery)
+  once per step [s]
+    startStep      4.5121
+
+  2 whole steps: 7 7 passes
+    total         40.4596
+    per pass       2.8900
+    overhead       0.1796  (per pass less respond, channels, strainOf)
+
+  surface sums |U| 3.387458037577556e-07  |phi| 3.942183011777721e-07
+  state fingerprint 8fe667f270ec8eeb (bitwise check; one thread)
+  peak RSS 34.03 GB
