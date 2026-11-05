@@ -4,7 +4,8 @@
 sl3dpp on a large shared-memory node, what they show, and the plans that
 follow. Nothing here is implemented beyond §1; the plans are for later
 work, each to be measured before and after with the sweeps below. §6 adds
-the work of 25 October: plan 1 built, plan 3's node blocks measured. The
+the work of 25 October: plan 1 built, plan 3's node blocks measured; §7
+the server measurements of 5 November on the current code. The
 process per socket that §6 points to is built since
 ([radial-partitioning.md](../radial-partitioning.md)). A dated record: the
 code has moved, and the file:line pointers it carried are removed.*
@@ -248,3 +249,76 @@ lmax 16) takes 9.5 s on one thread, 4.9 s on 4, 4.3 s on 8 and 5.9 s on 16
 core, which a cap by work size would not remove. The README's advice (one
 thread per physical core, pinned) is the remedy; no cap was built.
 
+
+## 7. 5 November 2026: the server again, on the current code
+
+Server (tunya), Release, GCC 13.2, MPI from the PETSc build (MPICH 5.0.2),
+against 9271be1 for the step and 5bf824d for the static solve. At most 32
+threads (one socket's cores), the machine otherwise near idle unless noted.
+
+**The step, one process.** `step_timing tests/data/prem.simp.vm1 128 2 2`,
+`OMP_PLACES=cores OMP_PROC_BIND=close`, seconds, §3's runs in brackets:
+
+| threads | per pass | analyse | synthesise | solves | startStep |
+|---|---|---|---|---|---|
+| 16 | 3.68 (3.77) | 1.70 | 1.27 | 0.15 | 3.96 (4.98) |
+| 32 | 2.77 (2.89) | 1.49 | 0.77 | 0.10 | 3.44 (4.51) |
+| 32, `glibc.malloc.hugetlb=1` | 2.78 | 1.50 | 0.76 | 0.11 | 3.43 |
+
+`startStep` is a second faster, plan 1's array reuse. Huge pages change
+nothing here: the server's transparent huge pages are `always` (the
+laptop's `madvise`), so plan 4 is moot on this machine. Analyse barely
+moves from 16 to 32 threads; synthesise does.
+
+**The step over ranks, the same 32 cores.** `distributed_step` (lmax 128,
+best of 2, the slowest rank), each rank pinned to its own physical cores
+(`taskset`, ranks alternating between the sockets):
+
+| ranks x threads | analyse | synthesise | respond | strainOf | startStep | peak RSS / rank |
+|---|---|---|---|---|---|---|
+| 1 x 32 | 1.52 | 0.76 | 2.41 | 0.13 | 3.43 | 33.1 GB |
+| 2 x 16 | 0.87 | 0.61 | 1.72 | 0.10 | 2.01 | 17.9 GB |
+| 4 x 8 | 0.47 | 0.39 | 1.15 | 0.06 | 1.20 | 9.9 GB |
+| 8 x 4 | 0.41 | 0.39 | 1.11 | 0.05 | 1.02 | 6.0 GB |
+
+Eight ranks of four threads take respond 2.2 times faster than one process
+of 32, with no change to the code; one rank per socket alone gives 1.4.
+Analyse scales with the work per process (each rank's share of the nodes),
+not with the threads inside one: the forward transform is the limit.
+Reading GSHTrans at the pin explains it. The forward loop kernel's chunk
+comes from `Chunking::Count` with the thread count as the number of live
+copies (each thread's private accumulator), and with the default 8 MB
+cache a field's 266 KB coefficient block at lmax 128 gives a chunk of one
+field at 16 and at 32 threads, against about 16 for the inverse. Every
+field then opens its own parallel region, zeroes one accumulator per
+thread, streams the whole Wigner table and reduces the accumulators, so
+the Wigner traffic and the reduction both grow with the thread count.
+The replacement (a Fourier stage over colatitudes, then the Legendre sums
+threaded over blocks of degrees, disjoint writes and no reduction) is
+GSHTrans work, on its develop branch. At eight ranks the force, solves and
+sum (respond less the transforms, 0.31 s against 0.13 s on one process)
+are the next term: the per-degree work on four threads a rank.
+
+**The lateral step pass.** `LateralModuli3D.DISABLED_StepTiming`, lmax 64,
+seconds a pass, 16 / 32 threads: viscosity alone 0.60 / 0.55, with a mantle
+shear 0.59 / 0.56, shear everywhere 0.87 / 0.82, shear and bulk 1.11 / 1.03.
+The laptop's 16-thread figures (adjoints.md §13k) are 0.66 and 0.96: the
+same transform limit.
+
+**The static lateral solve.** `ElasticPerturbation3D.DISABLED_TimingAtHigherDegree`,
+`SL3DPP_LMAX=64`, six iterations, seconds:
+
+| threads | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|
+| 9271be1 | 22.9 | 18.9 | 19.6 | 19.8 |
+| 5bf824d | 14.5 | 9.3 | 9.0 | 8.3 |
+
+The laptop took 15 s on 16 threads. Stack samples of the main thread (gdb;
+no `perf` on the server) put about half the time in serial loops over the
+degrees: the reference band products of `Apply`, the preconditioner's band
+solves in `Solve`, the strain gathers of `Force`, and the zero-fill of a
+fresh 1.6 GB grid tensor in every iteration's synthesis. 5bf824d threads
+the three loops over the degrees as the stepper does (the operators
+resolved serially first; each degree writes only its own outputs) and keeps
+one grid workspace across the conjugate-gradient iterations. What remains
+flat past eight threads is the transforms, as in the step.
