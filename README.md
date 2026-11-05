@@ -618,6 +618,9 @@ The API reference and these pages are published at
   MPI ranks.
 - [docs/conventions.md](docs/conventions.md): code style and testing
   conventions.
+- [docs/status.md](docs/status.md): where the code stands and what it
+  is for: its role beside AdGIA and pyslfp, what is built and decided,
+  what is not, and the aims in order.
 
 The developer notes in [docs/dev](https://github.com/da380/sl3dpp/blob/main/docs/dev) are dated records kept from
 the code's development, not maintained as reference: the derivations and
