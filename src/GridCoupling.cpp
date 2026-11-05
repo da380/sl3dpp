@@ -28,7 +28,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
                    SurfaceGrid(lmax, {.nmax = 2,
                                       .oversampling = options.oversampling,
                                       .parallel = options.parallel,
-                                      .matrix_kernel = options.matrix_kernel}),
+                                      .matrix_kernel = options.matrix_kernel,
+                                      .cache_bytes = options.cache_bytes}),
                    options) {}
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
@@ -94,11 +95,11 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
           {node, 0,
            degree == lmax
                ? grid_
-               : SurfaceGrid(degree,
-                             {.nmax = 2,
-                              .oversampling = options.oversampling,
-                              .parallel = options.parallel,
-                              .matrix_kernel = options.matrix_kernel})});
+               : SurfaceGrid(degree, {.nmax = 2,
+                                      .oversampling = options.oversampling,
+                                      .parallel = options.parallel,
+                                      .matrix_kernel = options.matrix_kernel,
+                                      .cache_bytes = options.cache_bytes})});
     }
     ++blocks_.back().nodeCount;
     blockOf_.push_back(static_cast<int>(blocks_.size()) - 1);

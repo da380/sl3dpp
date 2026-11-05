@@ -93,6 +93,8 @@ class GridCoupling {
     bool parallel = true;
     /// GSHTrans's BLAS matrix kernel for the batched transforms.
     bool matrix_kernel = false;
+    /// The cache the transforms block for (SurfaceGrid::Options).
+    std::size_t cache_bytes = 0;
     /// Where the radial memory nodes sit within each element (the
     /// default matches ViscoelasticOperator's).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;

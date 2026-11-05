@@ -98,6 +98,8 @@ class Viscoelastic3D {
     /// vector's length.
     bool parallel = true;
     bool matrix_kernel = false;
+    /// The cache the transforms block for (SurfaceGrid::Options).
+    std::size_t cache_bytes = 0;
     /// The within-step iteration (IterationControl): Picard, Anderson-
     /// accelerated when it contracts too slowly (anderson_memory 0 = plain
     /// Picard throughout), with optional damping of the Picard part.
@@ -440,7 +442,12 @@ class Viscoelastic3D {
     void AddChannels(Solutions& solutions, const LoadCallable3D& load,
                      const LoadCallable3D& tide) const;
 
-    /// The strain coefficients of solutions, for the next pass.
+    /// The strain coefficients of solutions, for the next pass: into
+    /// `out` (a tensor of this step's layout, from an earlier call, is
+    /// zeroed and refilled without reallocating; an empty one is sized),
+    /// or into a new tensor.
+    void StrainOf(const Solutions& solutions,
+                  GridCoupling::SpectralTensor& out) const;
     [[nodiscard]] GridCoupling::SpectralTensor StrainOf(
         const Solutions& solutions) const;
 

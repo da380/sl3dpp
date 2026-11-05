@@ -150,13 +150,13 @@ struct Viscoelastic3D::Flavour {
 Viscoelastic3D::Viscoelastic3D(
     const Rheology& rheology, int lmax,
     const std::function<double(double, double, double)>& delta, Options options)
-    : Viscoelastic3D(
-          rheology, lmax,
-          SurfaceGrid(lmax, {.nmax = 2,
-                             .oversampling = options.oversampling,
-                             .parallel = options.parallel,
-                             .matrix_kernel = options.matrix_kernel}),
-          delta, options) {}
+    : Viscoelastic3D(rheology, lmax,
+                     SurfaceGrid(lmax, {.nmax = 2,
+                                        .oversampling = options.oversampling,
+                                        .parallel = options.parallel,
+                                        .matrix_kernel = options.matrix_kernel,
+                                        .cache_bytes = options.cache_bytes}),
+                     delta, options) {}
 
 std::vector<char> Viscoelastic3D::ActiveElementsFor(const Rheology& rheology,
                                                      int lmax,
@@ -172,6 +172,7 @@ std::vector<char> Viscoelastic3D::ActiveElementsFor(const Rheology& rheology,
                             .oversampling = options.oversampling,
                             .parallel = options.parallel,
                             .matrix_kernel = options.matrix_kernel,
+                            .cache_bytes = options.cache_bytes,
                             .memory_points = options.memory_points,
                             .transform_degrees = options.transform_degrees,
                             .all_solid = true});
@@ -216,10 +217,12 @@ Viscoelastic3D::Viscoelastic3D(
            .oversampling = options.oversampling,
            .parallel = options.parallel,
            .matrix_kernel = options.matrix_kernel,
+           .cache_bytes = options.cache_bytes,
            .memory_points = options.memory_points,
            .transform_degrees = options.transform_degrees,
            .elements = OwnedElements(rheology.BaseMaterial().Mesh(), options),
-           .active_elements = ActiveElementsFor(rheology, lmax, grid, options)}),
+           .active_elements =
+               ActiveElementsFor(rheology, lmax, grid, options)}),
       reference_(*rheology_, lmax,
                  {.eps = options.eps,
                   .truncation = options.truncation,
@@ -1559,10 +1562,16 @@ void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,
 
 GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
     const Solutions& solutions) const {
+  // Into the iterate Converge last spent, when there is one.
+  auto spectral = std::move(spare_);
+  StrainOf(solutions, spectral);
+  return spectral;
+}
+
+void Viscoelastic3D::OpenStep::StrainOf(
+    const Solutions& solutions, GridCoupling::SpectralTensor& spectral) const {
   const auto& op = *op_;
   auto& flavour = *flavour_;
-  // Into the iterate Converge last spent, zeroed, when there is one.
-  auto spectral = std::move(spare_);
   if (spectral.r.empty()) {
     spectral = op.ZeroSpectralFor();
   } else {
@@ -1579,7 +1588,6 @@ GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
                            [&](int l) -> const ToroidalOperator& {
                              return op.FlavourToroidal(flavour, l);
                            });
-  return spectral;
 }
 
 double Viscoelastic3D::OpenStep::InertiaMoment(

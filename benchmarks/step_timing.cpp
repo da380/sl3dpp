@@ -32,6 +32,9 @@
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
 //               [degrees]
 //
+// SL3DPP_CACHE_MB, when set, is the cache the transforms block for
+// (Options::cache_bytes), in MiB: 32 on a server with 32 MiB per CCD.
+//
 // With steps 0 only the phases are timed (one warm-up step, no whole
 // steps, no surface sums or fingerprint): the quick comparison.
 //
@@ -171,6 +174,9 @@ int main(int argc, char** argv) {
   options.rtol = 1e-10;
   options.memory_points = gauss ? MemoryPointSet::Gauss : MemoryPointSet::Gll;
   options.transform_degrees = degrees;
+  if (const auto* mb = std::getenv("SL3DPP_CACHE_MB")) {
+    options.cache_bytes = static_cast<std::size_t>(std::atol(mb)) << 20;
+  }
 
   auto start = std::chrono::steady_clock::now();
   Viscoelastic3D op(rheology, lmax, delta, options);
@@ -266,11 +272,12 @@ int main(int argc, char** argv) {
     // here, so that the timed ones do the whole pass.
     auto solutions = step.Respond(s0);
     respond = Best(repeats, [&] { solutions = step.Respond(s0); });
-    channels = Best(repeats, [&] {
-      auto copy = solutions;
-      step.AddChannels(copy, load, {});
-    });
-    strainOf = Best(repeats, [&] { auto out = step.StrainOf(solutions); });
+    // Into storage made once, as a pass does: the channels added to a
+    // copy (repeated adds cost the same), the strain into a reused tensor.
+    auto withChannels = solutions;
+    channels = Best(repeats, [&] { step.AddChannels(withChannels, load, {}); });
+    auto strain = step.StrainOf(solutions);
+    strainOf = Best(repeats, [&] { step.StrainOf(solutions, strain); });
   }
   startStep = Best(
       repeats, [&] { auto opened = op.StartStep(state, dt, scheme, load); });
