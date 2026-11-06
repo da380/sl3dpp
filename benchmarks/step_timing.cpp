@@ -273,7 +273,8 @@ int main(int argc, char** argv) {
     auto solutions = step.Respond(s0);
     respond = Best(repeats, [&] { solutions = step.Respond(s0); });
     // Into storage made once, as a pass does: the channels added to a
-    // copy (repeated adds cost the same), the strain into a reused tensor.
+    // copy, which accumulates them (the cost is the same each time; the
+    // copy is not a step's result), the strain into a reused tensor.
     auto withChannels = solutions;
     channels = Best(repeats, [&] { step.AddChannels(withChannels, load, {}); });
     auto strain = step.StrainOf(solutions);

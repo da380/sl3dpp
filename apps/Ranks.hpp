@@ -15,6 +15,7 @@
  * calls live in Ranks.cpp, under SL3DPP_HAVE_MPI.
  */
 
+#include <cstddef>
 #include <filesystem>
 #include <span>
 #include <vector>
@@ -57,7 +58,8 @@ class RanksOverride {
 };
 
 /// The 3D operator's options for a run: the configured transform degrees
-/// and, on several ranks, this rank's radial segment (ShareMesh over
+/// and transform cache (`cache_mb` MiB, 0 for the library's default) and,
+/// on several ranks, this rank's radial segment (ShareMesh over
 /// MPI_COMM_WORLD, balanced on GridCoupling::TransformWeights) and the
 /// collectives.
 /// With `active_elements` (GridCoupling::Options::active_elements), the
@@ -65,7 +67,7 @@ class RanksOverride {
 /// rheology's viscous ones: the static problem on a branchless rheology
 /// under lateral moduli, whose work is where the moduli are.
 [[nodiscard]] Viscoelastic3D::Options OperatorOptions(
-    int lmax, const std::vector<int>& transform_degrees,
+    int lmax, const std::vector<int>& transform_degrees, std::size_t cache_mb,
     const Rheology& rheology, const std::vector<char>& active_elements = {});
 [[nodiscard]] Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
                                                       const Rheology& rheology);

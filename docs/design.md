@@ -654,8 +654,8 @@ Beyond the fixtures:
   tangent-linear runs run the same way, each rank sweeping its own nodes
   over its own trajectory, as do the discrete 3D sweep, the material
   tangent and the material kernels (docs/adjoints.md §17). `sl3d`'s
-  `evolve` and `kernel`
-  run under `mpiexec` with per-rank checkpoints
+  `evolve` and `kernel` run under `mpiexec` with per-rank checkpoints,
+  and `static` over the same ranks
   ([sl3d-configs.md](sl3d-configs.md)).
 
 ## 13. Dependencies and boundaries
@@ -747,9 +747,8 @@ What is not built, or holds only within limits:
   gravity and radius held (`SeaLevelParameters::body_from_table`;
   docs/adjoints.md §16), and lateral density variations are excluded
   in 3D.
-- **The `sl3d` program** exposes none of the discrete 3D kernels, the
-  tangent-linear runs, the Hessian products and the material kernels;
-  they are library calls.
+- **The `sl3d` program** exposes neither the tangent-linear runs, the
+  Hessian products nor the material kernels; they are library calls.
 - **Adaptive stepping** exists in `ViscoelasticOperator` but not in the
   evolution drivers.
 - **Sharp lateral structure** (cratons, slabs) aliases in the pointwise

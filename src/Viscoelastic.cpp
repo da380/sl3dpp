@@ -913,7 +913,8 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                   .emplace(key, ComputeLoveNumbers(
                                     material, lmax_,
                                     {.eps = options_.eps,
-                                     .truncation = options_.truncation}))
+                                     .truncation = options_.truncation,
+                                     .parallel = options_.parallel}))
                   .first;
     } else {
       const auto& flavour = FlavourOf(scheme, dt);
@@ -922,7 +923,8 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                     NodalMaterial(), lmax_,
                                     {.eps = options_.eps,
                                      .truncation = options_.truncation,
-                                     .point_shear = &flavour.pointShear}))
+                                     .point_shear = &flavour.pointShear,
+                                     .parallel = options_.parallel}))
                   .first;
     }
   }
@@ -938,7 +940,8 @@ const LoveNumbers& ViscoelasticOperator::ElasticLoveNumbers() const {
                                   NodalMaterial(), lmax_,
                                   {.eps = options_.eps,
                                    .truncation = options_.truncation,
-                                   .point_shear = ElasticPointShear()}))
+                                   .point_shear = ElasticPointShear(),
+                                   .parallel = options_.parallel}))
                 .first;
   }
   return found->second;

@@ -272,7 +272,8 @@ rank its segment.
   (docs/adjoints.md §17): the discrete transpose sums
   the ranks' partial contractions for the load duals and places the
   surface duals on their holding rank.
-- **The `sl3d` program** runs `evolve` and `kernel` under `mpiexec`.
+- **The `sl3d` program** runs `evolve`, `kernel` and `static` under
+  `mpiexec`.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A
     run resumes from the newest node every rank has, over the same rank

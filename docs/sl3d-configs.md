@@ -371,6 +371,7 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 | `coupled.rtol` | number | 1e-9 | `evolve` and `kernel`: the relative tolerance of each step's combined fixed point (in `kernel`, of the reversed sweep's steps too) |
 | `coupled.max_iterations` | integer | 60 | `evolve` and `kernel`: its iteration limit (likewise) |
 | `coupled.transform_degrees` | integers in [2, lmax] | absent | `evolve` and `kernel`: the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the viscosity's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
+| `coupled.cache_mb` | integer >= 0 | 0 | `evolve` and `kernel`: the last-level cache the lateral coupling's transforms block their work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it |
 | `shorelines` | word | `"frozen"` | `"frozen"`: the start's ocean function throughout (the linear equation); `"migrating"`: the ocean function follows flotation |
 | `calibrate_initial_sea_level` | object | absent | calibrate the initial sea level against `state.file` at the window's end (above); its members, all optional, follow |
 | `calibrate_initial_sea_level.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
@@ -441,15 +442,16 @@ finished run whose last checkpoint is at the final node just writes the
 output again.
 
 A checkpoint is bound to its run: it records a hash of the members that
-decide the computation (everything but `checkpoint`, `restart` and
-`output`) and of the contents of the files the config names (the deck, the
-state, the ice history and, for `evolve`, the viscosity file). A run is
-refused, with an error naming the checkpoint, rather than resuming another
-run's state when any of these differ: another time grid, tolerance or
-model, or the same config over an input file that has changed since. The
-config's layout, its output, the checkpoint stride and the wall-time limit
-may all change between a run and its resumption, and the paths may change
-as long as the files' contents do not, so a run directory can be moved. A
+decide the computation (everything but `checkpoint`, `restart`,
+`coupled.cache_mb` and `output`) and of the contents of the files the
+config names (the deck, the state, the ice history and, for `evolve`, the
+viscosity file). A run is refused, with an error naming the checkpoint,
+rather than resuming another run's state when any of these differ: another
+time grid, tolerance or model, or the same config over an input file that
+has changed since. The config's layout, its output, the checkpoint stride,
+the wall-time limit and the transforms' cache may all change between a run
+and its resumption, and the paths may change as long as the files'
+contents do not, so a run directory can be moved. A
 checkpoint of the other command (`evolve1d` against `evolve`) is refused
 too. The files are raw binary, for the machine that wrote them.
 
@@ -555,6 +557,7 @@ The radial model's response to the same forcing is written beside it.
 | `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual |
 | `solver.max_iterations` | integer >= 1 | 200 | their budget |
 | `transform_degrees` | integers in [2, lmax] | absent | the transforms cut with depth, as `evolve`'s |
+| `cache_mb` | integer >= 0 | 0 | the transforms' cache in MiB, as `evolve`'s `coupled.cache_mb` |
 | `output` | path | required | the surface file to write |
 | `exchange_output` | path | absent | the surface coefficients as a cross-code exchange table |
 | `volume_output` | path | absent | the response inside the body as a planetmodel model file |

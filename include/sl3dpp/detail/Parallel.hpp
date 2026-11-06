@@ -37,10 +37,12 @@ void ForEach(bool parallel, std::size_t count, Body&& body) {
 }
 
 /// GSHTrans::ForEachTask: body(i) for i in [0, count), handed out
-/// dynamically.
+/// dynamically. The task counts here are degrees, so the body takes an
+/// int; the conversion from GSHTrans's index is made here, once.
 template <typename Body>
 void ForEachTask(bool parallel, int count, Body&& body) {
-  GSHTrans::ForEachTask(PolicyOf(parallel), count, std::forward<Body>(body));
+  GSHTrans::ForEachTask(PolicyOf(parallel), count,
+                        [&](std::ptrdiff_t i) { body(static_cast<int>(i)); });
 }
 
 }  // namespace sl3dpp::detail

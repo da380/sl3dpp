@@ -91,8 +91,8 @@ std::string Today() {
 StaticInput ReadStaticInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   Allow(top, {"model", "model_format", "lmax", "moduli", "load", "tide",
-              "solver", "transform_degrees", "output", "exchange_output",
-              "volume_output"});
+              "solver", "transform_degrees", "cache_mb", "output",
+              "exchange_output", "volume_output"});
   const auto directory = config.parent_path();
   auto out = StaticInput{};
   out.model = PathOf(top, "model", directory);
@@ -159,6 +159,11 @@ StaticInput ReadStaticInput(const std::filesystem::path& config) {
       out.transform_degrees.push_back(static_cast<int>(value));
     }
   }
+  const auto cache_mb = Integer(top, "cache_mb", 0);
+  if (cache_mb < 0) {
+    Fail(top.At("cache_mb"), "is not a cache size in MiB (0 or more)");
+  }
+  out.cache_mb = static_cast<std::size_t>(cache_mb);
   out.output = PathOf(top, "output", directory);
   if (Has(top, "exchange_output")) {
     out.exchange_output = PathOf(top, "exchange_output", directory);
@@ -268,10 +273,12 @@ std::string RunStatic3D(const std::filesystem::path& config) {
     // rheology has no viscous element to weight)
     auto probe = Viscoelastic3D::Options{};
     probe.transform_degrees = input.transform_degrees;
+    probe.cache_bytes = input.cache_mb << 20;
     probe.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
     const auto active = Viscoelastic3D::ActiveElementsFor(
         *elastic, input.lmax, reference.Coupling().Grid(), probe);
-    auto options = OperatorOptions(input.lmax, input.transform_degrees, *elastic, active);
+    auto options = OperatorOptions(input.lmax, input.transform_degrees,
+                                   input.cache_mb, *elastic, active);
     options.solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients;
     options.elastic_rtol = input.rtol;
     options.elastic_max_iterations = input.max_iterations;

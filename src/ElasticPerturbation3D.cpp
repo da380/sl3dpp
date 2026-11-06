@@ -208,8 +208,11 @@ ElasticPerturbation3D::Force(const Solutions& x, std::span<const double> dMu,
       const auto& g = gathers[count - 1 - i];
       coupling_.AddDilatationOfSolution(scalar, g.l, *g.sph, *g.x);
     });
+    // The whole tensor is allocated, not its real component alone, so
+    // that a later call with a shear direction finds a workspace it can
+    // synthesise into.
+    if (grid.r.empty()) grid = coupling_.ZeroTensor();
     auto& field = grid.r;
-    field.resize(values);
     coupling_.SynthesiseScalar(scalar, field);
     detail::ForEach(options_.parallel, values,
                     [&](std::size_t i) { field[i] *= dKappa[i]; });

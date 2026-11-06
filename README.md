@@ -303,7 +303,8 @@ nodes.
   numactl --cpunodebind=1 --membind=1 sl3d evolve second.json &
   ```
 
-  Built with `SL3DPP_WITH_MPI`, `sl3d evolve` and `kernel` can instead
+  Built with `SL3DPP_WITH_MPI`, `sl3d evolve`, `kernel` and `static` can
+  instead
   spread one run over the node, one MPI rank per socket with its threads
   inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
   ranks"). Measured with `distributed_step` at lmax 128 on 32 of the
@@ -538,7 +539,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing`, `substructure_prototype` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve` and `kernel` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve`, `kernel` and `static` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.

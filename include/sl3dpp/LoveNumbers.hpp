@@ -104,12 +104,16 @@ struct LoveNumberOptions {
   /// the elastic or a step's effective solid with internal variables at
   /// those points. Read during the computation only.
   const PointShear* point_shear = nullptr;
+  /// Whether the degrees run threaded, on OpenMP's thread count
+  /// (OMP_NUM_THREADS); false forces serial, for a caller already inside
+  /// its own parallel region.
+  bool parallel = true;
 };
 
 /// The Love numbers of a material for every degree from 0 to lmax: each
 /// degree assembled and factorised once, solved for the four forcings
 /// (degree 0 for the centrifugal potential besides), degrees in parallel
-/// under OpenMP.
+/// under OpenMP unless `options.parallel` is false.
 [[nodiscard]] LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
                                              LoveNumberOptions options = {});
 
@@ -187,7 +191,8 @@ struct TractionNumbers {
 /// the full problem with `gravitating = true` -- the same forcing on both,
 /// so the pair isolates the effect of gravity. The non-gravitating problem
 /// takes a solid material, and its degree 1 is NaN. Degrees in parallel
-/// under OpenMP. Mirrors pyslfp's `traction_numbers`.
+/// under OpenMP unless `options.parallel` is false. Mirrors pyslfp's
+/// `traction_numbers`.
 [[nodiscard]] TractionNumbers ComputeTractionNumbers(
     const Material& material, int lmax, bool gravitating = false,
     LoveNumberOptions options = {});

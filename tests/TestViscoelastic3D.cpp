@@ -288,11 +288,11 @@ TEST(Lateral, LateralStepSelfConvergesAtSecondOrder) {
 TEST(Lateral, ThreadedStepMatchesSerial) {
   // Options::parallel threads the transforms, the per-degree loops (force
   // assembly, solves, strain recovery) and the step's own loops (weights
-  // and decay, the residual, the mixing, the memory update). The degree
-  // and element-wise loops are bitwise independent of the thread count;
-  // the threaded transforms are not (each thread plans its own FFTs), nor
-  // are the mixer's partial sums, so the comparison is at the iteration's
-  // tolerance, not bitwise.
+  // and decay, the residual, the mixing, the memory update). With the loop
+  // kernel the step is bitwise independent of the thread count (the loops
+  // write only what their index owns, the transforms are thread-count
+  // independent, the mixer's sums run over blocks fixed by the vector's
+  // length), so the comparison is exact.
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {
@@ -329,13 +329,14 @@ TEST(Lateral, ThreadedStepMatchesSerial) {
       for (auto i = std::size_t{0}; i < x.size(); ++i) {
         scale = std::max(scale, std::abs(x[i]));
         diff = std::max(diff, std::abs(x[i] - y[i]));
+        ASSERT_EQ(x[i], y[i]) << "degree " << l << " at " << i;
       }
     }
   };
   compare(serial.spheroidal, threaded.spheroidal);
   compare(serial.toroidal, threaded.toroidal);
   EXPECT_GT(scale, 0.0);
-  EXPECT_LE(diff, 1e-10 * scale);
+  EXPECT_EQ(diff, 0.0);
 }
 
 TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
