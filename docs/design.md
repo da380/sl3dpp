@@ -768,8 +768,11 @@ What is not built, or holds only within limits:
   start (`StartStep`) is mostly two analyses, which carry the transforms'
   limit. README, *Running*, has the advice that follows. One process per
   socket, over MPI, is built (§12,
-  [radial-partitioning.md](radial-partitioning.md)); its timing on a
-  two-socket node is not measured.
+  [radial-partitioning.md](radial-partitioning.md)), and on 32 of the node's
+  cores the response phase of a pass is 1.4 times faster as two ranks
+  of 16 threads than as one process, and 2.2 times faster as eight ranks
+  of four, the forward transform scaling with each rank's share of the
+  nodes rather than with its thread count.
 - **Memory at lmax 512.** A 3D run there needs the recorded states on disk
   (the `on_state` store) and a large node.
 - **Inversion.** There are no inversion drivers or optimiser interface: the

@@ -24,6 +24,8 @@ INPUT                  = @PROJECT_SOURCE_DIR@/README.md \
                          @PROJECT_SOURCE_DIR@/docs/design.md \
                          @PROJECT_SOURCE_DIR@/docs/radial-partitioning.md \
                          @PROJECT_SOURCE_DIR@/docs/conventions.md \
+                         @PROJECT_SOURCE_DIR@/docs/adjoints.md \
+                         @PROJECT_SOURCE_DIR@/docs/lateral-coupling.md \
                          @PROJECT_SOURCE_DIR@/examples/README.md \
                          @PROJECT_SOURCE_DIR@/examples/configs/README.md
 USE_MDFILE_AS_MAINPAGE = @PROJECT_SOURCE_DIR@/README.md

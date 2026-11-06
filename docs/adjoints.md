@@ -1550,7 +1550,7 @@ the continuous 3D adjoint and the 3D tangent-linear runs do:
   channels through the collective `Surface` and the summed moment — are
   the forward step's.
 - **Threads.** The derivative loops are threaded through
-  `detail::ParallelElements` / `ParallelFor` (the 3D sweeps over nodes
+  `detail::ForEach` / `ForEachTask` (the 3D sweeps over nodes
   and grid values, the 1D sweeps over degrees), as are the static Born
   perturbation's pointwise loops.
 

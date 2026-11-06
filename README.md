@@ -306,8 +306,12 @@ nodes.
   Built with `SL3DPP_WITH_MPI`, `sl3d evolve` and `kernel` can instead
   spread one run over the node, one MPI rank per socket with its threads
   inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
-  ranks"); the timing of that shape on a two-socket server is not
-  measured.
+  ranks"). Measured with `distributed_step` at lmax 128 on 32 of the
+  node's cores, each rank pinned to its own cores: the response phase of a
+  pass is 1.4 times faster with two ranks of 16 threads than with one
+  process of 32, and 2.2 times faster with eight ranks of four, the
+  forward transform scaling with each rank's share of the nodes rather
+  than with the threads inside a rank.
 - **Small problems want fewer threads.** The parallel loops run over
   degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
   degree of a few dozen there is too little work to share among the cores

@@ -5,3 +5,5 @@ benchmarks/runs/
 __pycache__/
 .venv/
 poetry.lock
+# Outputs of the README's step_timing recipe.
+step_*.txt
