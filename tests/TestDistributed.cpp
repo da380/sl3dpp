@@ -661,10 +661,10 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
   };
   const auto [k0, m0] = body.material.Moduli().KappaMu();
   const auto options = Viscoelastic3D::Options{
-      .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gll,
+      .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = share.cuts};
   const auto evolutionOptions =
-      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::None,
+      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,

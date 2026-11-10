@@ -1813,6 +1813,24 @@ Viscoelastic3D::StepResult Viscoelastic3D::Step(
           info};
 }
 
+double Viscoelastic3D::InertiaMoment(const Solutions& solutions) const {
+  const auto found = solutions.spheroidal.find(0);
+  if (found == solutions.spheroidal.end()) return 0.0;
+  const auto& x = found->second;
+  auto column = std::vector<double>(x.size());
+  for (auto i = std::size_t{0}; i < x.size(); ++i) column[i] = x[i].real();
+  Spheroidal(0).MaskToShare(column);
+  auto moment = 0.0;
+  {
+    const auto lock = LockCaches();
+    moment = reference_.InertiaMoment(column, 1)[0];
+  }
+  if (options_.collectives.Distributed()) {
+    options_.collectives.sum(std::span(&moment, 1));
+  }
+  return moment;
+}
+
 std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
     const Solutions& solutions, Component component) const {
   auto out = std::map<int, std::vector<Complex>>{};

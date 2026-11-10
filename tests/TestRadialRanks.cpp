@@ -687,10 +687,10 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
       count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
   ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
   const auto options = Viscoelastic3D::Options{
-      .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gll,
+      .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = cuts};
   const auto evolutionOptions =
-      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::None,
+      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,

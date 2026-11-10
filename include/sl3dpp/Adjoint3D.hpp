@@ -207,9 +207,9 @@ class AdjointSolver3D {
     /// quadrature of the continuous adjoint displacement's pairing with
     /// the forward solution and memory plus the lumped pairings at the
     /// observations, at the commute level of the viscosity kernels. Both
-    /// need the trajectory, the memory nodes at the GLL points and no
-    /// rotational feedback; one unrelaxed solve per node (two for the
-    /// continuous form). Distributed like the sweeps.
+    /// need the trajectory; one unrelaxed
+    /// solve per node (two for the continuous form). Distributed like the
+    /// sweeps.
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for

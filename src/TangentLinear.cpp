@@ -587,9 +587,10 @@ TangentLinearSolver::MakeMaterialDrive(const PointMaterialDirection& d,
                                        std::span<const double> times) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
-  if (ev.options_.rotation != RotationalFeedback::None) {
+  if (ev.options_.rotation != RotationalFeedback::None && !d.rho.empty()) {
     throw std::invalid_argument(
-        "the material tangent takes no rotational feedback");
+        "a density direction takes no rotational feedback (the moments of "
+        "inertia would move with it)");
   }
   const auto& rheology = op.GetRheology();
   const auto pointCount = op.UnrelaxedShearAtPoints().size();
@@ -959,6 +960,12 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
           ev.Coefficients(op.Surface(startResponse, Component::U), ev.toNdLength_);
       forcing.potentialResponse = ev.Coefficients(
           op.Surface(startResponse, Component::Phi), ev.toNdPotential_);
+      // and, for the axial rotational feedback, its inertia moment
+      if (const auto found = startResponse.find(0);
+          found != startResponse.end()) {
+        forcing.inertiaMomentChange =
+            op.InertiaMoment(found->second, 2)[0] * ev.toNdMoment_;
+      }
     }
     response = solverFor(0.0).SolveGeneralised(ev.state_, forcing, sleOptions);
     checkConverged(response, 0);

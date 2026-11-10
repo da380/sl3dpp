@@ -62,9 +62,9 @@ struct TangentPerturbation3D {
   std::vector<std::vector<double>> itau;
   /// Over the grid values: delta itau_k = -itau_k(x) logViscosity(x).
   std::vector<double> logViscosity;
-  /// The moduli (docs/adjoints.md); needs the recorded
-  /// trajectory, memory nodes at the GLL points and no rotational
-  /// feedback. Distributed like the run.
+  /// The moduli, over the grid values of the memory nodes
+  /// (docs/adjoints.md); needs the recorded trajectory. Distributed like
+  /// the run.
   MaterialDirection3D material;
 
   [[nodiscard]] bool Empty() const {
@@ -179,8 +179,7 @@ class TangentLinearSolver3D {
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
       const MaterialForcing3D* material) const;
-  /// A material drive after the checks (the memory nodes at the GLL
-  /// points, no rotational feedback, the fields on the grid values).
+  /// A material drive after the checks (the fields on the grid values).
   [[nodiscard]] std::shared_ptr<MaterialDrive3D> MakeMaterialDrive3D(
       const MaterialDirection3D& direction,
       const ForwardTrajectory3D* trajectory, ForwardCursor3D* cursor) const;

@@ -705,8 +705,19 @@ sea level closure already reads — carries them, and the closure needs no
 Love-table derivative: acting on the full solution, the first term holds
 the material derivative of the load response too (adding δh_eff σ as a
 response channel would double count). The scheme weights depend on itau
-and dt only, so the memory recursion is unchanged. Refused: rotational
-feedback (the rotational Love numbers would move too).
+and dt only, so the memory recursion is unchanged.
+
+Rotational feedback, axial or full, needs nothing further for the
+moduli. The base solution the force acts on holds the response to the
+centrifugal potential, so the force carries the tidal Love numbers'
+derivative as it carries the load numbers'; and the rotation block of
+the sea level solve closes about the material response through the
+channels it reads for the memory — the degree-2 surface displacement
+and potential and the degree-0 inertia moment, the start's unrelaxed
+response included — with the base model's numbers in its closed form.
+A density direction is refused under rotational feedback: the moments of
+inertia, which the sea level engine holds as parameters, would move
+with it.
 
 GATE (`TangentLinear.MaterialDirectionMatchesDifferences`): along
 a smooth direction in κ and μ on the solid, both schemes, the tangent
@@ -717,6 +728,13 @@ landing at 1e-6 of the derivative. The steps are 1% and 0.5% of the
 moduli, wide enough for the truncation error to stand above the solves'
 1e-12 noise: the functional moves by parts in 1e-12 per unit step, and
 at narrower steps the ratio check reads noise.
+With rotational feedback on, axial and full, the same holds along the
+moduli (the same test and its 3D twin), the discrete kernels stay the
+tangent's transpose (`Adjoint.MaterialKernelsAreTheTangentTranspose`,
+`DiscreteAdjoint3D.MaterialKernelsPairWithTheTangent`), the continuous
+ones converge to them, and the second-order blocks are exact and
+symmetric (`SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric`,
+`SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactUnderRotation`).
 `TangentLinear.MaterialDirectionMatchesDifferencesAtGaussPoints` holds
 the same at the default memory points, along a direction in κ and μ at
 the Gauss points and in the nodal density, against differences of the
@@ -753,17 +771,21 @@ carry them as they carry the memory force:
 
 and the start's unrelaxed response −K_U⁻¹ (δK_U) x₀ by the same
 pipeline, closing the start's sea level solve and seeding the start
-strain. Refused: memory points away from the GLL nodes, rotational
-feedback, distribution.
+strain. Rotational feedback as in 1D (§13c): the closure reads the
+material response's surface values and inertia moment, the start's
+included.
 
 GATES (`TestTangentLinear3D`): `MaterialDirectionMatchesDifferences`
 — with lateral viscosity ON, along an angle-uniform direction in κ and
 μ on the memory nodes, the 3D tangent matches central differences of
 the coupled 3D run on the shifted material at second order with
-Richardson at 1e-6, both schemes (the lateral β_k(x) factor exercised);
+Richardson at 1e-6, both schemes (the lateral β_k(x) factor exercised),
+and `MaterialDirectionMatchesDifferencesAtGaussPoints` the same at the
+default memory nodes against the run with `Options::moduli` perturbed;
 `ZeroLateralMaterialMatchesThe1DRun` — with δ = 0 the 3D run equals the
-1D material tangent at 1e-7 (it lands at 1e-12), both schemes, and a
-lateral direction of the same angular mean is a different run. The
+1D material tangent at 1e-7, both schemes, at the GLL and at the Gauss
+points, and a lateral direction of the same angular mean is a different
+run. The
 lateral part of the shear term is the pipeline of §13b and of the
 viscosity path; its exact gate is the pairing identity with the discrete
 3D material kernels (`DiscreteAdjoint3D.MaterialKernelsPairWithTheTangent`,
@@ -798,7 +820,9 @@ The gradient lives on `DegreeOperator`, not on the operator's per-degree
 workspace, because that workspace covers the memory window only (the
 relaxing elements) and the kernels span the elastic lithosphere too.
 Discrete exact, continuous at the commute level (below, §13g); needs the
-trajectory and no rotational feedback; the bulk pairing costs one
+trajectory; with rotational feedback the kernels in κ and μ are formed
+and the density kernel is not (the moments of inertia are not moved);
+the bulk pairing costs one
 unrelaxed solve per step. The kernels in κ and μ are held at the memory
 points, each entry the kernel's value there times the point's quadrature
 weight, and pair with a `PointMaterialDirection` by the plain sum;
@@ -843,8 +867,7 @@ tensors:
   need), paired with the base start solution.
 
 Discrete exact, continuous at the commute level (below, §13g); needs the
-trajectory, GLL memory nodes and no rotational feedback; distributed
-(§17).
+trajectory; distributed (§17).
 
 GATES (`TestDiscreteAdjoint3D`): `MaterialKernelsPairWithTheTangent` —
 with lateral viscosity on, the kernels paired with LATERAL directions in
@@ -1372,10 +1395,11 @@ action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
 materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
 `KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
 spherical reductions). New design, no pyslfp counterpart. Everything
-needs no rotational feedback (the material tangent's condition), and the
-3D forms the memory points at the GLL nodes; in 1D the moduli's
-directions and kernels are held at the memory points (§13c, §13e), GLL
-or Gauss. The 3D forms are distributed (§17).
+runs under any rotational feedback, the density kernel's derivative
+without it only. The
+moduli's directions and kernels are held at the memory points, GLL or
+Gauss, in 1D (§13c, §13e) as on the 3D coupling's memory nodes. The 3D
+forms are distributed (§17).
 
 **The second-order tangent run** (`TangentLinearSolver::RunSecondOrder`,
 3D alike). The step map is affine in the moduli, so the second variation

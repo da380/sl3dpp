@@ -238,10 +238,6 @@ IceKernels AdjointSolver::DiscreteSweep(
       throw std::invalid_argument(
           "the material kernels need the recorded forward trajectory");
     }
-    if (rotation != RotationalFeedback::None) {
-      throw std::invalid_argument(
-          "the material kernels take no rotational feedback");
-    }
     // at the memory points, where the moduli's perturbations live
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto f = op.BranchFractionAtPoints(k);
@@ -717,7 +713,11 @@ IceKernels AdjointSolver::DiscreteSweep(
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   out.kappaKernel = std::move(kappaKernel);
   out.muKernel = std::move(muKernel);
-  if (material) out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
+  // the density kernel without rotational feedback only: the moments of
+  // inertia would move with the density
+  if (material && rotation == RotationalFeedback::None) {
+    out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
+  }
   return out;
 }
 
@@ -783,10 +783,6 @@ IceKernels AdjointSolver::ContinuousSweep(
     if (trajectory == nullptr) {
       throw std::invalid_argument(
           "the material kernels need the recorded forward trajectory");
-    }
-    if (rotation != RotationalFeedback::None) {
-      throw std::invalid_argument(
-          "the material kernels take no rotational feedback");
     }
     // at the memory points, where the moduli's perturbations live
     for (auto k = std::size_t{0}; k < K; ++k) {
@@ -1296,7 +1292,11 @@ IceKernels AdjointSolver::ContinuousSweep(
   out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
   out.kappaKernel = std::move(kappaKernel);
   out.muKernel = std::move(muKernel);
-  if (material) out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
+  // the density kernel without rotational feedback only: the moments of
+  // inertia would move with the density
+  if (material && rotation == RotationalFeedback::None) {
+    out.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
+  }
   return out;
 }
 

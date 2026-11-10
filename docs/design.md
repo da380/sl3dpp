@@ -415,8 +415,10 @@ Deliberately out of scope:
   the continuous ones, the time quadrature of the adjoint displacement's
   pairing with the forward solution and memory plus lumped pairings at
   the observations, at the commute level. They need the recorded
-  trajectory, the memory points at the GLL nodes and no rotational
-  feedback. The static kernels: `ComputeLoveNumberKernels` (the Love
+  trajectory; the moduli's directions and
+  kernels are held at the memory points, GLL or Gauss, where a
+  perturbation of the moduli enters (`ViscoelasticOperator::Options::
+  moduli`, `Viscoelastic3D::Options::moduli`). The static kernels: `ComputeLoveNumberKernels` (the Love
   numbers' in κ(r), μ(r) per channel and degree) and
   `ElasticPerturbation3D::StaticKernels` with `SolveSurfaceDual` (the
   lateral kernels of a static surface measurement).
@@ -741,12 +743,12 @@ What is not built, or holds only within limits:
   form's second variation in the density is not built), and the
   shoreline terms of pyslfp's smoothed flotation rule are not ported
   (sl3dpp has the sharp rule only).
-- **Material derivatives.** The time-stepped material tangents and
-  kernels need the memory points at the GLL nodes and no rotational
-  feedback; a density direction is taken with the sea level engine's
-  gravity and radius held (`SeaLevelParameters::body_from_table`;
-  docs/adjoints.md §16), and lateral density variations are excluded
-  in 3D.
+- **Material derivatives.** The time-stepped tangents and kernels in
+  the moduli run under any rotational feedback; a density direction and
+  the density kernel need none (the moments of inertia are not moved)
+  and are taken with the sea level engine's gravity and radius held
+  (`SeaLevelParameters::body_from_table`; docs/adjoints.md §16), and
+  lateral density variations are excluded in 3D.
 - **The `sl3d` program** exposes neither the tangent-linear runs, the
   Hessian products nor the material kernels; they are library calls.
 - **Adaptive stepping** exists in `ViscoelasticOperator` but not in the

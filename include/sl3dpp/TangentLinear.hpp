@@ -80,7 +80,9 @@ struct TangentPerturbation {
   /// direction moves the gravity self-consistently and the forcings with
   /// it, the sea level engine's own gravity and radius held
   /// (SeaLevelParameters::body_from_table; docs/adjoints.md §16). Needs
-  /// the recorded trajectory and no rotational feedback.
+  /// the recorded trajectory; the moduli are taken under any rotational
+  /// feedback, a density direction without it only (the moments of
+  /// inertia are not moved).
   PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {

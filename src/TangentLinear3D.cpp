@@ -759,30 +759,20 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
           "a material direction lives on the coupling's grid values");
     }
   }
-  if (op.GetOptions().memory_points != MemoryPointSet::Gll) {
-    throw std::invalid_argument(
-        "the material tangent needs the memory nodes at the GLL points "
-        "(Viscoelastic3D::Options::memory_points)");
-  }
-  if (ev.options_.rotation != RotationalFeedback::None) {
-    throw std::invalid_argument(
-        "the material tangent takes no rotational feedback");
-  }
   auto material = std::make_shared<MaterialDrive3D>();
   material->ev = &ev;
   material->direction = direction;
   material->trajectory = trajectory;
   material->cursor = cursor;
-  const auto& base = op.GetRheology().BaseMaterial();
-  const auto ngll = base.Mesh().NGll();
-  const auto [kappaU, muU] = base.Moduli().KappaMu();
+  // the branch fractions at each memory node, the radial reference's at
+  // its memory points
+  const auto np = coupling.Points().count;
   for (auto k = std::size_t{0}; k < K; ++k) {
+    const auto atPoints = op.Reference().BranchFractionAtPoints(k);
     auto f = std::vector<double>(coupling.NodeCount(), 0.0);
     for (auto n = 0; n < coupling.NodeCount(); ++n) {
-      const auto full =
-          static_cast<std::size_t>(coupling.ElementOfNode(n)) * ngll +
-          coupling.NodeInElementOf(n);
-      f[n] = muU[full] > 0.0 ? op.muBranch_[k][n] / muU[full] : 0.0;
+      f[n] = atPoints[static_cast<std::size_t>(coupling.ElementOfNode(n)) * np +
+                      coupling.NodeInElementOf(n)];
     }
     material->fractions.push_back(std::move(f));
   }
@@ -1193,6 +1183,9 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
           op.Surface(*startResponse, Component::U), ev.toNdLength_);
       forcing.potentialResponse = ev.Coefficients(
           op.Surface(*startResponse, Component::Phi), ev.toNdPotential_);
+      // and, for the axial rotational feedback, its inertia moment
+      forcing.inertiaMomentChange =
+          op.InertiaMoment(*startResponse) * ev.toNdMoment_;
     }
     response =
         solverFor(op.ElasticLove()).SolveGeneralised(ev.state_, forcing, sleOptions);

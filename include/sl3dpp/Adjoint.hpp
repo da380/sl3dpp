@@ -221,9 +221,10 @@ class AdjointSolver {
     /// continuous adjoint displacement's pairing with the forward
     /// solution and memory, plus the lumped pairings at the observations
     /// — the commute error of the viscosity kernels, falling under
-    /// refinement. Both need the trajectory and no rotational feedback,
-    /// and cost one unrelaxed solve per node (two for the continuous
-    /// form).
+    /// refinement. Both need the trajectory and cost one unrelaxed
+    /// solve per node (two for the continuous form). With rotational
+    /// feedback the kernels in the moduli are formed and the density
+    /// kernel is left empty (the moments of inertia are not moved).
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
@@ -279,10 +280,10 @@ class AdjointSolver {
    * migrating run as the tangent-linear run.
    * @param material v's perturbation of the moduli
    * (TangentPerturbation::material, the density refused), which the
-   * tangent run must have been driven by too; empty for none. A
-   * material direction, like Options::material_kernels (which adds the
-   * material kernels' derivatives along v, for any v), needs no
-   * rotational feedback. Discrete: the
+   * tangent run must have been driven by too; empty for none
+   * (Options::material_kernels adds the material kernels' derivatives
+   * along v, for any v; the density kernel's without rotational feedback
+   * only). Discrete: the
    * derivative of the effective systems acts on the first sweep's
    * solutions as a source of the derivative duals, and the memory force's
    * variation on the first sweep's strains; the material kernels'

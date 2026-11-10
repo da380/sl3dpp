@@ -467,7 +467,9 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   // landing on them — both schemes, with the memory points at the GLL
   // nodes and at the Gauss points, the moduli's directions held at the
   // points and the base moved through ViscoelasticOperator::Options::
-  // moduli.
+  // moduli. At the Gauss points with the rotational feedback on too,
+  // axial and full, without the density part (the density kernel is
+  // formed without rotational feedback only).
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(43);
   auto times = std::vector<double>{};
@@ -557,15 +559,24 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   };
 
   for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const bool rotating = rotation != RotationalFeedback::None;
+    // rotational feedback at the default points, one scheme each
+    if (rotating && (set != MemoryPointSet::Gauss ||
+                     (rotation == RotationalFeedback::Axial) !=
+                         (scheme == Scheme::BackwardEuler))) {
+      continue;
+    }
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
     u.material = AtMemoryPoints(op.Points(), nodalU);
     w.material = AtMemoryPoints(op.Points(), nodalW);
     auto uPair = u;
-    uPair.material.rho = rhoU;
+    if (!rotating) uPair.material.rho = rhoU;
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
-                                 .rotation = RotationalFeedback::None,
+                                 .rotation = rotation,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -592,15 +603,21 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
               1e-12 * MaxAbs(first.kappaKernel));
     EXPECT_LT(MaxDiff(kernelsU.muKernel, first.muKernel),
               1e-12 * MaxAbs(first.muKernel));
-    EXPECT_LT(MaxDiff(kernelsU.rhoKernel, first.rhoKernel),
-              1e-12 * MaxAbs(first.rhoKernel));
+    ASSERT_EQ(first.rhoKernel.empty(), rotating);
+    ASSERT_EQ(alongU.rhoKernel.empty(), rotating);
+    if (!rotating) {
+      EXPECT_LT(MaxDiff(kernelsU.rhoKernel, first.rhoKernel),
+                1e-12 * MaxAbs(first.rhoKernel));
+      EXPECT_GT(MaxAbs(alongU.rhoKernel), 0.0);
+    }
     EXPECT_GT(MaxAbs(alongU.kappaKernel), 0.0);
     EXPECT_GT(MaxAbs(alongU.muKernel), 0.0);
-    EXPECT_GT(MaxAbs(alongU.rhoKernel), 0.0);
 
     const auto huW = Pairing(setup, alongU, w);
     const auto hwU = Pairing(setup, alongW, u);
-    EXPECT_NEAR(huW, hwU, 1e-9 * std::abs(huW)) << "scheme " << static_cast<int>(scheme);
+    EXPECT_NEAR(huW, hwU, 1e-9 * std::abs(huW))
+        << "scheme " << static_cast<int>(scheme) << " rotation "
+        << static_cast<int>(rotation);
     SecondOrderDirection uw;
     uw.itauU = u.itau;
     uw.itauV = w.itau;
@@ -609,13 +626,14 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
     const auto forward = Objective(setup, second, measurements);
     EXPECT_NEAR(forward, huW, 1e-9 * std::abs(forward))
-        << "scheme " << static_cast<int>(scheme);
+        << "scheme " << static_cast<int>(scheme) << " rotation "
+        << static_cast<int>(rotation);
 
     auto gradientAt = [&](double eps) {
       const auto movedOp = operatorAt(eps, set, w.material);
       SeaLevelEvolution movedEvolution(movedOp, setup.solver, setup.state,
                                        {.scheme = scheme,
-                                        .rotation = RotationalFeedback::None,
+                                        .rotation = rotation,
                                         .rtol = 1e-12,
                                         .record_stride = 1});
       const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
@@ -643,7 +661,8 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
     const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
-        << "scheme " << static_cast<int>(scheme);
+        << "scheme " << static_cast<int>(scheme) << " rotation "
+        << static_cast<int>(rotation);
 
     // Refusals: a density direction; the continuous sweep.
     auto withRho = w.material;

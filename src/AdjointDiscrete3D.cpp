@@ -131,28 +131,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           "the tangent-linear run must give one snapshot per time node");
     }
   }
-  if (hasMaterialV) {
-    if (op.GetOptions().memory_points != MemoryPointSet::Gll) {
-      throw std::invalid_argument(
-          "a material direction needs the memory nodes at the GLL points");
-    }
-    if (rotation != RotationalFeedback::None) {
-      throw std::invalid_argument(
-          "a material direction takes no rotational feedback");
-    }
-  }
   if (material) {
     if (trajectory == nullptr) {
       throw std::invalid_argument(
           "the material kernels need the recorded forward trajectory");
-    }
-    if (op.GetOptions().memory_points != MemoryPointSet::Gll) {
-      throw std::invalid_argument(
-          "the material kernels need the memory nodes at the GLL points");
-    }
-    if (rotation != RotationalFeedback::None) {
-      throw std::invalid_argument(
-          "the material kernels take no rotational feedback");
     }
   }
   for (const auto& [node, m] : measurements) {
@@ -470,21 +452,25 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   // a mu direction.
   std::vector<double> dmuV, muRatioV;
   if (material || hasMaterialV) {
-    const auto& base = op.GetRheology().BaseMaterial();
-    const auto ngll = base.Mesh().NGll();
-    const auto [kappaU, muU] = base.Moduli().KappaMu();
+    // the reference's unrelaxed shear and branch fractions at each memory
+    // node, the radial reference's at its memory points
+    const auto np = static_cast<std::size_t>(coupling.Points().count);
+    const auto muUAtPoints = op.Reference().UnrelaxedShearAtPoints();
+    auto pointOf = [&](std::size_t rn) {
+      return static_cast<std::size_t>(
+                 coupling.ElementOfNode(static_cast<int>(rn))) *
+                 np +
+             coupling.NodeInElementOf(static_cast<int>(rn));
+    };
     auto muUNode = std::vector<double>(nodeCount, 0.0);
     for (auto rn = std::size_t{0}; rn < nodeCount; ++rn) {
-      const auto full =
-          static_cast<std::size_t>(coupling.ElementOfNode(static_cast<int>(rn))) *
-              ngll +
-          coupling.NodeInElementOf(static_cast<int>(rn));
-      muUNode[rn] = muU[full];
+      muUNode[rn] = muUAtPoints[pointOf(rn)];
     }
     for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto atPoints = op.Reference().BranchFractionAtPoints(k);
       auto f = std::vector<double>(nodeCount, 0.0);
       for (auto rn = std::size_t{0}; rn < nodeCount; ++rn) {
-        f[rn] = muUNode[rn] > 0.0 ? op.muBranch_[k][rn] / muUNode[rn] : 0.0;
+        f[rn] = atPoints[pointOf(rn)];
       }
       fractions.push_back(std::move(f));
     }

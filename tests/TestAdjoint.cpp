@@ -795,7 +795,10 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   // is a nodal one, central differences of the objective on the shifted
   // material (the rheology rebuilt at the same fractions and times, the
   // sea level engine's gravity held) land on them at second order with
-  // Richardson at 1e-6. Refused without a trajectory.
+  // Richardson at 1e-6. With rotational feedback on, axial and full, the
+  // kernels in kappa and mu are the tangent's transpose alike (the
+  // density kernel is formed without rotational feedback only). Refused
+  // without a trajectory.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
   const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
@@ -853,12 +856,18 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   };
 
   for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const bool rotating = rotation != RotationalFeedback::None;
+    // rotational feedback at the default points only
+    if (rotating && set != MemoryPointSet::Gauss) continue;
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
-    const auto atPoints = AtMemoryPoints(op.Points(), d);
+    auto atPoints = AtMemoryPoints(op.Points(), d);
+    if (rotating) atPoints.rho.clear();
     SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
-                                 .rotation = RotationalFeedback::None,
+                                 .rotation = rotation,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -869,13 +878,13 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel.size(), atPoints.kappa.size());
     ASSERT_EQ(kernels.muKernel.size(), atPoints.mu.size());
-    ASSERT_EQ(kernels.rhoKernel.size(), k0.size());
+    ASSERT_EQ(kernels.rhoKernel.size(), rotating ? 0 : k0.size());
     auto paired = 0.0;
     for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
       paired += kernels.kappaKernel[i] * atPoints.kappa[i] +
                 kernels.muKernel[i] * atPoints.mu[i];
     }
-    for (auto i = std::size_t{0}; i < k0.size(); ++i) {
+    for (auto i = std::size_t{0}; i < kernels.rhoKernel.size(); ++i) {
       paired += kernels.rhoKernel[i] * d.rho[i];
     }
 
@@ -888,7 +897,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
         measurements);
     EXPECT_NEAR(paired, tangent, 1e-10 * std::abs(tangent))
         << "scheme " << static_cast<int>(scheme) << ", points "
-        << static_cast<int>(set);
+        << static_cast<int>(set) << ", rotation " << static_cast<int>(rotation);
     // The refusal without a trajectory.
     EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
                  std::invalid_argument);
@@ -962,7 +971,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   const auto gMid = setup.Smooth(rng, 1.0);
   const auto gEnd = setup.Smooth(rng, 0.5);
   const auto gDisp = setup.Smooth(rng, 0.4);
-  auto gap = [&](std::size_t npts, Scheme scheme, MemoryPointSet set) {
+  auto gap = [&](std::size_t npts, Scheme scheme, MemoryPointSet set,
+                 RotationalFeedback rotation = RotationalFeedback::None) {
     auto times = std::vector<double>{};
     for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(10.0 * static_cast<double>(n) /
@@ -985,7 +995,7 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
     const auto atPoints = AtMemoryPoints(op.Points(), d);
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
-                                 .rotation = RotationalFeedback::None,
+                                 .rotation = rotation,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -1002,7 +1012,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
         sum += kernels.kappaKernel[i] * atPoints.kappa[i] +
                kernels.muKernel[i] * atPoints.mu[i];
       }
-      for (auto i = std::size_t{0}; i < k0.size(); ++i) {
+      // (no density kernel with rotational feedback)
+      for (auto i = std::size_t{0}; i < kernels.rhoKernel.size(); ++i) {
         sum += kernels.rhoKernel[i] * d.rho[i];
       }
       paired[method] = sum;
@@ -1014,14 +1025,26 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     const auto coarse = gap(5, scheme, set);
     const auto fine = gap(9, scheme, set);
-    const auto finer = gap(17, scheme, set);
     // a few per cent at 2.5 kyr steps (the first-order scheme the larger),
     // falling under refinement
     EXPECT_LT(coarse, 0.1) << "scheme " << static_cast<int>(scheme);
     EXPECT_LT(fine, coarse / 1.5) << "scheme " << static_cast<int>(scheme)
                                   << " " << coarse << " " << fine;
+    // a third level at the default points
+    if (set != MemoryPointSet::Gauss) continue;
+    const auto finer = gap(17, scheme, set);
     EXPECT_LT(finer, fine / 1.5) << "scheme " << static_cast<int>(scheme)
                                  << " " << fine << " " << finer;
+  }
+  // the same with the rotational feedback on, in kappa and mu
+  for (auto rotation : {RotationalFeedback::Axial, RotationalFeedback::Full}) {
+    const auto coarse =
+        gap(5, Scheme::ExponentialTrapezoid, MemoryPointSet::Gauss, rotation);
+    const auto fine =
+        gap(9, Scheme::ExponentialTrapezoid, MemoryPointSet::Gauss, rotation);
+    EXPECT_LT(coarse, 0.1) << "rotation " << static_cast<int>(rotation);
+    EXPECT_LT(fine, coarse / 1.5) << "rotation " << static_cast<int>(rotation)
+                                  << " " << coarse << " " << fine;
   }
 }
 

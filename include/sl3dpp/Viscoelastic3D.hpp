@@ -378,6 +378,10 @@ class Viscoelastic3D {
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 
+  /// The inertia moment of the degree-0, m = 0 column of solutions (zero
+  /// without one); distributed, collective (each process's share summed).
+  [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;
+
  private:
   struct Flavour;  // reference effective systems per (scheme, dt)
 

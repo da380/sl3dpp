@@ -771,14 +771,16 @@ TEST(SecondOrderAdjoint3D, DiscreteLateralHessianIsExact) {
   EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted));
 }
 
-TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactAndSymmetric) {
+void DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback rotation) {
   // With lateral structure on and LATERAL directions in the moduli as
   // well as the thickness and the log viscosity, the discrete second-order
   // sweep with the material kernels on: the carried kernels (material
   // included) equal the first-order discrete sweep's to rounding;
   // <H u, w> = <H w, u> and both equal <g, F''[u, w]> from the discrete
   // 3D second-order tangent-linear run in the material, to the solvers'
-  // tolerance — the exact transposes, every mixed block exercised.
+  // tolerance — the exact transposes, every mixed block exercised. At
+  // the default memory nodes, the Gauss points (the same under lateral
+  // moduli is held at the GLL points, below).
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(23);
   const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
@@ -820,10 +822,10 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactAndSymmetric) {
   const auto& m0 = kappaMu.second;
 
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
-                    {.memory_points = MemoryPointSet::Gll});
+                    {.memory_points = MemoryPointSet::Gauss});
   SeaLevelEvolution3D evolution(
       op, scene.solver, scene.state,
-      {.rotation = RotationalFeedback::None,
+      {.rotation = rotation,
        .rtol = 1e-12,
        .coupled_rtol = 1e-12,
        .record_stride = 1});
@@ -912,6 +914,14 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactAndSymmetric) {
   EXPECT_NEAR(forward, uvTerm + huW, 1e-8 * std::abs(forward));
 }
 
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactAndSymmetric) {
+  DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback::None);
+}
+
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderRotation) {
+  DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback::Full);
+}
+
 TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   // With lateral structure on and lateral directions in the thickness,
   // the log viscosity and the moduli in both u and w, the continuous
@@ -919,6 +929,8 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   // tend to the discrete ones block by block as the steps are halved,
   // and so does its mismatch with the continuous second-order run: the
   // commute level of the first-order 3D gates, on the eta = 1e22 mantle.
+  // At the default memory nodes, the Gauss points, with the full
+  // rotational feedback on (without it under lateral moduli, below).
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(29);
   const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
@@ -942,7 +954,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   const auto& m0 = kappaMu.second;
   const auto span = 10.0 * scene.Kyr();
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
-                    {.memory_points = MemoryPointSet::Gll});
+                    {.memory_points = MemoryPointSet::Gauss});
   const auto& coupling = op.Coupling();
   struct Blocks {
     double ice, viscosity, material, forward;
@@ -965,7 +977,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
-        {.rotation = RotationalFeedback::None,
+        {.rotation = RotationalFeedback::Full,
          .rtol = 1e-12,
          .coupled_rtol = 1e-12,
          .record_stride = 1});
@@ -1042,12 +1054,16 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
     iceGaps.push_back(std::abs(d.ice - c.ice) / std::abs(d.ice));
     viscosityGaps.push_back(std::abs(d.viscosity - c.viscosity) / std::abs(d.viscosity));
     materialGaps.push_back(std::abs(d.material - c.material) / std::abs(d.material));
-    mismatches.push_back(std::abs(c.ice + c.viscosity + c.material - c.forward) /
-                         std::abs(c.forward));
+    // against the blocks' size: with the rotational feedback on they
+    // nearly cancel in the sum
+    mismatches.push_back(
+        std::abs(c.ice + c.viscosity + c.material - c.forward) /
+        (std::abs(c.ice) + std::abs(c.viscosity) + std::abs(c.material)));
   }
   for (const auto* gaps : {&iceGaps, &viscosityGaps, &materialGaps, &mismatches}) {
     EXPECT_LT((*gaps)[0], 0.1) << (*gaps)[0] << " " << (*gaps)[1];
     EXPECT_LT((*gaps)[1], (*gaps)[0]) << (*gaps)[0] << " " << (*gaps)[1];
+    std::cout << "gap " << (*gaps)[0] << " -> " << (*gaps)[1] << '\n';
   }
 }
 
@@ -1199,7 +1215,8 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
   // The continuous second-order sweep at a laterally heterogeneous
   // elastic background: its derivatives tend to the discrete ones block
   // by block as the steps are halved, and so does its mismatch with the
-  // continuous second-order run.
+  // continuous second-order run. At the default memory nodes, the Gauss
+  // points.
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(29);
   const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
@@ -1224,7 +1241,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
   const auto span = 10.0 * scene.Kyr();
   Viscoelastic3D op(
       scene.rheology, kLmax, baseDelta,
-      {.memory_points = MemoryPointSet::Gll,
+      {.memory_points = MemoryPointSet::Gauss,
        .moduli = {.shear =
                       [](double r, double theta, double phi) {
                         return 0.1 * (0.5 + r * r) *

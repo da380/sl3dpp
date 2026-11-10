@@ -513,8 +513,9 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
   // The exact transpose in the material: with lateral viscosity on, the
   // discrete material kernels paired with LATERAL directions in kappa and
   // mu equal the 3D material tangent's objective change, both schemes,
-  // each modulus alone and together. Refused by the continuous sweep and
-  // without a trajectory.
+  // each modulus alone and together, with the memory nodes at the GLL
+  // points and at the Gauss points, and at the Gauss points with the
+  // rotational feedback on, axial and full. Refused without a trajectory.
   auto scene = Scene::Make(1e21);
   std::mt19937 rng(17);
   auto times = std::vector<double>{};
@@ -533,15 +534,25 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
   measurements[4] = std::move(last);
   const auto [k0, m0] = scene.material.Moduli().KappaMu();
 
+  for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    // rotational feedback at the default points, one scheme each
+    if (rotation != RotationalFeedback::None &&
+        (set != MemoryPointSet::Gauss ||
+         (rotation == RotationalFeedback::Axial) !=
+             (scheme == Scheme::BackwardEuler))) {
+      continue;
+    }
     Viscoelastic3D op(scene.rheology, kLmax,
                       [](double, double theta, double phi) {
                         return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
                       },
-                      {.memory_points = MemoryPointSet::Gll});
+                      {.memory_points = set});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = scheme, .rotation = RotationalFeedback::None,
+        {.scheme = scheme, .rotation = rotation,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
@@ -582,7 +593,8 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
       const auto lhs =
           Objective(scene, tangent.Run(times, direction, &trajectory), measurements);
       EXPECT_NEAR(lhs, rhs, 1e-8 * std::abs(lhs))
-          << name << " scheme " << static_cast<int>(scheme);
+          << name << " scheme " << static_cast<int>(scheme) << ", points "
+          << static_cast<int>(set) << ", rotation " << static_cast<int>(rotation);
       EXPECT_NE(lhs, 0.0) << name;
     }
 
@@ -617,7 +629,8 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
   // paired with lateral directions in kappa and mu, lateral viscosity on:
   // a few per cent at 2.5 kyr steps, falling under refinement, both
   // schemes — one problem at every resolution (a ramped cap load, the
-  // measurements at the same times).
+  // measurements at the same times). At the default memory nodes, the
+  // Gauss points.
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(29);
   const auto load = scene.MeltLoad(-0.1);
@@ -631,7 +644,8 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
-  auto gap = [&](std::size_t npts, Scheme scheme) {
+  auto gap = [&](std::size_t npts, Scheme scheme,
+                 RotationalFeedback rotation = RotationalFeedback::None) {
     auto times = std::vector<double>{};
     for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(10.0 * static_cast<double>(n) /
@@ -642,10 +656,10 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
     measurements[npts / 2].seaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
-                      {.memory_points = MemoryPointSet::Gll});
+                      {.memory_points = MemoryPointSet::Gauss});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = scheme, .rotation = RotationalFeedback::None,
+        {.scheme = scheme, .rotation = rotation,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
@@ -681,6 +695,11 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
     EXPECT_LT(fine, coarse / 1.5) << "scheme " << static_cast<int>(scheme)
                                   << " " << coarse << " " << fine;
   }
+  // the same with the full rotational feedback on
+  const auto coarse = gap(5, Scheme::ExponentialTrapezoid, RotationalFeedback::Full);
+  const auto fine = gap(9, Scheme::ExponentialTrapezoid, RotationalFeedback::Full);
+  EXPECT_LT(coarse, 0.1);
+  EXPECT_LT(fine, coarse / 1.5) << coarse << " " << fine;
 }
 
 TEST(DiscreteAdjoint3D, ZeroLateralMaterialKernelsMatchThe1D) {
@@ -841,6 +860,15 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentUnderLateralModuli) {
   }
 }
 
+/// The lateral-moduli material gates' rotational feedback: full under
+/// the backward Euler scheme, none under the trapezoid, so that the
+/// material derivative about a laterally heterogeneous elastic
+/// background is gated both ways.
+RotationalFeedback RotationOf(Scheme scheme) {
+  return scheme == Scheme::BackwardEuler ? RotationalFeedback::Full
+                                         : RotationalFeedback::None;
+}
+
 TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
   // The material kernels at a laterally heterogeneous elastic background:
   // the discrete kappa(x) and mu(x) kernels paired with lateral directions
@@ -871,7 +899,7 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
         {.memory_points = MemoryPointSet::Gll, .moduli = TestModuli()});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = scheme, .rotation = RotationalFeedback::None,
+        {.scheme = scheme, .rotation = RotationOf(scheme),
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
@@ -975,9 +1003,10 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
 /// under refinement, both schemes; the forward steps, the continuous
 /// sweep's reversed steps and the discrete sweep's regenerations closed
 /// by the given solver (the discrete transpose is a fixed point either
-/// way).
+/// way). At the default memory nodes, the Gauss points.
 void ContinuousMaterialKernelsAgreeUnderLateralModuli(
-    Viscoelastic3D::Options::StepSolver solver) {
+    Viscoelastic3D::Options::StepSolver solver,
+    std::initializer_list<Scheme> schemes) {
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(29);
   const auto load = scene.MeltLoad(-0.1);
@@ -1004,7 +1033,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                       {.solver = solver,
                        .solve_rtol = 1e-12,
-                       .memory_points = MemoryPointSet::Gll,
+                       .memory_points = MemoryPointSet::Gauss,
                        .moduli = TestModuli()});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
@@ -1037,7 +1066,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
     return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
            std::abs(paired[AdjointMethod::Discrete]);
   };
-  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+  for (auto scheme : schemes) {
     const auto coarse = gap(5, scheme);
     const auto fine = gap(9, scheme);
     EXPECT_LT(coarse, 0.1) << "scheme " << static_cast<int>(scheme);
@@ -1050,12 +1079,15 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
 
 TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderLateralModuli) {
   ContinuousMaterialKernelsAgreeUnderLateralModuli(
-      Viscoelastic3D::Options::StepSolver::FixedPoint);
+      Viscoelastic3D::Options::StepSolver::FixedPoint,
+      {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler});
 }
 
 TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeUnderConjugateGradientSteps) {
+  // one scheme: the solver changes how a step is closed, not the scheme
   ContinuousMaterialKernelsAgreeUnderLateralModuli(
-      Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+      Viscoelastic3D::Options::StepSolver::ConjugateGradients,
+      {Scheme::ExponentialTrapezoid});
 }
 
 TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {

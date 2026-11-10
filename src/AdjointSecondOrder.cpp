@@ -139,13 +139,6 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
         "a material direction of the second-order sweep takes kappa and mu, "
         "not the density");
   }
-  if (materialV || options_.material_kernels) {
-    if (ev.options_.rotation != RotationalFeedback::None) {
-      throw std::invalid_argument(
-          "the material in the second-order sweep takes no rotational "
-          "feedback");
-    }
-  }
   return options_.method == AdjointMethod::Discrete
              ? DiscreteSecondOrder(times, measurements, tangent, ditauPoints,
                                    trajectory, oceanFunctions, material)
@@ -806,7 +799,9 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   derivatives.itauKernel = op.ItauKernelsAtNodes(std::move(dItauKernel));
   derivatives.kappaKernel = std::move(dKappaKernel);
   derivatives.muKernel = std::move(dMuKernel);
-  if (material) {
+  // the density kernel without rotational feedback only: the moments of
+  // inertia would move with the density
+  if (material && ev.options_.rotation == RotationalFeedback::None) {
     kernels.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
     derivatives.rhoKernel = op.BaseMaterial().DensityGradient(dDensityDuals);
   }
@@ -1470,7 +1465,9 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   derivatives.itauKernel = op.ItauKernelsAtNodes(std::move(dItauKernel));
   derivatives.kappaKernel = std::move(dKappaKernel);
   derivatives.muKernel = std::move(dMuKernel);
-  if (material) {
+  // the density kernel without rotational feedback only: the moments of
+  // inertia would move with the density
+  if (material && ev.options_.rotation == RotationalFeedback::None) {
     kernels.rhoKernel = op.BaseMaterial().DensityGradient(densityDuals);
     derivatives.rhoKernel = op.BaseMaterial().DensityGradient(dDensityDuals);
   }

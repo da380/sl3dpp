@@ -777,9 +777,10 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   // The stepper at eps along the direction: the moduli perturbed at the
   // points, relative; the density shifted nodally, the branches kept.
   const auto& base = setup.rheology;
-  auto operatorAt = [&](double eps) {
+  auto operatorAt = [&](double eps, bool withDensity) {
     MaterialDirection density;
     density.rho = d.rho;
+    if (!withDensity) density.rho.assign(d.rho.size(), 0.0);
     auto branches = std::vector<Rheology::Branch>{};
     for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
       branches.push_back(base.BranchAt(k));
@@ -796,11 +797,17 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     return ViscoelasticOperator(rheology, kLmax, {.moduli = moduli});
   };
 
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    // with rotational feedback the moduli alone: a density direction
+    // would move the moments of inertia
+    auto along = d;
+    if (rotation != RotationalFeedback::None) along.rho.clear();
     ViscoelasticOperator op(setup.rheology, kLmax);
     SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
-                                 .rotation = RotationalFeedback::None,
+                                 .rotation = rotation,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -808,15 +815,15 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     TangentLinearSolver tangent(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     TangentPerturbation direction;
-    direction.material = d;
+    direction.material = along;
     const auto predicted =
         Objective(setup, tangent.Run(times, direction, &trajectory), measurements);
 
     auto functional = [&](double eps) {
-      const auto moved = operatorAt(eps);
+      const auto moved = operatorAt(eps, !along.rho.empty());
       SeaLevelEvolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
-                                        .rotation = RotationalFeedback::None,
+                                        .rotation = rotation,
                                         .rtol = 1e-12});
       return Objective(setup, movedEvolution.Run(times, History(times, loads)),
                        measurements);
@@ -827,12 +834,15 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     }
     const auto r1 = std::abs(fd[0.1] - predicted);
     const auto r2 = std::abs(fd[0.05] - predicted);
-    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme)
+                            << " rotation " << static_cast<int>(rotation) << " "
                             << fd[0.1] << " " << fd[0.05] << " " << predicted;
     EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
     const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
-        << "scheme " << static_cast<int>(scheme);
+        << "scheme " << static_cast<int>(scheme) << " rotation "
+        << static_cast<int>(rotation);
+    if (rotation != RotationalFeedback::None) continue;
 
     // Each part of the direction alone, to the same standard: the three
     // enter by different routes.
