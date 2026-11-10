@@ -2,10 +2,12 @@
 
 /**
  * @file Forcing.hpp
- * @brief The `forcing` block of a config: a surface load, the sum of a
- * list of terms of surface mass density, and an external tidal potential,
- * the sum of a list of coefficients; the block's reader, and its builder
- * onto a run's grid.
+ * @brief The `forcing` blocks of the configs. `response`'s: a surface
+ * load, the sum of a list of terms of surface mass density, and an
+ * external tidal potential, the sum of a list of coefficients; the block's
+ * reader, and its builder onto a run's grid. `sea-level`'s (and the
+ * kernel commands'): the state the ocean stands on and the surface load
+ * that changes it, the ice (SeaLevelForcing, at the end of this file).
  *
  * A load term is one of
  *
@@ -214,5 +216,51 @@ class TimedForcing {
 
 /// What a forcing holds, as `load (2 terms) + tide (1 coefficient)`.
 [[nodiscard]] std::string Summary(const Forcing& forcing);
+
+// -- the forcing of a run with an ocean ---------------------------------------
+
+/// The state the ocean stands on: a planetmodel surface file holding
+/// `ice_thickness` and `topography`.
+struct StateSource {
+  std::filesystem::path file;
+  /// The date the elastic fingerprint reads the state at, kyr before
+  /// present; a run through time reads it at its window's start (or,
+  /// calibrating, at its end) instead.
+  double date_kyr_bp = 0.0;
+};
+
+/// The elastic fingerprint's ice change: a Gaussian cap, of a fraction of
+/// the state's ice thickness or of a thickness.
+struct IceChange {
+  enum class Kind { CapFraction, CapThickness } kind = Kind::CapFraction;
+  GeographicPoint site;
+  double width = 0.0;   ///< the Gaussian cap's width, radians
+  double amount = 0.0;  ///< the fraction, or the thickness in metres
+};
+
+/// The ice: through time, a surface file's history of `ice_thickness`;
+/// for the elastic fingerprint, a change applied to the state.
+struct IceForcing {
+  std::filesystem::path history;    ///< a run through time's
+  std::optional<IceChange> change;  ///< the fingerprint's
+};
+
+/// The `forcing` block of `sea-level` and the kernel commands: the state
+/// and the surface load that changes it. The load is the ice, a member of
+/// its own; another kind of surface load would be a member beside it.
+struct SeaLevelForcing {
+  StateSource state;
+  IceForcing ice;
+};
+
+/// Reads a `forcing` block of a run with an ocean, relative paths against
+/// `directory`: `state` (`file`, and `date_kyr_bp` for the fingerprint)
+/// and `ice`, both required. In a run through time (`timed`) `ice` is an
+/// ice history, `file`; for the fingerprint it is a change, `type`
+/// ("cap_fraction" or "cap_thickness"), `latitude`, `longitude`,
+/// `width_deg` and the amount, `fraction` or `thickness_m`. The members of
+/// the other kind of run are refused, naming what this run takes.
+[[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
+    const Json& block, const std::filesystem::path& directory, bool timed);
 
 }  // namespace sl3dpp::app

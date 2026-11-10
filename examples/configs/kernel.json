@@ -1,13 +1,15 @@
 {
-  "model": "prem8.gia.deck",
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../viscosity_log.nc"}},
   "lmax": 12,
-  "viscosity": {"file": "../viscosity_log.nc"},
-  "state": {"file": "../synthetic_earth.nc"},
-  "ice_history": {"file": "../synthetic_earth.nc"},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 22},
+  "forcing": {
+    "state": {"file": "../synthetic_earth.nc"},
+    "ice": {"file": "../synthetic_earth.nc"}
+  },
   "rotation": "full",
   "moments": "hydrostatic",
-  "coupled": {"rtol": 1e-8, "max_iterations": 80},
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
   "measurements": [
     {"type": "sea_level_cap", "name": "hudson_bay_sea_level",
      "latitude": 60, "longitude": 275, "width_deg": 10, "date_kyr_bp": 0},

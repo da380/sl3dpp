@@ -1,11 +1,12 @@
-// sl3d's 3D commands over MPI ranks (apps/Ranks.hpp), built with
-// SL3DPP_WITH_MPI and run under mpiexec: evolve, kernel and the
-// viscoelastic response over the ranks against the same configs on one
+// sl3d's 3D runs over MPI ranks (apps/Ranks.hpp), built with
+// SL3DPP_WITH_MPI and run under mpiexec: sea-level's 3-D run, kernel and
+// the viscoelastic response over the ranks against the same configs on one
 // process (rank 0 alone, as a run of one rank), a run resumed from
-// per-rank checkpoints against the uninterrupted one, and the spilled
-// trajectory in per-rank subdirectories against the in-memory one. Rank 0
-// writes the outputs and compares them; every rank's verdict is reduced to
-// rank 0, which alone prints.
+// per-rank checkpoints against the uninterrupted one, the spilled
+// trajectory in per-rank subdirectories against the in-memory one, and a
+// 1-D sea-level run, which is the first rank's alone. Rank 0 writes the
+// outputs and compares them; every rank's verdict is reduced to rank 0,
+// which alone prints.
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -91,38 +92,37 @@ class AppsOverRanks : public ::testing::Test {
   [[nodiscard]] static std::string Body() {
     const auto data = std::string{SL3DPP_TEST_DATA_DIR};
     return std::string{R"(
-      "model": ")"} +
-           data + R"(/prem8.elastic.deck",
-      "model_format": "elastic",
+      "model": {"deck": ")"} +
+           data + R"(/prem8.elastic.deck", "format": "elastic",
+                "viscosity": {"file": ")" +
+           data + R"(/viscosity_log.nc"}},
       "lmax": 8,
-      "viscosity": {"file": ")" +
-           data + R"(/viscosity_log.nc"},
-      "state": {"file": "history.nc"},
-      "ice_history": {"file": "history.nc"},
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+      "forcing": {"state": {"file": "history.nc"},
+                  "ice": {"file": "history.nc"}},
       "rotation": "full")";
   }
 
   fs::path dir_;
 };
 
-TEST_F(AppsOverRanks, EvolveMatchesOneProcessAndResumesFromRankCheckpoints) {
+TEST_F(AppsOverRanks, SeaLevelMatchesOneProcessAndResumesFromRankCheckpoints) {
   const auto one = Write("one.json", "{" + Body() + R"(,
-      "output": "out/one.nc"})");
+      "output": {"surface": "out/one.nc"}})");
   const auto over = Write("over.json", "{" + Body() + R"(,
-      "output": "out/over.nc"})");
+      "output": {"surface": "out/over.nc"}})");
   const auto pieces = Write("pieces.json", "{" + Body() + R"(,
       "checkpoint": {"directory": "ckpt", "every": 1,
                      "max_walltime_min": 1e-9},
-      "output": "out/pieces.nc"})");
-  OneProcess([&] { static_cast<void>(app::RunEvolve3D(one)); });
-  const auto summary = app::RunEvolve3D(over);
+      "output": {"surface": "out/pieces.nc"}})");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+  const auto summary = app::RunSeaLevel(over);
   EXPECT_NE(summary.find("wrote"), std::string::npos) << summary;
   // stopped at every checkpoint by the wall-time limit, and resumed from
   // the node every rank's own subdirectory holds
   auto attempts = 0;
   for (; attempts < 8; ++attempts) {
-    const auto part = app::RunEvolve3D(pieces);
+    const auto part = app::RunSeaLevel(pieces);
     if (part.find("wrote") != std::string::npos) break;
     EXPECT_NE(part.find("checkpointed"), std::string::npos) << part;
   }
@@ -146,7 +146,7 @@ TEST_F(AppsOverRanks, EvolveMatchesOneProcessAndResumesFromRankCheckpoints) {
   }
 }
 
-TEST_F(AppsOverRanks, CalibratedMigratingEvolveMatchesOneProcess) {
+TEST_F(AppsOverRanks, CalibratedMigratingSeaLevelMatchesOneProcess) {
   // Calibration iterates whole runs until the initial sea level settles:
   // every rank must decide alike when to stop (they see the same, rank 0's,
   // sea level), and the calibrated run, migrating shorelines and all,
@@ -163,22 +163,22 @@ TEST_F(AppsOverRanks, CalibratedMigratingEvolveMatchesOneProcess) {
     }
   }
   body += R"(,
-      "shorelines": "migrating",
-      "calibrate_initial_sea_level": {"rtol": 1e-8})";
+      "ocean": {"shorelines": "migrating",
+                "calibrate_initial_sea_level": {"rtol": 1e-8}})";
   const auto one = Write("one.json", "{" + body + R"(,
-      "output": "out/one.nc"})");
+      "output": {"surface": "out/one.nc"}})");
   const auto over = Write("over.json", "{" + body + R"(,
-      "output": "out/over.nc"})");
+      "output": {"surface": "out/over.nc"}})");
   const auto pieces = Write("pieces.json", "{" + body + R"(,
       "checkpoint": {"directory": "ckpt", "every": 1,
                      "max_walltime_min": 1e-9},
-      "output": "out/pieces.nc"})");
-  OneProcess([&] { static_cast<void>(app::RunEvolve3D(one)); });
-  const auto summary = app::RunEvolve3D(over);
+      "output": {"surface": "out/pieces.nc"}})");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+  const auto summary = app::RunSeaLevel(over);
   EXPECT_NE(summary.find("initial sea level calibrated"), std::string::npos)
       << summary;
   for (auto attempts = 0; attempts < 8; ++attempts) {
-    if (app::RunEvolve3D(pieces).find("wrote") != std::string::npos) break;
+    if (app::RunSeaLevel(pieces).find("wrote") != std::string::npos) break;
   }
   Barrier();
   if (Rank() != 0) return;
@@ -260,6 +260,97 @@ TEST_F(AppsOverRanks, KernelMatchesOneProcessAndSpillsPerRank) {
     }
   }
   EXPECT_GT(compared, 0);
+}
+
+TEST_F(AppsOverRanks, SeaLevelUnderLateralModuliMatchesOneProcess) {
+  // Under lateral moduli the rank cuts balance the transform work of the
+  // elements the moduli perturb as well as the viscous ones: the run over
+  // the ranks is the one-process run's to the substructured solves'
+  // round-off.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  if (Rank() == 0) {
+    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic));
+    ASSERT_TRUE(deck);
+    const auto model = EarthModel::FromDeck(*deck);
+    ASSERT_TRUE(model);
+    ASSERT_TRUE(
+        io::WriteModuli(dir_ / "moduli.nc", *model, SurfaceGrid(8),
+                        [](double, double theta, double phi) {
+                          return 0.05 * std::sin(theta) * std::cos(phi);
+                        },
+                        {}, {.name = "toy moduli", .elementMetres = 500e3}));
+  }
+  Barrier();
+  auto body = Body();
+  const auto viscosity = std::string{"/viscosity_log.nc\"}"};
+  body.replace(body.find(viscosity), viscosity.size(),
+               viscosity + R"(, "moduli": {"file": "moduli.nc"})");
+  const auto one = Write("one.json", "{" + body + R"(,
+      "output": {"surface": "out/one.nc"}})");
+  const auto over = Write("over.json", "{" + body + R"(,
+      "output": {"surface": "out/over.nc"}})");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+  const auto summary = app::RunSeaLevel(over);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with(
+        "3-D (lateral viscosity, lateral moduli), viscoelastic"))
+        << summary;
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    EXPECT_LT(Relative(distributed.variables.at(name).values,
+                       reference.variables.at(name).values),
+              1e-10)
+        << name;
+  }
+}
+
+TEST_F(AppsOverRanks, RadialSeaLevelIsTheFirstRanksAlone) {
+  // A 1-D sea-level run is one process's: over the ranks the first runs it
+  // alone, as a run of one rank (its checkpoints in the directory itself,
+  // not a rank's subdirectory), and the others return at once. The output
+  // is the one-process run's to the bit.
+  if (Rank() == 0) {
+    std::ofstream(dir_ / "ball.deck")
+        << "homogeneous test ball\n"
+           "gia deck for the sl3d tests\n"
+           "0 5500 10000 5500 10000 5500 1 1e21\n"
+           "6371000 5500 10000 5500 10000 5500 1 1e21\n";
+  }
+  Barrier();
+  const auto body = std::string{R"(
+      "model": {"deck": "ball.deck"}, "lmax": 8,
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
+      "forcing": {"state": {"file": "history.nc"},
+                  "ice": {"file": "history.nc"}},
+      "rotation": "full", "moments": "hydrostatic")"};
+  const auto one = Write("one.json", "{" + body + R"(,
+      "output": {"surface": "out/one.nc"}})");
+  const auto over = Write("over.json", "{" + body + R"(,
+      "checkpoint": {"directory": "ckpt", "every": 2},
+      "output": {"surface": "out/over.nc"}})");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+  const auto summary = app::RunSeaLevel(over);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with("1-D, viscoelastic")) << summary;
+  } else {
+    EXPECT_EQ(summary, "");
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_TRUE(fs::exists(dir_ / "ckpt" / "node_000004.ckpt"));
+  EXPECT_FALSE(fs::exists(dir_ / "ckpt" / "rank_0000"));
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto first = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    EXPECT_EQ(first.variables.at(name).values,
+              reference.variables.at(name).values)
+        << name;
+  }
 }
 
 TEST_F(AppsOverRanks, ViscoelasticResponseMatchesOneProcess) {

@@ -27,6 +27,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | The 3D static problem as a program: `sl3d response` solves an elastic Earth's response, radial or laterally heterogeneous, to a prescribed load (a sum of caps, disks, surface-file fields and coefficient tables) and tide, with no ocean (the lateral moduli read from a planetmodel model file's `mu` and `kappa` by `io::ModelModuli`, written from a radial model by `io::WriteModuli`), over MPI ranks, and writes the surface response, the radial model's beside it, the surface coefficients as a cross-code exchange table and the response inside the body as a model file (`io::WriteNodeFields`, with `io::ResponseFieldsAtNodes`) for planetmodel's cutaways | `apps/ResponseCommand.cpp`, `apps/Forcing.hpp`, `io/ModelModuli.hpp`, `io/KernelWriter.hpp` |
 | The viscoelastic response to a prescribed forcing as a program: `sl3d response` with a `times` block steps a radial or laterally heterogeneous Maxwell Earth (the 3D viscosity read from a model file by `io::ModelViscosity`, the lateral moduli as above) through time, with no ocean, under a load and tide given as sums of terms with piecewise-linear amplitude histories and surface-file fields on a time axis, by the radial stepper per degree or by `Viscoelastic3D` over MPI ranks, and writes the surface response at every node, the radial reference model's beside it, and an exchange table per node | `apps/ResponseCommand.cpp`, `apps/Forcing.hpp`, `apps/Blocks.hpp` |
+| The sea level equation as a program: `sl3d sea-level` solves the elastic fingerprint of an ice change on a present-day state read from a surface file, or, with a `times` block, GIA through time under an ice history (frozen or migrating shorelines, the initial sea level read or calibrated), on the radial model or, under a lateral viscosity or lateral moduli (`Viscoelastic3D::Options::moduli`), in 3D over MPI ranks, restartable from disk checkpoints; `kernel1d` and `kernel` read the same blocks for their forward runs | `apps/SeaLevelCommand.cpp`, `apps/Common.hpp`, `apps/KernelCommand.cpp`, `apps/Blocks.hpp` |
 | Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives and kernels; its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
@@ -655,8 +656,8 @@ Beyond the fixtures:
   tangent-linear runs run the same way, each rank sweeping its own nodes
   over its own trajectory, as do the discrete 3D sweep, the material
   tangent and the material kernels (docs/adjoints.md §17). `sl3d`'s
-  `evolve` and `kernel` run under `mpiexec` with per-rank checkpoints,
-  and `response` over the same ranks
+  3D `sea-level` run and `kernel` run under `mpiexec` with per-rank
+  checkpoints, and `response` over the same ranks
   ([sl3d-configs.md](sl3d-configs.md)).
 
 ## 13. Dependencies and boundaries
@@ -692,8 +693,12 @@ Beyond the fixtures:
   linked publicly, so a code using sl3dpp can read and write its files
   beside it.
 - **The program.** `apps/` holds the `sl3d` program: strict JSON configs
-  read with planetmodel's reader, one subcommand per capability, outputs
-  with provenance, and disk checkpoints for the evolutions.
+  read with planetmodel's reader, one subcommand per physical problem
+  (`love-numbers`, `response`, `sea-level`) and the kernel commands, each
+  config made of blocks read by one reader apiece (`apps/Blocks.hpp`), the
+  run's dimension and its elastic or viscoelastic kind read from the
+  blocks; outputs with provenance, and disk checkpoints for the runs
+  through time.
 
 ## 14. Known limitations
 

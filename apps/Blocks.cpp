@@ -19,6 +19,11 @@ DeckFormat FormatOf(ModelFormat format) {
 
 ModelBlock ReadModelBlock(const Json& block,
                           const std::filesystem::path& directory) {
+  if (!block.IsObject()) {
+    Fail(block,
+         "is not a block: `model` is an object of `deck` (the deck's path), "
+         "`format`, `moduli` and `viscosity`");
+  }
   Allow(block, {"deck", "format", "moduli", "viscosity"});
   auto out = ModelBlock{};
   out.deck = PathOf(block, "deck", directory);
@@ -61,9 +66,43 @@ double Finite(const Json& item) {
   return value;
 }
 
+/// The before-present form of a `times` block.
+TimesBlock ReadDates(const Json& block) {
+  for (const auto* name : {"start_kyr", "end_kyr", "at_kyr"}) {
+    if (Has(block, name)) {
+      Fail(block.At(name),
+           "counts forwards on a run's own clock, the form of `response`'s "
+           "times; this command's times are dates before present: "
+           "`start_kyr_bp`, `end_kyr_bp` and `nodes`");
+    }
+  }
+  Allow(block, {"start_kyr_bp", "end_kyr_bp", "nodes"});
+  auto out = TimesBlock{};
+  out.start_kyr_bp = Finite(block.At("start_kyr_bp"));
+  out.end_kyr_bp =
+      Has(block, "end_kyr_bp") ? Finite(block.At("end_kyr_bp")) : 0.0;
+  out.nodes = Integer(block, "nodes");
+  if (!(out.start_kyr_bp > out.end_kyr_bp)) {
+    Fail(Has(block, "end_kyr_bp") ? block.At("end_kyr_bp") : block,
+         "is not later than start_kyr_bp: dates count back from the "
+         "present, so the window's end is the smaller");
+  }
+  if (out.nodes < 2) Fail(block.At("nodes"), "is fewer than two nodes");
+  return out;
+}
+
 }  // namespace
 
-TimesBlock ReadTimesBlock(const Json& block) {
+TimesBlock ReadTimesBlock(const Json& block, TimesForm form) {
+  if (form == TimesForm::BeforePresent) return ReadDates(block);
+  for (const auto* name : {"start_kyr_bp", "end_kyr_bp"}) {
+    if (Has(block, name)) {
+      Fail(block.At(name),
+           "is a date before present, the form of `sea-level`'s times; "
+           "`response`'s times count forwards on the run's own clock: "
+           "`start_kyr`, `end_kyr` and `nodes`, or `at_kyr`");
+    }
+  }
   Allow(block, {"start_kyr", "end_kyr", "nodes", "at_kyr"});
   const auto even = Has(block, "end_kyr") || Has(block, "nodes");
   const auto listed = Has(block, "at_kyr");
@@ -123,15 +162,74 @@ TimesBlock ReadTimesBlock(const Json& block) {
   return out;
 }
 
-SolverBlock ReadSolverBlock(const Json& block, int lmax) {
-  Allow(block, {"rtol", "max_iterations", "transform_degrees", "cache_mb",
-                "scheme", "step"});
+OceanBlock ReadOceanBlock(const Json& block) {
+  Allow(block, {"shorelines", "calibrate_initial_sea_level"});
+  auto out = OceanBlock{};
+  if (Has(block, "shorelines")) {
+    out.shorelines = Choice<Shorelines>(
+        block.At("shorelines"),
+        {{"frozen", Shorelines::Frozen}, {"migrating", Shorelines::Migrating}});
+  }
+  if (Has(block, "calibrate_initial_sea_level")) {
+    const auto& calibration = block.At("calibrate_initial_sea_level");
+    Allow(calibration, {"method", "iterations", "rtol"});
+    out.calibrate = true;
+    if (Has(calibration, "method")) {
+      out.calibration_method = Choice<CalibrationMethod>(
+          calibration.At("method"),
+          {{"fixed_point", CalibrationMethod::FixedPoint},
+           {"gradient", CalibrationMethod::Gradient}});
+    }
+    out.calibration_iterations = Integer(calibration, "iterations", 10);
+    if (out.calibration_iterations < 1) {
+      Fail(calibration.At("iterations"), "is fewer than one run");
+    }
+    out.calibration_rtol = Number(calibration, "rtol", 1e-4);
+    if (!(out.calibration_rtol > 0.0)) {
+      Fail(calibration.At("rtol"), "is not a positive tolerance");
+    }
+  }
+  return out;
+}
+
+SolverBlock SolverDefaults(SolverOf command) {
   auto out = SolverBlock{};
-  out.rtol = Number(block, "rtol", out.rtol);
-  if (!(out.rtol > 0.0)) Fail(block.At("rtol"), "is not a positive tolerance");
-  out.max_iterations = Integer(block, "max_iterations", out.max_iterations);
-  if (out.max_iterations < 1) {
-    Fail(block.At("max_iterations"), "is not a positive count");
+  if (command == SolverOf::Response) {
+    out.step_rtol = 1e-10;
+    out.step_max_iterations = 200;
+  }
+  return out;
+}
+
+SolverBlock ReadSolverBlock(const Json& block, int lmax, SolverOf command) {
+  const auto ocean = command == SolverOf::SeaLevel;
+  if (!ocean && Has(block, "rtol")) {
+    Fail(block.At("rtol"),
+         "is the sea level solves' tolerance, which `response` (no ocean) "
+         "does not have; its 3D solves' tolerance is `step_rtol`");
+  }
+  if (ocean) {
+    Allow(block, {"rtol", "step_rtol", "step_max_iterations",
+                  "transform_degrees", "cache_mb", "scheme", "step"});
+  } else {
+    Allow(block, {"step_rtol", "step_max_iterations", "transform_degrees",
+                  "cache_mb", "scheme", "step"});
+  }
+  auto out = SolverDefaults(command);
+  if (ocean) {
+    out.rtol = Number(block, "rtol", out.rtol);
+    if (!(out.rtol > 0.0)) {
+      Fail(block.At("rtol"), "is not a positive tolerance");
+    }
+  }
+  out.step_rtol = Number(block, "step_rtol", out.step_rtol);
+  if (!(out.step_rtol > 0.0)) {
+    Fail(block.At("step_rtol"), "is not a positive tolerance");
+  }
+  out.step_max_iterations =
+      Integer(block, "step_max_iterations", out.step_max_iterations);
+  if (out.step_max_iterations < 1) {
+    Fail(block.At("step_max_iterations"), "is not a positive count");
   }
   if (Has(block, "transform_degrees")) {
     for (const auto& item : block.At("transform_degrees").AsArray()) {
@@ -163,8 +261,24 @@ SolverBlock ReadSolverBlock(const Json& block, int lmax) {
   return out;
 }
 
+CheckpointBlock ReadCheckpointBlock(const Json& block,
+                                    const std::filesystem::path& directory) {
+  Allow(block, {"directory", "every", "max_walltime_min"});
+  auto out = CheckpointBlock{};
+  out.directory = PathOf(block, "directory", directory);
+  out.every = Integer(block, "every");
+  if (out.every < 1) Fail(block.At("every"), "is not a positive stride");
+  out.max_walltime_min = Number(block, "max_walltime_min", 0.0);
+  return out;
+}
+
 OutputBlock ReadOutputBlock(const Json& block,
                             const std::filesystem::path& directory) {
+  if (!block.IsObject()) {
+    Fail(block,
+         "is not a block: `output` is an object, the surface file its "
+         "`surface`");
+  }
   Allow(block, {"surface", "exchange", "volume", "exchange_nodes"});
   auto out = OutputBlock{};
   out.surface = PathOf(block, "surface", directory);
@@ -182,6 +296,32 @@ OutputBlock ReadOutputBlock(const Json& block,
     }
   }
   return out;
+}
+
+RotationalFeedback RotationOf(const Json& word) {
+  return Choice<RotationalFeedback>(word, {{"none", RotationalFeedback::None},
+                                           {"axial", RotationalFeedback::Axial},
+                                           {"full", RotationalFeedback::Full}});
+}
+
+bool HydrostaticMomentsOf(const Json& word) {
+  return Choice<bool>(word, {{"input", false}, {"hydrostatic", true}});
+}
+
+std::string_view NameOf(RotationalFeedback rotation) {
+  switch (rotation) {
+    case RotationalFeedback::None:
+      return "none";
+    case RotationalFeedback::Axial:
+      return "axial";
+    case RotationalFeedback::Full:
+      break;
+  }
+  return "full";
+}
+
+std::string_view NameOf(Shorelines shorelines) {
+  return shorelines == Shorelines::Frozen ? "frozen" : "migrating";
 }
 
 }  // namespace sl3dpp::app

@@ -44,12 +44,6 @@ RanksOverride::RanksOverride(Ranks ranks)
 
 RanksOverride::~RanksOverride() { Current() = std::move(saved_); }
 
-Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
-                                        const Rheology& rheology) {
-  return OperatorOptions(input.lmax, input.transform_degrees, input.cache_mb,
-                         rheology);
-}
-
 Viscoelastic3D::Options OperatorOptions(int lmax,
                                         const std::vector<int>& transform_degrees,
                                         std::size_t cache_mb,

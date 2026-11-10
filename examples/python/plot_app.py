@@ -2,12 +2,14 @@
 (and, for the ICE-7G figures, get_ice7g.py, which makes run_all.sh run the
 ICE-7G configs too), then `poetry run python plot_app.py` from
 build/examples. The outputs in configs/out/ are read with planetmodel's own
-readers, and one figure per command is written beside this script:
-app_love_numbers.png, app_fingerprint.png, app_evolve.png,
-app_evolve1d_calibrated.png, app_kernels1d.png, app_kernels3d.png and
-app_response.png, plus app_evolve1d_ice7g_calibrated.png, app_fingerprint_ice7g.png
-and app_evolve1d_ice7g.png where the ICE-7G runs exist. A missing output
-skips its figure.
+readers, and figures of each command are written beside this script:
+app_love_numbers.png, app_sea_level_fingerprint.png, app_sea_level.png,
+app_sea_level_1d_calibrated.png, app_sea_level_3d_calibrated.png,
+app_kernels1d.png, app_kernels3d.png and app_response.png,
+app_response_viscoelastic.png, app_response1d_disk.png and
+app_response1d_tide.png, plus app_sea_level_fingerprint_ice7g.png,
+app_sea_level_1d_ice7g.png and app_sea_level_1d_ice7g_calibrated.png
+where the ICE-7G runs exist. A missing output skips its figure.
 """
 from __future__ import annotations
 
@@ -106,7 +108,7 @@ def love_numbers() -> None:
     print("wrote app_love_numbers.png")
 
 
-def fingerprint(name: str, title: str, synthetic: bool) -> None:
+def sea_level_fingerprint(name: str, title: str, synthetic: bool) -> None:
     path = OUT / f"{name}.nc"
     if not path.exists():
         return
@@ -133,15 +135,16 @@ def fingerprint(name: str, title: str, synthetic: bool) -> None:
 
 
 def histories(path: Path):
-    """An evolve output's grid, node dates (kyr BP) and sea-level change."""
+    """A sea-level run's grid, node dates (kyr BP) and sea-level change."""
     file = read_surface_file(path)
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
     sea_level = np.asarray(file.variables["sea_level_change"].values)
     return file.grid, dates, sea_level
 
 
-def evolve() -> None:
-    runs = [(name, OUT / f"{name}.nc") for name in ("evolve1d", "evolve")]
+def sea_level() -> None:
+    runs = [(name, OUT / f"{name}.nc")
+            for name in ("sea_level_1d", "sea_level_3d")]
     runs = [(name, path) for name, path in runs if path.exists()]
     if not runs:
         return
@@ -164,22 +167,22 @@ def evolve() -> None:
             grid, dates, sea_level = histories(path)
             i, j = nearest(grid, *site)
             ax.plot(dates, sea_level[:, i, j], color=f"C{k}",
-                    linestyle="-" if name == "evolve1d" else "--",
+                    linestyle="-" if name == "sea_level_1d" else "--",
                     label=f"{label} ({name})")
     ax.invert_xaxis()
     ax.set_xlabel("kyr before present")
     ax.set_ylabel("sea level change since the start (m)")
     ax.axhline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8, ncol=3)
-    fig.suptitle("sl3d evolve1d (1D, solid) and evolve (3D viscosity, "
-                 "dashed): the synthetic deglaciation")
+    fig.suptitle("sl3d sea-level, 1D (solid) and 3D viscosity (dashed): the "
+                 "synthetic deglaciation")
     fig.tight_layout()
-    fig.savefig("app_evolve.png", dpi=150)
-    print("wrote app_evolve.png")
+    fig.savefig("app_sea_level.png", dpi=150)
+    print("wrote app_sea_level.png")
 
 
-def evolve_calibrated(name: str, reference: str, state: str | None,
-                      title: str) -> None:
+def sea_level_calibrated(name: str, reference: str, state: str | None,
+                         title: str) -> None:
     """A migrating-shoreline run whose initial sea level was calibrated
     against the present day, beside the uncalibrated run from the state
     file's own initial sea level: what the calibration changed at the
@@ -228,8 +231,8 @@ def evolve_calibrated(name: str, reference: str, state: str | None,
     print(f"wrote app_{name}.png")
 
 
-def evolve_ice7g() -> None:
-    path = OUT / "evolve1d_ice7g.nc"
+def sea_level_ice7g() -> None:
+    path = OUT / "sea_level_1d_ice7g.nc"
     if not path.exists():
         return
     grid, dates, sea_level = histories(path)
@@ -254,10 +257,10 @@ def evolve_ice7g() -> None:
     ax.set_ylabel(f"sea level change since {dates[0]:g} ka (m)")
     ax.axhline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8)
-    fig.suptitle("sl3d evolve1d on ICE-7G")
+    fig.suptitle("sl3d sea-level (1D) on ICE-7G")
     fig.tight_layout()
-    fig.savefig("app_evolve1d_ice7g.png", dpi=150)
-    print("wrote app_evolve1d_ice7g.png")
+    fig.savefig("app_sea_level_1d_ice7g.png", dpi=150)
+    print("wrote app_sea_level_1d_ice7g.png")
 
 
 def measurements(directory: Path) -> dict[str, float]:
@@ -374,24 +377,173 @@ def response() -> None:
     print("wrote app_response.png")
 
 
+def response_viscoelastic() -> None:
+    """The cap load grown and removed on the synthetic 3D viscoelastic Earth:
+    the displacement under full load, just after the load has gone and at the
+    end, the lateral structure's part of the last, and the histories at the
+    cap's centre of the load, the displacement and the radial model's."""
+    path = OUT / "response_viscoelastic.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    times = np.asarray(file.time) / KYR
+    load = np.asarray(file.variables["load"].values)
+    disp = np.asarray(file.variables["displacement"].values)
+    radial = np.asarray(file.variables["displacement_radial_model"].values)
+    i, j = nearest(grid, *HUDSON_BAY)
+    full = int(np.argmax(load[:, i, j]))
+    after = full + int(np.argmax(load[full:, i, j] == 0.0))
+    last = len(times) - 1
+
+    fig = plt.figure(figsize=(14, 8))
+    extent = (-140.0, -30.0, 25.0, 85.0)
+    panels = (
+        (disp[full], f"displacement at {times[full]:g} kyr, full load (m)"),
+        (disp[after], f"at {times[after]:g} kyr, the load just removed (m)"),
+        (disp[last], f"at {times[last]:g} kyr (m)"),
+        (disp[last] - radial[last],
+         f"3D minus radial model at {times[last]:g} kyr (m)"),
+    )
+    for k, (values, title) in enumerate(panels):
+        ex = Example.from_fields(grid.colatitudes, grid.longitudes,
+                                 {"field": values})
+        ax = world_map(fig, 2, 3, (1, 2, 4, 5)[k], central_longitude=-85.0,
+                       extent=extent)
+        mesh = plot_field(ax, ex, "field", title=title)
+        mark_sites(ax, [HUDSON_BAY])
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+
+    ax = fig.add_subplot(2, 3, 3)
+    ax.plot(times, load[:, i, j] / 1.0e6, color="0.3")
+    ax.set_ylabel("load at the cap's centre (10$^6$ kg m$^{-2}$)")
+    ax.set_xlabel("time (kyr)")
+    ax.set_title("the forcing")
+    ax = fig.add_subplot(2, 3, 6)
+    ax.plot(times, disp[:, i, j], label="3D model")
+    ax.plot(times, radial[:, i, j], "--", label="radial model")
+    ax.axhline(0.0, color="0.7", lw=0.5)
+    ax.set_ylabel("displacement at the cap's centre (m)")
+    ax.set_xlabel("time (kyr)")
+    ax.set_title("the response")
+    ax.legend()
+    fig.suptitle("sl3d response: a cap load grown and removed over Hudson Bay "
+                 "on the synthetic 3D viscoelastic Earth")
+    fig.tight_layout()
+    fig.savefig("app_response_viscoelastic.png", dpi=150)
+    print("wrote app_response_viscoelastic.png")
+
+
+def response1d_disk() -> None:
+    """A disk load held and then removed on the radial viscoelastic Earth:
+    the displacement against distance from the disk's centre at a few times,
+    the peripheral bulge growing under the load and the uplift after it."""
+    path = OUT / "response1d_disk.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    times = np.asarray(file.time) / KYR
+    disp = np.asarray(file.variables["displacement"].values)
+    theta = np.asarray(grid.colatitudes)[:, None]
+    phi = np.asarray(grid.longitudes)[None, :]
+    theta0 = np.deg2rad(90.0 - HUDSON_BAY[0])
+    phi0 = np.deg2rad(HUDSON_BAY[1])
+    cosine = (np.cos(theta) * np.cos(theta0)
+              + np.sin(theta) * np.sin(theta0) * np.cos(phi - phi0))
+    distance = np.rad2deg(np.arccos(np.clip(cosine, -1.0, 1.0))).ravel()
+    order = np.argsort(distance)
+    near = distance[order] <= 40.0
+
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), sharex=True)
+    for ax, title, chosen in (
+            (axes[0], "under the load", (0.0, 1.0, 5.0, 10.0)),
+            (axes[1], "after its removal", (10.5, 12.0, 15.0, 20.0))):
+        for t in chosen:
+            n = int(np.argmin(np.abs(times - t)))
+            ax.plot(distance[order][near], disp[n].ravel()[order][near],
+                    label=f"{times[n]:g} kyr")
+        ax.axhline(0.0, color="0.7", lw=0.5)
+        ax.axvline(8.0, color="0.7", lw=0.5, ls=":")
+        ax.set_xlabel("distance from the disk's centre (degrees)")
+        ax.set_title(title)
+        ax.legend()
+    axes[0].set_ylabel("radial displacement (m)")
+    fig.suptitle("sl3d response: a disk load of 8 degrees held for 10 kyr on "
+                 "the radial viscoelastic Earth")
+    fig.tight_layout()
+    fig.savefig("app_response1d_disk.png", dpi=150)
+    print("wrote app_response1d_disk.png")
+
+
+def response1d_tide() -> None:
+    """A degree-2 tidal potential switched on and held: the tidal Love
+    numbers of the radial viscoelastic Earth through time, from the elastic
+    values at the start towards the fluid limit, read from the exchange
+    tables of the nodes."""
+    tables = sorted(OUT.glob("response1d_tide_*.txt"))
+    if not tables:
+        return
+    times, h2, k2 = [], [], []
+    for table in tables:
+        scalars, rows = {}, {}
+        for line in table.read_text().splitlines():
+            if line.startswith("#"):
+                continue
+            words = line.split()
+            if words[0].isdigit():
+                rows[(int(words[0]), int(words[1]))] = [float(w)
+                                                        for w in words[2:]]
+            else:
+                scalars[words[0]] = words[1:]
+        gravity = float(scalars["surface_gravity"][0])
+        amplitude = float(scalars["tide_amplitude_m2_s2"][0])
+        times.append(float(scalars["time_kyr"][0]))
+        # the potential is the physical one, negative where it attracts, so
+        # the conventional h_2 takes the opposite sign of g U / psi
+        h2.append(-gravity * rows[(2, 0)][0] / amplitude)
+        k2.append(rows[(2, 0)][2] / amplitude)
+    times = np.asarray(times)
+
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    shown = np.where(times > 0.0, times, 0.5 * times[1])
+    ax.semilogx(shown, h2, "o-", ms=3, label="$h_2$")
+    ax.semilogx(shown, k2, "o-", ms=3, label="$k_2$")
+    ax.set_xlabel("time since the potential was applied (kyr; the first "
+                  "point is the elastic response)")
+    ax.set_ylabel("degree-2 tidal Love number")
+    ax.legend()
+    ax.set_title("sl3d response: a held degree-2 tide on the radial "
+                 "viscoelastic Earth")
+    fig.tight_layout()
+    fig.savefig("app_response1d_tide.png", dpi=150)
+    print("wrote app_response1d_tide.png")
+
+
 if __name__ == "__main__":
     love_numbers()
-    fingerprint("fingerprint", "sl3d fingerprint: 10% of the synthetic "
-                               "Greenland melted", synthetic=True)
-    fingerprint("fingerprint_ice7g", "sl3d fingerprint: 10% of the ICE-7G "
-                                     "Greenland ice melted", synthetic=False)
-    evolve()
-    evolve_calibrated("evolve1d_calibrated", "evolve1d", None,
-                      "sl3d evolve1d, migrating shorelines, initial sea "
-                      "level calibrated against the present day")
-    evolve_calibrated("evolve1d_ice7g_calibrated", "evolve1d_ice7g",
-                      "ice7g.nc",
-                      "sl3d evolve1d on ICE-7G, migrating shorelines, "
-                      "initial sea level calibrated against the present day")
-    evolve_calibrated("evolve_calibrated", "evolve", None,
-                      "sl3d evolve (3D), migrating shorelines, initial sea "
-                      "level calibrated against the present day")
-    evolve_ice7g()
+    sea_level_fingerprint("sea_level_fingerprint",
+                          "sl3d sea-level, the fingerprint: 10% of the "
+                          "synthetic Greenland melted", synthetic=True)
+    sea_level_fingerprint("sea_level_fingerprint_ice7g",
+                          "sl3d sea-level, the fingerprint: 10% of the "
+                          "ICE-7G Greenland ice melted", synthetic=False)
+    sea_level()
+    sea_level_calibrated("sea_level_1d_calibrated", "sea_level_1d", None,
+                         "sl3d sea-level (1D), migrating shorelines, initial "
+                         "sea level calibrated against the present day")
+    sea_level_calibrated("sea_level_1d_ice7g_calibrated", "sea_level_1d_ice7g",
+                         "ice7g.nc",
+                         "sl3d sea-level (1D) on ICE-7G, migrating shorelines, "
+                         "initial sea level calibrated against the present "
+                         "day")
+    sea_level_calibrated("sea_level_3d_calibrated", "sea_level_3d", None,
+                         "sl3d sea-level (3D), migrating shorelines, initial "
+                         "sea level calibrated against the present day")
+    sea_level_ice7g()
     kernels1d()
     kernels3d()
     response()
+    response_viscoelastic()
+    response1d_disk()
+    response1d_tide()

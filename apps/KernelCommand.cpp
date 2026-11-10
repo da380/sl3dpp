@@ -1,3 +1,12 @@
+/**
+ * @file KernelCommand.cpp
+ * @brief `sl3d kernel1d` and `sl3d kernel`: the adjoint sensitivity kernels
+ * of measurements of a run through time. The forward run is `sea-level`'s,
+ * read by the same block readers (Common.hpp): `kernel1d` on a radial
+ * model, `kernel` on a laterally varying viscosity; then one reverse sweep
+ * per measurement gives its sensitivity to the ice history and to the
+ * viscosity.
+ */
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -27,7 +36,6 @@
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 #include "sl3dpp/io/KernelWriter.hpp"
-#include "sl3dpp/io/ModelViscosity.hpp"
 
 namespace sl3dpp::app {
 
@@ -118,13 +126,14 @@ struct Built {
 
 /// The node a date names, which must lie on the grid.
 std::size_t NodeOf(const Json& where, double date_kyr_bp,
-                   const EvolveInput& run) {
+                   const SeaLevelRun& run) {
+  const auto& window = *run.times;
   const auto step =
-      (run.start_kyr_bp - run.end_kyr_bp) / (run.nodes - 1);
-  const auto exact = (run.start_kyr_bp - date_kyr_bp) / step;
+      (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
+  const auto exact = (window.start_kyr_bp - date_kyr_bp) / step;
   const auto node = std::llround(exact);
-  if (node < 0 || node >= run.nodes ||
-      std::abs(exact - static_cast<double>(node)) > 1e-9 * run.nodes) {
+  if (node < 0 || node >= window.nodes ||
+      std::abs(exact - static_cast<double>(node)) > 1e-9 * window.nodes) {
     Fail(where, std::format("{} kyr BP is not a node of the times grid",
                             date_kyr_bp));
   }
@@ -133,7 +142,7 @@ std::size_t NodeOf(const Json& where, double date_kyr_bp,
 
 template <class Snapshot>
 Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
-                       const EvolveInput& run, const SeaLevelSolver& solver,
+                       const SeaLevelRun& run, const SeaLevelSolver& solver,
                        std::span<const Snapshot> snapshots) {
   const auto& grid = solver.Grid();
   const auto a = solver.Radius();
@@ -215,8 +224,9 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
       const auto length = scales.Length();
       auto elapsed = std::vector<double>{};
       auto series = std::vector<double>{};
+      const auto& window = *run.times;
       const auto step =
-          (run.start_kyr_bp - run.end_kyr_bp) / (run.nodes - 1);
+          (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
       for (auto node = first; node <= last; ++node) {
         elapsed.push_back(step * static_cast<double>(node - first));
         series.push_back(
@@ -250,11 +260,10 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
 /// the static baseline and initial-sea-level duals — all SI densities
 /// pairing by int K delta dS (per metre of ice, or of initial sea
 /// level), the objective in its SI unit.
-void WriteIceKernels(const std::filesystem::path& path,
-                     const SurfaceGrid& grid, int lmax,
-                     const EvolveInput& run, const IceKernels& kernels,
-                     const Built& built, double solver_length,
-                     std::string_view command) {
+void WriteIceKernels(const std::filesystem::path& path, const SurfaceGrid& grid,
+                     int lmax, const SeaLevelRun& run,
+                     const IceKernels& kernels, const Built& built,
+                     double solver_length, std::string_view command) {
   namespace pm = planetmodel;
   const auto fieldSize = grid.FieldSize();
   auto file = pm::SurfaceFile{};
@@ -266,10 +275,12 @@ void WriteIceKernels(const std::filesystem::path& path,
                           grid.CoLatitudeWeights().end()));
   file.source = std::format("sl3d {} (sl3dpp {})", command, Version());
   file.title = "ice-history sensitivity kernels";
-  const auto step = (run.start_kyr_bp - run.end_kyr_bp) / (run.nodes - 1);
+  const auto& window = *run.times;
+  const auto step =
+      (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
   auto axis = std::vector<double>{};
-  for (auto n = 0; n < run.nodes; ++n) {
-    axis.push_back(-(run.start_kyr_bp - step * n) * KYR);
+  for (auto n = 0; n < window.nodes; ++n) {
+    axis.push_back(-(window.start_kyr_bp - step * n) * KYR);
   }
   file.time = axis;
   auto instants = std::vector<double>{};
@@ -382,15 +393,24 @@ void CheckMeasurements(std::span<const Json> items, const KernelInput& input) {
 
 KernelInput ReadKernelInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  auto allowed = RunMemberNames();
+  auto allowed = SeaLevelRunMemberNames();
   for (const auto name : {"record_stride", "adjoint", "trajectory",
                           "measurements", "output"}) {
     allowed.push_back(name);
   }
-  Allow(top, std::span(allowed));
+  AllowTopLevel(top, allowed);
+  if (!Has(top, "times")) {
+    Fail(top, "has no `times` block: the kernels are of a run through time");
+  }
+  if (const auto& model = top.At("model");
+      model.IsObject() && Has(model, "moduli")) {
+    Fail(model.At("moduli"),
+         "gives lateral moduli, which the kernel commands do not take: their "
+         "runs are on the deck's moduli");
+  }
   const auto directory = config.parent_path();
   auto out = KernelInput{};
-  ReadRunMembers(top, directory, out.run);
+  out.run = ReadSeaLevelRun(top, directory);
   out.record_stride = Integer(top, "record_stride", 1);
   if (out.record_stride < 1) {
     Fail(top.At("record_stride"), "is not a positive stride");
@@ -494,33 +514,27 @@ std::string RunKernelsWith(
 std::string RunKernel1D(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   const auto input = ReadKernelInput(config);
-  if (!input.run.viscosity.empty()) {
-    Fail(top.At("viscosity"),
-         "names a 3D viscosity; kernel1d takes the model's own column — "
-         "use `sl3d kernel`");
-  }
   if (!input.trajectory_directory.empty()) {
     Fail(top.At("trajectory"),
-         "spills a 3D recording; the 1D trajectory fits in memory");
+         "spills a 3-D recording; the 1-D trajectory fits in memory");
   }
-  if (Has(top, "coupled")) {
-    Fail(top.At("coupled"),
-         "sets the 3D commands' within-step fixed point, which kernel1d does "
-         "not have");
+  RefuseThreeDSolver(top, "kernel1d (a radial model)");
+  const auto earth = BuildEarth(input.run, top);
+  if (earth.LateralViscosity()) {
+    Fail(top.At("model").At("viscosity").At("file"),
+         "varies laterally; kernel1d runs a radial model — use `sl3d kernel`");
   }
-  auto earth = BuildEarth(input.run, top);
-  const auto rheology = Rheology::FromModel(earth.material, earth.model);
-  if (!rheology) Fail(top.At("model"), rheology.error().message);
-  ViscoelasticOperator op(*rheology, input.run.lmax);
+  const auto rheology = RheologyOf(earth, top);
+  ViscoelasticOperator op(rheology, input.run.lmax);
   SeaLevelSolver solver(SurfaceGrid(input.run.lmax), op.ElasticLoveNumbers(),
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
   const auto times = MakeTimes(input.run, solver.SolverScales());
   auto options = SeaLevelEvolution::Options{};
-  options.scheme = input.run.scheme;
+  options.scheme = input.run.solver.scheme;
   options.rotation = input.run.rotation;
-  options.rtol = input.run.rtol;
-  if (input.run.calibrate) {
+  options.rtol = input.run.solver.rtol;
+  if (input.run.ocean.calibrate) {
     // calibrated by runs that record nothing; the recording run follows
     SeaLevelEvolution calibrating(op, solver, world.background, options);
     static_cast<void>(
@@ -532,22 +546,23 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   const auto snapshots = RunIceHistory(evolution, times, history);
   for (const auto& snapshot : snapshots) {
     if (!snapshot.converged) {
-      throw std::runtime_error(std::format(
-          "the sea level solve did not converge at t = {}; loosen rtol",
-          snapshot.t));
+      throw std::runtime_error(
+          std::format("the sea level solve did not converge at t = {}; loosen "
+                      "solver.rtol",
+                      snapshot.t));
     }
   }
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
   // about a migrating run, the sweeps linearise about its own shorelines
-  const auto oceans = input.run.shorelines == Shorelines::Migrating
+  const auto oceans = input.run.ocean.shorelines == Shorelines::Migrating
                           ? OceanFunctionsOf(snapshots)
                           : std::vector<std::vector<double>>{};
 
   const auto& material = earth.material;
   const auto& mesh = material.Mesh();
   const auto& matScales = material.ModelScales();
-  AdjointSolver adjoint(evolution,
-                        {.method = input.method, .rtol = input.run.rtol});
+  AdjointSolver adjoint(
+      evolution, {.method = input.method, .rtol = input.run.solver.rtol});
   return RunKernelsWith<SeaLevelEvolution::Snapshot>(
       config, input, solver, snapshots, "kernel1d",
       [&](const std::map<std::size_t, Measurement>& measurements,
@@ -556,7 +571,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
             adjoint.IceHistoryKernels(times, measurements, &trajectory, oceans);
         // the radial viscosity kernels, densities per unit volume, SI:
         // dJ = int K d eta dV = 4 pi int K(r) d eta(r) r^2 dr per branch
-        const auto eta = kernels.Viscosity(*rheology);
+        const auto eta = kernels.Viscosity(rheology);
         const auto etaSi = matScales.Factor(ViscosityDimensions);
         const auto rSi = matScales.Length();
         auto out = std::ofstream(stem.string() + "_viscosity_kernel.txt");
@@ -587,25 +602,21 @@ std::string RunKernel1D(const std::filesystem::path& config) {
 std::string RunKernel3D(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   const auto input = ReadKernelInput(config);
-  if (input.run.viscosity.empty()) {
-    Fail(top, "needs a viscosity section: a planetmodel model file whose "
-              "viscosity drives the 3D run");
+  const auto& model = top.At("model");
+  if (input.run.model.viscosity.empty()) {
+    Fail(model,
+         "has no `viscosity` file: kernel runs a laterally varying viscosity, "
+         "a planetmodel model file's; kernel1d runs a radial model");
   }
-  auto earth = BuildEarth(input.run, top);
-  auto mv_options = io::ModelViscosityOptions{};
-  mv_options.reference = input.run.viscosity_file_radial
-                             ? io::ViscosityReference::FileRadial
-                             : io::ViscosityReference::GeometricMean;
-  const auto viscosity =
-      io::ModelViscosity::Read(input.run.viscosity, earth.model, mv_options);
-  if (!viscosity) Fail(top.At("viscosity").At("file"),
-                       viscosity.error().message);
-  const auto rheology =
-      Rheology::Maxwell(earth.material, viscosity->Viscosity());
-  if (!rheology) Fail(top.At("viscosity").At("file"),
-                      rheology.error().message);
-  Viscoelastic3D op(*rheology, input.run.lmax, viscosity->Delta(),
-                    OperatorOptions(input.run, *rheology));
+  const auto earth = BuildEarth(input.run, top);
+  if (!earth.LateralViscosity()) {
+    Fail(model.At("viscosity").At("file"),
+         "is radial: kernel runs a laterally varying viscosity — use "
+         "`sl3d kernel1d`");
+  }
+  const auto rheology = RheologyOf(earth, top);
+  Viscoelastic3D op(rheology, input.run.lmax, DeltaOf(earth),
+                    OperatorOptionsOf(input.run, earth, rheology));
   // On several ranks each holds its own radial segment's memory nodes:
   // its states spill into its own subdirectory, and its viscosity kernels
   // are gathered to rank 0, which writes them over the whole mesh.
@@ -632,12 +643,12 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   auto world = LoadWorld(input.run, top, solver);
   const auto times = MakeTimes(input.run, solver.SolverScales());
   auto options = SeaLevelEvolution3D::Options{};
-  options.scheme = input.run.scheme;
+  options.scheme = input.run.solver.scheme;
   options.rotation = input.run.rotation;
-  options.rtol = input.run.rtol;
-  options.coupled_rtol = input.run.coupled_rtol;
-  options.max_coupled_iterations = input.run.max_coupled_iterations;
-  if (input.run.calibrate) {
+  options.rtol = input.run.solver.rtol;
+  options.coupled_rtol = input.run.solver.step_rtol;
+  options.max_coupled_iterations = input.run.solver.step_max_iterations;
+  if (input.run.ocean.calibrate) {
     SeaLevelEvolution3D calibrating(op, solver, world.background, options);
     static_cast<void>(
         CalibrateWorld(input.run, top, solver, world, calibrating, times));
@@ -646,8 +657,8 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   // with a trajectory directory, the recorded states spill to disk as
   // the run passes them, and the sweep fetches them back one at a time
   const auto spilling = !input.trajectory_directory.empty();
-  auto spilled = std::vector<bool>(static_cast<std::size_t>(input.run.nodes),
-                                   false);
+  auto spilled = std::vector<bool>(
+      static_cast<std::size_t>(input.run.times->nodes), false);
   auto state_path = [&](std::size_t node) {
     return trajectoryDirectory / std::format("node_{:06}.traj", node);
   };
@@ -670,13 +681,13 @@ std::string RunKernel3D(const std::filesystem::path& config) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
           "the coupled fixed point or its sea level solve did not converge "
-          "at t = {}; loosen coupled.rtol or rtol",
+          "at t = {}; loosen solver.step_rtol or solver.rtol",
           snapshot.t));
     }
   }
   auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
   // about a migrating run, the sweep linearises about its own shorelines
-  const auto oceans = input.run.shorelines == Shorelines::Migrating
+  const auto oceans = input.run.ocean.shorelines == Shorelines::Migrating
                           ? OceanFunctionsOf(snapshots)
                           : std::vector<std::vector<double>>{};
   if (spilling) {
@@ -693,10 +704,11 @@ std::string RunKernel3D(const std::filesystem::path& config) {
 
   const auto& matScales = earth.material.ModelScales();
   AdjointSolver3D adjoint(
-      evolution, {.method = input.method,
-                  .rtol = input.run.rtol,
-                  .max_coupled_iterations = input.run.max_coupled_iterations,
-                  .coupled_rtol = input.run.coupled_rtol});
+      evolution,
+      {.method = input.method,
+       .rtol = input.run.solver.rtol,
+       .max_coupled_iterations = input.run.solver.step_max_iterations,
+       .coupled_rtol = input.run.solver.step_rtol});
   const auto summary = RunKernelsWith<SeaLevelEvolution3D::Snapshot>(
       config, input, solver, snapshots, "kernel",
       [&](const std::map<std::size_t, Measurement>& measurements,

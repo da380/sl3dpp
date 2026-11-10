@@ -555,4 +555,68 @@ std::string Summary(const Forcing& forcing) {
   return out;
 }
 
+namespace {
+
+/// The fingerprint's ice change.
+IceChange ReadIceChange(const Json& change) {
+  Allow(change, {"type", "latitude", "longitude", "width_deg", "fraction",
+                 "thickness_m"});
+  auto out = IceChange{};
+  out.kind = Choice<IceChange::Kind>(
+      change.At("type"), {{"cap_fraction", IceChange::Kind::CapFraction},
+                          {"cap_thickness", IceChange::Kind::CapThickness}});
+  out.site = {Number(change, "latitude"), Number(change, "longitude")};
+  const auto width = Number(change, "width_deg");
+  if (!(width > 0.0)) Fail(change.At("width_deg"), "is not a positive angle");
+  out.width = width * std::numbers::pi / 180.0;
+  const auto fraction = out.kind == IceChange::Kind::CapFraction;
+  if (Has(change, fraction ? "thickness_m" : "fraction")) {
+    Fail(change, "gives the amount of the other kind of change");
+  }
+  out.amount = Number(change, fraction ? "fraction" : "thickness_m");
+  return out;
+}
+
+}  // namespace
+
+SeaLevelForcing ReadSeaLevelForcing(const Json& block,
+                                    const std::filesystem::path& directory,
+                                    bool timed) {
+  Allow(block, {"state", "ice"});
+  auto out = SeaLevelForcing{};
+  const auto& state = block.At("state");
+  if (timed && Has(state, "date_kyr_bp")) {
+    Fail(state.At("date_kyr_bp"),
+         "dates the state, as the elastic fingerprint (no `times` block) "
+         "reads it; a run through time reads the state at its window's "
+         "start, or calibrating at its end");
+  }
+  Allow(state, {"file", "date_kyr_bp"});
+  out.state.file = PathOf(state, "file", directory);
+  out.state.date_kyr_bp = Number(state, "date_kyr_bp", 0.0);
+  const auto& ice = block.At("ice");
+  if (timed) {
+    for (const auto* name : {"type", "latitude", "longitude", "width_deg",
+                             "fraction", "thickness_m"}) {
+      if (Has(ice, name)) {
+        Fail(ice.At(name),
+             "describes an ice change, which the elastic fingerprint (no "
+             "`times` block) takes; a run through time takes an ice "
+             "history, `file`");
+      }
+    }
+    Allow(ice, {"file"});
+    out.ice.history = PathOf(ice, "file", directory);
+  } else {
+    if (Has(ice, "file")) {
+      Fail(ice.At("file"),
+           "is an ice history, which needs a `times` block; the elastic "
+           "fingerprint takes an ice change: `type`, `latitude`, "
+           "`longitude`, `width_deg` and `fraction` or `thickness_m`");
+    }
+    out.ice.change = ReadIceChange(ice);
+  }
+  return out;
+}
+
 }  // namespace sl3dpp::app

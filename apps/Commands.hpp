@@ -8,15 +8,17 @@
  *
  * `love-numbers` solves the per-degree systems of a radial model and
  * writes the SI Love-number table as plain text under a provenance
- * header. `fingerprint` solves the elastic sea level equation for an
- * ice change on a present-day state read from a planetmodel surface
- * file (pyslfp's `export_ice_history` writes one), and writes the
- * fingerprint — sea-level change, displacement, potential, the ice
- * change and the ocean function, with the angular-velocity perturbation
- * in the metadata — as a planetmodel surface file. `response` solves for
- * the planet's response to a prescribed load and tide, with no ocean,
- * elastic or, with a `times` block, viscoelastic through time, from a
- * config of blocks (`model`, `times`, `forcing`, `solver`, `output`).
+ * header. `response` solves for the planet's response to a prescribed
+ * load and tide, with no ocean, elastic or, with a `times` block,
+ * viscoelastic through time. `sea-level` solves the sea level equation,
+ * the ocean coupled to the solid Earth, under an ice load on a state read
+ * from planetmodel surface files (pyslfp's `export_ice_history` writes
+ * them): without `times` the elastic fingerprint of an ice change, with
+ * `times` GIA through time under an ice history, restartable from disk
+ * checkpoints. `kernel1d` and `kernel` give the adjoint sensitivity
+ * kernels of measurements of a run through time. Each of these four
+ * reads a config of blocks (Blocks.hpp, Forcing.hpp), 1-D or 3-D as its
+ * `model` block makes it.
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -30,6 +32,7 @@
 #include <vector>
 
 #include "Blocks.hpp"
+#include "Common.hpp"
 #include "Forcing.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
@@ -59,101 +62,26 @@ struct LoveNumbersInput {
 /// Runs a love-numbers config and returns the summary line.
 [[nodiscard]] std::string RunLoveNumbers(const std::filesystem::path& config);
 
-/// How a fingerprint config changes the ice.
-struct IceChange {
-  enum class Kind { CapFraction, CapThickness } kind = Kind::CapFraction;
-  GeographicPoint site;
-  double width = 0.0;   ///< the Gaussian cap's width, radians
-  double amount = 0.0;  ///< the fraction, or the thickness in metres
+/// The config of `sl3d sea-level`: the sea level equation, the ocean
+/// coupled to the solid Earth. Without `times` it is the elastic
+/// fingerprint of an ice change on a present-day state, on a radial Earth;
+/// with `times` it is GIA through time under an ice history, of the radial
+/// model, or, under a lateral viscosity or lateral moduli, the 3-D one,
+/// restartable from disk checkpoints.
+struct SeaLevelInput {
+  SeaLevelRun run;
+  CheckpointBlock checkpoint;  ///< no directory: no checkpoints
+  /// Whether a run finding a checkpoint in the directory resumes from it.
+  bool restart = true;
+  OutputBlock output;  ///< `surface` alone
 };
 
-/// The config of `sl3d fingerprint`.
-struct FingerprintInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
-  int lmax = 0;
-  std::filesystem::path state;  ///< a planetmodel surface file
-  double date_kyr_bp = 0.0;     ///< the state's date, kyr before present
-  IceChange change;
-  RotationalFeedback rotation = RotationalFeedback::Full;
-  std::filesystem::path output;  ///< the surface file to write
-};
-
-/// Reads a fingerprint config, relative paths against its directory.
-[[nodiscard]] FingerprintInput ReadFingerprintInput(
+/// Reads a sea-level config, relative paths against its directory.
+[[nodiscard]] SeaLevelInput ReadSeaLevelInput(
     const std::filesystem::path& config);
 
-/// Runs a fingerprint config and returns the summary line.
-[[nodiscard]] std::string RunFingerprint(const std::filesystem::path& config);
-
-/// The config of `sl3d evolve1d`: a 1D viscoelastic GIA run under an
-/// ice history, restartable from disk checkpoints.
-struct EvolveInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
-  int lmax = 0;
-  /// `sl3d evolve` alone: a planetmodel model file whose viscosity,
-  /// eta(x) = eta_bar(r) exp(delta(x)), supplies both the radial Maxwell
-  /// body and the lateral perturbation (io/ModelViscosity); empty for
-  /// the 1D command, whose viscosity is the deck's own column.
-  std::filesystem::path viscosity;
-  bool viscosity_file_radial = false;  ///< the file's own radial reference
-  std::filesystem::path state;        ///< a planetmodel surface file
-  std::filesystem::path ice_history;  ///< likewise; often the same file
-  double start_kyr_bp = 0.0;          ///< the window, kyr before present
-  double end_kyr_bp = 0.0;
-  int nodes = 0;                      ///< time nodes, the ends included
-  Scheme scheme = Scheme::ExponentialTrapezoid;
-  RotationalFeedback rotation = RotationalFeedback::Full;
-  /// The shorelines: frozen at the start's (the linear equation), or
-  /// following flotation.
-  Shorelines shorelines = Shorelines::Frozen;
-  /// With `calibrate`, the initial sea level is calibrated so that the run
-  /// reaches the state file's sea level at the window's end, by the method
-  /// and within the iterations and tolerance given (InitialSeaLevel.hpp),
-  /// instead of being read from the state file at the window's start.
-  bool calibrate = false;
-  CalibrationMethod calibration_method = CalibrationMethod::FixedPoint;
-  int calibration_iterations = 10;
-  double calibration_rtol = 1e-4;
-  /// The 3D command's combined (strain, ocean, rotation) fixed point.
-  double coupled_rtol = 1e-9;
-  int max_coupled_iterations = 60;
-  /// The 3D commands' transforms cut with depth: the degrees a memory
-  /// node's grid may take below lmax (Viscoelastic3D::Options::
-  /// transform_degrees); empty, every node at lmax.
-  std::vector<int> transform_degrees;
-  /// The 3D commands' last-level cache every transform grid of the run
-  /// blocks its work for (the operator's, Viscoelastic3D::Options::
-  /// cache_bytes, and the sea level solver's), in MiB; 0, the library's
-  /// default.
-  std::size_t cache_mb = 0;
-  /// With "hydrostatic", the moments of inertia difference is set from
-  /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
-  /// which the full transverse feedback needs when the input moments
-  /// sustain less oblateness than the model's tidal response.
-  bool hydrostatic_moments = false;
-  double rtol = 1e-9;
-  /// Checkpointing: every `checkpoint_every`-th node's recurrence and
-  /// the history so far go to `checkpoint_directory` (none when the
-  /// directory is empty); a run finding a checkpoint there resumes from
-  /// it unless `restart` is false; a positive `max_walltime_min` makes
-  /// the run checkpoint and stop cleanly once the wall clock passes it.
-  std::filesystem::path checkpoint_directory;
-  int checkpoint_every = 0;
-  double max_walltime_min = 0.0;
-  bool restart = true;
-  std::filesystem::path output;  ///< the surface file of SI histories
-};
-
-/// Reads an evolve config, relative paths against its directory.
-[[nodiscard]] EvolveInput ReadEvolveInput(const std::filesystem::path& config);
-
-/// Runs (or resumes) a 1D evolve config and returns the summary line.
-[[nodiscard]] std::string RunEvolve(const std::filesystem::path& config);
-
-/// Runs (or resumes) a 3D (lateral-viscosity) evolve config.
-[[nodiscard]] std::string RunEvolve3D(const std::filesystem::path& config);
+/// Runs (or resumes) a sea-level config and returns the summary line.
+[[nodiscard]] std::string RunSeaLevel(const std::filesystem::path& config);
 
 /// One measurement of a kernel config: a named linear functional of one
 /// time node's outputs, or the decay time of a site's series over a
@@ -186,11 +114,13 @@ struct MeasurementSpec {
   double value_uncertainty_m = 0.0;
 };
 
-/// The config of `sl3d kernel1d` and `sl3d kernel`: the evolve commands'
-/// run members, a recording stride, and the measurements — one adjoint
-/// sweep, and one set of kernel files, per measurement.
+/// The config of `sl3d kernel1d` and `sl3d kernel`: the members of
+/// `sea-level`'s run through time, a recording stride, and the
+/// measurements — one adjoint sweep, and one set of kernel files, per
+/// measurement. `kernel1d` runs a radial model, `kernel` a lateral
+/// viscosity.
 struct KernelInput {
-  EvolveInput run;
+  SeaLevelRun run;
   int record_stride = 1;
   AdjointMethod method = AdjointMethod::Continuous;
   /// `sl3d kernel` alone: with a directory given, the recorded states
@@ -208,7 +138,7 @@ struct KernelInput {
 /// Runs a 1D kernel config and returns the summary line.
 [[nodiscard]] std::string RunKernel1D(const std::filesystem::path& config);
 
-/// Runs a 3D (lateral-viscosity) kernel config.
+/// Runs a 3-D (lateral-viscosity) kernel config.
 [[nodiscard]] std::string RunKernel3D(const std::filesystem::path& config);
 
 /// The config of `sl3d response`: the response of the planet to a
@@ -225,7 +155,7 @@ struct ResponseInput {
   int lmax = 0;
   std::optional<TimesBlock> times;  ///< empty for the elastic response
   Forcing forcing;
-  SolverBlock solver;
+  SolverBlock solver = SolverDefaults(SolverOf::Response);
   OutputBlock output;
 };
 

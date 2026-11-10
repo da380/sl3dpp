@@ -1,9 +1,11 @@
 {
-  "model": "prem8.gia.deck",
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
   "lmax": 24,
-  "state": {"file": "../synthetic_earth.nc"},
-  "ice_history": {"file": "../synthetic_earth.nc"},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
+  "forcing": {
+    "state": {"file": "../synthetic_earth.nc"},
+    "ice": {"file": "../synthetic_earth.nc"}
+  },
   "rotation": "full",
   "moments": "hydrostatic",
   "record_stride": 6,

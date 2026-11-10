@@ -267,7 +267,9 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
   }
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
-  if (timed) out.times = ReadTimesBlock(top.At("times"));
+  if (timed) {
+    out.times = ReadTimesBlock(top.At("times"), TimesForm::Forwards);
+  }
   out.forcing = ReadForcing(top.At("forcing"), directory, out.lmax, timed);
   if (Has(top, "solver")) {
     const auto& solver = top.At("solver");
@@ -280,7 +282,7 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
         }
       }
     }
-    out.solver = ReadSolverBlock(solver, out.lmax);
+    out.solver = ReadSolverBlock(solver, out.lmax, SolverOf::Response);
   }
   const auto& output = top.At("output");
   out.output = ReadOutputBlock(output, directory);
@@ -423,8 +425,8 @@ std::string RunElastic(const std::filesystem::path& config,
     auto options = OperatorOptions(input.lmax, solver.transform_degrees,
                                    solver.cache_mb, *elastic, active);
     options.solver = Viscoelastic3D::Options::StepSolver::ConjugateGradients;
-    options.elastic_rtol = solver.rtol;
-    options.elastic_max_iterations = solver.max_iterations;
+    options.elastic_rtol = solver.step_rtol;
+    options.elastic_max_iterations = solver.step_max_iterations;
     options.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
     op.emplace(*elastic, input.lmax, [](double, double, double) { return 0.0; },
                options);
@@ -433,7 +435,8 @@ std::string RunElastic(const std::filesystem::path& config,
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the 3D elastic solve did not converge: residual {} after {} "
-          "iterations; loosen solver.rtol or raise solver.max_iterations",
+          "iterations; loosen solver.step_rtol or raise "
+          "solver.step_max_iterations",
           info.residual, info.iterations));
     }
   }
@@ -835,12 +838,12 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     auto options = OperatorOptions(input.lmax, solver.transform_degrees,
                                    solver.cache_mb, *rheology, active);
     options.solver = solver.step;
-    options.rtol = solver.rtol;
-    options.max_iterations = solver.max_iterations;
-    options.solve_rtol = solver.rtol;
-    options.solve_max_iterations = solver.max_iterations;
-    options.elastic_rtol = solver.rtol;
-    options.elastic_max_iterations = solver.max_iterations;
+    options.rtol = solver.step_rtol;
+    options.max_iterations = solver.step_max_iterations;
+    options.solve_rtol = solver.step_rtol;
+    options.solve_max_iterations = solver.step_max_iterations;
+    options.elastic_rtol = solver.step_rtol;
+    options.elastic_max_iterations = solver.step_max_iterations;
     options.moduli = lateral;
     const auto delta = viscosity
                            ? viscosity->Delta()
@@ -892,8 +895,8 @@ std::string RunViscoelastic(const std::filesystem::path& config,
         if (!info.converged) {
           throw std::runtime_error(std::format(
               "the unrelaxed solve at the first node did not converge: "
-              "residual {} after {} iterations; loosen solver.rtol or raise "
-              "solver.max_iterations",
+              "residual {} after {} iterations; loosen solver.step_rtol or "
+              "raise solver.step_max_iterations",
               info.residual, info.iterations));
         }
         iterations[0] = info.iterations;
@@ -924,8 +927,8 @@ std::string RunViscoelastic(const std::filesystem::path& config,
       if (!info.converged) {
         throw std::runtime_error(std::format(
             "the step to node {} ({:g} kyr) did not converge: residual {} "
-            "after {} iterations; loosen solver.rtol or raise "
-            "solver.max_iterations",
+            "after {} iterations; loosen solver.step_rtol or raise "
+            "solver.step_max_iterations",
             n, times.nodes_kyr[n], info.residual, info.iterations));
       }
       iterations[n] = info.iterations;

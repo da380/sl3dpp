@@ -2,8 +2,8 @@
 
 /**
  * @file Serialize.hpp
- * @brief The binary plumbing of the programs' scratch files — the evolve
- * commands' checkpoints and the kernel command's spilled trajectories:
+ * @brief The binary plumbing of the programs' scratch files — `sea-level`'s
+ * checkpoints and the kernel command's spilled trajectories:
  * machine-local, private to a run, sized and raw.
  */
 

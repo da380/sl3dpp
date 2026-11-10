@@ -2,47 +2,128 @@
 
 /**
  * @file Common.hpp
- * @brief The run scaffold the time-dependent commands share: the earth
- * built from a config's deck, the background state and ice history read
- * from surface files onto the solver grid, the time grid of the window,
- * and the shared config members themselves.
+ * @brief The run scaffold the commands with an ocean share (`sea-level`,
+ * `kernel1d`, `kernel`): their shared config members and the one reader of
+ * them, the Earth built from the `model` block (1-D or 3-D as its files
+ * make it), the background state and ice history read from surface files
+ * onto the solver grid, the time grid of the window, and the initial sea
+ * level's calibration.
  */
 
 #include <filesystem>
+#include <functional>
+#include <optional>
+#include <span>
+#include <string>
+#include <string_view>
 #include <vector>
 
-#include "Commands.hpp"
+#include "Blocks.hpp"
+#include "Forcing.hpp"
 #include "Input.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/Viscoelastic3D.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
+#include "sl3dpp/io/ModelModuli.hpp"
+#include "sl3dpp/io/ModelViscosity.hpp"
 
 namespace sl3dpp::app {
 
-/// The names of the run members `ReadRunMembers` reads, for a command's
-/// Allow list.
-[[nodiscard]] std::vector<std::string_view> RunMemberNames();
+/// The members `sea-level`, `kernel1d` and `kernel` share: the Earth, the
+/// degree, the window, the forcing, the ocean, the rotation and the solves.
+/// Without `times` the run is the elastic fingerprint (`sea-level` alone).
+struct SeaLevelRun {
+  ModelBlock model;
+  int lmax = 0;
+  /// The window, dates before present; empty for the elastic fingerprint.
+  std::optional<TimesBlock> times;
+  SeaLevelForcing forcing;
+  OceanBlock ocean;
+  RotationalFeedback rotation = RotationalFeedback::Full;
+  /// With "hydrostatic", the moments of inertia difference is set from
+  /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
+  /// which the full transverse feedback needs when the input moments
+  /// sustain less oblateness than the model's tidal response.
+  bool hydrostatic_moments = false;
+  SolverBlock solver = SolverDefaults(SolverOf::SeaLevel);
+};
 
-/// Reads the members every time-dependent command shares (the model,
-/// the viscosity where given, the state and ice-history files, the
-/// window, the scheme, rotation, moments and tolerances) into an
-/// `EvolveInput`, relative paths against `directory`.
-void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
-                    EvolveInput& out);
+/// The top-level members `ReadSeaLevelRun` reads, for a command's list of
+/// its members.
+[[nodiscard]] std::vector<std::string_view> SeaLevelRunMemberNames();
 
-/// The model and material of a config's deck at its lmax.
+/// Refuses every top-level member not among `allowed`: one a block of the
+/// layout holds instead (`state`, `coupled`, `shorelines`, ...) is named
+/// with the block it belongs in.
+void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
+
+/// Reads the shared members, relative paths against `directory`. The
+/// members that need a `times` block (a viscosity file, the ocean's, the
+/// time step's and the 3-D step's) are refused without one, naming the
+/// member.
+[[nodiscard]] SeaLevelRun ReadSeaLevelRun(
+    const Json& top, const std::filesystem::path& directory);
+
+/// Refuses the `solver` members that set the 3-D step (`step`,
+/// `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`)
+/// for a run on a radial model, `what` naming the run.
+void RefuseThreeDSolver(const Json& top, std::string_view what);
+
+/// The Earth of a run: the deck's model and material at lmax, and the
+/// viscosity and moduli files' contents where given.
 struct BuiltEarth {
   EarthModel model;
   Material material;
+  std::optional<io::ModelViscosity> viscosity;
+  std::optional<io::ModelModuli> moduli;
+
+  /// Whether the viscosity file's viscosity, or the moduli file's moduli,
+  /// vary laterally: either makes a run through time 3-D.
+  [[nodiscard]] bool LateralViscosity() const {
+    return viscosity && !viscosity->IsRadial();
+  }
+  [[nodiscard]] bool LateralModuli() const {
+    return moduli && !moduli->IsRadial();
+  }
+  [[nodiscard]] bool Lateral() const {
+    return LateralViscosity() || LateralModuli();
+  }
+  /// What the model was taken to be, for a summary: `3-D (lateral
+  /// viscosity)`, `3-D (lateral moduli)`, `3-D (lateral viscosity, lateral
+  /// moduli)`, `1-D`, or `1-D` followed by `(the viscosity file is
+  /// radial)`, `(the moduli file is radial)` or `(the viscosity and moduli
+  /// files are radial)`.
+  [[nodiscard]] std::string Dimension() const;
 };
-[[nodiscard]] BuiltEarth BuildEarth(const EvolveInput& input, const Json& top);
+
+/// Builds the run's Earth: the deck's model and material at lmax, and the
+/// model files of `model.viscosity` and `model.moduli` read about their
+/// chosen references.
+[[nodiscard]] BuiltEarth BuildEarth(const SeaLevelRun& run, const Json& top);
+
+/// The Maxwell rheology of a run through time: the viscosity file's
+/// radial reference where given, the deck's viscosity column otherwise.
+[[nodiscard]] Rheology RheologyOf(const BuiltEarth& earth, const Json& top);
+
+/// The options of a 3-D run's operator: the transforms, cache and rank
+/// cuts (OperatorOptions), the step solver, and the lateral moduli where
+/// the model has them.
+[[nodiscard]] Viscoelastic3D::Options OperatorOptionsOf(
+    const SeaLevelRun& run, const BuiltEarth& earth, const Rheology& rheology);
+
+/// The lateral perturbation delta of a 3-D run's viscosity: the viscosity
+/// file's, or zero under the deck's column.
+[[nodiscard]] std::function<double(double, double, double)> DeltaOf(
+    const BuiltEarth& earth);
 
 /// The SLE parameters, the moments set hydrostatically where asked.
-[[nodiscard]] SeaLevelParameters ParametersOf(const EvolveInput& input,
+[[nodiscard]] SeaLevelParameters ParametersOf(const SeaLevelRun& run,
                                               const Material& material);
 
 /// The world a run moves: the state and ice histories on the solver
@@ -54,45 +135,43 @@ struct Loaded {
   std::vector<double> ice0;  ///< the start's ice thickness, SI
   SeaLevelSolver::State background;
 };
-[[nodiscard]] Loaded LoadWorld(const EvolveInput& input, const Json& top,
+[[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const SeaLevelSolver& solver);
 
 /// The sea level the state file gives at the window's end, by the
 /// flotation construction, solver units: the calibration's target. Refused
 /// when the window's end lies outside the file's time span.
-[[nodiscard]] std::vector<double> FinalSeaLevelOf(const EvolveInput& input,
+[[nodiscard]] std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run,
                                                   const Json& top,
                                                   const SeaLevelSolver& solver,
                                                   const Loaded& world);
 
 /// The window's uniform time grid, SLE units, zero at its start.
-[[nodiscard]] std::vector<double> MakeTimes(const EvolveInput& input,
+[[nodiscard]] std::vector<double> MakeTimes(const SeaLevelRun& run,
                                             const Scales& scales);
 
 /// The grounded ice load relative to the window's start, as the drivers
 /// take it: a callable of SLE time over the solver grid. The references
 /// must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceLoadOf(
-    const EvolveInput& input, const SeaLevelSolver& solver,
-    const Loaded& world);
+    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world);
 
 /// The ice thickness the migrating runs take, solver units: the
 /// background's ice plus the history's change from the start's ice
 /// (world.ice0, as IceLoadOf measures it). The references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
-    const EvolveInput& input, const SeaLevelSolver& solver,
-    const Loaded& world);
+    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world);
 
 /// The run's ice history under its shorelines: IceLoadOf when frozen,
 /// IceThicknessOf when migrating.
-[[nodiscard]] IceHistory HistoryOf(const EvolveInput& input,
+[[nodiscard]] IceHistory HistoryOf(const SeaLevelRun& run,
                                    const SeaLevelSolver& solver,
                                    const Loaded& world);
 
 /// Rebuilds the world's start from the ice history: its ice at the
 /// window's start (world.ice0 too) under the given sea level, the ocean
 /// function by flotation.
-void StartFromIceHistory(const EvolveInput& input, const SeaLevelSolver& solver,
+void StartFromIceHistory(const SeaLevelRun& run, const SeaLevelSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess);
 
 /// Calibrates the world's initial sea level against the state file's sea
@@ -108,11 +187,11 @@ struct CalibrationSummary {
   double after_m = 0.0;
   std::size_t runs = 0;
 };
-CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
                                   const SeaLevelSolver& solver, Loaded& world,
                                   SeaLevelEvolution& evolution,
                                   std::span<const double> times);
-CalibrationSummary CalibrateWorld(const EvolveInput& input, const Json& top,
+CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
                                   const SeaLevelSolver& solver, Loaded& world,
                                   SeaLevelEvolution3D& evolution,
                                   std::span<const double> times);

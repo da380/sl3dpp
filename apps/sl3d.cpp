@@ -10,9 +10,10 @@
  * relative paths against the config's directory), runs, writes its
  * outputs with provenance, and prints a one-line summary to stderr.
  *
- * Built with SL3DPP_WITH_MPI, the 3D commands run under mpiexec over
- * several ranks, one radial segment each (Ranks.hpp); rank 0 writes and
- * prints, and a failure on any rank ends the job.
+ * Built with SL3DPP_WITH_MPI, the commands with a 3D run (response,
+ * sea-level, kernel) run under mpiexec over several ranks, one radial
+ * segment each (Ranks.hpp); rank 0 writes and prints, and a failure on any
+ * rank ends the job.
  */
 
 #include <array>
@@ -42,19 +43,21 @@ constexpr auto kUsage =
     "\n"
     "commands:\n"
     "  love-numbers   the SI Love-number table of a radial model\n"
-    "  fingerprint    an elastic sea-level fingerprint on a present-day\n"
-    "                 state read from a planetmodel surface file\n"
-    "  evolve         a 3D (lateral-viscosity) GIA run under an ice\n"
-    "                 history, restartable from disk checkpoints\n"
-    "  evolve1d       its 1D counterpart, on the deck's own viscosity\n"
-    "  kernel         adjoint sensitivity kernels of configured\n"
-    "                 measurements, 3D lateral viscosity\n"
-    "  kernel1d       its 1D counterpart\n"
     "  response       the response to a prescribed surface load and tide,\n"
     "                 no ocean: the instantaneous elastic response or, with\n"
     "                 a times block, the viscoelastic response through\n"
     "                 time; 1D or 3D as the model block's moduli (and\n"
     "                 viscosity) make it\n"
+    "  sea-level      the sea level equation under an ice load on a state\n"
+    "                 read from planetmodel surface files: the elastic\n"
+    "                 fingerprint of an ice change or, with a times block,\n"
+    "                 GIA through time under an ice history, restartable\n"
+    "                 from disk checkpoints; 1D or 3D as the model block's\n"
+    "                 viscosity (and moduli) make it\n"
+    "  kernel1d       adjoint sensitivity kernels of configured\n"
+    "                 measurements of a sea-level run through time, on a\n"
+    "                 radial model\n"
+    "  kernel         their 3D counterpart, on a lateral viscosity\n"
     "\n"
     "sl3d --version prints the library versions. Every command's config\n"
     "is documented in docs/sl3d-configs.md, also at\n"
@@ -68,12 +71,10 @@ struct Command {
 
 constexpr auto kCommands = std::array{
     Command{"love-numbers", sl3dpp::app::RunLoveNumbers, false},
-    Command{"fingerprint", sl3dpp::app::RunFingerprint, false},
-    Command{"evolve", sl3dpp::app::RunEvolve3D, true},
-    Command{"evolve1d", sl3dpp::app::RunEvolve, false},
-    Command{"kernel", sl3dpp::app::RunKernel3D, true},
-    Command{"kernel1d", sl3dpp::app::RunKernel1D, false},
     Command{"response", sl3dpp::app::RunResponse, true},
+    Command{"sea-level", sl3dpp::app::RunSeaLevel, true},
+    Command{"kernel1d", sl3dpp::app::RunKernel1D, false},
+    Command{"kernel", sl3dpp::app::RunKernel3D, true},
 };
 
 /// MPI from the start of main to its end (nothing without MPI).
@@ -130,8 +131,8 @@ int Run(int argc, char** argv) {
     if (command.name != name) continue;
     if (ranks.Distributed() && !command.distributes) {
       err << std::format(
-          "sl3d {}: runs on one process; only evolve, kernel and response "
-          "run over several ranks (this run has {})\n",
+          "sl3d {}: runs on one process; only response, sea-level and "
+          "kernel run over several ranks (this run has {})\n",
           name, ranks.size);
       return 2;
     }

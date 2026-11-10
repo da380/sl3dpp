@@ -5,14 +5,15 @@
  * @brief The processes a run of sl3d spans: one, or, built with
  * SL3DPP_WITH_MPI and started under mpiexec, the ranks of MPI_COMM_WORLD.
  *
- * On several ranks the 3D commands (evolve, kernel, response) distribute
- * their run over radius, one radial segment per rank balanced on the
- * transform work (docs/radial-partitioning.md): every rank reads the
- * config and the inputs, steps its own memory nodes, and solves the sea
- * level equation alike; rank 0 alone writes the outputs and prints. Each
- * rank checkpoints its own state into its own subdirectory of the
- * checkpoint directory. The other commands refuse several ranks. The MPI
- * calls live in Ranks.cpp, under SL3DPP_HAVE_MPI.
+ * On several ranks the commands with a 3D run (sea-level, kernel,
+ * response) distribute it over radius, one radial segment per rank
+ * balanced on the transform work (docs/radial-partitioning.md): every rank
+ * reads the config and the inputs, steps its own memory nodes, and solves
+ * the sea level equation alike; rank 0 alone writes the outputs and
+ * prints. Each rank checkpoints its own state into its own subdirectory of
+ * the checkpoint directory. A 1-D run of those commands is the first
+ * rank's alone; the other commands refuse several ranks. The MPI calls
+ * live in Ranks.cpp, under SL3DPP_HAVE_MPI.
  */
 
 #include <cstddef>
@@ -20,7 +21,6 @@
 #include <span>
 #include <vector>
 
-#include "Commands.hpp"
 #include "sl3dpp/Collectives.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
@@ -44,8 +44,8 @@ struct Ranks {
 /// The ranks of MPI_COMM_WORLD (MPI initialised); one without MPI.
 void StartRanks();
 
-/// Runs as if on `ranks` until the guard goes (a test's one-rank
-/// reference inside an MPI job).
+/// Runs as if on `ranks` until the guard goes: a test's one-rank
+/// reference inside an MPI job, or a 1-D run on the first rank alone.
 class RanksOverride {
  public:
   explicit RanksOverride(Ranks ranks);
@@ -69,8 +69,6 @@ class RanksOverride {
 [[nodiscard]] Viscoelastic3D::Options OperatorOptions(
     int lmax, const std::vector<int>& transform_degrees, std::size_t cache_mb,
     const Rheology& rheology, const std::vector<char>& active_elements = {});
-[[nodiscard]] Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
-                                                      const Rheology& rheology);
 
 /// This rank's own subdirectory of a directory of per-run scratch (the
 /// checkpoints, the spilled trajectory): rank_RRRR on several ranks, the

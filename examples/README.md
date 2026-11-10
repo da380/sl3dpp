@@ -57,8 +57,8 @@ writing a config from scratch:
 
 ```sh
 cd build/examples/configs
-../../apps/sl3d fingerprint fingerprint.json   # one command
-./run_all.sh                                   # every config in turn
+../../apps/sl3d sea-level sea_level_fingerprint.json   # one command
+./run_all.sh                                           # every config in turn
 ```
 
 Outputs land in `configs/out/`, and `poetry run python plot_app.py`, from
@@ -71,7 +71,7 @@ delete a file (or the whole directory) and reconfigure to get the original
 back. [configs/README.md](configs/README.md) says what each config does, and every
 member is documented in the configuration reference
 ([docs/sl3d-configs.md](../docs/sl3d-configs.md)). One thing to know:
-`evolve1d.json` writes checkpoints into `out/`, and a run refuses another
+`sea_level_1d.json` writes checkpoints into `out/`, and a run refuses another
 run's checkpoints, so after changing it set `"restart": false` (or delete
 `out/`) for the first rerun.
 

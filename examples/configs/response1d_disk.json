@@ -1,0 +1,11 @@
+{
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
+  "lmax": 64,
+  "times": {"start_kyr": 0.0, "end_kyr": 20.0, "nodes": 41},
+  "forcing": {
+    "load": [{"disk": {"latitude": 60.0, "longitude": -85.0, "radius_deg": 8.0,
+                       "amplitude_kg_m2": 1.834e6},
+              "history_kyr": [[0.0, 1.0], [10.0, 1.0], [10.5, 0.0]]}]
+  },
+  "output": {"surface": "out/response1d_disk.nc"}
+}

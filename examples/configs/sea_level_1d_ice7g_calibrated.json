@@ -1,0 +1,16 @@
+{
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
+  "lmax": 64,
+  "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
+  "forcing": {
+    "state": {"file": "../ice7g.nc"},
+    "ice": {"file": "../ice7g.nc"}
+  },
+  "ocean": {
+    "shorelines": "migrating",
+    "calibrate_initial_sea_level": {"method": "fixed_point", "iterations": 12}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "output": {"surface": "out/sea_level_1d_ice7g_calibrated.nc"}
+}

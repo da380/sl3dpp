@@ -105,8 +105,8 @@ writes itself, so nothing needs downloading:
 
 ```
 cd build/examples/configs
-../../apps/sl3d fingerprint fingerprint.json   # one command
-./run_all.sh                                   # every command in turn
+../../apps/sl3d sea-level sea_level_fingerprint.json   # one command
+./run_all.sh                                           # every command in turn
 ```
 
 The outputs land in `out/`. The configs there are yours to edit — the build
@@ -136,19 +136,22 @@ common capabilities from JSON configs:
 
 ```
 sl3d love-numbers run.json     # the SI Love-number table of a radial model
-sl3d fingerprint run.json      # an elastic fingerprint on a present-day state
-sl3d evolve run.json           # a 3D (lateral-viscosity) GIA run, restartable
-sl3d evolve1d run.json         # its 1D counterpart
-sl3d kernel run.json           # adjoint kernels of configured measurements
-                               #   ("trajectory": {"directory": ...} spills
-                               #    the recorded states to disk for large lmax)
-sl3d kernel1d run.json         # its 1D counterpart
 sl3d response run.json         # the response to a prescribed load and
                                #   tide, no ocean: elastic, or with a
                                #   "times" block viscoelastic through
                                #   time; 1D, or 3D under lateral moduli
                                #   (or viscosity) with the radial model's
                                #   beside it
+sl3d sea-level run.json        # the sea level equation under an ice load:
+                               #   the elastic fingerprint of an ice change,
+                               #   or with a "times" block GIA through time
+                               #   under an ice history, restartable; 1D, or
+                               #   3D under a lateral viscosity (or moduli)
+sl3d kernel1d run.json         # adjoint kernels of configured measurements
+                               #   of a radial sea-level run through time
+sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
+                               #   ("trajectory": {"directory": ...} spills
+                               #    the recorded states to disk for large lmax)
 ```
 
 Every config member is documented in the configuration reference,
@@ -158,7 +161,11 @@ Every config member is documented in the configuration reference,
 
 Configs are strict JSON read with planetmodel's reader: an unknown or
 misspelt member is refused naming the file, the member and the fault,
-and relative paths resolve against the config's directory. A
+and relative paths resolve against the config's directory. A config is
+made of blocks (`model`, `times`, `forcing`, `ocean`, `solver`,
+`output`, ...), each read by the same code for every command that takes
+it, and the blocks decide what is run: a `times` block makes a run go
+through time, and the `model` block's files make it 1D or 3D. A
 fingerprint's present-day state is a planetmodel surface file holding
 `ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
 one from ICE-5G/6G/7G), and the fingerprint comes back as a surface
@@ -167,28 +174,35 @@ metadata. For example:
 
 ```json
 {
-  "model": "earth.deck",
+  "model": {"deck": "earth.deck"},
   "lmax": 256,
-  "state": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
-  "change": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
-             "width_deg": 16, "fraction": -0.1},
+  "forcing": {
+    "state": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
+    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
+            "width_deg": 16, "fraction": -0.1}
+  },
   "rotation": "full",
-  "output": "fingerprint.nc"
+  "output": {"surface": "fingerprint.nc"}
 }
 ```
+
+run by `sl3d sea-level`; with a `times` block and an ice history in
+`forcing.ice` the same command runs GIA through time.
 
 ### Inputs
 
 - **Earth models** are tabulated decks: planetmodel's Maxwell format (with
-  a viscosity column, which the 1D commands use; `"gia"`, its old name, is
-  still accepted), MINEOS, or a six-column elastic table.
+  a viscosity column, which a radial run through time uses; `"gia"` names
+  the same format), MINEOS, or a six-column elastic table.
 - **Present-day states and ice histories** are planetmodel surface files
   holding `ice_thickness` and `topography`. pyslfp's `export_ice_history`
   writes them from ICE-5G, ICE-6G or ICE-7G (`get_ice7g.py` in the examples
   does so), and any code can write one with planetmodel.
-- **3D viscosity**, for `evolve`, `kernel` and a viscoelastic `response`,
-  is a planetmodel model file holding a `viscosity` field, as
-  planetmodel's conversion of a tomography model writes it.
+- **3D viscosity**, for a run through time of `sea-level`, `kernel` or
+  `response` (`model.viscosity`), is a planetmodel model file holding a
+  `viscosity` field, as planetmodel's conversion of a tomography model
+  writes it; lateral elastic moduli (`model.moduli`) are a model file's
+  `mu` and `kappa`.
 - **Loads and tides**, for `response`, are sums of terms: Gaussian caps,
   uniform disks (expanded exactly), fields of planetmodel surface files and
   tables of spherical-harmonic coefficients, and tidal potential
@@ -198,10 +212,10 @@ metadata. For example:
 
 ### Outputs
 
-`love-numbers` writes a plain-text table; `fingerprint`, `evolve` and
-`evolve1d` write planetmodel surface files of SI fields, with the angular
-velocity in their metadata; `kernel` and `kernel1d` write a directory per
-run: the ice-history kernels of each measurement as surface files, its
+`love-numbers` writes a plain-text table; `sea-level` writes a
+planetmodel surface file of SI fields (static for the fingerprint, a
+slice per time node through time), with the angular velocity in its
+metadata; `kernel1d` and `kernel` write a directory per run: the ice-history kernels of each measurement as surface files, its
 viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
 measured values; `response` writes the surface response as a surface file
 (with a slice per time node when viscoelastic) and, on request, the
@@ -214,10 +228,10 @@ model files (see below).
 
 ### Long runs
 
-- A `checkpoint` section makes `evolve` and `evolve1d` write their state as
-  they go and resume from it when rerun; with `max_walltime_min` they stop
-  cleanly before a batch system's time limit, so a chain of jobs running
-  one config completes the run.
+- A `checkpoint` block makes a `sea-level` run through time write its
+  state as it goes and resume from it when rerun; with `max_walltime_min`
+  it stops cleanly before a batch system's time limit, so a chain of jobs
+  running one config completes the run.
 - `kernel` can spill the recorded forward states to disk (`trajectory`),
   the lever on memory at large degree.
 - *Running*, below, has the threads and memory a run needs.
@@ -240,7 +254,7 @@ environment has them.
   - *3D viscosity:* planetmodel builds laterally varying models — from a
     seismic tomography model through its conversion laws
     (`planetmodel.conversion`), say — and writes them as model files
-    (`planetmodel.modelfile.write_model`), which `sl3d evolve` and
+    (`planetmodel.modelfile.write_model`), which `sl3d sea-level` and
     `io::ModelViscosity` read.
   - *Ice histories and present-day states:* pyslfp's `export_ice_history`
     (in `pyslfp.ice`) writes ICE-5G, ICE-6G or ICE-7G as surface files, and
@@ -248,7 +262,7 @@ environment has them.
     one's own (a synthetic load, say).
 - **Reading the outputs in Python.** Every `sl3d` output is a planetmodel
   file or a plain table: `planetmodel.surfacefile.read_surface` reads the
-  fingerprint and evolution outputs as histories in time, and
+  `sea-level` and `response` outputs as histories in time, and
   `planetmodel.modelfile.read_model` the 3D kernels, for analysis and
   plotting (`examples/python/plot_app.py` does both).
 - **In C++.** Linking `sl3dpp::sl3dpp` brings planetmodel's headers with it,
@@ -307,11 +321,11 @@ nodes.
 
   ```
   export OMP_NUM_THREADS=<cores per NUMA node> OMP_PLACES=cores OMP_PROC_BIND=close
-  numactl --cpunodebind=0 --membind=0 sl3d evolve first.json &
-  numactl --cpunodebind=1 --membind=1 sl3d evolve second.json &
+  numactl --cpunodebind=0 --membind=0 sl3d sea-level first.json &
+  numactl --cpunodebind=1 --membind=1 sl3d sea-level second.json &
   ```
 
-  Built with `SL3DPP_WITH_MPI`, `sl3d evolve`, `kernel` and `response` can
+  Built with `SL3DPP_WITH_MPI`, `sl3d sea-level`, `kernel` and `response` can
   instead
   spread one run over the node, one MPI rank per socket with its threads
   inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
@@ -326,7 +340,7 @@ nodes.
   degree of a few dozen there is too little work to share among the cores
   of a large node: more threads then make a run slower, not faster.
 - **Cutting the transforms with depth.** `Viscoelastic3D::Options::
-  transform_degrees` (sl3d's `coupled.transform_degrees`) transforms each
+  transform_degrees` (sl3d's `solver.transform_degrees`) transforms each
   memory node only to the degrees its solution carries there under the
   degree truncation. At lmax 128, the list 32, 48, ..., 112 made a step
   1.5 times faster and cut its peak memory from 34 to 24 GB, with the
@@ -390,8 +404,9 @@ no data: the build writes a synthetic Earth (`synthetic_earth.nc`, a toy
 planet over a glacial cycle from 21 ka) for them, and each also runs on
 ICE-7G (`--state ice7g.nc`, or the `*_ice7g.json` configs).
 
-- **The `sl3d` configs** in `examples/configs`, one per command, as in
-  *Run a first model*, above.
+- **The `sl3d` configs** in `examples/configs`, at least one per command
+  (for `sea-level`, the fingerprint and runs through time in 1D and 3D),
+  as in *Run a first model*, above.
 - **Seven C++ drivers** of the library, each with a plotting script:
 
 | Driver | What it shows |
@@ -547,7 +562,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve`, `kernel` and `response` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d sea-level`, `kernel` and `response` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.

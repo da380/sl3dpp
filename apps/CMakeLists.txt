@@ -7,10 +7,9 @@ add_library(sl3d_app STATIC
   Blocks.cpp
   Forcing.cpp
   Common.cpp
-  EvolveCommand.cpp
+  SeaLevelCommand.cpp
   KernelCommand.cpp
   LoveNumbersCommand.cpp
-  FingerprintCommand.cpp
   ResponseCommand.cpp
   Ranks.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})

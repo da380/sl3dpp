@@ -1,0 +1,13 @@
+{
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
+  "lmax": 32,
+  "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 85},
+  "forcing": {
+    "state": {"file": "../synthetic_earth.nc"},
+    "ice": {"file": "../synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "checkpoint": {"directory": "out/checkpoints_sea_level_1d", "every": 6},
+  "output": {"surface": "out/sea_level_1d.nc"}
+}
