@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/DegreeOperator.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
 
@@ -107,8 +108,7 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   const auto hPot = scales.Factor(kHPerPotential);
   const auto kPot = scales.Factor(kKPerPotential);
 
-#pragma omp parallel for schedule(dynamic)
-  for (auto l = 0; l <= lmax; ++l) {
+  detail::ForEachTask(options.parallel, lmax + 1, [&](int l) {
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
@@ -168,7 +168,7 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
         *name = InertiaMoment(material, nodal.U) * factor;
       }
     }
-  }
+  });
   return out;
 }
 
@@ -221,8 +221,7 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
   const auto hPot = scales.Factor(kHPerPotential);
   const auto kPot = scales.Factor(kKPerPotential);
 
-#pragma omp parallel for schedule(dynamic)
-  for (auto l = 0; l <= lmax; ++l) {
+  detail::ForEachTask(options.parallel, lmax + 1, [&](int l) {
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
@@ -301,7 +300,7 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
                 factor;
       }
     }
-  }
+  });
   return out;
 }
 
@@ -325,8 +324,7 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
     }
   }
 
-#pragma omp parallel for schedule(dynamic)
-  for (auto l = 0; l <= lmax; ++l) {
+  detail::ForEachTask(options.parallel, lmax + 1, [&](int l) {
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
@@ -405,7 +403,7 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
         for (auto i = std::size_t{0}; i < size; ++i) rho[i] = factors[c] * gr[i];
       }
     }
-  }
+  });
   return out;
 }
 
@@ -546,9 +544,8 @@ TractionNumbers ComputeTractionNumbers(const Material& material, int lmax,
     v->assign(lmax + 1, kNaN);
   }
 
-#pragma omp parallel for schedule(dynamic)
-  for (auto l = 0; l <= lmax; ++l) {
-    if (l == 1 && !gravitating) continue;
+  detail::ForEachTask(options.parallel, lmax + 1, [&](int l) {
+    if (l == 1 && !gravitating) return;
     DegreeOperator op(material, l,
                       {.eps = options.eps,
                        .truncation = options.truncation,
@@ -568,7 +565,7 @@ TractionNumbers ComputeTractionNumbers(const Material& material, int lmax,
     out.l_u[l] = value(iV, 0) * hFactor;
     out.h_v[l] = value(iU, 1) * hFactor;
     out.l_v[l] = value(iV, 1) * hFactor;
-  }
+  });
   return out;
 }
 

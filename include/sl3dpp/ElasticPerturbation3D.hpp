@@ -4,7 +4,7 @@
  * @file ElasticPerturbation3D.hpp
  * @brief The static gravitating elastic problem under LATERAL
  * perturbations of the shear and bulk moduli, through the grid pipeline
- * of the 3D memory coupling (docs/dev/adjoints.md §13b, §13j): its
+ * of the 3D memory coupling (docs/adjoints.md §13b, §13j): its
  * first-order (Born) response, and the full solve of the laterally
  * heterogeneous problem by preconditioned conjugate gradients with the
  * reference systems as the preconditioner (SolveLateral), for loads,
@@ -24,7 +24,7 @@
  * spheroidal and toroidal degrees alike (a lateral perturbation couples
  * them, and couples the degrees by the selection rules of the products).
  * No lateral density: the hydrostatic background does not admit it
- * (docs/dev/adjoints.md §13l).
+ * (docs/adjoints.md §13l).
  *
  * Conventions: directions over the coupling's grid values
  * ([FieldOffset(node) + x]), material units; the nodes are the GLL nodes
@@ -196,6 +196,16 @@ class ElasticPerturbation3D {
   [[nodiscard]] const ToroidalOperator& Toroidal(int l) const;
 
  private:
+  /// Force and Apply synthesising into a caller's grid workspace, which a
+  /// caller iterating (SolveLateral) keeps across calls: wholly
+  /// overwritten, so neither reallocated nor zeroed after the first.
+  [[nodiscard]] std::pair<Forces, Forces> Force(
+      const Solutions& x, std::span<const double> dMu,
+      std::span<const double> dKappa, GridCoupling::TensorField& grid) const;
+  [[nodiscard]] std::pair<Forces, Forces> Apply(
+      const Solutions& x, std::span<const double> dMu,
+      std::span<const double> dKappa, GridCoupling::TensorField& grid) const;
+
   /// The material itself (the reference systems' and the perturbation's
   /// meaning: an isotropic increment of whatever anisotropy it has), and
   /// the throwaway rheology over its isotropic Voigt average, whose only

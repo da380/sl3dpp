@@ -277,7 +277,7 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
 }
 
 TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
-  // The comparison (docs/dev/adjoints.md): the discrete
+  // The comparison (docs/adjoints.md): the discrete
   // transpose is exact at any step; the continuous adjoint carries the
   // discretise/transpose commute error — at the per-cent level or better
   // once the steps resolve the relaxation, falling under refinement.
@@ -912,7 +912,11 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   auto setup = Scene::Make(1e22);
   const auto& material = setup.material;
   const auto& mesh = material.Mesh();
-  const auto [k0, m0] = material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);

@@ -1,6 +1,6 @@
-// Phase timings of the 3D lateral-viscosity step: the baseline for the
-// performance work (docs/dev/walkthrough-3d-step.md §4 and §7), to be run
-// before and after each change and on the target machine.
+// Phase timings of the 3D lateral-viscosity step: the baseline for
+// performance work, to be run before and after each change and on the
+// target machine.
 //
 // The physical setup is fortran_gate's (PREM, the Y_{2,+-2} log-viscosity
 // pattern, the constant zonal load rate, 50 yr trapezoid steps). Warm-up
@@ -32,6 +32,9 @@
 //   step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
 //               [degrees]
 //
+// SL3DPP_CACHE_MB, when set, is the cache the transforms block for
+// (Options::cache_bytes), in MiB: 32 on a server with 32 MiB per CCD.
+//
 // With steps 0 only the phases are timed (one warm-up step, no whole
 // steps, no surface sums or fingerprint): the quick comparison.
 //
@@ -43,10 +46,9 @@
 // compare with the uncut run.
 //
 // Options::parallel is set when OMP_NUM_THREADS > 1, as in fortran_gate:
-// the transforms and the per-degree loops (force, solves, strain) then run
-// threaded; the pointwise loops and the mixing stay serial. The
-// fingerprint is reproducible run to run on one thread; on several,
-// GSHTrans's per-thread FFTW plans (FFTW_MEASURE) can differ at round-off.
+// the transforms, the per-degree loops (force, solves, strain), the
+// pointwise loops and the mixing then run threaded. With the loop kernel
+// the fingerprint is the same on any thread count, one included.
 
 #include <omp.h>
 #include <sys/resource.h>
@@ -172,6 +174,9 @@ int main(int argc, char** argv) {
   options.rtol = 1e-10;
   options.memory_points = gauss ? MemoryPointSet::Gauss : MemoryPointSet::Gll;
   options.transform_degrees = degrees;
+  if (const auto* mb = std::getenv("SL3DPP_CACHE_MB")) {
+    options.cache_bytes = static_cast<std::size_t>(std::atol(mb)) << 20;
+  }
 
   auto start = std::chrono::steady_clock::now();
   Viscoelastic3D op(rheology, lmax, delta, options);
@@ -267,11 +272,13 @@ int main(int argc, char** argv) {
     // here, so that the timed ones do the whole pass.
     auto solutions = step.Respond(s0);
     respond = Best(repeats, [&] { solutions = step.Respond(s0); });
-    channels = Best(repeats, [&] {
-      auto copy = solutions;
-      step.AddChannels(copy, load, {});
-    });
-    strainOf = Best(repeats, [&] { auto out = step.StrainOf(solutions); });
+    // Into storage made once, as a pass does: the channels added to a
+    // copy, which accumulates them (the cost is the same each time; the
+    // copy is not a step's result), the strain into a reused tensor.
+    auto withChannels = solutions;
+    channels = Best(repeats, [&] { step.AddChannels(withChannels, load, {}); });
+    auto strain = step.StrainOf(solutions);
+    strainOf = Best(repeats, [&] { step.StrainOf(solutions, strain); });
   }
   startStep = Best(
       repeats, [&] { auto opened = op.StartStep(state, dt, scheme, load); });
@@ -329,7 +336,7 @@ int main(int argc, char** argv) {
     for (const auto& v : columns) sumPhi += std::abs(v);
   }
   std::printf("\n  surface sums |U| %.15e  |phi| %.15e\n", sumU, sumPhi);
-  std::printf("  state fingerprint %016llx (bitwise check; one thread)\n",
+  std::printf("  state fingerprint %016llx (bitwise check)\n",
               static_cast<unsigned long long>(Fingerprint(state)));
   std::printf("  peak RSS %.2f GB\n", PeakRssGb());
   return 0;

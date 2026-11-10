@@ -47,6 +47,13 @@ class SurfaceGrid {
     /// Use GSHTrans's BLAS matrix kernel for the transforms (its order
     /// loops run sequentially and the BLAS supplies the threading).
     bool matrix_kernel = false;
+    /// The last-level cache the transforms block their work for, in
+    /// bytes; 0 takes GSHTrans's default (8 MiB, Chunking::Automatic).
+    /// A server with large per-CCD caches may gain at large lmax from
+    /// stating its own (GSHTrans measured 14% on its transforms at band
+    /// 256 with 32 << 20 on an EPYC 9334, and no difference at 128); a
+    /// small cache loses by overstating it.
+    std::size_t cache_bytes = 0;
   };
 
   SurfaceGrid(int lmax, Options options)
@@ -55,7 +62,11 @@ class SurfaceGrid {
         parallel_(options.parallel),
         grid_(std::make_shared<const Gsh>(Gsh::ForBand(
             lmax, options.nmax, options.oversampling, FFTWpp::Measure,
-            GSHTrans::Chunking::Automatic(), GSHTrans::WignerValues::Stored(),
+            options.cache_bytes > 0
+                ? GSHTrans::Chunking::ForCache(
+                      static_cast<GSHTrans::Chunking::Int>(options.cache_bytes))
+                : GSHTrans::Chunking::Automatic(),
+            GSHTrans::WignerValues::Stored(),
             options.matrix_kernel ? GSHTrans::TransformKernel::Matrix()
                                   : GSHTrans::TransformKernel::Loop()))) {
     for (auto theta : grid_->CoLatitudes()) coLatitudes_.push_back(theta);

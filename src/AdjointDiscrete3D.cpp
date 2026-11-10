@@ -1,5 +1,5 @@
 // The discrete 3D adjoint: the exact transpose of the coupled
-// lateral-viscosity time-stepped map (docs/dev/adjoints.md). Under the
+// lateral-viscosity time-stepped map (docs/adjoints.md). Under the
 // energy pairing the force assembly is the transpose of the strain
 // evaluation (Entry = Exit^T), the pointwise weight and the reference
 // systems are self-adjoint, and the sea level equation has its exact
@@ -24,12 +24,12 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
-#include <optional>
-#include <tuple>
-#include <type_traits>
 #include <map>
+#include <optional>
 #include <span>
 #include <stdexcept>
+#include <tuple>
+#include <type_traits>
 #include <utility>
 
 #include "sl3dpp/Adjoint3D.hpp"
@@ -38,7 +38,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -509,24 +509,32 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
     }
   }
-  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x,
-                          const std::function<const DegreeOperator&(int)>& sph) {
-    auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
-    for (const auto& [l, xl] : x.spheroidal) {
-      coupling.AddDilatationOfSolution(scalar, l, sph(l), xl);
-    }
-    return coupling.SynthesiseScalar(scalar);
-  };
+  auto dilatationCoefficients =
+      [&](const Viscoelastic3D::Solutions& x,
+          const std::function<const DegreeOperator&(int)>& sph) {
+        auto scalar =
+            std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
+        for (const auto& [l, xl] : x.spheroidal) {
+          coupling.AddDilatationOfSolution(scalar, l, sph(l), xl);
+        }
+        return scalar;
+      };
+  auto dilatationOf =
+      [&](const Viscoelastic3D::Solutions& x,
+          const std::function<const DegreeOperator&(int)>& sph) {
+        return coupling.SynthesiseScalar(dilatationCoefficients(x, sph));
+      };
   // The bulk pairing -Wq D(y) D(x) and the shear pairing
   // -Wq r^2 factor C(e(y), e(x)) + Wq r^2 sum_k f_k C(e(y), m~_k), over
   // the grid values; `factor` and `memory` empty for the start.
   auto addMaterialPairing = [&](std::span<const double> Dy,
                                 std::span<const double> Dx, const Tensor& ey,
-                                const Tensor& ex, std::span<const double> factor,
+                                const Tensor& ex,
+                                std::span<const double> factor,
                                 const std::vector<Tensor>* memory,
                                 std::vector<double>& kappaTo,
                                 std::vector<double>& muTo) {
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));
@@ -561,7 +569,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           const std::function<const DegreeOperator&(int)>& sph,
           const std::function<const ToroidalOperator&(int)>& tor) {
         auto gridForce = coupling.ZeroTensor();
-        detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+        detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
           const auto w = shear.empty() ? 0.0 : -shear[i];
           for (auto c = 0; c < 2; ++c) {
             gridForce.c[c][i] = w * strain.c[c][i] +
@@ -572,12 +580,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto analysed = coupling.Analyse(gridForce);
         auto sphForces = coupling.SpheroidalForce(analysed, sph);
         if (!materialV->kappa.empty() && x != nullptr) {
-          auto field = dilatationOf(*x, sph);
+          // Through gridForce's real component, analysed (done with it),
+          // and back over the dilatation's coefficients.
+          auto scalar = dilatationCoefficients(*x, sph);
+          auto& field = gridForce.r;
+          coupling.SynthesiseScalar(scalar, field);
           for (auto i = std::size_t{0}; i < values; ++i) {
             field[i] *= -materialV->kappa[i];
           }
-          for (const auto& [l, f] :
-               coupling.DilatationForce(coupling.AnalyseScalar(field), sph)) {
+          coupling.AnalyseScalar(field, scalar);
+          for (const auto& [l, f] : coupling.DilatationForce(scalar, sph)) {
             auto& b = sphForces.at(l);
             for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
           }
@@ -589,7 +601,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   auto memoryVariationV = [&](const std::vector<Tensor>& memory) {
     auto out = coupling.ZeroTensor();
     if (dmuV.empty()) return out;
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base_ = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -688,7 +700,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     auto de = ddual;
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& beta = step.beta_[k];
-      detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+      detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
         de.c[0][i] += beta[i] * mdual[k].c[0][i];
         de.c[1][i] += beta[i] * mdual[k].c[1][i];
         de.r[i] += beta[i] * mdual[k].r[i];
@@ -706,7 +718,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto& delta = (*ditau)[k];
         const auto& md = mdual[k];
         const auto& dmd = dmdual[k];
-        detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+        detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
           const auto base = coupling.FieldOffset(static_cast<int>(rn));
           const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
           for (auto x = std::size_t{0}; x < size; ++x) {
@@ -764,7 +776,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         auto y = e;
         coupling.Multiply(y, W);
         if (!y.scalars.empty()) op.WeightCompanions(y);
-        detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+        detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
           y.c[0][i] += src.c[0][i];
           y.c[1][i] += src.c[1][i];
           y.r[i] += src.r[i];
@@ -816,7 +828,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     if (second) {
       auto src = last.e;
       coupling.Multiply(src, dW);
-      detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+      detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
         src.c[0][i] += dde.c[0][i];
         src.c[1][i] += dde.c[1][i];
         src.r[i] += dde.r[i];
@@ -911,7 +923,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       auto* dmd = second ? &dmdual[k] : nullptr;
       auto* dkernel = second ? &dItauKernel[k] : nullptr;
       const auto* delta = second ? &(*ditau)[k] : nullptr;
-      detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+      detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
         const auto base = coupling.FieldOffset(static_cast<int>(rn));
         const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
         const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));

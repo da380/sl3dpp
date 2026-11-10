@@ -1,4 +1,4 @@
-// The zero-lateral limit (docs/dev/lateral-coupling.md): a random
+// The zero-lateral limit (docs/lateral-coupling.md): a random
 // degree-basis internal-variable state, pushed through the FULL grid
 // pipeline — components, spin synthesis, a pointwise (here uniform)
 // multiply, spin analysis, force assembly, degree solves — must reproduce
@@ -137,6 +137,18 @@ TEST(Lateral, TransformsIntoBuffersAndThreadedPointwise) {
   serial.Analyse(field, reusedSpectral);
   for (auto c = 0; c < 2; ++c) ASSERT_EQ(reusedSpectral.c[c], analysed.c[c]);
   ASSERT_EQ(reusedSpectral.r, analysed.r);
+
+  // The scalar companions alike, and a tensor's real component is a
+  // scalar in this layout: the same transforms, the same bits.
+  auto scalarField = std::vector<double>(serial.GridValueCount(), -1e300);
+  serial.SynthesiseScalar(spectral.r, scalarField);
+  ASSERT_EQ(scalarField, serial.SynthesiseScalar(spectral.r));
+  ASSERT_EQ(scalarField, field.r);
+  auto scalarSpectral =
+      std::vector<Complex>(serial.ScalarCoefficientCount(), 1e300);
+  serial.AnalyseScalar(field.r, scalarSpectral);
+  ASSERT_EQ(scalarSpectral, serial.AnalyseScalar(field.r));
+  ASSERT_EQ(scalarSpectral, analysed.r);
 
   const auto saved = omp_get_max_threads();
   omp_set_num_threads(4);

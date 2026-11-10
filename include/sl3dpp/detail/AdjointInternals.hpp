@@ -154,7 +154,7 @@ namespace sl3dpp {
 
 /**
  * @brief The material pieces of the 1D second-order sweeps
- * (AdjointSecondOrder.cpp; docs/dev/adjoints.md §15): a direction v in
+ * (AdjointSecondOrder.cpp; docs/adjoints.md §15): a direction v in
  * the moduli (kappa, mu; may be empty), the branch fractions
  * f_k = mu_k / mu_U, v's variation of the unrelaxed and of each dt's
  * effective material (delta mu scaled by 1 - sum_k f_k (1 - w_k), the

@@ -3,10 +3,8 @@
 How sl3dpp splits the 3D problem over contiguous radial segments: the
 substructured degree solves and their distributed form, the transforms
 cut with depth, the balance of the cuts, the communication, and the rest
-of the step and adjoint run over MPI ranks. This is the maintained
-account; the measurements and the order in which it was built are in
-[dev/radial-substructuring.md](https://github.com/da380/sl3dpp/blob/main/docs/dev/radial-substructuring.md),
-the formulation in [design.md](design.md), and running `sl3d` over ranks in
+of the step and adjoint run over MPI ranks. The formulation is in
+[design.md](design.md), and running `sl3d` over ranks in
 [sl3d-configs.md](sl3d-configs.md).
 
 ## 1. Why radius
@@ -270,11 +268,12 @@ rank its segment.
   forward trajectory, and its viscosity kernels are its own nodes'; laid
   end to end in rank order they are the mesh's. The ice kernels are every
   rank's alike. The discrete 3D sweep (first and second order), the
-  material tangent and the material kernels run the same way since 4
-  November 2026 (docs/dev/adjoints.md §17): the discrete transpose sums
+  material tangent and the material kernels run the same way
+  (docs/adjoints.md §17): the discrete transpose sums
   the ranks' partial contractions for the load duals and places the
   surface duals on their holding rank.
-- **The `sl3d` program** runs `evolve` and `kernel` under `mpiexec`.
+- **The `sl3d` program** runs `evolve`, `kernel` and `static` under
+  `mpiexec`.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A
     run resumes from the newest node every rank has, over the same rank

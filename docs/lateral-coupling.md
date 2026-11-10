@@ -1,10 +1,11 @@
 # 3D viscosity: the pseudospectral lateral coupling
 
-*Drafted 15 October 2026 from the old Fortran (`sl3d/src/module_gia.f90`,
-`module_mat.f90`) and pyslfp's `gia_notes.md`. This records the
-algebra before it is implemented; equation references are Al-Attar &
-Tromp (2014, GJI) Appendix D. The within-step lateral iteration is the
-research content of the project ([design.md](../design.md) §6).*
+*The algebra of the pseudospectral lateral coupling, after the old
+Fortran (`sl3d/src/module_gia.f90`, `module_mat.f90`), with the
+within-step convergence and the Fortran gate; equation references are
+Al-Attar & Tromp (2014, GJI) Appendix D. The within-step lateral
+iteration is the research content of the project
+([design.md](design.md) §6).*
 
 ## 1. Scope and gates
 
@@ -25,10 +26,10 @@ complex components in the Fortran's ordering and normalisation
     A5 = A(++).
 
 A real tensor gives the Hermitian pairs A5 = conj-pattern of A1 and
-A4 of A2 under m -> −m; the Fortran stores all five complex and so, to
-begin with, shall we (GSHTrans handles tensor components as complex
-fields at each spin; exploiting the symmetry halves the transforms and
-is an optimisation to take once the plain path is gated).
+A4 of A2 under m -> −m. The Fortran stores all five complex; sl3dpp
+stores spins −2 and −1 as complex fields and spin 0 as a real field,
+and reconstructs +1 and +2 by the orbit relation, which halves the
+transforms (§8).
 
 Per degree (ζ² = l(l+1)), from the spheroidal (U, V) and toroidal (W)
 radial scalars and their r-derivatives, the deviatoric strain components
@@ -81,7 +82,7 @@ with absent fluid dofs covers them; the blocks are SPD separately).
 No gravity, no fluid terms, no DtN. At l = 1 the form is singular
 (rigid rotation W ∝ r: both terms vanish).
 
-**Degree 1 is included** (decided 17 Oct 2026; [design.md](../design.md) §8). The
+**Degree 1 is included** ([design.md](design.md) §8). The
 rigid rotations, one per order in each solid region that fluid separates
 (mantle, inner core), form a null space that is removed by convention.
 The right-hand side is torque-free, so the singular system is consistent.
@@ -89,19 +90,17 @@ Which frame does not matter, so a convenient gauge is used (one pinned
 dof per solid region). What matters is that measured,
 benchmarked and tested quantities are invariant under the rigid
 rotations, which is also the condition for the adjoint equations to
-exist. The expectation first recorded here,
-dropping the l = 1 toroidal response into the angular-momentum bookkeeping
-of the rotation feedback, was wrong: differential degree-1 rotation
-carries strain through W − r∂rW, and lateral viscosity drives it.
-Implemented 17 Oct 2026: `ToroidalOperator` accepts l = 1, pinning one
+exist. The l = 1 toroidal response cannot be dropped into the
+angular-momentum bookkeeping of the rotation feedback: differential
+degree-1 rotation carries strain through W − r∂rW, and lateral viscosity
+drives it. `ToroidalOperator` accepts l = 1, pinning one
 dof per solid region (its top node by default), and the toroidal force,
 solves and strain recovery run from l = 1. The Fortran factors the
 unconstrained degree-1 form by banded LU (`aa_tor_1`) and fixes no frame,
 so it is no reference for this mode.
 
 Verification: reciprocity/symmetry, an analytic homogeneous-sphere
-toroidal response, and the Fortran once the time-dependent cross-checks
-start (l ≥ 2).
+toroidal response, and the Fortran gate (§5b, l ≥ 2).
 
 ## 5. The step with lateral viscosity
 
@@ -112,7 +111,7 @@ itau(x) nodal on the grid; per (scheme, Δt) the weight FIELDS
 e(x), α(x), β(x) from h(x) = Δt·itau(x) — StepWeights pointwise, exactly
 as the 1D code does per node.
 
-Split ([design.md](../design.md) §6): μ_eff(x) = μ̄_eff(r) + δμ_eff(x), with μ̄_eff built from
+Split ([design.md](design.md) §6): μ_eff(x) = μ̄_eff(r) + δμ_eff(x), with μ̄_eff built from
 the reference τ̄(r) (laterally averaged η̄ by default) and factorised per
 degree by the existing flavour machinery. The within-step iteration, one
 combined fixed point under the SLE's existing Anderson mixer:
@@ -129,44 +128,22 @@ coefficient field in place of the memory state. The memory state
 m̃(x) = e(x) m + α(x) d^n is pointwise on the grid. After convergence,
 m⁺ = m̃ + β(x) d^{n+1} pointwise.
 
-The ocean-load and rotation fixed points fold in as today (the SLE's
-load iteration), so the combined iteration costs one banded back-solve
-per degree plus a bounded number of spin transforms per pass.
-Fallbacks if contraction fails under strong contrasts: damped Picard
-(built), a better reference profile (per-degree or worst-case) and IMEX
-(neither built; [design.md](../design.md) §14).
+The ocean-load and rotation fixed points fold in through the SLE's
+load iteration, so the combined iteration costs one banded back-solve
+per degree plus a bounded number of spin transforms per pass. Under
+strong contrasts: damped Picard, or the step by conjugate gradients
+(§5a''); a better reference profile (per-degree or worst-case) and IMEX
+are not built.
 
-## 5a. Measured within-step convergence (15 Oct 2026, first numbers)
+## 5a. Measured within-step convergence
 
 PREM-deck Maxwell mantle, lmax 16, a sin(theta)cos(phi) log-viscosity
 pattern of amplitude A (peak-to-peak contrast e^{2A}), unit loads on all
-degrees, trapezoid steps; iterations to 1e-11 on the second step:
-
-    contrast   dt/tau:   0.5      2       10
-    3x (plain Picard)     12      22       67
-    3x (Anderson 5)       10      17       23
-    10x    Picard         21      54     FAIL (oscillates)
-    10x    Anderson       14      29       52
-    100x   Picard         64     FAIL    FAIL
-    100x   Anderson       27      68     FAIL*
-    1000x  Anderson       49     147     FAIL*
-    10^4x  Anderson       92     FAIL*   FAIL*
-
-(*) the Anderson failures are slow grinds (residual 1e-3..1e-9 at the
-200-iteration cap), not divergence — unlike Picard's oscillation at
-residual ~1.8 — so a larger budget, a better reference profile
-(per-degree or worst-case) or IMEX would extend the envelope.
-Headline: Anderson mixing roughly squares the practical contrast ceiling
-at fixed dt, and one-decade contrasts at dt = 10 tau — far beyond the old
-explicit code's dt <= tau_min limit — converge in ~50 passes. At the
-saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
-iteration trivialises, as it should.
-
-**Revisited 17 Oct 2026 (performance chunk 9): history depth and adaptive
-mixing.** The same setup (the iterate now the strain's coefficients,
-internal variables at Gauss points), every step-1 result checked: `s1`
-marks a case whose first step failed, so the second is not reported.
-DIV is a residual above 1e-2 (or non-finite) at the 200-pass cap, cap a
+degrees, trapezoid steps; iterations to 1e-11 on the second step, the
+iterate the strain's coefficients and the internal variables at Gauss
+points, over the history depth and adaptive mixing. Every step-1 result
+is checked: `s1` marks a case whose first step failed, so the second is
+not reported. DIV is a residual above 1e-2 (or non-finite) at the 200-pass cap, cap a
 smaller one. "always" mixes from the first pass at the given depth;
 "adaptive" is the default iteration (below), with the passes it mixed.
 
@@ -184,10 +161,14 @@ smaller one. "always" mixes from the first pass at the given depth;
       1000x    2.0  |   s1   |          s1   s1   s1  147  127 |  147 (145)   |  125 (123)
       1000x   10.0  |   s1   |          s1   s1   s1   s1   s1 |   s1         |   s1
 
-Depth 5 reproduces the October 15 numbers (68 at 100x, 2 tau); depth 2-3
-gets most of the gain in mild cases and falls well behind at 100x and
-above; depth 8 is somewhat better at the hard end for 18 history vectors
-against 12. Picard never converges where Anderson does not.
+Depth 2-3 gets most of the gain in mild cases and falls well behind at
+100x and above; depth 8 is somewhat better at the hard end for 18
+history vectors against 12. Picard never converges where Anderson does
+not. Anderson mixing roughly squares the practical contrast ceiling at
+fixed dt, and one-decade contrasts at dt = 10 tau — far beyond the old
+explicit code's dt <= tau_min limit — converge in ~50 passes. At the
+saturated extreme (h >> 1 everywhere) the lateral term vanishes and the
+iteration trivialises, as it should.
 
 What it costs (lmax 64, 8 threads, the laptop): at the benchmark's weak
 contrast (1.26x, 50 yr steps) every depth takes 7 passes a step, while
@@ -201,18 +182,11 @@ Hence the default iteration (`Viscoelastic3D::IterationControl`,
 `anderson_rate = 0.5`): Picard until a pass shrinks the residual by less
 than half, then Anderson (depth 5) for the rest of the step. It is plain
 Picard wherever Picard is quick, and pass for pass Anderson wherever it
-is not, the switch costing a pass or two. `anderson_rate = 0` is the
-previous iteration, Anderson from the first pass, bitwise. A first
-version also gave Anderson up for Picard when it fell behind Picard's
-early rate; it did harm (Anderson's early passes lag before it settles,
-and Picard then diverged) and was dropped.
+is not, the switch costing a pass or two. `anderson_rate = 0` mixes
+from the first pass.
 
-An earlier sweep that did not check step 1 showed Picard converging at
-1000x, 10 tau where every Anderson depth failed. That was an artefact:
-Picard's first step had diverged to non-finite values, and the residual,
-a maximum that passes over NaNs, read the all-NaN iterates of step 2 as
-no change. A non-finite pass now ends the iteration unconverged, with a
-NaN residual, on the last finite iterate.
+A non-finite pass ends the iteration unconverged, with a NaN residual,
+on the last finite iterate.
 
 **Resolution of the strong contrasts.** Are the hard cases resolved at
 lmax 16, or is part of their difficulty truncation? The log-viscosity
@@ -241,7 +215,7 @@ the pseudospectral products alias and the solution needs a higher lmax,
 and a delta supplied as a truncated expansion overshoots (exaggerating
 the contrast, though exp keeps it positive).
 
-## 5a'. Lateral elastic moduli in the same fixed point (4 November 2026)
+## 5a'. Lateral elastic moduli in the same fixed point
 
 A lateral perturbation of the unrelaxed shear, s(x) relative, and of the
 bulk modulus, b(x) relative, enters the step through the same weight as
@@ -252,7 +226,7 @@ bulk pipeline of the static perturbation. The unrelaxed start solve
 becomes a preconditioned conjugate-gradient solve on the reference
 systems. Gates and the within-step cost are in adjoints.md §13k.
 
-## 5a''. The step by conjugate gradients (5 November 2026)
+## 5a''. The step by conjugate gradients
 
 The step is a symmetric positive definite system in the degree
 solutions (adjoints.md §13n), and `Viscoelastic3D::Options::solver =
@@ -308,71 +282,57 @@ output, `tests/data/fortran_visco_test.txt` at lmax 32); the physics
 is untouched, so the comparison pits the two codes' discretisations —
 rate-form explicit stepping on a coarse uniform mesh against implicit
 stepping on the graded mesh — against each other at physical accuracy.
-Measured (lmax 8, laptop, 15 Oct 2026): the two codes agree at
+Measured (lmax 8): the two codes agree at
 3-13 x 1e-4 relative in the surface U and phi coefficients over the full
 5 kyr history for every degree l >= 2 — independent discretisations in
 space AND time, with the lateral viscosity on, agreeing at observational
 accuracy. The drift grows slowly with time in phi, consistent with the
 Fortran's explicit RK2 truncation at dt/tau ~ 0.5. Degree 1 is
 excluded from the comparison: sl3dpp works in the centre-of-mass frame,
-while the Fortran's l = 1 handling was a known loose end (deferred until
-rotation was added, which it never was), so its l = 1 output is neither
-our frame nor a settled one — the driver reports it separately for the
-record.
+while the Fortran's l = 1 handling is unsettled, so its l = 1 output is
+neither our frame nor a settled one — the driver reports it separately.
 
-Detailed runs are server work (the original always was): the kit is
+Detailed runs are server work: the kit is
 `benchmarks/fortran_gate` plus `scripts/run_fortran_gate.sh`, which
 builds both repos and runs the comparison at a chosen lmax; the lmax-32
-fixture is committed for reference. The sl3d driver patch (I/O only)
-must be committed in that repo for the kit to work from a fresh clone.
+fixture is committed for reference. The kit needs an sl3d checkout
+carrying the driver patch (I/O only).
 
 ## 6. Data layout, dealiasing, memory
 
-- Memory state: per branch, 5 complex component fields over (viscous
-  radial memory nodes × angular grid). Radial memory nodes are the Gauss
-  points of viscous elements by default, ~20% fewer than the GLL nodes,
-  which remain selectable ([design.md](../design.md) §5).
+- Memory state: per branch, the reduced components (spins −2 and −1
+  complex, spin 0 real; §8) over (radial memory nodes × angular grid).
+  Radial memory nodes are the Gauss points of viscous elements by
+  default, ~20% fewer than the GLL nodes, which remain selectable
+  ([design.md](design.md) §5).
 - Grid: one `SurfaceGrid` with nMax = 2 and `ForBand` oversampling 1.5
   (the 3/2 rule) for the pointwise products — an improvement over the
   Fortran, which never dealiased.
 - Transforms are issued **batched** (one call per spin component, the
   radial nodes as the batch — GSHTrans guarantees exact equality with the
-  per-field calls) with the BLAS matrix kernel and threaded execution as
-  options. Measured on the PREM-deck Maxwell body (15 Oct 2026, 8
-  threads): a full synthesis + analysis pass over all five components,
-  lmax 128, 1630 graded-mesh viscous nodes: 51.6 s naive single-field
-  loop kernel → 12.9 s batched loop → 5.0 s batched matrix kernel —
-  about 10x; lmax 64 (1170 nodes): 0.8 s. (Those are the five-component
-  pipeline's numbers.) With the reality reduction (15 Oct 2026): the
-  full reduced pass is **5.2 s at lmax 128 / 0.6 s at lmax 64, batched
-  loop kernel, 8 threads** — the 12.9 s loop figure roughly halved, as
-  the component count predicts. Grid construction is 0.1 s at lmax 128.
-  The BLAS-threading livelock diagnosed here (GSHTrans open issue 8:
-  GEMMs inside the transform's parallel region) is FIXED upstream
-  (15 Oct 2026, GSHTrans `ecc4dcd`: the matrix kernel's order loops run
-  sequentially and the BLAS threads the GEMMs). Post-fix, the unsafe
-  path no longer exists (the nesting is structurally unrepresentable),
-  and the kernels are comparable on the reduced pass: matrix 4.4 s vs
-  loop 4.9 s at lmax 128, a wash at lmax 64 — the old 2.6x matrix edge
-  was partly an artefact of the nesting the fix removed. The matrix
-  kernel stays opt-in only because its gain is now marginal. The Gauss-point
-  memory nodes (~20% fewer) remain to compound.
-- Budget at lmax 256 (grid ~385 × 770 with 1.5× oversampling), graded
-  mesh (~600 radial nodes, ~450 viscous): 5 comps × 450 × 385 × 770
-  complex ≈ 11 GB per branch... **the oversampled grid is for products
-  only**: m is band-limited at lmax, stored as coefficients or on the
-  unoversampled grid (257 × 515 ≈ 4.8 GB complex per branch), with
-  synthesis to the big grid per step. Final layout to be settled against
-  measurements; the Wigner table adds 2.6–5.2 GB.
+  per-field calls), threaded, with GSHTrans's BLAS matrix kernel as an
+  option. Measured on the PREM-deck Maxwell body (8 threads, the memory
+  nodes at the GLL points): batching takes a full synthesis + analysis
+  pass over the five components at lmax 128 (1630 graded-mesh viscous
+  nodes) from 51.6 s (single-field calls) to 12.9 s; over the reduced
+  components the pass is 4.9 s with the loop kernel and 4.4 s with the
+  matrix kernel at lmax 128, and about 0.6 s at lmax 64 (1170 nodes),
+  where the two kernels are alike. Grid construction is 0.1 s at lmax
+  128. The matrix kernel is opt-in, its gain being marginal.
+- Budget: the internal variables are held on the coupling's oversampled
+  grid at every memory node (a collocation representation), so one
+  branch's tensor is about 0.7 GB at lmax 64, 4 GB at 128, 21 GB at 256
+  and 98 GB at 512 ([design.md](design.md) §6); the Wigner table adds
+  2.6–5.2 GB at lmax 256.
 
-## 7. Implementation order and gates
+## 7. Components and gates
 
-a. **Spin machinery**: `SurfaceGrid` grows spin-N transforms (complex
+a. **Spin machinery**: `SurfaceGrid` carries spin-N transforms (complex
    fields, N = −2..2); the degree ↔ spin maps of §2 and force rows of §3
-   as a `TensorPipeline` beside the 1D `Degree` workspace (built as
-   `GridCoupling`, with `SpinComponents.hpp`). GATE: with
+   are `GridCoupling`, with `SpinComponents.hpp`, beside the 1D `Degree`
+   workspace. GATE: with
    zero lateral perturbation (δ = 0, weights uniform in angle), one full
-   grid-pipeline step must reproduce the 1D stepper's state and
+   grid-pipeline step reproduces the 1D stepper's state and
    solutions at machine precision, degree by degree — the round trip
    through synthesis/multiply/analysis is then exact up to transform
    round-off. This is the decisive correctness gate and needs no
@@ -380,72 +340,48 @@ a. **Spin machinery**: `SurfaceGrid` grows spin-N transforms (complex
 b. **Toroidal operator** (§4), with its own tests.
 c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
    self-convergence at order 2 with lateral viscosity on; the old sl3d
-   in the weak-contrast limit (tolerances set by its explicit stepping
-   and lack of dealiasing); contraction diagnostics over a contrast
-   ladder (the research measurements).
+   in the weak-contrast limit (§5b; tolerances set by its explicit
+   stepping and lack of dealiasing); contraction diagnostics over a
+   contrast ladder (§5a, the research measurements).
 d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
 
-## 7a. Nonlinear Maxwell rheologies (readily buildable here)
+## 8. Choices
 
-Stress-dependent relaxation times — AdGIA's `RelaxationLaw`
-(τ_k = τ_k0(x) F_k(state), Crawford et al. 2017 Appendix A) — fit this
-machinery with almost no new structure: τ already varies
-pointwise on the grid, the local deviatoric stress invariant is
-computable from the (d − m) component fields the pipeline already
-synthesises, and re-evaluating the weight fields e(x), α(x), β(x) from
-the updated τ(x, state) folds the nonlinearity into the SAME within-step
-fixed point as the lateral iteration (one more contribution to the
-Anderson-mixed residual). pyslfp's notes defer exactly this to the 3-D
-code (`gia_notes.md`: "it belongs with lateral viscosity variations").
-Planned as an option on `Rheology` (a per-branch law hook), implemented
-once the linear lateral iteration is gated, and benchmarked against
-AdGIA's `RelaxationLaw` path.
-
-## 8. Open questions
-
-- l = 1 toroidal: INCLUDED (decided and implemented 17 Oct 2026, §4),
-  with one pinned dof per solid region as the gauge ([design.md](../design.md) §8).
-- Whether the SLE needs toroidal surface channels: no first-order
-  coupling to sea level or gravity (toroidal motion is divergence-free
-  and radial-displacement-free at the surface), so the toroidal block
-  enters through the memory coupling alone; surface toroidal velocity is
-  an observable output only.
-- The reference profile τ̄(r): laterally averaged log-viscosity vs
-  worst-case; possibly per-degree. To be measured in (c).
-- Hermitian-pair exploitation in the transforms: DONE (15 Oct 2026).
-  The tensors are real, so GridCoupling stores spins -2, -1 as complex
-  fields and spin 0 as a real field; spins +1, +2 are reconstructed at
-  the force exit by A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}) — the
-  same orbit relation GSHTrans's tensor layer encodes (eq:reality,
-  Tensor/TensorField.hpp; its sign table corroborates the convention our
-  tests pinned, the anti-conjugating spin-1 pair included). A full
-  TensorField adoption was considered and set aside: its transform
-  batches the components of ONE tensor, while this pipeline's dominant
-  win is batching across the ~10^3 radial memory nodes, so the hybrid
-  keeps our cross-node batched calls (now wired into Synthesise/Analyse,
-  previously per-node loops) over the stored spins plus the real N = 0
-  path. The contract the reduction rests on — every degree-column set
-  entering the pipeline is Hermitian, i.e. a real field — is stated in
-  GridCoupling.hpp and the gate tests feed Hermitian data. Kernel
-  implications checked: contractions are pointwise on the grid, where
-  the derived spins reconstruct by sign * conj for free; adjoint fields
-  are real tensors too; the discrete adjoint must transpose the reduced
-  pipeline consistently (as with the Gauss-point memory migration).
-  The m >= 0 degree-column reduction is DONE too (15 Oct 2026): the
-  degree boundary carries l + 1 columns per degree (the fields are real;
-  Scatter writes each column's -m twin into the full-m spin blocks),
-  halving the banded solves, the boundary loops and the solution
-  storage, and deleting Evolution3D's Hermitian mirror layer. Public
-  column convention: index m, m >= 0, m = 0 real.
-- Depth-variable lmax (declined for now, 15 Oct 2026): deep memory nodes
-  carry only the degrees whose truncation reaches them, yet the batched
-  transforms run every node at full lmax, so truncation-banded node
-  groups at reduced lmax would save transform work. Declined because it
-  fragments the cross-node batches and complicates the entry/exit
-  bookkeeping for a saving concentrated in the few deep nodes of a
-  graded mesh; revisit only if production profiles say otherwise. Built
-  since, as `transform_degrees` (node blocks by depth, each transformed at
-  its own degree; [radial-partitioning.md](../radial-partitioning.md) §6).
+- l = 1 toroidal: included, with one pinned dof per solid region as the
+  gauge (§4, [design.md](design.md) §8).
+- The SLE has no toroidal surface channels: there is no first-order
+  coupling of toroidal motion to sea level or gravity (it is
+  divergence-free and radial-displacement-free at the surface), so the
+  toroidal block enters through the memory coupling alone; surface
+  toroidal velocity is an observable output only.
+- The reference profile τ̄(r) is the laterally averaged log-viscosity by
+  default (§5); a worst-case or per-degree reference is not built.
+- Hermitian pairs in the transforms. The tensors are real, so
+  GridCoupling stores spins -2, -1 as complex fields and spin 0 as a
+  real field; spins +1, +2 are reconstructed at the force exit by
+  A^{(N)}_{lm} = (-1)^m conj(A^{(-N)}_{l,-m}) — the same orbit relation
+  GSHTrans's tensor layer encodes (eq:reality, Tensor/TensorField.hpp;
+  its sign table corroborates the convention the tests pin, the
+  anti-conjugating spin-1 pair included). GSHTrans's TensorField
+  transform batches the components of ONE tensor, while this pipeline's
+  dominant win is batching across the ~10^3 radial memory nodes, so the
+  pipeline makes cross-node batched calls (in Synthesise/Analyse) over
+  the stored spins plus the real N = 0 path. The contract the reduction
+  rests on — every degree-column set entering the pipeline is Hermitian,
+  i.e. a real field — is stated in GridCoupling.hpp and the gate tests
+  feed Hermitian data. Contractions are pointwise on the grid, where the
+  derived spins reconstruct by sign * conj for free; adjoint fields are
+  real tensors too; the discrete adjoint transposes the reduced pipeline
+  consistently ([adjoints.md](adjoints.md) §6b, §12).
+- m >= 0 columns. The degree boundary carries l + 1 columns per degree
+  (the fields are real; Scatter writes each column's -m twin into the
+  full-m spin blocks), halving the banded solves, the boundary loops and
+  the solution storage. Public column convention: index m, m >= 0, m = 0
+  real.
+- Transforms cut with depth: deep memory nodes carry only the degrees
+  whose truncation reaches them, and `transform_degrees` transforms node
+  blocks by depth, each at its own degree
+  ([radial-partitioning.md](radial-partitioning.md) §6).
 - The grid (its Wigner table is the gigabytes) is shared: SurfaceGrid is
   a cheap handle to one immutable GSHTrans grid, and GridCoupling /
   Viscoelastic3D accept an existing grid. One grid per resolution: the
@@ -454,5 +390,5 @@ AdGIA's `RelaxationLaw` path.
 - GSHTrans's field algebra is not used: the stepping pipeline needs only
   batched transforms and hand loops, and the 3D viscosity kernel's
   contraction μ_k m†:(d − m)/itau carries its metric on the reduced
-  storage fixed by the 1D limit (`adjoints.md` §6a), not taken from the
-  library's tensor types.
+  storage fixed by the 1D limit ([adjoints.md](adjoints.md) §6a), not
+  taken from the library's tensor types.

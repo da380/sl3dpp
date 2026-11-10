@@ -1,7 +1,5 @@
 #include "sl3dpp/Adjoint.hpp"
 
-#include "sl3dpp/detail/AdjointInternals.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -9,7 +7,8 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/AdjointInternals.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -227,7 +226,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   // The material kernels: the dual solution of each step's effective
   // solve paired with the material derivative of the step's force — the
-  // transpose of the material tangent (docs/dev/adjoints.md). The
+  // transpose of the material tangent (docs/adjoints.md). The
   // branch fractions f_k = mu_k / mu_U carry the branch moduli.
   const bool material = options_.material_kernels;
   auto fractions = std::vector<std::vector<double>>{};
@@ -365,7 +364,7 @@ IceKernels AdjointSolver::DiscreteSweep(
     auto xd = std::vector<std::vector<double>>(lmax + 1);
     auto sigByDegree = std::vector<std::vector<double>>(lmax + 1);
     auto psiByDegree = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -478,7 +477,7 @@ IceKernels AdjointSolver::DiscreteSweep(
                                  : LoadCallable{};
     const auto tidesN = material ? ev.Columns(trajectory->tides[n], ev.toMatPotential_)
                                  : LoadCallable{};
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -491,7 +490,8 @@ IceKernels AdjointSolver::DiscreteSweep(
       const auto su = deg.system.SurfaceDof(Component::U);
       const auto sphi = deg.system.SurfaceDof(Component::Phi);
       for (auto c = 0; c < ncols; ++c) {
-        if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
+        if (su >= 0)
+          rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
         if (sphi >= 0) {
           rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
         }
@@ -827,7 +827,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   };
 
   // The instantaneous adjoint fingerprint of a measurement, through the
-  // forward channel mapping of the elastic adjoint (docs/dev/adjoints.md):
+  // forward channel mapping of the elastic adjoint (docs/adjoints.md):
   // its sea level (the delta amplitude), and the converged channel coefficients
   // that drive the radial jump.
   struct Jump {
@@ -928,7 +928,7 @@ IceKernels AdjointSolver::ContinuousSweep(
       // the entries made before the parallel loop fills them
       for (const auto& task : tasks) lumpSolutions[task.l].clear();
     }
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto& task = tasks[count - 1 - i];
       const auto l = task.l;
       auto& m = *task.m;
@@ -1060,7 +1060,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   const double pairing =
       r2 * ev.toNdLength_ /
       (aMat * aMat * ev.toMatDensity_ * op.BaseMaterial().SurfaceGravity());
-  // -- the material pairing (continuous; docs/dev/adjoints.md)
+  // -- the material pairing (continuous; docs/adjoints.md)
   // The continuous adjoint displacement lambda at a node — the unrelaxed
   // solve under the adjoint memory and the closed adjoint load, the
   // adjoint problem having the forward form — paired with the forward
@@ -1089,7 +1089,7 @@ IceKernels AdjointSolver::ContinuousSweep(
             tasks.size());
     auto duals = std::vector<DensityDuals>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
       const auto& deg = op.Deg(l);
       const auto ncols = 2 * (l + 1);
@@ -1168,7 +1168,7 @@ IceKernels AdjointSolver::ContinuousSweep(
     }
     auto terms = std::vector<std::vector<double>>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
       const auto l = tasks[j].first;
       const auto& mdual = *tasks[j].second;

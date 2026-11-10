@@ -6,7 +6,7 @@
 #include <span>
 #include <stdexcept>
 
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
 
@@ -28,7 +28,8 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
                    SurfaceGrid(lmax, {.nmax = 2,
                                       .oversampling = options.oversampling,
                                       .parallel = options.parallel,
-                                      .matrix_kernel = options.matrix_kernel}),
+                                      .matrix_kernel = options.matrix_kernel,
+                                      .cache_bytes = options.cache_bytes}),
                    options) {}
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
@@ -94,11 +95,11 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
           {node, 0,
            degree == lmax
                ? grid_
-               : SurfaceGrid(degree,
-                             {.nmax = 2,
-                              .oversampling = options.oversampling,
-                              .parallel = options.parallel,
-                              .matrix_kernel = options.matrix_kernel})});
+               : SurfaceGrid(degree, {.nmax = 2,
+                                      .oversampling = options.oversampling,
+                                      .parallel = options.parallel,
+                                      .matrix_kernel = options.matrix_kernel,
+                                      .cache_bytes = options.cache_bytes})});
     }
     ++blocks_.back().nodeCount;
     blockOf_.push_back(static_cast<int>(blocks_.size()) - 1);
@@ -243,9 +244,12 @@ GridCoupling::TensorField GridCoupling::Synthesise(
 void GridCoupling::Synthesise(const SpectralTensor& spectral,
                               TensorField& field) const {
   if (field.r.empty()) field = ZeroTensor();
+  // Into the companions' own storage when it is the right size (a
+  // workspace reused across passes); every value is overwritten.
   field.scalars.resize(spectral.scalars.size());
   for (auto k = std::size_t{0}; k < spectral.scalars.size(); ++k) {
-    field.scalars[k] = SynthesiseScalar(spectral.scalars[k]);
+    field.scalars[k].resize(GridValueCount());
+    SynthesiseScalar(spectral.scalars[k], field.scalars[k]);
   }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
@@ -273,7 +277,8 @@ void GridCoupling::Analyse(const TensorField& field,
   if (spectral.r.empty()) spectral = ZeroSpectral();
   spectral.scalars.resize(field.scalars.size());
   for (auto k = std::size_t{0}; k < field.scalars.size(); ++k) {
-    spectral.scalars[k] = AnalyseScalar(field.scalars[k]);
+    spectral.scalars[k].resize(ScalarCoefficientCount());
+    AnalyseScalar(field.scalars[k], spectral.scalars[k]);
   }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
@@ -289,12 +294,14 @@ void GridCoupling::Analyse(const TensorField& field,
   }
 }
 
-std::vector<double> GridCoupling::SynthesiseScalar(
-    std::span<const Complex> spectral) const {
+void GridCoupling::SynthesiseScalar(std::span<const Complex> spectral,
+                                    std::span<double> field) const {
   if (spectral.size() != ScalarCoefficientCount()) {
     throw std::invalid_argument("a scalar's coefficients span every node");
   }
-  auto field = std::vector<double>(GridValueCount(), 0.0);
+  if (field.size() != GridValueCount()) {
+    throw std::invalid_argument("a scalar field spans every node's grid");
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -303,15 +310,23 @@ std::vector<double> GridCoupling::SynthesiseScalar(
                          coefficientOffset_[last] - coefficientOffset_[first]),
         block.nodeCount, Nodes(field, fieldOffset_, first, last));
   }
+}
+
+std::vector<double> GridCoupling::SynthesiseScalar(
+    std::span<const Complex> spectral) const {
+  auto field = std::vector<double>(GridValueCount());
+  SynthesiseScalar(spectral, field);
   return field;
 }
 
-std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
-    std::span<const double> field) const {
+void GridCoupling::AnalyseScalar(std::span<const double> field,
+                                 std::span<Complex> spectral) const {
   if (field.size() != GridValueCount()) {
     throw std::invalid_argument("a scalar field spans every node's grid");
   }
-  auto spectral = std::vector<Complex>(ScalarCoefficientCount(), 0.0);
+  if (spectral.size() != ScalarCoefficientCount()) {
+    throw std::invalid_argument("a scalar's coefficients span every node");
+  }
   for (const auto& block : blocks_) {
     const auto first = block.firstNode;
     const auto last = first + block.nodeCount;
@@ -319,6 +334,12 @@ std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
         field.subspan(fieldOffset_[first], fieldOffset_[last] - fieldOffset_[first]),
         block.nodeCount, Nodes(spectral, coefficientOffset_, first, last));
   }
+}
+
+std::vector<GridCoupling::Complex> GridCoupling::AnalyseScalar(
+    std::span<const double> field) const {
+  auto spectral = std::vector<Complex>(ScalarCoefficientCount());
+  AnalyseScalar(field, spectral);
   return spectral;
 }
 
@@ -405,7 +426,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::DilatationForce(
   auto ops = std::vector<const DegreeOperator*>(lmax_ + 1);
   for (auto l = 0; l <= lmax_; ++l) ops[l] = &system(l);
   auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
-  detail::ParallelFor(lmax_ + 1, options_.parallel, [&](int task) {
+  detail::ForEachTask(options_.parallel, lmax_ + 1, [&](int task) {
     const auto l = lmax_ - task;
     const auto& op = *ops[l];
     const auto k2 = l * (l + 1.0);
@@ -461,7 +482,7 @@ void GridCoupling::Multiply(TensorField& field,
     throw std::invalid_argument(std::format(
         "the weight field has {} values, the tensor {}", weight.size(), size));
   }
-  detail::ParallelElements(size, options_.parallel, [&](std::size_t i) {
+  detail::ForEach(options_.parallel, size, [&](std::size_t i) {
     field.c[0][i] *= weight[i];
     field.c[1][i] *= weight[i];
     field.r[i] *= weight[i];
@@ -477,8 +498,8 @@ void GridCoupling::MultiplyScalar(TensorField& field, std::size_t companion,
         "a scalar companion and its weight span every node's grid");
   }
   auto& s = field.scalars[companion];
-  detail::ParallelElements(size, options_.parallel,
-                           [&](std::size_t i) { s[i] *= weight[i]; });
+  detail::ForEach(options_.parallel, size,
+                  [&](std::size_t i) { s[i] *= weight[i]; });
 }
 
 void GridCoupling::ScaleByNode(SpectralTensor& spectral,
@@ -489,15 +510,14 @@ void GridCoupling::ScaleByNode(SpectralTensor& spectral,
   const auto offsets =
       std::array{&spinOffset_[0], &spinOffset_[1], &coefficientOffset_};
   const auto blocks = std::array{&spectral.c[0], &spectral.c[1], &spectral.r};
-  detail::ParallelElements(
-      nodes_.size(), options_.parallel, [&](std::size_t node) {
-        for (auto b = std::size_t{0}; b < blocks.size(); ++b) {
-          const auto& offset = *offsets[b];
-          for (auto k = offset[node]; k < offset[node + 1]; ++k) {
-            (*blocks[b])[k] *= factor[node];
-          }
-        }
-      });
+  detail::ForEach(options_.parallel, nodes_.size(), [&](std::size_t node) {
+    for (auto b = std::size_t{0}; b < blocks.size(); ++b) {
+      const auto& offset = *offsets[b];
+      for (auto k = offset[node]; k < offset[node + 1]; ++k) {
+        (*blocks[b])[k] *= factor[node];
+      }
+    }
+  });
 }
 
 int GridCoupling::FirstNodeFor(int firstElement, int l) const {
@@ -640,7 +660,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::SpheroidalForce(
   auto ops = std::vector<const DegreeOperator*>(lmax_ + 1);
   for (auto l = 0; l <= lmax_; ++l) ops[l] = &system(l);
   auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
-  detail::ParallelFor(lmax_ + 1, options_.parallel, [&](int task) {
+  detail::ForEachTask(options_.parallel, lmax_ + 1, [&](int task) {
     const auto l = lmax_ - task;  // the largest degrees first
     const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);
@@ -702,7 +722,7 @@ std::map<int, std::vector<GridCoupling::Complex>> GridCoupling::ToroidalForce(
   auto ops = std::vector<const ToroidalOperator*>(lmax_ + 1, nullptr);
   for (auto l = 1; l <= lmax_; ++l) ops[l] = &system(l);
   auto forces = std::vector<std::vector<Complex>>(lmax_ + 1);
-  detail::ParallelFor(lmax_, options_.parallel, [&](int task) {
+  detail::ForEachTask(options_.parallel, lmax_, [&](int task) {
     const auto l = lmax_ - task;  // the largest degrees first
     const auto& op = *ops[l];
     const auto columns = static_cast<std::size_t>(l + 1);

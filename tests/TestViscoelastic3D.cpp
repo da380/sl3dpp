@@ -2,7 +2,7 @@
 // the grid machinery equals the 1D two-phase stepper at machine
 // precision), the onset of spheroidal-toroidal coupling under lateral
 // viscosity, and the dt self-convergence of the laterally varying step —
-// measurements in docs/dev/lateral-coupling.md — and the threaded step
+// measurements in docs/lateral-coupling.md — and the threaded step
 // against the serial one.
 
 #include <gtest/gtest.h>
@@ -288,11 +288,11 @@ TEST(Lateral, LateralStepSelfConvergesAtSecondOrder) {
 TEST(Lateral, ThreadedStepMatchesSerial) {
   // Options::parallel threads the transforms, the per-degree loops (force
   // assembly, solves, strain recovery) and the step's own loops (weights
-  // and decay, the residual, the mixing, the memory update). The degree
-  // and element-wise loops are bitwise independent of the thread count;
-  // the threaded transforms are not (each thread plans its own FFTs), nor
-  // are the mixer's partial sums, so the comparison is at the iteration's
-  // tolerance, not bitwise.
+  // and decay, the residual, the mixing, the memory update). With the loop
+  // kernel the step is bitwise independent of the thread count (the loops
+  // write only what their index owns, the transforms are thread-count
+  // independent, the mixer's sums run over blocks fixed by the vector's
+  // length), so the comparison is exact.
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
   const auto delta = [](double, double theta, double phi) {
@@ -329,13 +329,14 @@ TEST(Lateral, ThreadedStepMatchesSerial) {
       for (auto i = std::size_t{0}; i < x.size(); ++i) {
         scale = std::max(scale, std::abs(x[i]));
         diff = std::max(diff, std::abs(x[i] - y[i]));
+        ASSERT_EQ(x[i], y[i]) << "degree " << l << " at " << i;
       }
     }
   };
   compare(serial.spheroidal, threaded.spheroidal);
   compare(serial.toroidal, threaded.toroidal);
   EXPECT_GT(scale, 0.0);
-  EXPECT_LE(diff, 1e-10 * scale);
+  EXPECT_EQ(diff, 0.0);
 }
 
 TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
@@ -586,7 +587,11 @@ TEST(Lateral, DISABLED_StepSolverProfile) {
   });
   time("StrainOf", 10, [&] { (void)step.StrainOf(x); });
   time("Apply (lateral force + band)", 10, [&] { (void)step.Apply(x); });
-  const auto [fs, ft] = step.Forces(load, {});
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto forces = step.Forces(load, {});
+  const auto& fs = forces.first;
+  const auto& ft = forces.second;
   time("Forces", 10, [&] { (void)step.Forces(load, {}); });
   time("Solve, 0 iterations (two solves + apply)", 5, [&] {
     (void)step.Solve(fs, ft, &x, 1e30);
@@ -602,7 +607,7 @@ TEST(Lateral, DISABLED_StepSolverProfile) {
 }
 
 TEST(Lateral, DISABLED_StepSolverLadder) {
-  // Not a gate: the contrast ladder of docs/dev/lateral-coupling.md §5a
+  // Not a gate: the contrast ladder of docs/lateral-coupling.md §5a
   // (lmax 16, a sin(theta) cos(phi) log-viscosity of amplitude A, unit
   // loads on all degrees, trapezoid steps), the second step's passes
   // under the default fixed point against the conjugate-gradient

@@ -20,6 +20,7 @@
  * naming the config, the member and the fault.
  */
 
+#include <cstddef>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -126,6 +127,10 @@ struct EvolveInput {
   /// node's grid may take below lmax (Viscoelastic3D::Options::
   /// transform_degrees); empty, every node at lmax.
   std::vector<int> transform_degrees;
+  /// The 3D commands' last-level cache the transforms block their work
+  /// for, in MiB (Viscoelastic3D::Options::cache_bytes); 0, the library's
+  /// default.
+  std::size_t cache_mb = 0;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
   /// which the full transverse feedback needs when the input moments
@@ -190,7 +195,7 @@ struct MeasurementSpec {
 struct KernelInput {
   EvolveInput run;
   int record_stride = 1;
-  AdjointMethod method = AdjointMethod::Continuous;  ///< kernel1d alone
+  AdjointMethod method = AdjointMethod::Continuous;
   /// `sl3d kernel` alone: with a directory given, the recorded states
   /// are spilled there during the forward run and read back one at a
   /// time by the sweep, so the trajectory's N / stride states live on
@@ -211,7 +216,7 @@ struct KernelInput {
 
 /// The config of `sl3d static`: the instantaneous (elastic) response of
 /// a laterally heterogeneous elastic Earth to a surface load and a
-/// tidal potential, no sea level (docs/dev/adjoints.md §13j), with the
+/// tidal potential, no sea level (docs/adjoints.md §13j), with the
 /// radial model's response beside it.
 struct StaticInput {
   std::filesystem::path model;
@@ -241,6 +246,7 @@ struct StaticInput {
   double rtol = 1e-10;
   int max_iterations = 200;
   std::vector<int> transform_degrees;
+  std::size_t cache_mb = 0;               ///< as EvolveInput's
   std::filesystem::path output;           ///< the surface file
   std::filesystem::path exchange_output;  ///< the coefficient table, optional
   std::filesystem::path volume_output;    ///< the model file, optional

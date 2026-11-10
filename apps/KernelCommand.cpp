@@ -622,6 +622,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
                               .oversampling = o.oversampling,
                               .parallel = o.parallel,
                               .matrix_kernel = o.matrix_kernel,
+                              .cache_bytes = o.cache_bytes,
                               .memory_points = o.memory_points,
                               .transform_degrees = o.transform_degrees});
   }
@@ -691,7 +692,8 @@ std::string RunKernel3D(const std::filesystem::path& config) {
 
   const auto& matScales = earth.material.ModelScales();
   AdjointSolver3D adjoint(
-      evolution, {.rtol = input.run.rtol,
+      evolution, {.method = input.method,
+                  .rtol = input.run.rtol,
                   .max_coupled_iterations = input.run.max_coupled_iterations,
                   .coupled_rtol = input.run.coupled_rtol});
   const auto summary = RunKernelsWith<SeaLevelEvolution3D::Snapshot>(

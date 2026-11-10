@@ -12,7 +12,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -614,8 +614,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       const auto* delta = second ? &(*ditau)[k] : nullptr;
       auto* dKernel = second ? &dItauKernel[k] : nullptr;
       // Node by node, each writing only its own grid values.
-      detail::ParallelElements(
-          nodeCount, op.options_.parallel, [&](std::size_t rn) {
+      detail::ForEach(
+          op.options_.parallel, nodeCount, [&](std::size_t rn) {
             if (mu[rn] <= 0.0) return;
             const auto r = coupling.RadiusOfNode(static_cast<int>(rn));
             const auto wq = coupling.WeightOfNode(static_cast<int>(rn));
@@ -659,7 +659,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
   };
 
-  // -- the material pairing (continuous; docs/dev/adjoints.md)
+  // -- the material pairing (continuous; docs/adjoints.md)
   // The continuous adjoint displacement at a node (the unrelaxed solve
   // under the adjoint memory and closed load) paired with the forward
   // solution and memory there: the energy contraction of the grid
@@ -722,12 +722,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto unrelaxedTor = [&](int l) -> const ToroidalOperator& {
     return op.Toroidal(l);
   };
-  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x) {
+  auto dilatationCoefficients = [&](const Viscoelastic3D::Solutions& x) {
     auto scalar = std::vector<Complex>(coupling.ScalarCoefficientCount(), 0.0);
     for (const auto& [l, xl] : x.spheroidal) {
       coupling.AddDilatationOfSolution(scalar, l, op.Spheroidal(l), xl);
     }
-    return coupling.SynthesiseScalar(scalar);
+    return scalar;
+  };
+  auto dilatationOf = [&](const Viscoelastic3D::Solutions& x) {
+    return coupling.SynthesiseScalar(dilatationCoefficients(x));
   };
   using Tensor = GridCoupling::TensorField;
   // v's forces on a solution with its grid strain (the material tangent's
@@ -741,7 +744,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                                std::span<const double> shear,
                                const Tensor* memoryForce) {
     auto gridForce = coupling.ZeroTensor();
-    detail::ParallelElements(values, op.options_.parallel, [&](std::size_t i) {
+    detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
       const auto w = shear.empty() ? 0.0 : -shear[i];
       for (auto c = 0; c < 2; ++c) {
         gridForce.c[c][i] =
@@ -752,9 +755,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto analysed = coupling.Analyse(gridForce);
     auto bulk = std::map<int, std::vector<Complex>>{};
     if (hasMaterialV && !materialV->kappa.empty() && x != nullptr) {
-      auto field = dilatationOf(*x);
+      // Through gridForce's real component, analysed (done with it), and
+      // back over the dilatation's coefficients.
+      auto scalar = dilatationCoefficients(*x);
+      auto& field = gridForce.r;
+      coupling.SynthesiseScalar(scalar, field);
       for (auto i = std::size_t{0}; i < values; ++i) field[i] *= -materialV->kappa[i];
-      bulk = coupling.DilatationForce(coupling.AnalyseScalar(field), unrelaxedSph);
+      coupling.AnalyseScalar(field, scalar);
+      bulk = coupling.DilatationForce(scalar, unrelaxedSph);
     }
     return std::pair(std::move(analysed), std::move(bulk));
   };
@@ -763,7 +771,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   auto memoryVariationV = [&](const std::vector<Tensor>& memory) {
     auto out = coupling.ZeroTensor();
     if (dmuV.empty()) return out;
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base_ = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -826,7 +834,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (weight == 0.0) return;
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));
@@ -878,7 +886,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
-    detail::ParallelElements(nodeCount, op.options_.parallel, [&](std::size_t rn) {
+    detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
       const auto base = coupling.FieldOffset(static_cast<int>(rn));
       const auto size = coupling.FieldSizeOf(static_cast<int>(rn));
       const auto rr = coupling.RadiusOfNode(static_cast<int>(rn));

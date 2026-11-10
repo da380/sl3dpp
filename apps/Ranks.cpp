@@ -46,15 +46,18 @@ RanksOverride::~RanksOverride() { Current() = std::move(saved_); }
 
 Viscoelastic3D::Options OperatorOptions(const EvolveInput& input,
                                         const Rheology& rheology) {
-  return OperatorOptions(input.lmax, input.transform_degrees, rheology);
+  return OperatorOptions(input.lmax, input.transform_degrees, input.cache_mb,
+                         rheology);
 }
 
 Viscoelastic3D::Options OperatorOptions(int lmax,
                                         const std::vector<int>& transform_degrees,
+                                        std::size_t cache_mb,
                                         const Rheology& rheology,
                                         const std::vector<char>& active_elements) {
   auto options = Viscoelastic3D::Options{};
   options.transform_degrees = transform_degrees;
+  options.cache_bytes = cache_mb << 20;
   const auto& ranks = TheRanks();
   if (!ranks.Distributed()) return options;
 #ifdef SL3DPP_HAVE_MPI
@@ -65,6 +68,7 @@ Viscoelastic3D::Options OperatorOptions(int lmax,
       {.eps = options.eps,
        .truncation = options.truncation,
        .oversampling = options.oversampling,
+       .cache_bytes = options.cache_bytes,
        .memory_points = options.memory_points,
        .transform_degrees = options.transform_degrees,
        .active_elements = active_elements});

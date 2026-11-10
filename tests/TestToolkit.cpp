@@ -12,12 +12,13 @@
 #include <planetmodel/version.hpp>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "sl3dpp/Geography.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 TEST(Toolkit, Version) { EXPECT_EQ(sl3dpp::Version(), "0.1.0"); }
 
@@ -74,24 +75,26 @@ TEST(Toolkit, GeographicConversions) {
   EXPECT_NEAR(west.longitude, 290.0, 1e-12);
 }
 
-// The threaded task loop rethrows a task's exception after the loop (one
-// leaving an OpenMP region would terminate), and the other tasks still run.
-TEST(Toolkit, ParallelForRethrowsAfterTheLoop) {
-  auto ran = std::vector<int>(16, 0);
-  EXPECT_THROW(sl3dpp::detail::ParallelFor(16, true,
-                                           [&](int i) {
-                                             ran[i] = 1;
-                                             if (i == 5) {
-                                               throw std::runtime_error("5");
-                                             }
-                                           }),
-               std::runtime_error);
-  EXPECT_EQ(std::ranges::count(ran, 1), 16);
+// The threaded task loop rethrows after the loop (an exception leaving an
+// OpenMP region would terminate) the exception a sequential loop would
+// raise: the lowest failing task's, every task below it having run.
+TEST(Toolkit, ForEachTaskRethrowsTheLowestFailure) {
+  auto ran = std::vector<int>(64, 0);
+  try {
+    sl3dpp::detail::ForEachTask(true, 64, [&](std::ptrdiff_t i) {
+      ran[i] = 1;
+      if (i == 5 || i == 40) throw std::runtime_error(std::to_string(i));
+    });
+    FAIL() << "no exception";
+  } catch (const std::runtime_error& e) {
+    EXPECT_STREQ(e.what(), "5");
+  }
+  EXPECT_EQ(std::count(ran.begin(), ran.begin() + 6, 1), 6);
 }
 
-// The threaded mixer: at one thread bitwise the serial update; at four,
-// its per-thread partial sums change only round-off, and the iteration
-// still converges. A nonlinear contraction over a vector held as three
+// The threaded mixer: bitwise the serial update at one thread and at four,
+// its sums being over blocks fixed by the vector's length; and the
+// iteration converges. A nonlinear contraction over a vector held as three
 // segments, as the 3D step holds its coefficient blocks; the iterates are
 // compared midway, before convergence can wash differences out.
 TEST(Toolkit, AndersonMixerThreadedMatchesSerial) {
@@ -134,10 +137,8 @@ TEST(Toolkit, AndersonMixerThreadedMatchesSerial) {
   const auto [four, fourResidual] = run(true, 4);
   EXPECT_LT(serialResidual, 1e-8);
   EXPECT_LT(fourResidual, 1e-8);
-  auto worst = 0.0;
   for (auto i = std::size_t{0}; i < serial.size(); ++i) {
     ASSERT_EQ(one[i], serial[i]) << "at " << i;
-    worst = std::max(worst, std::abs(four[i] - serial[i]));
+    ASSERT_EQ(four[i], serial[i]) << "at " << i;
   }
-  EXPECT_LT(worst, 1e-10);
 }

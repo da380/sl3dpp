@@ -341,7 +341,11 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
   const auto g = setup.Smooth(rng, 1.0);
   const auto span = 10.0 * setup.Kyr();
   const auto& mesh = setup.material.Mesh();
-  const auto [k0, m0] = setup.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = setup.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   auto materialDirection = [&](const std::function<double(double)>& profile) {
     MaterialDirection d;
     d.kappa.assign(k0.size(), 0.0);
@@ -470,7 +474,11 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
 
   const auto& material = setup.material;
   const auto& mesh = material.Mesh();
-  const auto [k0, m0] = material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   auto materialDirection = [&](const std::function<double(double)>& profile) {
     MaterialDirection d;
     d.kappa.assign(k0.size(), 0.0);

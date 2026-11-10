@@ -101,7 +101,8 @@ void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
   }
   if (Has(top, "coupled")) {
     const auto& coupled = top.At("coupled");
-    Allow(coupled, {"rtol", "max_iterations", "transform_degrees"});
+    Allow(coupled,
+          {"rtol", "max_iterations", "transform_degrees", "cache_mb"});
     out.coupled_rtol = Number(coupled, "rtol", 1e-9);
     out.max_coupled_iterations = Integer(coupled, "max_iterations", 60);
     if (Has(coupled, "transform_degrees")) {
@@ -114,6 +115,11 @@ void ReadRunMembers(const Json& top, const std::filesystem::path& directory,
         out.transform_degrees.push_back(static_cast<int>(value));
       }
     }
+    const auto cache_mb = Integer(coupled, "cache_mb", 0);
+    if (cache_mb < 0) {
+      Fail(coupled.At("cache_mb"), "is not a cache size in MiB (0 or more)");
+    }
+    out.cache_mb = static_cast<std::size_t>(cache_mb);
   }
 }
 

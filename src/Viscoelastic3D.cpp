@@ -12,7 +12,7 @@
 
 #include "sl3dpp/detail/AndersonMixer.hpp"
 #include "sl3dpp/detail/LateralSolve.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
 
@@ -67,13 +67,12 @@ void AddSpectral(GridCoupling::SpectralTensor& out,
   for (auto k = std::size_t{0}; k < a.size(); ++k) {
     auto& o = *a[k];
     const auto& f = *b[k];
-    detail::ParallelElements(o.size(), parallel,
-                             [&](std::size_t i) { o[i] += f[i]; });
+    detail::ForEach(parallel, o.size(), [&](std::size_t i) { o[i] += f[i]; });
   }
   for (auto k = std::size_t{0}; k < out.scalars.size() && k < in.scalars.size(); ++k) {
     auto& o = out.scalars[k];
     const auto& f = in.scalars[k];
-    detail::ParallelElements(o.size(), parallel, [&](std::size_t i) { o[i] += f[i]; });
+    detail::ForEach(parallel, o.size(), [&](std::size_t i) { o[i] += f[i]; });
   }
 }
 
@@ -128,7 +127,7 @@ std::span<double> Reals(std::vector<std::complex<double>>& v) {
 void AdvanceMemory(GridCoupling::TensorField& m,
                    const std::vector<double>& beta,
                    const GridCoupling::TensorField& d, bool parallel) {
-  detail::ParallelElements(m.r.size(), parallel, [&](std::size_t i) {
+  detail::ForEach(parallel, m.r.size(), [&](std::size_t i) {
     m.c[0][i] += beta[i] * d.c[0][i];
     m.c[1][i] += beta[i] * d.c[1][i];
     m.r[i] += beta[i] * d.r[i];
@@ -151,13 +150,13 @@ struct Viscoelastic3D::Flavour {
 Viscoelastic3D::Viscoelastic3D(
     const Rheology& rheology, int lmax,
     const std::function<double(double, double, double)>& delta, Options options)
-    : Viscoelastic3D(
-          rheology, lmax,
-          SurfaceGrid(lmax, {.nmax = 2,
-                             .oversampling = options.oversampling,
-                             .parallel = options.parallel,
-                             .matrix_kernel = options.matrix_kernel}),
-          delta, options) {}
+    : Viscoelastic3D(rheology, lmax,
+                     SurfaceGrid(lmax, {.nmax = 2,
+                                        .oversampling = options.oversampling,
+                                        .parallel = options.parallel,
+                                        .matrix_kernel = options.matrix_kernel,
+                                        .cache_bytes = options.cache_bytes}),
+                     delta, options) {}
 
 std::vector<char> Viscoelastic3D::ActiveElementsFor(const Rheology& rheology,
                                                      int lmax,
@@ -173,6 +172,7 @@ std::vector<char> Viscoelastic3D::ActiveElementsFor(const Rheology& rheology,
                             .oversampling = options.oversampling,
                             .parallel = options.parallel,
                             .matrix_kernel = options.matrix_kernel,
+                            .cache_bytes = options.cache_bytes,
                             .memory_points = options.memory_points,
                             .transform_degrees = options.transform_degrees,
                             .all_solid = true});
@@ -217,10 +217,12 @@ Viscoelastic3D::Viscoelastic3D(
            .oversampling = options.oversampling,
            .parallel = options.parallel,
            .matrix_kernel = options.matrix_kernel,
+           .cache_bytes = options.cache_bytes,
            .memory_points = options.memory_points,
            .transform_degrees = options.transform_degrees,
            .elements = OwnedElements(rheology.BaseMaterial().Mesh(), options),
-           .active_elements = ActiveElementsFor(rheology, lmax, grid, options)}),
+           .active_elements =
+               ActiveElementsFor(rheology, lmax, grid, options)}),
       reference_(*rheology_, lmax,
                  {.eps = options.eps,
                   .truncation = options.truncation,
@@ -531,19 +533,21 @@ Viscoelastic3D::ApplyLateralOperator(
   // the real pairs, as shares when distributed, summed in one
   // collective for every degree (the collective serial, in the
   // same order on every process)
-  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
-    auto& task = tasks[i];
-    const auto columns = task.l + 1;
-    const auto ndof = task.tor != nullptr ? task.tor->DofCount() : task.sph->DofCount();
-    task.real = toReal(*task.x, ndof, columns);
-    if (collectives.Distributed()) {
-      if (task.tor != nullptr) {
-        task.tor->MaskToShare(task.real, 2 * columns);
-      } else {
-        task.sph->MaskToShare(task.real, 2 * columns);
-      }
-    }
-  });
+  detail::ForEachTask(
+      options_.parallel, static_cast<int>(tasks.size()), [&](int i) {
+        auto& task = tasks[i];
+        const auto columns = task.l + 1;
+        const auto ndof =
+            task.tor != nullptr ? task.tor->DofCount() : task.sph->DofCount();
+        task.real = toReal(*task.x, ndof, columns);
+        if (collectives.Distributed()) {
+          if (task.tor != nullptr) {
+            task.tor->MaskToShare(task.real, 2 * columns);
+          } else {
+            task.sph->MaskToShare(task.real, 2 * columns);
+          }
+        }
+      });
   if (collectives.Distributed()) {
     auto size = std::size_t{0};
     for (const auto& task : tasks) size += task.real.size();
@@ -560,28 +564,32 @@ Viscoelastic3D::ApplyLateralOperator(
   }
   // the bands, threaded over the degrees; the products masked
   // back to this process's share, the layout the forces have
-  detail::ParallelFor(static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
-    auto& task = tasks[i];
-    const auto columns = task.l + 1;
-    const auto ndof = task.tor != nullptr ? task.tor->DofCount() : task.sph->DofCount();
-    auto y = task.tor != nullptr ? task.tor->Apply(task.real, 2 * columns)
-                                 : task.sph->Apply(task.real, 2 * columns);
-    if (collectives.Distributed()) {
-      if (task.tor != nullptr) {
-        task.tor->MaskToShare(y, 2 * columns);
-      } else {
-        task.sph->MaskToShare(y, 2 * columns);
-      }
-    }
-    auto& b = *task.out;
-    for (auto c = 0; c < columns; ++c) {
-      for (auto d = 0; d < ndof; ++d) {
-        const auto k = static_cast<std::size_t>(c) * ndof + d;
-        b[k] = Complex{y[k], y[static_cast<std::size_t>(columns + c) * ndof + d]} -
-               b[k];
-      }
-    }
-  });
+  detail::ForEachTask(
+      options_.parallel, static_cast<int>(tasks.size()), [&](int i) {
+        auto& task = tasks[i];
+        const auto columns = task.l + 1;
+        const auto ndof =
+            task.tor != nullptr ? task.tor->DofCount() : task.sph->DofCount();
+        auto y = task.tor != nullptr ? task.tor->Apply(task.real, 2 * columns)
+                                     : task.sph->Apply(task.real, 2 * columns);
+        if (collectives.Distributed()) {
+          if (task.tor != nullptr) {
+            task.tor->MaskToShare(y, 2 * columns);
+          } else {
+            task.sph->MaskToShare(y, 2 * columns);
+          }
+        }
+        auto& b = *task.out;
+        for (auto c = 0; c < columns; ++c) {
+          for (auto d = 0; d < ndof; ++d) {
+            const auto k = static_cast<std::size_t>(c) * ndof + d;
+            b[k] =
+                Complex{y[k],
+                        y[static_cast<std::size_t>(columns + c) * ndof + d]} -
+                b[k];
+          }
+        }
+      });
   return std::pair{std::move(sph), std::move(tor)};
 }
 
@@ -662,7 +670,11 @@ void Viscoelastic3D::AddChannelForces(
     const LoadCallable3D& load, const LoadCallable3D& tide,
     const std::function<const DegreeOperator&(int)>& spheroidal) const {
   if (!load && !tide) return;
-  for (auto& [l, b] : forces) {
+  // Named, not a structured binding: Clang 18 does not capture those in a
+  // lambda when OpenMP is enabled.
+  for (auto& entry : forces) {
+    const auto l = entry.first;
+    auto& b = entry.second;
     const auto& system = spheroidal(l);
     const auto ndof = system.DofCount();
     auto add = [&](const std::optional<std::vector<Complex>>& columns,
@@ -704,7 +716,7 @@ void Viscoelastic3D::AddStrainCoefficients(
                      hasTor ? &torIt->second : nullptr});
   }
   const auto count = static_cast<int>(tasks.size());
-  detail::ParallelFor(count, options_.parallel, [&](int i) {
+  detail::ForEachTask(options_.parallel, count, [&](int i) {
     const auto& task = tasks[count - 1 - i];  // the largest degrees first
     coupling_.AddStrainOfSolution(
         spectral, task.l, *task.sph, *task.x, task.tor,
@@ -793,8 +805,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveForces(
   };
 
   auto pending = std::vector<PendingSolve>(tasks.size());
-  detail::ParallelFor(
-      static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
+  detail::ForEachTask(
+      options_.parallel, static_cast<int>(tasks.size()), [&](int i) {
         const auto& task = tasks[i];
         const auto columns = task.l + 1;
         pending[i] = task.tor != nullptr ? begin(*task.tor, *task.b, columns)
@@ -814,8 +826,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveForces(
       at += static_cast<std::ptrdiff_t>(p.separators.size());
     }
   }
-  detail::ParallelFor(
-      static_cast<int>(tasks.size()), options_.parallel, [&](int i) {
+  detail::ForEachTask(
+      options_.parallel, static_cast<int>(tasks.size()), [&](int i) {
         auto& task = tasks[i];
         const auto columns = task.l + 1;
         task.solution = task.tor != nullptr
@@ -839,7 +851,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveElastic(
   const auto nodes = static_cast<std::size_t>(coupling_.NodeCount());
   for (auto k = std::size_t{0}; k < state.m.size(); ++k) {
     const auto& m = state.m[k];
-    detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
+    detail::ForEach(options_.parallel, nodes, [&](std::size_t node) {
       const auto mu = muBranch_[k][node];
       if (mu == 0.0) return;
       const auto first = coupling_.FieldOffset(static_cast<int>(node));
@@ -853,7 +865,7 @@ Viscoelastic3D::Solutions Viscoelastic3D::SolveElastic(
   }
   // Under lateral moduli the branch moduli carry the shear factor.
   if (!shear_.empty() && !state.m.empty()) {
-    detail::ParallelElements(combined.r.size(), options_.parallel, [&](std::size_t i) {
+    detail::ForEach(options_.parallel, combined.r.size(), [&](std::size_t i) {
       const auto factor = 1.0 + shear_[i];
       combined.c[0][i] *= factor;
       combined.c[1][i] *= factor;
@@ -1120,7 +1132,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   step.grid_ = TakeTensor();
   auto& fixed = step.grid_;
   if (K == 0) {
-    detail::ParallelElements(values, options_.parallel, [&](std::size_t i) {
+    detail::ForEach(options_.parallel, values, [&](std::size_t i) {
       step.weight_[i] = 0.0;
       fixed.c[0][i] = 0.0;
       fixed.c[1][i] = 0.0;
@@ -1130,7 +1142,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   for (auto k = std::size_t{0}; k < K; ++k) {
     step.memory_.push_back(TakeTensor());
     step.beta_[k] = TakeField();
-    detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
+    detail::ForEach(options_.parallel, nodes, [&](std::size_t node) {
       const auto itauRef = itauRef_[k][node];
       const auto refBeta = scheme == Scheme::BackwardEuler
                                ? 1.0 - BackwardEulerWeight(dt * itauRef)
@@ -1182,7 +1194,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   // the local weights, and the memory force the factor (1 + rho(x)) on
   // every branch modulus.
   if (!shear_.empty()) {
-    detail::ParallelElements(nodes, options_.parallel, [&](std::size_t node) {
+    detail::ForEach(options_.parallel, nodes, [&](std::size_t node) {
       const auto base = coupling_.FieldOffset(static_cast<int>(node));
       const auto size = coupling_.FieldSizeOf(static_cast<int>(node));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -1205,7 +1217,7 @@ Viscoelastic3D::OpenStep Viscoelastic3D::StartStep(
   // The first pass's force, from the grid strain already in hand, so that
   // the first Respond (of s0) skips its synthesis; under a lateral bulk
   // modulus its dilatation too, which the start strain must carry.
-  detail::ParallelElements(values, options_.parallel, [&](std::size_t i) {
+  detail::ForEach(options_.parallel, values, [&](std::size_t i) {
     fixed.c[0][i] = step.weight_[i] * d0.c[0][i];
     fixed.c[1][i] = step.weight_[i] * d0.c[1][i];
     fixed.r[i] = step.weight_[i] * d0.r[i];
@@ -1378,8 +1390,11 @@ Viscoelastic3D::OpenStep::Nest(const Closure& closure,
     auto finite = true;
     for (const auto* block : {&image.spheroidal, &image.toroidal}) {
       const auto& other = block == &image.spheroidal ? iterate.spheroidal : iterate.toroidal;
-      for (const auto& [l, n] : *block) {
-        const auto& o = other.at(l);
+      // Named, not a structured binding: Clang 18 does not take those into
+      // an OpenMP region.
+      for (const auto& entry : *block) {
+        const auto& n = entry.second;
+        const auto& o = other.at(entry.first);
         const auto size = n.size();
 #pragma omp parallel for schedule(static) reduction(max : scale, diff) \
     reduction(&& : finite) if (parallel)
@@ -1517,8 +1532,8 @@ void Viscoelastic3D::OpenStep::AddForce(
     if (f.size() != o.size()) {
       throw std::invalid_argument("a force's tensor has the coupling's layout");
     }
-    detail::ParallelElements(o.size(), op.options_.parallel,
-                             [&](std::size_t i) { o[i] += f[i]; });
+    detail::ForEach(op.options_.parallel, o.size(),
+                    [&](std::size_t i) { o[i] += f[i]; });
   }
   for (const auto& [l, f] : spheroidal) {
     const auto expected =
@@ -1554,17 +1569,23 @@ void Viscoelastic3D::OpenStep::AddChannels(Solutions& solutions,
 
 GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
     const Solutions& solutions) const {
+  // Into the iterate Converge last spent, when there is one.
+  auto spectral = std::move(spare_);
+  StrainOf(solutions, spectral);
+  return spectral;
+}
+
+void Viscoelastic3D::OpenStep::StrainOf(
+    const Solutions& solutions, GridCoupling::SpectralTensor& spectral) const {
   const auto& op = *op_;
   auto& flavour = *flavour_;
-  // Into the iterate Converge last spent, zeroed, when there is one.
-  auto spectral = std::move(spare_);
   if (spectral.r.empty()) {
     spectral = op.ZeroSpectralFor();
   } else {
     for (auto* block : Blocks(spectral)) {
       auto& b = *block;
-      detail::ParallelElements(b.size(), op.options_.parallel,
-                               [&](std::size_t i) { b[i] = 0.0; });
+      detail::ForEach(op.options_.parallel, b.size(),
+                      [&](std::size_t i) { b[i] = 0.0; });
     }
   }
   const auto spheroidal = [&](int l) -> const DegreeOperator& {
@@ -1574,7 +1595,6 @@ GridCoupling::SpectralTensor Viscoelastic3D::OpenStep::StrainOf(
                            [&](int l) -> const ToroidalOperator& {
                              return op.FlavourToroidal(flavour, l);
                            });
-  return spectral;
 }
 
 double Viscoelastic3D::OpenStep::InertiaMoment(
@@ -1647,7 +1667,7 @@ void Viscoelastic3D::OpenStep::AddMemory(
     }
     const auto& mu = op.muBranch_[k];
     auto& memory = memory_[k];
-    detail::ParallelElements(nodes, op.options_.parallel, [&](std::size_t node) {
+    detail::ForEach(op.options_.parallel, nodes, [&](std::size_t node) {
       const auto base = coupling.FieldOffset(static_cast<int>(node));
       const auto size = coupling.FieldSizeOf(static_cast<int>(node));
       for (auto x = std::size_t{0}; x < size; ++x) {
@@ -1668,8 +1688,8 @@ void Viscoelastic3D::OpenStep::AddMemory(
   for (auto b = std::size_t{0}; b < out.size(); ++b) {
     auto& o = *out[b];
     const auto& f = *in[b];
-    detail::ParallelElements(o.size(), op.options_.parallel,
-                             [&](std::size_t i) { o[i] += f[i]; });
+    detail::ForEach(op.options_.parallel, o.size(),
+                    [&](std::size_t i) { o[i] += f[i]; });
   }
   startForce_ = false;
 }
@@ -1742,7 +1762,7 @@ Viscoelastic3D::OpenStep::Converge(
       for (auto b = std::size_t{0}; b < next.size(); ++b) {
         auto& n = *next[b];
         const auto& o = *now[b];
-        detail::ParallelElements(n.size(), parallel, [&](std::size_t i) {
+        detail::ForEach(parallel, n.size(), [&](std::size_t i) {
           n[i] = o[i] + control.damping * (n[i] - o[i]);
         });
       }

@@ -6,7 +6,7 @@
 #include <numbers>
 #include <stdexcept>
 
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -396,7 +396,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     tasks.push_back(std::move(task));
   }
   const auto count = static_cast<int>(tasks.size());
-  detail::ParallelFor(count, options_.parallel, [&](int i) {
+  detail::ForEachTask(options_.parallel, count, [&](int i) {
     auto& task = tasks[count - 1 - i];  // the largest degrees first
     const auto& deg = *task.deg;
     task.x = deg.system.Solve(deg.MemoryForce(*task.m, task.ncols), task.ncols);
@@ -423,7 +423,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::Strain(
   }
   auto strains = std::vector<std::vector<double>>(inputs.size());
   const auto count = static_cast<int>(inputs.size());
-  detail::ParallelFor(count, options_.parallel, [&](int i) {
+  detail::ForEachTask(options_.parallel, count, [&](int i) {
     const auto j = static_cast<std::size_t>(count - 1 - i);
     const auto& x = *inputs[j].second;
     strains[j] = degs[j]->Strain(x, static_cast<int>(x.size() / degs[j]->ndof));
@@ -522,7 +522,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
   }
   auto decayed = std::vector<std::vector<double>>(inputs.size());
   const auto count = static_cast<int>(inputs.size());
-  detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+  detail::ForEachTask(op.options_.parallel, count, [&](int i) {
     const auto j = static_cast<std::size_t>(count - 1 - i);
     const auto l = inputs[j].first;
     const auto& m = *inputs[j].second;
@@ -575,7 +575,7 @@ const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     }
     auto solved = std::vector<std::vector<double>>(inputs.size());
     const auto count = static_cast<int>(inputs.size());
-    detail::ParallelFor(count, op_->options_.parallel, [&](int i) {
+    detail::ForEachTask(op_->options_.parallel, count, [&](int i) {
       const auto j = static_cast<std::size_t>(count - 1 - i);
       const auto l = inputs[j].first;
       const auto ncols = ncols_.at(l);
@@ -685,7 +685,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     tasks.push_back(std::move(task));
   }
   const auto count = static_cast<int>(tasks.size());
-  detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+  detail::ForEachTask(op.options_.parallel, count, [&](int i) {
     auto& task = tasks[count - 1 - i];  // the largest degrees first
     const auto& deg = *task.deg;
     const auto ncols = task.ncols;
@@ -913,7 +913,8 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                   .emplace(key, ComputeLoveNumbers(
                                     material, lmax_,
                                     {.eps = options_.eps,
-                                     .truncation = options_.truncation}))
+                                     .truncation = options_.truncation,
+                                     .parallel = options_.parallel}))
                   .first;
     } else {
       const auto& flavour = FlavourOf(scheme, dt);
@@ -922,7 +923,8 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                     NodalMaterial(), lmax_,
                                     {.eps = options_.eps,
                                      .truncation = options_.truncation,
-                                     .point_shear = &flavour.pointShear}))
+                                     .point_shear = &flavour.pointShear,
+                                     .parallel = options_.parallel}))
                   .first;
     }
   }
@@ -938,7 +940,8 @@ const LoveNumbers& ViscoelasticOperator::ElasticLoveNumbers() const {
                                   NodalMaterial(), lmax_,
                                   {.eps = options_.eps,
                                    .truncation = options_.truncation,
-                                   .point_shear = ElasticPointShear()}))
+                                   .point_shear = ElasticPointShear(),
+                                   .parallel = options_.parallel}))
                 .first;
   }
   return found->second;

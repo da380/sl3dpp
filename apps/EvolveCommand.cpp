@@ -97,8 +97,9 @@ class Fnv1a {
 /// with another run's checkpoints -- another config, or the same config
 /// over changed inputs -- is refused. The members that only steer the run
 /// (the checkpoint stride and directory, the wall-time limit, restart, the
-/// output) are left out, and so are the paths themselves, so that these can
-/// change between a run and its resumption and a run directory can move.
+/// transforms' cache, the output) are left out, and so are the paths
+/// themselves, so that these can change between a run and its resumption
+/// and a run directory can move.
 std::uint64_t FingerprintOf(const EvolveInput& input) {
   auto hash = Fnv1a{};
   hash.AddFile(input.model);

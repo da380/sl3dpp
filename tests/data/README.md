@@ -43,20 +43,19 @@ anything back.
 ## From the Fortran sl3d
 
 - `prem.simp.vm1` — copied verbatim from `sl3d/data/prem.simp.vm1`
-  (da380/sl3d) on 15 Oct 2026: the legacy gia1d/sl3d 1D model format
+  (da380/sl3d): the legacy gia1d/sl3d 1D model format
   (title; `nknot ntau`; rows `r rho kappa[GPa] mu[GPa] log10(viscosity)`,
   0 meaning no viscosity). Used by the legacy-reader tests and by the
   Fortran gate (`benchmarks/fortran_gate.cpp`).
 - `fortran_visco_test.txt` — `visccoefs.out` from the original Fortran
   `sl3d/visco_test` (da380/sl3d, driver patched for coefficient output and
-  an lmax argument; physics untouched), run 15 Oct 2026 at lmax 32 on
+  an lmax argument; physics untouched), run at lmax 32 on
   `prem.simp.vm1`: the analytic lateral viscosity s = s(r) exp(0.3 (Y_2,-2
   + Y_2,2)), a constant zonal load rate, explicit RK2 at dt = 50 yr over
   5 kyr. Rows: output index (t = 1000 yr each), l, m, then Re/Im of
   surface U (m) and phi (m^2/s^2), SI. No test reads it; it is the record
-  of the comparison in `docs/dev/lateral-coupling.md`, which
+  of the comparison in `docs/lateral-coupling.md`, which
   `scripts/run_fortran_gate.sh` reruns at any lmax.
-  Degree 1 of that fixture reflects the Fortran's unfinished l = 1
-  handling (a known loose end in the original, deferred with rotation)
-  and is not compared; the gate uses l >= 2 (see
+  Degree 1 of that fixture reflects the Fortran's unsettled l = 1
+  handling and is not compared; the gate uses l >= 2 (see
   `benchmarks/fortran_gate.cpp`).

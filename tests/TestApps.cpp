@@ -11,18 +11,26 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <filesystem>
 #include <fstream>
 #include <planetmodel/error.hpp>
 #include <planetmodel/grid.hpp>
+#include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <sstream>
 #include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "AppFixtures.hpp"
 #include "Commands.hpp"
+#include "Common.hpp"
+#include "Ranks.hpp"
+#include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/Viscoelastic3D.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
 
 namespace {
@@ -990,6 +998,74 @@ TEST_F(AppsTest, TransformDegreesAreReadAndChecked) {
         },
         planetmodel::Error)
         << bad;
+  }
+}
+
+TEST_F(AppsTest, CacheMbIsReadAndChecked) {
+  // evolve's and kernel's coupled.cache_mb, and static's own cache_mb: a
+  // count of MiB that reaches the operator's options as bytes, 0 or absent
+  // leaving the library's default
+  static_cast<void>(Deck());
+  const auto evolve = [&](std::string_view coupled) {
+    return Write("cache.json", std::string{R"({
+      "model": "ball.deck", "lmax": 4,
+      "state": {"file": "history.nc"},
+      "ice_history": {"file": "history.nc"},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 3},
+      "coupled": {)"} + std::string{coupled} +
+                                   R"(}, "output": "out.nc"})");
+  };
+  const auto staticConfig = [&](std::string_view member) {
+    return Write("static.json", std::string{R"({
+      "model": "ball.deck", "lmax": 4,
+      "tide": {"degree": 2, "amplitude_m2_s2": 1.0},)"} +
+                                    std::string{member} +
+                                    R"( "output": "out.nc"})");
+  };
+  const auto absent = app::ReadEvolveInput(evolve(""));
+  const auto zero = app::ReadEvolveInput(evolve(R"("cache_mb": 0)"));
+  const auto set = app::ReadEvolveInput(evolve(R"("cache_mb": 32)"));
+  EXPECT_EQ(absent.cache_mb, 0u);
+  EXPECT_EQ(zero.cache_mb, 0u);
+  EXPECT_EQ(set.cache_mb, 32u);
+  const auto earth =
+      app::BuildEarth(absent, planetmodel::ReadJsonFile(evolve("")));
+  const auto rheology = Rheology::Create(earth.material, {});
+  ASSERT_TRUE(rheology);
+  const auto library = Viscoelastic3D::Options{}.cache_bytes;
+  EXPECT_EQ(app::OperatorOptions(absent, *rheology).cache_bytes, library);
+  EXPECT_EQ(app::OperatorOptions(zero, *rheology).cache_bytes, library);
+  EXPECT_EQ(app::OperatorOptions(set, *rheology).cache_bytes,
+            std::size_t{32} << 20);
+  EXPECT_EQ(app::ReadStaticInput(staticConfig("")).cache_mb, 0u);
+  EXPECT_EQ(
+      app::ReadStaticInput(staticConfig(R"( "cache_mb": 16,)")).cache_mb,
+      16u);
+
+  // refused naming the member: negative, fractional, or not a number
+  const auto refused = [](auto&& read, const fs::path& config,
+                          std::string_view what) {
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(read(config));
+          } catch (const planetmodel::Error& error) {
+            const auto message = std::string{error.what()};
+            EXPECT_NE(message.find("cache_mb"), std::string::npos) << message;
+            EXPECT_NE(message.find(what), std::string::npos) << message;
+            throw;
+          }
+        },
+        planetmodel::Error)
+        << config;
+  };
+  for (const auto& [bad, what] :
+       {std::pair{"-1", "is not a cache size in MiB"},
+        std::pair{"2.5", "is not an integer"},
+        std::pair{R"("32")", "expected a number"}}) {
+    const auto member = std::string{R"("cache_mb": )"} + bad;
+    refused(app::ReadEvolveInput, evolve(member), what);
+    refused(app::ReadStaticInput, staticConfig(" " + member + ","), what);
   }
 }
 

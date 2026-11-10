@@ -352,7 +352,11 @@ TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
   // its tangent, the forcings' variations and the gravity chain included.
   const auto material = MakeMaterial();
   const auto& mesh = material.Mesh();
-  const auto [k0, m0] = material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);

@@ -4,7 +4,7 @@
 // gradient) and by the continuous one (the second-order adjoint equations
 // discretised by the forward stepper), as pyslfp's
 // `second_order_adjoint_ice_history` and `_second_order_continuous_sweep`
-// under the sharp flotation rule; see docs/dev/adjoints.md.
+// under the sharp flotation rule; see docs/adjoints.md.
 
 #include <algorithm>
 #include <cmath>
@@ -17,7 +17,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
-#include "sl3dpp/detail/ParallelFor.hpp"
+#include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -245,7 +245,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     return ev.Columns(c, ev.toMatPotential_);
   };
 
-  // -- the material (docs/dev/adjoints.md §15)
+  // -- the material (docs/adjoints.md §15)
   // v's direction in the moduli enters the derivative sweep as the
   // derivative of the effective systems on the first sweep's solutions
   // (a source of the derivative duals before the unit-response
@@ -440,7 +440,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     auto xd = std::vector<std::vector<double>>(lmax + 1);
     auto sigBy = std::vector<std::vector<double>>(lmax + 1);
     auto psiBy = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -479,7 +479,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     auto sys = std::vector<std::vector<double>>(lmax + 1);
     auto wsys = std::vector<std::vector<double>>(lmax + 1);
     auto dxd = std::vector<std::vector<double>>(lmax + 1);
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -547,7 +547,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto tidesN = material ? tidesOf(trajectory.tides[n]) : LoadCallable{};
     const auto loadsV = material ? loadsOf(tangent[n].loadCoefficients) : LoadCallable{};
     const auto tidesV = material ? tidesOf(tangent[n].tideCoefficients) : LoadCallable{};
-    detail::ParallelFor(lmax + 1, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
       const auto ncols = 2 * (l + 1);
@@ -877,7 +877,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     return ev.Columns(c, ev.toMatPotential_);
   };
 
-  // -- the material (docs/dev/adjoints.md §15)
+  // -- the material (docs/adjoints.md §15)
   // The second-order adjoint equations are the derivative of the
   // continuous adjoint equations, which have the forward form: along a
   // material direction v the derivative state is driven by v's material
@@ -1288,7 +1288,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
             tasks.size());
     auto duals = std::vector<DensityDuals>(tasks.size());
     const auto count = static_cast<int>(tasks.size());
-    detail::ParallelFor(count, op.options_.parallel, [&](int i) {
+    detail::ForEachTask(op.options_.parallel, count, [&](int i) {
       const auto l = tasks[static_cast<std::size_t>(count - 1 - i)];
       const auto& deg = op.Deg(l);
       const auto ncols = 2 * (l + 1);

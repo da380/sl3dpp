@@ -6,7 +6,7 @@
  * of a run's responses along a perturbation of the ice history, the
  * initial sea level and the inverse relaxation times, about a forward
  * trajectory. Corresponds to pyslfp's `tangent_linear_ice_history`; see
- * docs/dev/adjoints.md.
+ * docs/adjoints.md.
  *
  * With the trajectory's ocean functions held the forward problem is linear
  * in its loads, so the derivative is the forward problem once more: the
@@ -79,7 +79,7 @@ struct TangentPerturbation {
   /// held instead); a density direction moves the gravity
   /// self-consistently and the forcings with it, the sea level engine's
   /// own gravity and radius held (SeaLevelParameters::body_from_table;
-  /// docs/dev/adjoints.md §16). Needs the recorded trajectory, the
+  /// docs/adjoints.md §16). Needs the recorded trajectory, the
   /// internal variables at the GLL nodes and no rotational feedback.
   MaterialDirection material;
 
@@ -162,7 +162,7 @@ class TangentLinearSolver {
   /// in the moduli, the material forces of u's direction on v's tangent
   /// trajectory (its full solution and its decayed memory with v's itau
   /// drive, which carries the mixed moduli–relaxation-time term) and of
-  /// v's on u's, the start's alike (docs/dev/adjoints.md §15). Symmetric
+  /// v's on u's, the start's alike (docs/adjoints.md §15). Symmetric
   /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
   /// the sharp flotation rule, extended to the moduli.
   [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunSecondOrder(

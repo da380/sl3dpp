@@ -14,8 +14,8 @@
  *
  *   e_M = V,  e_R = r d_r U - U + (1/2) k^2 V,  e_S = r d_r V - V + U,
  *
- * and force weights k^2 (k^2 - 2), 4/3 and k^2 (pyslfp's
- * docs/planning/gia_notes.md records the algebra). Evaluating anything —
+ * and force weights k^2 (k^2 - 2), 4/3 and k^2 (docs/lateral-coupling.md
+ * §2 relates them to the 3D components). Evaluating anything —
  * displacement, a step — contains quasi-static degree solves: the system
  * assembled with the unrelaxed or a per-step effective shear modulus,
  * forced by the load channels and the memory force

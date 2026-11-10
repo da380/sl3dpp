@@ -3,7 +3,7 @@
 /**
  * @file GridCoupling.hpp
  * @brief The grid side of the 3D memory coupling
- * (docs/dev/lateral-coupling.md): tensor fields over (viscous radial node
+ * (docs/lateral-coupling.md): tensor fields over (viscous radial node
  * × angular grid), the transforms between them and their per-degree
  * spectral components, and the assembly of the memory force onto the
  * spheroidal and toroidal degree systems.
@@ -93,6 +93,8 @@ class GridCoupling {
     bool parallel = true;
     /// GSHTrans's BLAS matrix kernel for the batched transforms.
     bool matrix_kernel = false;
+    /// The cache the transforms block for (SurfaceGrid::Options).
+    std::size_t cache_bytes = 0;
     /// Where the radial memory nodes sit within each element (the
     /// default matches ViscoelasticOperator's).
     MemoryPointSet memory_points = MemoryPointSet::Gauss;
@@ -329,6 +331,13 @@ class GridCoupling {
   [[nodiscard]] std::size_t ScalarCoefficientCount() const {
     return coefficientOffset_.back();
   }
+  /// A scalar's transforms, node block by node block, into storage the
+  /// caller holds (every value overwritten; nothing allocated), or into a
+  /// new vector. The field may alias nothing the coefficients hold.
+  void SynthesiseScalar(std::span<const Complex> spectral,
+                        std::span<double> field) const;
+  void AnalyseScalar(std::span<const double> field,
+                     std::span<Complex> spectral) const;
   [[nodiscard]] std::vector<double> SynthesiseScalar(
       std::span<const Complex> spectral) const;
   [[nodiscard]] std::vector<Complex> AnalyseScalar(
