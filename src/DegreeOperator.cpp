@@ -538,6 +538,160 @@ std::vector<double> DegreeOperator::ApplyVariation(const MaterialVariation& dm,
   return ApplyBand(band, x, nrhs);
 }
 
+namespace {
+
+/// The dilatation and the deviatoric scalars of a degree's solution at a
+/// memory point, as weights on the element's nodal U and V: D = r d_r U +
+/// 2 U - k^2 V, M = V, R = r d_r U - U + k^2 V / 2, S = U + r d_r V - V.
+struct PointStrain {
+  std::vector<double> dU, dV, rU, rV, sU, sV, mV;
+
+  PointStrain(const MemoryPoints& points, const RadialMesh& mesh, int e,
+              int p, double k2) {
+    const auto n = mesh.NGll();
+    const auto jac = mesh.Jacobian(e);
+    auto rp = 0.0;
+    for (auto i = 0; i < n; ++i) rp += points.Value(p, i) * mesh.Radius(e, i);
+    dU.resize(n), dV.resize(n), rU.resize(n), rV.resize(n);
+    sU.resize(n), sV.resize(n), mV.resize(n);
+    for (auto i = 0; i < n; ++i) {
+      const auto v = points.Value(p, i);
+      const auto b = rp * points.Derivative(p, i) / jac;
+      dU[i] = b + 2.0 * v;
+      dV[i] = -k2 * v;
+      rU[i] = b - v;
+      rV[i] = 0.5 * k2 * v;
+      sU[i] = v;
+      sV[i] = b - v;
+      mV[i] = v;
+    }
+  }
+};
+
+}  // namespace
+
+std::vector<double> DegreeOperator::ApplyPointVariation(
+    const MemoryPoints& points, std::span<const double> dkappa,
+    std::span<const double> dmu, std::span<const double> x, int nrhs) const {
+  const auto& mesh = material_->Mesh();
+  const auto n = mesh.NGll();
+  const auto k2 = l_ * (l_ + 1.0);
+  const auto size =
+      static_cast<std::size_t>(mesh.ElementCount()) * points.count;
+  if (static_cast<std::size_t>(ndof_) * nrhs != x.size()) {
+    throw std::invalid_argument("the solutions have ndof x nrhs entries");
+  }
+  if ((!dkappa.empty() && dkappa.size() != size) ||
+      (!dmu.empty() && dmu.size() != size)) {
+    throw std::invalid_argument(
+        "a point perturbation has (element, point) entries");
+  }
+  auto out = std::vector<double>(x.size(), 0.0);
+  std::vector<int> iU(n), iV(n);
+  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
+    const auto fluid = material_->IsFluid(e);
+    if (fluid && l_ > 0) continue;
+    const auto jac = mesh.Jacobian(e);
+    for (auto i = 0; i < n; ++i) {
+      const auto g = mesh.GlobalIndex(e, i);
+      iU[i] = Dof(g, Component::U);
+      iV[i] = Dof(g, Component::V);
+    }
+    for (auto p = 0; p < points.count; ++p) {
+      const auto at = static_cast<std::size_t>(e) * points.count + p;
+      const auto dk = dkappa.empty() ? 0.0 : dkappa[at];
+      const auto dm = dmu.empty() || fluid ? 0.0 : dmu[at];
+      if (dk == 0.0 && dm == 0.0) continue;
+      const PointStrain s(points, mesh, e, p, k2);
+      const auto weight = points.weight[p] * jac;
+      for (auto c = 0; c < nrhs; ++c) {
+        const auto column = static_cast<std::size_t>(c) * ndof_;
+        auto D = 0.0, R = 0.0, S = 0.0, M = 0.0;
+        for (auto i = 0; i < n; ++i) {
+          const auto U = iU[i] >= 0 ? x[column + iU[i]] : 0.0;
+          const auto V = iV[i] >= 0 ? x[column + iV[i]] : 0.0;
+          D += s.dU[i] * U + s.dV[i] * V;
+          R += s.rU[i] * U + s.rV[i] * V;
+          S += s.sU[i] * U + s.sV[i] * V;
+          M += s.mV[i] * V;
+        }
+        const auto cD = weight * dk * D;
+        const auto cR = weight * dm * (4.0 / 3.0) * R;
+        const auto cS = weight * dm * k2 * S;
+        const auto cM = weight * dm * k2 * (k2 - 2.0) * M;
+        for (auto i = 0; i < n; ++i) {
+          if (iU[i] >= 0) {
+            out[column + iU[i]] += cD * s.dU[i] + cR * s.rU[i] + cS * s.sU[i];
+          }
+          if (iV[i] >= 0) {
+            out[column + iV[i]] += cD * s.dV[i] + cR * s.rV[i] +
+                                   cS * s.sV[i] + cM * s.mV[i];
+          }
+        }
+      }
+    }
+  }
+  return out;
+}
+
+std::pair<std::vector<double>, std::vector<double>>
+DegreeOperator::PointGradient(const MemoryPoints& points,
+                              std::span<const double> y,
+                              std::span<const double> x, int nrhs) const {
+  const auto& mesh = material_->Mesh();
+  const auto n = mesh.NGll();
+  const auto k2 = l_ * (l_ + 1.0);
+  const auto expected = static_cast<std::size_t>(ndof_) * nrhs;
+  if (y.size() != expected || x.size() != expected) {
+    throw std::invalid_argument("the solutions have ndof x nrhs entries");
+  }
+  const auto size =
+      static_cast<std::size_t>(mesh.ElementCount()) * points.count;
+  auto kappa = std::vector<double>(size, 0.0);
+  auto mu = std::vector<double>(size, 0.0);
+  std::vector<int> iU(n), iV(n);
+  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
+    const auto fluid = material_->IsFluid(e);
+    if (fluid && l_ > 0) continue;
+    const auto jac = mesh.Jacobian(e);
+    for (auto i = 0; i < n; ++i) {
+      const auto g = mesh.GlobalIndex(e, i);
+      iU[i] = Dof(g, Component::U);
+      iV[i] = Dof(g, Component::V);
+    }
+    for (auto p = 0; p < points.count; ++p) {
+      const auto at = static_cast<std::size_t>(e) * points.count + p;
+      const PointStrain s(points, mesh, e, p, k2);
+      const auto weight = points.weight[p] * jac;
+      for (auto c = 0; c < nrhs; ++c) {
+        const auto column = static_cast<std::size_t>(c) * ndof_;
+        auto Dy = 0.0, Ry = 0.0, Sy = 0.0, My = 0.0;
+        auto Dx = 0.0, Rx = 0.0, Sx = 0.0, Mx = 0.0;
+        for (auto i = 0; i < n; ++i) {
+          const auto Uy = iU[i] >= 0 ? y[column + iU[i]] : 0.0;
+          const auto Vy = iV[i] >= 0 ? y[column + iV[i]] : 0.0;
+          const auto Ux = iU[i] >= 0 ? x[column + iU[i]] : 0.0;
+          const auto Vx = iV[i] >= 0 ? x[column + iV[i]] : 0.0;
+          Dy += s.dU[i] * Uy + s.dV[i] * Vy;
+          Ry += s.rU[i] * Uy + s.rV[i] * Vy;
+          Sy += s.sU[i] * Uy + s.sV[i] * Vy;
+          My += s.mV[i] * Vy;
+          Dx += s.dU[i] * Ux + s.dV[i] * Vx;
+          Rx += s.rU[i] * Ux + s.rV[i] * Vx;
+          Sx += s.sU[i] * Ux + s.sV[i] * Vx;
+          Mx += s.mV[i] * Vx;
+        }
+        kappa[at] += weight * Dy * Dx;
+        if (!fluid) {
+          mu[at] += weight * ((4.0 / 3.0) * Ry * Rx + k2 * Sy * Sx +
+                              k2 * (k2 - 2.0) * My * Mx);
+        }
+      }
+    }
+  }
+  return {std::move(kappa), std::move(mu)};
+}
+
 std::vector<double> DegreeOperator::LoadVariation(const MaterialVariation& dm,
                                                   LoadPart part) const {
   auto b = std::vector<double>(ndof_, 0.0);

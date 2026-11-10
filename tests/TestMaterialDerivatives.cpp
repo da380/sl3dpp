@@ -416,3 +416,135 @@ TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
   }
 }
 
+
+namespace {
+
+/// A smooth perturbation of the moduli at memory points, (element, point):
+/// a fraction of the nodal modulus interpolated there, on the solid
+/// elements, and for kappa in the fluid too when asked.
+std::pair<std::vector<double>, std::vector<double>> PointDirection(
+    const Material& material, const MemoryPoints& points, bool fluidKappa) {
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  const auto kAt = points.Interpolate(k0);
+  const auto mAt = points.Interpolate(m0);
+  auto dk = std::vector<double>(kAt.size(), 0.0);
+  auto dm = std::vector<double>(mAt.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto p = 0; p < points.count; ++p) {
+      const auto i = static_cast<std::size_t>(e) * points.count + p;
+      const auto r = points.RadiusAt(mesh, e, p);
+      const auto profile =
+          0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      if (!material.IsFluid(e)) dm[i] = profile * mAt[i];
+      if (!material.IsFluid(e) || fluidKappa) dk[i] = 0.7 * profile * kAt[i];
+    }
+  }
+  return {std::move(dk), std::move(dm)};
+}
+
+double RelativeDifference(const std::vector<double>& a,
+                          const std::vector<double>& b) {
+  auto diff = 0.0, scale = 0.0;
+  for (auto i = std::size_t{0}; i < a.size(); ++i) {
+    diff = std::max(diff, std::abs(a[i] - b[i]));
+    scale = std::max(scale, std::abs(b[i]));
+  }
+  return diff / scale;
+}
+
+}  // namespace
+
+TEST(MaterialDerivatives, PointVariationAtTheGllPointsIsTheNodalVariation) {
+  // With the memory points at the GLL nodes a perturbation of the moduli
+  // at the points is a nodal one, and the two variations of the system
+  // are the same operator: on the solid for every degree, and with the
+  // fluid core's bulk modulus too at degree zero, where it enters the
+  // elastic block.
+  const auto material = MakeMaterial();
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gll, material.Mesh());
+  for (auto l = 0; l <= kLmax; ++l) {
+    const auto [dk, dm] = PointDirection(material, points, l == 0);
+    MaterialDirection d;
+    d.kappa = dk;
+    d.mu = dm;
+    const auto variation = material.Variation(d);
+    DegreeOperator op(material, l, {});
+    const auto n = op.DofCount();
+    constexpr auto nrhs = 2;
+    auto x = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      x[i] = std::sin(0.37 * i + 0.1 * l) + 0.3;
+    }
+    const auto nodal = op.ApplyVariation(variation, x, nrhs);
+    const auto atPoints = op.ApplyPointVariation(points, dk, dm, x, nrhs);
+    EXPECT_LT(RelativeDifference(atPoints, nodal), 1e-12) << "degree " << l;
+  }
+}
+
+TEST(MaterialDerivatives, PointVariationIsThePointShearOfTheAssembly) {
+  // At Gauss points: the system assembled with a shear modulus at the
+  // points, less the system without, is the point variation along that
+  // modulus, the form being linear in it.
+  const auto material = MakeMaterial();
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, material.Mesh());
+  const auto [dk, dm] = PointDirection(material, points, false);
+  const PointShear shear{&points, dm};
+  for (auto l = 0; l <= kLmax; ++l) {
+    DegreeOperator base(material, l, {});
+    DegreeOperator raised(material, l, {.point_shear = &shear});
+    const auto n = base.DofCount();
+    ASSERT_EQ(raised.DofCount(), n);
+    auto x = std::vector<double>(n);
+    for (auto i = 0; i < n; ++i) x[i] = std::sin(0.37 * i + 0.1 * l) + 0.3;
+    auto difference = raised.Apply(x);
+    const auto without = base.Apply(x);
+    for (auto i = 0; i < n; ++i) difference[i] -= without[i];
+    const auto predicted = base.ApplyPointVariation(points, {}, dm, x);
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = 0; i < n; ++i) {
+      scale = std::max(scale, std::abs(without[i]));
+      diff = std::max(diff, std::abs(difference[i] - predicted[i]));
+    }
+    EXPECT_LT(diff, 1e-12 * scale) << "degree " << l;
+    if (l != 1) {
+      EXPECT_GT(RelativeDifference(predicted, without), 1e-6)
+          << "degree " << l;
+    }
+  }
+}
+
+TEST(MaterialDerivatives, PointGradientIsTheTransposeOfThePointVariation) {
+  // sum_p kappa_p dkappa_p + mu_p dmu_p = y^T (dK) x at Gauss points, for
+  // random solutions of two columns and every degree.
+  const auto material = MakeMaterial();
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, material.Mesh());
+  std::mt19937 rng(11);
+  std::normal_distribution<double> normal;
+  for (auto l = 0; l <= kLmax; ++l) {
+    const auto [dk, dm] = PointDirection(material, points, l == 0);
+    DegreeOperator op(material, l, {});
+    const auto n = op.DofCount();
+    constexpr auto nrhs = 2;
+    std::vector<double> x(static_cast<std::size_t>(n) * nrhs),
+        y(static_cast<std::size_t>(n) * nrhs);
+    for (auto& v : x) v = normal(rng);
+    for (auto& v : y) v = normal(rng);
+    const auto dKx = op.ApplyPointVariation(points, dk, dm, x, nrhs);
+    auto direct = 0.0;
+    for (auto i = std::size_t{0}; i < y.size(); ++i) direct += y[i] * dKx[i];
+    const auto [gk, gm] = op.PointGradient(points, y, x, nrhs);
+    auto transposed = 0.0;
+    for (auto i = std::size_t{0}; i < gk.size(); ++i) {
+      transposed += gk[i] * dk[i] + gm[i] * dm[i];
+    }
+    EXPECT_NEAR(transposed, direct, 1e-12 * std::abs(direct) + 1e-300)
+        << "degree " << l;
+    EXPECT_NE(direct, 0.0) << "degree " << l;
+  }
+  DegreeOperator op(material, 2, {});
+  const auto x = std::vector<double>(op.DofCount(), 1.0);
+  const auto bad = std::vector<double>(3, 1.0);
+  EXPECT_THROW((void)op.ApplyPointVariation(points, bad, {}, x),
+               std::invalid_argument);
+}

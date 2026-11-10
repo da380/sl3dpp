@@ -216,6 +216,30 @@ class DegreeOperator {
   [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
   MaterialGradient(std::span<const double> y, std::span<const double> x,
                    int nrhs) const;
+  /// The derivative of the system along a perturbation of the isotropic
+  /// moduli held at memory points, applied to one or several vectors:
+  /// per element and point the perturbations dkappa and dmu, (element,
+  /// point), integrated with the points' quadrature against the
+  /// dilatation and the deviatoric strain there — sum_p jac w_p (dkappa_p
+  /// D^2 + dmu_p (k^2 (k^2 - 2) M^2 + 4/3 R^2 + k^2 S^2)), with D = r d_r U
+  /// + 2 U - k^2 V and the deviatoric scalars of the point shear
+  /// (MemoryPoints.hpp). Either span may be empty. With GLL points it is
+  /// ApplyVariation along the same nodal dkappa and dmu. The solid
+  /// elements, and the fluid core's bulk term at degree zero.
+  [[nodiscard]] std::vector<double> ApplyPointVariation(
+      const MemoryPoints& points, std::span<const double> dkappa,
+      std::span<const double> dmu, std::span<const double> x,
+      int nrhs = 1) const;
+
+  /// The transpose of ApplyPointVariation in the moduli: arrays (kappa,
+  /// mu) over (element, point) with sum_p kappa_p dkappa_p + mu_p dmu_p =
+  /// y^T (dK) x for solutions y and x of nrhs columns each, summed over
+  /// the columns. Each entry is the form's integrand at the point times
+  /// the point's quadrature weight.
+  [[nodiscard]] std::pair<std::vector<double>, std::vector<double>>
+  PointGradient(const MemoryPoints& points, std::span<const double> y,
+                std::span<const double> x, int nrhs) const;
+
   /// The variations of the forcings along the same: the load's traction
   /// piece and the tangential traction through the surface gravity, the
   /// tide through the density, its derivative, gravity and the interfaces;
