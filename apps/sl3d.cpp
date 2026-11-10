@@ -53,7 +53,7 @@ constexpr auto kUsage =
     "                 fingerprint of an ice change or, with a times block,\n"
     "                 GIA through time under an ice history, restartable\n"
     "                 from disk checkpoints; 1D or 3D as the model block's\n"
-    "                 viscosity (and moduli) make it\n"
+    "                 moduli (and, through time, viscosity) make it\n"
     "  kernel1d       adjoint sensitivity kernels of configured\n"
     "                 measurements of a sea-level run through time, on a\n"
     "                 radial model\n"

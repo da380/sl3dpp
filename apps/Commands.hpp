@@ -64,10 +64,11 @@ struct LoveNumbersInput {
 
 /// The config of `sl3d sea-level`: the sea level equation, the ocean
 /// coupled to the solid Earth. Without `times` it is the elastic
-/// fingerprint of an ice change on a present-day state, on a radial Earth;
-/// with `times` it is GIA through time under an ice history, of the radial
-/// model, or, under a lateral viscosity or lateral moduli, the 3-D one,
-/// restartable from disk checkpoints.
+/// fingerprint of an ice change on a present-day state, on the radial
+/// Earth or, under lateral moduli, the 3-D one; with `times` it is GIA
+/// through time under an ice history, of the radial model, or, under a
+/// lateral viscosity or lateral moduli, the 3-D one, restartable from disk
+/// checkpoints.
 struct SeaLevelInput {
   SeaLevelRun run;
   CheckpointBlock checkpoint;  ///< no directory: no checkpoints

@@ -1133,8 +1133,8 @@ closure with response channels. `Viscoelastic3D::StartStep` accepts
 dt = 0: a zero-length step (β = 0, m̃ = m, the effective systems the
 unrelaxed ones, the lateral weight −δμ_U), whose within-step fixed point
 with the sea level engine IS the instantaneous coupled solve. Under
-lateral moduli the evolution's start is such a step (`SeaLevelEvolution3D::
-March`, one `coupledPass` for the start and the steps), the tangent's
+lateral moduli the evolution's start is such a step (`SeaLevelEvolution3D`,
+one coupled pass for the start and the steps), the tangent's
 node 0 likewise with the material drive's start forces on it
 (`MaterialForcing3D::ApplyStart`), the discrete sweep runs its step
 transpose down to n = 0 with dt = 0 instead of its start block (the
@@ -1145,6 +1145,20 @@ continuous sweep's jumps and equilibria are zero-length reversed steps
 `reversedStep(…, 0.0, …)` for the equilibria, the derivative state's
 with v's material source). Without lateral moduli the Love-number
 closures are kept.
+
+The evolution's start is also a solve of its own,
+`SeaLevelEvolution3D::Instantaneous(load)`: the instantaneous elastic
+response of the sea level problem to a direct load, the linear equation
+on the background state's shorelines coupled to the rotational feedback,
+by the zero-length step's fixed point (or the nested closure of §13n)
+under lateral moduli and by the unrelaxed Love numbers without — the
+elastic sea-level fingerprint of a laterally heterogeneous Earth, which
+`sl3d sea-level` solves without a `times` block on a lateral moduli
+file. `Run`'s first node is the same code (`Start`), so `Run(times,
+load)[0]` is `Instantaneous(load(times[0]), times[0])`; it is distributed
+over radial segments as the run is. The check of the transverse
+rotational feedback against the model's fluid limit, which a run
+through time makes for its long steps, does not apply to it.
 
 GATES under lateral moduli (10% shear, 5% bulk, angle-varying, with
 lateral viscosity): the coupled evolution with angle-uniform moduli
@@ -1166,7 +1180,15 @@ loads and log viscosity (`ContinuousGapClosesUnderLateralModuli`), and
 the continuous material
 kernels and continuous second-order sweep converge likewise
 (`ContinuousMaterialKernelsAgreeUnderLateralModuli`,
-`ContinuousMaterialHessianConvergesUnderLateralModuli`).
+`ContinuousMaterialHessianConvergesUnderLateralModuli`). The
+instantaneous response equals the run's first node to the bit, with and
+without lateral moduli, rotation off and full, both step solvers
+(`LateralModuli3D.InstantaneousIsTheRunsFirstNode`); with the moduli set
+but zero it is the radial fingerprint, to the bit
+(`InstantaneousWithoutLateralStructureIsTheRadialFingerprint`); 10%
+shear and 5% bulk perturbations move it by 2.3e-2 of the sea level's
+largest magnitude, the two step solvers agreeing at 1e-9
+(`InstantaneousUnderLateralModuliDepartsFromTheRadialFingerprint`).
 
 Not covered: lateral δκ in the fluid. Distribution over radial
 segments: §13m.
@@ -1220,7 +1242,11 @@ slices, and the branchless static solve, against the one process at
 1e-11 (measured 1e-13); the continuous and discrete sweeps on three
 ranks with lateral moduli and the axial rotational feedback
 (`LateralModuliAdjointsMatchTheOneProcessSweeps`): ice kernels and
-viscosity-kernel slices at 1e-10 (measured 6e-13 and 2e-13); under
+viscosity-kernel slices at 1e-10 (measured 6e-13 and 2e-13); the
+instantaneous response on three ranks, on the Maxwell and on the
+branchless rheology, both step solvers, at 1e-10 (measured 2e-16 by the
+fixed point and 1.2e-12 by the conjugate gradients;
+`InstantaneousResponsesMatchTheOneProcess`); under
 mpiexec on two and three ranks
 (`Distributed.LateralModuliStepsMatchTheOneProcessSteps`), likewise.
 
@@ -1319,7 +1345,8 @@ numbers the engine closes with, times the ocean's feedback — small
 unless the lateral structure is strong at the surface.
 
 **Who uses what.** The evolution's steps and its lateral start (the
-zero-length step), the tangent-linear run's steps and start, the
+zero-length step, `Instantaneous` too), the tangent-linear run's steps
+and start, the
 continuous sweep's reversed steps and its instantaneous problems
 (equilibria, jumps) all go through `Nest` under the option; the
 forward regenerations in the sweeps (a kept trajectory's steps rebuilt

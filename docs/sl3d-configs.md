@@ -11,7 +11,7 @@ sl3d <command> <config.json>
 | --- | --- | --- |
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
 | `response` | the response to a prescribed surface load and tide, no ocean: elastic, or viscoelastic through time with a `times` block; 1D or 3D as the model's moduli (and viscosity) make it | a surface file (of histories, with `times`), and optionally coefficient tables and, elastic, a model file |
-| `sea-level` | the sea level equation under an ice load on a present-day state: the elastic fingerprint of an ice change, or with a `times` block GIA through time under an ice history; 1D or 3D as the model's viscosity (and moduli) make it | a surface file (of histories, with `times`) |
+| `sea-level` | the sea level equation under an ice load on a present-day state: the elastic fingerprint of an ice change, or with a `times` block GIA through time under an ice history; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, with `times`) |
 | `kernel1d` | adjoint sensitivity kernels of configured measurements of a `sea-level` run through time, on a radial model | a directory of kernel files |
 | `kernel` | their 3D counterpart, on a laterally varying viscosity | a directory of kernel files |
 
@@ -50,8 +50,8 @@ threads inside, and every rank reads the inputs and solves the sea level
 equation, the first rank's solution serving all (a `response` run has no
 sea level equation: every rank builds the forcing, the first rank's
 coefficients serving all). A 1D run of these commands (the `sea-level`
-fingerprint, a radial `sea-level` run through time, a 1D viscoelastic
-`response`) is the first rank's alone, as a run of one process, its
+fingerprint on a radial Earth, a radial `sea-level` run through time, a
+1D viscoelastic `response`) is the first rank's alone, as a run of one process, its
 checkpoints in `checkpoint.directory` itself; the other ranks return at
 once. One rank per socket (or per node) with threads inside is the
 intended shape. Rank 0 writes every output and prints the summary, with
@@ -201,23 +201,23 @@ Which command takes which:
 | --- | --- | --- | --- |
 | `model.deck`, `model.format` | yes | yes | yes |
 | `model.viscosity` | with `times` | with `times` | `kernel1d`: a radial one; `kernel`: required, varying laterally |
-| `model.moduli` | yes | yes; without `times` a radial one alone | no |
+| `model.moduli` | yes | yes | no |
 | `lmax` | yes | yes | yes |
 | `times` | the forwards form; absent, elastic | the before-present form; absent, the fingerprint | the before-present form, required |
 | `forcing` | `load` and `tide` | `state` and `ice` | `state` and `ice` (an ice history) |
 | `ocean` | no | with `times` | yes |
 | `rotation`, `moments` | no | yes | yes |
 | `solver.rtol` | no | yes | yes |
-| `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | yes | in a 3D run | `kernel` |
+| `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | yes | in a 3D run (the fingerprint's on lateral moduli too) | `kernel` |
 | `solver.scheme` | with `times` | with `times` | yes |
-| `solver.step` | with `times` | in a 3D run | `kernel` |
+| `solver.step` | with `times` | in a 3D run (the fingerprint's on lateral moduli too) | `kernel` |
 | `checkpoint`, `restart` | no | with `times` | no |
 | `output` | a block: `surface`, `exchange`, `exchange_nodes`, `volume` | a block: `surface` | a path: the directory of the kernel files |
 
 The kernel commands also take members of their own (kernel1d and kernel,
 below). "In a 3D run" means a run on a model the `model` block makes 3D
-(each command says when); a 1D run of `sea-level` and `kernel1d` refuse
-the members of the 3D step.
+(each command says when); a 1D run of `sea-level` (its fingerprint
+included) and `kernel1d` refuse the members of the 3D step.
 
 ### The model block
 
@@ -315,19 +315,23 @@ shorelines.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `solver.rtol` | number > 0 | 1e-9 | `sea-level` and the kernel commands: the relative tolerance of the sea level solves (and, for the kernels and the gradient calibration, of the adjoint solves); a sea level solve that misses it is an error. `response` has no sea level equation and refuses it |
-| `solver.step_rtol` | number > 0 | 1e-10 in `response`, 1e-9 in the others | the relative tolerance of a 3D step's closure. `sea-level` and `kernel`: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too). `response`: each step's closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual) and the unrelaxed solve under lateral moduli (an elastic response's one solve, a viscoelastic run's first node) |
+| `solver.step_rtol` | number > 0 | 1e-10 in `response`, 1e-9 in the others | the relative tolerance of a 3D step's closure. `sea-level` and `kernel`: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the fingerprint's one zero-length step). `response`: each step's closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual) and the unrelaxed solve under lateral moduli (an elastic response's one solve, a viscoelastic run's first node) |
 | `solver.step_max_iterations` | integer >= 1 | 200 in `response`, 60 in the others | its iteration budget; a step or solve that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the lateral structure's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
 | `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are bitwise independent of it: it sets only how many fields a batched transform takes at a time |
 | `solver.scheme` | word | `"exponential_trapezoid"` | with `times` alone: the time step, `"exponential_trapezoid"` (second order) or `"backward_euler"` (first) |
-| `solver.step` | word | `"fixed_point"` | with `times` alone: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`). In `sea-level` and `kernel` the conjugate-gradient solves are nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`); in `response` they are the step's closure, to `step_rtol` |
+| `solver.step` | word | `"fixed_point"` | with `times` alone, but for `sea-level`'s fingerprint on lateral moduli: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`). In `sea-level` and `kernel` the conjugate-gradient solves are nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`); in `response` they are the step's closure, to `step_rtol` |
 
 The members of the 3D step (`step`, `step_rtol`, `step_max_iterations`,
 `transform_degrees`, `cache_mb`) are refused by a 1D run of `sea-level`
-and by `kernel1d`, and, with `scheme`, by `sea-level`'s fingerprint, which
-takes `rtol` alone. `response` takes them in 1D too, where its steps are
-direct solves and they have no effect, and takes all but `scheme` and
-`step` without `times` (its 3D elastic solve under lateral moduli).
+and by `kernel1d`, and by `sea-level`'s fingerprint on a radial Earth,
+which takes `rtol` alone (without a `model.moduli` file they are refused
+when the config is read, with a radial one once the file is read);
+`sea-level`'s fingerprint on lateral moduli takes them all. `scheme` is
+refused by every fingerprint. `response` takes them in 1D too, where its
+steps are direct solves and they have no effect, and takes all but
+`scheme` and `step` without `times` (its 3D elastic solve under lateral
+moduli).
 
 ### The output block
 
@@ -787,8 +791,9 @@ The `times` block decides what is solved:
 
 - without `times` it is the elastic sea-level fingerprint of an ice change
   applied to a present-day state: one solve of the linear sea level
-  equation, with the Love numbers of the deck's elastic structure at
-  `lmax` (The fingerprint, below);
+  equation on the state's shorelines, with the Love numbers of the deck's
+  elastic structure at `lmax`, or, under lateral moduli, on the laterally
+  heterogeneous elastic Earth (The fingerprint, below);
 - with `times` it is GIA through time under an ice history: the
   viscoelastic Earth through the sea level equation over a window of
   dates (The run through time, below), restartable from checkpoints.
@@ -799,10 +804,11 @@ of `model.moduli` vary laterally: `SeaLevelEvolution3D`, each step
 solving the combined fixed point of the strain, the ocean load and the
 rotation about the radial reference, over MPI ranks; otherwise it is the
 radial model's (`SeaLevelEvolution`), on the deck's viscosity column or
-the radial viscosity of `model.viscosity`. The fingerprint is solved on a
-radial Earth alone: `model.viscosity` is refused without `times`, and so,
-once read, is a moduli file whose moduli vary laterally (a radial one
-leaves the deck's moduli as they are).
+the radial viscosity of `model.viscosity`. The fingerprint is 3D when the
+moduli of `model.moduli` vary laterally (The fingerprint on lateral
+moduli, below), and radial otherwise, a radial moduli file leaving the
+deck's moduli as they are; it has no use for a viscosity, and
+`model.viscosity` is refused without `times`.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -813,7 +819,7 @@ leaves the deck's moduli as they are).
 | `ocean` | object | absent | with `times` alone: the shorelines and the initial sea level's calibration (The ocean block, above) |
 | `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above) |
 | `moments` | word | `"input"` | the moments of inertia (Rotation and moments, above) |
-| `solver` | object | absent | the solves (The solver block, above): without `times`, `rtol` alone |
+| `solver` | object | absent | the solves (The solver block, above): without `times`, `rtol` alone on a radial Earth, and the 3D step's members too on lateral moduli |
 | `checkpoint` | object | absent | with `times` alone: the checkpoints (Checkpoints and restarts, below) |
 | `restart` | boolean | `true` | with `times` alone: whether to resume from a checkpoint (Checkpoints and restarts, below) |
 | `output` | object | required | `output.surface`, the surface file to write (the block's other members are `response`'s) |
@@ -870,6 +876,60 @@ Its metadata record the config, deck and state paths (and the moduli
 file's, where given), `date_kyr_bp`, the `rotation`, the angular velocity
 perturbation as `omega_x_rad_s`, `omega_y_rad_s` and `omega_z_rad_s`
 (rad s^-1), and the number of sea level iterations (`sle_iterations`).
+
+### The fingerprint on lateral moduli
+
+Without `times`, a `model.moduli` file whose moduli vary laterally makes
+the fingerprint 3D: the same problem, the linear sea level equation on
+the state's own shorelines under the same ice change, rotation and
+moments, on the laterally heterogeneous elastic Earth. Its unrelaxed
+solid varies laterally, so the solid's response is no Love-number
+closure: the fingerprint is the instantaneous response of the 3D sea
+level problem (`SeaLevelEvolution3D::Instantaneous`), the combined fixed
+point of the strain, the ocean load and the rotation over a step of zero
+length about the radial reference (docs/adjoints.md §13k, §13n). It is
+what a 3D run through time solves at its start, here under the ice
+change; the solid is the deck's elastic structure carrying the lateral
+moduli, as in `response`'s elastic 3D solve, and no viscosity enters.
+With the lateral part of the moduli zero (a file stored laterally but
+uniform) it is the radial fingerprint to the solves' tolerance.
+
+The members are the radial fingerprint's, and the 3D step's members of
+the solver block apply (The solver block, above): `solver.step` chooses
+how the zero-length step is closed, `"fixed_point"` (the default) or
+`"conjugate_gradients"` (the sea level closure nested over
+conjugate-gradient solves of the lateral elastic systems);
+`solver.step_rtol` (1e-9) and `solver.step_max_iterations` (60) are its
+tolerance and budget, and a closure that misses them is an error;
+`solver.transform_degrees` and `solver.cache_mb` set the transforms;
+`solver.rtol` is the sea level solves' tolerance, as in 1D. `scheme` is
+refused: there is no time step. Over MPI ranks the solve is distributed
+over radial segments like the 3D runs through time, the cuts balancing
+the elements the moduli perturb (a fingerprint on a radial Earth is the
+first rank's alone). The coupling carries every solid element where the
+moduli are perturbed, so the cost grows with `lmax` as a 3D step's does:
+the example config `examples/configs/sea_level_fingerprint_3d.json`
+takes about 3 s and 0.9 GB at lmax 32 on four threads, and about 23 s
+and 6 GB at lmax 64.
+
+The output is the radial fingerprint's surface file, its fields the 3D
+fingerprint's, with the radial model's fingerprint of the same change
+beside them, so that the lateral moduli's effect is a subtraction:
+
+| Field | Unit | Meaning |
+| --- | --- | --- |
+| `sea_level_change_radial_model` | m | the sea-level change of the radial model's fingerprint |
+| `displacement_radial_model` | m | its radial surface displacement |
+| `potential_radial_model` | m^2 s^-2 | its potential perturbation at the surface |
+
+Its metadata add `lateral` (1), the moduli file's reference
+(`moduli_reference`: `lateral_mean` or `file_radial`), the step solver
+(`step_solver`), the closure's passes (`step_iterations`), its
+conjugate-gradient iterations (`solve_iterations`, 0 under the fixed
+point) and its last residual (`step_residual`), and the radial model's
+angular velocity perturbation (`omega_x_radial_model_rad_s`,
+`omega_y_radial_model_rad_s`, `omega_z_radial_model_rad_s`); there is no
+`sle_iterations`.
 
 ### The run through time
 
@@ -1004,7 +1064,10 @@ What the config was taken to mean, then the file:
 
 - the fingerprint: `<model>, elastic (fingerprint), rotation
   <rotation>[, moments hydrostatic]; wrote <surface> (<n> SLE
-  iterations)`;
+  iterations)`; on lateral moduli the parenthesis is the 3D closure's,
+  `(<n> fixed-point iterations, residual <r>)`, or under
+  `"conjugate_gradients"` `(<n> conjugate-gradient iterations in <k>
+  passes, residual <r>)`;
 - a run through time: `<model>, viscoelastic, <n> nodes <start> to <end>
   kyr BP, shorelines <frozen|migrating>[, initial sea level calibrated],
   rotation <rotation>[, moments hydrostatic]; wrote <surface>`, ending in
@@ -1016,11 +1079,13 @@ What the config was taken to mean, then the file:
 moduli file is radial)`, `1-D (the viscosity and moduli files are
 radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
 (lateral viscosity, lateral moduli)`. The example configs
-`examples/configs/sea_level_fingerprint.json` and
+`examples/configs/sea_level_fingerprint.json`,
+`examples/configs/sea_level_fingerprint_3d.json` and
 `examples/configs/sea_level_3d_calibrated.json` print
 
 ```
 sl3d sea-level: 1-D, elastic (fingerprint), rotation full; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc (9 SLE iterations) in 0.29 s
+sl3d sea-level: 3-D (lateral moduli), elastic (fingerprint), rotation full; wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.38 s
 sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 28.34 s
 ```
 
@@ -1040,6 +1105,28 @@ sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, 
 ```
 
 The fingerprint of thinning West Antarctic ice by 10 m at its centre.
+
+```json
+{
+  "model": {"deck": "prem8.elastic.deck", "format": "elastic",
+            "moduli": {"file": "s40rts_moduli.nc"}},
+  "lmax": 64,
+  "forcing": {
+    "state": {"file": "ice7g.nc"},
+    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 318,
+            "width_deg": 8, "fraction": -0.1}
+  },
+  "rotation": "full",
+  "solver": {"step": "conjugate_gradients", "step_rtol": 1e-9},
+  "output": {"surface": "fingerprint_3d.nc"}
+}
+```
+
+The fingerprint of melting a tenth of Greenland's ice on the lateral
+moduli of `s40rts_moduli.nc` (a planetmodel model file of `mu` and
+`kappa`), its zero-length step closed by the sea level closure nested
+over conjugate-gradient solves, with the radial model's fingerprint
+beside it in `fingerprint_3d.nc`.
 
 ```json
 {
@@ -1092,8 +1179,9 @@ calibration it is read at the window's end alone.
 }
 ```
 
-The first is the fingerprint and the next two radial runs through time;
-the last is 3D, under the lateral viscosity of `s40rts_viscosity.nc`.
+The first two are fingerprints, radial and 3D, and the next two radial
+runs through time; the last is 3D, under the lateral viscosity of
+`s40rts_viscosity.nc`.
 
 ## kernel1d and kernel
 

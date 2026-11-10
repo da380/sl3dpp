@@ -33,6 +33,7 @@ run response response_tide_oscillating_short.json
 run response response_tide_oscillating.json
 run response response_tide_oscillating_long.json
 run sea-level sea_level_fingerprint.json
+run sea-level sea_level_fingerprint_3d.json
 run sea-level sea_level_1d.json
 run sea-level sea_level_1d_calibrated.json
 run sea-level sea_level_3d.json

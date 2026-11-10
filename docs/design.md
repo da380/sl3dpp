@@ -18,7 +18,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | --- | --- |
 | Load, tidal and traction Love numbers of transversely isotropic radial models | `LoveNumbers.hpp`, `DegreeOperator.hpp`, `ToroidalOperator.hpp` |
 | The sea level equation: linear, generalised (extra channels), nonlinear (migrating shorelines), with rotational feedback, and its exact adjoint | `SeaLevel.hpp` |
-| Elastic sea-level fingerprints, SI at the interface | `Fingerprint.hpp` |
+| Elastic sea-level fingerprints, SI at the interface; on laterally varying elastic moduli, the 3D evolution's instantaneous response | `Fingerprint.hpp`, `Evolution3D.hpp` (`Instantaneous`) |
 | 1D viscoelastic evolution under an ice history, frozen or migrating shorelines | `Viscoelastic.hpp`, `Evolution.hpp` |
 | The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
 | 3D (lateral-viscosity) evolution under an ice history, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
@@ -27,7 +27,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | The 3D static problem as a program: `sl3d response` solves an elastic Earth's response, radial or laterally heterogeneous, to a prescribed load (a sum of caps, disks, surface-file fields and coefficient tables) and tide, with no ocean (the lateral moduli read from a planetmodel model file's `mu` and `kappa` by `io::ModelModuli`, written from a radial model by `io::WriteModuli`), over MPI ranks, and writes the surface response, the radial model's beside it, the surface coefficients as a cross-code exchange table and the response inside the body as a model file (`io::WriteNodeFields`, with `io::ResponseFieldsAtNodes`) for planetmodel's cutaways | `apps/ResponseCommand.cpp`, `apps/Forcing.hpp`, `io/ModelModuli.hpp`, `io/KernelWriter.hpp` |
 | The viscoelastic response to a prescribed forcing as a program: `sl3d response` with a `times` block steps a radial or laterally heterogeneous Maxwell Earth (the 3D viscosity read from a model file by `io::ModelViscosity`, the lateral moduli as above) through time, with no ocean, under a load and tide given as sums of terms with piecewise-linear amplitude histories and surface-file fields on a time axis, by the radial stepper per degree or by `Viscoelastic3D` over MPI ranks, and writes the surface response at every node, the radial reference model's beside it, and an exchange table per node | `apps/ResponseCommand.cpp`, `apps/Forcing.hpp`, `apps/Blocks.hpp` |
-| The sea level equation as a program: `sl3d sea-level` solves the elastic fingerprint of an ice change on a present-day state read from a surface file, or, with a `times` block, GIA through time under an ice history (frozen or migrating shorelines, the initial sea level read or calibrated), on the radial model or, under a lateral viscosity or lateral moduli (`Viscoelastic3D::Options::moduli`), in 3D over MPI ranks, restartable from disk checkpoints; `kernel1d` and `kernel` read the same blocks for their forward runs | `apps/SeaLevelCommand.cpp`, `apps/Common.hpp`, `apps/KernelCommand.cpp`, `apps/Blocks.hpp` |
+| The sea level equation as a program: `sl3d sea-level` solves the elastic fingerprint of an ice change on a present-day state read from a surface file (on the radial model, or, under lateral moduli, the 3D instantaneous response over MPI ranks with the radial model's beside it), or, with a `times` block, GIA through time under an ice history (frozen or migrating shorelines, the initial sea level read or calibrated), on the radial model or, under a lateral viscosity or lateral moduli (`Viscoelastic3D::Options::moduli`), in 3D over MPI ranks, restartable from disk checkpoints; `kernel1d` and `kernel` read the same blocks for their forward runs | `apps/SeaLevelCommand.cpp`, `apps/Common.hpp`, `apps/KernelCommand.cpp`, `apps/Blocks.hpp` |
 | Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives and kernels; its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
@@ -402,7 +402,9 @@ Deliberately out of scope:
   core carries no lateral moduli. The instantaneous problem under them
   (the run's start, the sweeps' starts, jumps and equilibria) is a
   coupled fixed point: a zero-length open step (`StartStep` with dt =
-  0). The tangent, both first-order adjoints and the second-order
+  0). `SeaLevelEvolution3D::Instantaneous` is the run's start as a solve
+  of its own, the elastic sea-level fingerprint of a laterally
+  heterogeneous Earth (the run's first node is the same code). The tangent, both first-order adjoints and the second-order
   sweeps carry lateral moduli in the background (the branch moduli's
   shear factor, the lateral unrelaxed solves, the dilatation's block in
   the discrete transpose).
@@ -601,7 +603,10 @@ Beyond the fixtures:
   against the static lateral solve at 1e-9; Δt self-convergence at
   second order with lateral moduli and viscosity together; the coupled
   evolution against the shifted rheology at every node including the
-  start, rotation on, at 1e-9.
+  start, rotation on, at 1e-9; the instantaneous response against the
+  run's first node, and with zero lateral moduli against the radial
+  fingerprint, to the bit, and over three threads-as-ranks against one
+  process at 1e-10 (measured 1.2e-12).
 - **The sweeps under lateral moduli.** The discrete sweep's pairing
   with the tangent (loads, log viscosity, κ and μ directions) at 1e-8;
   the tangent against central differences on the shifted background at

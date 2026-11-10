@@ -134,6 +134,269 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::ResumeMigrating(
   return March(times, nullptr, &iceThickness, true);
 }
 
+/// The machinery of one call's combined fixed point, which the start
+/// (Start) and the steps (March) share: the flavour sea level solvers
+/// under the caller's parameters, the closure of a pass through the sea
+/// level equation, and the step's closer, the fixed point on the strain
+/// or (Viscoelastic3D::Options::solver) the closure nested over
+/// conjugate-gradient solves. A pass's load, response and ocean function
+/// live here between passes, the recurrence's coefficients on the
+/// evolution.
+class SeaLevelEvolution3D::Coupled {
+ public:
+  Coupled(SeaLevelEvolution3D& owner, bool migrating)
+      : owner_(owner),
+        migrating_(migrating),
+        control_{.max_iterations = owner.options_.max_coupled_iterations,
+                 .rtol = owner.options_.coupled_rtol,
+                 .anderson_memory = owner.options_.anderson_memory,
+                 .anderson_rate = owner.options_.anderson_rate},
+        nested_(owner.op_->GetOptions().solver ==
+                Viscoelastic3D::Options::StepSolver::ConjugateGradients) {
+    sleOptions.rtol = owner.options_.rtol;
+    sleOptions.anderson_memory = owner.options_.anderson_memory;
+    nonlinearOptions = sleOptions;
+    nonlinearOptions.max_iterations = owner.options_.max_nonlinear_iterations;
+  }
+
+  /// The flavour SLE solver of a Love table, keyed by the (operator-cached,
+  /// address-stable) table.
+  const SeaLevelSolver& SolverFor(const LoveNumbers& table) {
+    auto found = flavours_.find(&table);
+    if (found == flavours_.end()) {
+      const auto& solver = *owner_.solver_;
+      found = flavours_
+                  .emplace(&table, SeaLevelSolver(solver.Grid(), table,
+                                                  solver.Parameters()))
+                  .first;
+    }
+    return found->second;
+  }
+
+  /// The total load's coefficients: the non-ocean load and the ocean's.
+  [[nodiscard]] std::vector<Complex> TotalLoadCoefficients(
+      const std::vector<double>& load, const std::vector<double>& slc) const {
+    const auto& solver = *owner_.solver_;
+    const auto fieldSize = solver.Grid().FieldSize();
+    const auto& ocean = owner_.state_.oceanFunction;
+    auto total = std::vector<double>(fieldSize);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      total[i] = load[i] + solver.WaterDensity() * ocean[i] * slc[i];
+    }
+    return solver.Grid().Expand(total);
+  }
+
+  /// The centrifugal coefficients of the response's angular velocity.
+  [[nodiscard]] std::vector<Complex> CentrifugalCoefficients() const {
+    const auto& solver = *owner_.solver_;
+    return owner_.options_.rotation == RotationalFeedback::None
+               ? solver.Grid().ZeroCoefficients()
+               : solver.CentrifugalCoefficients(response.angularVelocity);
+  }
+
+  /// Distributed (Viscoelastic3D::Options::collectives), every process
+  /// solves the sea level equation alike, but their transforms may round
+  /// differently (each process plans its own FFTs): the first process's
+  /// loads, ocean function and response then serve them all, so that
+  /// every segment is forced alike and every process's snapshots are the
+  /// same (whatever is decided from them, a calibration's next run say,
+  /// is decided alike).
+  void Agree() {
+    const auto& collectives = owner_.op_->GetOptions().collectives;
+    if (!collectives.Distributed()) return;
+    for (auto* coefficients : {&owner_.sigma_, &owner_.psi_}) {
+      collectives.share(
+          std::span(reinterpret_cast<double*>(coefficients->data()),
+                    2 * coefficients->size()));
+    }
+    for (auto* field : {&response.seaLevelChange, &response.displacement,
+                        &response.potential}) {
+      collectives.share(*field);
+    }
+    collectives.share(response.angularVelocity);
+    auto converged = response.converged ? 1.0 : 0.0;
+    collectives.share(std::span(&converged, 1));
+    response.converged = converged != 0.0;
+    if (migrating_) collectives.share(ocean);
+  }
+
+  /// A pass's closure: the sea level equation on the step's memory and
+  /// lateral responses, then the load and centrifugal channels of its
+  /// answer.
+  std::pair<Viscoelastic3D::LoadCallable3D, Viscoelastic3D::LoadCallable3D>
+  Closure(const Viscoelastic3D::Solutions& responses) {
+    auto& owner = owner_;
+    const auto& op = *owner.op_;
+    auto displacement = owner.Coefficients(op.Surface(responses, Component::U),
+                                           owner.toNdLength_);
+    auto potential = owner.Coefficients(op.Surface(responses, Component::Phi),
+                                        owner.toNdPotential_);
+    const auto moment = step->InertiaMoment(responses) * owner.toNdMoment_;
+    if (migrating_) {
+      moving.displacementResponse = std::move(displacement);
+      moving.potentialResponse = std::move(potential);
+      moving.inertiaMomentChange = moment;
+      auto solved = effectiveSolver->SolveNonlinear(owner.state_, moving,
+                                                    nonlinearOptions);
+      response = std::move(solved.response);
+      owner.sigma_ = detail::MigratedLoadCoefficients(
+          *owner.solver_, owner.state_, solved.finalState);
+      ocean = std::move(solved.finalState.oceanFunction);
+    } else {
+      SeaLevelSolver::GeneralisedForcing coupled;
+      coupled.directLoad = loadGrid;
+      coupled.displacementResponse = std::move(displacement);
+      coupled.potentialResponse = std::move(potential);
+      coupled.inertiaMomentChange = moment;
+      coupled.rotation = owner.options_.rotation;
+      response =
+          effectiveSolver->SolveGeneralised(owner.state_, coupled, sleOptions);
+      owner.sigma_ = TotalLoadCoefficients(loadGrid, response.seaLevelChange);
+    }
+    owner.psi_ = CentrifugalCoefficients();
+    Agree();
+    return std::pair{owner.Columns(owner.sigma_, owner.toMatDensity_),
+                     owner.Columns(owner.psi_, owner.toMatPotential_)};
+  }
+
+  /// One pass of the fixed point on the strain.
+  GridCoupling::SpectralTensor CoupledPass(const GridCoupling::SpectralTensor& s) {
+    auto responses = step->Respond(s);
+    const auto [load, tide] = Closure(responses);
+    step->AddChannels(responses, load, tide);
+    return step->StrainOf(responses);
+  }
+
+  /// The open step's combined fixed point: strain, ocean load and rotation
+  /// together, closed as the operator's step solver says.
+  std::pair<GridCoupling::SpectralTensor, Viscoelastic3D::StepInfo> Close() {
+    return nested_
+               ? step->Nest(
+                     [this](const Viscoelastic3D::Solutions& responses) {
+                       return Closure(responses);
+                     },
+                     control_)
+               : step->Converge(
+                     [this](const GridCoupling::SpectralTensor& s) {
+                       return CoupledPass(s);
+                     },
+                     control_);
+  }
+
+  SeaLevelSolver::Options sleOptions;
+  SeaLevelSolver::Options nonlinearOptions;
+  /// The non-ocean load of the node (frozen shorelines).
+  std::vector<double> loadGrid;
+  /// The last pass's sea level response, and the node's ocean function
+  /// (migrating shorelines alone).
+  SeaLevelSolver::Response response;
+  std::vector<double> ocean;
+  /// The open step and the sea level solver of its effective Love numbers.
+  std::optional<Viscoelastic3D::OpenStep> step;
+  const SeaLevelSolver* effectiveSolver = nullptr;
+  /// The nonlinear forcing of the node (migrating shorelines).
+  SeaLevelSolver::NonlinearForcing moving;
+
+ private:
+  SeaLevelEvolution3D& owner_;
+  bool migrating_;
+  std::map<const LoveNumbers*, SeaLevelSolver> flavours_;
+  Viscoelastic3D::IterationControl control_;
+  bool nested_;
+};
+
+Viscoelastic3D::StepInfo SeaLevelEvolution3D::Start(Coupled& coupled, double t,
+                                                   std::vector<double> load) {
+  const auto& op = *op_;
+  vstate_ = op.ZeroState();
+  vstate_.t = t * toMatTime_;
+  coupled.loadGrid = std::move(load);
+  if (op.HasLateralModuli()) {
+    // Under lateral moduli the unrelaxed operator varies laterally: the
+    // instantaneous response is the combined fixed point of a zero-length
+    // step.
+    coupled.step.emplace(op.StartStep(vstate_, 0.0, options_.scheme));
+    coupled.effectiveSolver = &coupled.SolverFor(coupled.step->EffectiveLove());
+    auto [strain, info] = coupled.Close();
+    if (!info.converged) {
+      throw std::runtime_error(std::format(
+          "the instantaneous coupled fixed point at the start did not "
+          "converge (residual {})",
+          info.residual));
+    }
+    op.Recycle(
+        std::exchange(vstate_, std::move(*coupled.step).Finish(std::move(strain))));
+    coupled.step.reset();
+    return info;
+  }
+  // The sea level equation closed by the unrelaxed Love numbers.
+  const auto& elastic = coupled.SolverFor(op.ElasticLove());
+  SeaLevelSolver::GeneralisedForcing forcing;
+  forcing.directLoad = coupled.loadGrid;
+  forcing.rotation = options_.rotation;
+  coupled.response = elastic.SolveGeneralised(state_, forcing, coupled.sleOptions);
+  sigma_ = coupled.TotalLoadCoefficients(coupled.loadGrid,
+                                         coupled.response.seaLevelChange);
+  psi_ = coupled.CentrifugalCoefficients();
+  coupled.Agree();
+  return {};
+}
+
+void SeaLevelEvolution3D::PrimeForRecording() {
+  if (options_.record_stride > 0) {
+    op_->PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
+                     Columns(psi_, toMatPotential_));
+  }
+}
+
+SeaLevelEvolution3D::Snapshot SeaLevelEvolution3D::MakeSnapshot(
+    double t, SeaLevelSolver::Response& response,
+    const Viscoelastic3D::StepInfo& info, bool converged,
+    std::vector<double> oceanFunction, bool keepState) const {
+  Snapshot snapshot;
+  snapshot.t = t;
+  snapshot.seaLevelChange = std::move(response.seaLevelChange);
+  snapshot.displacement = std::move(response.displacement);
+  snapshot.potential = std::move(response.potential);
+  snapshot.angularVelocity = response.angularVelocity;
+  snapshot.coupledIterations = info.iterations;
+  snapshot.coupledResidual = info.residual;
+  snapshot.solveIterations = info.solveIterations;
+  snapshot.converged = converged && response.converged;
+  snapshot.oceanFunction = std::move(oceanFunction);
+  // The internal variables, and the strain only on request: an adjoint
+  // otherwise regenerates it by one elastic solve under the recorded
+  // loads.
+  if (keepState && options_.record_strain) {
+    snapshot.internalState = vstate_;
+  } else if (keepState) {
+    auto trimmed = Viscoelastic3D::State{};
+    trimmed.t = vstate_.t;
+    trimmed.m = vstate_.m;
+    snapshot.internalState = std::move(trimmed);
+  }
+  if (options_.record_stride > 0) {
+    snapshot.loadCoefficients = sigma_;
+    snapshot.tideCoefficients = psi_;
+  }
+  return snapshot;
+}
+
+SeaLevelEvolution3D::Snapshot SeaLevelEvolution3D::Instantaneous(
+    const std::vector<double>& load, double t) {
+  if (load.size() != solver_->Grid().FieldSize()) {
+    throw std::invalid_argument("the load must live on the solver's grid");
+  }
+  Coupled coupled(*this, false);
+  const auto info = Start(coupled, t, load);
+  PrimeForRecording();
+  auto snapshot = MakeSnapshot(t, coupled.response, info, true,
+                               std::move(coupled.ocean),
+                               options_.record_stride > 0);
+  op_->ReleaseScratch();
+  return snapshot;
+}
+
 std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>* iceLoad,
@@ -161,32 +424,12 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
     }
   }
 
-  SeaLevelSolver::Options sleOptions;
-  sleOptions.rtol = options_.rtol;
-  sleOptions.anderson_memory = options_.anderson_memory;
-  auto nonlinearOptions = sleOptions;
-  nonlinearOptions.max_iterations = options_.max_nonlinear_iterations;
-
-  // Flavour SLE solvers under the caller's parameters, keyed by the
-  // (operator-cached, address-stable) Love table.
-  auto flavours = std::map<const LoveNumbers*, SeaLevelSolver>{};
-  auto solverFor = [&](const LoveNumbers& table) -> const SeaLevelSolver& {
-    auto found = flavours.find(&table);
-    if (found == flavours.end()) {
-      found =
-          flavours
-              .emplace(&table, SeaLevelSolver(grid, table, solver.Parameters()))
-              .first;
-    }
-    return found->second;
-  };
+  Coupled coupled(*this, migrating);
+  auto& response = coupled.response;
+  auto& ocean = coupled.ocean;
 
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
-  if (!resumed) {
-    vstate_ = op.ZeroState();
-    vstate_.t = times[0] * toMatTime_;
-  }
 
   auto checkpoint = [&](std::size_t node) {
     const auto every = options_.checkpoint_stride;
@@ -202,176 +445,32 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
                          .tideCoefficients = psi_});
   };
 
-  auto totalLoadCoefficients = [&](const std::vector<double>& loadGrid,
-                                   const std::vector<double>& slc) {
-    auto total = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      total[i] = loadGrid[i] +
-                 solver.WaterDensity() * state_.oceanFunction[i] * slc[i];
-    }
-    return grid.Expand(total);
-  };
-
-  auto loadGrid = std::vector<double>{};
-  auto response = SeaLevelSolver::Response{};
-  auto ocean = std::vector<double>{};  // the node's C, migrating only
-
-  // Distributed (Viscoelastic3D::Options::collectives), every process
-  // solves the sea level equation alike, but their transforms may round
-  // differently (each process plans its own FFTs): the first process's
-  // loads, ocean function and response then serve them all, so that
-  // every segment is forced alike and every process's snapshots are the
-  // same (whatever is decided from them, a calibration's next run say,
-  // is decided alike).
-  const auto& collectives = op.GetOptions().collectives;
-  auto agree = [&] {
-    if (!collectives.Distributed()) return;
-    for (auto* coefficients : {&sigma_, &psi_}) {
-      collectives.share(
-          std::span(reinterpret_cast<double*>(coefficients->data()),
-                    2 * coefficients->size()));
-    }
-    for (auto* field : {&response.seaLevelChange, &response.displacement,
-                        &response.potential}) {
-      collectives.share(*field);
-    }
-    collectives.share(response.angularVelocity);
-    auto converged = response.converged ? 1.0 : 0.0;
-    collectives.share(std::span(&converged, 1));
-    response.converged = converged != 0.0;
-    if (migrating) collectives.share(ocean);
-  };
-  // The combined fixed point of a step: strain, ocean load and rotation
-  // together — one pass for the steps and, under lateral moduli, for the
-  // instantaneous start as a zero-length step (Viscoelastic3D::StartStep).
-  auto step = std::optional<Viscoelastic3D::OpenStep>{};
-  const SeaLevelSolver* effectiveSolver = nullptr;
-  auto moving = SeaLevelSolver::NonlinearForcing{};
-  auto closure = [&](const Viscoelastic3D::Solutions& responses) {
-    auto displacement =
-        Coefficients(op.Surface(responses, Component::U), toNdLength_);
-    auto potential =
-        Coefficients(op.Surface(responses, Component::Phi), toNdPotential_);
-    const auto moment = step->InertiaMoment(responses) * toNdMoment_;
-    if (migrating) {
-      moving.displacementResponse = std::move(displacement);
-      moving.potentialResponse = std::move(potential);
-      moving.inertiaMomentChange = moment;
-      auto solved =
-          effectiveSolver->SolveNonlinear(state_, moving, nonlinearOptions);
-      response = std::move(solved.response);
-      sigma_ = detail::MigratedLoadCoefficients(solver, state_, solved.finalState);
-      ocean = std::move(solved.finalState.oceanFunction);
-    } else {
-      SeaLevelSolver::GeneralisedForcing coupled;
-      coupled.directLoad = loadGrid;
-      coupled.displacementResponse = std::move(displacement);
-      coupled.potentialResponse = std::move(potential);
-      coupled.inertiaMomentChange = moment;
-      coupled.rotation = options_.rotation;
-      response = effectiveSolver->SolveGeneralised(state_, coupled, sleOptions);
-      sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-    }
-    psi_ = options_.rotation == RotationalFeedback::None
-               ? grid.ZeroCoefficients()
-               : solver.CentrifugalCoefficients(response.angularVelocity);
-    agree();
-    return std::pair{Columns(sigma_, toMatDensity_), Columns(psi_, toMatPotential_)};
-  };
-  auto coupledPass = [&](const GridCoupling::SpectralTensor& s) {
-    auto responses = step->Respond(s);
-    const auto [load, tide] = closure(responses);
-    step->AddChannels(responses, load, tide);
-    return step->StrainOf(responses);
-  };
-  const Viscoelastic3D::IterationControl control{
-      .max_iterations = options_.max_coupled_iterations,
-      .rtol = options_.coupled_rtol,
-      .anderson_memory = options_.anderson_memory,
-      .anderson_rate = options_.anderson_rate};
-  // The step's closure: the fixed point on the strain, or (Viscoelastic3D
-  // ::Options::solver) the closure nested over conjugate-gradient solves.
-  const bool nested = op.GetOptions().solver ==
-                      Viscoelastic3D::Options::StepSolver::ConjugateGradients;
-  auto close = [&] {
-    return nested ? step->Nest(closure, control)
-                  : step->Converge(coupledPass, control);
-  };
   auto startInfo = Viscoelastic3D::StepInfo{};
-
   if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
+    vstate_ = op.ZeroState();
+    vstate_.t = times[0] * toMatTime_;
     response.seaLevelChange.assign(fieldSize, 0.0);
     response.displacement.assign(fieldSize, 0.0);
     response.potential.assign(fieldSize, 0.0);
     sigma_ = grid.ZeroCoefficients();
     psi_ = grid.ZeroCoefficients();
     ocean = state_.oceanFunction;
-  } else if (!resumed && op.HasLateralModuli()) {
-    // The instantaneous elastic response at the start under lateral
-    // moduli: the coupled fixed point of a zero-length step.
-    loadGrid = (*iceLoad)(times[0]);
-    step.emplace(op.StartStep(vstate_, 0.0, options_.scheme));
-    effectiveSolver = &solverFor(step->EffectiveLove());
-    auto [strain, info] = close();
-    if (!info.converged) {
-      throw std::runtime_error(std::format(
-          "the instantaneous coupled fixed point at the start did not "
-          "converge (residual {})",
-          info.residual));
-    }
-    startInfo = info;
-    op.Recycle(std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
-    step.reset();
   } else if (!resumed) {
-    // The instantaneous elastic response at the start.
-    loadGrid = (*iceLoad)(times[0]);
-    const auto& elastic = solverFor(op.ElasticLove());
-    SeaLevelSolver::GeneralisedForcing forcing;
-    forcing.directLoad = loadGrid;
-    forcing.rotation = options_.rotation;
-    response = elastic.SolveGeneralised(state_, forcing, sleOptions);
-    sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
-    psi_ = options_.rotation == RotationalFeedback::None
-               ? grid.ZeroCoefficients()
-               : solver.CentrifugalCoefficients(response.angularVelocity);
-    agree();
+    // The instantaneous elastic response at the start (Instantaneous).
+    startInfo = Start(coupled, times[0], (*iceLoad)(times[0]));
   }
-  if (stride > 0) op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
-                                 Columns(psi_, toMatPotential_));
+  PrimeForRecording();
 
   auto snapshots = std::vector<Snapshot>{};
   auto record = [&](double t, SeaLevelSolver::Response& r,
                     const Viscoelastic3D::StepInfo& info, bool converged,
                     bool keepState) {
-    Snapshot snapshot;
-    snapshot.t = t;
-    snapshot.seaLevelChange = std::move(r.seaLevelChange);
-    snapshot.displacement = std::move(r.displacement);
-    snapshot.potential = std::move(r.potential);
-    snapshot.angularVelocity = r.angularVelocity;
-    snapshot.coupledIterations = info.iterations;
-    snapshot.coupledResidual = info.residual;
-    snapshot.solveIterations = info.solveIterations;
-    snapshot.converged = converged && r.converged;
-    snapshot.oceanFunction = std::move(ocean);
-    // The internal variables, and the strain only on request: an adjoint
-    // otherwise regenerates it by one elastic solve under the recorded
-    // loads. With on_state, the kept state is handed out instead.
+    auto snapshot =
+        MakeSnapshot(t, r, info, converged, std::move(ocean), keepState);
+    // With on_state, the kept state is handed out instead.
     auto kept = std::optional<Viscoelastic3D::State>{};
-    if (keepState && options_.record_strain) {
-      kept = vstate_;
-    } else if (keepState) {
-      auto trimmed = Viscoelastic3D::State{};
-      trimmed.t = vstate_.t;
-      trimmed.m = vstate_.m;
-      kept = std::move(trimmed);
-    }
-    if (kept && !options_.on_state) snapshot.internalState = std::move(kept);
-    if (stride > 0) {
-      snapshot.loadCoefficients = sigma_;
-      snapshot.tideCoefficients = psi_;
-    }
+    if (options_.on_state) std::swap(kept, snapshot.internalState);
     snapshots.push_back(std::move(snapshot));
     const auto node = snapshots.size() - (resumed ? 0 : 1);
     if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
@@ -384,14 +483,16 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
+    auto& step = coupled.step;
     step.emplace(op.StartStep(vstate_, dt, options_.scheme,
                               Columns(sigma_, toMatDensity_),
                               Columns(psi_, toMatPotential_)));
-    effectiveSolver = &solverFor(step->EffectiveLove());
+    coupled.effectiveSolver = &coupled.SolverFor(step->EffectiveLove());
     // Under migrating shorelines each pass solves the nonlinear equation
     // from the background, the memory and lateral responses entering
     // through the response channels, so the ocean function follows the
     // flotation condition inside the fixed point.
+    auto& moving = coupled.moving;
     moving = SeaLevelSolver::NonlinearForcing{};
     if (migrating) {
       moving.iceThicknessChange = (*iceThickness)(times[node]);
@@ -400,11 +501,11 @@ std::vector<SeaLevelEvolution3D::Snapshot> SeaLevelEvolution3D::March(
       }
       moving.rotation = options_.rotation;
     } else {
-      loadGrid = (*iceLoad)(times[node]);
+      coupled.loadGrid = (*iceLoad)(times[node]);
     }
 
     // The combined fixed point: strain, ocean load and rotation together.
-    auto [strain, info] = close();
+    auto [strain, info] = coupled.Close();
     // the replaced state's tensors go to the next StartStep
     op.Recycle(
         std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));

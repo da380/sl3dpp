@@ -108,6 +108,7 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | --- | --- |
 | `love_numbers` | `love_numbers.png` |
 | `sea_level_fingerprint`, `sea_level_fingerprint_ice7g` | `fingerprint.png` |
+| `sea_level_fingerprint_3d` | `fingerprint.png`: the fingerprint on the synthetic 3D elastic Earth and its 3D minus radial difference |
 | `sea_level_1d` | `sea_level.png`: the 1D run and `sea_level_3d`'s together |
 | `sea_level_1d_ice7g` | `sea_level.png` |
 | `sea_level_1d_calibrated`, `sea_level_3d_calibrated`, `sea_level_1d_ice7g_calibrated` | `calibration.png` |

@@ -145,7 +145,8 @@ struct SolverBlock {
   /// `sea-level` and the kernel commands: each step's combined fixed
   /// point over the strain, the ocean load and the rotation
   /// (SeaLevelEvolution3D::Options::coupled_rtol, max_coupled_iterations;
-  /// under lateral moduli the start's zero-length step too). `response`:
+  /// under lateral moduli the start's zero-length step too, and the
+  /// fingerprint's one zero-length step). `response`:
   /// each step's closure (the fixed point or the conjugate gradients) and
   /// the unrelaxed solve under lateral moduli (an elastic response's one
   /// solve, a viscoelastic run's first node).

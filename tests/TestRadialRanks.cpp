@@ -4,8 +4,9 @@
 // rank reduces all the ranks' values in rank order, so that all get the
 // same. The distributed paths run without MPI and are held to the
 // one-process run on the same cuts: the steps (with the transforms cut
-// with depth), the coupled evolutions, frozen and migrating, and the 3D
-// adjoint's kernels. Each rank's memory nodes are a slice of the one
+// with depth), the coupled evolutions, frozen and migrating, the 3D
+// adjoint's kernels, and the instantaneous elastic response under lateral
+// moduli (the fingerprint). Each rank's memory nodes are a slice of the one
 // process's, compared value by value. TestDistributed runs the same under
 // mpiexec.
 
@@ -1093,5 +1094,103 @@ TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
     EXPECT_LT(worstIce, 1e-10) << label;
     EXPECT_LT(worstViscosity, 1e-10) << label;
     std::cout << label << ": ice " << worstIce << ", viscosity " << worstViscosity << '\n';
+  }
+}
+
+TEST(RadialRanks, InstantaneousResponsesMatchTheOneProcess) {
+  // The instantaneous elastic response under lateral moduli, the elastic
+  // sea-level fingerprint of a laterally heterogeneous Earth, on three
+  // ranks (the zero-length step's fixed point or nested conjugate-gradient
+  // solves, the sea level solved on every rank, the first rank's answer
+  // shared): on the Maxwell rheology, and on the branchless rheology of the
+  // static problem, whose cuts balance the elements the moduli make active,
+  // with the full rotational feedback, against the one process's response
+  // (measured 2e-16 by the fixed point, 1.2e-12 by the conjugate
+  // gradients).
+  constexpr auto lmax = 8;
+  constexpr auto count = 3;
+  const auto body = Body::Make(lmax);
+  const auto elastic = Rheology::Create(body.material, {}).value();
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  auto solvers = std::vector<SeaLevelSolver>{};
+  for (auto rank = 0; rank <= count; ++rank) {
+    solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                         SeaLevelParameters{});
+  }
+  const auto length = solvers[0].SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solvers[0].MakeState(ice, toNd(fingerprint.SeaLevel()));
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] = -0.1 * solvers[0].IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
+  }
+  const auto evolutionOptions = SeaLevelEvolution3D::Options{
+      .rotation = RotationalFeedback::Full, .rtol = 1e-12,
+      .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
+  using StepSolver = Viscoelastic3D::Options::StepSolver;
+  for (const auto* rheology : {&body.rheology, &elastic}) {
+    for (const auto stepSolver : {StepSolver::FixedPoint, StepSolver::ConjugateGradients}) {
+      const auto label = std::format("{} rheology, solver {}",
+                                     rheology == &elastic ? "branchless" : "Maxwell",
+                                     static_cast<int>(stepSolver));
+      auto options = Viscoelastic3D::Options{.parallel = false,
+                                             .rtol = 1e-12,
+                                             .solver = stepSolver,
+                                             .solve_rtol = 1e-12,
+                                             .moduli = RankModuli()};
+      const SurfaceGrid grid(lmax, {.nmax = 2, .oversampling = options.oversampling,
+                                    .parallel = false});
+      const auto active = Viscoelastic3D::ActiveElementsFor(*rheology, lmax, grid, options);
+      options.radial_cuts = body.material.Mesh().BalancedCuts(
+          count, GridCoupling::TransformWeights(*rheology, lmax,
+                                                {.active_elements = active}));
+      ASSERT_EQ(options.radial_cuts.size(), static_cast<std::size_t>(count - 1)) << label;
+      const Viscoelastic3D whole(*rheology, lmax, Peaked, options);
+      SeaLevelEvolution3D one(whole, solvers[count], state, evolutionOptions);
+      const auto want = one.Instantaneous(melt);
+      ASSERT_TRUE(want.converged) << label;
+      ASSERT_GT(want.coupledIterations, 0) << label;
+
+      ThreadRanks ranks(count);
+      auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+      for (auto rank = 0; rank < count; ++rank) {
+        auto mine = options;
+        mine.segments = {rank};
+        mine.collectives = ranks.For(rank);
+        ops.push_back(std::make_unique<Viscoelastic3D>(*rheology, lmax, Peaked, mine));
+      }
+      auto nodes = 0;
+      for (const auto& op : ops) nodes += op->Coupling().NodeCount();
+      EXPECT_EQ(nodes, whole.Coupling().NodeCount()) << label;
+      auto got = std::vector<SeaLevelEvolution3D::Snapshot>(count);
+      ranks.Run([&](int rank) {
+        SeaLevelEvolution3D evolution(*ops[rank], solvers[rank], state, evolutionOptions);
+        got[rank] = evolution.Instantaneous(melt);
+      });
+
+      auto worst = 0.0;
+      for (auto rank = 0; rank < count; ++rank) {
+        EXPECT_TRUE(got[rank].converged) << label << ", rank " << rank;
+        EXPECT_EQ(got[rank].coupledIterations, got[0].coupledIterations) << label;
+        EXPECT_EQ(got[rank].seaLevelChange, got[0].seaLevelChange) << label;
+        worst = std::max({worst, Relative(got[rank].seaLevelChange, want.seaLevelChange),
+                          Relative(got[rank].displacement, want.displacement),
+                          Relative(got[rank].potential, want.potential),
+                          Relative(got[rank].angularVelocity, want.angularVelocity)});
+      }
+      RecordProperty(std::format("{}_{}", rheology == &elastic ? "branchless" : "maxwell",
+                                 static_cast<int>(stepSolver)),
+                     std::format("{:.3e}", worst));
+      std::cout << label << ": " << want.coupledIterations << " passes, "
+                << want.solveIterations << " conjugate-gradient iterations, worst "
+                << worst << '\n';
+      EXPECT_LT(worst, 1e-10) << label;
+    }
   }
 }

@@ -2496,15 +2496,259 @@ TEST_F(AppsTest, SeaLevel3DStepSolversAgree) {
   RecordProperty("solver_departure", std::format("{:.3e}", worst));
 }
 
+/// A fingerprint config on the prem8 deck at lmax 8, the moduli member and
+/// the solver block given where they are: the off-pole cap thinned by 50 m
+/// on the toy history's present day, with the full rotational feedback.
+std::string Prem8Fingerprint(const std::string& name,
+                             const std::string& moduli = "",
+                             const std::string& solver = "") {
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  return std::format(R"({{
+    "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic"{}}},
+    "lmax": 8,
+    "forcing": {{"state": {{"file": "history.nc"}},
+                "ice": {{"type": "cap_thickness", "latitude": 70,
+                        "longitude": 30, "width_deg": 10,
+                        "thickness_m": -50}}}},
+    "rotation": "full",{}
+    "output": {{"surface": "out/{}.nc"}}}})",
+                     data,
+                     moduli.empty()
+                         ? std::string{}
+                         : std::format(R"(, "moduli": {{"file": "{}"}})", moduli),
+                     solver.empty() ? std::string{}
+                                    : std::format(R"( "solver": {},)", solver),
+                     name);
+}
+
+TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
+  // Without a times block, a laterally varying moduli file makes the
+  // fingerprint 3-D: the command is SeaLevelEvolution3D::Instantaneous on
+  // the stepper of a branchless rheology under the same moduli, solved
+  // here on the same state and load, to rounding (equal to the bit here),
+  // with the metadata of the 3-D solve. Its *_radial_model fields are the
+  // radial fingerprint of the same change, a run without the moduli to the
+  // bit, and the lateral moduli (10% in shear, 5% in bulk) move the
+  // fingerprint measurably (about 2e-2 of its largest sea level change).
+  // A run through time cannot pin
+  // it: the command measures a history's load from the window's start, so
+  // the first node of a run through time carries no load; the library's
+  // gates hold Instantaneous to Run's first node.
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc");
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto model =
+      ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+  const auto shear = [](double, double theta, double phi) {
+    return 0.1 * std::sin(theta) * std::cos(phi);
+  };
+  const auto bulk = [](double, double theta, double) {
+    return 0.05 * std::cos(theta);
+  };
+  ASSERT_TRUE(io::WriteModuli(dir_ / "moduli.nc", model, SurfaceGrid(8), shear,
+                              bulk,
+                              {.name = "toy moduli", .elementMetres = 500e3}));
+  const auto summary = app::RunSeaLevel(
+      Write("lateral.json", Prem8Fingerprint("lateral", "moduli.nc")));
+  EXPECT_TRUE(summary.starts_with(
+      "3-D (lateral moduli), elastic (fingerprint), rotation full; wrote "))
+      << summary;
+  EXPECT_NE(summary.find("fixed-point iterations, residual "),
+            std::string::npos)
+      << summary;
+  static_cast<void>(
+      app::RunSeaLevel(Write("radial.json", Prem8Fingerprint("radial"))));
+  const auto byCommand = pm::ReadSurfaceFile(dir_ / "out" / "lateral.nc");
+  const auto radial = pm::ReadSurfaceFile(dir_ / "out" / "radial.nc");
+  for (const auto* name :
+       {"ice_change", "sea_level_change", "displacement", "potential",
+        "ocean_function", "sea_level_change_radial_model",
+        "displacement_radial_model", "potential_radial_model"}) {
+    EXPECT_TRUE(byCommand.variables.contains(name)) << name;
+  }
+  EXPECT_EQ(std::get<std::string>(byCommand.meta.at("moduli")),
+            (dir_ / "moduli.nc").string());
+  EXPECT_EQ(byCommand.meta.at("lateral"),
+            pm::netcdf::Attribute{std::vector<long long>{1}});
+  EXPECT_EQ(std::get<std::string>(byCommand.meta.at("moduli_reference")),
+            "lateral_mean");
+  EXPECT_EQ(std::get<std::string>(byCommand.meta.at("step_solver")),
+            "fixed_point");
+  const auto iterations =
+      std::get<std::vector<long long>>(byCommand.meta.at("step_iterations"));
+  const auto residual =
+      std::get<std::vector<double>>(byCommand.meta.at("step_residual"));
+  EXPECT_GT(iterations.at(0), 0);
+  EXPECT_LE(residual.at(0), 1e-9);
+
+  // the radial model's fields are the radial fingerprint's, to the bit
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    EXPECT_EQ(byCommand.variables.at(std::string{name} + "_radial_model").values,
+              radial.variables.at(name).values)
+        << name;
+  }
+  for (const auto* axis : {"x", "y", "z"}) {
+    EXPECT_EQ(byCommand.meta.at(std::format("omega_{}_radial_model_rad_s", axis)),
+              radial.meta.at(std::format("omega_{}_rad_s", axis)))
+        << axis;
+  }
+
+  // the library's instantaneous response on the same operator, state and
+  // load
+  constexpr auto kLmax = 8;
+  const auto mesh = RadialMesh::Create(model, {.lmax = kLmax});
+  ASSERT_TRUE(mesh);
+  const auto material = Material::Create(model, *mesh);
+  ASSERT_TRUE(material);
+  const auto elastic = Rheology::Create(*material, {});
+  ASSERT_TRUE(elastic);
+  const auto moduli = io::ModelModuli::Read(dir_ / "moduli.nc", model);
+  ASSERT_TRUE(moduli);
+  auto options = Viscoelastic3D::Options{};
+  options.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
+  const Viscoelastic3D op(*elastic, kLmax,
+                          [](double, double, double) { return 0.0; }, options);
+  const SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLove(),
+                              SeaLevelParameters{});
+  const auto history = io::FieldHistory::Read(dir_ / "history.nc", solver.Grid());
+  ASSERT_TRUE(history);
+  const auto& scales = solver.SolverScales();
+  const auto length = scales.Length();
+  auto ice = history->Values("ice_thickness", 0.0);
+  auto sea = SeaLevelFromTopography(history->Values("topography", 0.0), ice,
+                                    solver.Parameters());
+  for (auto& v : ice) v /= length;
+  for (auto& v : sea) v /= length;
+  const auto state = solver.MakeState(std::move(ice), std::move(sea));
+  const auto cap = app::CapField(solver.Grid(), {70.0, 30.0},
+                                 10.0 * std::numbers::pi / 180.0, 1.0);
+  auto load = std::vector<double>(cap.size());
+  for (auto i = std::size_t{0}; i < load.size(); ++i) {
+    const auto thickness = -50.0 * cap[i];
+    load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
+              thickness / length;
+  }
+  SeaLevelEvolution3D evolution(op, solver, state);
+  const auto response = evolution.Instantaneous(load);
+  ASSERT_TRUE(response.converged);
+  EXPECT_EQ(iterations.at(0), response.coupledIterations);
+  auto worst = 0.0;
+  for (const auto& [name, field, factor] :
+       {std::tuple{"sea_level_change", &response.seaLevelChange, length},
+        std::tuple{"displacement", &response.displacement, length},
+        std::tuple{"potential", &response.potential,
+                   scales.Factor(PotentialDimensions)}}) {
+    auto want = *field;
+    for (auto& v : want) v *= factor;
+    const auto departure = Departure(byCommand.variables.at(name).values, want);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+  }
+  RecordProperty("library_departure", std::format("{:.3e}", worst));
+  const auto moved =
+      Departure(byCommand.variables.at("sea_level_change").values,
+                radial.variables.at("sea_level_change").values);
+  RecordProperty("moduli_departure", std::format("{:.3e}", moved));
+  EXPECT_GT(moved, 1e-5);
+  EXPECT_LT(moved, 0.1);
+}
+
+TEST_F(AppsTest, SeaLevelFingerprintOnLaterallyUniformModuliIsTheRadialOne) {
+  // A moduli file stored laterally but uniform (its lateral part zero)
+  // makes the fingerprint 3-D, and the 3-D fingerprint is the radial one
+  // to the solves' tolerance (5e-16 here: the operator's elastic Love
+  // numbers and the radial solver's agree, and the zero-length step's
+  // fixed point adds nothing).
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc");
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto model =
+      ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+  const auto zero = [](double, double, double) { return 0.0; };
+  ASSERT_TRUE(io::WriteModuli(dir_ / "uniform.nc", model, SurfaceGrid(8), zero,
+                              zero,
+                              {.name = "uniform moduli", .elementMetres = 500e3}));
+  const auto summary = app::RunSeaLevel(
+      Write("uniform.json", Prem8Fingerprint("uniform", "uniform.nc")));
+  EXPECT_TRUE(summary.starts_with("3-D (lateral moduli), elastic (fingerprint)"))
+      << summary;
+  static_cast<void>(
+      app::RunSeaLevel(Write("radial.json", Prem8Fingerprint("radial"))));
+  const auto uniform = pm::ReadSurfaceFile(dir_ / "out" / "uniform.nc");
+  const auto radial = pm::ReadSurfaceFile(dir_ / "out" / "radial.nc");
+  auto worst = 0.0;
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    const auto departure = Departure(uniform.variables.at(name).values,
+                                     radial.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-9) << name;
+    EXPECT_EQ(uniform.variables.at(std::string{name} + "_radial_model").values,
+              radial.variables.at(name).values)
+        << name;
+  }
+  EXPECT_EQ(uniform.variables.at("ocean_function").values,
+            radial.variables.at("ocean_function").values);
+  EXPECT_EQ(uniform.variables.at("ice_change").values,
+            radial.variables.at("ice_change").values);
+  RecordProperty("radial_departure", std::format("{:.3e}", worst));
+}
+
+TEST_F(AppsTest, SeaLevelFingerprintStepSolversAgree) {
+  // The 3-D fingerprint closes its zero-length step by the fixed point or
+  // by the sea level closure nested over conjugate-gradient solves
+  // (solver.step), to the same tolerance (solver.step_rtol, 1e-10 here):
+  // the two agree to it (about 2e-12).
+  namespace pm = planetmodel;
+  WriteToyHistory(dir_ / "history.nc");
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto model =
+      ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+  ASSERT_TRUE(io::WriteModuli(
+      dir_ / "moduli.nc", model, SurfaceGrid(8),
+      [](double, double theta, double phi) {
+        return 0.1 * std::sin(theta) * std::cos(phi);
+      },
+      {}, {.name = "toy moduli", .elementMetres = 500e3}));
+  const auto run = [&](const std::string& name, const std::string& step) {
+    return app::RunSeaLevel(Write(
+        name + ".json",
+        Prem8Fingerprint(name, "moduli.nc",
+                         std::format(R"({{"step": "{}", "step_rtol": 1e-10,
+                                     "step_max_iterations": 200}})",
+                                     step))));
+  };
+  const auto fixed = run("fixed", "fixed_point");
+  EXPECT_NE(fixed.find("fixed-point iterations"), std::string::npos) << fixed;
+  const auto conjugate = run("conjugate", "conjugate_gradients");
+  EXPECT_NE(conjugate.find("conjugate-gradient iterations in"),
+            std::string::npos)
+      << conjugate;
+  const auto a = pm::ReadSurfaceFile(dir_ / "out" / "fixed.nc");
+  const auto b = pm::ReadSurfaceFile(dir_ / "out" / "conjugate.nc");
+  EXPECT_EQ(std::get<std::string>(b.meta.at("step_solver")),
+            "conjugate_gradients");
+  EXPECT_GT(std::get<std::vector<long long>>(b.meta.at("solve_iterations")).at(0),
+            0);
+  auto worst = 0.0;
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    const auto departure =
+        Departure(b.variables.at(name).values, a.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-9) << name;
+  }
+  RecordProperty("solver_departure", std::format("{:.3e}", worst));
+}
+
 TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
   // Each fault of a sea-level or kernel config is refused naming the
   // member: the other command's form of the times block; the members that
-  // need a times block (the ocean's, the time step's and the 3-D step's,
-  // a viscosity file, an ice history, checkpoints) without one, and the
-  // fingerprint's (a dated state, an ice change) with one; a member of
-  // the commands' blocks given at the top level; an unknown member in
-  // every block; the kernel commands' own limits. Once the run reads its
-  // files, lateral moduli without times, kernel1d on a lateral model and
+  // need a times block (the ocean's, the time step's, a viscosity file,
+  // an ice history, checkpoints) without one, and the 3-D step's without
+  // one or a moduli file, and the fingerprint's (a dated state, an ice
+  // change) with one; a member of the commands' blocks given at the top
+  // level; an unknown member in every block; the kernel commands' own
+  // limits. Once the run reads its files, the 3-D step's members on a
+  // radial moduli file without times, kernel1d on a lateral model and
   // kernel on a radial one.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
@@ -2589,6 +2833,13 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
           "solver.scheme", "needs a `times` block");
   refused(read, fingerprint(R"( "solver": {"step_rtol": 1e-8},)"),
           "solver.step_rtol", "needs a `times` block");
+  refused(read, fingerprint(R"( "solver": {"step": "conjugate_gradients"},)"),
+          "solver.step", "or lateral moduli (`model.moduli`)");
+  // with a moduli file the time step is still refused
+  refused(read,
+          fingerprint(R"( "solver": {"scheme": "backward_euler"},)",
+                      R"({"deck": "ball.deck", "moduli": {"file": "m.nc"}})"),
+          "solver.scheme", "needs a `times` block");
   refused(read, fingerprint("", R"({"deck": "ball.deck",
                              "viscosity": {"file": "v.nc"}})"),
           "model.viscosity", "needs a `times` block");
@@ -2724,20 +2975,26 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                                            "every": 1},)"),
           "checkpoint", "not a recognised member");
 
-  // once the files are read: lateral moduli without times, and the kernel
-  // commands on the wrong kind of model
+  // once the files are read: the 3-D step's members on a radial moduli
+  // file without times, and the kernel commands on the wrong kind of model
   const auto prem8 =
       ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
-  ASSERT_TRUE(io::WriteModuli(
-      dir_ / "moduli.nc", prem8, SurfaceGrid(4),
-      [](double, double theta, double) { return 0.05 * std::cos(theta); }, {},
-      {.name = "toy moduli", .elementMetres = 500e3}));
-  refused(app::RunSeaLevel,
-          fingerprint("", std::format(R"({{"deck": "{}/prem8.elastic.deck",
-                                         "format": "elastic",
-                                         "moduli": {{"file": "moduli.nc"}}}})",
-                                      data)),
-          "model.moduli.file", "varies laterally");
+  ASSERT_TRUE(io::WriteModuli(dir_ / "radial_moduli.nc", prem8, SurfaceGrid(4),
+                              {}, {},
+                              {.name = "radial moduli", .elementMetres = 500e3}));
+  for (const auto* member :
+       {R"("step_rtol": 1e-8)", R"("step": "conjugate_gradients")",
+        R"("transform_degrees": [3])", R"("cache_mb": 4)"}) {
+    const auto name = std::string{member}.substr(1, std::string{member}.find('"', 1) - 1);
+    refused(app::RunSeaLevel,
+            fingerprint(std::format(R"( "solver": {{{}}},)", member),
+                        std::format(R"({{"deck": "{}/prem8.elastic.deck",
+                                       "format": "elastic",
+                                       "moduli": {{"file": "radial_moduli.nc"}}}})",
+                                    data)),
+            "solver." + name,
+            "3-D step, which the elastic fingerprint on a radial Earth");
+  }
   const auto lateral = std::format(R"({{"deck": "{}/prem8.elastic.deck",
       "format": "elastic", "viscosity": {{"file": "{}/viscosity_log.nc"}}}})",
                                    data, data);

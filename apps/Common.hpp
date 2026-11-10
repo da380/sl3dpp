@@ -64,9 +64,10 @@ struct SeaLevelRun {
 void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 
 /// Reads the shared members, relative paths against `directory`. The
-/// members that need a `times` block (a viscosity file, the ocean's, the
-/// time step's and the 3-D step's) are refused without one, naming the
-/// member.
+/// members that need a `times` block (a viscosity file, the ocean's and
+/// the time step's) are refused without one, naming the member, and so
+/// are the 3-D step's unless a moduli file is given (the fingerprint on
+/// lateral moduli takes them; on a radial file the runner refuses them).
 [[nodiscard]] SeaLevelRun ReadSeaLevelRun(
     const Json& top, const std::filesystem::path& directory);
 

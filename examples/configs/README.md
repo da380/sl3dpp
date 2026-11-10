@@ -33,6 +33,18 @@ draws each config's figures from `out/<config>/` into
   the elastic sea-level fingerprint of melting a tenth of the synthetic
   Greenland ice, at lmax 128, with full rotational feedback:
   `out/sea_level_fingerprint/sea_level_fingerprint.nc`.
+- **`sea_level_fingerprint_3d.json`** — that fingerprint on the synthetic
+  3D elastic Earth (`../data/synthetic_moduli.nc` on
+  `../data/prem8.elastic.deck`, as `response.json`): without a `times`
+  block, a moduli file that varies laterally makes the fingerprint 3D,
+  the instantaneous response of the 3D sea level problem, its
+  zero-length step closed by the fixed point, at lmax 32 (the moduli
+  file's own degree):
+  `out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc`, which also
+  holds the radial model's fingerprint of the same melt
+  (`*_radial_model`). The stiff craton under North America and the soft
+  ridge change the sea level by a few centimetres at most, against a
+  near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
 - **`sea_level_1d.json`** — `sea-level` with a `times` block: the synthetic
   deglaciation from 21 ka to the present through the 1D viscoelastic Earth
   of `../data/prem8.gia.deck`, at lmax 32 in quarter-kiloyear steps, with

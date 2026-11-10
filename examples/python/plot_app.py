@@ -7,6 +7,7 @@ figures/sl3d/<config>/:
 
     love_numbers/love_numbers.png
     sea_level_fingerprint/fingerprint.png
+    sea_level_fingerprint_3d/fingerprint.png
     sea_level_1d/sea_level.png        (sea_level_1d against sea_level_3d)
     sea_level_1d_calibrated/calibration.png
     sea_level_3d_calibrated/calibration.png
@@ -155,6 +156,54 @@ def sea_level_fingerprint(name: str, title: str, synthetic: bool) -> None:
                           title=label)
         fig.colorbar(mesh, ax=ax, shrink=0.7)
     fig.suptitle(title)
+    fig.tight_layout()
+    save(fig, name, "fingerprint")
+
+
+def sea_level_fingerprint_3d() -> None:
+    """The fingerprint on the synthetic 3D elastic Earth: the sea level
+    change and the vertical displacement, each beside its 3D minus radial
+    difference, the lateral moduli's part of the fingerprint (the radial
+    model's fingerprint of the same melt is in the same file)."""
+    name = "sea_level_fingerprint_3d"
+    path = OUT / name / f"{name}.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    fields = {}
+    for field in ("sea_level_change", "displacement"):
+        values = np.asarray(file.variables[field].values)
+        radial = np.asarray(file.variables[f"{field}_radial_model"].values)
+        fields[field] = values
+        fields[f"{field}_difference"] = 1e2 * (values - radial)  # cm
+    ex = Example.from_fields(grid.colatitudes, grid.longitudes, fields)
+    melt = (72.0, 318.0)  # the melted cap
+    structure = [(58.0, -95.0), (-15.0, -110.0)]  # the craton, the ridge
+
+    fig = plt.figure(figsize=(12, 7))
+    panels = (
+        ("sea_level_change", "sea level change, 3D model (m)"),
+        ("sea_level_change_difference", "sea level, 3D minus radial model "
+         "(cm)"),
+        ("displacement", "vertical displacement, 3D model (m)"),
+        ("displacement_difference", "displacement, 3D minus radial model "
+         "(cm)"),
+    )
+    # the differences over the North Atlantic, where the lateral part lies
+    extent = (-130.0, 20.0, 35.0, 88.0)
+    for k, (field, title) in enumerate(panels):
+        difference = field.endswith("_difference")
+        ax = world_map(fig, 2, 2, k + 1,
+                       central_longitude=-55.0 if difference else 0.0,
+                       extent=extent if difference else None)
+        mesh = plot_field(ax, ex, field, title=title)
+        mark_sites(ax, [melt] + structure, colors=["k", "C0", "C3"])
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+    fig.suptitle("sl3d sea-level, the fingerprint on the synthetic 3D elastic "
+                 "Earth: 10% of the synthetic Greenland melted\n(black: the "
+                 "melt; blue: the stiff craton; red: the soft ridge)",
+                 fontsize=11)
     fig.tight_layout()
     save(fig, name, "fingerprint")
 
@@ -817,6 +866,7 @@ if __name__ == "__main__":
     sea_level_fingerprint("sea_level_fingerprint",
                           "sl3d sea-level, the fingerprint: 10% of the "
                           "synthetic Greenland melted", synthetic=True)
+    sea_level_fingerprint_3d()
     sea_level_fingerprint("sea_level_fingerprint_ice7g",
                           "sl3d sea-level, the fingerprint: 10% of the "
                           "ICE-7G Greenland ice melted", synthetic=False)

@@ -1,5 +1,6 @@
 // sl3d's 3D runs over MPI ranks (apps/Ranks.hpp), built with
-// SL3DPP_WITH_MPI and run under mpiexec: sea-level's 3-D run, kernel and
+// SL3DPP_WITH_MPI and run under mpiexec: sea-level's 3-D run and its
+// fingerprint on lateral moduli, kernel and
 // the viscoelastic response over the ranks against the same configs on one
 // process (rank 0 alone, as a run of one rank), a run resumed from
 // per-rank checkpoints against the uninterrupted one, the spilled
@@ -305,6 +306,95 @@ TEST_F(AppsOverRanks, SeaLevelUnderLateralModuliMatchesOneProcess) {
     EXPECT_LT(Relative(distributed.variables.at(name).values,
                        reference.variables.at(name).values),
               1e-10)
+        << name;
+  }
+}
+
+TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
+  // The elastic fingerprint on lateral moduli (no times block) over the
+  // ranks, its zero-length step closed by the fixed point and by the
+  // nested conjugate gradients, the cuts balancing the elements the moduli
+  // make active: the one-process fingerprint to the substructured solves'
+  // round-off, the radial model's fields beside it the same. A fingerprint
+  // on a radial Earth is the first rank's alone, the one process's to the
+  // bit.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  if (Rank() == 0) {
+    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic));
+    ASSERT_TRUE(deck);
+    const auto model = EarthModel::FromDeck(*deck);
+    ASSERT_TRUE(model);
+    ASSERT_TRUE(io::WriteModuli(
+        dir_ / "moduli.nc", *model, SurfaceGrid(8),
+        [](double, double theta, double phi) {
+          return 0.1 * std::sin(theta) * std::cos(phi);
+        },
+        [](double, double theta, double) { return 0.05 * std::cos(theta); },
+        {.name = "toy moduli", .elementMetres = 500e3}));
+  }
+  Barrier();
+  const auto config = [&](const std::string& name, const std::string& moduli,
+                          const std::string& solver) {
+    return Write(name + ".json",
+                 std::format(R"({{
+      "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic"{}}},
+      "lmax": 8,
+      "forcing": {{"state": {{"file": "history.nc"}},
+                  "ice": {{"type": "cap_thickness", "latitude": 70,
+                          "longitude": 30, "width_deg": 10,
+                          "thickness_m": -50}}}},
+      "rotation": "full",{}
+      "output": {{"surface": "out/{}.nc"}}}})",
+                             data, moduli, solver, name));
+  };
+  const auto lateral = std::string{R"(, "moduli": {"file": "moduli.nc"})"};
+  for (const auto* step : {"fixed_point", "conjugate_gradients"}) {
+    const auto solver = std::format(R"( "solver": {{"step": "{}"}},)", step);
+    const auto one = config(std::format("one_{}", step), lateral, solver);
+    const auto over = config(std::format("over_{}", step), lateral, solver);
+    OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+    const auto summary = app::RunSeaLevel(over);
+    if (Rank() == 0) {
+      EXPECT_TRUE(summary.starts_with(
+          "3-D (lateral moduli), elastic (fingerprint), rotation full; wrote "))
+          << summary;
+    } else {
+      EXPECT_EQ(summary, "");
+    }
+    Barrier();
+    if (Rank() != 0) continue;
+    const auto reference =
+        pm::ReadSurfaceFile(dir_ / "out" / std::format("one_{}.nc", step));
+    const auto distributed =
+        pm::ReadSurfaceFile(dir_ / "out" / std::format("over_{}.nc", step));
+    for (const auto* name :
+         {"sea_level_change", "displacement", "potential",
+          "sea_level_change_radial_model", "displacement_radial_model",
+          "potential_radial_model"}) {
+      EXPECT_LT(Relative(distributed.variables.at(name).values,
+                         reference.variables.at(name).values),
+                1e-10)
+          << step << " " << name;
+    }
+  }
+
+  const auto radialOne = config("radial_one", "", "");
+  const auto radialOver = config("radial_over", "", "");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(radialOne)); });
+  const auto summary = app::RunSeaLevel(radialOver);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with("1-D, elastic (fingerprint)")) << summary;
+  } else {
+    EXPECT_EQ(summary, "");
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "radial_one.nc");
+  const auto first = pm::ReadSurfaceFile(dir_ / "out" / "radial_over.nc");
+  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    EXPECT_EQ(first.variables.at(name).values,
+              reference.variables.at(name).values)
         << name;
   }
 }

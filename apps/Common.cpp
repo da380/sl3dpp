@@ -92,20 +92,23 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
   if (Has(top, "solver")) {
     const auto& solver = top.At("solver");
     if (!timed) {
-      for (const auto* name : {"scheme", "step"}) {
-        if (Has(solver, name)) {
-          Fail(solver.At(name),
-               "sets the time step, which needs a `times` block (a run "
-               "through time)");
-        }
+      if (Has(solver, "scheme")) {
+        Fail(solver.At("scheme"),
+             "sets the time step, which needs a `times` block (a run "
+             "through time)");
       }
-      for (const auto* name : {"step_rtol", "step_max_iterations",
-                               "transform_degrees", "cache_mb"}) {
-        if (Has(solver, name)) {
-          Fail(solver.At(name),
-               "sets the 3-D step, which needs a `times` block (a run "
-               "through time): the elastic fingerprint is one solve on a "
-               "radial Earth");
+      // the fingerprint takes the 3-D step on a laterally varying moduli
+      // file, which BuildEarth reads; without one it is refused here
+      if (out.model.moduli.empty()) {
+        for (const auto* name : {"step", "step_rtol", "step_max_iterations",
+                                 "transform_degrees", "cache_mb"}) {
+          if (Has(solver, name)) {
+            Fail(solver.At(name),
+                 "sets the 3-D step, which needs a `times` block (a run "
+                 "through time) or lateral moduli (`model.moduli`): the "
+                 "elastic fingerprint on a radial Earth is one solve of the "
+                 "sea level equation");
+          }
         }
       }
     }

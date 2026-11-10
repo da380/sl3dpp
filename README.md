@@ -23,7 +23,8 @@ of mantle viscosity using deglacial sea level observations;
 
 - **Elastic response.** Load and tidal Love numbers of transversely isotropic
   radial models, from per-degree spheroidal and toroidal systems; elastic
-  sea-level fingerprints.
+  sea-level fingerprints, of a radial Earth or of one with laterally
+  varying elastic moduli.
 - **The sea-level equation.** The generalised sea-level equation, with
   displacement and potential response channels, frozen or migrating
   shorelines, exact mass conservation, rotational feedback (none, axial, or
@@ -147,7 +148,8 @@ sl3d sea-level run.json        # the sea level equation under an ice load:
                                #   the elastic fingerprint of an ice change,
                                #   or with a "times" block GIA through time
                                #   under an ice history, restartable; 1D, or
-                               #   3D under a lateral viscosity (or moduli)
+                               #   3D under lateral moduli (the fingerprint
+                               #   too) or a lateral viscosity
 sl3d kernel1d run.json         # adjoint kernels of configured measurements
                                #   of a radial sea-level run through time
 sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
@@ -408,7 +410,8 @@ a glacial cycle from 21 ka) for them, and each also runs on ICE-7G
 (`--state data/ice7g.nc`, or the `*_ice7g.json` configs).
 
 - **The `sl3d` configs** in `examples/configs`, at least one per command
-  (for `sea-level`, the fingerprint and runs through time in 1D and 3D),
+  (for `sea-level`, the fingerprint and runs through time, each in 1D and
+  3D),
   as in *Run a first model*, above.
 - **Seven C++ drivers** of the library, each with a plotting script:
 
@@ -495,7 +498,9 @@ The other entry points follow the same pattern:
 
 - **Fingerprints.** `Fingerprint(lmax, ComputeLoveNumbers(material, lmax))`,
   then `SetState(iceThickness, seaLevel)` and `SolveForIceChange(change)`,
-  all in SI.
+  all in SI. On laterally varying elastic moduli,
+  `SeaLevelEvolution3D(op, solver, state).Instantaneous(load)`, `op` a
+  `Viscoelastic3D` with `Options::moduli` set, in the solver's units.
 - **3D.** `Viscoelastic3D(rheology, lmax, delta)`, with `delta(r, theta, phi)`
   the log-viscosity perturbation, driven by `SeaLevelEvolution3D` as above.
 - **Kernels.** Run the evolution with `{.record_stride = n}`, build a

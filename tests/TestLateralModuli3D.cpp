@@ -17,8 +17,10 @@
 #include <cstdlib>
 #include <complex>
 #include <filesystem>
+#include <format>
 #include <iostream>
 #include <map>
+#include <tuple>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -672,6 +674,259 @@ TEST(LateralModuli3D, NestedConjugateGradientEvolutionMatchesTheFixedPoint) {
               << " conjugate-gradient iterations; fixed point "
               << b[n].coupledIterations << " passes\n";
   }
+}
+
+// -- the instantaneous response (SeaLevelEvolution3D::Instantaneous) ----------
+
+namespace {
+
+/// The sea level problem the instantaneous gates share: the radial
+/// reference's elastic sea level solver, pyslfp's analytic present-day
+/// state, and the grounded load of melting a tenth of its ice.
+struct Ocean {
+  SeaLevelSolver solver;
+  SeaLevelSolver::State state;
+  std::vector<double> load;
+
+  static Ocean Make(const Body& body) {
+    ViscoelasticOperator reference(body.rheology, kLmax);
+    SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+                          SeaLevelParameters{});
+    Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
+    fingerprint.SetAnalyticTestState(0.0);
+    const auto length = solver.SolverScales().Length();
+    auto toNd = [&](std::vector<double> si) {
+      for (auto& v : si) v /= length;
+      return si;
+    };
+    const auto ice = toNd(fingerprint.IceThickness());
+    auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+    auto load = std::vector<double>(ice.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) * -0.1 * ice[i];
+    }
+    return Ocean{std::move(solver), std::move(state), std::move(load)};
+  }
+};
+
+/// Angle-varying moduli: 10% in shear, 5% in bulk.
+Viscoelastic3D::Options::LateralModuli VaryingModuli() {
+  return {.shear =
+              [](double, double theta, double phi) {
+                return 0.1 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+              },
+          .bulk = [](double, double theta, double) { return 0.05 * std::cos(theta); }};
+}
+
+/// The largest difference of two fields over the largest magnitude of the
+/// second.
+template <class A, class B>
+double Departure(const A& got, const B& want) {
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < want.size(); ++i) {
+    scale = std::max(scale, std::abs(want[i]));
+    diff = std::max(diff, std::abs(got[i] - want[i]));
+  }
+  return scale > 0.0 ? diff / scale : diff;
+}
+
+/// The worst departure of a snapshot's surface fields and angular velocity
+/// from a sea level response's.
+double SnapshotDeparture(const SeaLevelEvolution3D::Snapshot& got,
+                         const SeaLevelSolver::Response& want) {
+  return std::max({Departure(got.seaLevelChange, want.seaLevelChange),
+                   Departure(got.displacement, want.displacement),
+                   Departure(got.potential, want.potential),
+                   Departure(got.angularVelocity, want.angularVelocity)});
+}
+
+}  // namespace
+
+TEST(LateralModuli3D, InstantaneousIsTheRunsFirstNode) {
+  // The instantaneous response to the load at a run's first node is the
+  // run's first node, field by field (the same code; equal to the bit
+  // here): with and without lateral moduli, rotation off and full, both
+  // step solvers, the states recorded; at a first node away from zero.
+  auto body = Body::Make();
+  const auto ocean = Ocean::Make(body);
+  const auto kyr = 1000.0 * 3.15576e7 / ocean.solver.SolverScales().Time();
+  const auto times = std::vector<double>{2.0 * kyr, 3.0 * kyr};
+  const auto iceLoad = [&](double t) {
+    auto out = ocean.load;
+    for (auto& v : out) v *= 0.5 + 0.25 * t / kyr;
+    return out;
+  };
+  using StepSolver = Viscoelastic3D::Options::StepSolver;
+  auto worst = 0.0;
+  for (const auto moduli : {false, true}) {
+    for (const auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+      for (const auto stepSolver : {StepSolver::FixedPoint, StepSolver::ConjugateGradients}) {
+        const auto label = std::format("moduli {}, rotation {}, solver {}", moduli,
+                                       static_cast<int>(rotation),
+                                       static_cast<int>(stepSolver));
+        Viscoelastic3D::Options options;
+        options.solver = stepSolver;
+        options.rtol = 1e-12;
+        options.solve_rtol = 1e-12;
+        if (moduli) options.moduli = VaryingModuli();
+        const Viscoelastic3D op(body.rheology, kLmax,
+                                [](double, double, double) { return 0.0; }, options);
+        const auto evolutionOptions = SeaLevelEvolution3D::Options{
+            .rotation = rotation, .rtol = 1e-12, .max_coupled_iterations = 200,
+            .coupled_rtol = 1e-11, .record_stride = 1};
+        SeaLevelEvolution3D run(op, ocean.solver, ocean.state, evolutionOptions);
+        const auto snapshots = run.Run(times, iceLoad);
+        const auto& a = snapshots.front();
+        SeaLevelEvolution3D instant(op, ocean.solver, ocean.state, evolutionOptions);
+        const auto b = instant.Instantaneous(iceLoad(times[0]), times[0]);
+        EXPECT_EQ(b.t, a.t) << label;
+        EXPECT_TRUE(a.converged) << label;
+        EXPECT_TRUE(b.converged) << label;
+        EXPECT_EQ(b.coupledIterations, a.coupledIterations) << label;
+        EXPECT_EQ(b.solveIterations, a.solveIterations) << label;
+        EXPECT_EQ(b.coupledResidual, a.coupledResidual) << label;
+        // the fixed point ran under lateral moduli alone
+        EXPECT_EQ(b.coupledIterations > 0, moduli) << label;
+        EXPECT_EQ(b.solveIterations > 0, moduli && stepSolver == StepSolver::ConjugateGradients)
+            << label;
+        auto departure = 0.0;
+        for (const auto& [name, fa, fb] :
+             {std::tuple{"sea level", &a.seaLevelChange, &b.seaLevelChange},
+              std::tuple{"displacement", &a.displacement, &b.displacement},
+              std::tuple{"potential", &a.potential, &b.potential}}) {
+          auto scale = 0.0;
+          for (const auto v : *fa) scale = std::max(scale, std::abs(v));
+          EXPECT_GT(scale, 0.0) << name << ", " << label;
+          departure = std::max(departure, Departure(*fb, *fa));
+        }
+        departure = std::max({departure, Departure(b.angularVelocity, a.angularVelocity),
+                              Departure(b.loadCoefficients, a.loadCoefficients),
+                              Departure(b.tideCoefficients, a.tideCoefficients)});
+        EXPECT_LE(departure, 1e-13) << label;
+        worst = std::max(worst, departure);
+        // the recorded state and the state left behind
+        EXPECT_TRUE(a.internalState.has_value()) << label;
+        EXPECT_TRUE(b.internalState.has_value()) << label;
+        EXPECT_EQ(b.internalState->t, a.internalState->t) << label;
+        EXPECT_EQ(instant.FinalState().t, a.internalState->t) << label;
+      }
+    }
+  }
+  RecordProperty("worst_departure", std::format("{:.3e}", worst));
+  std::cout << "Instantaneous against Run's first node: worst departure " << worst << '\n';
+}
+
+TEST(LateralModuli3D, InstantaneousWithoutLateralStructureIsTheRadialFingerprint) {
+  // With no lateral moduli the instantaneous response is the sea level
+  // equation closed by the elastic Love numbers: the radial fingerprint of
+  // the load, to rounding. With lateral moduli set but zero everywhere it
+  // goes through the zero-length step's fixed point, by either step
+  // solver, and lands on the radial fingerprint to the solves' tolerance
+  // (both equal to the bit here: the zero-length step's responses vanish,
+  // and its sea level solve is the radial one).
+  auto body = Body::Make();
+  const auto ocean = Ocean::Make(body);
+  using StepSolver = Viscoelastic3D::Options::StepSolver;
+  for (const auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    const auto radial = ocean.solver.Solve(ocean.state, ocean.load, rotation,
+                                           {.rtol = 1e-12});
+    ASSERT_TRUE(radial.converged);
+    const auto evolutionOptions = SeaLevelEvolution3D::Options{
+        .rotation = rotation, .rtol = 1e-12, .max_coupled_iterations = 200,
+        .coupled_rtol = 1e-11};
+    {
+      const Viscoelastic3D op(body.rheology, kLmax,
+                              [](double, double, double) { return 0.0; });
+      ASSERT_FALSE(op.HasLateralModuli());
+      SeaLevelEvolution3D evolution(op, ocean.solver, ocean.state, evolutionOptions);
+      const auto response = evolution.Instantaneous(ocean.load);
+      EXPECT_TRUE(response.converged);
+      EXPECT_EQ(response.coupledIterations, 0);
+      const auto departure = SnapshotDeparture(response, radial);
+      EXPECT_LT(departure, 1e-12) << static_cast<int>(rotation);
+      RecordProperty(std::format("radial_rotation{}", static_cast<int>(rotation)),
+                     std::format("{:.3e}", departure));
+    }
+    for (const auto stepSolver : {StepSolver::FixedPoint, StepSolver::ConjugateGradients}) {
+      Viscoelastic3D::Options options;
+      options.solver = stepSolver;
+      options.rtol = 1e-12;
+      options.solve_rtol = 1e-12;
+      options.moduli = {.shear = [](double, double, double) { return 0.0; },
+                        .bulk = [](double, double, double) { return 0.0; }};
+      const Viscoelastic3D op(body.rheology, kLmax,
+                              [](double, double, double) { return 0.0; }, options);
+      ASSERT_TRUE(op.HasLateralModuli());
+      SeaLevelEvolution3D evolution(op, ocean.solver, ocean.state, evolutionOptions);
+      const auto response = evolution.Instantaneous(ocean.load);
+      EXPECT_TRUE(response.converged);
+      EXPECT_GT(response.coupledIterations, 0);
+      const auto departure = SnapshotDeparture(response, radial);
+      EXPECT_LT(departure, 1e-9) << static_cast<int>(rotation) << ", "
+                                 << static_cast<int>(stepSolver);
+      RecordProperty(std::format("zero_moduli_rotation{}_solver{}", static_cast<int>(rotation),
+                                 static_cast<int>(stepSolver)),
+                     std::format("{:.3e}", departure));
+    }
+  }
+}
+
+TEST(LateralModuli3D, InstantaneousUnderLateralModuliDepartsFromTheRadialFingerprint) {
+  // Under 10% shear and 5% bulk perturbations, angle-varying, the elastic
+  // fingerprint departs from the radial one by a few per cent of its size
+  // (measured 2.3e-2 in the sea level, 2.1e-2 in the displacement and
+  // 2.6e-3 in the potential, relative to their largest magnitudes: below
+  // the moduli's 10%, as a perturbation over part of the body should move
+  // an elastic response, and far above the solves' tolerance), the two
+  // step solvers agree, and the ocean's mass balances the load's to the
+  // solve's tolerance.
+  auto body = Body::Make();
+  const auto ocean = Ocean::Make(body);
+  const auto radial = ocean.solver.Solve(ocean.state, ocean.load, RotationalFeedback::Full,
+                                         {.rtol = 1e-12});
+  ASSERT_TRUE(radial.converged);
+  using StepSolver = Viscoelastic3D::Options::StepSolver;
+  auto responses = std::vector<SeaLevelEvolution3D::Snapshot>{};
+  for (const auto stepSolver : {StepSolver::FixedPoint, StepSolver::ConjugateGradients}) {
+    Viscoelastic3D::Options options;
+    options.solver = stepSolver;
+    options.rtol = 1e-12;
+    options.solve_rtol = 1e-12;
+    options.moduli = VaryingModuli();
+    const Viscoelastic3D op(body.rheology, kLmax,
+                            [](double, double, double) { return 0.0; }, options);
+    SeaLevelEvolution3D evolution(op, ocean.solver, ocean.state,
+                                  {.rtol = 1e-12, .max_coupled_iterations = 200,
+                                   .coupled_rtol = 1e-11});
+    responses.push_back(evolution.Instantaneous(ocean.load));
+    EXPECT_TRUE(responses.back().converged);
+  }
+  const auto& response = responses.front();
+  const auto seaLevel = Departure(response.seaLevelChange, radial.seaLevelChange);
+  const auto displacement = Departure(response.displacement, radial.displacement);
+  const auto potential = Departure(response.potential, radial.potential);
+  RecordProperty("sea_level_departure", std::format("{:.3e}", seaLevel));
+  RecordProperty("displacement_departure", std::format("{:.3e}", displacement));
+  RecordProperty("potential_departure", std::format("{:.3e}", potential));
+  std::cout << "lateral moduli against the radial fingerprint: sea level " << seaLevel
+            << ", displacement " << displacement << ", potential " << potential << '\n';
+  for (const auto departure : {seaLevel, displacement, potential}) {
+    EXPECT_GT(departure, 1e-3);
+    EXPECT_LT(departure, 0.1);
+  }
+  EXPECT_LT(Departure(responses[1].seaLevelChange, response.seaLevelChange), 1e-9);
+  EXPECT_LT(Departure(responses[1].displacement, response.displacement), 1e-9);
+
+  // the ocean gains what the ice loses
+  const auto& grid = ocean.solver.Grid();
+  auto gain = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < gain.size(); ++i) {
+    gain[i] = ocean.solver.WaterDensity() * ocean.state.oceanFunction[i] *
+              response.seaLevelChange[i];
+  }
+  const auto gained = grid.Integrate(gain);
+  const auto removed = -grid.Integrate(ocean.load);
+  EXPECT_NEAR(gained, removed, 1e-9 * std::abs(removed));
 }
 
 TEST(LateralModuli3D, DISABLED_StepTiming) {
