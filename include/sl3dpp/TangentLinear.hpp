@@ -72,23 +72,17 @@ struct TangentPerturbation {
   /// over the material's mesh in its units; needs the recorded forward
   /// trajectory.
   std::vector<std::vector<double>> itau;
-  /// A perturbation of the material's moduli and density: delta kappa
-  /// and delta mu at the memory points and delta rho at the GLL nodes
-  /// (PointMaterialDirection), the branch moduli following as fixed
-  /// fractions of the unrelaxed modulus and the relaxation times held
-  /// (compose with `itau` for a viscosity held instead); a density
-  /// direction moves the gravity self-consistently and the forcings with
-  /// it, the sea level engine's own gravity and radius held
-  /// (SeaLevelParameters::body_from_table; docs/adjoints.md §16). Needs
-  /// the recorded trajectory; the moduli are taken under any rotational
-  /// feedback, a density direction without it only (the moments of
-  /// inertia are not moved).
+  /// A perturbation of the material's moduli: delta kappa and delta mu
+  /// at the memory points (PointMaterialDirection), the branch moduli
+  /// following as fixed fractions of the unrelaxed modulus and the
+  /// relaxation times held (compose with `itau` for a viscosity held
+  /// instead). Needs the recorded trajectory; taken under any rotational
+  /// feedback.
   PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
     return directLoad.empty() && iceThickness.empty() &&
-           initialSeaLevel.empty() && itau.empty() && material.kappa.empty() &&
-           material.mu.empty() && material.rho.empty();
+           initialSeaLevel.empty() && itau.empty() && material.Empty();
   }
 };
 
@@ -97,10 +91,10 @@ struct TangentPerturbation {
 /// itau_uv along both for a parameterisation that is not linear in them
 /// (itau delta_u chi delta_v chi for the log viscosity; empty for a
 /// linear one), each as TangentPerturbation::itau, and the perturbations
-/// of the moduli along u and v (TangentPerturbation::material; the
-/// density refused). Under the sharp flotation rule the loads and the
-/// initial sea level enter no second derivative, so they are not taken
-/// here: their part of u and v is in the recorded tangent runs.
+/// of the moduli along u and v (TangentPerturbation::material). Under
+/// the sharp flotation rule the loads and the initial sea level enter no
+/// second derivative, so they are not taken here: their part of u and v
+/// is in the recorded tangent runs.
 struct SecondOrderDirection {
   std::vector<std::vector<double>> itauU;
   std::vector<std::vector<double>> itauV;

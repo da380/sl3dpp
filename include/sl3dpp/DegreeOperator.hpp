@@ -191,15 +191,10 @@ class DegreeOperator {
   /// not hold.
   void MaskToShare(std::span<double> x, int nrhs = 1) const;
 
-  /// A x for `nrhs` column-major columns: the assembled (unscaled)
-  /// operator, for residuals.
   /// The derivative of the system along a material variation, applied to
-  /// one or several vectors: the bilinear form with each coefficient
-  /// replaced by its variation — the moduli's, and the density's with
-  /// gravity, the stratification and the fluid-solid interface terms
-  /// differentiated (the self-consistent density derivative). The point
-  /// shear (fixed branches) and the exterior closures carry no variation.
-  /// Non-gravitating: the moduli alone.
+  /// one or several vectors: the elastic block with each modulus replaced
+  /// by its variation. The point shear (fixed branches), the gravitational
+  /// couplings and the exterior closures carry no variation.
   [[nodiscard]] std::vector<double> ApplyVariation(const MaterialVariation& dm,
                                                    std::span<const double> x,
                                                    int nrhs = 1) const;
@@ -240,36 +235,8 @@ class DegreeOperator {
   PointGradient(const MemoryPoints& points, std::span<const double> y,
                 std::span<const double> x, int nrhs) const;
 
-  /// The variations of the forcings along the same: the load's traction
-  /// piece and the tangential traction through the surface gravity, the
-  /// tide through the density, its derivative, gravity and the interfaces;
-  /// the attraction piece and the unit tractions carry none.
-  [[nodiscard]] std::vector<double> LoadVariation(
-      const MaterialVariation& dm, LoadPart part = LoadPart::Both) const;
-  [[nodiscard]] std::vector<double> TangentialVariation(
-      const MaterialVariation& dm) const;
-  [[nodiscard]] std::vector<double> TideVariation(const MaterialVariation& dm,
-                                                  int power = -1) const;
-
-  /// The transposes in the DENSITY of ApplyVariation and of the forcings'
-  /// variations: the pairings' dependence on the nodal density, its radial
-  /// derivative, gravity and the surface gravity, accumulated as duals
-  /// (times `scale`) that Material::DensityGradient maps to a nodal
-  /// density gradient — y^T (dK) x for solutions of nrhs columns, summed
-  /// over the columns, and y^T (dF) a for a forcing's variation with the
-  /// column amplitudes a (one per column of y). Nothing non-gravitating.
-  void AddDensityDuals(std::span<const double> y, std::span<const double> x,
-                       int nrhs, double scale, DensityDuals& duals) const;
-  void AddLoadDensityDuals(std::span<const double> y,
-                           std::span<const double> amplitudes, LoadPart part,
-                           double scale, DensityDuals& duals) const;
-  void AddTangentialDensityDuals(std::span<const double> y,
-                                 std::span<const double> amplitudes,
-                                 double scale, DensityDuals& duals) const;
-  void AddTideDensityDuals(std::span<const double> y,
-                           std::span<const double> amplitudes, int power,
-                           double scale, DensityDuals& duals) const;
-
+  /// A x for `nrhs` column-major columns: the assembled (unscaled)
+  /// operator, for residuals.
   [[nodiscard]] std::vector<double> Apply(std::span<const double> x,
                                           int nrhs = 1) const;
 
@@ -299,7 +266,8 @@ class DegreeOperator {
   void BuildDofMap();
   void Assemble(const PointShear* pointShear);
   /// The per-node coefficients one band assembly integrates: the base
-  /// system's from the material, or their variation along a direction.
+  /// system's from the material, or the moduli's variation along a
+  /// direction.
   struct Coefficients;
   /// Assembles the bilinear form of the coefficients into a band of this
   /// system's layout (the exterior closures and the k^2 potential term

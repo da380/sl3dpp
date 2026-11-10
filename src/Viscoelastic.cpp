@@ -180,7 +180,7 @@ PointMaterialDirection AtMemoryPoints(const MemoryPoints& points,
   auto at = [&](const std::vector<double>& a) {
     return a.empty() || gll ? a : points.Interpolate(a);
   };
-  return {.kappa = at(nodal.kappa), .mu = at(nodal.mu), .rho = nodal.rho};
+  return {.kappa = at(nodal.kappa), .mu = at(nodal.mu)};
 }
 
 ViscoelasticOperator::~ViscoelasticOperator() = default;

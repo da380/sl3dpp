@@ -585,50 +585,35 @@ static kernels (§13h).
 
 ### 13a. The static elastic problem
 
-The parameters are the material's nodal fields — `MaterialDirection`:
-δκ, δμ, δρ on the mesh's (element, gll) nodes in material units, any
-empty — and the derivative is taken of the computed map through
-`Material::Shifted(d, ε)`, whose linearisation `Material::Variation(d)`
-is exact: the moduli's variation (A, C, F, L, N from δκ, δμ), the
-density's, its radial derivative's (the element differentiation of δρ,
-one-sided at interfaces) and gravity's, δg = 4πG r⁻² ∫ δρ r² dr from the
-bottom of the mesh by the exact integrals of the GLL Lagrange basis
-(the integral of the interpolant of δρ r², consistent with the GLL
-quadrature on whole elements; spectral integration through the
-differentiation matrix is wrong at the top degree). The density
-derivative is self-consistent in 1D — the background gravity, the
-stratification and the interface terms move with δρ; lateral δρ is
-excluded in 3D (incompatible with the hydrostatic
-equations used, and it opens the rotation question AdGIA's generalised
-theory fixes; sl3dpp carries the traditional theory only).
+The parameters are the material's moduli at its nodes —
+`MaterialDirection`: δκ, δμ on the mesh's (element, gll) nodes in
+material units, either empty — and the derivative is taken of the
+computed map through `Material::Shifted(d, ε)`, whose linearisation
+`Material::Variation(d)` is exact: the moduli's variation (A, C, F, L, N
+from δκ, δμ). The density, gravity and the fluid flags are held; the
+density is not a parameter of the derivatives (§13l).
 
 `DegreeOperator` assembles its band from a `Coefficients` set
 (`AssembleBand`), the base one from the material and the variation's
 from `VariationCoefficients`: the elastic block's moduli replaced by
-their variations, and the density terms differentiated — the U-U
-coupling 4ρ(πGρr − g)r, the U-V coupling k²ρgr, the V-φ coupling k²ρr,
-the U-φ gradient ρr², the fluid stratification r²ρ'/g and the
-fluid-solid interface terms ρ_f g r², ρ_f r² — with the exterior
-closures and the point shear (fixed branches) carrying none.
-`ApplyVariation(dm, x)` is (dK·dm) x; `LoadVariation` (the traction
-piece through δg(a)), `TangentialVariation` and `TideVariation` (through
-δρ, δρ', δg and the interfaces) are the forcings'.
-`ComputeLoveNumberDerivatives(material, lmax, direction)` solves
-dx = K⁻¹(db − dK x) per degree and forcing and reads the surface off as
-the numbers are, the axial inertia moments carrying ∫δρ U r³ too; it
-returns a LoveNumbers-shaped table of derivatives (surface_gravity =
-δg(a), radius and G zero).
+their variations, with the gravitational couplings, the fluid
+stratification, the fluid-solid interface terms, the exterior closures
+and the point shear (fixed branches) carrying none.
+`ApplyVariation(dm, x)` is (dK·dm) x; the forcings do not depend on the
+moduli. `ComputeLoveNumberDerivatives(material, lmax, direction)` solves
+dx = −K⁻¹ dK x per degree and forcing and reads the surface off as the
+numbers are; it returns a LoveNumbers-shaped table of derivatives
+(surface_gravity, radius and G zero).
 
-GATES (`TestMaterialDerivatives`, prem8 at lmax 6): gravity's variation
-exact for constant and quadratic density directions (4πGr/3, 4πGr³/5);
-the variation operator against central differences of K(m ± εd)x,
-Richardson to 1e-9 at every degree; the Love-number derivatives against
-central differences of the shifted material's numbers for directions in
-μ, κ, ρ alone and together, Richardson to 1e-7 per kind of number for
-every channel, degree and axial number and the surface gravity, the
-differences second order where resolved; the reciprocity identities
-differentiated (δg h_φ + g δh_φ = δk_u and the two others) at 1e-10; an
-empty direction gives zeros.
+GATES (`TestMaterialDerivatives`, prem8 at lmax 6): the variation
+operator against central differences of K(m ± εd)x, Richardson to 1e-9
+at every degree, and a direction of the wrong size refused; the
+Love-number derivatives against central differences of the shifted
+material's numbers for directions in μ, κ alone and together,
+Richardson to 1e-7 per kind of number for every channel, degree and
+axial number, the differences second order where resolved; the
+reciprocity identities differentiated (g δh_φ = δk_u and the two others)
+at 1e-10; an empty direction gives zeros.
 
 ### 13b. The lateral Born response
 
@@ -655,7 +640,7 @@ increment of whatever anisotropy the material has — are the material's
 own. `SolveLoad` gives the reference response to a surface mass load by
 its m ≥ 0 coefficients; `Force`, `Respond`, `Solve`, `Surface`,
 `SurfaceToroidal` and the Hermitian `Pair` complete the interface. No
-lateral δρ (§13a).
+δρ (§13l).
 
 GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): angle-uniform
 δμ(r) and δκ(r) reproduce §13a's exact 1D Love-number derivatives
@@ -673,7 +658,7 @@ cross-code comparison with AdGIA, which is what this is for.
 ### 13c. The material tangent, 1D
 
 `TangentPerturbation::material` (a `PointMaterialDirection`: δκ and δμ
-at the memory points, δρ at the GLL nodes, §16) runs the 1D
+at the memory points) runs the 1D
 tangent-linear along a direction of the moduli with the branch moduli as
 fixed fractions f_k = μ_k/μ_U of the unrelaxed modulus at the points and
 the relaxation times held (compose with `itau` for a viscosity held
@@ -715,9 +700,6 @@ the sea level solve closes about the material response through the
 channels it reads for the memory — the degree-2 surface displacement
 and potential and the degree-0 inertia moment, the start's unrelaxed
 response included — with the base model's numbers in its closed form.
-A density direction is refused under rotational feedback: the moments of
-inertia, which the sea level engine holds as parameters, would move
-with it.
 
 GATE (`TangentLinear.MaterialDirectionMatchesDifferences`): along
 a smooth direction in κ and μ on the solid, both schemes, the tangent
@@ -737,8 +719,8 @@ symmetric (`SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric`,
 `SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactUnderRotation`).
 `TangentLinear.MaterialDirectionMatchesDifferencesAtGaussPoints` holds
 the same at the default memory points, along a direction in κ and μ at
-the Gauss points and in the nodal density, against differences of the
-run with `Options::moduli` perturbed and the density shifted.
+the Gauss points, against differences of the run with `Options::moduli`
+perturbed.
 
 ### 13d. The material tangent, 3D
 
@@ -820,10 +802,8 @@ The gradient lives on `DegreeOperator`, not on the operator's per-degree
 workspace, because that workspace covers the memory window only (the
 relaxing elements) and the kernels span the elastic lithosphere too.
 Discrete exact, continuous at the commute level (below, §13g); needs the
-trajectory; with rotational feedback the kernels in κ and μ are formed
-and the density kernel is not (the moments of inertia are not moved);
-the bulk pairing costs one
-unrelaxed solve per step. The kernels in κ and μ are held at the memory
+trajectory; formed under any rotational feedback; the bulk pairing costs
+one unrelaxed solve per step. The kernels in κ and μ are held at the memory
 points, each entry the kernel's value there times the point's quadrature
 weight, and pair with a `PointMaterialDirection` by the plain sum;
 divided by the weights they are samples of the kernel in radius, with
@@ -1005,7 +985,7 @@ preconditioner handles, as the papers found for Poisson's equation.
 Not built: aspherical geometry by particle relabelling (the papers'
 mapping ξ, which turns the geometry into laterally varying tensorial
 coefficients of the same form), lateral
-δρ (the hydrostatic background does not admit it, §13a), and
+δρ (the hydrostatic background does not admit it, §13l), and
 distribution of the static solve (OpenMP over the grid pipeline only).
 
 The program: `sl3d static` (apps/StaticCommand.cpp) runs this problem
@@ -1142,9 +1122,13 @@ kernels and continuous second-order sweep converge likewise
 Not covered: lateral δκ in the fluid. Distribution over radial
 segments: §13m.
 
-### 13l. Lateral density: not offered
+### 13l. Density: not offered
 
-The equations sl3dpp solves are
+sl3dpp offers no derivatives with respect to the density, radial or
+lateral: its material directions, tangents and kernels are in the moduli
+(and, through the rheology, the relaxation times), the density a fixed
+part of the forward model. A lateral density would not even be
+consistent with the forward problem. The equations sl3dpp solves are
 those of a hydrostatically pre-stressed body: the reference gravity
 g(r), the reference potential and its Hessian, and the stratification
 r²(dρ/dr)/g all come from a radial density in equilibrium. A laterally
@@ -1159,10 +1143,9 @@ first-order together) still leaves the pressure wrong, because ∇p =
 ρ∇φ₀ has no solution on a spherically layered reference with a lateral
 ρ; the consistent routes are an aspherical figure (particle
 relabelling, not built) or a non-hydrostatic pre-stress, which is
-AdGIA's new theory. So 3D
-density belongs on the AdGIA side, and sl3dpp says only what it can
-defend: the moduli laterally, the density radially, with the
-self-consistent radial density derivatives of §13a and §16 intact.
+AdGIA's new theory. So 3D density belongs on the AdGIA side, and
+sl3dpp says only what it can defend: the moduli laterally, the density
+radially.
 
 ### 13m. The lateral solves over radial segments
 
@@ -1407,13 +1390,12 @@ unchanged; the two are the same problem's commute pair, as in 1D.
 The directions u, v of the second-order machinery (§8–§12, §14) gain a
 part in the moduli — `MaterialDirection` (1D, nodal) / `MaterialDirection3D`
 (3D, grid values): δκ, δμ with the branch moduli as fixed fractions and
-the relaxation times held, the density refused — so that the Hessian's
+the relaxation times held — so that the Hessian's
 action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
 materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
 `KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
 spherical reductions). New design, no pyslfp counterpart. Everything
-runs under any rotational feedback, the density kernel's derivative
-without it only. The
+runs under any rotational feedback. The
 moduli's directions and kernels are held at the memory points, GLL or
 Gauss, in 1D (§13c, §13e) as on the 3D coupling's memory nodes. The 3D
 forms are distributed (§17).
@@ -1514,74 +1496,6 @@ the material kernels (their spherical reductions and derivatives against
 the 1D at 1e-7 / 1e-6); `ContinuousMaterialHessianConverges` (lateral
 directions, the continuous blocks against the discrete and the mismatch
 with the continuous run below 10 % at 9 nodes and smaller at 17).
-
-The density direction is §16.
-
-## 16. The density in the time-stepped problem
-
-`MaterialDirection::rho` drives the 1D time-stepped tangent and the
-1D sweeps form the density kernel `IceKernels::rhoKernel` (and its
-derivative along ice, itau, κ and μ directions,
-`KernelDerivatives::rhoKernel`), and the static Love-number kernels carry
-`h_rho, l_rho, k_rho`. The static problem's variation (§13a) is
-self-consistent in the density — the moduli unchanged, gravity moving as
-the integral of δρ r², the stratification, the interfaces and the
-forcings (the load's traction piece through g(a), the tide through ρ, ρ',
-g and the interfaces) — so the time-stepped extension is: the effective
-systems' variation along δρ on the full base solution (the density terms
-are the base material's in every flavour; the per-dt effective variation
-carries δρ), plus the FORCINGS'
-variations times the node's recorded load and centrifugal amplitudes,
-dF σ_n + dTide ψ_n, through the same `AddForce` (1D
-`MaterialDrive::AddForcingVariation`); the memory force carries no
-density. The transposes: `DensityDuals` (duals of the variation's
-ρ, ρ', g and g(a)), accumulated by `DegreeOperator::AddDensityDuals`
-(the form's density, gravity and stratification terms and the
-interfaces, pointwise, with the U–φ gradient coupling's sum over the
-element) and the forcings' (`AddLoadDensityDuals`,
-`AddTangentialDensityDuals`, `AddTideDensityDuals`), and mapped to a
-nodal density gradient by `Material::DensityGradient` — the transpose of
-`Material::Variation` in ρ: the density's own dual, the element
-differentiation's transpose and the transposed cumulative integral
-(each node's partial-integral weights within its element plus the
-element's full-integral weight times the duals of every node above),
-times r², the surface gravity's dual joining g's at the top node. The
-sweeps pair with the node's recorded loads (`MaterialTools::
-DensityPairing`): the kernel is −⟨y, dK_ρ x_n⟩ + ⟨y, dF σ_n + dTide ψ_n⟩
-summed over the steps and the start, discrete exact, continuous at the
-commute level with the same quadrature as the moduli; the derivative
-along v pairs the derivative duals with the base and the first duals with
-v's tangent solution AND v's tangent loads.
-
-**The sea level engine's gravity is held.** The engine takes its surface
-gravity and sea-floor radius from the Love table (pyslfp's `with_body`),
-so on a shifted density the engine's own g would move too, and its
-sensitivity (the geoid Φ/g in the closures) is not part of these
-derivatives: they are taken with the engine's parameters as parameters,
-exactly as the static derivative reports δg(a) separately.
-`SeaLevelParameters::body_from_table` (default true) makes the engine's
-gravity an explicit parameter when false, which is how the gates hold it;
-a run whose engine follows the table and whose density moves differs by
-the engine term, computable as the derivative in one scalar if ever
-wanted. Not built: a density direction in a SECOND-order run or sweep
-(the form is quadratic in ρ through ρ g(ρ), so its second variation is
-needed), lateral density in 3D (excluded by the hydrostatic equations,
-§13a).
-
-GATES (§16): `MaterialDerivatives.DensityDualsAreTheTransposeOfTheVariation`
-(random solution pairs and column amplitudes at every degree: the
-density gradient of the accumulated duals paired with a direction
-against y^T(dK)x and y^T(dF)a for the load, tangential, tide and
-degree-0 centrifugal forcings, at 1e-12);
-`LoveNumberKernelsPairToTheDerivatives` with ρ (every channel and
-degree at 1e-10); `TangentLinear.MaterialDirectionMatchesDifferences`
-along (κ, μ, ρ) with the engine held (second order, Richardson at
-1e-6, both schemes); `Adjoint.MaterialKernelsAreTheTangentTranspose`
-with ρ (the pairing identity at 1e-10 and the finite differences at
-1e-6, both schemes); `ContinuousMaterialKernelsAgreeAndConverge`
-with ρ; `SecondOrderAdjoint.MaterialBlocksAreExactAndSymmetric`
-checks the density kernel's derivative along a (κ, μ, itau, ice)
-direction against central differences of the density kernel.
 
 ## 17. The derivatives over radial segments
 

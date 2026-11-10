@@ -26,7 +26,7 @@ structure or laterally varying viscosity (3D), forward and adjoint.
 | Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | The 3D static problem as a program: `sl3d static` solves a laterally heterogeneous elastic Earth's response to a cap load and a tide (the lateral moduli read from a planetmodel model file's `mu` and `kappa` by `io::ModelModuli`, written from a radial model by `io::WriteModuli`), over MPI ranks, and writes the surface response, the radial model's beside it, the surface coefficients as a cross-code exchange table and the response inside the body as a model file (`io::WriteNodeFields`, with `io::ResponseFieldsAtNodes`) for planetmodel's cutaways | `apps/StaticCommand.cpp`, `io/ModelModuli.hpp`, `io/KernelWriter.hpp` |
-| Material derivatives and kernels in κ, μ and ρ: the static problem's variation operator, Love-number derivatives and kernels (gravity self-consistent in ρ); its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli and (1D) the density; the κ, μ and (1D) ρ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
+| Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives and kernels; its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution, its continuous adjoint and its tangent-linear runs distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
 | Reading planetmodel decks, model files and surface files; writing kernels | `Deck.hpp`, `io/` |
 | The `sl3d` program: the common capabilities from JSON configs | `apps/`, [sl3d-configs.md](sl3d-configs.md) |
@@ -358,20 +358,19 @@ Deliberately out of scope:
   (docs/adjoints.md §14). Material directions and the material
   kernels' derivatives as in 1D, by both methods, distributed
   (docs/adjoints.md §15, §17).
-- **Material derivatives** (`MaterialDirection`: δκ, δμ, δρ on the mesh's
+- **Material derivatives** (`MaterialDirection`: δκ, δμ on the mesh's
   nodes). `Material::Variation` is the exact linearisation of
-  `Material::Shifted`, gravity's variation integrated from δρ so that the
-  background gravity, the stratification and the interface terms move
-  with it; `DegreeOperator::ApplyVariation` applies the degree system's
-  variation and `ComputeLoveNumberDerivatives` gives the Love numbers'.
+  `Material::Shifted`; `DegreeOperator::ApplyVariation` applies the
+  degree system's variation and `ComputeLoveNumberDerivatives` gives the
+  Love numbers'.
   The time-stepped tangent-linear runs take directions in κ and μ
   (`TangentPerturbation::material`; `TangentPerturbation3D::material` on
   the memory nodes' grid values), the branch moduli fixed fractions of
   the unrelaxed modulus and the relaxation times held: the variations of
   each step's effective system and memory force enter as forces on the
   step (`AddForce`), and the start's unrelaxed response to the variation
-  seeds the start. Density directions are refused there, and lateral δρ
-  is excluded in 3D.
+  seeds the start. No derivative is taken in the density
+  (docs/adjoints.md §13l).
 - **The lateral Born response** (`ElasticPerturbation3D`): the first-order
   response of the static elastic problem to lateral δμ(x) and δκ(x),
   applied through the grid pipeline as the lateral viscosity is (δμ on
@@ -577,12 +576,11 @@ Beyond the fixtures:
   discrete sweep at 1e-8; the machine-grade Taylor test (second order at
   every step, Richardson to 1e-7); the continuous gap closing under
   refinement.
-- **Material derivatives (static).** Gravity's variation exact for
-  polynomial density directions; the variation operator against central
-  differences of the assembled system at 1e-9; the Love-number
+- **Material derivatives (static).** The variation operator against
+  central differences of the assembled system at 1e-9; the Love-number
   derivatives against central differences of the shifted material's
   numbers, Richardson to 1e-7 for every channel, degree and axial number
-  under μ, κ and ρ directions; the reciprocity identities differentiated.
+  under μ and κ directions; the reciprocity identities differentiated.
 - **Lateral elastic perturbation (Born).** Angle-uniform directions
   reproducing the 1D Love-number derivatives at 1e-8 through the grid
   pipeline; the perturbation force symmetric at 1e-10; the selection
@@ -715,8 +713,7 @@ What is not built, or holds only within limits:
   has no lateral pipeline.
 - **No lateral density.** The hydrostatic reference does not admit one
   (docs/adjoints.md §13l says why, and where it belongs: AdGIA's
-  non-hydrostatic theory). The radial density derivatives (gravity
-  self-consistent) stay.
+  non-hydrostatic theory).
 - **Strong lateral contrasts at long steps.** The within-step fixed
   point's envelope (§6) binds the default solver and the discrete
   transpose; the conjugate-gradient step (`Options::solver`) has no such
@@ -739,16 +736,11 @@ What is not built, or holds only within limits:
   branch relaxes. What a relaxed TI medium is — the relaxed bulk response,
   and whether moduli relax on different time-scales — is open.
 - **Bulk relaxation** is not modelled.
-- **Second-order runs and adjoints** take no density direction (the
-  form's second variation in the density is not built), and the
-  shoreline terms of pyslfp's smoothed flotation rule are not ported
-  (sl3dpp has the sharp rule only).
-- **Material derivatives.** The time-stepped tangents and kernels in
-  the moduli run under any rotational feedback; a density direction and
-  the density kernel need none (the moments of inertia are not moved)
-  and are taken with the sea level engine's gravity and radius held
-  (`SeaLevelParameters::body_from_table`; docs/adjoints.md §16), and
-  lateral density variations are excluded in 3D.
+- **Second-order runs and adjoints** do not port the shoreline terms of
+  pyslfp's smoothed flotation rule (sl3dpp has the sharp rule only).
+- **Material derivatives** are in the moduli: no derivative is taken in
+  the density, radial or lateral (docs/adjoints.md §13l). The
+  time-stepped tangents and kernels run under any rotational feedback.
 - **The `sl3d` program** exposes neither the tangent-linear runs, the
   Hessian products nor the material kernels; they are library calls.
 - **Adaptive stepping** exists in `ViscoelasticOperator` but not in the

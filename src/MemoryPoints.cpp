@@ -61,6 +61,26 @@ double MemoryPoints::RadiusAt(const RadialMesh& mesh, int e, int p) const {
   return r;
 }
 
+std::vector<double> MemoryPoints::Radii(const RadialMesh& mesh) const {
+  auto out = std::vector<double>{};
+  out.reserve(static_cast<std::size_t>(mesh.ElementCount()) * count);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto p = 0; p < count; ++p) out.push_back(RadiusAt(mesh, e, p));
+  }
+  return out;
+}
+
+std::vector<double> MemoryPoints::QuadratureWeights(
+    const RadialMesh& mesh) const {
+  auto out = std::vector<double>{};
+  out.reserve(static_cast<std::size_t>(mesh.ElementCount()) * count);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto jac = mesh.Jacobian(e);
+    for (auto p = 0; p < count; ++p) out.push_back(weight[p] * jac);
+  }
+  return out;
+}
+
 std::vector<double> MemoryPoints::Interpolate(
     std::span<const double> nodal) const {
   if (nodal.size() % ngll != 0) {

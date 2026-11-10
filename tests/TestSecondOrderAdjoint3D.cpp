@@ -44,10 +44,10 @@ namespace {
 /// are the nodes: a nodal direction as one for the time-stepped problem,
 /// and back.
 [[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 [[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 
 constexpr auto kLmax = 8;

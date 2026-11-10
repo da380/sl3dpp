@@ -40,10 +40,10 @@ namespace {
 /// are the nodes: a nodal direction as one for the time-stepped problem,
 /// and back.
 [[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 [[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 
 }  // namespace
@@ -595,19 +595,17 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
 // -- the material ------------------------------------------------------------
 
 TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
-  // Along a direction in the material's kappa, mu AND rho — the branch
-  // moduli as fixed fractions of the unrelaxed one, the relaxation times
-  // held, the gravity moving with the density — the tangent-linear run
-  // matches central differences of the coupled run on the shifted
-  // material (its rheology rebuilt with the same fractions and times, the
-  // sea level engine's gravity held), at second order with Richardson
-  // landing at 1e-6, both schemes; the start's instantaneous response
-  // moves with the material too (the trapezoid's first step reads its
-  // strain).
+  // Along a direction in the material's kappa and mu — the branch moduli
+  // as fixed fractions of the unrelaxed one, the relaxation times held —
+  // the tangent-linear run matches central differences of the coupled run
+  // on the shifted material (its rheology rebuilt with the same fractions
+  // and times, the sea level engine's gravity held), at second order with
+  // Richardson landing at 1e-6, both schemes; the start's instantaneous
+  // response moves with the material too (the trapezoid's first step
+  // reads its strain).
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
-  // The engine's body held: the density direction's derivative is taken
-  // with the sea level solver's gravity and radius as parameters.
+  // The engine's body held at the base table's.
   const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
   SeaLevelParameters held;
   held.body_from_table = false;
@@ -634,13 +632,11 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
-  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
-      d.rho[i] = 0.5 * profile * material.Rho()[i];
       if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
@@ -707,27 +703,18 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
     const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
         << "scheme " << static_cast<int>(scheme);
-
-    // Refusal: a density direction in a second-order run.
-    TangentLinearSolver recording(
-        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
-    const auto run = recording.Run(times, direction, &trajectory);
-    SecondOrderDirection withRho;
-    withRho.materialU = AtGll(d);
-    EXPECT_THROW((void)recording.RunSecondOrder(times, run, run, withRho, &trajectory),
-                 std::invalid_argument);
   }
 }
 
 
 TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   // The same at the default memory points: along a direction in kappa and
-  // mu held at the Gauss points, and in the nodal density, the
-  // tangent-linear run matches central differences of the coupled run
-  // with the moduli perturbed at the points (ViscoelasticOperator::
-  // Options::moduli, the relative perturbation eps * direction / modulus)
-  // and the density shifted, at second order with Richardson landing at
-  // 1e-6, both schemes.
+  // mu held at the Gauss points, the tangent-linear run matches central
+  // differences of the coupled run with the moduli perturbed at the
+  // points (ViscoelasticOperator::Options::moduli, the relative
+  // perturbation eps * direction / modulus), at second order with
+  // Richardson landing at 1e-6, both schemes, with and without the
+  // rotational feedback.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
   const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
@@ -757,15 +744,10 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   PointMaterialDirection d;
   d.kappa.assign(muU.size(), 0.0);
   d.mu.assign(muU.size(), 0.0);
-  d.rho.assign(material.Rho().size(), 0.0);
   auto profile = [](double r) {
     return 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
   };
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    for (auto q = 0; q < mesh.NGll(); ++q) {
-      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
-      d.rho[i] = 0.5 * profile(mesh.Radius(e, q)) * material.Rho()[i];
-    }
     if (material.IsFluid(e)) continue;
     for (auto p = 0; p < points.count; ++p) {
       const auto i = static_cast<std::size_t>(e) * points.count + p;
@@ -775,18 +757,14 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     }
   }
   // The stepper at eps along the direction: the moduli perturbed at the
-  // points, relative; the density shifted nodally, the branches kept.
+  // points, relative, the branches kept.
   const auto& base = setup.rheology;
-  auto operatorAt = [&](double eps, bool withDensity) {
-    MaterialDirection density;
-    density.rho = d.rho;
-    if (!withDensity) density.rho.assign(d.rho.size(), 0.0);
+  auto operatorAt = [&](double eps) {
     auto branches = std::vector<Rheology::Branch>{};
     for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
       branches.push_back(base.BranchAt(k));
     }
-    const auto rheology =
-        Rheology::Create(material.Shifted(density, eps), branches).value();
+    const auto rheology = Rheology::Create(material, branches).value();
     ViscoelasticOperator::Options::PointModuli moduli;
     moduli.shear.assign(muU.size(), 0.0);
     moduli.bulk.assign(muU.size(), 0.0);
@@ -800,10 +778,6 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
                         RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    // with rotational feedback the moduli alone: a density direction
-    // would move the moments of inertia
-    auto along = d;
-    if (rotation != RotationalFeedback::None) along.rho.clear();
     ViscoelasticOperator op(setup.rheology, kLmax);
     SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
@@ -815,12 +789,12 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     TangentLinearSolver tangent(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     TangentPerturbation direction;
-    direction.material = along;
+    direction.material = d;
     const auto predicted =
         Objective(setup, tangent.Run(times, direction, &trajectory), measurements);
 
     auto functional = [&](double eps) {
-      const auto moved = operatorAt(eps, !along.rho.empty());
+      const auto moved = operatorAt(eps);
       SeaLevelEvolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = rotation,
@@ -844,13 +818,12 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
         << static_cast<int>(rotation);
     if (rotation != RotationalFeedback::None) continue;
 
-    // Each part of the direction alone, to the same standard: the three
+    // Each part of the direction alone, to the same standard: the two
     // enter by different routes.
-    for (const auto* part : {"kappa", "mu", "rho"}) {
+    for (const auto* part : {"kappa", "mu"}) {
       TangentPerturbation only;
       if (part == std::string("kappa")) only.material.kappa = d.kappa;
       if (part == std::string("mu")) only.material.mu = d.mu;
-      if (part == std::string("rho")) only.material.rho = d.rho;
       EXPECT_NE(Objective(setup, tangent.Run(times, only, &trajectory), measurements),
                 0.0)
           << part;

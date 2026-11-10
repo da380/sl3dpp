@@ -83,25 +83,21 @@ class ViscoelasticStep;
 /// A direction in the material for the time-stepped problem: the
 /// perturbations of kappa and mu at the memory points, (element, point)
 /// over the whole mesh, in material units — absolute, where
-/// ViscoelasticOperator::Options::moduli is relative — and of the density
-/// at the GLL nodes, (element, gll). The moduli enter as that option's
-/// perturbation does (the branch moduli as fixed fractions of the
-/// unrelaxed shear at the points, the relaxation times held), so a
+/// ViscoelasticOperator::Options::moduli is relative. They enter as that
+/// option's perturbation does (the branch moduli as fixed fractions of
+/// the unrelaxed shear at the points, the relaxation times held), so a
 /// derivative along the direction is the derivative of the stepper under
-/// Options::moduli = eps * direction / modulus at eps = 0. Any of the
-/// three may be empty.
+/// Options::moduli = eps * direction / modulus at eps = 0. Either may be
+/// empty.
 struct PointMaterialDirection {
-  std::vector<double> kappa, mu, rho;
+  std::vector<double> kappa, mu;
 
-  [[nodiscard]] bool Empty() const {
-    return kappa.empty() && mu.empty() && rho.empty();
-  }
+  [[nodiscard]] bool Empty() const { return kappa.empty() && mu.empty(); }
 };
 
 /// A nodal direction (Material.hpp) as a direction for the time-stepped
 /// problem: the moduli interpolated to the memory points through each
-/// element's basis (the nodal arrays themselves at the GLL points), the
-/// density as it is.
+/// element's basis (the nodal arrays themselves at the GLL points).
 [[nodiscard]] PointMaterialDirection AtMemoryPoints(
     const MemoryPoints& points, const MaterialDirection& nodal);
 

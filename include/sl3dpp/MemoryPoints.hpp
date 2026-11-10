@@ -82,6 +82,15 @@ struct MemoryPoints {
   /// point values onto the nodal values they interpolate.
   [[nodiscard]] std::vector<double> InterpolateTranspose(
       std::span<const double> atPoints) const;
+
+  /// The radii of the points over the whole mesh, (element, point).
+  [[nodiscard]] std::vector<double> Radii(const RadialMesh& mesh) const;
+  /// Their quadrature weights in radius, (element, point): the reference
+  /// weight times the element's Jacobian, so that sum_p w_p f(r_p)
+  /// approximates int f(r) dr. The weights of the L2 pairing of functions
+  /// sampled at the points.
+  [[nodiscard]] std::vector<double> QuadratureWeights(
+      const RadialMesh& mesh) const;
 };
 
 /// A shear modulus that lives at the memory points, which an operator

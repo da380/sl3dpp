@@ -61,9 +61,8 @@ of mantle viscosity using deglacial sea level observations;
   (Hessian-vector products), as the derivatives of the kernels, 1D and 3D.
 - **Material derivatives and kernels.** Derivatives and kernels with
   respect to the bulk and shear moduli κ and μ, 1D and 3D: the static
-  Love numbers' derivatives (in the density too) and kernels,
-  tangent-linear runs of the evolutions along the moduli, and the
-  evolutions' κ and μ kernels.
+  Love numbers' derivatives and kernels, tangent-linear runs of the
+  evolutions along the moduli, and the evolutions' κ and μ kernels.
 - **The lateral Born response.** The first-order response of the static
   elastic problem to laterally varying δμ and δκ, with the kernels of a
   surface measurement (`ElasticPerturbation3D`).

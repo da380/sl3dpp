@@ -556,10 +556,10 @@ std::string RunKernel1D(const std::filesystem::path& config) {
             adjoint.IceHistoryKernels(times, measurements, &trajectory, oceans);
         // the radial viscosity kernels as densities in radius, SI:
         // dJ = int K(r) d eta(r) dr per branch
-        const auto eta = kernels.Viscosity(*rheology);
+        auto eta = kernels.Viscosity(*rheology);
+        for (auto& branch : eta) branch = RadialDensity(mesh, branch);
         const auto etaSi = matScales.Factor(ViscosityDimensions);
         const auto rSi = matScales.Length();
-        const auto w = mesh.Weights();
         auto out = std::ofstream(stem.string() + "_viscosity_kernel.txt");
         out << std::format("# sl3d kernel1d (sl3dpp {})\n", Version())
             << "# dJ = int K(r) d eta(r) dr, SI (J in its SI unit)\n"
@@ -569,14 +569,12 @@ std::string RunKernel1D(const std::filesystem::path& config) {
         }
         out << '\n';
         for (auto e = 0; e < mesh.ElementCount(); ++e) {
-          const auto jac = mesh.Jacobian(e);
           for (auto q = 0; q < mesh.NGll(); ++q) {
             const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
             out << std::format("{:.17g}", mesh.Radius(e, q) * rSi);
             for (auto b = std::size_t{0}; b < eta.size(); ++b) {
-              out << std::format(
-                  " {:.17g}",
-                  built.factor * eta[b][i] / (w[q] * jac) / (etaSi * rSi));
+              out << std::format(" {:.17g}",
+                                 built.factor * eta[b][i] / (etaSi * rSi));
             }
             out << '\n';
           }

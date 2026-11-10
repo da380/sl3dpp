@@ -138,10 +138,12 @@ std::vector<DegreeOperator::Interface> DegreeOperator::Interfaces() const {
 }
 
 struct DegreeOperator::Coefficients {
-  // Per node (element, gll): the elastic block's moduli, the pointwise
-  // V-V modulus, the gravitational couplings, the fluid stratification and,
-  // per fluid-solid interface, the two point couplings.
+  // Per node (element, gll): the elastic block's moduli and the pointwise
+  // V-V modulus; with `gravity`, the gravitational couplings, the fluid
+  // stratification and, per fluid-solid interface, the two point
+  // couplings.
   std::vector<double> C, AN, F, L, N;
+  bool gravity = true;
   std::vector<double> UU, UV, VP, UPhi, strat;
   std::vector<double> interfaceUU, interfaceUP;
 };
@@ -184,15 +186,8 @@ DegreeOperator::Coefficients DegreeOperator::BaseCoefficients() const {
 
 DegreeOperator::Coefficients DegreeOperator::VariationCoefficients(
     const MaterialVariation& dm) const {
-  const auto& mesh = material_->Mesh();
-  const auto n = mesh.NGll();
-  const auto k2 = l_ * (l_ + 1.0);
-  const auto G = material_->G();
-  const auto rho = material_->Rho();
-  const auto drho = material_->DRho();
-  const auto g = material_->Gravity();
-  const auto size = rho.size();
-  if (dm.rho.size() != size || dm.moduli.A.size() != size) {
+  const auto size = material_->Rho().size();
+  if (dm.moduli.A.size() != size) {
     throw std::invalid_argument(
         "the material variation must have the mesh's nodal size");
   }
@@ -202,40 +197,10 @@ DegreeOperator::Coefficients DegreeOperator::VariationCoefficients(
   c.L.assign(dm.moduli.L.begin(), dm.moduli.L.end());
   c.N.assign(dm.moduli.N.begin(), dm.moduli.N.end());
   c.AN.resize(size);
-  c.UU.resize(size);
-  c.UV.resize(size);
-  c.VP.resize(size);
-  c.UPhi.resize(size);
-  c.strat.resize(size);
   for (auto i = std::size_t{0}; i < size; ++i) {
-    const auto r = mesh.Radii()[i];
     c.AN[i] = dm.moduli.A[i] - dm.moduli.N[i];
-    // d/d(rho, g) of 4 rho (pi G rho r - g) r
-    c.UU[i] = 4.0 * dm.rho[i] * (kPi * G * rho[i] * r - g[i]) * r +
-              4.0 * rho[i] * (kPi * G * dm.rho[i] * r - dm.g[i]) * r;
-    c.UV[i] = k2 * (dm.rho[i] * g[i] + rho[i] * dm.g[i]) * r;
-    c.VP[i] = k2 * dm.rho[i] * r;
-    c.UPhi[i] = dm.rho[i] * r * r;
-    // d of r^2 drho / g
-    c.strat[i] = g[i] > 0.0 ? r * r * (dm.drho[i] / g[i] -
-                                       drho[i] * dm.g[i] / (g[i] * g[i]))
-                            : 0.0;
   }
-  // The interfaces: the fluid-side density and gravity at the interface
-  // node, varied.
-  for (int e = firstElement_; e + 1 < mesh.ElementCount(); ++e) {
-    if (material_->IsFluid(e) == material_->IsFluid(e + 1)) continue;
-    if (l_ == 0) break;
-    const auto rt = mesh.Radius(e, n - 1);
-    const auto top = static_cast<std::size_t>(e) * n + (n - 1);
-    const auto fluidNode =
-        material_->IsFluid(e) ? top : static_cast<std::size_t>(e + 1) * n;
-    const auto sign = material_->IsFluid(e) ? 1.0 : -1.0;
-    const auto rhoF = rho[fluidNode], dRhoF = dm.rho[fluidNode];
-    const auto gt = g[top], dgt = dm.g[top];
-    c.interfaceUU.push_back(sign * (dRhoF * gt + rhoF * dgt) * rt * rt);
-    c.interfaceUP.push_back(sign * dRhoF * rt * rt);
-  }
+  c.gravity = false;
   return c;
 }
 
@@ -296,7 +261,9 @@ void DegreeOperator::AssembleBand(std::vector<double>& band,
         at(local, 3 * q + 2, 3 * q + 2) += ifpg * k2 * Wq;
       }
       if (fluid) {
-        at(local, 3 * q + 2, 3 * q + 2) += c.strat[base + q] * Wq;
+        if (c.gravity) {
+          at(local, 3 * q + 2, 3 * q + 2) += c.strat[base + q] * Wq;
+        }
         continue;
       }
 
@@ -330,7 +297,7 @@ void DegreeOperator::AssembleBand(std::vector<double>& band,
 
       // Pointwise couplings at the node q.
       at(local, 3 * q + 1, 3 * q + 1) += k2 * (k2 - 2.0) * c.N[base + q] * Wq;
-      if (!gravitating_) continue;
+      if (!gravitating_ || !c.gravity) continue;
       at(local, 3 * q, 3 * q) += c.UU[base + q] * Wq;
       const auto cUV = c.UV[base + q] * Wq;
       at(local, 3 * q, 3 * q + 1) += cUV;
@@ -340,7 +307,7 @@ void DegreeOperator::AssembleBand(std::vector<double>& band,
       at(local, 3 * q + 2, 3 * q + 1) += cVP;
     }
 
-    if (!fluid && gravitating_) {
+    if (!fluid && gravitating_ && c.gravity) {
       // The U-phi gradient coupling int rho r^2 (U phi' + phi U') dr,
       // whose jac cancels against the derivative's.
       for (auto i = 0; i < n; ++i) {
@@ -436,12 +403,14 @@ void DegreeOperator::AssembleBand(std::vector<double>& band,
     if (i > j) std::swap(i, j);
     BandOf(band, kd_, i, j) += value;
   };
-  const auto interfaces = Interfaces();
-  for (auto f = std::size_t{0}; f < interfaces.size(); ++f) {
-    const auto iU = Dof(interfaces[f].node, Component::U);
-    const auto iP = Dof(interfaces[f].node, Component::Phi);
-    point(iU, iU, c.interfaceUU[f]);
-    point(iU, iP, c.interfaceUP[f]);
+  if (c.gravity) {
+    const auto interfaces = Interfaces();
+    for (auto f = std::size_t{0}; f < interfaces.size(); ++f) {
+      const auto iU = Dof(interfaces[f].node, Component::U);
+      const auto iP = Dof(interfaces[f].node, Component::Phi);
+      point(iU, iU, c.interfaceUU[f]);
+      point(iU, iP, c.interfaceUP[f]);
+    }
   }
 
   // Dirichlet-to-Neumann closures.
@@ -716,279 +685,6 @@ DegreeOperator::PointGradient(const MemoryPoints& points,
     }
   }
   return {std::move(kappa), std::move(mu)};
-}
-
-std::vector<double> DegreeOperator::LoadVariation(const MaterialVariation& dm,
-                                                  LoadPart part) const {
-  auto b = std::vector<double>(ndof_, 0.0);
-  const auto a = material_->Radius();
-  if (part != LoadPart::Potential && gravitating_) {
-    b[SurfaceDof(Component::U)] = -dm.surfaceGravity * a * a;
-  }
-  return b;
-}
-
-std::vector<double> DegreeOperator::TangentialVariation(
-    const MaterialVariation& dm) const {
-  auto b = std::vector<double>(ndof_, 0.0);
-  const auto i = SurfaceDof(Component::V);
-  if (i >= 0 && gravitating_) {
-    const auto a = material_->Radius();
-    b[i] = -dm.surfaceGravity * a * a * l_ * (l_ + 1.0);
-  }
-  return b;
-}
-
-std::vector<double> DegreeOperator::TideVariation(const MaterialVariation& dm,
-                                                  int power) const {
-  const auto p = power < 0 ? l_ : power;
-  auto b = std::vector<double>(ndof_, 0.0);
-  if (p == 0 || !gravitating_) return b;
-  const auto& mesh = material_->Mesh();
-  const auto n = mesh.NGll();
-  const auto a = material_->Radius();
-  const auto k2 = l_ * (l_ + 1.0);
-  const auto rho = material_->Rho();
-  const auto drho = material_->DRho();
-  const auto g = material_->Gravity();
-  const auto w = mesh.Weights();
-  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
-    const auto base = static_cast<std::size_t>(e) * n;
-    const auto jac = mesh.Jacobian(e);
-    const auto fluid = material_->IsFluid(e) && l_ > 0;
-    for (auto q = 0; q < n; ++q) {
-      const auto Wq = w[q] * jac;
-      const auto rq = mesh.Radius(e, q);
-      const auto psi = std::pow(rq / a, p);
-      const auto gn = mesh.GlobalIndex(e, q);
-      const auto i = base + q;
-      if (fluid) {
-        const auto dstrat =
-            g[i] > 0.0
-                ? rq * rq * (dm.drho[i] / g[i] - drho[i] * dm.g[i] / (g[i] * g[i]))
-                : 0.0;
-        b[Dof(gn, Component::Phi)] -= Wq * dstrat * psi;
-        continue;
-      }
-      const auto dpsi = (p / a) * std::pow(rq / a, p - 1);
-      const auto iU = Dof(gn, Component::U);
-      if (iU >= 0) b[iU] -= Wq * dm.rho[i] * rq * rq * dpsi;
-      if (l_ > 0) b[Dof(gn, Component::V)] -= k2 * Wq * dm.rho[i] * rq * psi;
-    }
-  }
-  if (l_ > 0) {
-    for (int e = firstElement_; e + 1 < mesh.ElementCount(); ++e) {
-      if (material_->IsFluid(e) == material_->IsFluid(e + 1)) continue;
-      const auto gn = mesh.GlobalIndex(e, n - 1);
-      const auto rt = mesh.Radius(e, n - 1);
-      const auto fluidNode = material_->IsFluid(e)
-                                 ? static_cast<std::size_t>(e) * n + (n - 1)
-                                 : static_cast<std::size_t>(e + 1) * n;
-      const auto sign = material_->IsFluid(e) ? 1.0 : -1.0;
-      b[Dof(gn, Component::U)] -=
-          sign * dm.rho[fluidNode] * rt * rt * std::pow(rt / a, p);
-    }
-  }
-  return b;
-}
-
-// -- the density transposes
-// -----------------------------------------------------
-
-void DegreeOperator::AddDensityDuals(std::span<const double> y,
-                                     std::span<const double> x, int nrhs,
-                                     double scale, DensityDuals& duals) const {
-  const auto& mesh = material_->Mesh();
-  const auto n = mesh.NGll();
-  const auto k2 = l_ * (l_ + 1.0);
-  const auto G = material_->G();
-  const auto rho = material_->Rho();
-  const auto drho = material_->DRho();
-  const auto g = material_->Gravity();
-  const auto w = mesh.Weights();
-  const auto size = rho.size();
-  const auto expected = static_cast<std::size_t>(ndof_) * nrhs;
-  if (y.size() != expected || x.size() != expected) {
-    throw std::invalid_argument("the solutions have ndof x nrhs entries");
-  }
-  if (duals.rho.size() != size) duals.Resize(size);
-  std::vector<double> Uy(n), Vy(n), Py(n), Ux(n), Vx(n), Px(n);
-  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
-    const auto base = static_cast<std::size_t>(e) * n;
-    const auto jac = mesh.Jacobian(e);
-    const auto fluid = material_->IsFluid(e) && l_ > 0;
-    for (auto c = 0; c < nrhs; ++c) {
-      const auto column = static_cast<std::size_t>(c) * ndof_;
-      for (auto i = 0; i < n; ++i) {
-        const auto gn = mesh.GlobalIndex(e, i);
-        const auto iU = Dof(gn, Component::U);
-        const auto iV = Dof(gn, Component::V);
-        const auto iP = Dof(gn, Component::Phi);
-        Uy[i] = iU >= 0 ? y[column + iU] : 0.0;
-        Ux[i] = iU >= 0 ? x[column + iU] : 0.0;
-        Vy[i] = iV >= 0 ? y[column + iV] : 0.0;
-        Vx[i] = iV >= 0 ? x[column + iV] : 0.0;
-        Py[i] = iP >= 0 ? y[column + iP] : 0.0;
-        Px[i] = iP >= 0 ? x[column + iP] : 0.0;
-      }
-      for (auto q = 0; q < n; ++q) {
-        const auto Wq = w[q] * jac;
-        const auto r = mesh.Radius(e, q);
-        const auto i = base + q;
-        if (fluid) {
-          // the stratification r^2 drho / g on phi phi
-          if (g[i] > 0.0) {
-            const auto pp = Py[q] * Px[q] * Wq * r * r;
-            duals.drho[i] += scale * pp / g[i];
-            duals.g[i] -= scale * pp * drho[i] / (g[i] * g[i]);
-          }
-          continue;
-        }
-        if (!gravitating_) continue;
-        const auto uu = Uy[q] * Ux[q];
-        const auto uv = Uy[q] * Vx[q] + Vy[q] * Ux[q];
-        const auto vp = Vy[q] * Px[q] + Py[q] * Vx[q];
-        // 4 rho (pi G rho r - g) r on U U, k^2 rho g r on U V, k^2 rho r
-        // on V phi, differentiated in rho and g
-        duals.rho[i] += scale * Wq *
-                        (4.0 * r * (2.0 * kPi * G * rho[i] * r - g[i]) * uu +
-                         k2 * g[i] * r * uv + k2 * r * vp);
-        duals.g[i] += scale * Wq * (-4.0 * rho[i] * r * uu + k2 * rho[i] * r * uv);
-        // the U-phi gradient coupling rho r^2 (U phi' + phi U'), no jac
-        auto s = 0.0;
-        for (auto j = 0; j < n; ++j) {
-          s += mesh.Derivative(q, j) * (Uy[q] * Px[j] + Ux[q] * Py[j]);
-        }
-        duals.rho[i] += scale * w[q] * r * r * s;
-      }
-    }
-  }
-  // The fluid-solid interfaces: +/- rho_f (g U U' + phi U' + U phi') r^2.
-  if (l_ > 0) {
-    for (int e = firstElement_; e + 1 < mesh.ElementCount(); ++e) {
-      if (material_->IsFluid(e) == material_->IsFluid(e + 1)) continue;
-      const auto gn = mesh.GlobalIndex(e, n - 1);
-      const auto rt = mesh.Radius(e, n - 1);
-      const auto top = static_cast<std::size_t>(e) * n + (n - 1);
-      const auto fluidNode =
-          material_->IsFluid(e) ? top : static_cast<std::size_t>(e + 1) * n;
-      const auto sign = material_->IsFluid(e) ? 1.0 : -1.0;
-      const auto iU = Dof(gn, Component::U);
-      const auto iP = Dof(gn, Component::Phi);
-      if (iU < 0) continue;
-      for (auto c = 0; c < nrhs; ++c) {
-        const auto column = static_cast<std::size_t>(c) * ndof_;
-        const auto yu = y[column + iU], xu = x[column + iU];
-        const auto yp = iP >= 0 ? y[column + iP] : 0.0;
-        const auto xp = iP >= 0 ? x[column + iP] : 0.0;
-        duals.rho[fluidNode] +=
-            scale * sign * rt * rt * (g[top] * yu * xu + yu * xp + yp * xu);
-        duals.g[top] += scale * sign * rho[fluidNode] * rt * rt * yu * xu;
-      }
-    }
-  }
-}
-
-void DegreeOperator::AddLoadDensityDuals(std::span<const double> y,
-                                         std::span<const double> amplitudes,
-                                         LoadPart part, double scale,
-                                         DensityDuals& duals) const {
-  if (duals.rho.size() != material_->Rho().size()) {
-    duals.Resize(material_->Rho().size());
-  }
-  if (part == LoadPart::Potential || !gravitating_) return;
-  const auto a = material_->Radius();
-  const auto iU = SurfaceDof(Component::U);
-  const auto nrhs = amplitudes.size();
-  for (auto c = std::size_t{0}; c < nrhs; ++c) {
-    duals.surfaceGravity -=
-        scale * a * a * y[c * static_cast<std::size_t>(ndof_) + iU] * amplitudes[c];
-  }
-}
-
-void DegreeOperator::AddTangentialDensityDuals(std::span<const double> y,
-                                               std::span<const double> amplitudes,
-                                               double scale,
-                                               DensityDuals& duals) const {
-  if (duals.rho.size() != material_->Rho().size()) {
-    duals.Resize(material_->Rho().size());
-  }
-  const auto iV = SurfaceDof(Component::V);
-  if (iV < 0 || !gravitating_) return;
-  const auto a = material_->Radius();
-  const auto nrhs = amplitudes.size();
-  for (auto c = std::size_t{0}; c < nrhs; ++c) {
-    duals.surfaceGravity -= scale * a * a * l_ * (l_ + 1.0) *
-                            y[c * static_cast<std::size_t>(ndof_) + iV] *
-                            amplitudes[c];
-  }
-}
-
-void DegreeOperator::AddTideDensityDuals(std::span<const double> y,
-                                         std::span<const double> amplitudes,
-                                         int power, double scale,
-                                         DensityDuals& duals) const {
-  const auto size = material_->Rho().size();
-  if (duals.rho.size() != size) duals.Resize(size);
-  const auto p = power < 0 ? l_ : power;
-  if (p == 0 || !gravitating_) return;
-  const auto& mesh = material_->Mesh();
-  const auto n = mesh.NGll();
-  const auto a = material_->Radius();
-  const auto k2 = l_ * (l_ + 1.0);
-  const auto drho = material_->DRho();
-  const auto g = material_->Gravity();
-  const auto w = mesh.Weights();
-  const auto nrhs = amplitudes.size();
-  auto yAt = [&](int dof, std::size_t c) {
-    return dof >= 0 ? y[c * static_cast<std::size_t>(ndof_) + dof] : 0.0;
-  };
-  for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
-    const auto base = static_cast<std::size_t>(e) * n;
-    const auto jac = mesh.Jacobian(e);
-    const auto fluid = material_->IsFluid(e) && l_ > 0;
-    for (auto q = 0; q < n; ++q) {
-      const auto Wq = w[q] * jac;
-      const auto rq = mesh.Radius(e, q);
-      const auto psi = std::pow(rq / a, p);
-      const auto gn = mesh.GlobalIndex(e, q);
-      const auto i = base + q;
-      if (fluid) {
-        if (g[i] <= 0.0) continue;
-        auto yp = 0.0;
-        for (auto c = std::size_t{0}; c < nrhs; ++c) {
-          yp += yAt(Dof(gn, Component::Phi), c) * amplitudes[c];
-        }
-        duals.drho[i] -= scale * Wq * psi * rq * rq * yp / g[i];
-        duals.g[i] += scale * Wq * psi * rq * rq * drho[i] * yp / (g[i] * g[i]);
-        continue;
-      }
-      const auto dpsi = (p / a) * std::pow(rq / a, p - 1);
-      auto yu = 0.0, yv = 0.0;
-      for (auto c = std::size_t{0}; c < nrhs; ++c) {
-        yu += yAt(Dof(gn, Component::U), c) * amplitudes[c];
-        if (l_ > 0) yv += yAt(Dof(gn, Component::V), c) * amplitudes[c];
-      }
-      duals.rho[i] -= scale * Wq * rq * rq * dpsi * yu;
-      if (l_ > 0) duals.rho[i] -= scale * k2 * Wq * rq * psi * yv;
-    }
-  }
-  if (l_ > 0) {
-    for (int e = firstElement_; e + 1 < mesh.ElementCount(); ++e) {
-      if (material_->IsFluid(e) == material_->IsFluid(e + 1)) continue;
-      const auto gn = mesh.GlobalIndex(e, n - 1);
-      const auto rt = mesh.Radius(e, n - 1);
-      const auto fluidNode = material_->IsFluid(e)
-                                 ? static_cast<std::size_t>(e) * n + (n - 1)
-                                 : static_cast<std::size_t>(e + 1) * n;
-      const auto sign = material_->IsFluid(e) ? 1.0 : -1.0;
-      auto yu = 0.0;
-      for (auto c = std::size_t{0}; c < nrhs; ++c) {
-        yu += yAt(Dof(gn, Component::U), c) * amplitudes[c];
-      }
-      duals.rho[fluidNode] -= scale * sign * rt * rt * std::pow(rt / a, p) * yu;
-    }
-  }
 }
 
 // -- factorisation

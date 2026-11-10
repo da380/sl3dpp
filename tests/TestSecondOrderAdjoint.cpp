@@ -46,9 +46,6 @@ double Pairing(const Scene& setup, const Kernels& kernels,
     for (auto i = std::size_t{0}; i < d.material.mu.size(); ++i) {
       total += kernels.muKernel[i] * d.material.mu[i];
     }
-    for (auto i = std::size_t{0}; i < d.material.rho.size(); ++i) {
-      total += kernels.rhoKernel[i] * d.material.rho[i];
-    }
   }
   return total;
 }
@@ -468,8 +465,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   // nodes and at the Gauss points, the moduli's directions held at the
   // points and the base moved through ViscoelasticOperator::Options::
   // moduli. At the Gauss points with the rotational feedback on too,
-  // axial and full, without the density part (the density kernel is
-  // formed without rotational feedback only).
+  // axial and full.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(43);
   auto times = std::vector<double>{};
@@ -506,16 +502,6 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
                      [](double r) { return 0.3 + 0.7 * r * r; });
   const auto nodalU = materialDirection(
       [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
-  // a density part for u too, for the PAIRINGS only (a density direction
-  // drives no second-order run): the density kernel's derivative along w.
-  auto rhoU = std::vector<double>(k0.size(), 0.0);
-  for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    for (auto q = 0; q < mesh.NGll(); ++q) {
-      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
-      const auto r = mesh.Radius(e, q);
-      rhoU[i] = 0.05 * (0.6 + 0.4 * r) * setup.material.Rho()[i];
-    }
-  }
   auto w = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.8 - 0.5 * r; });
   const auto nodalW = materialDirection([](double r) { return 1.0 - 0.5 * r; });
@@ -572,8 +558,6 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
     u.material = AtMemoryPoints(op.Points(), nodalU);
     w.material = AtMemoryPoints(op.Points(), nodalW);
-    auto uPair = u;
-    if (!rotating) uPair.material.rho = rhoU;
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = rotation,
@@ -603,13 +587,6 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
               1e-12 * MaxAbs(first.kappaKernel));
     EXPECT_LT(MaxDiff(kernelsU.muKernel, first.muKernel),
               1e-12 * MaxAbs(first.muKernel));
-    ASSERT_EQ(first.rhoKernel.empty(), rotating);
-    ASSERT_EQ(alongU.rhoKernel.empty(), rotating);
-    if (!rotating) {
-      EXPECT_LT(MaxDiff(kernelsU.rhoKernel, first.rhoKernel),
-                1e-12 * MaxAbs(first.rhoKernel));
-      EXPECT_GT(MaxAbs(alongU.rhoKernel), 0.0);
-    }
     EXPECT_GT(MaxAbs(alongU.kappaKernel), 0.0);
     EXPECT_GT(MaxAbs(alongU.muKernel), 0.0);
 
@@ -644,12 +621,10 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
       return Pairing(setup,
                      movedAdjoint.IceHistoryKernels(times, measurements,
                                                     &movedTrajectory),
-                     uPair);
+                     u);
     };
-    // The derivatives along w paired with u and its density part: the
-    // density kernel's derivative along a direction in the moduli, the
-    // relaxation times and the thickness is checked here too.
-    const auto predicted = Pairing(setup, alongW, uPair);
+    // The derivatives along w paired with u.
+    const auto predicted = Pairing(setup, alongW, u);
     auto fd = std::map<double, double>{};
     for (double eps : {0.1, 0.05}) {
       fd[eps] = (gradientAt(eps) - gradientAt(-eps)) / (2.0 * eps);
@@ -663,12 +638,5 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
         << "scheme " << static_cast<int>(scheme) << " rotation "
         << static_cast<int>(rotation);
-
-    // Refusals: a density direction; the continuous sweep.
-    auto withRho = w.material;
-    withRho.rho.assign(k0.size(), 1.0);
-    EXPECT_THROW((void)adjoint.SecondOrderKernels(times, measurements, runW,
-                                                  w.itau, trajectory, {}, withRho),
-                 std::invalid_argument);
   }
 }

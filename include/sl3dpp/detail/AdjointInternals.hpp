@@ -209,12 +209,9 @@ struct AdjointSolver::MaterialTools {
     return !direction.kappa.empty() || !direction.mu.empty();
   }
   /// The memory points over the whole mesh, where the kernels in kappa
-  /// and mu live; and the mesh's nodes, where the density's does.
+  /// and mu live.
   [[nodiscard]] std::size_t PointCount() const {
     return op->UnrelaxedShearAtPoints().size();
-  }
-  [[nodiscard]] std::size_t NodeCount() const {
-    return op->BaseMaterial().Rho().size();
   }
 
   /// v's variation of the effective shear of a dt: delta mu scaled by
@@ -401,27 +398,6 @@ struct AdjointSolver::MaterialTools {
       }
     }
     return std::pair(std::move(kappa), std::move(mu));
-  }
-
-  /// The density pairing of a dual solution y and a base solution x at a
-  /// node, with the node's load and centrifugal column amplitudes:
-  /// -y^T (dK/d rho) x + y^T (dF/d rho) sigma + y^T (dTide/d rho) psi as
-  /// density duals (times `scale`), which Material::DensityGradient maps
-  /// to the nodal density kernel; the transpose of the material tangent's
-  /// forcing variation.
-  static void DensityPairing(const Degree& deg, int ncols,
-                             std::span<const double> y, std::span<const double> x,
-                             const LoadCallable& loads, const LoadCallable& tides,
-                             double scale, DensityDuals& duals) {
-    deg.system.AddDensityDuals(y, x, ncols, -scale, duals);
-    const auto sigma = loads(deg.l, 0.0);
-    const auto psi = tides(deg.l, 0.0);
-    if (sigma) {
-      deg.system.AddLoadDensityDuals(y, *sigma, LoadPart::Both, scale, duals);
-    }
-    if (psi) {
-      deg.system.AddTideDensityDuals(y, *psi, deg.l == 0 ? 2 : -1, scale, duals);
-    }
   }
 };
 

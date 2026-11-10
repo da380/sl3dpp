@@ -172,29 +172,6 @@ LoveNumbers ComputeLoveNumbers(const Material& material, int lmax,
   return out;
 }
 
-namespace {
-
-/// The inertia moment integrand with a given density: sqrt(4 pi) int rho
-/// U r^3 dr over the mesh (InertiaMoment with the material's density).
-double InertiaMomentWith(const RadialMesh& mesh, std::span<const double> rho,
-                         std::span<const double> U) {
-  const auto n = mesh.NGll();
-  const auto w = mesh.Weights();
-  auto sum = 0.0;
-  for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    const auto jac = mesh.Jacobian(e);
-    for (auto q = 0; q < n; ++q) {
-      const auto i = static_cast<std::size_t>(e) * n + q;
-      if (!std::isfinite(U[i])) continue;
-      const auto r = mesh.Radius(e, q);
-      sum += w[q] * jac * rho[i] * U[i] * r * r * r;
-    }
-  }
-  return std::sqrt(4.0 * std::numbers::pi) * sum;
-}
-
-}  // namespace
-
 LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
                                          const MaterialDirection& direction,
                                          LoveNumberOptions options) {
@@ -212,8 +189,7 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
     v->assign(lmax + 1, 0.0);
   }
   out.radius = 0.0;
-  out.surface_gravity =
-      dm.surfaceGravity * scales.Factor(AccelerationDimensions);
+  out.surface_gravity = 0.0;
   out.gravitational_constant = 0.0;
 
   const auto hLoad = scales.Factor(kHPerLoad);
@@ -229,29 +205,20 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
     const auto n = op.DofCount();
     const auto nrhs = l == 0 ? 5 : 4;
     auto rhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
-    auto drhs = std::vector<double>(static_cast<std::size_t>(n) * nrhs);
     const auto columns = {op.Load(LoadPart::Force),
                           op.Load(LoadPart::Potential), op.Tangential(),
                           op.Tide()};
-    const auto dcolumns = {op.LoadVariation(dm, LoadPart::Force),
-                           op.LoadVariation(dm, LoadPart::Potential),
-                           op.TangentialVariation(dm), op.TideVariation(dm)};
     auto k = 0;
     for (const auto& column : columns) {
       std::ranges::copy(column, rhs.begin() + (k++) * n);
     }
-    k = 0;
-    for (const auto& column : dcolumns) {
-      std::ranges::copy(column, drhs.begin() + (k++) * n);
-    }
     if (l == 0) {
       std::ranges::copy(op.Tide(2), rhs.begin() + 4 * n);
-      std::ranges::copy(op.TideVariation(dm, 2), drhs.begin() + 4 * n);
     }
-    // x = K^-1 b, then dx = K^-1 (db - dK x).
+    // x = K^-1 b, then dx = -K^-1 (dK) x.
     const auto x = op.Solve(rhs, nrhs);
-    const auto dKx = op.ApplyVariation(dm, x, nrhs);
-    for (auto i = std::size_t{0}; i < drhs.size(); ++i) drhs[i] -= dKx[i];
+    auto drhs = op.ApplyVariation(dm, x, nrhs);
+    for (auto& v : drhs) v = -v;
     const auto dx = op.Solve(drhs, nrhs);
 
     const auto iU = op.SurfaceDof(Component::U);
@@ -285,19 +252,13 @@ LoveNumbers ComputeLoveNumberDerivatives(const Material& material, int lmax,
       out.k_c = value(dx, iP, 4) * kPot;
       const auto mLoad = scales.Factor(kMomentPerLoad);
       const auto mPot = scales.Factor(kMomentPerPotential);
-      const auto& mesh = material.Mesh();
       for (const auto& [name, column, factor] :
            {std::tuple{&out.m_u, 0, mLoad}, std::tuple{&out.m_phi, 1, mLoad},
             std::tuple{&out.m_c, 4, mPot}}) {
-        const auto nodal =
-            op.Expand({x.data() + static_cast<std::size_t>(column) * n,
-                       static_cast<std::size_t>(n)});
         const auto dnodal =
             op.Expand({dx.data() + static_cast<std::size_t>(column) * n,
                        static_cast<std::size_t>(n)});
-        *name = (InertiaMomentWith(mesh, material.Rho(), dnodal.U) +
-                 InertiaMomentWith(mesh, dm.rho, nodal.U)) *
-                factor;
+        *name = InertiaMoment(material, dnodal.U) * factor;
       }
     }
   });
@@ -317,9 +278,8 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
   const auto kPot = scales.Factor(kKPerPotential);
   LoveNumberKernels out;
   for (auto* channel : {&out.load, &out.potential, &out.tangential, &out.tide}) {
-    for (auto* v : {&channel->h_kappa, &channel->h_mu, &channel->h_rho,
-                    &channel->l_kappa, &channel->l_mu, &channel->l_rho,
-                    &channel->k_kappa, &channel->k_mu, &channel->k_rho}) {
+    for (auto* v : {&channel->h_kappa, &channel->h_mu, &channel->l_kappa,
+                    &channel->l_mu, &channel->k_kappa, &channel->k_mu}) {
       v->assign(lmax + 1, std::vector<double>(size, 0.0));
     }
   }
@@ -364,10 +324,7 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
           &t.channel->h_kappa, &t.channel->l_kappa, &t.channel->k_kappa};
       std::vector<std::vector<double>>* mus[3] = {&t.channel->h_mu, &t.channel->l_mu,
                                                   &t.channel->k_mu};
-      std::vector<std::vector<double>>* rhos[3] = {
-          &t.channel->h_rho, &t.channel->l_rho, &t.channel->k_rho};
       const double factors[3] = {t.hFactor, t.hFactor, t.kFactor};
-      const double one[1] = {1.0};
       for (auto c = 0; c < 3; ++c) {
         if (dofs[c] < 0) continue;
         const auto yc = std::span(y).subspan(static_cast<std::size_t>(c) * n,
@@ -379,28 +336,6 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
           kappa[i] = -factors[c] * gk[i];
           mu[i] = -factors[c] * gm[i];
         }
-        // The density: -<y, (dK) x> plus the forcing's own variation
-        // (the load's traction piece through the surface gravity, the
-        // tangential's alike, the tide's through the density, its
-        // derivative, gravity and the interfaces).
-        DensityDuals duals;
-        op.AddDensityDuals(yc, xc, 1, -1.0, duals);
-        switch (t.column) {
-          case 0:
-            op.AddLoadDensityDuals(yc, one, LoadPart::Force, 1.0, duals);
-            break;
-          case 2:
-            op.AddTangentialDensityDuals(yc, one, 1.0, duals);
-            break;
-          case 3:
-            op.AddTideDensityDuals(yc, one, -1, 1.0, duals);
-            break;
-          default:
-            break;
-        }
-        auto& rho = (*rhos[c])[l];
-        const auto gr = material.DensityGradient(duals);
-        for (auto i = std::size_t{0}; i < size; ++i) rho[i] = factors[c] * gr[i];
       }
     }
   });

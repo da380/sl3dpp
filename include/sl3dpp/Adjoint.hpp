@@ -135,24 +135,21 @@ struct IceKernels {
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
 
-  /// dJ / d kappa(r), dJ / d mu(r) and dJ / d rho(r), material units,
-  /// pairing with a PointMaterialDirection by the plain sum: the moduli's
-  /// at the memory points, (element, point) over the whole mesh, and the
-  /// density's at the GLL nodes. Each entry of the moduli's is the
-  /// kernel's value at its point times the point's quadrature weight
+  /// dJ / d kappa(r) and dJ / d mu(r), material units, pairing with a
+  /// PointMaterialDirection by the plain sum: at the memory points,
+  /// (element, point) over the whole mesh. Each entry is the kernel's
+  /// value at its point times the point's quadrature weight
   /// (MemoryPoints::weight times the element's Jacobian), so dividing by
   /// the weight gives samples of the kernel as a function of radius; no
   /// point is shared between elements, so its jumps across the mesh's
   /// interfaces are kept. The transpose of
   /// TangentPerturbation::material (the branch moduli as fixed fractions
-  /// of the unrelaxed modulus, the relaxation times held; the density
-  /// with its gravity and the forcings, the sea level engine's gravity
-  /// held; docs/adjoints.md). Empty unless Options::material_kernels
-  /// asked for them (with a trajectory; Discrete exact, Continuous at the
-  /// commute level).
+  /// of the unrelaxed modulus, the relaxation times held;
+  /// docs/adjoints.md). Empty unless Options::material_kernels asked for
+  /// them (with a trajectory; Discrete exact, Continuous at the commute
+  /// level).
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
-  std::vector<double> rhoKernel;
 };
 
 enum class AdjointMethod { Continuous, Discrete };
@@ -173,13 +170,29 @@ struct KernelDerivatives {
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;
   /// The derivatives along v of the material kernels (IceKernels::
-  /// kappaKernel, muKernel, rhoKernel), in their layout: the material
-  /// rows of the Hessian's action on v. Empty unless
-  /// Options::material_kernels.
+  /// kappaKernel, muKernel), in their layout: the material rows of the
+  /// Hessian's action on v. Empty unless Options::material_kernels.
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
-  std::vector<double> rhoKernel;
 };
+
+/// A 1D kernel as a function of radius. The kernel arrays of IceKernels
+/// and KernelDerivatives pair with a perturbation by the plain sum, so
+/// each entry is the kernel's value at its point times the point's
+/// quadrature weight in radius; this divides the weights out, giving
+/// samples K(r_p) at the points (MemoryPoints::Radii) with
+///   dJ = int K(r) delta(r) dr ~ sum_p w_p K(r_p) delta(r_p),
+/// w the points' MemoryPoints::QuadratureWeights. Material scheme, per
+/// unit length. For a kernel held at the memory points (kappaKernel,
+/// muKernel) pass the operator's Points(); for a nodal one (itauKernel,
+/// IceKernels::Viscosity) the mesh alone. No point is shared between
+/// elements, so the function's jumps across the mesh's interfaces are
+/// kept.
+[[nodiscard]] std::vector<double> RadialDensity(
+    const MemoryPoints& points, const RadialMesh& mesh,
+    std::span<const double> kernel);
+[[nodiscard]] std::vector<double> RadialDensity(
+    const RadialMesh& mesh, std::span<const double> nodalKernel);
 
 namespace detail {
 /// The grounded views and the distributional/quelled assembly shared by
@@ -214,17 +227,15 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// Also form the material kernels (IceKernels::kappaKernel, muKernel,
-    /// rhoKernel). Discrete: the pairing of each step's dual solution with
+    /// Also form the material kernels (IceKernels::kappaKernel,
+    /// muKernel). Discrete: the pairing of each step's dual solution with
     /// the material derivative of the step's force, the exact transpose
     /// of the material tangent. Continuous: the time quadrature of the
     /// continuous adjoint displacement's pairing with the forward
     /// solution and memory, plus the lumped pairings at the observations
     /// — the commute error of the viscosity kernels, falling under
     /// refinement. Both need the trajectory and cost one unrelaxed
-    /// solve per node (two for the continuous form). With rotational
-    /// feedback the kernels in the moduli are formed and the density
-    /// kernel is left empty (the moments of inertia are not moved).
+    /// solve per node (two for the continuous form).
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
@@ -279,11 +290,9 @@ class AdjointSolver {
    * @param oceanFunctions As for IceHistoryKernels, from the same
    * migrating run as the tangent-linear run.
    * @param material v's perturbation of the moduli
-   * (TangentPerturbation::material, the density refused), which the
-   * tangent run must have been driven by too; empty for none
-   * (Options::material_kernels adds the material kernels' derivatives
-   * along v, for any v; the density kernel's without rotational feedback
-   * only). Discrete: the
+   * (TangentPerturbation::material), which the tangent run must have
+   * been driven by too; empty for none (Options::material_kernels adds
+   * the material kernels' derivatives along v, for any v). Discrete: the
    * derivative of the effective systems acts on the first sweep's
    * solutions as a source of the derivative duals, and the memory force's
    * variation on the first sweep's strains; the material kernels'

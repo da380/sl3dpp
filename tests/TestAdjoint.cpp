@@ -5,6 +5,7 @@
 // delta amplitudes — the structure of pyslfp's
 // test_continuous_adjoint_against_the_discrete.
 
+#include <cstdlib>
 #include <gtest/gtest.h>
 
 #include <cmath>
@@ -39,10 +40,10 @@ namespace {
 /// are the nodes: a nodal direction as one for the time-stepped problem,
 /// and back.
 [[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 [[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+  return {.kappa = d.kappa, .mu = d.mu};
 }
 
 constexpr auto kLmax = 16;
@@ -788,17 +789,15 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
 
 TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   // The discrete material kernels: their pairing with a direction in
-  // kappa and mu at the memory points AND in the nodal rho equals the
-  // material tangent's objective change (the exact transpose, at solver
-  // precision), both schemes, with the memory points at the GLL nodes
-  // and at the Gauss points; and at the GLL points, where the direction
-  // is a nodal one, central differences of the objective on the shifted
-  // material (the rheology rebuilt at the same fractions and times, the
-  // sea level engine's gravity held) land on them at second order with
-  // Richardson at 1e-6. With rotational feedback on, axial and full, the
-  // kernels in kappa and mu are the tangent's transpose alike (the
-  // density kernel is formed without rotational feedback only). Refused
-  // without a trajectory.
+  // kappa and mu at the memory points equals the material tangent's
+  // objective change (the exact transpose, at solver precision), both
+  // schemes, with the memory points at the GLL nodes and at the Gauss
+  // points; and at the GLL points, where the direction is a nodal one,
+  // central differences of the objective on the shifted material (the
+  // rheology rebuilt at the same fractions and times, the sea level
+  // engine's gravity held) land on them at second order with Richardson
+  // at 1e-6. With rotational feedback on, axial and full, the kernels are
+  // the tangent's transpose alike. Refused without a trajectory.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
   const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
@@ -827,13 +826,11 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
-  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
-      d.rho[i] = 0.5 * profile * material.Rho()[i];
       if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
@@ -863,8 +860,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     // rotational feedback at the default points only
     if (rotating && set != MemoryPointSet::Gauss) continue;
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
-    auto atPoints = AtMemoryPoints(op.Points(), d);
-    if (rotating) atPoints.rho.clear();
+    const auto atPoints = AtMemoryPoints(op.Points(), d);
     SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = rotation,
@@ -878,14 +874,10 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel.size(), atPoints.kappa.size());
     ASSERT_EQ(kernels.muKernel.size(), atPoints.mu.size());
-    ASSERT_EQ(kernels.rhoKernel.size(), rotating ? 0 : k0.size());
     auto paired = 0.0;
     for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
       paired += kernels.kappaKernel[i] * atPoints.kappa[i] +
                 kernels.muKernel[i] * atPoints.mu[i];
-    }
-    for (auto i = std::size_t{0}; i < kernels.rhoKernel.size(); ++i) {
-      paired += kernels.rhoKernel[i] * d.rho[i];
     }
 
     TangentPerturbation direction;
@@ -928,6 +920,101 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
   }
 }
 
+TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
+  // The kernels as functions. RadialDensity divides the quadrature
+  // weights out of the point-held kernels in kappa and mu and of the
+  // nodal itau kernel; the samples it gives with the points' weights
+  // make the same pairing; and the two memory point sets, two
+  // discretisations of one problem, give samples of the same functions:
+  // the GLL set's, interpolated within each element to the Gauss points,
+  // against the Gauss set's, in the weighted L2 norm.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(31);
+  const auto& scales = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 / sigma));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[2].displacementDual = setup.Smooth(rng, 0.5);
+  const auto& mesh = setup.material.Mesh();
+
+  struct Functions {
+    std::vector<double> kappa, mu, itau;
+  };
+  auto functionsAt = [&](MemoryPointSet set) {
+    ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
+    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+                                {.rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    const auto kernels =
+        AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                  .rtol = 1e-12,
+                                  .material_kernels = true})
+            .IceHistoryKernels(times, measurements, &trajectory);
+    const auto& points = op.Points();
+    const auto weights = points.QuadratureWeights(mesh);
+    const auto radii = points.Radii(mesh);
+    EXPECT_EQ(weights.size(), kernels.muKernel.size());
+    EXPECT_EQ(radii.size(), weights.size());
+    Functions f;
+    f.kappa = RadialDensity(points, mesh, kernels.kappaKernel);
+    f.mu = RadialDensity(points, mesh, kernels.muKernel);
+    f.itau = RadialDensity(mesh, kernels.itauKernel[0]);
+    // the weighted samples make the plain sum's pairing
+    auto plain = 0.0, weighted = 0.0;
+    for (auto i = std::size_t{0}; i < weights.size(); ++i) {
+      const auto delta = 0.3 + radii[i] * radii[i];
+      plain += kernels.muKernel[i] * delta;
+      weighted += weights[i] * f.mu[i] * delta;
+    }
+    EXPECT_NEAR(weighted, plain, 1e-13 * std::abs(plain));
+    // a kernel of another layout is refused
+    EXPECT_THROW((void)RadialDensity(points, mesh, std::vector<double>(3)),
+                 std::invalid_argument);
+    return f;
+  };
+  const auto gll = functionsAt(MemoryPointSet::Gll);
+  const auto gauss = functionsAt(MemoryPointSet::Gauss);
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, mesh);
+  const auto weights = points.QuadratureWeights(mesh);
+  auto distance = [&](const std::vector<double>& nodal,
+                      const std::vector<double>& atPoints) {
+    const auto carried = points.Interpolate(nodal);
+    auto diff = 0.0, size = 0.0;
+    for (auto i = std::size_t{0}; i < weights.size(); ++i) {
+      diff += weights[i] * (carried[i] - atPoints[i]) * (carried[i] - atPoints[i]);
+      size += weights[i] * atPoints[i] * atPoints[i];
+    }
+    return std::sqrt(diff / size);
+  };
+  const auto kappa = distance(gll.kappa, gauss.kappa);
+  const auto mu = distance(gll.mu, gauss.mu);
+  // the nodal itau kernels of both sets, as functions at the GLL nodes
+  const auto nodalWeights =
+      MemoryPoints::Of(MemoryPointSet::Gll, mesh).QuadratureWeights(mesh);
+  auto diff = 0.0, size = 0.0;
+  for (auto i = std::size_t{0}; i < nodalWeights.size(); ++i) {
+    diff += nodalWeights[i] * (gll.itau[i] - gauss.itau[i]) * (gll.itau[i] - gauss.itau[i]);
+    size += nodalWeights[i] * gauss.itau[i] * gauss.itau[i];
+  }
+  const auto itau = std::sqrt(diff / size);
+  std::cout << "functions, GLL against Gauss: kappa " << kappa << ", mu " << mu
+            << ", itau " << itau << '\n';
+  // (they land at 3e-9, 5e-8 and 7e-7)
+  EXPECT_LT(kappa, 1e-6);
+  EXPECT_LT(mu, 1e-6);
+  EXPECT_LT(itau, 1e-5);
+}
+
 TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   // The continuous material kernels carry the commute error of the
   // viscosity kernels: against the exact discrete ones (paired with a
@@ -947,13 +1034,11 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   MaterialDirection d;
   d.kappa.assign(k0.size(), 0.0);
   d.mu.assign(m0.size(), 0.0);
-  d.rho.assign(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
       const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
-      d.rho[i] = 0.5 * profile * material.Rho()[i];
       if (material.IsFluid(e)) continue;
       d.kappa[i] = 0.5 * profile * k0[i];
       d.mu[i] = profile * m0[i];
@@ -1011,10 +1096,6 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
       for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
         sum += kernels.kappaKernel[i] * atPoints.kappa[i] +
                kernels.muKernel[i] * atPoints.mu[i];
-      }
-      // (no density kernel with rotational feedback)
-      for (auto i = std::size_t{0}; i < kernels.rhoKernel.size(); ++i) {
-        sum += kernels.rhoKernel[i] * d.rho[i];
       }
       paired[method] = sum;
     }
