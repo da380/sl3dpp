@@ -143,9 +143,9 @@ sl3d kernel run.json           # adjoint kernels of configured measurements
                                #   ("trajectory": {"directory": ...} spills
                                #    the recorded states to disk for large lmax)
 sl3d kernel1d run.json         # its 1D counterpart
-sl3d static run.json           # the static response of a laterally
-                               #   heterogeneous elastic Earth to a cap
-                               #   load and a tide, with the radial
+sl3d response run.json         # the elastic response to a prescribed
+                               #   load and tide, no ocean: 1D, or 3D
+                               #   under lateral moduli with the radial
                                #   model's beside it
 ```
 
@@ -187,6 +187,11 @@ metadata. For example:
 - **3D viscosity**, for `evolve` and `kernel`, is a planetmodel model file
   holding a `viscosity` field, as planetmodel's conversion of a tomography
   model writes it.
+- **Loads and tides**, for `response`, are sums of terms: Gaussian caps,
+  uniform disks (expanded exactly), fields of planetmodel surface files and
+  tables of spherical-harmonic coefficients, and tidal potential
+  coefficients; its lateral moduli are a planetmodel model file's `mu` and
+  `kappa`.
 
 ### Outputs
 
@@ -195,7 +200,7 @@ metadata. For example:
 velocity in their metadata; `kernel` and `kernel1d` write a directory per
 run: the ice-history kernels of each measurement as surface files, its
 viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
-measured values; `static` writes the surface response as a surface file
+measured values; `response` writes the surface response as a surface file
 and, on request, the surface coefficients as a cross-code exchange table
 and the response inside the body as a planetmodel model file (its lateral
 moduli come from a model file's `mu` and `kappa`, as planetmodel's
@@ -302,7 +307,7 @@ nodes.
   numactl --cpunodebind=1 --membind=1 sl3d evolve second.json &
   ```
 
-  Built with `SL3DPP_WITH_MPI`, `sl3d evolve`, `kernel` and `static` can
+  Built with `SL3DPP_WITH_MPI`, `sl3d evolve`, `kernel` and `response` can
   instead
   spread one run over the node, one MPI rank per socket with its threads
   inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
@@ -538,7 +543,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve`, `kernel` and `static` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
+| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve`, `kernel` and `response` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
 
 "At top level" means when sl3dpp is the project being built rather than a
 dependency of another, which then gets only the library.

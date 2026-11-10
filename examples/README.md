@@ -30,7 +30,7 @@ sized for a laptop; CI runs each at a small one) and the Earth's state.
   the PREM-like deck's density and moduli with a lateral perturbation of
   the upper mantle — a stiff craton under the Canadian shield, a soft
   ridge under the eastern Pacific — in the form planetmodel's conversion
-  of a tomography model writes, for `ExampleStatic3D` and `static.json`.
+  of a tomography model writes, for `ExampleStatic3D` and `response.json`.
 - **The synthetic Earth**, `synthetic_earth.nc`, which the build writes
   (`MakeSyntheticEarth`): a planetmodel surface file of `ice_thickness` and
   `topography` on a 1° grid over a toy glacial cycle — smooth continents on

@@ -4,12 +4,14 @@
 # the thin dispatch of sl3d.cpp. Only the program is installed.
 add_library(sl3d_app STATIC
   Input.cpp
+  Blocks.cpp
+  Forcing.cpp
   Common.cpp
   EvolveCommand.cpp
   KernelCommand.cpp
   LoveNumbersCommand.cpp
   FingerprintCommand.cpp
-  StaticCommand.cpp
+  ResponseCommand.cpp
   Ranks.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sl3d_app PUBLIC sl3dpp::sl3dpp)

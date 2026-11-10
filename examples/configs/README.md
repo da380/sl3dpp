@@ -63,15 +63,18 @@ draws a figure per command from `out/`.
 - **`kernel.json`** — the 3D counterpart for the Hudson Bay sea level and
   decay time, with the log-viscosity kernels of the 3D viscosity:
   `out/kernels3d/`.
-- **`static.json`** — the instantaneous elastic response of the synthetic
-  3D elastic Earth (`../synthetic_moduli.nc`, written by the build: the
-  PREM-like moduli with a stiff craton and a soft ridge in the upper
-  mantle) to a 2 km ice-equivalent cap over Hudson Bay and a unit
+- **`response.json`** — the instantaneous elastic response of the
+  synthetic 3D elastic Earth (`../synthetic_moduli.nc`, written by the
+  build: the PREM-like moduli with a stiff craton and a soft ridge in the
+  upper mantle) to a 2 km ice-equivalent cap over Hudson Bay and a unit
   degree-2 tide, at lmax 16, by conjugate gradients on the radial
-  systems: `out/static.nc` (the surface displacement, potential and the
-  radial model's beside them), `out/static.txt` (the surface coefficients
-  in the cross-code exchange form) and `out/static_volume.nc` (the
-  response inside the body, for planetmodel's cutaways).
+  systems: `out/response.nc` (the surface displacement, potential and the
+  radial model's beside them), `out/response.txt` (the surface
+  coefficients in the cross-code exchange form) and
+  `out/response_volume.nc` (the response inside the body, for
+  planetmodel's cutaways). Its config is made of blocks (`model`,
+  `forcing`, `solver`, `output`); the forcing's `load` and `tide` are lists
+  of terms, summed.
 
 `prem8.gia.deck` is `../prem8.elastic.deck` in planetmodel's GIA format,
 with a Maxwell mantle of 1e21 Pa s (the solid layers between 3480 and

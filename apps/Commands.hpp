@@ -13,7 +13,9 @@
  * file (pyslfp's `export_ice_history` writes one), and writes the
  * fingerprint — sea-level change, displacement, potential, the ice
  * change and the ocean function, with the angular-velocity perturbation
- * in the metadata — as a planetmodel surface file.
+ * in the metadata — as a planetmodel surface file. `response` solves for
+ * the planet's response to a prescribed load and tide, with no ocean,
+ * from a config of blocks (`model`, `forcing`, `solver`, `output`).
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -25,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include "Blocks.hpp"
+#include "Forcing.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/Geography.hpp"
@@ -34,16 +38,6 @@
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp::app {
-
-/// The deck formats a config may name: planetmodel's GIA and MINEOS
-/// tables, and the library's six-column elastic table (rho, vpv, vsv,
-/// vph, vsh, eta; no header), the test and example decks' format.
-/// Gia is planetmodel's Maxwell deck (`"maxwell"` in a config; `"gia"`, the
-/// format's old name, is kept as an alias).
-enum class ModelFormat { Gia, Mineos, Elastic };
-
-/// The format a `ModelFormat` stands for.
-[[nodiscard]] DeckFormat FormatOf(ModelFormat format);
 
 /// The config of `sl3d love-numbers`.
 struct LoveNumbersInput {
@@ -215,48 +209,25 @@ struct KernelInput {
 /// Runs a 3D (lateral-viscosity) kernel config.
 [[nodiscard]] std::string RunKernel3D(const std::filesystem::path& config);
 
-/// The config of `sl3d static`: the instantaneous (elastic) response of
-/// a laterally heterogeneous elastic Earth to a surface load and a
-/// tidal potential, no sea level (docs/adjoints.md §13j), with the
-/// radial model's response beside it.
-struct StaticInput {
-  std::filesystem::path model;
-  ModelFormat format = ModelFormat::Gia;
+/// The config of `sl3d response`: the response of the planet to a
+/// prescribed surface load and external tidal potential, with no ocean.
+/// It is the instantaneous elastic response: of the radial model, or,
+/// under lateral moduli, the 3D static problem of docs/adjoints.md §13j
+/// with the radial model's response beside it. A config is made of
+/// blocks (Blocks.hpp, Forcing.hpp).
+struct ResponseInput {
+  ModelBlock model;
   int lmax = 0;
-  /// A planetmodel model file whose `mu` and `kappa` fields supply the
-  /// lateral perturbations of the moduli (io/ModelModuli); empty for
-  /// the radial model alone.
-  std::filesystem::path moduli;
-  bool moduli_file_radial = false;  ///< the file's own radial reference
-  /// A Gaussian cap of surface mass density: kg m^-2 at its centre.
-  struct Cap {
-    bool set = false;
-    GeographicPoint site;
-    double width = 0.0;      ///< radians
-    double amplitude = 0.0;  ///< kg m^-2
-  } load;
-  /// One coefficient of an external tidal potential, m^2 s^-2.
-  struct Tide {
-    bool set = false;
-    int degree = 2;
-    int order = 0;
-    double amplitude = 0.0;
-    double imaginary = 0.0;
-  } tide;
-  /// The conjugate-gradient solve under lateral moduli.
-  double rtol = 1e-10;
-  int max_iterations = 200;
-  std::vector<int> transform_degrees;
-  std::size_t cache_mb = 0;               ///< as EvolveInput's
-  std::filesystem::path output;           ///< the surface file
-  std::filesystem::path exchange_output;  ///< the coefficient table, optional
-  std::filesystem::path volume_output;    ///< the model file, optional
+  Forcing forcing;
+  SolverBlock solver;
+  OutputBlock output;
 };
 
-/// Reads a static config, relative paths against its directory.
-[[nodiscard]] StaticInput ReadStaticInput(const std::filesystem::path& config);
+/// Reads a response config, relative paths against its directory.
+[[nodiscard]] ResponseInput ReadResponseInput(
+    const std::filesystem::path& config);
 
-/// Runs a static config and returns the summary line.
-[[nodiscard]] std::string RunStatic3D(const std::filesystem::path& config);
+/// Runs a response config and returns the summary line.
+[[nodiscard]] std::string RunResponse(const std::filesystem::path& config);
 
 }  // namespace sl3dpp::app

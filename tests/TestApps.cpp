@@ -1,21 +1,27 @@
 // The sl3d configs and commands: a misspelt or missing member is refused
 // naming the config and the place, relative paths resolve against the
 // config's directory, love-numbers writes its provenance-headed table,
-// and fingerprint runs a toy state read from a planetmodel surface file
-// through the sea level equation and writes the fingerprint back as one.
+// fingerprint runs a toy state read from a planetmodel surface file
+// through the sea level equation and writes the fingerprint back as one,
+// and response takes its load and tide as sums of terms of every kind.
 
 #include <gtest/gtest.h>
 #include "sl3dpp/EarthModel.hpp"
 #include <planetmodel/modelfile.hpp>
 #include "sl3dpp/io/ModelModuli.hpp"
 
+#include <GaussQuad/All>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 #include <complex>
 #include <cstddef>
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <initializer_list>
+#include <numbers>
 #include <planetmodel/error.hpp>
 #include <planetmodel/grid.hpp>
 #include <planetmodel/json.hpp>
@@ -24,6 +30,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "AppFixtures.hpp"
@@ -40,6 +47,7 @@ namespace {
 
 namespace fs = std::filesystem;
 using namespace sl3dpp;
+using Complex = std::complex<double>;
 
 class AppsTest : public ::testing::Test {
  protected:
@@ -70,8 +78,39 @@ class AppsTest : public ::testing::Test {
                  "6371000 5500 10000 5500 10000 5500 1 1e21\n");
   }
 
+  /// Runs `sl3d response` on the radial ball at `lmax` under the forcing
+  /// block given, and returns its surface file.
+  planetmodel::SurfaceFile Respond(const std::string& name,
+                                   const std::string& forcing,
+                                   int lmax = 8) const {
+    static_cast<void>(Deck());
+    const auto config = Write(name + ".json", std::format(R"({{
+      "model": {{"deck": "ball.deck"}}, "lmax": {}, "forcing": {},
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                                          lmax, forcing, name));
+    const auto summary = app::RunResponse(config);
+    EXPECT_TRUE(summary.starts_with("1-D, elastic, ")) << summary;
+    return planetmodel::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  }
+
   fs::path dir_;
 };
+
+/// The largest difference of two fields over the largest magnitude of the
+/// second.
+double Departure(const std::vector<double>& got,
+                 const std::vector<double>& want) {
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < want.size(); ++i) {
+    scale = std::max(scale, std::abs(want[i]));
+    diff = std::max(diff, std::abs(got[i] - want[i]));
+  }
+  return diff / scale;
+}
+
+/// The response fields of a surface file that every run writes.
+constexpr auto kResponseFields = {"displacement", "tangential_potential",
+                                  "potential"};
 
 TEST_F(AppsTest, RefusesWhatTheConfigCannotSay) {
   const auto deck = Deck();
@@ -227,8 +266,8 @@ TEST_F(AppsTest, FingerprintRunsAToyStateEndToEnd) {
 
 using sl3dpp::test::WriteToyHistory;
 
-TEST_F(AppsTest, StaticRespondsOnAToyModuliFile) {
-  // The static command on the homogeneous ball with a 10% lateral shear
+TEST_F(AppsTest, ResponseRespondsOnAToyModuliFile) {
+  // The response command on the homogeneous ball with a 10% lateral shear
   // modulus from a model file written by io::WriteModuli: a polar cap
   // load and a degree-2 tide, the surface file, the exchange table and
   // the volume file all written; the 3D displacement departs from the
@@ -245,22 +284,25 @@ TEST_F(AppsTest, StaticRespondsOnAToyModuliFile) {
       {.name = "toy moduli", .elementMetres = 500e3});
   ASSERT_TRUE(written) << written.error().message;
 
-  const auto config = Write("static.json", R"({
-    "model": "ball.deck",
+  const auto config = Write("response.json", R"({
+    "model": {"deck": "ball.deck", "moduli": {"file": "moduli.nc"}},
     "lmax": 8,
-    "moduli": {"file": "moduli.nc"},
-    "load": {"latitude": 90, "longitude": 0, "width_deg": 20,
-             "amplitude_kg_m2": 1.0e6},
-    "tide": {"degree": 2, "order": 0, "amplitude_m2_s2": 1.0},
-    "output": "out/static.nc",
-    "exchange_output": "out/static.txt",
-    "volume_output": "out/static_volume.nc"})");
-  const auto summary = app::RunStatic3D(config);
+    "forcing": {
+      "load": [{"cap": {"latitude": 90, "longitude": 0, "width_deg": 20,
+                        "amplitude_kg_m2": 1.0e6}}],
+      "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0}]},
+    "output": {"surface": "out/response.nc",
+               "exchange": "out/response.txt",
+               "volume": "out/response_volume.nc"}})");
+  const auto summary = app::RunResponse(config);
   EXPECT_NE(summary.find("wrote"), std::string::npos) << summary;
   EXPECT_NE(summary.find("conjugate-gradient"), std::string::npos) << summary;
+  EXPECT_TRUE(summary.starts_with("3-D (lateral moduli), elastic, load (1 "
+                                  "term) + tide (1 coefficient); wrote"))
+      << summary;
 
   namespace pm = planetmodel;
-  const auto result = pm::ReadSurfaceFile(dir_ / "out" / "static.nc");
+  const auto result = pm::ReadSurfaceFile(dir_ / "out" / "response.nc");
   for (const auto name : {"load", "displacement", "tangential_potential",
                           "potential", "displacement_radial_model",
                           "potential_radial_model"}) {
@@ -277,24 +319,33 @@ TEST_F(AppsTest, StaticRespondsOnAToyModuliFile) {
   EXPECT_GT(diff, 1e-3 * scale);
   EXPECT_LT(diff, 0.2 * scale);
 
-  auto exchange = std::ifstream(dir_ / "out" / "static.txt");
+  auto exchange = std::ifstream(dir_ / "out" / "response.txt");
   auto lines = std::vector<std::string>{};
   for (std::string line; std::getline(exchange, line);) lines.push_back(line);
   ASSERT_GT(lines.size(), 10u);
   EXPECT_EQ(lines[0].substr(0, 1), "#");
-  EXPECT_NE(std::ranges::find_if(lines, [](const std::string& l) {
-              return l.rfind("columns l m U_re U_im Phi_re Phi_im", 0) == 0;
-            }),
-            lines.end());
-  const auto volume = pm::ReadModelFile(dir_ / "out" / "static_volume.nc");
+  const auto has = [&lines](std::string_view start) {
+    return std::ranges::find_if(lines, [start](const std::string& l) {
+             return l.starts_with(start);
+           }) != lines.end();
+  };
+  EXPECT_TRUE(has("columns l m U_re U_im Phi_re Phi_im"));
+  // one cap and one tide coefficient: their scalars, with the counts
+  for (const auto* name :
+       {"load_terms 1", "tide_coefficients 1", "cap_latitude_deg 90",
+        "cap_width_deg 20", "cap_amplitude_kg_m2 1000000", "tide_degree 2",
+        "tide_order 0", "tide_amplitude_m2_s2 1 0"}) {
+    EXPECT_TRUE(has(name)) << name;
+  }
+  const auto volume = pm::ReadModelFile(dir_ / "out" / "response_volume.nc");
   for (const auto name : {"radial_displacement", "deviatoric_strain",
                           "mu_relative"}) {
     EXPECT_TRUE(volume.HasField(0, name)) << name;
   }
 }
 
-TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
-  // cache_mb reaches every transform grid of a static run (the forcing's,
+TEST_F(AppsTest, ResponseIsBitwiseIndependentOfTheCache) {
+  // cache_mb reaches every transform grid of a response run (the forcing's,
   // the radial reference's coupling and the 3D operator's), and the run is
   // bit for bit the same under any setting. At lmax 24 the smallest
   // setting, 1 MiB, cuts the couplings' batched spin -2 transforms into
@@ -326,26 +377,26 @@ TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
 
   const auto run = [&](const std::string& name, std::string_view cache) {
     const auto text = std::format(R"({{
-      "model": "ball.deck",
+      "model": {{"deck": "ball.deck", "moduli": {{"file": "moduli.nc"}}}},
       "lmax": {},
-      "moduli": {{"file": "moduli.nc"}},
-      "load": {{"latitude": 60, "longitude": 30, "width_deg": 10,
-               "amplitude_kg_m2": 1.0e6}},
-      "tide": {{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
-               "imaginary_m2_s2": 0.5}},{}
-      "output": "{}/static.nc",
-      "exchange_output": "{}/static.txt",
-      "volume_output": "{}/static_volume.nc"}})",
+      "forcing": {{
+        "load": [{{"cap": {{"latitude": 60, "longitude": 30, "width_deg": 10,
+                           "amplitude_kg_m2": 1.0e6}}}}],
+        "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                  "imaginary_m2_s2": 0.5}}]}},{}
+      "output": {{"surface": "{}/response.nc",
+                 "exchange": "{}/response.txt",
+                 "volume": "{}/response_volume.nc"}}}})",
                                   kLmax, cache, name, name, name);
-    const auto summary = app::RunStatic3D(Write(name + ".json", text));
+    const auto summary = app::RunResponse(Write(name + ".json", text));
     EXPECT_NE(summary.find("conjugate-gradient"), std::string::npos) << summary;
   };
   run("standard", "");
-  run("small", R"( "cache_mb": 1,)");
+  run("small", R"( "solver": {"cache_mb": 1},)");
 
   namespace pm = planetmodel;
-  const auto standard = pm::ReadSurfaceFile(dir_ / "standard" / "static.nc");
-  const auto small = pm::ReadSurfaceFile(dir_ / "small" / "static.nc");
+  const auto standard = pm::ReadSurfaceFile(dir_ / "standard" / "response.nc");
+  const auto small = pm::ReadSurfaceFile(dir_ / "small" / "response.nc");
   for (const auto& [name, field] : standard.variables) {
     EXPECT_EQ(field.values, small.variables.at(name).values) << name;
   }
@@ -357,7 +408,7 @@ TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
   // the exchange tables' rows, the coefficients at 17 digits (the comment
   // lines name the config)
   const auto rows = [&](const std::string& name) {
-    auto in = std::ifstream(dir_ / name / "static.txt");
+    auto in = std::ifstream(dir_ / name / "response.txt");
     auto out = std::vector<std::string>{};
     for (std::string line; std::getline(in, line);) {
       if (!line.starts_with("#")) out.push_back(line);
@@ -369,9 +420,9 @@ TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
   EXPECT_EQ(standardRows, rows("small"));
 
   const auto standardVolume =
-      pm::ReadModelFile(dir_ / "standard" / "static_volume.nc");
+      pm::ReadModelFile(dir_ / "standard" / "response_volume.nc");
   const auto smallVolume =
-      pm::ReadModelFile(dir_ / "small" / "static_volume.nc");
+      pm::ReadModelFile(dir_ / "small" / "response_volume.nc");
   ASSERT_EQ(standardVolume.Parts().size(), smallVolume.Parts().size());
   for (auto p = std::size_t{0}; p < standardVolume.Parts().size(); ++p) {
     const auto& held = smallVolume.Parts()[p].variables;
@@ -381,6 +432,440 @@ TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
   }
 }
 
+TEST_F(AppsTest, ResponseFieldTermMatchesTheCap) {
+  // A field term holding a cap's field gives the cap's response. Written on
+  // the run's own Gauss-Legendre grid, the file's round trip is exact but
+  // for rounding: the lateral rule gives a field back at its own nodes.
+  // Written on a 1-degree equiangular grid and read by the cubic rule, it
+  // carries the spline's error onto the run's grid, fourth order in the
+  // spacing over the cap's width: about 3e-8 of the 20-degree cap's
+  // amplitude in the load, and 1.5e-8 in the response, held below 1e-6.
+  namespace pm = planetmodel;
+  constexpr auto kLmax = 8;
+  const auto site = GeographicPoint{60.0, -85.0};
+  const auto width = 20.0 * std::numbers::pi / 180.0;
+  const auto amplitude = 1.0e6;
+  const auto density = pm::Dimensions{.mass = 1, .length = -2};
+  const SurfaceGrid grid(kLmax);
+  auto own = pm::SurfaceFile{};
+  own.grid = pm::AngularGrid(
+      std::vector<double>(grid.CoLatitudes().begin(), grid.CoLatitudes().end()),
+      std::vector<double>(grid.Longitudes().begin(), grid.Longitudes().end()),
+      "gauss_legendre", kLmax,
+      std::vector<double>(grid.CoLatitudeWeights().begin(),
+                          grid.CoLatitudeWeights().end()));
+  own.source = "sl3dpp tests";
+  own.variables.emplace(
+      "load", pm::SurfaceField("load", app::CapField(grid, site, width, amplitude),
+                               {.dimensions = density}));
+  pm::WriteSurfaceFile(dir_ / "own.nc", own);
+  // the cap at the nodes of a 1-degree grid with both poles, by its formula
+  const auto fine = pm::Equiangular(181, 360, true);
+  auto values = std::vector<double>{};
+  const auto colat0 = site.CoLatitude(), lon0 = site.Longitude();
+  for (const auto theta : fine.Colatitudes()) {
+    for (const auto phi : fine.Longitudes()) {
+      const auto c = std::cos(theta) * std::cos(colat0) +
+                     std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
+      const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+      values.push_back(amplitude * std::exp(-0.5 * (d / width) * (d / width)));
+    }
+  }
+  auto other = pm::SurfaceFile{};
+  other.grid = fine;
+  other.source = "sl3dpp tests";
+  other.variables.emplace(
+      "sigma", pm::SurfaceField("sigma", values,
+                                {.lateral_interpolation = "cubic",
+                                 .dimensions = density}));
+  pm::WriteSurfaceFile(dir_ / "fine.nc", other);
+
+  const auto cap = Respond("cap", R"({"load": [{"cap": {"latitude": 60,
+      "longitude": -85, "width_deg": 20, "amplitude_kg_m2": 1.0e6}}]})");
+  const auto same = Respond("same", R"({"load": [{"field": {"file": "own.nc"}}]})");
+  const auto resampled = Respond("resampled", R"({"load": [{"field":
+      {"file": "fine.nc", "name": "sigma"}}]})");
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto& want = cap.variables.at(name).values;
+    EXPECT_LT(Departure(same.variables.at(name).values, want), 1e-12) << name;
+    const auto departure = Departure(resampled.variables.at(name).values, want);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-6) << name;
+  }
+  RecordProperty("resampled_departure", std::format("{:.3e}", worst));
+  EXPECT_LT(Departure(same.variables.at("load").values,
+                      cap.variables.at("load").values),
+            1e-14);
+  const auto loadDeparture = Departure(resampled.variables.at("load").values,
+                                       cap.variables.at("load").values);
+  RecordProperty("resampled_load_departure", std::format("{:.3e}", loadDeparture));
+  EXPECT_LT(loadDeparture, 1e-6);
+}
+
+TEST_F(AppsTest, ResponseCoefficientsTermMatchesTheCap) {
+  // A coefficient table holding a cap's coefficients, at 17 digits, gives
+  // the cap's response to rounding; absent degrees are zero, so a table of
+  // degrees 0 to 4 alone is the cap truncated there.
+  constexpr auto kLmax = 8;
+  const auto site = GeographicPoint{60.0, -85.0};
+  const SurfaceGrid grid(kLmax);
+  const auto coefficients = grid.Expand(
+      app::CapField(grid, site, 20.0 * std::numbers::pi / 180.0, 1.0e6));
+  const auto table = [&](int top) {
+    auto text = std::string{"# a Gaussian cap's coefficients\n#\n"};
+    for (auto l = 0; l <= top; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto c = coefficients[SurfaceGrid::Index(l, m)];
+        text += std::format("{} {} {:.17g} {:.17g}\n", l, m, c.real(), c.imag());
+      }
+    }
+    return text;
+  };
+  static_cast<void>(Write("cap_lm.txt", table(kLmax)));
+  static_cast<void>(Write("cap_lm4.txt", table(4)));
+  const auto cap = Respond("cap", R"({"load": [{"cap": {"latitude": 60,
+      "longitude": -85, "width_deg": 20, "amplitude_kg_m2": 1.0e6}}]})");
+  const auto read = Respond(
+      "read", R"({"load": [{"coefficients": {"file": "cap_lm.txt"}}]})");
+  for (const auto* name : kResponseFields) {
+    EXPECT_LT(Departure(read.variables.at(name).values,
+                        cap.variables.at(name).values),
+              1e-12)
+        << name;
+  }
+  // the load written is the table's synthesis, whose expansion is the cap's
+  EXPECT_LT(Departure(grid.Synthesise(coefficients),
+                      read.variables.at("load").values),
+            1e-13);
+
+  auto truncated = coefficients;
+  for (auto l = 5; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) truncated[SurfaceGrid::Index(l, m)] = 0.0;
+  }
+  const auto four = Respond(
+      "four", R"({"load": [{"coefficients": {"file": "cap_lm4.txt"}}]})");
+  EXPECT_LT(Departure(four.variables.at("load").values,
+                      grid.Synthesise(truncated)),
+            1e-13);
+}
+
+TEST_F(AppsTest, ResponseLoadTermsAndTideCoefficientsAdd) {
+  // The forcing is linear in its terms: two load terms in one run (a cap and
+  // a disk) give the sum of the two single-term runs, and so do two tide
+  // coefficients, to rounding (the radial model's solves are direct).
+  const auto capTerm = std::string{R"({"cap": {"latitude": 60,
+      "longitude": -85, "width_deg": 20, "amplitude_kg_m2": 1.0e6}})"};
+  const auto diskTerm = std::string{R"({"disk": {"latitude": -75,
+      "longitude": 10, "radius_deg": 15, "amplitude_kg_m2": -9.0e5}})"};
+  const auto tide21 = std::string{R"({"degree": 2, "order": 1,
+      "amplitude_m2_s2": 1.0, "imaginary_m2_s2": -0.5})"};
+  const auto tide30 = std::string{R"({"degree": 3, "order": 0,
+      "amplitude_m2_s2": 2.0})"};
+  const auto check = [](const planetmodel::SurfaceFile& both,
+                        const planetmodel::SurfaceFile& a,
+                        const planetmodel::SurfaceFile& b, auto&& names) {
+    for (const auto* name : names) {
+      const auto& x = a.variables.at(name).values;
+      const auto& y = b.variables.at(name).values;
+      auto sum = std::vector<double>(x.size());
+      for (auto i = std::size_t{0}; i < x.size(); ++i) sum[i] = x[i] + y[i];
+      EXPECT_LT(Departure(both.variables.at(name).values, sum), 1e-12) << name;
+    }
+  };
+  const auto cap = Respond("cap", "{\"load\": [" + capTerm + "]}");
+  const auto disk = Respond("disk", "{\"load\": [" + diskTerm + "]}");
+  const auto loads =
+      Respond("loads", "{\"load\": [" + capTerm + ", " + diskTerm + "]}");
+  check(loads, cap, disk, kResponseFields);
+  check(loads, cap, disk, std::initializer_list<const char*>{"load"});
+
+  const auto one = Respond("one", "{\"tide\": [" + tide21 + "]}");
+  const auto other = Respond("other", "{\"tide\": [" + tide30 + "]}");
+  const auto tides =
+      Respond("tides", "{\"tide\": [" + tide21 + ", " + tide30 + "]}");
+  check(tides, one, other, kResponseFields);
+  EXPECT_FALSE(tides.variables.contains("load"));
+
+  // the summary says what the config was taken to mean, and the metadata
+  // count the terms
+  static_cast<void>(Deck());
+  const auto config = Write("all.json", "{\"model\": {\"deck\": \"ball.deck\"}, "
+                                        "\"lmax\": 8, \"forcing\": {\"load\": [" +
+                                            capTerm + ", " + diskTerm +
+                                            "], \"tide\": [" + tide21 + ", " +
+                                            tide30 + "]}, \"output\": "
+                                            "{\"surface\": \"out/all.nc\", "
+                                            "\"exchange\": \"out/all.txt\"}}");
+  const auto summary = app::RunResponse(config);
+  EXPECT_TRUE(summary.starts_with("1-D, elastic, load (2 terms) + tide (2 "
+                                  "coefficients); wrote "))
+      << summary;
+  const auto all = planetmodel::ReadSurfaceFile(dir_ / "out" / "all.nc");
+  EXPECT_EQ(std::get<std::vector<long long>>(all.meta.at("load_terms")),
+            std::vector<long long>{2});
+  EXPECT_EQ(std::get<std::vector<long long>>(all.meta.at("tide_coefficients")),
+            std::vector<long long>{2});
+  EXPECT_FALSE(all.meta.contains("load_latitude_deg"));
+  EXPECT_FALSE(all.meta.contains("tide_degree"));
+  auto exchange = std::ifstream(dir_ / "out" / "all.txt");
+  auto scalars = std::vector<std::string>{};
+  for (std::string line; std::getline(exchange, line);) {
+    if (line.empty() || line.starts_with("#") ||
+        std::isdigit(static_cast<unsigned char>(line.front()))) {
+      continue;
+    }
+    scalars.push_back(line.substr(0, line.find(' ')));
+  }
+  EXPECT_EQ(scalars, (std::vector<std::string>{
+                         "radius", "surface_gravity", "lmax", "lateral",
+                         "load_terms", "tide_coefficients", "columns"}));
+}
+
+TEST_F(AppsTest, DiskIsExpandedExactly) {
+  // The disk's coefficients are the truncated exact expansion in the grid's
+  // own harmonics: the harmonics at a point are the grid's synthesis there;
+  // the mean is the amplitude times the disk's share of the sphere,
+  // (1 - cos alpha) / 2; a disk about a pole has m = 0 terms alone; the
+  // coefficients are the disk's integrals of conj(Y_lm) by a quadrature in
+  // the disk's own frame, exact for the band, to rounding; and they agree
+  // with the expansion of the disk sampled on a much finer grid, to that
+  // sampling's error across the disk's edge.
+  constexpr auto kLmax = 32;
+  const SurfaceGrid grid(kLmax);
+  const auto size = grid.CoefficientSize();
+
+  // the harmonics at a point against the grid's synthesis of a unit
+  // coefficient (2 Re Y_lm for m > 0, a real field; -2 Im Y_lm for i)
+  auto worstHarmonic = 0.0;
+  const auto nphi = grid.Longitudes().size();
+  for (auto l = 0; l <= kLmax; l += 3) {
+    for (auto m = 0; m <= l; m += 2) {
+      for (const auto unit : {Complex{1.0, 0.0}, Complex{0.0, 1.0}}) {
+        if (m == 0 && unit.imag() != 0.0) continue;
+        auto coefficients = grid.ZeroCoefficients();
+        coefficients[SurfaceGrid::Index(l, m)] = unit;
+        const auto field = grid.Synthesise(coefficients);
+        for (const auto i : {std::size_t{0}, std::size_t{7}, std::size_t{20}}) {
+          for (const auto j : {std::size_t{0}, std::size_t{5}, nphi - 3}) {
+            const auto point = GeographicPoint::FromSpherical(
+                grid.CoLatitudes()[i], grid.Longitudes()[j]);
+            const auto y = app::HarmonicsAt(kLmax, point)[SurfaceGrid::Index(l, m)];
+            const auto want = m == 0 ? y.real() : 2.0 * (unit * y).real();
+            worstHarmonic =
+                std::max(worstHarmonic, std::abs(field[i * nphi + j] - want));
+          }
+        }
+      }
+    }
+  }
+  RecordProperty("harmonic_departure", std::format("{:.3e}", worstHarmonic));
+  EXPECT_LT(worstHarmonic, 1e-13);
+
+  const auto centre = GeographicPoint{55.0, -100.0};
+  const auto alpha = 8.0 * std::numbers::pi / 180.0;
+  const auto amplitude = 2.5e3;
+  const auto disk = app::DiskCoefficients(grid, centre, alpha, amplitude);
+  ASSERT_EQ(disk.size(), size);
+  // the grid's degree-0 normalisation: a unit field's coefficient
+  const auto unit = grid.Expand(std::vector<double>(grid.FieldSize(), 1.0))[0];
+  const auto mean = amplitude * (1.0 - std::cos(alpha)) / 2.0;
+  EXPECT_NEAR(disk[0].real(), mean * unit.real(), 1e-14 * mean * unit.real());
+  EXPECT_EQ(disk[0].imag(), 0.0);
+
+  // about either pole, m = 0 alone (at the south pole to the rounding of
+  // its colatitude, whose sine is 1.2e-16 rather than zero)
+  for (const auto latitude : {90.0, -90.0}) {
+    const auto polar = app::DiskCoefficients(grid, {latitude, 30.0}, alpha, 1.0);
+    for (auto l = 0; l <= kLmax; ++l) {
+      EXPECT_NE(polar[SurfaceGrid::Index(l, 0)], Complex{}) << l;
+      for (auto m = 1; m <= l; ++m) {
+        EXPECT_LT(std::abs(polar[SurfaceGrid::Index(l, m)]),
+                  1e-14 * std::abs(polar[0]))
+            << latitude << " " << l << " " << m;
+      }
+    }
+  }
+
+  // the disk's integrals of conj(Y_lm), in the disk's own frame (polar
+  // angle t about the centre, azimuth s): Gauss-Legendre in cos t over
+  // [cos alpha, 1] and the trapezoid in s are exact for the band
+  const auto theta0 = centre.CoLatitude(), phi0 = centre.Longitude();
+  const auto e3 = std::array{std::sin(theta0) * std::cos(phi0),
+                             std::sin(theta0) * std::sin(phi0), std::cos(theta0)};
+  const auto e1 = std::array{std::cos(theta0) * std::cos(phi0),
+                             std::cos(theta0) * std::sin(phi0), -std::sin(theta0)};
+  const auto e2 = std::array{-std::sin(phi0), std::cos(phi0), 0.0};
+  const auto rule =
+      GaussQuad::GaussLegendreQuadrature1D<double>(kLmax + 2, std::cos(alpha), 1.0);
+  const auto azimuths = 2 * kLmax + 2;
+  auto quadrature = std::vector<Complex>(size);
+  for (auto q = std::size_t{0}; q < rule.Points().size(); ++q) {
+    const auto u = rule.Points()[q];
+    const auto v = std::sqrt(1.0 - u * u);
+    for (auto k = 0; k < azimuths; ++k) {
+      const auto s = 2.0 * std::numbers::pi * k / azimuths;
+      auto n = std::array<double, 3>{};
+      for (auto c = 0; c < 3; ++c) {
+        n[c] = v * std::cos(s) * e1[c] + v * std::sin(s) * e2[c] + u * e3[c];
+      }
+      const auto point = GeographicPoint::FromSpherical(
+          std::acos(std::clamp(n[2], -1.0, 1.0)), std::atan2(n[1], n[0]));
+      const auto y = app::HarmonicsAt(kLmax, point);
+      const auto weight =
+          amplitude * rule.Weights()[q] * 2.0 * std::numbers::pi / azimuths;
+      for (auto i = std::size_t{0}; i < size; ++i) {
+        quadrature[i] += weight * std::conj(y[i]);
+      }
+    }
+  }
+  auto worstQuadrature = 0.0;
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    worstQuadrature = std::max(worstQuadrature, std::abs(disk[i] - quadrature[i]));
+  }
+  worstQuadrature /= std::abs(disk[0]);
+  RecordProperty("quadrature_departure", std::format("{:.3e}", worstQuadrature));
+  EXPECT_LT(worstQuadrature, 1e-13);
+
+  // the disk sampled on much finer grids, expanded and cut to the band: the
+  // sampling's error across the edge falls with the fine grid's spacing
+  // (about 2.6e-2 of the mean coefficient at degree 128 and 7.2e-3 at 256),
+  // where a wrong phase or normalisation would leave a departure of order 1
+  const auto cosAlpha = std::cos(alpha);
+  const auto sampledDeparture = [&](int degree) {
+    const SurfaceGrid fine(degree);
+    const auto sampled =
+        fine.Expand(fine.FromFunction([&](double theta, double phi) {
+          const auto c = std::cos(theta) * std::cos(theta0) +
+                         std::sin(theta) * std::sin(theta0) * std::cos(phi - phi0);
+          return c >= cosAlpha ? amplitude : 0.0;
+        }));
+    auto worst = 0.0;
+    for (auto i = std::size_t{0}; i < size; ++i) {
+      worst = std::max(worst, std::abs(disk[i] - sampled[i]));
+    }
+    const auto departure = worst / std::abs(disk[0]);
+    RecordProperty(std::format("sampled_departure_{}", degree),
+                   std::format("{:.3e}", departure));
+    return departure;
+  };
+  const auto coarser = sampledDeparture(128);
+  const auto finer = sampledDeparture(256);
+  EXPECT_LT(finer, 1e-2);
+  EXPECT_LT(finer, 0.5 * coarser);
+}
+
+TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
+  // Each fault is refused naming the member: an unknown member anywhere, a
+  // load term of two kinds or none, an amplitude history, a times block, a
+  // viscosity, an empty forcing, the old layout's members; and, once the
+  // run reads its files, a field file with a time axis and a coefficient
+  // table above lmax.
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  static_cast<void>(Write("high.txt", "# degree 5 at lmax 4\n0 0 1 0\n5 2 1 1\n"));
+  const auto cap = std::string{
+      R"({"cap": {"latitude": 60, "longitude": 0, "width_deg": 10,
+                  "amplitude_kg_m2": 1.0}})"};
+  const auto config = [&](const std::string& model, const std::string& forcing,
+                          const std::string& extra = "") {
+    return std::format(R"({{"model": {}, "lmax": 4, "forcing": {},{}
+                             "output": {{"surface": "out.nc"}}}})",
+                       model, forcing, extra);
+  };
+  const auto ball = std::string{R"({"deck": "ball.deck"})"};
+  const auto loads = [](const std::string& terms) {
+    return "{\"load\": [" + terms + "]}";
+  };
+  const auto refused = [&](auto&& run, const std::string& text,
+                           const std::string& member, const std::string& what) {
+    const auto path = Write("bad.json", text);
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(run(path));
+          } catch (const planetmodel::Error& error) {
+            const auto message = std::string{error.what()};
+            EXPECT_NE(message.find(member), std::string::npos) << message;
+            EXPECT_NE(message.find(what), std::string::npos) << message;
+            throw;
+          }
+        },
+        planetmodel::Error)
+        << text;
+  };
+  const auto read = [](const fs::path& path) {
+    return app::ReadResponseInput(path);
+  };
+  const auto run = [](const fs::path& path) { return app::RunResponse(path); };
+
+  refused(read, config(ball, loads(cap), R"( "lmxa": 4,)"), "lmxa",
+          "not a recognised member");
+  refused(read,
+          config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
+                                 "width": 10, "amplitude_kg_m2": 1.0}})")),
+          "forcing.load[0].cap.width", "not a recognised member");
+  refused(read, config(R"({"deck": "ball.deck", "moduli": {"fil": "m.nc"}})",
+                       loads(cap)),
+          "model.moduli.fil", "not a recognised member");
+  refused(read,
+          std::format(R"({{"model": {}, "lmax": 4, "forcing": {},
+                          "output": {{"surface": "out.nc", "volum": "v.nc"}}}})",
+                      ball, loads(cap)),
+          "output.volum", "not a recognised member");
+  refused(read, config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
+      "width_deg": 10, "amplitude_kg_m2": 1.0}, "disk": {"latitude": 0,
+      "longitude": 0, "radius_deg": 5, "amplitude_kg_m2": 1.0}})")),
+          "forcing.load[0]", "names several terms");
+  refused(read, config(ball, loads(cap + ", {}")), "forcing.load[1]",
+          "names no term");
+  refused(read,
+          config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
+                                 "width_deg": 10, "amplitude_kg_m2": 1.0},
+                                 "history_kyr": [[0, 1]]})")),
+          "forcing.load[0].history_kyr", "needs a `times` block");
+  refused(read, config(ball, loads(cap), R"( "times": {"nodes": 3},)"),
+          "times", "not built yet");
+  refused(read,
+          config(R"({"deck": "ball.deck", "viscosity": {"file": "v.nc"}})",
+                 loads(cap)),
+          "model.viscosity", "needs a `times` block");
+  refused(read, config(ball, "{}"), "forcing", "needs at least one");
+  refused(read, config(ball, R"({"load": [], "tide": []})"), "forcing",
+          "needs at least one");
+  refused(read,
+          config(ball, R"({"tide": [{"degree": 2, "order": 0,
+                                     "amplitude_m2_s2": 1.0,
+                                     "imaginary_m2_s2": 1.0}]})"),
+          "forcing.tide[0].imaginary_m2_s2", "not zero at order 0");
+  refused(read,
+          config(ball, loads(R"({"disk": {"latitude": 0, "longitude": 0,
+                                 "radius_deg": 0, "amplitude_kg_m2": 1.0}})")),
+          "forcing.load[0].disk.radius_deg", "is not an angle");
+  // the old layout's members
+  refused(read,
+          R"({"model": "ball.deck", "lmax": 4, "tide": {"degree": 2,
+              "amplitude_m2_s2": 1.0}, "output": "out.nc"})",
+          "tide", "not a recognised member");
+
+  refused(run,
+          config(ball, loads(R"({"field": {"file": "history.nc",
+                                           "name": "ice_thickness"}})")),
+          "forcing.load[0].field.file", "has a time axis");
+  refused(run, config(ball, loads(R"({"field": {"file": "history.nc"}})")),
+          "forcing.load[0].field.file", "needs a `times` block");
+  refused(run,
+          config(ball, loads(R"({"coefficients": {"file": "high.txt"}})")),
+          "forcing.load[0].coefficients.file", "line 3: degree 5 exceeds lmax = 4");
+  static_cast<void>(Write("imaginary.txt", "0 0 1 0.5\n"));
+  refused(run,
+          config(ball, loads(R"({"coefficients": {"file": "imaginary.txt"}})")),
+          "forcing.load[0].coefficients.file",
+          "line 1: the imaginary part at order 0 is not zero");
+  static_cast<void>(Write("short.txt", "2 1 1\n"));
+  refused(run, config(ball, loads(R"({"coefficients": {"file": "short.txt"}})")),
+          "forcing.load[0].coefficients.file", "line 1: is not a row");
+}
 
 TEST_F(AppsTest, EvolveRunsAndARestartedRunMatchesAnUninterruptedOne) {
   namespace pm = planetmodel;
@@ -1093,9 +1578,9 @@ TEST_F(AppsTest, TransformDegreesAreReadAndChecked) {
 }
 
 TEST_F(AppsTest, CacheMbIsReadAndChecked) {
-  // evolve's and kernel's coupled.cache_mb, and static's own cache_mb: a
-  // count of MiB that reaches the operator's options as bytes, 0 or absent
-  // leaving the library's default
+  // evolve's and kernel's coupled.cache_mb, and response's solver.cache_mb:
+  // a count of MiB that reaches the operator's options as bytes, 0 or
+  // absent leaving the library's default
   static_cast<void>(Deck());
   const auto evolve = [&](std::string_view coupled) {
     return Write("cache.json", std::string{R"({
@@ -1106,12 +1591,12 @@ TEST_F(AppsTest, CacheMbIsReadAndChecked) {
       "coupled": {)"} + std::string{coupled} +
                                    R"(}, "output": "out.nc"})");
   };
-  const auto staticConfig = [&](std::string_view member) {
-    return Write("static.json", std::string{R"({
-      "model": "ball.deck", "lmax": 4,
-      "tide": {"degree": 2, "amplitude_m2_s2": 1.0},)"} +
-                                    std::string{member} +
-                                    R"( "output": "out.nc"})");
+  const auto responseConfig = [&](std::string_view member) {
+    return Write("response.json", std::string{R"({
+      "model": {"deck": "ball.deck"}, "lmax": 4,
+      "forcing": {"tide": [{"degree": 2, "amplitude_m2_s2": 1.0}]},
+      "solver": {)"} + std::string{member} +
+                                      R"(}, "output": {"surface": "out.nc"}})");
   };
   const auto absent = app::ReadEvolveInput(evolve(""));
   const auto zero = app::ReadEvolveInput(evolve(R"("cache_mb": 0)"));
@@ -1128,9 +1613,9 @@ TEST_F(AppsTest, CacheMbIsReadAndChecked) {
   EXPECT_EQ(app::OperatorOptions(zero, *rheology).cache_bytes, library);
   EXPECT_EQ(app::OperatorOptions(set, *rheology).cache_bytes,
             std::size_t{32} << 20);
-  EXPECT_EQ(app::ReadStaticInput(staticConfig("")).cache_mb, 0u);
+  EXPECT_EQ(app::ReadResponseInput(responseConfig("")).solver.cache_mb, 0u);
   EXPECT_EQ(
-      app::ReadStaticInput(staticConfig(R"( "cache_mb": 16,)")).cache_mb,
+      app::ReadResponseInput(responseConfig(R"("cache_mb": 16)")).solver.cache_mb,
       16u);
 
   // refused naming the member: negative, fractional, or not a number
@@ -1156,7 +1641,7 @@ TEST_F(AppsTest, CacheMbIsReadAndChecked) {
         std::pair{R"("32")", "expected a number"}}) {
     const auto member = std::string{R"("cache_mb": )"} + bad;
     refused(app::ReadEvolveInput, evolve(member), what);
-    refused(app::ReadStaticInput, staticConfig(" " + member + ","), what);
+    refused(app::ReadResponseInput, responseConfig(member), what);
   }
 }
 

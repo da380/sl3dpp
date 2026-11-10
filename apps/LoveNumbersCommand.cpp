@@ -13,18 +13,6 @@
 
 namespace sl3dpp::app {
 
-DeckFormat FormatOf(ModelFormat format) {
-  switch (format) {
-    case ModelFormat::Gia:
-      return GiaFormat();
-    case ModelFormat::Mineos:
-      return MineosFormat();
-    case ModelFormat::Elastic:
-      break;
-  }
-  return DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0);
-}
-
 namespace {
 
 /// The members every model-bearing config shares.

@@ -4,8 +4,8 @@ ICE-7G configs too), then `poetry run python plot_app.py` from
 build/examples. The outputs in configs/out/ are read with planetmodel's own
 readers, and one figure per command is written beside this script:
 app_love_numbers.png, app_fingerprint.png, app_evolve.png,
-app_evolve1d_calibrated.png, app_kernels1d.png and app_kernels3d.png,
-plus app_evolve1d_ice7g_calibrated.png, app_fingerprint_ice7g.png
+app_evolve1d_calibrated.png, app_kernels1d.png, app_kernels3d.png and
+app_response.png, plus app_evolve1d_ice7g_calibrated.png, app_fingerprint_ice7g.png
 and app_evolve1d_ice7g.png where the ICE-7G runs exist. A missing output
 skips its figure.
 """
@@ -351,8 +351,8 @@ def kernels3d() -> None:
     print("wrote app_kernels3d.png")
 
 
-def static() -> None:
-    path = OUT / "static.nc"
+def response() -> None:
+    path = OUT / "response.nc"
     if not path.exists():
         return
     ex = surface(path, ["displacement", "displacement_radial_model", "potential"])
@@ -367,11 +367,11 @@ def static() -> None:
         mesh = plot_field(ax, ex, name, title=title)
         mark_sites(ax, [HUDSON_BAY])
         fig.colorbar(mesh, ax=ax, shrink=0.7)
-    fig.suptitle("sl3d static: a cap load over Hudson Bay on the synthetic 3D "
+    fig.suptitle("sl3d response: a cap load over Hudson Bay on the synthetic 3D "
                  "elastic Earth")
     fig.tight_layout()
-    fig.savefig("app_static.png", dpi=150)
-    print("wrote app_static.png")
+    fig.savefig("app_response.png", dpi=150)
+    print("wrote app_response.png")
 
 
 if __name__ == "__main__":
@@ -394,4 +394,4 @@ if __name__ == "__main__":
     evolve_ice7g()
     kernels1d()
     kernels3d()
-    static()
+    response()

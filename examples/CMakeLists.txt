@@ -37,7 +37,8 @@ add_custom_target(sl3dpp_synthetic_earth ALL
 
 # The synthetic 3D elastic Earth (the PREM-like deck's moduli with a
 # lateral perturbation of the upper mantle as a planetmodel model file),
-# likewise written by the build, for the static example and config.
+# likewise written by the build, for the 3D static example and the
+# response config.
 sl3dpp_add_example(MakeSyntheticModuli)
 add_custom_command(
   OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/synthetic_moduli.nc

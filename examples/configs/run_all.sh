@@ -29,7 +29,7 @@ run evolve evolve.json
 run evolve evolve_calibrated.json
 run kernel1d kernel1d.json
 run kernel kernel.json
-run static static.json
+run response response.json
 
 if [[ -f ../ice7g.nc ]]; then
   run fingerprint fingerprint_ice7g.json

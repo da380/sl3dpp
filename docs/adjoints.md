@@ -1035,7 +1035,7 @@ coefficients of the same form), lateral
 δρ (the hydrostatic background does not admit it, §13l), and
 distribution of the static solve (OpenMP over the grid pipeline only).
 
-The program: `sl3d static` (apps/StaticCommand.cpp) runs this problem
+The program: `sl3d response` (apps/ResponseCommand.cpp) runs this problem
 on a model file's lateral moduli (io::ModelModuli:
 the relative perturbations of its `mu` and `kappa` about their lateral
 means or a stored radial reference) through the stepper's conjugate
@@ -1044,7 +1044,7 @@ with the radial model's response from ElasticPerturbation3D beside it;
 it writes the surface fields, the surface coefficients in the
 benchmarks' exchange form, and the response at the memory nodes as a
 model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
-planetmodel's cutaways. ExampleStatic3D and `configs/static.json` run
+planetmodel's cutaways. ExampleStatic3D and `configs/response.json` run
 it on the synthetic 3D elastic Earth the build writes
 (MakeSyntheticModuli, io::WriteModuli).
 
@@ -1236,7 +1236,7 @@ whole solid sampling the functions; `GridCoupling::Options::
 active_elements`), so a perturbation confined to the mantle costs no
 lithosphere or inner-core nodes.
 
-Two properties of the distribution, which the program's `static`
+Two properties of the distribution, which the program's `response`
 command relies on. Whether an operator has lateral moduli is a
 property of the RUN, not of a rank: with the moduli confined to the
 upper mantle, an inner rank's segment holds no element where they are
@@ -1246,7 +1246,7 @@ every rank must take the lateral route, since the solve is collective
 `RadialRanks.ConfinedLateralModuliMatchTheOneProcessStatic` holds a
 node-less rank to the one-process answer). And the rank cuts balance
 the transform work of the coupling's nodes, which for a branchless
-rheology the rheology does not know: the static command weights the
+rheology the rheology does not know: the response command weights the
 active elements the moduli make (`OperatorOptions` takes them), or the
 partition is degenerate and the conjugate gradients stall.
 

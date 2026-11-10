@@ -15,6 +15,7 @@ sl3d <command> <config.json>
 | `evolve` | its 3D counterpart, the viscosity read from a planetmodel model file | a surface file of histories |
 | `kernel1d` | adjoint sensitivity kernels of configured measurements, 1D | a directory of kernel files |
 | `kernel` | their 3D counterpart | a directory of kernel files |
+| `response` | the elastic response to a prescribed surface load and tide, no ocean; 1D or 3D as the model's moduli make it | a surface file, and optionally a coefficient table and a model file |
 
 ## Running sl3d
 
@@ -35,7 +36,7 @@ sl3d <command> <config.json>
 ### Over MPI ranks
 
 Built with the CMake option `SL3DPP_WITH_MPI`, `evolve`, `kernel` and
-`static` run under `mpiexec` over several ranks, the same config on every
+`response` run under `mpiexec` over several ranks, the same config on every
 rank:
 
 ```
@@ -82,6 +83,14 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 - Members whose values are words (`"rotation": "full"`) take exactly the
   words listed in the tables below.
 
+### Blocks
+
+`response` reads its config as blocks, JSON objects each read by one
+piece of code: `model` (the deck, its format and the lateral moduli),
+`forcing` (the load and the tide), `solver` (the 3D solve's tolerance,
+budget and transforms) and `output` (the files written), with `lmax`
+beside them. The other commands keep the layouts documented with each.
+
 ### Units and conventions
 
 - Files are SI throughout: lengths in metres, viscosities in Pa s, times in
@@ -91,7 +100,7 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
   is the time -D kyr: the time axes of the files sl3d writes are in seconds
   relative to the present, negative in the past.
 - Latitudes and longitudes are in degrees, latitude north positive and
-  longitude east positive; cap widths are in degrees.
+  longitude east positive; cap widths and disk radii are in degrees.
 - `rotation` chooses the rotational feedback: `"none"`, `"axial"` (the
   length-of-day change alone) or `"full"` (polar wander as well); the
   default is `"full"` wherever the member is accepted.
@@ -99,7 +108,8 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 ### Earth models
 
 `model` names a deck: a table of knots, radius first, in which a repeated
-radius marks a layer boundary. `model_format` says which kind:
+radius marks a layer boundary. `model_format` says which kind (in
+`response`'s `model` block the two are `model.deck` and `model.format`):
 
 | `model_format` | Header lines | Columns after the radius |
 | --- | --- | --- |
@@ -128,7 +138,8 @@ writes one from ICE-5G, ICE-6G or ICE-7G, holding the `ice_thickness` and
 
 - A present-day state (`state.file`) must hold the fields `ice_thickness`
   and `topography`; an ice history (`ice_history.file`) must hold
-  `ice_thickness`. The two may be the same file.
+  `ice_thickness`. The two may be the same file. A `field` load term of
+  `response` is read from a surface file the same way.
 - Fields are resampled once onto the run's Gauss–Legendre grid at `lmax`,
   by each field's own lateral interpolation rule, and converted to SI by
   their declared dimensions (a field declaring none is used as it stands).
@@ -533,79 +544,244 @@ is read at the window's end alone.
 
 The first is an `evolve1d` config; the second needs `evolve`.
 
-## static
+## response
 
-The instantaneous (elastic) response of a laterally heterogeneous elastic
-Earth to a surface load and a tidal potential, with no sea level: the 3D
-static problem (docs/adjoints.md §13j) closed by preconditioned
-conjugate gradients on the radial systems, over MPI ranks like `evolve`.
-The radial model's response to the same forcing is written beside it.
+The planet's response to a prescribed surface load and external tidal
+potential, with no ocean: no sea level equation is solved. The config is
+made of blocks (Blocks, above): `model`, `forcing`, `solver` and
+`output`, with `lmax` beside them. It is the instantaneous elastic
+response; a `times` block, which a viscoelastic response would take, is
+refused (the viscoelastic response is not built yet).
+
+Whether the run is 1D or 3D is decided by the `model` block alone:
+
+- with no `moduli`, or with a moduli file whose perturbations do not vary
+  laterally, the run is the radial model's, by direct per-degree solves;
+- with laterally varying moduli it is the 3D static problem
+  (docs/adjoints.md §13j), closed by preconditioned conjugate gradients
+  on the radial systems, over MPI ranks like `evolve`, and the radial
+  model's response to the same forcing is written beside it.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `model` | path | required | the deck |
-| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
+| `model` | object | required | the Earth model (below) |
 | `lmax` | integer >= 1 | required | the degree of the solve and of its grid |
-| `moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli (below); absent, the radial model alone |
-| `moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
-| `load.latitude`, `load.longitude` | number | required with `load` | the cap's centre, degrees |
-| `load.width_deg` | number > 0 | required with `load` | the Gaussian cap's width, degrees |
-| `load.amplitude_kg_m2` | number | required with `load` | the surface mass density at the cap's centre |
-| `tide.degree` | integer in [2, lmax] | required with `tide` | the tidal potential's degree |
-| `tide.order` | integer in [0, degree] | 0 | its order (m >= 0: the field is real) |
-| `tide.amplitude_m2_s2`, `tide.imaginary_m2_s2` | number | required / 0 | the coefficient's real and imaginary parts (imaginary zero at order 0) |
-| `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual |
-| `solver.max_iterations` | integer >= 1 | 200 | their budget |
-| `transform_degrees` | integers in [2, lmax] | absent | the transforms cut with depth, as `evolve`'s |
-| `cache_mb` | integer >= 0 | 0 | the cache in MiB that every transform grid of the run blocks its work for (the forcing's, the radial reference's and the 3D operator's), as `evolve`'s `coupled.cache_mb`; the results are bitwise independent of it |
-| `output` | path | required | the surface file to write |
-| `exchange_output` | path | absent | the surface coefficients as a cross-code exchange table |
-| `volume_output` | path | absent | the response inside the body as a planetmodel model file |
+| `forcing` | object | required | the load and the tide (below) |
+| `solver` | object | absent | the 3D solve's tolerance, budget and transforms (below) |
+| `output` | object | required | the files to write (below) |
 
-At least one of `load` and `tide` is needed. The cap is Gaussian in
-great-circle distance d from its centre, weighted exp(-d^2 / (2 w^2))
-with no cut-off. The moduli file holds absolute moduli (planetmodel's
-`mu` and `kappa`, Pa), as planetmodel's conversion of a tomography model
-or `io::WriteModuli` writes them; the command takes their RELATIVE
-lateral perturbations, mu(x) / mu_ref(r) - 1, about the chosen
-reference, and applies them to the deck's own radial moduli — so the
-file should be built from the deck's radial model, and its lateral mean
-is not checked against the deck. A fluid layer takes no shear
+### The model block
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `model.deck` | path | required | the deck (Earth models, above) |
+| `model.format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"`, the words of `model_format` |
+| `model.moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli; absent, the radial model alone |
+| `model.moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
+
+`model.viscosity` is refused: a viscosity needs a `times` block, which
+`response` does not take yet. The moduli file holds absolute moduli
+(planetmodel's `mu` and `kappa`, Pa), as planetmodel's conversion of a
+tomography model or `io::WriteModuli` writes them; the command takes
+their RELATIVE lateral perturbations, mu(x) / mu_ref(r) - 1, about the
+chosen reference, and applies them to the deck's own radial moduli — so
+the file should be built from the deck's radial model, and its lateral
+mean is not checked against the deck. A fluid layer takes no shear
 perturbation (the fluid form has no grid pipeline).
 
-The surface file holds `load` (kg m^-2), `displacement` (the radial
+### The forcing block
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `forcing.load` | array | absent | the load terms, summed (below) |
+| `forcing.tide` | array | absent | the tide coefficients, summed (below) |
+
+At least one load term or tide coefficient is needed. Every term is a
+fixed pattern: an amplitude history (`history_kyr`) is refused, since it
+needs a `times` block.
+
+**Load terms.** Each element of `forcing.load` is an object with exactly
+one member, naming the term's kind; its value holds the term's members.
+Each is a surface mass density in kg m^-2:
+
+| Kind | Members | Surface mass density |
+| --- | --- | --- |
+| `cap` | `latitude`, `longitude`, `width_deg` (> 0), `amplitude_kg_m2` | A exp(-d^2 / (2 w^2)), with d the great-circle distance from the centre, w = `width_deg` and A = `amplitude_kg_m2`; no cut-off |
+| `disk` | `latitude`, `longitude`, `radius_deg` (in (0, 180]), `amplitude_kg_m2` | A where d <= alpha (alpha = `radius_deg`), zero outside |
+| `field` | `file`, `name` (default `"load"`) | the field `name` of a planetmodel surface file |
+| `coefficients` | `file` | the coefficients in a text table |
+
+All members are required but `name`; latitudes lie in [-90, 90].
+
+- `cap` is sampled at the run's grid points and expanded by the grid's
+  quadrature.
+- `disk` is not sampled across its edge but expanded exactly to `lmax`.
+  By the Funk–Hecke theorem its coefficients are
+
+  ```
+  f_lm = 2 pi A I_l conj(Y_lm(theta_0, phi_0))
+  I_0 = 1 - cos(alpha)
+  I_l = sin(alpha) P_l^1(cos(alpha)) / (l (l + 1))     (l >= 1)
+  ```
+
+  with I_l the integral of the Legendre polynomial P_l over
+  [cos(alpha), 1], P_l^1 the associated Legendre function without the
+  Condon–Shortley phase (by its upward recurrence), (theta_0, phi_0) the
+  centre and Y_lm the harmonics of the coefficient tables below. The load
+  is this truncated exact expansion, so it rings at the disk's edge as a
+  band-limited step does; its mean is A (1 - cos(alpha)) / 2.
+- `field` is read as present-day states and ice histories are (above):
+  resampled onto the run's Gauss–Legendre grid by the field's own lateral
+  rule and converted to SI by its declared dimensions (a field declaring
+  none is used as it stands, so it should hold kg m^-2), then expanded by
+  the grid's quadrature. A file with a time axis is refused: a load that
+  varies in time needs a `times` block.
+- `coefficients` names a text table. Lines starting with `#` and blank
+  lines are skipped; every other line is a row `l m re im`: integers
+  0 <= m <= l and the real and imaginary parts of the coefficient f_lm of
+  the surface mass density, in kg m^-2. The harmonics are the exchange
+  table's (Outputs, below): the library's complex orthonormal harmonics
+  with the Condon–Shortley phase,
+  Y_lm(theta, phi) = sqrt((2l + 1) / (4 pi)) d^l_0m(theta) e^(i m phi),
+  each squared modulus integrating to 1 over the unit sphere; the field is
+  real, so the coefficients of m < 0 follow as
+  f_(l,-m) = (-1)^m conj(f_lm) and the imaginary part at m = 0 must be
+  zero. From the real orthonormal coefficients a_lm (cosine) and b_lm
+  (sine) of pyshtools' `"ortho"` normalisation without the Condon–Shortley
+  phase, f_l0 = a_l0 and f_lm = (-1)^m (a_lm - i b_lm) / sqrt(2) for
+  m > 0. Degrees absent from the table are zero; a degree above `lmax`, a
+  row given twice or a malformed row is refused, naming the line.
+
+The load applied is the sum of the terms' coefficients. The `load` field
+written is the sum of each term's field at the grid points whose
+expansion is that term's coefficients: a cap's and a field's values as
+sampled, a disk's and a table's synthesised from their coefficients.
+
+**Tide coefficients.** Each element of `forcing.tide` is one coefficient
+of the external potential, in the harmonics of the coefficient tables;
+coefficients of the same degree and order add.
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `degree` | integer in [2, lmax] | required | the degree |
+| `order` | integer in [0, degree] | 0 | the order (m >= 0: the potential is real) |
+| `amplitude_m2_s2` | number | required | the coefficient's real part, m^2 s^-2 |
+| `imaginary_m2_s2` | number | 0 | its imaginary part, zero at order 0 |
+
+### The solver block
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual (3D) |
+| `solver.max_iterations` | integer >= 1 | 200 | their budget; a solve that runs out of it is an error |
+| `solver.transform_degrees` | integers in [2, lmax] | absent | the 3D coupling's transforms cut with depth, as `evolve`'s `coupled.transform_degrees` |
+| `solver.cache_mb` | integer >= 0 | 0 | the cache in MiB that every transform grid of the run blocks its work for (the forcing's, the radial reference's and the 3D operator's), as `evolve`'s `coupled.cache_mb`; the results are bitwise independent of it |
+
+### The output block
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `output.surface` | path | required | the surface file to write |
+| `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table |
+| `output.volume` | path | absent | the response inside the body as a planetmodel model file |
+
+### Outputs
+
+The surface file, on the run's Gauss–Legendre grid, holds `load`
+(kg m^-2, with a load term: the field above), `displacement` (the radial
 displacement, m), `tangential_potential` (V, m: the tangential
 displacement is its surface gradient), `potential` (m^2 s^-2) and, under
 lateral moduli, `displacement_radial_model` and `potential_radial_model`,
-the radial model's under the same forcing; the metadata carry the
-forcing, the solve's iterations and residual and `lateral`. The exchange
-table is the format of AdGIA's benchmarks: `#` provenance lines, named
-scalars (`radius`, `surface_gravity`, `lmax`, `lateral`, the cap and the
-tide) and `columns l m U_re U_im Phi_re Phi_im`, the m >= 0 coefficients
-of the surface displacement (m) and potential (m^2 s^-2) in real
-orthonormal harmonics with f_(l,-m) = (-1)^m conj(f_lm), SI, `%.17g`.
+the radial model's under the same forcing. Its metadata record the config,
+deck and moduli paths, `lateral` (1 for the 3D solve), `load_terms` and
+`tide_coefficients` (the counts), `forcing` (each term described, `; `
+between them) and `solve_iterations` and `solve_residual` (0 in 1D); when
+the load is exactly one `cap`, also `load_latitude_deg`,
+`load_longitude_deg`, `load_width_deg` and `load_amplitude_kg_m2`, and
+when the tide is exactly one coefficient, `tide_degree`, `tide_order`,
+`tide_amplitude_m2_s2` and `tide_imaginary_m2_s2`.
+
+The exchange table is the format of AdGIA's benchmarks:
+
+- `#` provenance lines: what the table holds, the code's version and the
+  date, the config, deck and moduli paths, and a line `# forcing ...`
+  describing each load term and tide coefficient;
+- named scalars, one per line as `name value`: `radius` (m),
+  `surface_gravity` (m s^-2), `lmax`, `lateral`, `load_terms` and
+  `tide_coefficients`; then, when the load is exactly one `cap`,
+  `cap_latitude_deg`, `cap_longitude_deg`, `cap_width_deg` and
+  `cap_amplitude_kg_m2`, and when the tide is exactly one coefficient,
+  `tide_degree`, `tide_order` and `tide_amplitude_m2_s2` (two numbers,
+  the real and imaginary parts), so that a table of one cap and one tide
+  carries the same scalars whatever else it holds;
+- `columns l m U_re U_im Phi_re Phi_im` and one row per (l, m), m >= 0:
+  the coefficients of the surface displacement (m) and potential
+  (m^2 s^-2) in the harmonics of the coefficient tables above, SI,
+  `%.17g`.
+
 The volume file holds `radial_displacement` (m), `deviatoric_strain`
 (sqrt(e:e), dimensionless) and, under lateral moduli, `mu_relative` and
 `kappa_relative` (the perturbations applied) at the memory nodes of every
 solid element but the one holding the centre, with the model's density
 as the radial reference; planetmodel's `slices.cutaway` and
-`plotting.cutaway` draw it (`examples/python/plot_static_3d.py`).
+`plotting.cutaway` draw it (as `examples/python/plot_static_3d.py` does
+for the library's example of the same problem).
 
-Summary: `wrote <output> [and <exchange_output>] [and <volume_output>] (<n>
-conjugate-gradient iterations, residual <r>)`, or `(radial model)`.
+Summary: what the config was taken to mean, then the files:
+`<model>, elastic, <forcing>; wrote <surface> [and <exchange>] [and
+<volume>]`, ending under lateral moduli in `(<n> conjugate-gradient
+iterations, residual <r>)`. `<model>` is `3-D (lateral moduli)`, `1-D`,
+or `1-D (the moduli file is radial)`; `<forcing>` is `load (<n> term[s])`,
+`tide (<n> coefficient[s])`, or both joined by ` + `. The example config
+`examples/configs/response.json` prints
+
+```
+sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficient); wrote out/response.nc and out/response.txt and out/response_volume.nc (5 conjugate-gradient iterations, residual 3.52e-11) in 1.29 s
+```
+
+### Examples
 
 ```json
 {
-  "model": "prem8.elastic.deck",
-  "model_format": "elastic",
-  "lmax": 64,
-  "moduli": {"file": "s40rts_moduli.nc"},
-  "load": {"latitude": 60.0, "longitude": -85.0, "width_deg": 10.0,
-           "amplitude_kg_m2": 1.834e6},
-  "output": "out/static.nc",
-  "exchange_output": "out/static.txt",
-  "volume_output": "out/static_volume.nc"
+  "model": {"deck": "earth.deck"},
+  "lmax": 128,
+  "forcing": {
+    "load": [{"disk": {"latitude": 64, "longitude": 20, "radius_deg": 6,
+                       "amplitude_kg_m2": 1.0e5}}]
+  },
+  "output": {"surface": "out/disk.nc"}
 }
+```
+
+```json
+{
+  "model":   {"deck": "prem.deck", "format": "elastic",
+              "moduli": {"file": "s40rts_moduli.nc", "reference": "lateral_mean"}},
+  "lmax":    64,
+  "forcing": {
+    "load": [
+      {"cap":  {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6}},
+      {"disk": {"latitude": -75, "longitude": 0, "radius_deg": 8, "amplitude_kg_m2": -9.0e5}},
+      {"field": {"file": "load.nc", "name": "load"}},
+      {"coefficients": {"file": "load_lm.txt"}}
+    ],
+    "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0, "imaginary_m2_s2": 0.0}]
+  },
+  "solver":  {"rtol": 1e-10, "max_iterations": 200, "transform_degrees": [16, 32], "cache_mb": 0},
+  "output":  {"surface": "out/response.nc", "exchange": "out/response.txt", "volume": "out/response_volume.nc"}
+}
+```
+
+The first is a 1D run (the deck's radial model); the second solves the
+3D problem under the lateral moduli of `s40rts_moduli.nc`.
+
+A coefficient table, degrees 0 and 2 of a load (the m = 0 rows real):
+
+```
+# a load's coefficients, kg m^-2
+0 0 3.5e3 0
+2 0 -1.2e3 0
+2 1 4.0e2 -2.5e2
 ```
 
 ## kernel1d and kernel

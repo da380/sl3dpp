@@ -5,7 +5,7 @@
  * isotropic moduli with a lateral perturbation of the upper mantle, in
  * the form planetmodel's conversion of a tomography model writes (the
  * `mu` and `kappa` fields of its vocabulary), so that the 3D static
- * example and the `sl3d static` config run with no data to fetch.
+ * example and the `sl3d response` config run with no data to fetch.
  *
  * The perturbation is a toy: a stiff "craton" under the Canadian shield
  * (+8% shear), a soft "ridge" under the eastern Pacific (-6%), and a

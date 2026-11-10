@@ -5,9 +5,9 @@
  * @brief The processes a run of sl3d spans: one, or, built with
  * SL3DPP_WITH_MPI and started under mpiexec, the ranks of MPI_COMM_WORLD.
  *
- * On several ranks the 3D commands (evolve, kernel) distribute their run
- * over radius, one radial segment per rank balanced on the transform
- * work (docs/radial-partitioning.md): every rank reads the
+ * On several ranks the 3D commands (evolve, kernel, response) distribute
+ * their run over radius, one radial segment per rank balanced on the
+ * transform work (docs/radial-partitioning.md): every rank reads the
  * config and the inputs, steps its own memory nodes, and solves the sea
  * level equation alike; rank 0 alone writes the outputs and prints. Each
  * rank checkpoints its own state into its own subdirectory of the
