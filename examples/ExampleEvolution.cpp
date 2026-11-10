@@ -5,19 +5,19 @@
  * generalised SLE closing each step, full rotational feedback.
  *
  * 20% of the West Antarctic ice of the present-day state (the synthetic
- * Earth, or ICE-7G with `--state ice7g.nc`) melts linearly over the first
+ * Earth, or ICE-7G with `--state data/ice7g.nc`) melts linearly over the first
  * 5 kyr and the load
  * is then held for another 10 kyr: the elastic response appears
  * instantly, the viscous mantle keeps relaxing long after the melting
  * stops. A PREM-like deck with a 1e21 Pa s Maxwell mantle.
  *
- * Outputs (SI): a time series of the sea-level change at three sites and
- * the polar/rotational response, and maps at the end of melting and the
- * end of the run.
+ * Outputs (SI), in output/library/evolution/evolution.txt: a time series of
+ * the sea-level change at three sites and the polar/rotational response,
+ * and maps at the end of melting and the end of the run.
  *
  *   ExampleEvolution [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_evolution.py.
+ * Run from build/examples; plot with python/plot_evolution.py.
  */
 
 #include <format>
@@ -117,7 +117,8 @@ int main(int argc, char** argv) {
     return field[bi * lons.size() + bj];
   };
 
-  examples::Writer out("evolution.txt");
+  const auto table = examples::OutputDirectory("evolution") / "evolution.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "1D viscoelastic GIA: 20% West Antarctic melt over 5 kyr, held to "
@@ -149,6 +150,7 @@ int main(int argc, char** argv) {
   out.Field("displacement_final_m", snapshots.back().displacement, length);
   out.Scalar("melt_end_kyr", 5.0);
 
-  std::cout << "wrote evolution.txt (" << snapshots.size() << " nodes)\n";
+  std::cout << "wrote " << table.string() << " (" << snapshots.size()
+            << " nodes)\n";
   return 0;
 }

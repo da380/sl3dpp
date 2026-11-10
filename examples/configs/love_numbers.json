@@ -1,6 +1,6 @@
 {
-  "model": "../prem8.elastic.deck",
+  "model": "../data/prem8.elastic.deck",
   "model_format": "elastic",
   "lmax": 256,
-  "output": "out/love_numbers.txt"
+  "output": "out/love_numbers/love_numbers.txt"
 }

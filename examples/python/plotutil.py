@@ -12,8 +12,10 @@ on it (real coastlines would mislead over its toy continents).
 Maps use cartopy (Robinson projection, coastlines) when it is importable
 — the poetry environment provides it — and fall back to a plain
 lat/lon pcolormesh otherwise, so the scripts run anywhere matplotlib
-does. Everything is read from and written to the CURRENT directory: run
-these from build/examples, never from the source tree.
+does. Every path is relative to the CURRENT directory, which is
+build/examples (never the source tree): the inputs are in data/, a
+library example's outputs in output/library/<example>/, and the figures
+go to figures/library/ and figures/sl3d/<config>/.
 """
 from __future__ import annotations
 
@@ -29,10 +31,31 @@ except Exception:  # pragma: no cover - environment dependent
     HAVE_CARTOPY = False
 
 
+DATA = Path("data")
+SYNTHETIC_EARTH = DATA / "synthetic_earth.nc"
+
+
+def library_output(example: str, name: str) -> Path:
+    """A file a library example wrote: output/library/<example>/<name>."""
+    return Path("output") / "library" / example / name
+
+
+def library_figure(name: str) -> Path:
+    """A library example's figure: figures/library/<name>.png."""
+    return Path("figures") / "library" / f"{name}.png"
+
+
+def save_figure(fig, path: Path, dpi: int = 180) -> None:
+    """Writes a figure, creating its directory, and says so."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(path, dpi=dpi)
+    print(f"wrote {path}")
+
+
 class Example:
     """One example's outputs: fields, series and scalars by name."""
 
-    def __init__(self, path: str):
+    def __init__(self, path: str | Path):
         self.fields: dict[str, np.ndarray] = {}
         self.series: dict[str, np.ndarray] = {}
         self.scalars: dict[str, float] = {}
@@ -118,9 +141,9 @@ def world_map(fig, rows, cols, index, state=None, central_longitude=0.0,
               extent=None):
     """A map axes with the coastline that belongs to the data: for the
     synthetic Earth, its own present-day coastline (where its topography
-    crosses sea level, read from synthetic_earth.nc in the current
-    directory); for any other state, the real one. `state` is a state file
-    name, or an Example, whose '# state' comment is used. `extent`, as
+    crosses sea level, read from data/synthetic_earth.nc); for any other
+    state, the real one. `state` is a state file name, or an Example, whose
+    '# state' comment is used. `extent`, as
     (west, east, south, north) in degrees, shows a region instead of the
     globe."""
     if isinstance(state, Example):
@@ -134,7 +157,7 @@ def world_map(fig, rows, cols, index, state=None, central_longitude=0.0,
     try:
         from planetmodel.surfacefile import read_surface_file
 
-        file = read_surface_file(Path(state or "synthetic_earth.nc"))
+        file = read_surface_file(Path(state) if state else SYNTHETIC_EARTH)
         topography = np.asarray(file.variables["topography"].values)[-1]
         lats = 90.0 - np.rad2deg(np.asarray(file.grid.colatitudes))
         lons = np.rad2deg(np.asarray(file.grid.longitudes))

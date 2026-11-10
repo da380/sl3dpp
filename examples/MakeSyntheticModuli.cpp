@@ -15,7 +15,9 @@
  * reader's split against the lateral mean (io::ModelModuli) is the one
  * that gives these back less their means.
  *
- * The build runs it, writing synthetic_moduli.nc beside the examples:
+ * The build runs it from build/examples, reading the deck in data/ and
+ * writing the examples' input data/synthetic_moduli.nc (the default
+ * output):
  *
  *   MakeSyntheticModuli [output.nc]
  */
@@ -64,7 +66,8 @@ double Bulk(double r, double theta, double phi) { return 0.4 * Shear(r, theta, p
 }  // namespace
 
 int main(int argc, char** argv) {
-  const auto output = std::string{argc > 1 ? argv[1] : "synthetic_moduli.nc"};
+  const auto output = argc > 1 ? std::filesystem::path{argv[1]}
+                               : examples::DataFile("synthetic_moduli.nc");
   const auto earth = examples::Earth::Make(kLmax, 1e21);
   const sl3dpp::SurfaceGrid grid(kLmax);
   const auto written = sl3dpp::io::WriteModuli(
@@ -74,6 +77,6 @@ int main(int argc, char** argv) {
     std::cerr << "MakeSyntheticModuli: " << written.error().message << "\n";
     return 1;
   }
-  std::cout << "wrote " << output << "\n";
+  std::cout << "wrote " << output.string() << "\n";
   return 0;
 }

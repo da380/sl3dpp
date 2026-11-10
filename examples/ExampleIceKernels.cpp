@@ -22,9 +22,11 @@
  *   path) and the exact discrete transpose: their agreement is the
  *   resolution diagnostic (docs/adjoints.md §1).
  *
+ * Outputs: output/library/ice_kernels/ice_kernels.txt.
+ *
  *   ExampleIceKernels [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_kernels.py.
+ * Run from build/examples; plot with python/plot_kernels.py.
  */
 
 #include <format>
@@ -128,7 +130,9 @@ int main(int argc, char** argv) {
   measurements[nodes - 1].seaLevelDual = site;
   for (auto& v : measurements[nodes - 1].seaLevelDual) v /= norm;
 
-  examples::Writer out("kernels.txt");
+  const auto table =
+      examples::OutputDirectory("ice_kernels") / "ice_kernels.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "adjoint kernels of the site-mean sea level at 10 kyr under a "
@@ -208,6 +212,6 @@ int main(int argc, char** argv) {
     out.Series("viscosity_kernel_" + tag, {"r_km", "dJ_deta"}, rows);
   }
 
-  std::cout << "wrote kernels.txt\n";
+  std::cout << "wrote " << table.string() << "\n";
   return 0;
 }

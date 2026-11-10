@@ -2,13 +2,13 @@
 # Runs every example config through sl3d, from build/examples/configs (where the
 # build copies this directory), and stops at the first failure. The
 # synthetic Earth configs always run; the ICE-7G ones run only once
-# ../ice7g.nc exists (python get_ice7g.py, from build/examples, writes it).
-# CI calls this.
+# ../data/ice7g.nc exists (python get_ice7g.py, from build/examples, writes
+# it). CI calls this.
 #
 #   cd build/examples/configs && ./run_all.sh
 #
 # SL3D names the program (default ../../apps/sl3d); OMP_NUM_THREADS sets
-# its threads. Outputs land in out/.
+# its threads. Each config's outputs land in out/<config>/.
 set -euo pipefail
 cd "$(dirname "$0")"
 sl3d=${SL3D:-../../apps/sl3d}
@@ -34,11 +34,11 @@ run sea-level sea_level_3d_calibrated.json
 run kernel1d kernel1d.json
 run kernel kernel.json
 
-if [[ -f ../ice7g.nc ]]; then
+if [[ -f ../data/ice7g.nc ]]; then
   run sea-level sea_level_fingerprint_ice7g.json
   run sea-level sea_level_1d_ice7g.json
   run sea-level sea_level_1d_ice7g_calibrated.json
 else
-  echo "run_all.sh: no ../ice7g.nc, so the ICE-7G configs are skipped" \
+  echo "run_all.sh: no ../data/ice7g.nc, so the ICE-7G configs are skipped" \
        "(python get_ice7g.py in build/examples writes it)"
 fi

@@ -1,15 +1,15 @@
 {
-  "model": {"deck": "prem8.gia.deck", "format": "maxwell",
-            "viscosity": {"file": "../viscosity_log.nc",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/viscosity_log.nc",
                           "reference": "geometric_mean"}},
   "lmax": 16,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
-    "state": {"file": "../synthetic_earth.nc"},
-    "ice": {"file": "../synthetic_earth.nc"}
+    "state": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
   "moments": "hydrostatic",
   "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
-  "output": {"surface": "out/sea_level_3d.nc"}
+  "output": {"surface": "out/sea_level_3d/sea_level_3d.nc"}
 }

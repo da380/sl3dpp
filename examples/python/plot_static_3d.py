@@ -1,8 +1,10 @@
 """The 3D static response: the synthetic lateral shear modulus and the
 radial displacement under a Hudson Bay cap load as planetmodel cutaways
 of the body, and the surface displacement with its departure from the
-radial model's as maps. Reads synthetic_moduli.nc, static_3d.txt and
-static_3d_volume.nc from the current directory (ExampleStatic3D)."""
+radial model's as maps: run ExampleStatic3D first, then
+`poetry run python plot_static_3d.py` from build/examples. Reads
+data/synthetic_moduli.nc, and static_3d.txt and static_3d_volume.nc from
+output/library/static_3d/; writes figures/library/static_3d.png."""
 
 import matplotlib
 
@@ -13,13 +15,14 @@ from planetmodel import slices
 from planetmodel.modelfile import read_model
 from planetmodel.plotting import cutaway
 
-from plotutil import Example, world_map, mark_sites, plot_field
+from plotutil import (DATA, Example, library_figure, library_output,
+                      mark_sites, plot_field, save_figure, world_map)
 
-ex = Example("static_3d.txt")
+ex = Example(library_output("static_3d", "static_3d.txt"))
 site = [(ex.scalars["site_lat"], ex.scalars["site_lon"])]
 
-moduli = read_model("synthetic_moduli.nc")
-response = read_model("static_3d_volume.nc")
+moduli = read_model(DATA / "synthetic_moduli.nc")
+response = read_model(library_output("static_3d", "static_3d_volume.nc"))
 cmb = 3480.0e3
 # a wedge over the Americas, the northern hemisphere cut, the core left
 # standing: the craton under Hudson Bay on the faces and the surface
@@ -56,5 +59,4 @@ fig.suptitle(
     "the static response of a laterally heterogeneous elastic Earth to a cap "
     f"load ({int(ex.scalars['cg_iterations'])} conjugate-gradient iterations)")
 fig.tight_layout()
-fig.savefig("static_3d.png", dpi=180)
-print("wrote static_3d.png")
+save_figure(fig, library_figure("static_3d"))

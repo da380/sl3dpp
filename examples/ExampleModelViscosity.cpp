@@ -8,24 +8,25 @@
  * eta(x) = eta_bar(r) exp(delta(x)) about its lateral geometric mean:
  * eta_bar is the Maxwell rheology's radial profile and delta the lateral
  * perturbation Viscoelastic3D applies pseudospectrally. The file here is
- * the test suite's (viscosity_log.nc, copied beside the examples): on this
+ * the test suite's (viscosity_log.nc, copied into data/): on this
  * same PREM-like body, 1e21 Pa s with a degree-2 sectoral perturbation
  * delta = 0.4 (r/a)^2 sin^2(theta) cos(2 phi) through the mantle. A file
  * converted from a tomography model by planetmodel is read the same way.
  *
  * The load is the state file's own ice history from 21 ka to the present
  * (the synthetic Earth's glacial cycle, or ICE-7G with
- * `--state ice7g.nc`), relative to 21 ka, with the background state taken
- * at 21 ka. The radial twin uses the file's reference profile alone, so
- * the difference is what the lateral structure does.
+ * `--state data/ice7g.nc`), relative to 21 ka, with the background state
+ * taken at 21 ka. The radial twin uses the file's reference profile alone,
+ * so the difference is what the lateral structure does.
  *
- * Outputs (SI): present-day sea-level change for both runs and their
- * difference, delta at 1000 km depth, the 21 ka ice, and the sea-level
- * histories at two sites near the former ice sheets.
+ * Outputs (SI), in output/library/model_viscosity/model_viscosity.txt:
+ * present-day sea-level change for both runs and their difference, delta
+ * at 1000 km depth, the 21 ka ice, and the sea-level histories at two
+ * sites near the former ice sheets.
  *
  *   ExampleModelViscosity [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_model_viscosity.py.
+ * Run from build/examples; plot with python/plot_model_viscosity.py.
  */
 
 #include <cmath>
@@ -56,10 +57,11 @@ int main(int argc, char** argv) {
       "ExampleModelViscosity: a model file's 3D viscosity at lmax {}, state "
       "{}",
       lmax, options.state.string()));
-  examples::Say("reading viscosity_log.nc; building the 3D operators");
+  const auto viscosityFile = examples::DataFile("viscosity_log.nc");
+  examples::Say(std::format("reading {}; building the 3D operators",
+                            viscosityFile.string()));
   const auto earth = examples::Earth::Make(lmax, 1e21);
-  const auto viscosity =
-      io::ModelViscosity::Read("viscosity_log.nc", earth.model);
+  const auto viscosity = io::ModelViscosity::Read(viscosityFile, earth.model);
   if (!viscosity) {
     std::cerr << viscosity.error().message << "\n";
     return 1;
@@ -121,7 +123,9 @@ int main(int argc, char** argv) {
     }
   }
 
-  examples::Writer out("model_viscosity.txt");
+  const auto table =
+      examples::OutputDirectory("model_viscosity") / "model_viscosity.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D viscosity from viscosity_log.nc against its radial "
@@ -171,8 +175,8 @@ int main(int argc, char** argv) {
   }
 
   const auto& last = rows.back();
-  std::cout << "wrote model_viscosity.txt (present-day sea level at Hudson "
-               "Bay: "
+  std::cout << "wrote " << table.string()
+            << " (present-day sea level at Hudson Bay: "
             << last[1] << " m lateral, " << last[2] << " m radial)\n";
   return 0;
 }

@@ -1,9 +1,12 @@
 """The 3D viscosity-kernel example: run ExampleViscosityKernels3D first,
-then `poetry run python plot_kernels_3d.py` from build/examples.
+then `poetry run python plot_kernels_3d.py` from build/examples. Reads
+output/library/viscosity_kernels_3d/viscosity_kernels_3d.txt and writes
+figures/library/viscosity_kernels_3d.png.
 
-The full kernels are in viscosity_kernels.nc, a planetmodel model file
-(planetmodel's Python reads, draws and integrates it); this script draws
-the depth slices and radial profiles the example also writes as text."""
+The full kernels are in viscosity_kernels.nc beside the text, a
+planetmodel model file (planetmodel's Python reads, draws and integrates
+it); this script draws the depth slices and radial profiles the example
+also writes as text."""
 import re
 
 import matplotlib
@@ -11,9 +14,11 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, world_map, mark_sites, plot_field
+from plotutil import (Example, library_figure, library_output, mark_sites,
+                      plot_field, save_figure, world_map)
 
-ex = Example("kernels_3d.txt")
+ex = Example(library_output("viscosity_kernels_3d",
+                            "viscosity_kernels_3d.txt"))
 site = [(ex.scalars["site_lat"], ex.scalars["site_lon"])]
 
 rows = (("K_ln_eta_sea_level", "sea-level change", "m per km$^3$"),
@@ -51,5 +56,4 @@ fig.suptitle(
     f"(sea-level change since 21 ka {ex.scalars['sea_level_change_m']:.0f} m, "
     f"decay time {ex.scalars['decay_time_kyr']:.2f} kyr)")
 fig.tight_layout()
-fig.savefig("kernels_3d.png", dpi=180)
-print("wrote kernels_3d.png")
+save_figure(fig, library_figure("viscosity_kernels_3d"))

@@ -2,16 +2,17 @@
  * @file ExampleFingerprint.cpp
  * @brief Elastic sea-level fingerprint of a 10% Greenland melt, at full
  * resolution (lmax 256 by default) on the present-day Earth: the synthetic
- * Earth the build writes, or ICE-7G with `--state ice7g.nc`.
+ * Earth the build writes, or ICE-7G with `--state data/ice7g.nc`.
  *
  * One equilibrium solve of the generalised sea level equation with full
  * rotational feedback gives the fingerprint: the near-field sea-level
  * FALL from lost self-attraction and uplift, the far-field rise above
- * the eustatic mean, and the polar motion; all SI.
+ * the eustatic mean, and the polar motion; all SI, in
+ * output/library/fingerprint/fingerprint.txt.
  *
  *   ExampleFingerprint [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_fingerprint.py.
+ * Run from build/examples; plot with python/plot_fingerprint.py.
  */
 
 #include <format>
@@ -60,7 +61,9 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  examples::Writer out("fingerprint.txt");
+  const auto table =
+      examples::OutputDirectory("fingerprint") / "fingerprint.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment("elastic fingerprint of a 10% Greenland melt (SI)");
   out.Grid(grid);
@@ -74,7 +77,7 @@ int main(int argc, char** argv) {
   out.Scalar("omega_y_rad_s", result.angularVelocity[1]);
   out.Scalar("omega_z_rad_s", result.angularVelocity[2]);
 
-  std::cout << "wrote fingerprint.txt (" << result.iterations
+  std::cout << "wrote " << table.string() << " (" << result.iterations
             << " SLE iterations)\n";
   return 0;
 }

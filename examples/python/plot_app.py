@@ -1,15 +1,26 @@
 """Figures of the sl3d example configs' outputs: run configs/run_all.sh first
 (and, for the ICE-7G figures, get_ice7g.py, which makes run_all.sh run the
 ICE-7G configs too), then `poetry run python plot_app.py` from
-build/examples. The outputs in configs/out/ are read with planetmodel's own
-readers, and figures of each command are written beside this script:
-app_love_numbers.png, app_sea_level_fingerprint.png, app_sea_level.png,
-app_sea_level_1d_calibrated.png, app_sea_level_3d_calibrated.png,
-app_kernels1d.png, app_kernels3d.png and app_response.png,
-app_response_viscoelastic.png, app_response1d_disk.png and
-app_response1d_tide.png, plus app_sea_level_fingerprint_ice7g.png,
-app_sea_level_1d_ice7g.png and app_sea_level_1d_ice7g_calibrated.png
-where the ICE-7G runs exist. A missing output skips its figure.
+build/examples. Each config's outputs, in configs/out/<config>/, are read
+with planetmodel's own readers, and its figures are written to
+figures/sl3d/<config>/:
+
+    love_numbers/love_numbers.png
+    sea_level_fingerprint/fingerprint.png
+    sea_level_1d/sea_level.png        (sea_level_1d against sea_level_3d)
+    sea_level_1d_calibrated/calibration.png
+    sea_level_3d_calibrated/calibration.png
+    kernel1d/kernels.png
+    kernel/viscosity_kernels.png
+    response/displacement.png
+    response_viscoelastic/displacement.png
+    response1d_disk/displacement.png
+    response1d_tide/love_numbers.png
+
+and, where the ICE-7G runs exist, sea_level_fingerprint_ice7g/fingerprint.png,
+sea_level_1d_ice7g/sea_level.png and
+sea_level_1d_ice7g_calibrated/calibration.png. A missing output skips its
+figure.
 """
 from __future__ import annotations
 
@@ -23,10 +34,13 @@ import numpy as np
 from planetmodel.modelfile import read_model_file
 from planetmodel.surfacefile import read_surface_file
 
-from plotutil import Example, mark_sites, plot_field, world_map
+from plotutil import (DATA, Example, mark_sites, plot_field, save_figure,
+                      world_map)
 
 
-OUT = Path("configs/out")
+OUT = Path("configs/out")  # a config's outputs are in OUT / <config>
+FIGURES = Path("figures/sl3d")  # its figures in FIGURES / <config>
+ICE7G = str(DATA / "ice7g.nc")
 KYR = 1.0e3 * 365.25 * 86400.0  # s
 G = 6.6743e-11  # m^3 kg^-1 s^-2
 
@@ -48,6 +62,11 @@ def surface(path: Path, fields, index=None) -> Example:
     return Example.from_fields(grid.colatitudes, grid.longitudes, arrays)
 
 
+def save(fig, config: str, name: str) -> None:
+    """Writes a config's figure, figures/sl3d/<config>/<name>.png."""
+    save_figure(fig, FIGURES / config / f"{name}.png", dpi=150)
+
+
 def nearest(grid, lat: float, lon: float) -> tuple[int, int]:
     """The grid point nearest to a place."""
     i = int(np.argmin(np.abs(np.asarray(grid.colatitudes)
@@ -58,7 +77,7 @@ def nearest(grid, lat: float, lon: float) -> tuple[int, int]:
 
 
 def love_numbers() -> None:
-    path = OUT / "love_numbers.txt"
+    path = OUT / "love_numbers" / "love_numbers.txt"
     if not path.exists():
         return
     header = {}
@@ -104,12 +123,11 @@ def love_numbers() -> None:
     ax.legend()
     fig.suptitle("sl3d love-numbers: the prem8 deck, elastic")
     fig.tight_layout()
-    fig.savefig("app_love_numbers.png", dpi=150)
-    print("wrote app_love_numbers.png")
+    save(fig, "love_numbers", "love_numbers")
 
 
 def sea_level_fingerprint(name: str, title: str, synthetic: bool) -> None:
-    path = OUT / f"{name}.nc"
+    path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
     ex = surface(path, ["ice_change", "sea_level_change", "displacement",
@@ -124,14 +142,13 @@ def sea_level_fingerprint(name: str, title: str, synthetic: bool) -> None:
     ]
     for k, (field, label, cmap, symmetric) in enumerate(panels):
         ax = world_map(fig, 2, 2, k + 1,
-                       state=None if synthetic else "ice7g.nc")
+                       state=None if synthetic else ICE7G)
         mesh = plot_field(ax, ex, field, cmap=cmap, symmetric=symmetric,
                           title=label)
         fig.colorbar(mesh, ax=ax, shrink=0.7)
     fig.suptitle(title)
     fig.tight_layout()
-    fig.savefig(f"app_{name}.png", dpi=150)
-    print(f"wrote app_{name}.png")
+    save(fig, name, "fingerprint")
 
 
 def histories(path: Path):
@@ -143,7 +160,9 @@ def histories(path: Path):
 
 
 def sea_level() -> None:
-    runs = [(name, OUT / f"{name}.nc")
+    """The 1D and 3D deglaciations side by side, in the folder of the first
+    that ran (sea_level_1d's)."""
+    runs = [(name, OUT / name / f"{name}.nc")
             for name in ("sea_level_1d", "sea_level_3d")]
     runs = [(name, path) for name, path in runs if path.exists()]
     if not runs:
@@ -177,8 +196,7 @@ def sea_level() -> None:
     fig.suptitle("sl3d sea-level, 1D (solid) and 3D viscosity (dashed): the "
                  "synthetic deglaciation")
     fig.tight_layout()
-    fig.savefig("app_sea_level.png", dpi=150)
-    print("wrote app_sea_level.png")
+    save(fig, runs[0][0], "sea_level")
 
 
 def sea_level_calibrated(name: str, reference: str, state: str | None,
@@ -187,7 +205,7 @@ def sea_level_calibrated(name: str, reference: str, state: str | None,
     against the present day, beside the uncalibrated run from the state
     file's own initial sea level: what the calibration changed at the
     start, and where the ocean moved over the history."""
-    path = OUT / f"{name}.nc"
+    path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
     file = read_surface_file(path)
@@ -198,7 +216,7 @@ def sea_level_calibrated(name: str, reference: str, state: str | None,
     sea_level = np.asarray(file.variables["sea_level_change"].values)
     fields = {"flooded": ocean[-1] - ocean[0],
               "sea_level_change": sea_level[-1]}
-    reference_path = OUT / f"{reference}.nc"
+    reference_path = OUT / reference / f"{reference}.nc"
     if reference_path.exists():
         held = read_surface_file(reference_path).variables
         if "initial_sea_level" in held:
@@ -227,12 +245,11 @@ def sea_level_calibrated(name: str, reference: str, state: str | None,
             wrap=True, fontsize=9, va="top")
     fig.suptitle(title)
     fig.tight_layout()
-    fig.savefig(f"app_{name}.png", dpi=150)
-    print(f"wrote app_{name}.png")
+    save(fig, name, "calibration")
 
 
 def sea_level_ice7g() -> None:
-    path = OUT / "sea_level_1d_ice7g.nc"
+    path = OUT / "sea_level_1d_ice7g" / "sea_level_1d_ice7g.nc"
     if not path.exists():
         return
     grid, dates, sea_level = histories(path)
@@ -242,7 +259,7 @@ def sea_level_ice7g() -> None:
     for k, index in enumerate([dates.size // 2, dates.size - 1]):
         ex = Example.from_fields(grid.colatitudes, grid.longitudes,
                                  {"sea_level_change": sea_level[index]})
-        ax = world_map(fig, 2, 2, k + 1, state="ice7g.nc")
+        ax = world_map(fig, 2, 2, k + 1, state=ICE7G)
         mesh = plot_field(ax, ex, "sea_level_change",
                           title=f"sea level change, {dates[0]:g} to "
                                 f"{dates[index]:g} ka (m)")
@@ -259,8 +276,7 @@ def sea_level_ice7g() -> None:
     ax.legend(fontsize=8)
     fig.suptitle("sl3d sea-level (1D) on ICE-7G")
     fig.tight_layout()
-    fig.savefig("app_sea_level_1d_ice7g.png", dpi=150)
-    print("wrote app_sea_level_1d_ice7g.png")
+    save(fig, "sea_level_1d_ice7g", "sea_level")
 
 
 def measurements(directory: Path) -> dict[str, float]:
@@ -274,7 +290,7 @@ def measurements(directory: Path) -> dict[str, float]:
 
 
 def kernels1d() -> None:
-    directory = OUT / "kernels1d"
+    directory = OUT / "kernel1d"
     if not directory.exists():
         return
     values = measurements(directory)
@@ -310,12 +326,11 @@ def kernels1d() -> None:
     fig.suptitle("sl3d kernel1d: kernels of the synthetic deglaciation's "
                  "measurements")
     fig.tight_layout()
-    fig.savefig("app_kernels1d.png", dpi=150)
-    print("wrote app_kernels1d.png")
+    save(fig, "kernel1d", "kernels")
 
 
 def kernels3d() -> None:
-    directory = OUT / "kernels3d"
+    directory = OUT / "kernel"
     if not directory.exists():
         return
     values = measurements(directory)
@@ -350,12 +365,11 @@ def kernels3d() -> None:
         ax.legend(fontsize=8)
     fig.suptitle("sl3d kernel: 3D log-viscosity kernels")
     fig.tight_layout()
-    fig.savefig("app_kernels3d.png", dpi=150)
-    print("wrote app_kernels3d.png")
+    save(fig, "kernel", "viscosity_kernels")
 
 
 def response() -> None:
-    path = OUT / "response.nc"
+    path = OUT / "response" / "response.nc"
     if not path.exists():
         return
     ex = surface(path, ["displacement", "displacement_radial_model", "potential"])
@@ -373,8 +387,7 @@ def response() -> None:
     fig.suptitle("sl3d response: a cap load over Hudson Bay on the synthetic 3D "
                  "elastic Earth")
     fig.tight_layout()
-    fig.savefig("app_response.png", dpi=150)
-    print("wrote app_response.png")
+    save(fig, "response", "displacement")
 
 
 def response_viscoelastic() -> None:
@@ -382,7 +395,7 @@ def response_viscoelastic() -> None:
     the displacement under full load, just after the load has gone and at the
     end, the lateral structure's part of the last, and the histories at the
     cap's centre of the load, the displacement and the radial model's."""
-    path = OUT / "response_viscoelastic.nc"
+    path = OUT / "response_viscoelastic" / "response_viscoelastic.nc"
     if not path.exists():
         return
     file = read_surface_file(path)
@@ -430,15 +443,14 @@ def response_viscoelastic() -> None:
     fig.suptitle("sl3d response: a cap load grown and removed over Hudson Bay "
                  "on the synthetic 3D viscoelastic Earth")
     fig.tight_layout()
-    fig.savefig("app_response_viscoelastic.png", dpi=150)
-    print("wrote app_response_viscoelastic.png")
+    save(fig, "response_viscoelastic", "displacement")
 
 
 def response1d_disk() -> None:
     """A disk load held and then removed on the radial viscoelastic Earth:
     the displacement against distance from the disk's centre at a few times,
     the peripheral bulge growing under the load and the uplift after it."""
-    path = OUT / "response1d_disk.nc"
+    path = OUT / "response1d_disk" / "response1d_disk.nc"
     if not path.exists():
         return
     file = read_surface_file(path)
@@ -472,8 +484,7 @@ def response1d_disk() -> None:
     fig.suptitle("sl3d response: a disk load of 8 degrees held for 10 kyr on "
                  "the radial viscoelastic Earth")
     fig.tight_layout()
-    fig.savefig("app_response1d_disk.png", dpi=150)
-    print("wrote app_response1d_disk.png")
+    save(fig, "response1d_disk", "displacement")
 
 
 def response1d_tide() -> None:
@@ -481,7 +492,7 @@ def response1d_tide() -> None:
     numbers of the radial viscoelastic Earth through time, from the elastic
     values at the start towards the fluid limit, read from the exchange
     tables of the nodes."""
-    tables = sorted(OUT.glob("response1d_tide_*.txt"))
+    tables = sorted((OUT / "response1d_tide").glob("response1d_tide_*.txt"))
     if not tables:
         return
     times, h2, k2 = [], [], []
@@ -516,8 +527,7 @@ def response1d_tide() -> None:
     ax.set_title("sl3d response: a held degree-2 tide on the radial "
                  "viscoelastic Earth")
     fig.tight_layout()
-    fig.savefig("app_response1d_tide.png", dpi=150)
-    print("wrote app_response1d_tide.png")
+    save(fig, "response1d_tide", "love_numbers")
 
 
 if __name__ == "__main__":
@@ -533,7 +543,7 @@ if __name__ == "__main__":
                          "sl3d sea-level (1D), migrating shorelines, initial "
                          "sea level calibrated against the present day")
     sea_level_calibrated("sea_level_1d_ice7g_calibrated", "sea_level_1d_ice7g",
-                         "ice7g.nc",
+                         ICE7G,
                          "sl3d sea-level (1D) on ICE-7G, migrating shorelines, "
                          "initial sea level calibrated against the present "
                          "day")

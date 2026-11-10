@@ -1,14 +1,17 @@
 """The adjoint-kernel example: run ExampleIceKernels first, then
-`poetry run python plot_kernels.py` from build/examples."""
+`poetry run python plot_kernels.py` from build/examples. Reads
+output/library/ice_kernels/ice_kernels.txt and writes
+figures/library/ice_kernels.png."""
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 
-from plotutil import Example, world_map, mark_sites, plot_field
+from plotutil import (Example, library_figure, library_output, mark_sites,
+                      plot_field, save_figure, world_map)
 
-ex = Example("kernels.txt")
+ex = Example(library_output("ice_kernels", "ice_kernels.txt"))
 fig = plt.figure(figsize=(12, 7))
 
 gauge = [(ex.scalars["gauge_lat"], ex.scalars["gauge_lon"])]
@@ -72,5 +75,4 @@ ax.set_title("radial viscosity kernels", fontsize=10)
 
 fig.suptitle("Adjoint kernels of a single sea-level observation")
 fig.tight_layout()
-fig.savefig("kernels.png", dpi=180)
-print("wrote kernels.png")
+save_figure(fig, library_figure("ice_kernels"))

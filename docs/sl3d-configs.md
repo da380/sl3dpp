@@ -694,8 +694,8 @@ coefficient[s])`, or both joined by ` + `. The example configs
 `examples/configs/response_viscoelastic.json` print
 
 ```
-sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficient); wrote out/response.nc and out/response.txt and out/response_volume.nc (5 conjugate-gradient iterations, residual 3.52e-11) in 1.29 s
-sl3d response: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr, load (1 term) + tide (1 coefficient); wrote out/response_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.49 s
+sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficient); wrote out/response/response.nc and out/response/response.txt and out/response/response_volume.nc (5 conjugate-gradient iterations, residual 3.52e-11) in 1.29 s
+sl3d response: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr, load (1 term) + tide (1 coefficient); wrote out/response_viscoelastic/response_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.49 s
 ```
 
 ### Examples
@@ -1020,8 +1020,8 @@ radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
 `examples/configs/sea_level_3d_calibrated.json` print
 
 ```
-sl3d sea-level: 1-D, elastic (fingerprint), rotation full; wrote out/sea_level_fingerprint.nc (9 SLE iterations) in 0.29 s
-sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; wrote out/sea_level_3d_calibrated.nc in 28.34 s
+sl3d sea-level: 1-D, elastic (fingerprint), rotation full; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc (9 SLE iterations) in 0.29 s
+sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 28.34 s
 ```
 
 ### Examples

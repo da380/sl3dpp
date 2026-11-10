@@ -1,11 +1,11 @@
 {
-  "model": {"deck": "prem8.gia.deck", "format": "maxwell",
-            "viscosity": {"file": "../viscosity_log.nc"}},
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/viscosity_log.nc"}},
   "lmax": 12,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 22},
   "forcing": {
-    "state": {"file": "../synthetic_earth.nc"},
-    "ice": {"file": "../synthetic_earth.nc"}
+    "state": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
   "moments": "hydrostatic",
@@ -18,5 +18,5 @@
      "window_start_kyr_bp": 7, "window_end_kyr_bp": 0,
      "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0}
   ],
-  "output": "out/kernels3d"
+  "output": "out/kernel"
 }

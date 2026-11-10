@@ -18,12 +18,13 @@
  * on the PREM-like deck. At large degree h', l l' and l k' tend to
  * constants set by the elastic structure near the surface (Farrell 1972).
  *
- * Outputs: the table, one row per degree, and the reciprocity residual
- * (a structural check of the assembly's symmetry).
+ * Outputs, in output/library/love_numbers/: the table, one row per degree,
+ * and the reciprocity residual (a structural check of the assembly's
+ * symmetry), love_numbers.txt.
  *
  *   ExampleLoveNumbers [--lmax N] [--state FILE]  (the state is unused)
  *
- * Run from the build tree; plot with python/plot_love_numbers.py.
+ * Run from build/examples; plot with python/plot_love_numbers.py.
  */
 
 #include <format>
@@ -55,7 +56,9 @@ int main(int argc, char** argv) {
                     conventional.l_tide[i], conventional.k_tide[i]});
   }
 
-  examples::Writer out("love_numbers.txt");
+  const auto table =
+      examples::OutputDirectory("love_numbers") / "love_numbers.txt";
+  examples::Writer out(table);
   out.Comment(
       "elastic Love numbers of the PREM-like deck: conventional load "
       "(h' l' k', Farrell) and tidal (h l k), dimensionless");
@@ -67,7 +70,7 @@ int main(int argc, char** argv) {
              rows);
 
   const auto& two = rows.at(2);
-  std::cout << "wrote love_numbers.txt (degrees 0 to " << lmax
+  std::cout << "wrote " << table.string() << " (degrees 0 to " << lmax
             << "; degree 2: h' = " << two[1] << ", k' = " << two[3]
             << ", k = " << two[6] << "; reciprocity "
             << love.ReciprocityResidual() << ")\n";

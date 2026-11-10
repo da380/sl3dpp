@@ -1,10 +1,10 @@
 {
-  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
   "lmax": 24,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
-    "state": {"file": "../synthetic_earth.nc"},
-    "ice": {"file": "../synthetic_earth.nc"}
+    "state": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
   "moments": "hydrostatic",
@@ -22,5 +22,5 @@
      "window_start_kyr_bp": 7, "window_end_kyr_bp": 0,
      "time_uncertainty_kyr": 0.1, "value_uncertainty_m": 1.0}
   ],
-  "output": "out/kernels1d"
+  "output": "out/kernel1d"
 }

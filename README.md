@@ -109,7 +109,8 @@ cd build/examples/configs
 ./run_all.sh                                           # every command in turn
 ```
 
-The outputs land in `out/`. The configs there are yours to edit — the build
+Each config's outputs land in `out/<config>/` (`<config>` being its file name
+without `.json`). The configs there are yours to edit — the build
 copies them only when they are missing and never overwrites them — so change
 the degree, the dates, the ice change or the measurements and run again. To
 draw the outputs, and to run on the real ice history (ICE-7G, through
@@ -121,8 +122,8 @@ there — not from `build` or the repository root:
 ```
 cd ..                                     # from build/examples/configs up to build/examples
 poetry install --no-root                  # the examples' Python environment
-poetry run python plot_app.py             # a figure per command
-poetry run python get_ice7g.py            # writes ice7g.nc (about 24 MB the first time)
+poetry run python plot_app.py             # figures, in figures/sl3d/<config>/
+poetry run python get_ice7g.py            # writes data/ice7g.nc (about 24 MB the first time)
 (cd configs && ./run_all.sh)              # now also runs the *_ice7g.json configs
 ```
 
@@ -399,10 +400,12 @@ nodes.
 
 ## Examples
 
-The examples are built into `build/examples` and run from there. They need
-no data: the build writes a synthetic Earth (`synthetic_earth.nc`, a toy
-planet over a glacial cycle from 21 ka) for them, and each also runs on
-ICE-7G (`--state ice7g.nc`, or the `*_ice7g.json` configs).
+The examples are built into `build/examples` and run from there, which
+keeps their inputs in `data/`, their outputs in `output/` (and the configs'
+in `configs/out/`) and their figures in `figures/`. They need no data: the
+build writes a synthetic Earth (`data/synthetic_earth.nc`, a toy planet over
+a glacial cycle from 21 ka) for them, and each also runs on ICE-7G
+(`--state data/ice7g.nc`, or the `*_ice7g.json` configs).
 
 - **The `sl3d` configs** in `examples/configs`, at least one per command
   (for `sea-level`, the fingerprint and runs through time in 1D and 3D),

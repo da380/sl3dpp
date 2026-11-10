@@ -15,7 +15,8 @@
  * ICE-xG files: so the sea level of any date (SeaLevelFromTopography) is
  * minus the fixed bedrock height on land.
  *
- * The build runs it, writing synthetic_earth.nc beside the examples:
+ * The build runs it from build/examples, writing the examples' input
+ * data/synthetic_earth.nc (the default output):
  *
  *   MakeSyntheticEarth [output.nc]
  *
@@ -121,7 +122,8 @@ double Ice(double theta, double phi, double dateKyr) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  const auto path = std::string{argc > 1 ? argv[1] : "synthetic_earth.nc"};
+  const auto path =
+      std::string{argc > 1 ? argv[1] : "data/synthetic_earth.nc"};
   const auto grid = pm::Equiangular(180, 360);  // 1 degree, cell centred
 
   auto dates = std::vector<double>{};  // kyr BP, oldest first

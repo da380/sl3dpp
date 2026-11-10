@@ -1,13 +1,16 @@
 """The model-file viscosity example: run ExampleModelViscosity first, then
-`poetry run python plot_model_viscosity.py` from build/examples."""
+`poetry run python plot_model_viscosity.py` from build/examples. Reads
+output/library/model_viscosity/model_viscosity.txt and writes
+figures/library/model_viscosity.png."""
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-from plotutil import Example, world_map, mark_sites, plot_field
+from plotutil import (Example, library_figure, library_output, mark_sites,
+                      plot_field, save_figure, world_map)
 
-ex = Example("model_viscosity.txt")
+ex = Example(library_output("model_viscosity", "model_viscosity.txt"))
 sites = [(ex.scalars["site0_lat"], ex.scalars["site0_lon"]),
          (ex.scalars["site1_lat"], ex.scalars["site1_lon"])]
 colors = ["C0", "C1"]
@@ -62,5 +65,4 @@ ax.set_title("the lateral fixed point's cost per step", fontsize=10)
 fig.suptitle("A 3D viscosity from a planetmodel model file, under a "
              "deglaciation from 21 ka")
 fig.tight_layout()
-fig.savefig("model_viscosity.png", dpi=180)
-print("wrote model_viscosity.png")
+save_figure(fig, library_figure("model_viscosity"))

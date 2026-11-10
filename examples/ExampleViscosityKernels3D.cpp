@@ -5,7 +5,7 @@
  * of the coupled 3D evolution.
  *
  * The forward problem is ExampleModelViscosity's: the 3D viscosity of
- * viscosity_log.nc under the state file's deglaciation from 21 ka,
+ * data/viscosity_log.nc under the state file's deglaciation from 21 ka,
  * recorded at every node for the reverse sweeps. Two observations at a
  * site near the former Laurentide centre:
  *
@@ -21,12 +21,13 @@
  * (io::WriteKernels: viscosity_kernels.nc, for the Python to read, draw
  * and integrate), and as depth slices and radial profiles for the plot.
  *
- * Outputs: viscosity_kernels.nc and kernels_3d.txt (slices on the
- * coupling's grid, per km^3; the profiles per km of radius).
+ * Outputs, in output/library/viscosity_kernels_3d/: viscosity_kernels.nc
+ * and viscosity_kernels_3d.txt (slices on the coupling's grid, per km^3;
+ * the profiles per km of radius).
  *
  *   ExampleViscosityKernels3D [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_kernels_3d.py.
+ * Run from build/examples; plot with python/plot_kernels_3d.py.
  */
 
 #include <array>
@@ -63,10 +64,11 @@ int main(int argc, char** argv) {
       std::format("ExampleViscosityKernels3D: 3D kernels at lmax {}, state {}",
                   lmax, options.state.string()));
   // The forward problem, as ExampleModelViscosity sets it up.
-  examples::Say("reading viscosity_log.nc; building the 3D operator");
+  const auto viscosityFile = examples::DataFile("viscosity_log.nc");
+  examples::Say(std::format("reading {}; building the 3D operator",
+                            viscosityFile.string()));
   const auto earth = examples::Earth::Make(lmax, 1e21);
-  const auto viscosity =
-      io::ModelViscosity::Read("viscosity_log.nc", earth.model);
+  const auto viscosity = io::ModelViscosity::Read(viscosityFile, earth.model);
   if (!viscosity) {
     std::cerr << viscosity.error().message << "\n";
     return 1;
@@ -192,9 +194,13 @@ int main(int argc, char** argv) {
                       .objective = objectives[k].dimensions,
                       .values = scaled[k]});
   }
-  examples::Say("writing viscosity_kernels.nc and kernels_3d.txt");
+  const auto output = examples::OutputDirectory("viscosity_kernels_3d");
+  const auto kernelFile = output / "viscosity_kernels.nc";
+  const auto table = output / "viscosity_kernels_3d.txt";
+  examples::Say(std::format("writing {} and {}", kernelFile.string(),
+                            table.string()));
   const auto written =
-      io::WriteKernels("viscosity_kernels.nc", op, earth.model, fields,
+      io::WriteKernels(kernelFile, op, earth.model, fields,
                        {.name = "sl3dpp example kernels"});
   if (!written) {
     std::cerr << written.error().message << "\n";
@@ -209,7 +215,7 @@ int main(int argc, char** argv) {
   const auto& kernelGrid = coupling.Grid();
   const auto fieldSize = kernelGrid.FieldSize();
   const auto modelLength = modelScales.Length();
-  examples::Writer out("kernels_3d.txt");
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D log-viscosity kernels of two observations at a Hudson Bay site; "
@@ -263,8 +269,8 @@ int main(int argc, char** argv) {
   }
   out.Series("radial", {"r_km", "sea_level_per_km", "decay_time_per_km"}, rows);
 
-  std::cout << "wrote viscosity_kernels.nc and kernels_3d.txt (sea level "
-               "change "
+  std::cout << "wrote " << kernelFile.string() << " and " << table.string()
+            << " (sea level change "
             << length *
                    PairedValue(grid, a, dual, snapshots.back().seaLevelChange)
             << " m, decay time " << fit.decay_time << " kyr)\n";

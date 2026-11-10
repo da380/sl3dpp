@@ -13,7 +13,7 @@ Python plotting script, and an example config for every command of the
 | `ExampleModelViscosity` | the route from real tomography: a 3D viscosity read from a planetmodel model file (`io::ModelViscosity`), run through the whole deglaciation against the file's own radial reference | lmax 32, 20 s | `plot_model_viscosity.py` |
 | `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
 | `ExampleViscosityKernels3D` | 3D adjoint kernels: the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 31 s | `plot_kernels_3d.py` |
-| `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
+| `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
 
 The defaults keep each run under a minute on 8 threads, the times shown;
 the largest peak memory is 11 GB, for `ExampleIceKernels`. The
@@ -23,7 +23,17 @@ configs, one per `sl3d` command, are described in
 Every driver takes `[--lmax N] [--state FILE]`: the degree (the defaults are
 sized for a laptop; CI runs each at a small one) and the Earth's state.
 
+Each driver writes into its own `output/library/<example>/`, and its
+plotting script draws `figures/library/<example>.png`, where `<example>` is
+`love_numbers`, `fingerprint`, `evolution`, `lateral_viscosity`,
+`model_viscosity`, `ice_kernels`, `viscosity_kernels_3d` or `static_3d`.
+The table is `<example>.txt`; `ExampleViscosityKernels3D` also writes the
+kernels as a model file, `viscosity_kernels.nc`, and `ExampleStatic3D` the
+response inside the body, `static_3d_volume.nc`.
+
 ## The inputs
+
+Every input is in `build/examples/data/`.
 
 - **The synthetic 3D elastic Earth**, `synthetic_moduli.nc`, which the
   build writes too (`MakeSyntheticModuli`): a planetmodel model file of
@@ -39,11 +49,15 @@ sized for a laptop; CI runs each at a small one) and the Earth's state.
   needs no data, so the examples run anywhere, CI included. The drivers use
   it by default.
 - **ICE-7G**, the real thing, through pyslfp: `get_ice7g.py` writes
-  `ice7g.nc` in the same form (below), and `--state ice7g.nc` runs any
-  driver on it; `configs/*_ice7g.json` are the configs that use it.
+  `data/ice7g.nc` in the same form (below), and `--state data/ice7g.nc`
+  runs any driver on it; `configs/*_ice7g.json` are the configs that use
+  it.
 - The PREM-like deck `prem8.elastic.deck` and, for the 3D model-file
   example and configs, `viscosity_log.nc`, a planetmodel model file of a
-  3D viscosity on the same body (both copied from `tests/data`).
+  3D viscosity on the same body (both copied from `tests/data`), and
+  `prem8.gia.deck`, the same deck in planetmodel's GIA format with a
+  1e21 Pa s Maxwell mantle, for the configs' radial runs through time
+  (copied from `examples/data`).
 
 A state's sea level is built from its topography and ice thickness by
 `SeaLevelFromTopography` (pyslfp's construction), as the `sl3d` program
@@ -61,8 +75,26 @@ cd build/examples/configs
 ./run_all.sh                                           # every config in turn
 ```
 
-Outputs land in `configs/out/`, and `poetry run python plot_app.py`, from
-`build/examples`, draws a figure per command from them.
+Each config's outputs land in `configs/out/<config>/` (`<config>` is the
+file name without `.json`), and `poetry run python plot_app.py`, from
+`build/examples`, draws each config's figures into
+`figures/sl3d/<config>/`, named for what they show:
+
+| Config | Figure |
+| --- | --- |
+| `love_numbers` | `love_numbers.png` |
+| `sea_level_fingerprint`, `sea_level_fingerprint_ice7g` | `fingerprint.png` |
+| `sea_level_1d` | `sea_level.png`: the 1D run and `sea_level_3d`'s together |
+| `sea_level_1d_ice7g` | `sea_level.png` |
+| `sea_level_1d_calibrated`, `sea_level_3d_calibrated`, `sea_level_1d_ice7g_calibrated` | `calibration.png` |
+| `kernel1d` | `kernels.png` |
+| `kernel` | `viscosity_kernels.png` |
+| `response`, `response_viscoelastic`, `response1d_disk` | `displacement.png` |
+| `response1d_tide` | `love_numbers.png` |
+
+`sea_level_3d`'s run is drawn against the 1D one in
+`figures/sl3d/sea_level_1d/sea_level.png` (in `sea_level_3d/` when it
+alone has run), so it has no folder of its own.
 
 **The configs in `build/examples/configs` are yours to edit.** The build copies
 them there only when they are missing and never overwrites them, so change
@@ -71,28 +103,44 @@ delete a file (or the whole directory) and reconfigure to get the original
 back. [configs/README.md](configs/README.md) says what each config does, and every
 member is documented in the configuration reference
 ([docs/sl3d-configs.md](../docs/sl3d-configs.md)). One thing to know:
-`sea_level_1d.json` writes checkpoints into `out/`, and a run refuses another
-run's checkpoints, so after changing it set `"restart": false` (or delete
-`out/`) for the first rerun.
+`sea_level_1d.json` writes checkpoints into `out/sea_level_1d/checkpoints`,
+and a run refuses another run's checkpoints, so after changing it set
+`"restart": false` (or delete that directory) for the first rerun.
 
 ## Outputs generated in the build
 
 `cmake --build build -t sl3dpp_example_outputs` runs every driver at the
-small degree CI uses (seconds each) in `build/examples`, and with
-`-DSL3DPP_RUN_EXAMPLES=ON` the build does so by itself; `-t
-sl3dpp_example_figures` then draws every figure through the poetry
-environment there (`poetry install` in `build/examples` first). The
-full-size runs are the drivers' own defaults.
+small degree CI uses (seconds each) from `build/examples`, each writing
+into its `output/library/<example>/` with what it prints as
+`<example>.log` there, and with `-DSL3DPP_RUN_EXAMPLES=ON` the build does
+so by itself; `-t sl3dpp_example_figures` then draws every library
+figure into `figures/library/` through the poetry environment there
+(`poetry install` in `build/examples` first). The full-size runs are the
+drivers' own defaults.
 
 ## Everything runs in the build tree
 
-At configure time CMake copies the inputs, the configs (into
-`build/examples/configs`, once), the Python scripts and the poetry file into
-`build/examples`, and the build writes the synthetic Earth there. The
-drivers read and write in the current directory: run them from
-`build/examples`, and every output — data files, figures, the poetry
-environment, a downloaded ICE-7G file — lands there. The source tree is
-never written to.
+At configure time CMake copies the inputs into `build/examples/data`, the
+configs into `build/examples/configs` (once), and the Python scripts and
+the poetry file into `build/examples`, and the build writes the synthetic
+Earths into `data/`. Everything is run from `build/examples` (the configs
+from `configs/`), and every path is relative to it:
+
+```
+build/examples/
+  Example*, Make*         the drivers and the synthetic-Earth writers
+  *.py, pyproject.toml    the plotting scripts, get_ice7g.py, the poetry file
+  data/                   every input: the decks, viscosity_log.nc,
+                          synthetic_earth.nc, synthetic_moduli.nc, ice7g.nc
+  output/library/<example>/   a driver's outputs and its log
+  figures/library/            a driver's figure, <example>.png
+  figures/sl3d/<config>/      a config's figures
+  configs/                the sl3d configs and run_all.sh
+  configs/out/<config>/   a config's outputs
+```
+
+The poetry environment and a downloaded ICE-7G file land there too. The
+source tree is never written to.
 
 ## Setup and run
 
@@ -102,21 +150,23 @@ cmake -B build && cmake --build build -j
 
 # 2. Run the drivers from the build tree.
 cd build/examples
-./ExampleLoveNumbers
+./ExampleLoveNumbers                      # writes output/library/love_numbers/
 ./ExampleFingerprint
 ./ExampleEvolution
 ./ExampleLateralViscosity
 ./ExampleModelViscosity
 ./ExampleIceKernels
 ./ExampleViscosityKernels3D
+./ExampleStatic3D
 
 # 3. One-off: create the Python environment HERE (not in the source).
 poetry install --no-root
 
-# 4. Plot (figures land beside the data).
+# 4. Plot (figures land in figures/library/).
 poetry run python plot_love_numbers.py    # and plot_fingerprint.py, ...
 
-# 5. The sl3d configs, and their figures.
+# 5. The sl3d configs (outputs in configs/out/<config>/), and their
+#    figures (in figures/sl3d/<config>/).
 (cd configs && ./run_all.sh)
 poetry run python plot_app.py
 ```
@@ -125,9 +175,9 @@ poetry run python plot_app.py
 
 ```sh
 cd build/examples                         # from the repository root
-poetry run python get_ice7g.py            # writes ice7g.nc
-./ExampleFingerprint --state ice7g.nc     # any driver
-(cd configs && ./run_all.sh)                  # now runs the *_ice7g.json configs too
+poetry run python get_ice7g.py            # writes data/ice7g.nc
+./ExampleFingerprint --state data/ice7g.nc    # any driver
+(cd configs && ./run_all.sh)              # now runs the *_ice7g.json configs too
 ```
 
 `get_ice7g.py` uses pyslfp's `export_ice_history`: ICE-7G's stored slices
@@ -136,7 +186,7 @@ kiloyear), `ice_thickness` and `topography` on the dataset's grid, in
 metres. The first run downloads pyslfp's ICE-7G archive from Zenodo (about
 24 MB) into pyslfp's data directory (`~/.pyslfp_data`, or `$PYSLFP_DATA`);
 later runs reuse it. `--version ICE6G` or `ICE5G` writes those models
-instead.
+instead (`data/ice6g.nc`, `data/ice5g.nc`).
 
 Notes:
 

@@ -13,12 +13,13 @@
  * The load is a tenth of the Antarctic ice of the present-day state,
  * melted at once and held.
  *
- * Outputs (SI): final sea-level maps for both runs and their difference,
- * and the per-step iteration counts of the lateral fixed point.
+ * Outputs (SI), in output/library/lateral_viscosity/lateral_viscosity.txt:
+ * final sea-level maps for both runs and their difference, and the
+ * per-step iteration counts of the lateral fixed point.
  *
  *   ExampleLateralViscosity [--lmax N] [--state FILE]
  *
- * Run from the build tree; plot with python/plot_lateral.py.
+ * Run from build/examples; plot with python/plot_lateral.py.
  */
 
 #include <cmath>
@@ -94,7 +95,9 @@ int main(int argc, char** argv) {
   SeaLevelEvolution3D run1(flat, solver, state, {.on_snapshot = report});
   const auto without = run1.Run(times, iceLoad);
 
-  examples::Writer out("lateral.txt");
+  const auto table = examples::OutputDirectory("lateral_viscosity") /
+                     "lateral_viscosity.txt";
+  examples::Writer out(table);
   out.Comment("state " + options.state.string());
   out.Comment(
       "3D lateral viscosity (one decade peak to peak) vs the radial "
@@ -121,6 +124,6 @@ int main(int argc, char** argv) {
   }
   out.Series("iterations", {"t_kyr", "coupled_iterations", "residual"}, rows);
 
-  std::cout << "wrote lateral.txt\n";
+  std::cout << "wrote " << table.string() << "\n";
   return 0;
 }

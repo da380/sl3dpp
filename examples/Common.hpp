@@ -2,14 +2,15 @@
 
 /**
  * @file examples/Common.hpp
- * @brief Shared scaffolding for the example drivers: the command line, the
- * PREM-deck model and mantle Maxwell rheology, the Earth's state from a
- * surface file, simple text writers for the plotting scripts, and smooth
- * analytic shapes.
+ * @brief Shared scaffolding for the example drivers: where their inputs and
+ * outputs are, the command line, the PREM-deck model and mantle Maxwell
+ * rheology, the Earth's state from a surface file, simple text writers for
+ * the plotting scripts, and smooth analytic shapes.
  *
- * Examples run FROM THE BUILD TREE: the deck is copied next to the
- * executables at configure time, and every output lands in the working
- * directory (never the source tree). File format, consumed by
+ * Examples run FROM THE BUILD TREE, from build/examples: the inputs are in
+ * data/ there (copied at configure time, or written by the build), and each
+ * example writes into its own output/library/<example>/ (never the source
+ * tree). File format, consumed by
  * python/plotutil.py: '# comment' lines, 'grid nlat nlon' followed by the
  * colatitude and longitude rows, then named blocks — 'field <name>' with
  * nlat rows of nlon values, 'series <name> <n>' with n rows, or
@@ -43,6 +44,20 @@
 namespace examples {
 
 constexpr auto kYear = 3.15576e7;  // s
+
+/// An input of the examples, in data/ under the directory they run from
+/// (build/examples): the decks, the model files and the Earth's states.
+inline std::filesystem::path DataFile(std::string_view name) {
+  return std::filesystem::path{"data"} / name;
+}
+
+/// The directory of one example's outputs, output/library/<example> under
+/// the directory the examples run from, created if missing.
+inline std::filesystem::path OutputDirectory(std::string_view example) {
+  auto directory = std::filesystem::path{"output"} / "library" / example;
+  std::filesystem::create_directories(directory);
+  return directory;
+}
 
 /// Prints a line at once — flushed, since a redirected stdout would hold it
 /// back — so that a long run shows it is running.
@@ -80,8 +95,8 @@ inline std::function<void(std::size_t)> SweepReporter(std::size_t lastNode) {
   };
 }
 
-/// The PREM-like deck copied beside the executables, its mesh, material
-/// and a mantle Maxwell rheology (viscous between 3480 and 6151 km).
+/// The PREM-like deck of data/, its mesh, material and a mantle Maxwell
+/// rheology (viscous between 3480 and 6151 km).
 struct Earth {
   sl3dpp::EarthModel model;
   sl3dpp::Material material;
@@ -89,7 +104,7 @@ struct Earth {
 
   static Earth Make(int lmax, double viscositySI) {
     auto deck = sl3dpp::Deck::Read(
-                    "prem8.elastic.deck",
+                    DataFile("prem8.elastic.deck"),
                     sl3dpp::DeckFormat(
                         "elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
                         0))
@@ -118,7 +133,7 @@ struct Earth {
 /// writes, or an ICE-7G file from python/get_ice7g.py).
 struct Options {
   int lmax = 0;
-  std::filesystem::path state = "synthetic_earth.nc";
+  std::filesystem::path state = DataFile("synthetic_earth.nc");
 };
 
 /// Reads `[--lmax N] [--state FILE]`; prints the usage and exits on
@@ -131,7 +146,8 @@ inline Options ParseOptions(int argc, char** argv, int defaultLmax) {
               << "  --state FILE  the Earth's state: a planetmodel surface "
                  "file holding\n"
               << "                ice_thickness and topography (default "
-                 "synthetic_earth.nc)\n";
+                 "data/synthetic_earth.nc;\n"
+              << "                get_ice7g.py writes data/ice7g.nc)\n";
     std::exit(status);
   };
   for (auto k = 1; k < argc; ++k) {
@@ -167,8 +183,8 @@ inline EarthState LoadEarthState(const sl3dpp::SurfaceGrid& grid,
   if (!std::filesystem::exists(path)) {
     throw std::runtime_error(std::format(
         "{} not found: run the examples from build/examples, where the "
-        "build writes synthetic_earth.nc (python/get_ice7g.py writes "
-        "ice7g.nc)",
+        "build writes data/synthetic_earth.nc (get_ice7g.py writes "
+        "data/ice7g.nc)",
         path.string()));
   }
   const auto history = sl3dpp::io::FieldHistory::Read(path, grid);
@@ -195,9 +211,9 @@ inline double Cap(double theta, double phi, double colat0, double lon0,
 /// The text writer the plotting scripts read.
 class Writer {
  public:
-  explicit Writer(const std::string& path) : out_(path) {
+  explicit Writer(const std::filesystem::path& path) : out_(path) {
     if (!out_.is_open()) {
-      throw std::runtime_error(std::format("cannot open {}", path));
+      throw std::runtime_error(std::format("cannot open {}", path.string()));
     }
     out_.precision(10);
   }
