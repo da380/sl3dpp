@@ -623,7 +623,11 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
   const auto load = scene.MeltLoad(-0.1);
   const auto gMid = scene.Smooth(rng, 1.0);
   const auto gEnd = scene.Smooth(rng, 0.6);
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -979,7 +983,11 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
   const auto load = scene.MeltLoad(-0.1);
   const auto gMid = scene.Smooth(rng, 1.0);
   const auto gEnd = scene.Smooth(rng, 0.6);
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };

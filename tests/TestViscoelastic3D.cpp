@@ -587,7 +587,11 @@ TEST(Lateral, DISABLED_StepSolverProfile) {
   });
   time("StrainOf", 10, [&] { (void)step.StrainOf(x); });
   time("Apply (lateral force + band)", 10, [&] { (void)step.Apply(x); });
-  const auto [fs, ft] = step.Forces(load, {});
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto forces = step.Forces(load, {});
+  const auto& fs = forces.first;
+  const auto& ft = forces.second;
   time("Forces", 10, [&] { (void)step.Forces(load, {}); });
   time("Solve, 0 iterations (two solves + apply)", 5, [&] {
     (void)step.Solve(fs, ft, &x, 1e30);

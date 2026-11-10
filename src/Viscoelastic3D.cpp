@@ -670,7 +670,11 @@ void Viscoelastic3D::AddChannelForces(
     const LoadCallable3D& load, const LoadCallable3D& tide,
     const std::function<const DegreeOperator&(int)>& spheroidal) const {
   if (!load && !tide) return;
-  for (auto& [l, b] : forces) {
+  // Named, not a structured binding: Clang 18 does not capture those in a
+  // lambda when OpenMP is enabled.
+  for (auto& entry : forces) {
+    const auto l = entry.first;
+    auto& b = entry.second;
     const auto& system = spheroidal(l);
     const auto ndof = system.DofCount();
     auto add = [&](const std::optional<std::vector<Complex>>& columns,
@@ -1386,8 +1390,11 @@ Viscoelastic3D::OpenStep::Nest(const Closure& closure,
     auto finite = true;
     for (const auto* block : {&image.spheroidal, &image.toroidal}) {
       const auto& other = block == &image.spheroidal ? iterate.spheroidal : iterate.toroidal;
-      for (const auto& [l, n] : *block) {
-        const auto& o = other.at(l);
+      // Named, not a structured binding: Clang 18 does not take those into
+      // an OpenMP region.
+      for (const auto& entry : *block) {
+        const auto& n = entry.second;
+        const auto& o = other.at(entry.first);
         const auto size = n.size();
 #pragma omp parallel for schedule(static) reduction(max : scale, diff) \
     reduction(&& : finite) if (parallel)

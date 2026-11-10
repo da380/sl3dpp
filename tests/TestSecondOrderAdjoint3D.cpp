@@ -803,7 +803,11 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactAndSymmetric) {
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[times.size() - 1].seaLevelDual = g;
   measurements[4].displacementDual = scene.Smooth(rng, 0.5);
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
 
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                     {.memory_points = MemoryPointSet::Gll});
@@ -921,7 +925,11 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   auto pW = [](double theta, double phi) {
     return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
   };
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   const auto span = 10.0 * scene.Kyr();
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                     {.memory_points = MemoryPointSet::Gll});
@@ -1072,7 +1080,11 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[times.size() - 1].seaLevelDual = g;
   measurements[4].displacementDual = scene.Smooth(rng, 0.5);
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
 
   Viscoelastic3D op(
       scene.rheology, kLmax, baseDelta,
@@ -1194,7 +1206,11 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
   auto pW = [](double theta, double phi) {
     return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
   };
-  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   const auto span = 10.0 * scene.Kyr();
   Viscoelastic3D op(
       scene.rheology, kLmax, baseDelta,

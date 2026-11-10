@@ -739,7 +739,11 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
   // Smooth directions in kappa and mu on the solid, at 1% of the moduli.
   const auto& material = setup.material;
   const auto& mesh = material.Mesh();
-  const auto [k0, m0] = material.Moduli().KappaMu();
+  // named, not a structured binding: Clang 18 does not capture those
+  // in a lambda when OpenMP is enabled
+  const auto kappaMu = material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
   auto materialDirection = [&](const std::function<double(double)>& profile) {
     MaterialDirection d;
     d.kappa.assign(k0.size(), 0.0);
