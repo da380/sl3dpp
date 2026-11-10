@@ -1372,8 +1372,10 @@ action covers every pairing of (ice, itau, κ, μ): `SecondOrderDirection::
 materialU/materialV`, `AdjointSolver::SecondOrderKernels(..., material)`,
 `KernelDerivatives::kappaKernel/muKernel` (and the 3D forms with their
 spherical reductions). New design, no pyslfp counterpart. Everything
-needs the memory points at the GLL nodes and no rotational feedback (the
-material tangent's conditions); the 3D forms are distributed (§17).
+needs no rotational feedback (the material tangent's condition), and the
+3D forms the memory points at the GLL nodes; in 1D the moduli's
+directions and kernels are held at the memory points (§13c, §13e), GLL
+or Gauss. The 3D forms are distributed (§17).
 
 **The second-order tangent run** (`TangentLinearSolver::RunSecondOrder`,
 3D alike). The step map is affine in the moduli, so the second variation

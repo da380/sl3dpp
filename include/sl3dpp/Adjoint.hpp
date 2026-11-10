@@ -281,14 +281,15 @@ class AdjointSolver {
    * (TangentPerturbation::material, the density refused), which the
    * tangent run must have been driven by too; empty for none. A
    * material direction, like Options::material_kernels (which adds the
-   * material kernels' derivatives along v, for any v), needs the memory
-   * points at the GLL nodes and no rotational feedback. Discrete: the
+   * material kernels' derivatives along v, for any v), needs no
+   * rotational feedback. Discrete: the
    * derivative of the effective systems acts on the first sweep's
    * solutions as a source of the derivative duals, and the memory force's
    * variation on the first sweep's strains; the material kernels'
    * derivatives pair the derivative duals with the forward trajectory and
    * the first duals with v's tangent trajectory (docs/adjoints.md
-   * §15). Not yet in the continuous sweep.
+   * §15). Continuous: the same terms in the continuous sweep, at the
+   * commute level.
    */
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> SecondOrderKernels(
       std::span<const double> times,

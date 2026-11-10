@@ -140,11 +140,6 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
         "not the density");
   }
   if (materialV || options_.material_kernels) {
-    if (op.options_.memory_points != MemoryPointSet::Gll) {
-      throw std::invalid_argument(
-          "the material in the second-order sweep needs the memory points "
-          "at the GLL nodes");
-    }
     if (ev.options_.rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
           "the material in the second-order sweep takes no rotational "
@@ -259,16 +254,15 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   const bool materialV = !direction.kappa.empty() || !direction.mu.empty();
   auto tools = std::optional<MaterialTools>{};
   if (material || materialV) {
-    tools.emplace(ev, MaterialDirection{direction.kappa, direction.mu,
-                                        direction.rho});
+    tools.emplace(ev, direction);
   }
   std::vector<double> kappaKernel, muKernel, dKappaKernel, dMuKernel;
   DensityDuals densityDuals, dDensityDuals;
   if (material) {
-    kappaKernel.assign(tools->NodeCount(), 0.0);
-    muKernel.assign(tools->NodeCount(), 0.0);
-    dKappaKernel.assign(tools->NodeCount(), 0.0);
-    dMuKernel.assign(tools->NodeCount(), 0.0);
+    kappaKernel.assign(tools->PointCount(), 0.0);
+    muKernel.assign(tools->PointCount(), 0.0);
+    dKappaKernel.assign(tools->PointCount(), 0.0);
+    dMuKernel.assign(tools->PointCount(), 0.0);
     densityDuals.Resize(tools->NodeCount());
     dDensityDuals.Resize(tools->NodeCount());
   }
@@ -404,7 +398,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       vstep.AddMemory(TangentLinearSolver::FirstOrderDrive(
           op, AdjointMethod::Discrete, scheme, dt, fwdPrev, fwdN, ditauPoints));
       memv = vstep.mem_;
-      factor.assign(tools->NodeCount(), 1.0);
+      factor.assign(tools->PointCount(), 1.0);
       for (auto k = std::size_t{0}; k < K; ++k) {
         const auto& w = weights[k];
         for (auto i = std::size_t{0}; i < factor.size(); ++i) {
@@ -413,8 +407,6 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
         }
       }
     }
-    const MaterialVariation* varV =
-        materialV ? &tools->EffectiveVariation(dt) : nullptr;
 
     auto degs = std::vector<const ViscoelasticOperator::Degree*>(lmax + 1);
     auto unitsOf = std::vector<const std::vector<double>*>(lmax + 1);
@@ -521,10 +513,10 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       for (auto j = std::size_t{0}; j < dxd[l].size(); ++j) {
         dxd[l][j] += fromSource[j];
       }
-      if (varV != nullptr) {
+      if (materialV) {
         // -(dK_eff along v) on the first sweep's solution: the dual of
         // the full tangent solution, before the contraction.
-        const auto src = systems[l]->ApplyVariation(*varV, ys[l], ncols);
+        const auto src = tools->ApplyEffective(*systems[l], dt, ys[l], ncols);
         for (auto j = std::size_t{0}; j < dxd[l].size(); ++j) {
           dxd[l][j] -= src[j];
         }
@@ -589,10 +581,10 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
         // derivative: the derivative duals against the base, and the
         // first duals against v's tangent solution and memory.
         materialByDegree[l] =
-            MaterialTools::MaterialPairing(deg, ncols, ys[l], sy, xn.at(l), factor, &decayed, tools->fractions);
-        auto d = MaterialTools::MaterialPairing(deg, ncols, dy, dsy, xn.at(l), factor, &decayed, tools->fractions);
+            MaterialTools::MaterialPairing(op.Points(), deg, ncols, ys[l], sy, xn.at(l), factor, &decayed, tools->fractions);
+        auto d = MaterialTools::MaterialPairing(op.Points(), deg, ncols, dy, dsy, xn.at(l), factor, &decayed, tools->fractions);
         AddPairs(d.first, d.second,
-                 MaterialTools::MaterialPairing(deg, ncols, ys[l], sy, xvn.at(l), factor,
+                 MaterialTools::MaterialPairing(op.Points(), deg, ncols, ys[l], sy, xvn.at(l), factor,
                                &memv.at(l), tools->fractions));
         dMaterialByDegree[l] = std::move(d);
         // The density: the first duals against the base with its loads,
@@ -725,7 +717,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
         addSurfaceDuals(deg, l, ncols, adj0, rhs);
         y0[l] = deg.system.Solve(rhs, ncols);
         if (materialV) {
-          const auto src = deg.system.ApplyVariation(*tools->unrelaxed, y0[l], ncols);
+          const auto src = tools->ApplyUnrelaxed(deg.system, y0[l], ncols);
           for (auto j = std::size_t{0}; j < dxd0[l].size(); ++j) {
             dxd0[l][j] -= src[j];
           }
@@ -745,7 +737,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       const auto x0 = op.SolveElastic(cursor.State(0), loadsOf(trajectory.loads[0]),
                                       tidesOf(trajectory.tides[0]));
       const auto xv0 = tools->TangentSolution(tangent[0], x0, nullptr);
-      const auto ones = std::vector<double>(tools->NodeCount(), 1.0);
+      const auto ones = std::vector<double>(tools->PointCount(), 1.0);
       const auto loads0 = loadsOf(trajectory.loads[0]);
       const auto tides0 = tidesOf(trajectory.tides[0]);
       const auto loadsV0 = loadsOf(tangent[0].loadCoefficients);
@@ -758,12 +750,12 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
         const auto dy0 = deg.system.Solve(drhs, ncols);
         const auto sy0 = deg.Strain(y0[l], ncols);
         AddPairs(kappaKernel, muKernel,
-                 MaterialTools::MaterialPairing(deg, ncols, y0[l], sy0, x0.at(l), ones, nullptr, tools->fractions));
+                 MaterialTools::MaterialPairing(op.Points(), deg, ncols, y0[l], sy0, x0.at(l), ones, nullptr, tools->fractions));
         AddPairs(dKappaKernel, dMuKernel,
-                 MaterialTools::MaterialPairing(deg, ncols, dy0, deg.Strain(dy0, ncols), x0.at(l),
+                 MaterialTools::MaterialPairing(op.Points(), deg, ncols, dy0, deg.Strain(dy0, ncols), x0.at(l),
                                ones, nullptr, tools->fractions));
         AddPairs(dKappaKernel, dMuKernel,
-                 MaterialTools::MaterialPairing(deg, ncols, y0[l], sy0, xv0.at(l), ones, nullptr, tools->fractions));
+                 MaterialTools::MaterialPairing(op.Points(), deg, ncols, y0[l], sy0, xv0.at(l), ones, nullptr, tools->fractions));
         MaterialTools::DensityPairing(deg, ncols, y0[l], x0.at(l), loads0, tides0, 1.0,
                                       densityDuals);
         MaterialTools::DensityPairing(deg, ncols, dy0, x0.at(l), loads0, tides0, 1.0,
@@ -897,16 +889,15 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   const bool materialV = !direction.kappa.empty() || !direction.mu.empty();
   auto tools = std::optional<MaterialTools>{};
   if (material || materialV) {
-    tools.emplace(ev, MaterialDirection{direction.kappa, direction.mu,
-                                        direction.rho});
+    tools.emplace(ev, direction);
   }
   std::vector<double> kappaKernel, muKernel, dKappaKernel, dMuKernel;
   DensityDuals densityDuals, dDensityDuals;
   if (material) {
-    kappaKernel.assign(tools->NodeCount(), 0.0);
-    muKernel.assign(tools->NodeCount(), 0.0);
-    dKappaKernel.assign(tools->NodeCount(), 0.0);
-    dMuKernel.assign(tools->NodeCount(), 0.0);
+    kappaKernel.assign(tools->PointCount(), 0.0);
+    muKernel.assign(tools->PointCount(), 0.0);
+    dKappaKernel.assign(tools->PointCount(), 0.0);
+    dMuKernel.assign(tools->PointCount(), 0.0);
     densityDuals.Resize(tools->NodeCount());
     dDensityDuals.Resize(tools->NodeCount());
   }
@@ -1286,7 +1277,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
                           std::vector<double>& kappaTo,
                           std::vector<double>& muTo, DensityDuals& dualsTo) {
     if (weight == 0.0) return;
-    const auto ones = std::vector<double>(tools->NodeCount(), 1.0);
+    const auto ones = std::vector<double>(tools->PointCount(), 1.0);
     auto tasks = std::vector<int>{};
     for (const auto& [l, y] : lambda) tasks.push_back(l);
     auto terms =
@@ -1308,7 +1299,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
           y[static_cast<std::size_t>(c) * deg.ndof + d] *= cw;
         }
       }
-      auto p = MaterialTools::MaterialPairing(deg, ncols, y, deg.Strain(y, ncols), x.at(l),
+      auto p = MaterialTools::MaterialPairing(op.Points(), deg, ncols, y, deg.Strain(y, ncols), x.at(l),
                                ones, &memory.at(l), tools->fractions);
       for (auto j = std::size_t{0}; j < p.first.size(); ++j) {
         p.first[j] *= weight;

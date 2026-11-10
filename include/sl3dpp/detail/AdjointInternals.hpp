@@ -168,33 +168,39 @@ struct AdjointSolver::MaterialTools {
 
   const SeaLevelEvolution* ev = nullptr;
   const ViscoelasticOperator* op = nullptr;
-  MaterialDirection direction;
+  /// v's direction: the moduli at the memory points.
+  PointMaterialDirection direction;
+  /// The branch fractions f_k = mu_k / mu_U at the memory points.
   std::vector<std::vector<double>> fractions;
-  /// delta mu_v / mu_U at the nodes (zero where mu_U vanishes); empty
+  /// delta mu_v / mu_U at the points (zero where mu_U vanishes); empty
   /// without a mu direction.
   std::vector<double> muRatio;
-  std::optional<MaterialVariation> unrelaxed;
-  std::map<double, MaterialVariation> effective;
+  /// v's variation of the effective shear of a dt at the points.
+  std::map<double, std::vector<double>> effectiveMu;
 
-  MaterialTools(const SeaLevelEvolution& evolution, const MaterialDirection& d)
+  MaterialTools(const SeaLevelEvolution& evolution,
+                const PointMaterialDirection& d)
       : ev(&evolution), op(&*evolution.op_), direction(d) {
     const auto& rheology = op->GetRheology();
-    const auto muU = rheology.MuUnrelaxed();
-    for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
-      const auto& branch = rheology.BranchAt(k);
-      auto f = std::vector<double>(muU.size(), 0.0);
-      for (auto i = std::size_t{0}; i < f.size(); ++i) {
-        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
-      }
-      fractions.push_back(std::move(f));
+    const auto muU = op->UnrelaxedShearAtPoints();
+    if ((!d.kappa.empty() && d.kappa.size() != muU.size()) ||
+        (!d.mu.empty() && d.mu.size() != muU.size())) {
+      throw std::invalid_argument(
+          "a material direction's moduli live at the memory points, "
+          "(element, point)");
     }
-    if (HasDirection()) {
-      unrelaxed = op->BaseMaterial().Variation(direction);
-      if (!direction.mu.empty()) {
-        muRatio.assign(muU.size(), 0.0);
-        for (auto i = std::size_t{0}; i < muU.size(); ++i) {
-          muRatio[i] = muU[i] > 0.0 ? direction.mu[i] / muU[i] : 0.0;
-        }
+    for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+      const auto f = op->BranchFractionAtPoints(k);
+      fractions.emplace_back(f.begin(), f.end());
+    }
+    if (!direction.mu.empty()) {
+      // against the unrelaxed shear the operator steps with, the
+      // reference's under its own perturbation (Options::moduli)
+      const auto& shear = op->options_.moduli.shear;
+      muRatio.assign(muU.size(), 0.0);
+      for (auto i = std::size_t{0}; i < muU.size(); ++i) {
+        const auto current = muU[i] * (shear.empty() ? 1.0 : 1.0 + shear[i]);
+        muRatio[i] = current > 0.0 ? direction.mu[i] / current : 0.0;
       }
     }
   }
@@ -202,32 +208,51 @@ struct AdjointSolver::MaterialTools {
   [[nodiscard]] bool HasDirection() const {
     return !direction.kappa.empty() || !direction.mu.empty();
   }
-  [[nodiscard]] std::size_t NodeCount() const { return fractions[0].size(); }
+  /// The memory points over the whole mesh, where the kernels in kappa
+  /// and mu live; and the mesh's nodes, where the density's does.
+  [[nodiscard]] std::size_t PointCount() const {
+    return op->UnrelaxedShearAtPoints().size();
+  }
+  [[nodiscard]] std::size_t NodeCount() const {
+    return op->BaseMaterial().Rho().size();
+  }
 
-  /// v's variation of the effective material of a dt.
-  const MaterialVariation& EffectiveVariation(double dt) {
-    auto found = effective.find(dt);
-    if (found != effective.end()) return found->second;
+  /// v's variation of the effective shear of a dt: delta mu scaled by
+  /// 1 - sum_k f_k (1 - w_k) at the points.
+  const std::vector<double>& EffectiveMu(double dt) {
+    auto found = effectiveMu.find(dt);
+    if (found != effectiveMu.end()) return found->second;
     const auto scheme = ev->options_.scheme;
     const bool implicit = scheme == Scheme::BackwardEuler;
     const auto& weights = op->SchemeWeightsOf(scheme, dt);
-    MaterialDirection scaled;
-    scaled.kappa = direction.kappa;
-    scaled.rho = direction.rho;
-    if (!direction.mu.empty()) {
-      scaled.mu = direction.mu;
-      for (auto i = std::size_t{0}; i < scaled.mu.size(); ++i) {
-        auto factor = 1.0;
-        for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
-          const auto w = implicit ? weights[k].e[i] : 1.0 - weights[k].beta[i];
-          factor -= fractions[k][i] * (1.0 - w);
-        }
-        scaled.mu[i] *= factor;
+    auto scaled = direction.mu;
+    for (auto i = std::size_t{0}; i < scaled.size(); ++i) {
+      auto factor = 1.0;
+      for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
+        const auto w = implicit ? weights[k].e[i] : 1.0 - weights[k].beta[i];
+        factor -= fractions[k][i] * (1.0 - w);
       }
+      scaled[i] *= factor;
     }
-    return effective
-        .emplace(dt, op->EffectiveMaterial(scheme, dt).Variation(scaled))
-        .first->second;
+    return effectiveMu.emplace(dt, std::move(scaled)).first->second;
+  }
+
+  /// v's variation of a step's effective system of a dt on x, and of the
+  /// unrelaxed systems (every weight one).
+  [[nodiscard]] std::vector<double> ApplyEffective(const DegreeOperator& system,
+                                                   double dt,
+                                                   std::span<const double> x,
+                                                   int ncols) {
+    const auto none = std::vector<double>{};
+    return system.ApplyPointVariation(
+        op->Points(), direction.kappa,
+        direction.mu.empty() ? none : EffectiveMu(dt), x, ncols);
+  }
+  [[nodiscard]] std::vector<double> ApplyUnrelaxed(const DegreeOperator& system,
+                                                   std::span<const double> x,
+                                                   int ncols) const {
+    return system.ApplyPointVariation(op->Points(), direction.kappa,
+                                      direction.mu, x, ncols);
   }
 
   /// The memory force of a memory state (K, 3, ne, np, ncols) with the
@@ -261,13 +286,12 @@ struct AdjointSolver::MaterialTools {
   /// v's force on a full solution and a decayed memory under the dt
   /// flavour: -(dK_eff) x plus the memory force's variation.
   [[nodiscard]] Fields Force(double dt, const Fields& full, const Fields& mem) {
-    const auto& variation = EffectiveVariation(dt);
     auto& flavour = op->FlavourOf(ev->options_.scheme, dt);
     auto out = Fields{};
     for (const auto& [l, x] : full) {
       const auto& deg = op->Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = op->EffectiveSystem(flavour, l).ApplyVariation(variation, x, ncols);
+      auto force = ApplyEffective(op->EffectiveSystem(flavour, l), dt, x, ncols);
       for (auto& v : force) v = -v;
       if (!direction.mu.empty()) {
         const auto mf = MemoryVariationForce(deg, ncols, mem.at(l));
@@ -287,7 +311,7 @@ struct AdjointSolver::MaterialTools {
     for (const auto& [l, x] : full) {
       const auto& deg = op->Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = deg.system.ApplyVariation(*unrelaxed, x, ncols);
+      auto force = ApplyUnrelaxed(deg.system, x, ncols);
       for (auto& v : force) v = -v;
       if (mem != nullptr && !direction.mu.empty()) {
         const auto mf = MemoryVariationForce(deg, ncols, mem->at(l));
@@ -337,17 +361,19 @@ struct AdjointSolver::MaterialTools {
 
   /// The material pairing of a dual solution y (with its strain scalars
   /// sy) and a base solution x at a degree's points: -(dK/d kappa,
-  /// dK/d mu) of the degree form (DegreeOperator::MaterialGradient), the
-  /// shear scaled by `factor` at the nodes, and, with a memory state, the
+  /// dK/d mu) of the degree form at the memory points
+  /// (DegreeOperator::PointGradient), the shear scaled by `factor` there,
+  /// and, with a memory state, the
   /// memory force's variation sum_k f_k <sy, memory_k> on the memory
   /// window (the first-order sweeps' materialTerms).
   [[nodiscard]] static std::pair<std::vector<double>, std::vector<double>>
-  MaterialPairing(const Degree& deg, int ncols, std::span<const double> y,
+  MaterialPairing(const MemoryPoints& points, const Degree& deg, int ncols,
+                  std::span<const double> y,
                   std::span<const double> sy, std::span<const double> x,
                   std::span<const double> factor,
                   const std::vector<double>* memory,
                   const std::vector<std::vector<double>>& fractions) {
-    auto [kappa, mu] = deg.system.MaterialGradient(y, x, ncols);
+    auto [kappa, mu] = deg.system.PointGradient(points, y, x, ncols);
     for (auto i = std::size_t{0}; i < kappa.size(); ++i) {
       kappa[i] = -kappa[i];
       mu[i] = -factor[i] * mu[i];

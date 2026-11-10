@@ -20,16 +20,6 @@ using namespace kernel_scene;
 
 namespace {
 
-/// With the memory points at the GLL nodes, as in these tests, the points
-/// are the nodes: a nodal direction as one for the time-stepped problem,
-/// and back.
-[[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
-}
-[[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
-  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
-}
-
 /// A kernel object (kernels or their derivatives) paired with a direction
 /// in every argument: the thickness view against the thickness
 /// perturbation at every node, the initial sea level kernel against its
@@ -342,7 +332,8 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
   // second-order tangent-linear run; the discrete pair match to rounding
   // at every spacing. As for the second-order run, the grids coarser
   // than 17 nodes over 10 kyr sit before the asymptotic regime on this
-  // mantle.
+  // mantle. At the default memory points, the Gauss points, the moduli's
+  // directions held there.
   auto setup = Scene::Make(1e22);
   std::mt19937 rng(11);
   const auto fieldT = setup.Smooth(rng, 100.0 * setup.Metre());
@@ -371,8 +362,8 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     }
     return d;
   };
-  ViscoelasticOperator op(setup.rheology, kLmax,
-                          {.memory_points = MemoryPointSet::Gll});
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  ASSERT_EQ(op.Points().set, MemoryPointSet::Gauss);
   auto iceGaps = std::vector<double>{}, viscosityGaps = std::vector<double>{},
        materialGaps = std::vector<double>{}, mismatches = std::vector<double>{};
   for (const auto nodes : {17, 33}) {
@@ -398,11 +389,13 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     TangentPerturbation u, v;
     u.iceThickness = scaled(fieldU, [](double s) { return s; });
     u.itau = setup.DeltaItau(0.1, [](double r) { return 0.3 + 0.7 * r * r; });
-    u.material = AtGll(materialDirection(
-        [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); }));
+    u.material = AtMemoryPoints(op.Points(), materialDirection([](double r) {
+      return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r);
+    }));
     v.iceThickness = scaled(fieldV, [](double s) { return (1.0 - s) * (1.0 - s); });
     v.itau = setup.DeltaItau(0.1, [](double r) { return 1.0 + r; });
-    v.material = AtGll(materialDirection([](double r) { return 1.0 - 0.5 * r; }));
+    v.material = AtMemoryPoints(
+        op.Points(), materialDirection([](double r) { return 1.0 - 0.5 * r; }));
     auto measurement = std::map<std::size_t, Measurement>{};
     measurement[times.size() - 1].seaLevelDual = g;
     struct Blocks {
@@ -471,7 +464,10 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   // differences of the gradient along w (the material shifted, the
   // relaxation times and the thickness moved) paired with u converge at
   // second order to the derivatives along w paired with u, Richardson
-  // landing on them — both schemes.
+  // landing on them — both schemes, with the memory points at the GLL
+  // nodes and at the Gauss points, the moduli's directions held at the
+  // points and the base moved through ViscoelasticOperator::Options::
+  // moduli.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(43);
   auto times = std::vector<double>{};
@@ -506,41 +502,49 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   };
   auto u = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.3 + 0.7 * r * r; });
-  u.material = AtGll(materialDirection(
-      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); }));
-  // u with a density part too, for the PAIRINGS only (a density direction
+  const auto nodalU = materialDirection(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  // a density part for u too, for the PAIRINGS only (a density direction
   // drives no second-order run): the density kernel's derivative along w.
-  auto uPair = u;
-  uPair.material.rho.assign(k0.size(), 0.0);
+  auto rhoU = std::vector<double>(k0.size(), 0.0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
     for (auto q = 0; q < mesh.NGll(); ++q) {
       const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
       const auto r = mesh.Radius(e, q);
-      uPair.material.rho[i] = 0.05 * (0.6 + 0.4 * r) * setup.material.Rho()[i];
+      rhoU[i] = 0.05 * (0.6 + 0.4 * r) * setup.material.Rho()[i];
     }
   }
   auto w = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.8 - 0.5 * r; });
-  w.material = AtGll(materialDirection([](double r) { return 1.0 - 0.5 * r; }));
+  const auto nodalW = materialDirection([](double r) { return 1.0 - 0.5 * r; });
 
-  // The base moved along w by eps: the material shifted (the branch
-  // moduli as the same fractions of the shifted unrelaxed modulus), the
-  // inverse times by eps delta itau_w, the thickness by eps delta I_w.
+  // The base moved along w by eps: the moduli perturbed at the memory
+  // points (relative, eps delta_w / modulus; the branch moduli follow as
+  // the same fractions), the inverse times by eps delta itau_w, the
+  // thickness by eps delta I_w.
   const auto& base = setup.rheology;
-  auto rheologyAt = [&](double eps) {
-    const auto shifted = material.Shifted(Nodal(w.material), eps);
-    const auto muU = base.MuUnrelaxed();
-    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+  auto operatorAt = [&](double eps, MemoryPointSet set,
+                        const PointMaterialDirection& along) {
     auto branches = std::vector<Rheology::Branch>{};
     for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
       auto branch = base.BranchAt(k);
-      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
-        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+      for (auto i = std::size_t{0}; i < branch.itau.size(); ++i) {
         branch.itau[i] += eps * w.itau[k][i];
       }
       branches.push_back(std::move(branch));
     }
-    return Rheology::Create(shifted, branches).value();
+    const ViscoelasticOperator reference(base, kLmax, {.memory_points = set});
+    const auto muU = reference.UnrelaxedShearAtPoints();
+    const auto kappa = reference.BulkModulusAtPoints();
+    ViscoelasticOperator::Options::PointModuli moduli;
+    moduli.shear.assign(muU.size(), 0.0);
+    moduli.bulk.assign(muU.size(), 0.0);
+    for (auto i = std::size_t{0}; i < muU.size(); ++i) {
+      if (muU[i] > 0.0) moduli.shear[i] = eps * along.mu[i] / muU[i];
+      if (kappa[i] > 0.0) moduli.bulk[i] = eps * along.kappa[i] / kappa[i];
+    }
+    return ViscoelasticOperator(Rheology::Create(material, branches).value(),
+                                kLmax, {.memory_points = set, .moduli = moduli});
   };
   auto movedThickness = [&](double eps) {
     auto out = thickness;
@@ -552,9 +556,13 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     return out;
   };
 
+  for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    ViscoelasticOperator op(setup.rheology, kLmax,
-                            {.memory_points = MemoryPointSet::Gll});
+    ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
+    u.material = AtMemoryPoints(op.Points(), nodalU);
+    w.material = AtMemoryPoints(op.Points(), nodalW);
+    auto uPair = u;
+    uPair.material.rho = rhoU;
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
@@ -604,9 +612,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
         << "scheme " << static_cast<int>(scheme);
 
     auto gradientAt = [&](double eps) {
-      const auto rheology = rheologyAt(eps);
-      ViscoelasticOperator movedOp(rheology, kLmax,
-                                   {.memory_points = MemoryPointSet::Gll});
+      const auto movedOp = operatorAt(eps, set, w.material);
       SeaLevelEvolution movedEvolution(movedOp, setup.solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = RotationalFeedback::None,
