@@ -1,8 +1,11 @@
 // Lateral elastic moduli in the 3D stepper: an angle-uniform shift of
 // the unrelaxed shear and bulk moduli reproduces the 1D stepper on the
-// shifted rheology (exactly at the GLL memory points; at Gauss points
-// for a per-element constant shift of the Maxwell region, where every
-// shear term is a point term); the unrelaxed start solve under lateral
+// shifted rheology at the GLL memory points, and at Gauss points the 1D
+// stepper given the same perturbation at its memory points (and, for a
+// per-element constant shift of the Maxwell region, where every shear
+// term is a point term, the shifted rheology too); a perturbation at the
+// GLL points is the rheology with its nodal moduli scaled; the unrelaxed
+// start solve under lateral
 // moduli is the static lateral solve; lateral moduli couple spheroidal
 // and toroidal motion; the step self-converges at second order with
 // lateral moduli and lateral viscosity on together.
@@ -238,6 +241,124 @@ TEST(LateralModuli3D, ConstantShiftOfTheMaxwellRegionMatchesThe1DStepperAtGaussP
     EXPECT_LT(worst, 1e-10) << "scheme " << static_cast<int>(scheme);
     std::cout << "Gauss scheme " << static_cast<int>(scheme) << ": worst "
               << worst << ", passes " << iterations << '\n';
+  }
+}
+
+TEST(LateralModuli3D, AngleUniformShiftMatchesThe1DStepperAtGaussPoints) {
+  // Smooth 10% shifts of the unrelaxed shear and the bulk modulus over
+  // the whole solid, at Gauss memory points: the 1D stepper with the
+  // same perturbation sampled at its memory points (Options::moduli),
+  // both schemes, two steps from rest. The two take the perturbation by
+  // the one rule, so they agree as at the GLL points.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto& mesh = body.material.Mesh();
+  const auto r0 = mesh.Right(0);
+  const auto shear = [=](double r) {
+    return r > r0 ? 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r)) : 0.0;
+  };
+  const auto bulk = [=](double r) { return r > r0 ? 0.1 * (1.0 - 0.5 * r) : 0.0; };
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, mesh);
+  ViscoelasticOperator::Options::PointModuli moduli;
+  moduli.shear.assign(static_cast<std::size_t>(mesh.ElementCount()) * points.count, 0.0);
+  moduli.bulk = moduli.shear;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (body.material.IsFluid(e)) continue;
+    for (auto p = 0; p < points.count; ++p) {
+      const auto i = static_cast<std::size_t>(e) * points.count + p;
+      const auto r = points.RadiusAt(mesh, e, p);
+      moduli.shear[i] = shear(r);
+      moduli.bulk[i] = bulk(r);
+    }
+  }
+  ViscoelasticOperator op1(body.rheology, kLmax,
+                           {.memory_points = MemoryPointSet::Gauss,
+                            .moduli = moduli});
+  Viscoelastic3D op3(
+      body.rheology, kLmax, [](double, double, double) { return 0.0; },
+      {.memory_points = MemoryPointSet::Gauss,
+       .moduli = {.shear = [&](double r, double, double) { return shear(r); },
+                  .bulk = [&](double r, double, double) { return bulk(r); }}});
+  // the reference's moduli at the points are the 3D stepper's at its nodes
+  ViscoelasticOperator reference(body.rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gauss});
+  const auto& coupling = op3.Coupling();
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto at = static_cast<std::size_t>(coupling.ElementOfNode(node)) *
+                        points.count +
+                    coupling.NodeInElementOf(node);
+    ASSERT_EQ(reference.UnrelaxedShearAtPoints()[at],
+              op3.UnrelaxedShearAtNodes()[node]);
+    ASSERT_EQ(reference.BulkModulusAtPoints()[at],
+              op3.BulkModulusAtNodes()[node]);
+  }
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    auto iterations = 0;
+    const auto worst = CompareSteps(op1, op3, scheme, 0.7 * tau, 2, iterations);
+    EXPECT_LT(worst, 1e-10) << "scheme " << static_cast<int>(scheme);
+    std::cout << "Gauss, smooth, scheme " << static_cast<int>(scheme)
+              << ": worst " << worst << ", passes " << iterations << '\n';
+    // and the perturbation is felt: the unperturbed stepper differs
+    auto unused = 0;
+    EXPECT_GT(CompareSteps(reference, op3, scheme, 0.7 * tau, 2, unused), 1e-4);
+  }
+}
+
+TEST(LateralModuli3D, PointModuliAtGllPointsAreTheShiftedRheology) {
+  // With the memory points at the GLL nodes a perturbation at the points
+  // is a nodal one: the stepper given it is the stepper on the rheology
+  // with its nodal moduli scaled.
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto& mesh = body.material.Mesh();
+  const auto n = mesh.NGll();
+  const auto r0 = mesh.Right(0);
+  const auto shear = [=](double r) {
+    return r > r0 ? 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r)) : 0.0;
+  };
+  const auto bulk = [=](double r) { return r > r0 ? 0.1 * (1.0 - 0.5 * r) : 0.0; };
+  ViscoelasticOperator::Options::PointModuli moduli;
+  moduli.shear.assign(static_cast<std::size_t>(mesh.ElementCount()) * n, 0.0);
+  moduli.bulk = moduli.shear;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (body.material.IsFluid(e)) continue;
+    for (auto q = 0; q < n; ++q) {
+      const auto i = static_cast<std::size_t>(e) * n + q;
+      moduli.shear[i] = shear(mesh.Radius(e, q));
+      moduli.bulk[i] = bulk(mesh.Radius(e, q));
+    }
+  }
+  ViscoelasticOperator shifted(body.Shifted(shear, bulk), kLmax,
+                               {.memory_points = MemoryPointSet::Gll});
+  ViscoelasticOperator perturbed(body.rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gll,
+                                  .moduli = moduli});
+  const auto load = [](int l, double) { return Load1D(l); };
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    auto a = shifted.ZeroState([](int l) { return 2 * (l + 1); });
+    auto b = perturbed.ZeroState([](int l) { return 2 * (l + 1); });
+    auto xa = std::map<int, std::vector<double>>{};
+    auto xb = xa;
+    for (auto step = 0; step < 2; ++step) {
+      auto [na, sa] = shifted.Step(a, 0.7 * tau, scheme, load);
+      auto [nb, sb] = perturbed.Step(b, 0.7 * tau, scheme, load);
+      a = std::move(na), b = std::move(nb);
+      xa = std::move(sa), xb = std::move(sb);
+    }
+    for (const auto component : {Component::U, Component::V, Component::Phi}) {
+      const auto ua = shifted.Surface(xa, component);
+      const auto ub = perturbed.Surface(xb, component);
+      auto scale = 0.0, diff = 0.0;
+      for (auto l = 0; l <= kLmax; ++l) {
+        for (auto c = std::size_t{0}; c < ua.at(l).size(); ++c) {
+          scale = std::max(scale, std::abs(ua.at(l)[c]));
+          diff = std::max(diff, std::abs(ub.at(l)[c] - ua.at(l)[c]));
+        }
+      }
+      EXPECT_GT(scale, 0.0);
+      EXPECT_LT(diff, 1e-11 * scale)
+          << "component " << static_cast<int>(component);
+    }
   }
 }
 

@@ -89,10 +89,15 @@ struct MemoryPoints {
 /// per element and point the modulus s (the branches' sum_k mu_k w_k), and
 /// the term is sum_p jac w_p s_p times the deviatoric form at the point.
 /// With GLL points it is exactly the material's shear modulus raised by s.
-/// Read during the operator's construction only.
+/// Beside it, optionally, a bulk modulus at the points, integrated against
+/// the dilatation squared in the same way (a perturbation of kappa held at
+/// the points; empty for none), which the degree operators take and the
+/// toroidal ones, having no dilatation, do not. Read during the operator's
+/// construction only.
 struct PointShear {
   const MemoryPoints* points = nullptr;
   std::span<const double> modulus;  ///< (ElementCount, points->count)
+  std::span<const double> bulk{};   ///< likewise, or empty
 };
 
 }  // namespace sl3dpp

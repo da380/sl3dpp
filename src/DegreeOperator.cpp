@@ -358,6 +358,32 @@ void DegreeOperator::AssembleBand(std::vector<double>& band,
     // deviatoric scalars dM = V, dR = r d_r U - U + k^2 V / 2 and
     // dS = U + r d_r V - V, which with GLL points is exactly the elastic
     // block with the shear modulus raised by s.
+    if (pointShear != nullptr && !fluid && !pointShear->bulk.empty()) {
+      // The point bulk: jac w_p kappa_p D^2 in the dilatation
+      // D = r d_r U + 2 U - k^2 V.
+      const auto& points = *pointShear->points;
+      for (auto p = 0; p < points.count; ++p) {
+        const auto kappa =
+            pointShear->bulk[static_cast<std::size_t>(e) * points.count + p];
+        if (kappa == 0.0) continue;
+        auto rp = 0.0;
+        for (auto i = 0; i < n; ++i)
+          rp += points.Value(p, i) * mesh.Radius(e, i);
+        std::ranges::fill(dR, 0.0);
+        for (auto i = 0; i < n; ++i) {
+          const auto v = points.Value(p, i);
+          dR[3 * i] = rp * points.Derivative(p, i) / jac + 2.0 * v;
+          dR[3 * i + 1] = -k2 * v;
+        }
+        const auto weight = points.weight[p] * jac * kappa;
+        for (auto a = 0; a < n3; ++a) {
+          if (dR[a] == 0.0) continue;
+          for (auto b = 0; b < n3; ++b) {
+            at(local, a, b) += weight * dR[a] * dR[b];
+          }
+        }
+      }
+    }
     if (pointShear != nullptr && !fluid) {
       const auto& points = *pointShear->points;
       for (auto p = 0; p < points.count; ++p) {

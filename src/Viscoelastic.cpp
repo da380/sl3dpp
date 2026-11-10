@@ -46,21 +46,89 @@ void AddColumns(std::vector<double>& x, const std::vector<double>& units,
 // The per-degree workspace and the flavour struct live in
 // detail/ViscoelasticDegree.hpp, shared with the adjoint sweeps.
 
+namespace {
+
+/// The rheology an operator steps: the one given, or with the internal
+/// variables at the GLL nodes and a perturbation of the moduli there, the
+/// rheology with its nodal moduli scaled (the points are the nodes).
+std::shared_ptr<const Rheology> SteppedRheology(
+    const Rheology& rheology, const ViscoelasticOperator::Options& options) {
+  const auto& moduli = options.moduli;
+  if (moduli.Empty() || options.memory_points != MemoryPointSet::Gll) {
+    return std::make_shared<const Rheology>(rheology);
+  }
+  const auto size = rheology.BaseMaterial().Rho().size();
+  if ((!moduli.shear.empty() && moduli.shear.size() != size) ||
+      (!moduli.bulk.empty() && moduli.bulk.size() != size)) {
+    throw std::invalid_argument(
+        "a perturbation of the moduli has (element, point) entries");
+  }
+  MaterialDirection d;
+  const auto kappa = rheology.Kappa();
+  const auto muU = rheology.MuUnrelaxed();
+  d.kappa.assign(size, 0.0);
+  d.mu.assign(size, 0.0);
+  for (auto i = std::size_t{0}; i < size; ++i) {
+    if (!moduli.bulk.empty()) d.kappa[i] = moduli.bulk[i] * kappa[i];
+    if (!moduli.shear.empty()) d.mu[i] = moduli.shear[i] * muU[i];
+  }
+  auto branches = std::vector<Rheology::Branch>{};
+  for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+    branches.push_back(rheology.BranchAt(k));
+    if (moduli.shear.empty()) continue;
+    for (auto i = std::size_t{0}; i < size; ++i) {
+      branches.back().mu[i] *= 1.0 + moduli.shear[i];
+    }
+  }
+  auto shifted =
+      Rheology::Create(rheology.BaseMaterial().Shifted(d, 1.0), std::move(branches));
+  if (!shifted) {
+    throw std::invalid_argument(
+        "the perturbed moduli do not make a rheology");
+  }
+  return std::make_shared<const Rheology>(std::move(*shifted));
+}
+
+}  // namespace
+
 ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
                                            Options options)
-    : rheology_(std::make_shared<const Rheology>(rheology)),
+    : rheology_(SteppedRheology(rheology, options)),
       lmax_(lmax),
       options_(options),
       points_(std::make_unique<const MemoryPoints>(MemoryPoints::Of(
           options.memory_points, rheology.BaseMaterial().Mesh()))) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
   const auto gll = options.memory_points == MemoryPointSet::Gll;
+  const auto& moduli = options_.moduli;
+  const auto pointCount =
+      static_cast<std::size_t>(rheology.BaseMaterial().Mesh().ElementCount()) *
+      points_->count;
+  if ((!moduli.shear.empty() && moduli.shear.size() != pointCount) ||
+      (!moduli.bulk.empty() && moduli.bulk.size() != pointCount)) {
+    throw std::invalid_argument(
+        "a perturbation of the moduli has (element, point) entries");
+  }
   auto sample = [&](const std::vector<double>& nodal) {
     if (gll) return nodal;
     auto out = points_->Interpolate(nodal);
     for (auto& v : out) v = std::max(v, 0.0);
     return out;
   };
+  auto atPoints = [&](std::span<const double> nodal) {
+    return gll ? std::vector<double>(nodal.begin(), nodal.end())
+               : points_->Interpolate(nodal);
+  };
+  // The reference's moduli at the points, before any perturbation.
+  muUnrelaxedAtPoints_ = atPoints(rheology.MuLongTerm());
+  kappaAtPoints_ = atPoints(rheology.Kappa());
+  const auto longTermAtPoints = muUnrelaxedAtPoints_;
+  for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
+    const auto mu = sample(rheology.BranchAt(k).mu);
+    for (auto i = std::size_t{0}; i < mu.size(); ++i) {
+      muUnrelaxedAtPoints_[i] += mu[i];
+    }
+  }
   for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
     pointMu_.push_back(sample(rheology_->BranchAt(k).mu));
     pointItau_.push_back(sample(rheology_->BranchAt(k).itau));
@@ -70,15 +138,32 @@ ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
     // the branches' at the points (MemoryPoints.hpp).
     nodalMaterial_ =
         std::make_unique<const Material>(rheology_->LongTermMaterial());
-    elasticShear_.assign(static_cast<std::size_t>(
-                             rheology.BaseMaterial().Mesh().ElementCount()) *
-                             points_->count,
-                         0.0);
+    elasticShear_.assign(pointCount, 0.0);
+    if (!moduli.shear.empty()) {
+      // The branches scaled at the points; the long-term shear's
+      // perturbation a point term that every operator carries whole.
+      longTermShearShift_.resize(pointCount);
+      for (auto i = std::size_t{0}; i < pointCount; ++i) {
+        longTermShearShift_[i] = moduli.shear[i] * longTermAtPoints[i];
+        elasticShear_[i] = longTermShearShift_[i];
+      }
+      for (auto& mu : pointMu_) {
+        for (auto i = std::size_t{0}; i < pointCount; ++i) {
+          mu[i] *= 1.0 + moduli.shear[i];
+        }
+      }
+    }
+    if (!moduli.bulk.empty()) {
+      pointBulk_.resize(pointCount);
+      for (auto i = std::size_t{0}; i < pointCount; ++i) {
+        pointBulk_[i] = moduli.bulk[i] * kappaAtPoints_[i];
+      }
+    }
     for (const auto& mu : pointMu_) {
       for (auto i = std::size_t{0}; i < mu.size(); ++i)
         elasticShear_[i] += mu[i];
     }
-    elasticPointShear_ = {points_.get(), elasticShear_};
+    elasticPointShear_ = {points_.get(), elasticShear_, pointBulk_};
   }
 }
 
@@ -179,6 +264,9 @@ std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
       s[i] += pointMu_[k][i] * unrelaxed;
     }
   }
+  for (auto i = std::size_t{0}; i < longTermShearShift_.size(); ++i) {
+    s[i] += longTermShearShift_[i];
+  }
   return s;
 }
 
@@ -277,7 +365,8 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
     // points.
     flavour->material = std::make_unique<Material>(NodalMaterial());
     flavour->pointShearModulus = PointShearModulus(scheme, dt);
-    flavour->pointShear = {points_.get(), flavour->pointShearModulus};
+    flavour->pointShear = {points_.get(), flavour->pointShearModulus,
+                           pointBulk_};
   }
   flavours_.emplace_front(key, std::move(flavour));
   return *flavours_.front().second;

@@ -98,6 +98,23 @@ class ViscoelasticOperator {
     /// RadialMesh::BalancedCuts): solved by substructuring over the
     /// segments, the same answers to rounding. Empty, the direct solves.
     std::vector<int> radial_cuts{};
+    /// Perturbations of the ELASTIC moduli, relative and sampled at the
+    /// memory points, (element, point) over the whole mesh: the unrelaxed
+    /// shear becomes mu_U (1 + shear), every branch modulus scaled alike
+    /// (the branch fractions and the relaxation times held, as the
+    /// material derivatives hold them), and kappa becomes kappa (1 +
+    /// bulk); either may be empty. They enter as the 3D stepper's lateral
+    /// moduli do in the angle-uniform case (Viscoelastic3D::Options::
+    /// moduli): at Gauss points the branch moduli scaled at the points,
+    /// and the long-term shear's and the bulk modulus's perturbations as
+    /// point terms of the operators, shear and bulk times the nodal
+    /// modulus interpolated there; at the GLL points, where the points
+    /// are the nodes, the rheology with its nodal moduli scaled.
+    struct PointModuli {
+      std::vector<double> shear, bulk;
+      [[nodiscard]] bool Empty() const { return shear.empty() && bulk.empty(); }
+    };
+    PointModuli moduli{};
   };
 
   /// The rheology is copied into immutable shared storage, so the
@@ -248,10 +265,24 @@ class ViscoelasticOperator {
     return pointItau_.at(k);
   }
 
+  /// The reference's unrelaxed shear and bulk moduli at the memory
+  /// points, (element, point) over the whole mesh, before any
+  /// perturbation of Options::moduli: nodal at the GLL points; at Gauss
+  /// points the long-term shear and the bulk modulus interpolated, plus
+  /// the branches' shear at the points as the operators carry it. What a
+  /// relative perturbation multiplies.
+  [[nodiscard]] std::span<const double> UnrelaxedShearAtPoints() const {
+    return muUnrelaxedAtPoints_;
+  }
+  [[nodiscard]] std::span<const double> BulkModulusAtPoints() const {
+    return kappaAtPoints_;
+  }
+
   /// The branches' shear modulus at the memory points that a step's
   /// effective operators integrate there, sum_k mu_k w_k with w_k the
   /// branch's unrelaxed fraction (1/(1 + h) for backward Euler, 1 - beta
-  /// for the trapezoid), (element, point) over the whole mesh. Away from
+  /// for the trapezoid), plus a perturbation of the long-term shear
+  /// (Options::moduli), (element, point) over the whole mesh. Away from
   /// the GLL nodes the effective operators are NodalMaterial's plus this
   /// term (PointShear); at the GLL points that is EffectiveMaterial's
   /// assembly.
@@ -349,6 +380,12 @@ class ViscoelasticOperator {
   std::unique_ptr<const Material> nodalMaterial_;
   std::vector<double> elasticShear_;
   PointShear elasticPointShear_;
+  /// The reference's unrelaxed shear and bulk moduli at the memory
+  /// points, and away from the GLL nodes the perturbations of
+  /// Options::moduli that enter as point terms: the long-term shear's
+  /// (it does not relax) and the bulk modulus's.
+  std::vector<double> muUnrelaxedAtPoints_, kappaAtPoints_;
+  std::vector<double> longTermShearShift_, pointBulk_;
   /// The branch moduli and inverse relaxation times at the memory points,
   /// (element, point) over the whole mesh: interpolated from the nodal
   /// arrays (clamped at zero against overshoot), the nodal arrays
