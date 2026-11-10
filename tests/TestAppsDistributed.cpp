@@ -1,11 +1,11 @@
 // sl3d's 3D commands over MPI ranks (apps/Ranks.hpp), built with
-// SL3DPP_WITH_MPI and run under mpiexec: evolve and kernel over the ranks
-// against the same configs on one process (rank 0 alone, as a run of one
-// rank), a run resumed from per-rank checkpoints against the
-// uninterrupted one, and the spilled trajectory in per-rank
-// subdirectories against the in-memory one. Rank 0 writes the outputs and
-// compares them; every rank's verdict is reduced to rank 0, which alone
-// prints.
+// SL3DPP_WITH_MPI and run under mpiexec: evolve, kernel and the
+// viscoelastic response over the ranks against the same configs on one
+// process (rank 0 alone, as a run of one rank), a run resumed from
+// per-rank checkpoints against the uninterrupted one, and the spilled
+// trajectory in per-rank subdirectories against the in-memory one. Rank 0
+// writes the outputs and compares them; every rank's verdict is reduced to
+// rank 0, which alone prints.
 
 #include <gtest/gtest.h>
 #include <mpi.h>
@@ -24,6 +24,10 @@
 #include "AppFixtures.hpp"
 #include "Commands.hpp"
 #include "Ranks.hpp"
+#include "sl3dpp/Deck.hpp"
+#include "sl3dpp/EarthModel.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/io/ModelModuli.hpp"
 
 namespace {
 
@@ -256,6 +260,78 @@ TEST_F(AppsOverRanks, KernelMatchesOneProcessAndSpillsPerRank) {
     }
   }
   EXPECT_GT(compared, 0);
+}
+
+TEST_F(AppsOverRanks, ViscoelasticResponseMatchesOneProcess) {
+  // The viscoelastic response under a lateral viscosity and lateral
+  // moduli, each step closed by the fixed point and by conjugate
+  // gradients: over the ranks (the first node's conjugate-gradient solve
+  // and every step distributed over radial segments) as on one process,
+  // to the radially substructured solves' round-off and the solvers'
+  // tolerance; the radial reference model beside it is the first rank's
+  // alone and the same.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  if (Rank() == 0) {
+    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic));
+    ASSERT_TRUE(deck);
+    const auto model = EarthModel::FromDeck(*deck);
+    ASSERT_TRUE(model);
+    ASSERT_TRUE(
+        io::WriteModuli(dir_ / "moduli.nc", *model, SurfaceGrid(8),
+                        [](double, double theta, double phi) {
+                          return 0.05 * std::sin(theta) * std::cos(phi);
+                        },
+                        {}, {.name = "toy moduli", .elementMetres = 500e3}));
+  }
+  Barrier();
+  const auto body = std::string{R"(
+      "model": {"deck": ")"} +
+                    data +
+                    R"(/prem8.elastic.deck", "format": "elastic",
+                "viscosity": {"file": ")" +
+                    data + R"(/viscosity_log.nc"},
+                "moduli": {"file": "moduli.nc"}},
+      "lmax": 8,
+      "times": {"end_kyr": 1, "nodes": 3},
+      "forcing": {
+        "load": [{"cap": {"latitude": 60, "longitude": -85, "width_deg": 20,
+                          "amplitude_kg_m2": 1.0e6},
+                  "history_kyr": [[0, 0.5], [1, 1]]}],
+        "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0}]})";
+  for (const auto* step : {"fixed_point", "conjugate_gradients"}) {
+    const auto config = [&](const std::string& name) {
+      return Write(name + ".json",
+                   std::format(R"({{{}, "solver": {{"step": "{}"}},
+                                   "output": {{"surface": "out/{}.nc"}}}})",
+                               body, step, name));
+    };
+    const auto one = config(std::format("one_{}", step));
+    const auto over = config(std::format("over_{}", step));
+    OneProcess([&] { static_cast<void>(app::RunResponse(one)); });
+    const auto summary = app::RunResponse(over);
+    if (Rank() == 0) {
+      EXPECT_TRUE(summary.starts_with(
+          "3-D (lateral viscosity, lateral moduli), viscoelastic"))
+          << summary;
+    } else {
+      EXPECT_EQ(summary, "");
+    }
+    Barrier();
+    if (Rank() != 0) continue;
+    const auto reference =
+        pm::ReadSurfaceFile(dir_ / "out" / std::format("one_{}.nc", step));
+    const auto distributed =
+        pm::ReadSurfaceFile(dir_ / "out" / std::format("over_{}.nc", step));
+    for (const auto* name :
+         {"load", "displacement", "tangential_potential", "potential",
+          "displacement_radial_model", "potential_radial_model"}) {
+      EXPECT_LT(Relative(distributed.variables.at(name).values,
+                         reference.variables.at(name).values),
+                1e-10)
+          << step << " " << name;
+    }
+  }
 }
 
 }  // namespace

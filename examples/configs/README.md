@@ -16,7 +16,7 @@ cd build/examples/configs
 ../../apps/sl3d evolve1d evolve1d.json   # or one at a time
 ```
 
-The synthetic configs need no data and run in about 15 s together on four
+The synthetic configs need no data and run in about 35 s together on four
 threads (`OMP_NUM_THREADS=4`); CI runs them with `run_all.sh`. They are
 sized for that, so their degrees are low; raise `lmax` and `nodes` for
 sharper results. `poetry run python plot_app.py`, from `build/examples`,
@@ -75,6 +75,17 @@ draws a figure per command from `out/`.
   planetmodel's cutaways). Its config is made of blocks (`model`,
   `forcing`, `solver`, `output`); the forcing's `load` and `tide` are lists
   of terms, summed.
+- **`response_viscoelastic.json`** — the viscoelastic response of the
+  synthetic 3D Earth, the lateral viscosity of `../viscosity_log.nc` with
+  the lateral moduli of `../synthetic_moduli.nc`, to the same Hudson Bay
+  cap loaded linearly over 6 kyr and removed over the next one (its
+  `history_kyr`) and a constant unit degree-2 tide, from 0 to 12 kyr in
+  half-kyr steps at lmax 16, by the 3D stepper: `out/response_viscoelastic.nc`
+  (the surface response at every node, the radial reference model's beside
+  it) and exchange tables at four nodes,
+  `out/response_viscoelastic_{node}.txt` (the start, the peak load, the
+  unloaded state and the end). A `times` block is what makes a `response`
+  viscoelastic; it takes about 5 s on four threads.
 
 `prem8.gia.deck` is `../prem8.elastic.deck` in planetmodel's GIA format,
 with a Maxwell mantle of 1e21 Pa s (the solid layers between 3480 and

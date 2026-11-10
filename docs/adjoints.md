@@ -1046,7 +1046,9 @@ benchmarks' exchange form, and the response at the memory nodes as a
 model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
 planetmodel's cutaways. ExampleStatic3D and `configs/response.json` run
 it on the synthetic 3D elastic Earth the build writes
-(MakeSyntheticModuli, io::WriteModuli).
+(MakeSyntheticModuli, io::WriteModuli). With a `times` block the same
+command steps the viscoelastic response through time instead, its first
+node this problem's solve (docs/sl3d-configs.md).
 
 ### 13k. Lateral moduli in the 3D stepper
 

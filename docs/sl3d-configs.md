@@ -15,7 +15,7 @@ sl3d <command> <config.json>
 | `evolve` | its 3D counterpart, the viscosity read from a planetmodel model file | a surface file of histories |
 | `kernel1d` | adjoint sensitivity kernels of configured measurements, 1D | a directory of kernel files |
 | `kernel` | their 3D counterpart | a directory of kernel files |
-| `response` | the elastic response to a prescribed surface load and tide, no ocean; 1D or 3D as the model's moduli make it | a surface file, and optionally a coefficient table and a model file |
+| `response` | the response to a prescribed surface load and tide, no ocean: elastic, or viscoelastic through time with a `times` block; 1D or 3D as the model's moduli (and viscosity) make it | a surface file (of histories, with `times`), and optionally coefficient tables and, elastic, a model file |
 
 ## Running sl3d
 
@@ -49,7 +49,10 @@ run is split over radius, one contiguous radial segment per rank, the cuts
 balancing the transform work ([radial-partitioning.md](radial-partitioning.md) §7 and §9):
 each rank holds and steps its own segment's internal variables, with its
 threads inside, and every rank reads the inputs and solves the sea level
-equation, the first rank's solution serving all. One rank per socket (or
+equation, the first rank's solution serving all (a `response` run has no
+sea level equation: every rank builds the forcing, the first rank's
+coefficients serving all, and a 1D viscoelastic `response` is the first
+rank's alone). One rank per socket (or
 per node) with threads inside is the intended shape. Rank 0 writes every
 output and prints the summary, with `on <n> ranks` appended. A failure on
 any rank ends the whole job, the message naming the rank. The other
@@ -86,10 +89,12 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 ### Blocks
 
 `response` reads its config as blocks, JSON objects each read by one
-piece of code: `model` (the deck, its format and the lateral moduli),
-`forcing` (the load and the tide), `solver` (the 3D solve's tolerance,
-budget and transforms) and `output` (the files written), with `lmax`
-beside them. The other commands keep the layouts documented with each.
+piece of code: `model` (the deck, its format, the lateral moduli and the
+3D viscosity), `times` (the time nodes of a viscoelastic run), `forcing`
+(the load and the tide), `solver` (the 3D solves' tolerance, budget and
+transforms, and the time step) and `output` (the files written), with
+`lmax` beside them. The other commands keep the layouts documented with
+each.
 
 ### Units and conventions
 
@@ -98,7 +103,9 @@ beside them. The other commands keep the layouts documented with each.
 - Dates in configs are in kiloyears before present (`_kyr_bp` members),
   a kiloyear being 1000 Julian years, 3.15576e10 s. A date of D kyr BP
   is the time -D kyr: the time axes of the files sl3d writes are in seconds
-  relative to the present, negative in the past.
+  relative to the present, negative in the past. `response`'s `times`
+  (`_kyr` members) count forwards instead, on the run's own clock, and
+  its file's time axis is that clock in seconds (response, below).
 - Latitudes and longitudes are in degrees, latitude north positive and
   longitude east positive; cap widths and disk radii are in degrees.
 - `rotation` chooses the rotational feedback: `"none"`, `"axial"` (the
@@ -123,7 +130,10 @@ skipped. The elastic structure always comes from the deck. `evolve1d` and
 need a deck that has one (`"maxwell"`): each layer holding a viscosity is a
 Maxwell body, and a deck with no viscosity at all is refused. `evolve` and
 `kernel` take the viscosity from the model file named by `viscosity`
-instead, and ignore any viscosity column.
+instead, and ignore any viscosity column. A viscoelastic `response` (one
+with `times`) does either: the model file's of `model.viscosity` when
+given, the deck's column otherwise; an elastic `response` uses no
+viscosity.
 
 The radial mesh is built for the run's `lmax` from the deck alone; there
 are no mesh members.
@@ -139,7 +149,8 @@ writes one from ICE-5G, ICE-6G or ICE-7G, holding the `ice_thickness` and
 - A present-day state (`state.file`) must hold the fields `ice_thickness`
   and `topography`; an ice history (`ice_history.file`) must hold
   `ice_thickness`. The two may be the same file. A `field` load term of
-  `response` is read from a surface file the same way.
+  `response` is read from a surface file the same way, at each time node
+  of a viscoelastic run when the file has a time axis.
 - Fields are resampled once onto the run's Gauss–Legendre grid at `lmax`,
   by each field's own lateral interpolation rule, and converted to SI by
   their declared dimensions (a field declaring none is used as it stands).
@@ -161,7 +172,8 @@ writes one from ICE-5G, ICE-6G or ICE-7G, holding the `ice_thickness` and
 
 `evolve` and `kernel` read the viscosity from a planetmodel model file
 (`planetmodel.model/1`) with a field named `viscosity`, as planetmodel's
-tomography conversion writes. The viscosity is split as
+tomography conversion writes, and so does a viscoelastic `response`
+(`model.viscosity`). The viscosity is split as
 eta(r, theta, phi) = eta_bar(r) exp(delta(r, theta, phi)) about a radial
 reference eta_bar, chosen by `viscosity.reference`:
 
@@ -547,27 +559,41 @@ The first is an `evolve1d` config; the second needs `evolve`.
 ## response
 
 The planet's response to a prescribed surface load and external tidal
-potential, with no ocean: no sea level equation is solved. The config is
-made of blocks (Blocks, above): `model`, `forcing`, `solver` and
-`output`, with `lmax` beside them. It is the instantaneous elastic
-response; a `times` block, which a viscoelastic response would take, is
-refused (the viscoelastic response is not built yet).
+potential, with no ocean: no sea level equation is solved, and there is
+no rotational feedback. The config is made of blocks (Blocks, above):
+`model`, `times`, `forcing`, `solver` and `output`, with `lmax` beside
+them.
+
+The `times` block decides whether the response is elastic or
+viscoelastic:
+
+- without `times` it is the instantaneous elastic response;
+- with `times` it is the viscoelastic response, stepped through the
+  block's time nodes under the forcing at each node (The viscoelastic
+  run, below).
 
 Whether the run is 1D or 3D is decided by the `model` block alone:
 
-- with no `moduli`, or with a moduli file whose perturbations do not vary
-  laterally, the run is the radial model's, by direct per-degree solves;
-- with laterally varying moduli it is the 3D static problem
+- elastic: with no `moduli`, or with a moduli file whose perturbations do
+  not vary laterally, the run is the radial model's, by direct per-degree
+  solves; with laterally varying moduli it is the 3D static problem
   (docs/adjoints.md §13j), closed by preconditioned conjugate gradients
   on the radial systems, over MPI ranks like `evolve`, and the radial
-  model's response to the same forcing is written beside it.
+  model's response to the same forcing is written beside it;
+- viscoelastic: the run is 3D when the viscosity file's viscosity
+  (`model.viscosity`) or the moduli file's moduli vary laterally, by the
+  3D stepper (`Viscoelastic3D`) over MPI ranks like `evolve`, with the
+  radial reference model's response written beside it; otherwise it is
+  the radial model's, by its own stepper per degree, every order a column
+  (`ViscoelasticOperator`), with no 3D machinery.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model` | object | required | the Earth model (below) |
 | `lmax` | integer >= 1 | required | the degree of the solve and of its grid |
+| `times` | object | absent | the time nodes of a viscoelastic run (below); absent, the elastic response |
 | `forcing` | object | required | the load and the tide (below) |
-| `solver` | object | absent | the 3D solve's tolerance, budget and transforms (below) |
+| `solver` | object | absent | the solves' tolerance, budget and transforms, and the time step (below) |
 | `output` | object | required | the files to write (below) |
 
 ### The model block
@@ -578,16 +604,49 @@ Whether the run is 1D or 3D is decided by the `model` block alone:
 | `model.format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"`, the words of `model_format` |
 | `model.moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli; absent, the radial model alone |
 | `model.moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
+| `model.viscosity.file` | path | absent | with `times` alone: a planetmodel model file of the 3D viscosity, as `evolve`'s `viscosity.file` (3D viscosity models, above); absent, the deck's own viscosity column |
+| `model.viscosity.reference` | word | `"geometric_mean"` | `"geometric_mean"` or `"file_radial"`: the radial reference, as `evolve`'s `viscosity.reference` |
 
-`model.viscosity` is refused: a viscosity needs a `times` block, which
-`response` does not take yet. The moduli file holds absolute moduli
-(planetmodel's `mu` and `kappa`, Pa), as planetmodel's conversion of a
-tomography model or `io::WriteModuli` writes them; the command takes
-their RELATIVE lateral perturbations, mu(x) / mu_ref(r) - 1, about the
-chosen reference, and applies them to the deck's own radial moduli — so
-the file should be built from the deck's radial model, and its lateral
-mean is not checked against the deck. A fluid layer takes no shear
-perturbation (the fluid form has no grid pipeline).
+The moduli file holds absolute moduli (planetmodel's `mu` and `kappa`,
+Pa), as planetmodel's conversion of a tomography model or
+`io::WriteModuli` writes them; the command takes their RELATIVE lateral
+perturbations, mu(x) / mu_ref(r) - 1, about the chosen reference, and
+applies them to the deck's own radial moduli — so the file should be
+built from the deck's radial model, and its lateral mean is not checked
+against the deck. A fluid layer takes no shear perturbation (the fluid
+form has no grid pipeline). In a viscoelastic run the shear perturbation
+scales the unrelaxed shear modulus and every Maxwell branch's modulus
+alike, the branch fractions and the relaxation times held
+(`Viscoelastic3D::Options::moduli`).
+
+The viscosity matters only to a viscoelastic run: `model.viscosity` is
+refused without `times`. With `times`, the viscosity is the model file's
+when `model.viscosity` is given (its radial reference the Maxwell body,
+the deck's viscosity column, if any, unused, as in `evolve`), and the
+deck's own column otherwise, as in `evolve1d`: each layer holding a
+viscosity is a Maxwell body. A deck format with no viscosity column
+(`"elastic"`, `"mineos"`) is then refused at `model.format`, and a
+`"maxwell"` deck with no viscosity anywhere at `model.deck`.
+
+### The times block
+
+The time nodes of a viscoelastic run, in kyr on the run's own clock,
+which counts FORWARDS (these are not the `_kyr_bp` dates of the evolve
+commands). Either form:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `times.start_kyr` | number | 0 | the first node |
+| `times.end_kyr` | number > `start_kyr` | required with `nodes` | the last node |
+| `times.nodes` | integer >= 2 | required with `end_kyr` | the number of nodes, evenly spaced from `start_kyr` to `end_kyr`, both included |
+| `times.at_kyr` | array of numbers | instead of the three above | the nodes themselves, at least two, strictly increasing; the first is the start |
+
+Exactly one form is given: `end_kyr` and `nodes` (with `start_kyr` or
+its default), or `at_kyr` alone (`start_kyr` beside it is refused). Evenly
+spaced nodes take one step length, (end - start) / (nodes - 1), for every
+step; listed nodes step by their differences, so uneven steps are
+allowed. Listed nodes that coincide with evenly spaced ones give the same
+run to the bit. The step is not limited by the shortest Maxwell time.
 
 ### The forcing block
 
@@ -596,22 +655,24 @@ perturbation (the fluid form has no grid pipeline).
 | `forcing.load` | array | absent | the load terms, summed (below) |
 | `forcing.tide` | array | absent | the tide coefficients, summed (below) |
 
-At least one load term or tide coefficient is needed. Every term is a
-fixed pattern: an amplitude history (`history_kyr`) is refused, since it
-needs a `times` block.
+At least one load term or tide coefficient is needed. Without `times`
+every term is a fixed pattern; with `times` a term may vary in time
+(Forcing through time, below).
 
 **Load terms.** Each element of `forcing.load` is an object with exactly
-one member, naming the term's kind; its value holds the term's members.
-Each is a surface mass density in kg m^-2:
+one member naming the term's kind, whose value holds the term's members,
+and, with `times`, optionally `history_kyr` beside it. Each is a surface
+mass density in kg m^-2:
 
 | Kind | Members | Surface mass density |
 | --- | --- | --- |
 | `cap` | `latitude`, `longitude`, `width_deg` (> 0), `amplitude_kg_m2` | A exp(-d^2 / (2 w^2)), with d the great-circle distance from the centre, w = `width_deg` and A = `amplitude_kg_m2`; no cut-off |
 | `disk` | `latitude`, `longitude`, `radius_deg` (in (0, 180]), `amplitude_kg_m2` | A where d <= alpha (alpha = `radius_deg`), zero outside |
-| `field` | `file`, `name` (default `"load"`) | the field `name` of a planetmodel surface file |
+| `field` | `file`, `name` (default `"load"`), `time_origin_kyr` (with `times`, default 0) | the field `name` of a planetmodel surface file |
 | `coefficients` | `file` | the coefficients in a text table |
 
-All members are required but `name`; latitudes lie in [-90, 90].
+All members are required but `name` and `time_origin_kyr`; latitudes lie
+in [-90, 90].
 
 - `cap` is sampled at the run's grid points and expanded by the grid's
   quadrature.
@@ -634,8 +695,8 @@ All members are required but `name`; latitudes lie in [-90, 90].
   resampled onto the run's Gauss–Legendre grid by the field's own lateral
   rule and converted to SI by its declared dimensions (a field declaring
   none is used as it stands, so it should hold kg m^-2), then expanded by
-  the grid's quadrature. A file with a time axis is refused: a load that
-  varies in time needs a `times` block.
+  the grid's quadrature. A file with a time axis is refused without
+  `times`: a load that varies in time needs a viscoelastic run.
 - `coefficients` names a text table. Lines starting with `#` and blank
   lines are skipped; every other line is a row `l m re im`: integers
   0 <= m <= l and the real and imaginary parts of the coefficient f_lm of
@@ -667,45 +728,118 @@ coefficients of the same degree and order add.
 | `order` | integer in [0, degree] | 0 | the order (m >= 0: the potential is real) |
 | `amplitude_m2_s2` | number | required | the coefficient's real part, m^2 s^-2 |
 | `imaginary_m2_s2` | number | 0 | its imaginary part, zero at order 0 |
+| `history_kyr` | array | absent | with `times` alone: its amplitude history (below) |
+
+**Forcing through time.** With `times`, the forcing at a node is each
+term's pattern at the node's time t times the term's factor there, summed
+as above:
+
+- `history_kyr`, on a load term or a tide coefficient, is a list of
+  `[time_kyr, factor]` pairs, at least one, its times strictly increasing
+  on the run's clock. The factor at t is the piecewise-LINEAR interpolant
+  of the factors between the pairs' times, held CONSTANT at the first
+  factor before the first time and at the last factor after the last; a
+  single pair is a constant factor. A term without a history has the
+  factor 1 throughout. A history is refused without `times`.
+- A `field` term whose file has a time axis is read at each node by the
+  file's own time rule, as `evolve` reads an ice history at its nodes: a
+  `node` field with linear time interpolation (what pyslfp and this
+  program write) between its stored times, its first or last field held
+  outside the file's span, without a warning; then expanded. The file's
+  time axis is in seconds (Units and conventions, above), and the run's
+  time t kyr reads the file at (t - `time_origin_kyr`) x 3.15576e10 s:
+  with the default origin 0, t kyr on the run's clock is t kyr on the
+  file's axis, so a `response` surface file (whose axis is the run's
+  clock) reads back as it was written; a file whose axis counts from the
+  present, negative in the past (an ice history, an `evolve` output),
+  is read from its date -D kyr at the run's start by
+  `"time_origin_kyr": D` with `start_kyr` 0. A static file is the same
+  pattern at every node. A field term may also carry `history_kyr`: its
+  factor multiplies the field read. `time_origin_kyr` is refused without
+  `times`.
 
 ### The solver block
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual (3D) |
+| `solver.rtol` | number > 0 | 1e-10 | the 3D solves' relative tolerance: an elastic run's conjugate gradients; a viscoelastic run's step closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual) and its first node's conjugate gradients under lateral moduli |
 | `solver.max_iterations` | integer >= 1 | 200 | their budget; a solve that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the 3D coupling's transforms cut with depth, as `evolve`'s `coupled.transform_degrees` |
 | `solver.cache_mb` | integer >= 0 | 0 | the cache in MiB that every transform grid of the run blocks its work for (the forcing's, the radial reference's and the 3D operator's), as `evolve`'s `coupled.cache_mb`; the results are bitwise independent of it |
+| `solver.scheme` | word | `"exponential_trapezoid"` | with `times` alone: the time step, `"exponential_trapezoid"` (second order) or `"backward_euler"` (first), as the evolve commands' `scheme` |
+| `solver.step` | word | `"fixed_point"` | with `times` alone: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`); a 1D run's steps are direct solves either way |
 
 ### The output block
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `output.surface` | path | required | the surface file to write |
-| `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table |
-| `output.volume` | path | absent | the response inside the body as a planetmodel model file |
+| `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table; with `times`, one table per node, the path holding `{node}` |
+| `output.exchange_nodes` | array of integers | every node | with `times` alone: the indices (from 0) of the nodes whose tables are written |
+| `output.volume` | path | absent | without `times` alone: the response inside the body as a planetmodel model file |
+
+With `times`, `output.exchange` must hold the literal `{node}`, which is
+replaced by the node's index zero-padded to the width of the last index
+(`00` to `40` for 41 nodes); without `times` it must not.
+`exchange_nodes` needs `output.exchange`, and an index past the last node
+is refused. `output.volume` is refused with `times`: the volume file is
+written for the elastic response alone.
+
+### The viscoelastic run
+
+The run starts at the first node with no memory: the response there is
+the instantaneous elastic one to the forcing at the first node (the
+unrelaxed solve; under lateral moduli the conjugate-gradient solve of
+the elastic run). Each step then advances from one node to the next
+under the forcing AT the next node, the scheme's end-time loads being
+that node's: the forcing enters at the nodes alone, and a history's or a
+field file's variation between two nodes is not seen. This is the evolve
+commands' convention: a load that is non-zero at the first
+node includes the elastic jump at the start (the run is the response to
+a load switched on there), while a load ramped up from zero has none.
+
+- 1D: the radial model's stepper, every degree with all its orders as
+  columns, each step one direct solve per degree.
+- 3D: `Viscoelastic3D`, each step closed by the fixed point or by
+  conjugate gradients (`solver.step`) to `solver.rtol` within
+  `solver.max_iterations`; a step that does not converge is an error.
+  Over MPI ranks it is distributed over radial segments as `evolve` is,
+  every rank reading the inputs and the first rank's forcing coefficients
+  serving all. The radial reference model (the deck's radial moduli and
+  the radial reference viscosity: the viscosity file's reference, or the
+  deck's column) is stepped beside it by the 1D stepper under the same
+  forcing, on the first rank. A 1D run on several ranks is the first
+  rank's alone.
+
+The first node's response is the elastic run's for the same forcing to
+rounding (about 1e-11 relative on the test decks; under lateral moduli to
+the conjugate gradients' tolerance), the radial stepper's unrelaxed
+systems carrying the branch moduli at the memory points rather than at
+the nodes.
 
 ### Outputs
 
-The surface file, on the run's Gauss–Legendre grid, holds `load`
-(kg m^-2, with a load term: the field above), `displacement` (the radial
-displacement, m), `tangential_potential` (V, m: the tangential
-displacement is its surface gradient), `potential` (m^2 s^-2) and, under
-lateral moduli, `displacement_radial_model` and `potential_radial_model`,
-the radial model's under the same forcing. Its metadata record the config,
-deck and moduli paths, `lateral` (1 for the 3D solve), `load_terms` and
-`tide_coefficients` (the counts), `forcing` (each term described, `; `
-between them) and `solve_iterations` and `solve_residual` (0 in 1D); when
-the load is exactly one `cap`, also `load_latitude_deg`,
-`load_longitude_deg`, `load_width_deg` and `load_amplitude_kg_m2`, and
-when the tide is exactly one coefficient, `tide_degree`, `tide_order`,
-`tide_amplitude_m2_s2` and `tide_imaginary_m2_s2`.
+**Without `times`.** The surface file, on the run's Gauss–Legendre grid,
+holds `load` (kg m^-2, with a load term: the field above), `displacement`
+(the radial displacement, m), `tangential_potential` (V, m: the
+tangential displacement is its surface gradient), `potential`
+(m^2 s^-2) and, under lateral moduli, `displacement_radial_model` and
+`potential_radial_model`, the radial model's under the same forcing. Its
+metadata record the config, deck and moduli paths, `lateral` (1 for the
+3D solve), `load_terms` and `tide_coefficients` (the counts), `forcing`
+(each term described, `; ` between them) and `solve_iterations` and
+`solve_residual` (0 in 1D); when the load is exactly one `cap`, also
+`load_latitude_deg`, `load_longitude_deg`, `load_width_deg` and
+`load_amplitude_kg_m2`, and when the tide is exactly one coefficient,
+`tide_degree`, `tide_order`, `tide_amplitude_m2_s2` and
+`tide_imaginary_m2_s2`.
 
 The exchange table is the format of AdGIA's benchmarks:
 
 - `#` provenance lines: what the table holds, the code's version and the
-  date, the config, deck and moduli paths, and a line `# forcing ...`
-  describing each load term and tide coefficient;
+  date, the config, deck and moduli paths (with `times`, the viscosity
+  file's too), and a line `# forcing ...` describing each load term and
+  tide coefficient (with its time origin and history where set);
 - named scalars, one per line as `name value`: `radius` (m),
   `surface_gravity` (m s^-2), `lmax`, `lateral`, `load_terms` and
   `tide_coefficients`; then, when the load is exactly one `cap`,
@@ -727,16 +861,46 @@ as the radial reference; planetmodel's `slices.cutaway` and
 `plotting.cutaway` draw it (as `examples/python/plot_static_3d.py` does
 for the library's example of the same problem).
 
-Summary: what the config was taken to mean, then the files:
+**With `times`.** The surface file has one slice per node: its fields are
+SI node fields with linear time interpolation, `load` (with a load term:
+the load applied at each node, each term's field times its factor),
+`displacement`, `tangential_potential` and `potential` and, in a 3D run,
+`displacement_radial_model` and `potential_radial_model`, the radial
+reference model's under the same forcing. Its time axis is the run's
+clock in seconds: a node at t kyr is at t x 3.15576e10 s, so the axis
+starts at `start_kyr` (zero by default). Its metadata record what the
+elastic file's do, with `viscosity` (the viscosity file's path, where
+given) and, in place of `solve_iterations` and `solve_residual`,
+`dates_kyr` (the nodes, kyr), `time` (the axis's meaning), `scheme`,
+`step_solver` (`"fixed_point"` or `"conjugate_gradients"` in 3D,
+`"direct"` in 1D), and `step_iterations` and `step_residual`, one per
+node (the first node's those of its conjugate-gradient solve under
+lateral moduli, zero otherwise; zero throughout in 1D).
+
+Each exchange table is the elastic one's format for one node, with two
+named scalars more, `node` (the node's index) and `time_kyr` (its time),
+before `columns`.
+
+**Summary.** What the config was taken to mean, then the files. Elastic:
 `<model>, elastic, <forcing>; wrote <surface> [and <exchange>] [and
 <volume>]`, ending under lateral moduli in `(<n> conjugate-gradient
-iterations, residual <r>)`. `<model>` is `3-D (lateral moduli)`, `1-D`,
-or `1-D (the moduli file is radial)`; `<forcing>` is `load (<n> term[s])`,
-`tide (<n> coefficient[s])`, or both joined by ` + `. The example config
-`examples/configs/response.json` prints
+iterations, residual <r>)`; `<model>` is `3-D (lateral moduli)`, `1-D`,
+or `1-D (the moduli file is radial)`. Viscoelastic: `<model>,
+viscoelastic, <n> nodes <start> to <end> kyr, <forcing>; wrote <surface>
+[and <k> exchange tables]`, ending in 3D in `(<i> fixed-point iterations
+over <s> steps)` or `(<i> conjugate-gradient iterations over <s> steps)`,
+the iterations of the steps summed; `<model>` is `3-D (lateral
+viscosity)`, `3-D (lateral moduli)`, `3-D (lateral viscosity, lateral
+moduli)`, `1-D`, or `1-D` followed by `(the viscosity file is radial)`,
+`(the moduli file is radial)` or `(the viscosity and moduli files are
+radial)`. `<forcing>` is `load (<n> term[s])`, `tide (<n>
+coefficient[s])`, or both joined by ` + `. The example configs
+`examples/configs/response.json` and
+`examples/configs/response_viscoelastic.json` print
 
 ```
 sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficient); wrote out/response.nc and out/response.txt and out/response_volume.nc (5 conjugate-gradient iterations, residual 3.52e-11) in 1.29 s
+sl3d response: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr, load (1 term) + tide (1 coefficient); wrote out/response_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.49 s
 ```
 
 ### Examples
@@ -774,6 +938,38 @@ sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficien
 
 The first is a 1D run (the deck's radial model); the second solves the
 3D problem under the lateral moduli of `s40rts_moduli.nc`.
+
+```json
+{
+  "model": {
+    "deck": "prem_maxwell.deck", "format": "maxwell",
+    "viscosity": {"file": "visc3d.nc", "reference": "geometric_mean"},
+    "moduli":    {"file": "s40rts_moduli.nc"}
+  },
+  "lmax":  64,
+  "times": {"start_kyr": 0, "end_kyr": 20, "nodes": 41},
+  "forcing": {
+    "load": [
+      {"cap": {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6},
+       "history_kyr": [[0, 0.0], [10, 1.0], [10.5, 0.0]]},
+      {"field": {"file": "load_history.nc", "name": "load"}}
+    ],
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0,
+              "history_kyr": [[0, 1.0]]}]
+  },
+  "solver": {"scheme": "exponential_trapezoid", "step": "fixed_point",
+             "rtol": 1e-10, "max_iterations": 200,
+             "transform_degrees": [16, 32], "cache_mb": 0},
+  "output": {"surface": "out/relax.nc", "exchange": "out/relax_{node}.txt"}
+}
+```
+
+A viscoelastic 3D run under a lateral viscosity and lateral moduli: a cap
+loaded linearly over 10 kyr and removed over the next 0.5 kyr, a load
+history read from a surface file on the run's clock, and a constant
+tide, over 20 kyr in half-kyr steps, with a table per node
+(`out/relax_00.txt` to `out/relax_40.txt`). Without `viscosity` and
+`moduli` the same config runs the deck's radial Maxwell model in 1D.
 
 A coefficient table, degrees 0 and 2 of a load (the m = 0 rows real):
 

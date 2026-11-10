@@ -9,6 +9,7 @@
 #include <fstream>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <stdexcept>
 #include <string_view>
 #include <utility>
@@ -24,13 +25,36 @@ using Complex = std::complex<double>;
 constexpr auto kTermKinds =
     std::array<std::string_view, 4>{"cap", "disk", "field", "coefficients"};
 
-/// Refuses an amplitude history, which a forcing fixed in time cannot take.
-void RefuseHistory(const Json& item) {
-  if (Has(item, "history_kyr")) {
-    Fail(item.At("history_kyr"),
-         "is an amplitude history, which needs a `times` block; a forcing "
-         "that varies in time is not built yet");
+/// A term's amplitude history, `history_kyr`: refused without a `times`
+/// block (`timed`), which a forcing fixed in time cannot take.
+AmplitudeHistory ReadHistory(const Json& item, bool timed) {
+  auto out = AmplitudeHistory{};
+  if (!Has(item, "history_kyr")) return out;
+  const auto& history = item.At("history_kyr");
+  if (!timed) {
+    Fail(history, "is an amplitude history, which needs a `times` block");
   }
+  for (const auto& pair : history.AsArray()) {
+    if (!pair.IsArray() || pair.AsArray().size() != 2) {
+      Fail(pair, "is not a pair [time_kyr, factor]");
+    }
+    const auto time = pair.At(std::size_t{0}).AsNumber();
+    const auto factor = pair.At(std::size_t{1}).AsNumber();
+    if (!std::isfinite(time) || !std::isfinite(factor)) {
+      Fail(pair, "is not a pair of finite numbers [time_kyr, factor]");
+    }
+    if (!out.times_kyr.empty() && !(time > out.times_kyr.back())) {
+      Fail(pair.At(std::size_t{0}),
+           "is not later than the time before it: a history's times are "
+           "strictly increasing");
+    }
+    out.times_kyr.push_back(time);
+    out.factors.push_back(factor);
+  }
+  if (out.times_kyr.empty()) {
+    Fail(history, "holds no [time_kyr, factor] pair");
+  }
+  return out;
 }
 
 /// A centre's latitude and longitude, degrees.
@@ -42,10 +66,13 @@ GeographicPoint SiteOf(const Json& object) {
   return {latitude, Number(object, "longitude")};
 }
 
-LoadTerm ReadLoadTerm(const Json& item,
-                      const std::filesystem::path& directory) {
-  RefuseHistory(item);
-  Allow(item, kTermKinds);
+LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
+                      bool timed) {
+  auto history = ReadHistory(item, timed);
+  auto members =
+      std::vector<std::string_view>(kTermKinds.begin(), kTermKinds.end());
+  members.push_back("history_kyr");
+  Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
       kTermKinds, [&item](std::string_view kind) { return Has(item, kind); });
   if (kinds != 1) {
@@ -77,24 +104,35 @@ LoadTerm ReadLoadTerm(const Json& item,
     term.amplitude = Number(disk, "amplitude_kg_m2");
   } else if (Has(item, "field")) {
     const auto& field = item.At("field");
-    Allow(field, {"file", "name"});
+    Allow(field, {"file", "name", "time_origin_kyr"});
     term.kind = LoadTerm::Kind::Field;
     term.file = PathOf(field, "file", directory);
     term.name = String(field, "name", "load");
     if (term.name.empty()) Fail(field.At("name"), "is empty");
+    if (Has(field, "time_origin_kyr")) {
+      const auto& origin = field.At("time_origin_kyr");
+      if (!timed) Fail(origin, "is a time origin, which needs a `times` block");
+      term.time_origin_kyr = origin.AsNumber();
+      if (!std::isfinite(term.time_origin_kyr)) {
+        Fail(origin, "is not a finite number");
+      }
+    }
   } else {
     const auto& coefficients = item.At("coefficients");
     Allow(coefficients, {"file"});
     term.kind = LoadTerm::Kind::Coefficients;
     term.file = PathOf(coefficients, "file", directory);
   }
+  term.history = std::move(history);
   return term;
 }
 
-TideTerm ReadTideTerm(const Json& item, int lmax) {
-  RefuseHistory(item);
-  Allow(item, {"degree", "order", "amplitude_m2_s2", "imaginary_m2_s2"});
+TideTerm ReadTideTerm(const Json& item, int lmax, bool timed) {
+  auto history = ReadHistory(item, timed);
+  Allow(item, {"degree", "order", "amplitude_m2_s2", "imaginary_m2_s2",
+               "history_kyr"});
   auto term = TideTerm{};
+  term.history = std::move(history);
   term.degree = Integer(item, "degree");
   if (term.degree < 2 || term.degree > lmax) {
     Fail(item.At("degree"), "is not a tidal degree within [2, lmax]");
@@ -111,32 +149,93 @@ TideTerm ReadTideTerm(const Json& item, int lmax) {
   return term;
 }
 
-/// A field term's values on the grid, SI.
-std::vector<double> ReadFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
-                                  const Json& field) {
-  const auto& file = field.At("file");
-  const auto history = io::FieldHistory::Read(term.file, grid);
+/// A field term's file on the grid, holding its field. A file with a time
+/// axis is refused unless `timed`.
+io::FieldHistory OpenFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
+                               const Json& file, bool timed) {
+  auto history = io::FieldHistory::Read(term.file, grid);
   if (!history) Fail(file, history.error().message);
-  if (history->Span()) {
+  if (!timed && history->Span()) {
     Fail(file,
          "has a time axis: a load that varies in time needs a `times` "
-         "block, which is not built yet");
+         "block");
   }
   if (!history->Has(term.name)) {
     Fail(file, std::format("holds no field \"{}\"", term.name));
   }
+  return std::move(*history);
+}
+
+/// A field term's values on the grid, SI, at an SI time of its file;
+/// `when` names the run's time in a fault, where it matters.
+std::vector<double> FieldValues(const io::FieldHistory& history,
+                                const LoadTerm& term, const Json& file,
+                                double time, std::string_view when = {}) {
   auto values = std::vector<double>{};
   try {
-    values = history->Values(term.name, 0.0);
+    values = history.Values(term.name, time);
   } catch (const std::runtime_error& error) {
     Fail(file, error.what());
   }
   if (!std::ranges::all_of(values, [](double v) { return std::isfinite(v); })) {
     Fail(file, std::format("holds a field \"{}\" that is not finite "
-                           "everywhere on the run's grid",
-                           term.name));
+                           "everywhere on the run's grid{}",
+                           term.name, when));
   }
   return values;
+}
+
+/// A load term's pattern on the grid: its field at the grid's points and
+/// its coefficients, the one made from the other as the term's kind says.
+/// In a run through time (`timed`) a field term whose file has a time axis
+/// has no fixed pattern: its file comes back instead, both arrays empty.
+struct TermPattern {
+  std::vector<double> field;
+  std::vector<Complex> coefficients;
+  std::optional<io::FieldHistory> history;
+};
+
+TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
+                      const Json& item, bool timed) {
+  auto out = TermPattern{};
+  switch (term.kind) {
+    case LoadTerm::Kind::Cap:
+      out.field = CapField(grid, term.site, term.width, term.amplitude);
+      out.coefficients = grid.Expand(out.field);
+      break;
+    case LoadTerm::Kind::Disk:
+      out.coefficients =
+          DiskCoefficients(grid, term.site, term.radius, term.amplitude);
+      out.field = grid.Synthesise(out.coefficients);
+      break;
+    case LoadTerm::Kind::Field: {
+      const auto& file = item.At("field").At("file");
+      auto history = OpenFieldTerm(term, grid, file, timed);
+      if (history.Span()) {
+        out.history.emplace(std::move(history));
+        break;
+      }
+      out.field = FieldValues(history, term, file, 0.0);
+      out.coefficients = grid.Expand(out.field);
+      break;
+    }
+    case LoadTerm::Kind::Coefficients:
+      out.coefficients = ReadCoefficientTable(
+          term.file, grid.LMax(), item.At("coefficients").At("file"));
+      out.field = grid.Synthesise(out.coefficients);
+      break;
+  }
+  return out;
+}
+
+/// "[[t, f], ...]", for provenance.
+std::string Pairs(const AmplitudeHistory& history) {
+  auto out = std::string{"["};
+  for (auto i = std::size_t{0}; i < history.times_kyr.size(); ++i) {
+    out += std::format("{}[{:g}, {:g}]", i == 0 ? "" : ", ",
+                       history.times_kyr[i], history.factors[i]);
+  }
+  return out + "]";
 }
 
 /// The words of a line, split at white space.
@@ -170,18 +269,29 @@ std::optional<T> Parse(std::string_view word) {
 
 }  // namespace
 
+double AmplitudeHistory::At(double t) const {
+  if (times_kyr.empty()) return 1.0;
+  if (t <= times_kyr.front()) return factors.front();
+  if (t >= times_kyr.back()) return factors.back();
+  // times_kyr[i] <= t < times_kyr[i + 1]
+  const auto i = static_cast<std::size_t>(
+      std::ranges::upper_bound(times_kyr, t) - times_kyr.begin() - 1);
+  const auto w = (t - times_kyr[i]) / (times_kyr[i + 1] - times_kyr[i]);
+  return factors[i] + w * (factors[i + 1] - factors[i]);
+}
+
 Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
-                    int lmax) {
+                    int lmax, bool timed) {
   Allow(block, {"load", "tide"});
   auto out = Forcing{};
   if (Has(block, "load")) {
     for (const auto& item : block.At("load").AsArray()) {
-      out.load.push_back(ReadLoadTerm(item, directory));
+      out.load.push_back(ReadLoadTerm(item, directory, timed));
     }
   }
   if (Has(block, "tide")) {
     for (const auto& item : block.At("tide").AsArray()) {
-      out.tide.push_back(ReadTideTerm(item, lmax));
+      out.tide.push_back(ReadTideTerm(item, lmax, timed));
     }
   }
   if (out.load.empty() && out.tide.empty()) {
@@ -303,30 +413,8 @@ BuiltForcing BuildForcing(const Forcing& forcing, const SurfaceGrid& grid,
                           .load = grid.ZeroField(),
                           .tide = grid.ZeroCoefficients()};
   for (auto k = std::size_t{0}; k < forcing.load.size(); ++k) {
-    const auto& term = forcing.load[k];
-    const auto& item = block.At("load").At(k);
-    auto field = std::vector<double>{};
-    auto coefficients = std::vector<Complex>{};
-    switch (term.kind) {
-      case LoadTerm::Kind::Cap:
-        field = CapField(grid, term.site, term.width, term.amplitude);
-        coefficients = grid.Expand(field);
-        break;
-      case LoadTerm::Kind::Disk:
-        coefficients =
-            DiskCoefficients(grid, term.site, term.radius, term.amplitude);
-        field = grid.Synthesise(coefficients);
-        break;
-      case LoadTerm::Kind::Field:
-        field = ReadFieldTerm(term, grid, item.At("field"));
-        coefficients = grid.Expand(field);
-        break;
-      case LoadTerm::Kind::Coefficients:
-        coefficients = ReadCoefficientTable(term.file, grid.LMax(),
-                                            item.At("coefficients").At("file"));
-        field = grid.Synthesise(coefficients);
-        break;
-    }
+    auto [field, coefficients, history] =
+        PatternOf(forcing.load[k], grid, block.At("load").At(k), false);
     // the first term is taken as it stands, the others added to it
     if (out.terms.empty()) {
       out.load = field;
@@ -348,30 +436,109 @@ BuiltForcing BuildForcing(const Forcing& forcing, const SurfaceGrid& grid,
   return out;
 }
 
+TimedForcing::TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
+                           const Json& block)
+    : forcing_(forcing), grid_(&grid), block_(&block) {
+  for (auto k = std::size_t{0}; k < forcing_.load.size(); ++k) {
+    const auto& term = forcing_.load[k];
+    auto pattern = PatternOf(term, grid, block.At("load").At(k), true);
+    varies_ = varies_ || pattern.history.has_value() || !term.history.Empty();
+    patterns_.push_back({.field = std::move(pattern.field),
+                         .coefficients = std::move(pattern.coefficients),
+                         .history = std::move(pattern.history)});
+  }
+  for (const auto& term : forcing_.tide) {
+    varies_ = varies_ || !term.history.Empty();
+  }
+}
+
+BuiltForcing TimedForcing::At(double t) const {
+  const auto& grid = *grid_;
+  auto out = BuiltForcing{.terms = {},
+                          .loadCoefficients = grid.ZeroCoefficients(),
+                          .load = grid.ZeroField(),
+                          .tide = grid.ZeroCoefficients()};
+  for (auto k = std::size_t{0}; k < forcing_.load.size(); ++k) {
+    const auto& term = forcing_.load[k];
+    const auto& pattern = patterns_[k];
+    auto field = std::vector<double>{};
+    auto coefficients = std::vector<Complex>{};
+    if (pattern.history) {
+      field = FieldValues(*pattern.history, term,
+                          block_->At("load").At(k).At("field").At("file"),
+                          (t - term.time_origin_kyr) * KYR,
+                          std::format(" at {:g} kyr", t));
+      coefficients = grid.Expand(field);
+    } else {
+      field = pattern.field;
+      coefficients = pattern.coefficients;
+    }
+    if (!term.history.Empty()) {
+      const auto factor = term.history.At(t);
+      for (auto& v : field) v *= factor;
+      for (auto& c : coefficients) c *= factor;
+    }
+    // the first term is taken as it stands, the others added to it
+    if (out.terms.empty()) {
+      out.load = field;
+      out.loadCoefficients = coefficients;
+    } else {
+      for (auto i = std::size_t{0}; i < field.size(); ++i) {
+        out.load[i] += field[i];
+      }
+      for (auto i = std::size_t{0}; i < coefficients.size(); ++i) {
+        out.loadCoefficients[i] += coefficients[i];
+      }
+    }
+    out.terms.push_back(std::move(coefficients));
+  }
+  for (const auto& term : forcing_.tide) {
+    out.tide[SurfaceGrid::Index(term.degree, term.order)] +=
+        term.history.At(t) * Complex{term.amplitude, term.imaginary};
+  }
+  return out;
+}
+
 std::string Describe(const LoadTerm& term) {
+  auto out = std::string{};
   switch (term.kind) {
     case LoadTerm::Kind::Cap:
-      return std::format(
+      out = std::format(
           "cap at latitude {:g}, longitude {:g}, width {:g} deg, {:g} kg m^-2",
           term.site.latitude, term.site.longitude,
           term.width * 180.0 / std::numbers::pi, term.amplitude);
+      break;
     case LoadTerm::Kind::Disk:
-      return std::format(
+      out = std::format(
           "disk at latitude {:g}, longitude {:g}, radius {:g} deg, {:g} kg "
           "m^-2",
           term.site.latitude, term.site.longitude,
           term.radius * 180.0 / std::numbers::pi, term.amplitude);
+      break;
     case LoadTerm::Kind::Field:
-      return std::format("field \"{}\" of {}", term.name, term.file.string());
+      out = std::format("field \"{}\" of {}", term.name, term.file.string());
+      if (term.time_origin_kyr != 0.0) {
+        out += std::format(", time origin {:g} kyr", term.time_origin_kyr);
+      }
+      break;
     case LoadTerm::Kind::Coefficients:
+      out = std::format("coefficients of {}", term.file.string());
       break;
   }
-  return std::format("coefficients of {}", term.file.string());
+  if (!term.history.Empty()) {
+    out += ", history_kyr " + Pairs(term.history);
+  }
+  return out;
 }
 
 std::string Describe(const TideTerm& term) {
-  return std::format("tide degree {} order {}, {:g} + {:g} i m^2 s^-2",
-                     term.degree, term.order, term.amplitude, term.imaginary);
+  auto out =
+      std::format("tide degree {} order {}, {:g} + {:g} i m^2 s^-2",
+                  term.degree, term.order, term.amplitude, term.imaginary);
+  if (!term.history.Empty()) {
+    out += ", history_kyr " + Pairs(term.history);
+  }
+  return out;
 }
 
 std::string Summary(const Forcing& forcing) {

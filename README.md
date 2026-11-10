@@ -143,10 +143,12 @@ sl3d kernel run.json           # adjoint kernels of configured measurements
                                #   ("trajectory": {"directory": ...} spills
                                #    the recorded states to disk for large lmax)
 sl3d kernel1d run.json         # its 1D counterpart
-sl3d response run.json         # the elastic response to a prescribed
-                               #   load and tide, no ocean: 1D, or 3D
-                               #   under lateral moduli with the radial
-                               #   model's beside it
+sl3d response run.json         # the response to a prescribed load and
+                               #   tide, no ocean: elastic, or with a
+                               #   "times" block viscoelastic through
+                               #   time; 1D, or 3D under lateral moduli
+                               #   (or viscosity) with the radial model's
+                               #   beside it
 ```
 
 Every config member is documented in the configuration reference,
@@ -184,14 +186,15 @@ metadata. For example:
   holding `ice_thickness` and `topography`. pyslfp's `export_ice_history`
   writes them from ICE-5G, ICE-6G or ICE-7G (`get_ice7g.py` in the examples
   does so), and any code can write one with planetmodel.
-- **3D viscosity**, for `evolve` and `kernel`, is a planetmodel model file
-  holding a `viscosity` field, as planetmodel's conversion of a tomography
-  model writes it.
+- **3D viscosity**, for `evolve`, `kernel` and a viscoelastic `response`,
+  is a planetmodel model file holding a `viscosity` field, as
+  planetmodel's conversion of a tomography model writes it.
 - **Loads and tides**, for `response`, are sums of terms: Gaussian caps,
   uniform disks (expanded exactly), fields of planetmodel surface files and
   tables of spherical-harmonic coefficients, and tidal potential
-  coefficients; its lateral moduli are a planetmodel model file's `mu` and
-  `kappa`.
+  coefficients; through time each term may carry a piecewise-linear
+  amplitude history, and a surface file's field may have a time axis. Its
+  lateral moduli are a planetmodel model file's `mu` and `kappa`.
 
 ### Outputs
 
@@ -201,10 +204,11 @@ velocity in their metadata; `kernel` and `kernel1d` write a directory per
 run: the ice-history kernels of each measurement as surface files, its
 viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
 measured values; `response` writes the surface response as a surface file
-and, on request, the surface coefficients as a cross-code exchange table
-and the response inside the body as a planetmodel model file (its lateral
-moduli come from a model file's `mu` and `kappa`, as planetmodel's
-conversion of a tomography model writes them). Every output records the program, its version and the
+(with a slice per time node when viscoelastic) and, on request, the
+surface coefficients as cross-code exchange tables (one per node when
+viscoelastic) and, elastic, the response inside the body as a planetmodel
+model file (its lateral moduli come from a model file's `mu` and `kappa`,
+as planetmodel's conversion of a tomography model writes them). Every output records the program, its version and the
 config that made it, and planetmodel's Python readers read the surface and
 model files (see below).
 

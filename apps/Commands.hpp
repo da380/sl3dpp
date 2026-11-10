@@ -15,7 +15,8 @@
  * change and the ocean function, with the angular-velocity perturbation
  * in the metadata — as a planetmodel surface file. `response` solves for
  * the planet's response to a prescribed load and tide, with no ocean,
- * from a config of blocks (`model`, `forcing`, `solver`, `output`).
+ * elastic or, with a `times` block, viscoelastic through time, from a
+ * config of blocks (`model`, `times`, `forcing`, `solver`, `output`).
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -24,6 +25,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -211,13 +213,17 @@ struct KernelInput {
 
 /// The config of `sl3d response`: the response of the planet to a
 /// prescribed surface load and external tidal potential, with no ocean.
-/// It is the instantaneous elastic response: of the radial model, or,
-/// under lateral moduli, the 3D static problem of docs/adjoints.md §13j
-/// with the radial model's response beside it. A config is made of
-/// blocks (Blocks.hpp, Forcing.hpp).
+/// Without `times` it is the instantaneous elastic response: of the radial
+/// model, or, under lateral moduli, the 3D static problem of
+/// docs/adjoints.md §13j with the radial model's response beside it. With
+/// `times` it is the viscoelastic response stepped through the nodes: of
+/// the radial model, or, under a lateral viscosity or lateral moduli, the
+/// 3D stepper's, with the radial reference model's beside it. A config is
+/// made of blocks (Blocks.hpp, Forcing.hpp).
 struct ResponseInput {
   ModelBlock model;
   int lmax = 0;
+  std::optional<TimesBlock> times;  ///< empty for the elastic response
   Forcing forcing;
   SolverBlock solver;
   OutputBlock output;

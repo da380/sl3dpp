@@ -3,12 +3,10 @@
 // config's directory, love-numbers writes its provenance-headed table,
 // fingerprint runs a toy state read from a planetmodel surface file
 // through the sea level equation and writes the fingerprint back as one,
-// and response takes its load and tide as sums of terms of every kind.
+// and response takes its load and tide as sums of terms of every kind,
+// elastic or, with a times block, viscoelastic through time.
 
 #include <gtest/gtest.h>
-#include "sl3dpp/EarthModel.hpp"
-#include <planetmodel/modelfile.hpp>
-#include "sl3dpp/io/ModelModuli.hpp"
 
 #include <GaussQuad/All>
 #include <algorithm>
@@ -21,10 +19,12 @@
 #include <format>
 #include <fstream>
 #include <initializer_list>
+#include <map>
 #include <numbers>
 #include <planetmodel/error.hpp>
 #include <planetmodel/grid.hpp>
 #include <planetmodel/json.hpp>
+#include <planetmodel/modelfile.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <sstream>
 #include <string>
@@ -37,11 +37,16 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Ranks.hpp"
+#include "sl3dpp/EarthModel.hpp"
+#include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
+#include "sl3dpp/io/ModelModuli.hpp"
+#include "sl3dpp/io/ModelViscosity.hpp"
 
 namespace {
 
@@ -93,6 +98,22 @@ class AppsTest : public ::testing::Test {
     return planetmodel::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
   }
 
+  /// Runs `sl3d response` on a config of the members given, its output
+  /// block written after them (the surface file out/<name>.nc, a table per
+  /// node out/<name>_{node}.txt), and returns the summary.
+  std::string Run(const std::string& name, const std::string& members) const {
+    const auto config = Write(
+        name + ".json", std::format(R"({{{}, "output": {{"surface": "out/{}.nc",
+                                          "exchange": "out/{}_{{node}}.txt"}}}})",
+                                    members, name, name));
+    return app::RunResponse(config);
+  }
+
+  /// A run's surface file.
+  planetmodel::SurfaceFile Output(const std::string& name) const {
+    return planetmodel::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  }
+
   fs::path dir_;
 };
 
@@ -111,6 +132,91 @@ double Departure(const std::vector<double>& got,
 /// The response fields of a surface file that every run writes.
 constexpr auto kResponseFields = {"displacement", "tangential_potential",
                                   "potential"};
+
+/// The largest difference of two coefficient sets over the largest
+/// magnitude of the second.
+double Departure(const std::vector<Complex>& got,
+                 const std::vector<Complex>& want) {
+  auto scale = 0.0, diff = 0.0;
+  for (auto i = std::size_t{0}; i < want.size(); ++i) {
+    scale = std::max(scale, std::abs(want[i]));
+    diff = std::max(diff, std::abs(got[i] - want[i]));
+  }
+  return diff / scale;
+}
+
+/// One time slice of a surface file's node field.
+std::vector<double> Slice(const planetmodel::SurfaceFile& file,
+                          const std::string& name, std::size_t node) {
+  const auto& values = file.variables.at(name).values;
+  const auto size = values.size() / file.time->size();
+  return {values.begin() + static_cast<std::ptrdiff_t>(node * size),
+          values.begin() + static_cast<std::ptrdiff_t>((node + 1) * size)};
+}
+
+/// A response exchange table: its named scalars (the text after each
+/// name) and its coefficients of U and Phi in the grid's layout.
+struct ExchangeTable {
+  std::map<std::string, std::string> scalars;
+  std::vector<Complex> U, Phi;
+};
+
+ExchangeTable ReadExchange(const fs::path& path) {
+  auto in = std::ifstream(path);
+  EXPECT_TRUE(in) << path;
+  auto out = ExchangeTable{};
+  for (std::string line; std::getline(in, line);) {
+    if (line.empty() || line.starts_with("#")) continue;
+    if (!std::isdigit(static_cast<unsigned char>(line.front()))) {
+      const auto space = line.find(' ');
+      out.scalars[line.substr(0, space)] = line.substr(space + 1);
+      continue;
+    }
+    auto row = std::istringstream(line);
+    auto l = 0, m = 0;
+    auto ure = 0.0, uim = 0.0, pre = 0.0, pim = 0.0;
+    row >> l >> m >> ure >> uim >> pre >> pim;
+    const auto k = SurfaceGrid::Index(l, m);
+    if (out.U.size() <= k) {
+      out.U.resize(k + 1);
+      out.Phi.resize(k + 1);
+    }
+    out.U[k] = {ure, uim};
+    out.Phi[k] = {pre, pim};
+  }
+  return out;
+}
+
+/// A planetmodel model file of viscosity on a model's body, its fluid
+/// layers left out: eta0 exp(amplitude cos(theta)) Pa s, stored laterally
+/// (on a Gauss-Legendre grid, as a field that varies with direction even
+/// when the amplitude is zero), or, with `radial`, eta0 as a field of the
+/// radius alone.
+void WriteViscosity(const fs::path& path, const EarthModel& model, double eta0,
+                    double amplitude, bool radial = false) {
+  namespace pm = planetmodel;
+  const auto& boundaries = model.Boundaries();
+  auto file = pm::ModelFile(
+      pm::Skeleton(std::vector<double>(boundaries.begin(), boundaries.end())));
+  file.SetName("sl3dpp tests viscosity");
+  const auto& skeleton = file.GetSkeleton();
+  const auto layers = static_cast<int>(skeleton.NLayers());
+  file.AddPart(0, layers - 1, pm::ElementEdges(skeleton, 0, layers - 1, 500e3),
+               5, pm::GaussLegendre(8));
+  auto eta = std::map<int, pm::LayerSource>{};
+  for (auto layer = 0; layer < layers; ++layer) {
+    if (model.IsFluid(static_cast<std::size_t>(layer))) continue;
+    eta.emplace(layer,
+                radial
+                    ? pm::LayerSource::Radial([eta0](double) { return eta0; })
+                    : pm::LayerSource::Lateral(
+                          [eta0, amplitude](double, double theta, double) {
+                            return eta0 * std::exp(amplitude * std::cos(theta));
+                          }));
+  }
+  file.AddField("viscosity", eta);
+  pm::WriteModelFile(path, file);
+}
 
 TEST_F(AppsTest, RefusesWhatTheConfigCannotSay) {
   const auto deck = Deck();
@@ -757,10 +863,10 @@ TEST_F(AppsTest, DiskIsExpandedExactly) {
 
 TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
   // Each fault is refused naming the member: an unknown member anywhere, a
-  // load term of two kinds or none, an amplitude history, a times block, a
-  // viscosity, an empty forcing, the old layout's members; and, once the
-  // run reads its files, a field file with a time axis and a coefficient
-  // table above lmax.
+  // load term of two kinds or none, an amplitude history or a viscosity
+  // without a times block, a times block without its end, an empty
+  // forcing, the old layout's members; and, once the run reads its files,
+  // a field file with a time axis and a coefficient table above lmax.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   static_cast<void>(Write("high.txt", "# degree 5 at lmax 4\n0 0 1 0\n5 2 1 1\n"));
@@ -824,8 +930,8 @@ TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
                                  "width_deg": 10, "amplitude_kg_m2": 1.0},
                                  "history_kyr": [[0, 1]]})")),
           "forcing.load[0].history_kyr", "needs a `times` block");
-  refused(read, config(ball, loads(cap), R"( "times": {"nodes": 3},)"),
-          "times", "not built yet");
+  refused(read, config(ball, loads(cap), R"( "times": {"nodes": 3},)"), "times",
+          "gives `nodes` without `end_kyr`");
   refused(read,
           config(R"({"deck": "ball.deck", "viscosity": {"file": "v.nc"}})",
                  loads(cap)),
@@ -865,6 +971,811 @@ TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
   static_cast<void>(Write("short.txt", "2 1 1\n"));
   refused(run, config(ball, loads(R"({"coefficients": {"file": "short.txt"}})")),
           "forcing.load[0].coefficients.file", "line 1: is not a row");
+}
+
+/// The ball's model block and degree, for a viscoelastic response config.
+constexpr auto kBall = R"("model": {"deck": "ball.deck"}, "lmax": 8)";
+
+/// A cap and a degree-2 tide coefficient, as a forcing's terms.
+constexpr auto kCap = R"({"cap": {"latitude": 60, "longitude": -85,
+    "width_deg": 20, "amplitude_kg_m2": 1.0e6}})";
+constexpr auto kTide = R"({"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+    "imaginary_m2_s2": 0.5})";
+
+/// The prem8 deck with the test viscosity file, at lmax 8: the 3D runs'
+/// model block (the moduli member appended where given).
+std::string Prem8(const std::string& moduli = "") {
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  return std::format(R"("model": {{"deck": "{}/prem8.elastic.deck",
+      "format": "elastic", "viscosity": {{"file": "{}/viscosity_log.nc"}}{}}},
+      "lmax": 8)",
+                     data, data, moduli);
+}
+
+/// The test's models: the ball's, and the prem8 deck's.
+EarthModel ModelOf(const fs::path& deck, app::ModelFormat format) {
+  const auto read = sl3dpp::Deck::Read(deck, app::FormatOf(format));
+  EXPECT_TRUE(read) << read.error().message;
+  auto model = EarthModel::FromDeck(*read);
+  EXPECT_TRUE(model) << model.error().message;
+  return std::move(*model);
+}
+
+TEST_F(AppsTest, ViscoelasticResponseStartsFromTheElasticResponse) {
+  // The first node of a viscoelastic run is the unrelaxed solve under the
+  // forcing there with no memory before it: the elastic response of the
+  // same forcing. On the radial ball the radial stepper's unrelaxed
+  // systems (the branch moduli at the memory points) and the elastic
+  // command's agree to rounding, about 6e-12; under lateral moduli both
+  // close the 3D problem by conjugate gradients on the radial systems, to
+  // the same tolerance (1e-10), and agree well within it (about 7e-12). A load
+  // ramped up from zero has no response at the first node. The surface file has
+  // a slice per node, its time axis the run's clock in seconds.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  const auto forcing =
+      std::format(R"({{"load": [{}], "tide": [{}]}})", kCap, kTide);
+  const auto elastic = Respond("elastic", forcing);
+  const auto summary =
+      Run("visco", std::format(R"({}, "times": {{"end_kyr": 2, "nodes": 5}},
+                              "forcing": {})",
+                               kBall, forcing));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 5 nodes 0 to 2 kyr, load (1 term) + tide (1 "
+      "coefficient); wrote "))
+      << summary;
+  EXPECT_TRUE(summary.ends_with("and 5 exchange tables")) << summary;
+  const auto visco = Output("visco");
+  ASSERT_TRUE(visco.time);
+  ASSERT_EQ(visco.time->size(), 5u);
+  for (auto n = std::size_t{0}; n < 5; ++n) {
+    EXPECT_DOUBLE_EQ((*visco.time)[n], 0.5 * static_cast<double>(n) * app::KYR);
+  }
+  EXPECT_EQ(std::get<std::vector<double>>(visco.meta.at("dates_kyr")),
+            (std::vector<double>{0.0, 0.5, 1.0, 1.5, 2.0}));
+  EXPECT_EQ(pm::detail::TextOf(visco.variables.at("displacement").attributes,
+                               "time_support")
+                .value_or(""),
+            "node");
+  EXPECT_FALSE(visco.variables.contains("displacement_radial_model"));
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure =
+        Departure(Slice(visco, name, 0), elastic.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-10) << name;
+  }
+  RecordProperty("radial_departure", std::format("{:.3e}", worst));
+  EXPECT_EQ(Slice(visco, "load", 0), elastic.variables.at("load").values);
+  // and the response relaxes from there
+  EXPECT_GT(Departure(Slice(visco, "displacement", 4),
+                      Slice(visco, "displacement", 0)),
+            1e-2);
+
+  // under lateral moduli, the 3D problem
+  const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+  ASSERT_TRUE(io::WriteModuli(
+      dir_ / "moduli.nc", model, SurfaceGrid(8),
+      [](double, double theta, double) { return 0.1 * std::cos(theta); }, {},
+      {.name = "toy moduli", .elementMetres = 500e3}));
+  const auto lateral = std::string{
+      R"("model": {"deck": "ball.deck", "moduli": {"file": "moduli.nc"}},
+         "lmax": 8)"};
+  static_cast<void>(app::RunResponse(
+      Write("elastic3d.json",
+            std::format(R"({{{}, "forcing": {}, "output": {{"surface":
+                       "out/elastic3d.nc"}}}})",
+                        lateral, forcing))));
+  const auto lateralSummary =
+      Run("visco3d", std::format(R"({}, "times": {{"end_kyr": 1, "nodes": 2}},
+                                    "forcing": {})",
+                                 lateral, forcing));
+  EXPECT_TRUE(lateralSummary.starts_with(
+      "3-D (lateral moduli), viscoelastic, 2 nodes 0 to 1 kyr, "))
+      << lateralSummary;
+  const auto elastic3d = Output("elastic3d");
+  const auto visco3d = Output("visco3d");
+  auto worst3d = 0.0;
+  for (const auto* name :
+       {"displacement", "tangential_potential", "potential",
+        "displacement_radial_model", "potential_radial_model"}) {
+    const auto departure =
+        Departure(Slice(visco3d, name, 0), elastic3d.variables.at(name).values);
+    worst3d = std::max(worst3d, departure);
+    EXPECT_LT(departure, 1e-10) << name;
+  }
+  RecordProperty("lateral_departure", std::format("{:.3e}", worst3d));
+  const auto iterations =
+      std::get<std::vector<long long>>(visco3d.meta.at("step_iterations"));
+  EXPECT_GT(iterations.front(), 0);  // the first node's conjugate gradients
+
+  // a load ramped up from zero: nothing at the first node
+  static_cast<void>(
+      Run("ramp", std::format(R"({}, "times": {{"end_kyr": 2, "nodes": 3}},
+          "forcing": {{"load": [{{"cap": {{"latitude": 60, "longitude": -85,
+              "width_deg": 20, "amplitude_kg_m2": 1.0e6}},
+              "history_kyr": [[0, 0], [2, 1]]}}]}})",
+                              kBall)));
+  const auto ramp = Output("ramp");
+  for (const auto* name : {"load", "displacement", "potential"}) {
+    const auto first = Slice(ramp, name, 0);
+    EXPECT_TRUE(std::ranges::all_of(first, [](double v) { return v == 0.0; }))
+        << name;
+  }
+  const auto last = Slice(ramp, "displacement", 2);
+  EXPECT_TRUE(std::ranges::any_of(last, [](double v) { return v != 0.0; }));
+}
+
+TEST_F(AppsTest, ViscoelasticResponseMatchesTheLibraryStepper) {
+  // The command is the library's stepper under the forcing at each node:
+  // a loop written here, the radial ball's ViscoelasticOperator stepped
+  // per degree (the orders as columns) and the 3D Viscoelastic3D::Step on
+  // the prem8 deck's lateral viscosity, each under the cap's coefficients
+  // and the tide's scaled by their histories at the nodes and made
+  // non-dimensional by the model's scales, gives the command's exchange
+  // tables to 1e-10 relative (the same algorithm: the departures are
+  // rounding, about 6e-16). Uneven nodes, so that each step's length
+  // counts.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  constexpr auto kLmax = 8;
+  const auto nodes = std::vector<double>{0.0, 0.4, 1.0, 1.5};
+  const auto capFactor = [](double t) {
+    return t <= 0.0 ? 0.5 : (t >= 1.0 ? 1.0 : 0.5 + 0.5 * t);
+  };
+  const auto tideFactor = [](double t) {
+    return t >= 1.5 ? -1.0 : 1.0 - 2.0 * t / 1.5;
+  };
+  const auto forcing = std::string{R"("forcing": {
+      "load": [{"cap": {"latitude": 60, "longitude": -85, "width_deg": 20,
+                        "amplitude_kg_m2": 1.0e6},
+                "history_kyr": [[0, 0.5], [1, 1]]}],
+      "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                "imaginary_m2_s2": 0.5, "history_kyr": [[0, 1], [1.5, -1]]}]})"};
+  const auto times = std::string{R"("times": {"at_kyr": [0, 0.4, 1.0, 1.5]})"};
+  const SurfaceGrid grid(kLmax);
+  const auto cap = grid.Expand(app::CapField(
+      grid, {60.0, -85.0}, 20.0 * std::numbers::pi / 180.0, 1.0e6));
+  const auto tideIndex = SurfaceGrid::Index(2, 1);
+
+  // the command's tables, node by node
+  const auto compare = [&](const std::string& name, std::size_t n,
+                           const std::vector<Complex>& U,
+                           const std::vector<Complex>& Phi) {
+    const auto table =
+        ReadExchange(dir_ / "out" / std::format("{}_{}.txt", name, n));
+    const auto departure =
+        std::max(Departure(table.U, U), Departure(table.Phi, Phi));
+    EXPECT_LT(departure, 1e-10) << name << " node " << n;
+    return departure;
+  };
+
+  // 1D: the ball's radial stepper
+  {
+    EXPECT_TRUE(Run("radial", std::format("{}, {}, {}", kBall, times, forcing))
+                    .starts_with("1-D, viscoelastic, 4 nodes 0 to 1.5 kyr"));
+    const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+    const auto mesh = RadialMesh::Create(model, {.lmax = kLmax});
+    ASSERT_TRUE(mesh);
+    const auto material = Material::Create(model, *mesh);
+    ASSERT_TRUE(material);
+    const auto rheology = Rheology::FromModel(*material, model);
+    ASSERT_TRUE(rheology);
+    const ViscoelasticOperator op(*rheology, kLmax);
+    const auto& scales = model.ModelScales();
+    const auto density = scales.Factor(Dimensions{.mass = 1, .length = -2});
+    const auto potential = scales.Factor(PotentialDimensions);
+    const auto toTime = app::KYR / scales.Time();
+    const auto columns = [](std::vector<Complex> c, double factor,
+                            int only) -> LoadCallable {
+      return [c = std::move(c), factor, only](
+                 int l, double) -> std::optional<std::vector<double>> {
+        if (only >= 0 && l != only) return std::nullopt;
+        auto out = std::vector<double>(2 * (l + 1));
+        for (auto m = 0; m <= l; ++m) {
+          out[m] = factor * c[SurfaceGrid::Index(l, m)].real();
+          out[l + 1 + m] = factor * c[SurfaceGrid::Index(l, m)].imag();
+        }
+        return out;
+      };
+    };
+    auto tide = grid.ZeroCoefficients();
+    tide[tideIndex] = {1.0, 0.5};
+    const auto channels = [&](double t) {
+      return std::pair{columns(cap, capFactor(t) / density, -1),
+                       columns(tide, tideFactor(t) / potential, 2)};
+    };
+    const auto surface = [&](const std::map<int, std::vector<double>>& x,
+                             Component component, double factor) {
+      auto out = grid.ZeroCoefficients();
+      for (const auto& [l, c] : op.Surface(x, component)) {
+        for (auto m = 0; m <= l; ++m) {
+          out[SurfaceGrid::Index(l, m)] = factor * Complex{c[m], c[l + 1 + m]};
+        }
+      }
+      return out;
+    };
+    auto state = op.ZeroState([](int l) { return 2 * (l + 1); });
+    auto now = channels(nodes[0]);
+    auto x = op.SolveElastic(state, now.first, now.second);
+    state.strain = op.Strain(x);
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < nodes.size(); ++n) {
+      if (n > 0) {
+        auto next = channels(nodes[n]);
+        const auto step =
+            op.StartStep(state, (nodes[n] - nodes[n - 1]) * toTime,
+                         Scheme::ExponentialTrapezoid, now.first, now.second);
+        auto [after, solutions] = step.Finish(next.first, next.second);
+        state = std::move(after);
+        x = std::move(solutions);
+        now = std::move(next);
+      }
+      worst = std::max(
+          worst, compare("radial", n, surface(x, Component::U, scales.Length()),
+                         surface(x, Component::Phi, potential)));
+    }
+    RecordProperty("radial_departure", std::format("{:.3e}", worst));
+  }
+
+  // 3D: the prem8 deck's lateral viscosity, Viscoelastic3D::Step
+  {
+    EXPECT_TRUE(
+        Run("lateral", std::format("{}, {}, {}", Prem8(), times, forcing))
+            .starts_with("3-D (lateral viscosity), viscoelastic, 4 "
+                         "nodes 0 to 1.5 kyr"));
+    const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+    const auto model =
+        ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+    const auto mesh = RadialMesh::Create(model, {.lmax = kLmax});
+    ASSERT_TRUE(mesh);
+    const auto material = Material::Create(model, *mesh);
+    ASSERT_TRUE(material);
+    const auto viscosity =
+        io::ModelViscosity::Read(data + "/viscosity_log.nc", model);
+    ASSERT_TRUE(viscosity);
+    const auto rheology = Rheology::Maxwell(*material, viscosity->Viscosity());
+    ASSERT_TRUE(rheology);
+    auto options = Viscoelastic3D::Options{};
+    options.rtol = 1e-10;
+    options.max_iterations = 200;
+    const Viscoelastic3D op(*rheology, kLmax, viscosity->Delta(), options);
+    const auto& scales = model.ModelScales();
+    const auto density = scales.Factor(Dimensions{.mass = 1, .length = -2});
+    const auto potential = scales.Factor(PotentialDimensions);
+    const auto toTime = app::KYR / scales.Time();
+    const auto columns = [](std::vector<Complex> c, double factor,
+                            int only) -> Viscoelastic3D::LoadCallable3D {
+      return [c = std::move(c), factor, only](
+                 int l, double) -> std::optional<std::vector<Complex>> {
+        if (only >= 0 && l != only) return std::nullopt;
+        auto out = std::vector<Complex>(l + 1);
+        for (auto m = 0; m <= l; ++m) {
+          out[m] = factor * c[SurfaceGrid::Index(l, m)];
+        }
+        return out;
+      };
+    };
+    auto tide = grid.ZeroCoefficients();
+    tide[tideIndex] = {1.0, 0.5};
+    const auto channels = [&](double t) {
+      return std::pair{columns(cap, capFactor(t) / density, -1),
+                       columns(tide, tideFactor(t) / potential, 2)};
+    };
+    const auto surface = [&](const Viscoelastic3D::Solutions& x,
+                             Component component, double factor) {
+      auto out = grid.ZeroCoefficients();
+      for (const auto& [l, c] : op.Surface(x, component)) {
+        for (auto m = 0; m <= l; ++m)
+          out[SurfaceGrid::Index(l, m)] = factor * c[m];
+      }
+      return out;
+    };
+    auto state = op.ZeroState();
+    const auto start = channels(nodes[0]);
+    auto x = op.SolveElastic(state, start.first, start.second);
+    op.PrimeStrain(state, start.first, start.second);
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < nodes.size(); ++n) {
+      if (n > 0) {
+        const auto next = channels(nodes[n]);
+        auto result =
+            op.Step(state, (nodes[n] - nodes[n - 1]) * toTime,
+                    Scheme::ExponentialTrapezoid, next.first, next.second);
+        ASSERT_TRUE(result.info.converged);
+        state = std::move(result.state);
+        x = std::move(result.solutions);
+      }
+      worst = std::max(worst, compare("lateral", n,
+                                      surface(x, Component::U, scales.Length()),
+                                      surface(x, Component::Phi, potential)));
+    }
+    RecordProperty("lateral_departure", std::format("{:.3e}", worst));
+  }
+}
+
+TEST_F(AppsTest, ViscoelasticResponseIn3DReducesToTheRadialRun) {
+  // A viscosity file whose viscosity is the deck's column everywhere: held
+  // as a field of the radius alone it is radial and the run is the radial
+  // model's (to rounding, about 3e-12: the same 1e21 Pa s by another
+  // route, through the relaxation); held as a field on a grid, laterally
+  // uniform, the run is 3D, the lateral perturbation zero to rounding, and
+  // it equals the radial run to the fixed point's tolerance (1e-10; about
+  // 7e-12 here). Its radial reference model, written beside it, is the
+  // radial run to rounding.
+  static_cast<void>(Deck());
+  const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+  WriteViscosity(dir_ / "radial.nc", model, 1e21, 0.0, true);
+  WriteViscosity(dir_ / "uniform.nc", model, 1e21, 0.0);
+  const auto rest = std::format(
+      R"("times": {{"end_kyr": 2, "nodes": 5}},
+         "forcing": {{"load": [{}], "tide": [{}]}})",
+      kCap, kTide);
+  const auto withFile = [&](const std::string& file) {
+    return std::format(R"("model": {{"deck": "ball.deck", "viscosity":
+        {{"file": "{}"}}}}, "lmax": 8, {})",
+                       file, rest);
+  };
+  EXPECT_TRUE(Run("deck", std::string{kBall} + ", " + rest)
+                  .starts_with("1-D, viscoelastic"));
+  const auto radialSummary = Run("radial", withFile("radial.nc"));
+  EXPECT_TRUE(radialSummary.starts_with(
+      "1-D (the viscosity file is radial), viscoelastic"))
+      << radialSummary;
+  const auto uniformSummary = Run("uniform", withFile("uniform.nc"));
+  EXPECT_TRUE(
+      uniformSummary.starts_with("3-D (lateral viscosity), viscoelastic"))
+      << uniformSummary;
+  const auto deck = Output("deck");
+  const auto radial = Output("radial");
+  const auto uniform = Output("uniform");
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto& want = deck.variables.at(name).values;
+    EXPECT_LT(Departure(radial.variables.at(name).values, want), 1e-11) << name;
+    const auto departure = Departure(uniform.variables.at(name).values, want);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-10) << name;
+  }
+  RecordProperty("lateral_departure", std::format("{:.3e}", worst));
+  EXPECT_LT(Departure(uniform.variables.at("displacement_radial_model").values,
+                      deck.variables.at("displacement").values),
+            1e-11);
+  EXPECT_LT(Departure(uniform.variables.at("potential_radial_model").values,
+                      deck.variables.at("potential").values),
+            1e-11);
+}
+
+TEST_F(AppsTest, ViscoelasticResponseHistoriesScaleTheForcing) {
+  // An amplitude history scales its term by the piecewise-linear
+  // interpolant of its factors, held at the end factors outside its
+  // times: the load written at each node is the factor there times the
+  // cap. The response is linear in the forcing's histories: the run under
+  // h1 + h2 (the sum of two histories, on the union of their times) is the
+  // sum of the runs under h1 and under h2, to rounding, for a load term
+  // and a tide coefficient alike.
+  static_cast<void>(Deck());
+  const auto nodes =
+      std::vector<double>{0.0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0};
+  const auto times = std::string{
+      R"("times": {"at_kyr": [0, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0]})"};
+  const auto run = [&](const std::string& name, const std::string& load,
+                       const std::string& tide) {
+    static_cast<void>(Run(name, std::format(R"({}, {}, "forcing": {{
+            "load": [{{"cap": {{"latitude": 60, "longitude": -85,
+                                "width_deg": 20, "amplitude_kg_m2": 1.0e6}},
+                       "history_kyr": {}}}],
+            "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                       "imaginary_m2_s2": 0.5, "history_kyr": {}}}]}})",
+                                            kBall, times, load, tide)));
+    return Output(name);
+  };
+  const auto one = run("one", "[[0.5, 0], [2, 1]]", "[[0, 0], [3, 1]]");
+  const auto two = run("two", "[[0, 1], [1, 0.2], [3, 0.7]]", "[[1, 2]]");
+  const auto both =
+      run("both",
+          std::format("[[0, 1], [0.5, 0.6], [1, {:.17g}], [2, 1.45], [3, 1.7]]",
+                      0.2 + 1.0 / 3.0),
+          "[[0, 2], [3, 3]]");
+
+  // the load at each node: the factor of [[0.5, 0], [2, 1]] times the cap
+  const SurfaceGrid grid(8);
+  const auto cap = app::CapField(grid, {60.0, -85.0},
+                                 20.0 * std::numbers::pi / 180.0, 1.0e6);
+  for (auto n = std::size_t{0}; n < nodes.size(); ++n) {
+    const auto t = nodes[n];
+    const auto factor =
+        t <= 0.5 ? 0.0 : (t >= 2.0 ? 1.0 : 0.0 + (t - 0.5) / 1.5 * 1.0);
+    auto want = cap;
+    for (auto& v : want) v *= factor;
+    const auto got = Slice(one, "load", n);
+    if (factor == 0.0) {
+      EXPECT_TRUE(std::ranges::all_of(got, [](double v) { return v == 0.0; }))
+          << t;
+    } else {
+      EXPECT_LT(Departure(got, want), 1e-15) << t;
+    }
+  }
+
+  auto worst = 0.0;
+  for (const auto* name :
+       {"load", "displacement", "tangential_potential", "potential"}) {
+    const auto& a = one.variables.at(name).values;
+    const auto& b = two.variables.at(name).values;
+    auto sum = std::vector<double>(a.size());
+    for (auto i = std::size_t{0}; i < a.size(); ++i) sum[i] = a[i] + b[i];
+    const auto departure = Departure(both.variables.at(name).values, sum);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+  }
+  RecordProperty("linearity_departure", std::format("{:.3e}", worst));
+}
+
+TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
+  // A field term whose file has a time axis is read at each node by the
+  // file's own rule: a cap ramped linearly over its two dates is the cap
+  // term under the matching history. Written on the run's own grid the two
+  // agree to rounding; the same file with its axis counted back from the
+  // present, read from time_origin_kyr = 2, likewise; and on a 1-degree
+  // grid read by the cubic rule, to the resampling's error (about 3e-8, as
+  // the static field term's). Past the file's last date its last field is
+  // held. A history on a field term multiplies it.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  constexpr auto kLmax = 8;
+  const auto site = GeographicPoint{60.0, -85.0};
+  const auto width = 20.0 * std::numbers::pi / 180.0;
+  const auto density = pm::Dimensions{.mass = 1, .length = -2};
+  const SurfaceGrid grid(kLmax);
+  const auto field = app::CapField(grid, site, width, 1.0e6);
+  const auto ramp = [&](const std::string& name, std::vector<double> axis) {
+    auto file = pm::SurfaceFile{};
+    file.grid = pm::AngularGrid(
+        std::vector<double>(grid.CoLatitudes().begin(),
+                            grid.CoLatitudes().end()),
+        std::vector<double>(grid.Longitudes().begin(), grid.Longitudes().end()),
+        "gauss_legendre", kLmax,
+        std::vector<double>(grid.CoLatitudeWeights().begin(),
+                            grid.CoLatitudeWeights().end()));
+    file.source = "sl3dpp tests";
+    file.time = std::move(axis);
+    auto values = std::vector<double>(field.size(), 0.0);
+    values.insert(values.end(), field.begin(), field.end());
+    file.variables.emplace("load",
+                           pm::SurfaceField("load", values,
+                                            {.support = "node",
+                                             .time_interpolation = "linear",
+                                             .dimensions = density}));
+    pm::WriteSurfaceFile(dir_ / name, file);
+  };
+  ramp("ramp.nc", {0.0, 2.0 * app::KYR});
+  ramp("ramp_bp.nc", {-2.0 * app::KYR, 0.0});
+  // the cap at the nodes of a 1-degree grid with both poles, by its formula
+  {
+    const auto fine = pm::Equiangular(181, 360, true);
+    auto values = std::vector<double>{};
+    const auto colat0 = site.CoLatitude(), lon0 = site.Longitude();
+    for (const auto theta : fine.Colatitudes()) {
+      for (const auto phi : fine.Longitudes()) {
+        const auto c =
+            std::cos(theta) * std::cos(colat0) +
+            std::sin(theta) * std::sin(colat0) * std::cos(phi - lon0);
+        const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+        values.push_back(1.0e6 * std::exp(-0.5 * (d / width) * (d / width)));
+      }
+    }
+    auto both = std::vector<double>(values.size(), 0.0);
+    both.insert(both.end(), values.begin(), values.end());
+    auto file = pm::SurfaceFile{};
+    file.grid = fine;
+    file.source = "sl3dpp tests";
+    file.time = std::vector<double>{0.0, 2.0 * app::KYR};
+    file.variables.emplace("sigma",
+                           pm::SurfaceField("sigma", both,
+                                            {.support = "node",
+                                             .time_interpolation = "linear",
+                                             .lateral_interpolation = "cubic",
+                                             .dimensions = density}));
+    pm::WriteSurfaceFile(dir_ / "fine.nc", file);
+  }
+  const auto run = [&](const std::string& name, const std::string& term) {
+    static_cast<void>(Run(name, std::format(R"({}, "times": {{"end_kyr": 3,
+        "nodes": 7}}, "forcing": {{"load": [{}]}})",
+                                            kBall, term)));
+    return Output(name);
+  };
+  const auto cap = run("cap", R"({"cap": {"latitude": 60, "longitude": -85,
+      "width_deg": 20, "amplitude_kg_m2": 1.0e6},
+      "history_kyr": [[0, 0], [2, 1]]})");
+  const auto own = run("own", R"({"field": {"file": "ramp.nc"}})");
+  const auto shifted = run(
+      "shifted", R"({"field": {"file": "ramp_bp.nc", "time_origin_kyr": 2}})");
+  const auto resampled =
+      run("resampled", R"({"field": {"file": "fine.nc", "name": "sigma"}})");
+  const auto doubled = run(
+      "doubled", R"({"field": {"file": "ramp.nc"}, "history_kyr": [[0, 2]]})");
+  auto worst = 0.0;
+  for (const auto* name :
+       {"load", "displacement", "tangential_potential", "potential"}) {
+    const auto& want = cap.variables.at(name).values;
+    EXPECT_LT(Departure(own.variables.at(name).values, want), 1e-12) << name;
+    EXPECT_LT(Departure(shifted.variables.at(name).values, want), 1e-12)
+        << name;
+    const auto departure = Departure(resampled.variables.at(name).values, want);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-6) << name;
+    auto twice = want;
+    for (auto& v : twice) v *= 2.0;
+    EXPECT_LT(Departure(doubled.variables.at(name).values, twice), 1e-12)
+        << name;
+  }
+  RecordProperty("resampled_departure", std::format("{:.3e}", worst));
+}
+
+TEST_F(AppsTest, ViscoelasticResponseConvergesUnderStepHalving) {
+  // A load switched on at the start and held: the final displacement at
+  // the cap's peak converges as the step halves, at second order under the
+  // exponential trapezoid and first under backward Euler. On the ball (a
+  // Maxwell time of about 0.2 kyr) over 1 kyr in 8, 16, 32 and 64 steps,
+  // the successive differences fall by 3.96 and 3.99 (trapezoid) and by
+  // 1.94 and 1.97 (backward Euler).
+  static_cast<void>(Deck());
+  const auto final = [&](const std::string& scheme, int nodes) {
+    const auto name = std::format("{}_{}", scheme, nodes);
+    static_cast<void>(
+        Run(name, std::format(R"({}, "times": {{"end_kyr": 1, "nodes": {}}},
+            "forcing": {{"load": [{}]}},
+            "solver": {{"scheme": "{}"}})",
+                              kBall, nodes, kCap, scheme)));
+    const auto file = Output(name);
+    const auto last = Slice(file, "displacement", file.time->size() - 1);
+    // the peak, where the cap's centre is
+    return *std::ranges::max_element(
+        last, [](double a, double b) { return std::abs(a) < std::abs(b); });
+  };
+  for (const auto& [scheme, low, high] :
+       {std::tuple{std::string{"exponential_trapezoid"}, 3.0, 5.5},
+        std::tuple{std::string{"backward_euler"}, 1.7, 2.3}}) {
+    auto values = std::vector<double>{};
+    for (const auto nodes : {9, 17, 33, 65})
+      values.push_back(final(scheme, nodes));
+    auto ratios = std::string{};
+    for (auto k = std::size_t{2}; k < values.size(); ++k) {
+      const auto ratio =
+          (values[k - 2] - values[k - 1]) / (values[k - 1] - values[k]);
+      ratios += std::format("{}{:.3f}", ratios.empty() ? "" : " ", ratio);
+      EXPECT_GT(ratio, low) << scheme << " " << k;
+      EXPECT_LT(ratio, high) << scheme << " " << k;
+    }
+    RecordProperty(scheme + "_ratios", ratios);
+  }
+}
+
+TEST_F(AppsTest, ViscoelasticResponseStepSolversAgree) {
+  // A 3D run under a lateral viscosity and lateral moduli closes each step
+  // by the fixed point or by conjugate gradients, to the same tolerance
+  // (1e-10 a step): the two agree to it over the run (about 1.4e-11).
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto model =
+      ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+  ASSERT_TRUE(io::WriteModuli(dir_ / "moduli.nc", model, SurfaceGrid(8),
+                              [](double, double theta, double phi) {
+                                return 0.05 * std::sin(theta) * std::cos(phi);
+                              },
+                              {},
+                              {.name = "toy moduli", .elementMetres = 500e3}));
+  const auto body = std::format(
+      R"({}, "times": {{"end_kyr": 1, "nodes": 3}},
+         "forcing": {{"load": [{}], "tide": [{}]}})",
+      Prem8(R"(, "moduli": {"file": "moduli.nc"})"), kCap, kTide);
+  const auto fixed = Run("fixed", body);
+  const auto conjugate =
+      Run("conjugate", body + R"(, "solver": {"step": "conjugate_gradients"})");
+  EXPECT_TRUE(fixed.starts_with(
+      "3-D (lateral viscosity, lateral moduli), viscoelastic, 3 nodes 0 to 1 "
+      "kyr, load (1 term) + tide (1 coefficient); wrote "))
+      << fixed;
+  EXPECT_TRUE(fixed.ends_with("fixed-point iterations over 2 steps)")) << fixed;
+  EXPECT_TRUE(
+      conjugate.ends_with("conjugate-gradient iterations over 2 steps)"))
+      << conjugate;
+  const auto a = Output("fixed");
+  const auto b = Output("conjugate");
+  EXPECT_EQ(std::get<std::string>(a.meta.at("step_solver")), "fixed_point");
+  EXPECT_EQ(std::get<std::string>(b.meta.at("step_solver")),
+            "conjugate_gradients");
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure =
+        Departure(b.variables.at(name).values, a.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-9) << name;
+  }
+  RecordProperty("solver_departure", std::format("{:.3e}", worst));
+}
+
+TEST_F(AppsTest, ViscoelasticResponseTakesItsNodesEitherWay) {
+  // Nodes listed with at_kyr are the evenly spaced ones when they
+  // coincide, to the bit; uneven ones run and are recorded as given. The
+  // exchange tables are named by the node's index padded to the width of
+  // the last, and exchange_nodes chooses them.
+  static_cast<void>(Deck());
+  const auto forcing =
+      std::format(R"("forcing": {{"load": [{}], "tide": [{}]}})", kCap, kTide);
+  static_cast<void>(Run(
+      "even", std::format(R"({}, "times": {{"end_kyr": 2, "nodes": 5}}, {})",
+                          kBall, forcing)));
+  static_cast<void>(
+      Run("listed",
+          std::format(R"({}, "times": {{"at_kyr": [0, 0.5, 1, 1.5, 2]}}, {})",
+                      kBall, forcing)));
+  const auto even = Output("even");
+  const auto listed = Output("listed");
+  EXPECT_EQ(*even.time, *listed.time);
+  for (const auto& [name, field] : even.variables) {
+    EXPECT_EQ(field.values, listed.variables.at(name).values) << name;
+  }
+
+  // uneven nodes, starting late, with the tables of three of them
+  const auto config = Write(
+      "uneven.json",
+      std::format(R"({{{}, "times": {{"at_kyr": [1, 1.1, 1.4, 2, 3.5, 4, 5,
+                     6, 7, 8, 9.5]}}, {},
+          "output": {{"surface": "out/uneven.nc",
+                      "exchange": "out/uneven_{{node}}_{{node}}.txt",
+                      "exchange_nodes": [10, 0, 3, 3]}}}})",
+                  kBall, forcing));
+  const auto summary = app::RunResponse(config);
+  EXPECT_TRUE(summary.starts_with("1-D, viscoelastic, 11 nodes 1 to 9.5 kyr"))
+      << summary;
+  EXPECT_TRUE(summary.ends_with("and 3 exchange tables")) << summary;
+  const auto uneven = Output("uneven");
+  ASSERT_EQ(uneven.time->size(), 11u);
+  EXPECT_DOUBLE_EQ(uneven.time->front(), app::KYR);
+  EXPECT_DOUBLE_EQ(uneven.time->back(), 9.5 * app::KYR);
+  for (const auto* index : {"00", "03", "10"}) {
+    EXPECT_TRUE(fs::exists(dir_ / "out" /
+                           std::format("uneven_{}_{}.txt", index, index)))
+        << index;
+  }
+  EXPECT_FALSE(fs::exists(dir_ / "out" / "uneven_01_01.txt"));
+  const auto table = ReadExchange(dir_ / "out" / "uneven_03_03.txt");
+  EXPECT_EQ(table.scalars.at("node"), "3");
+  EXPECT_EQ(table.scalars.at("time_kyr"), "2");
+  // the first node is the elastic response at whatever time it is
+  EXPECT_LT(Departure(Slice(uneven, "displacement", 0),
+                      Slice(even, "displacement", 0)),
+            1e-14);
+}
+
+TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
+  // Each fault of a viscoelastic config is refused naming the member: the
+  // times block's forms, given both ways or neither, out of order or too
+  // short; a history out of order or malformed; an elastic deck with no
+  // viscosity file; the output's {node}, missing with times and present
+  // without, a volume file, exchange nodes out of range or without their
+  // tables; the time step's members and a time origin without times; and
+  // the members of other commands. Once the run reads its deck, a Maxwell
+  // deck with no viscosity anywhere.
+  static_cast<void>(Deck());
+  static_cast<void>(Write("inviscid.deck",
+                          "a ball with no viscosity\n"
+                          "gia deck for the sl3d tests\n"
+                          "0 5500 10000 5500 10000 5500 1 nan\n"
+                          "6371000 5500 10000 5500 10000 5500 1 nan\n"));
+  const auto refused = [&](auto&& run, const std::string& text,
+                           const std::string& member, const std::string& what) {
+    const auto path = Write("bad.json", text);
+    EXPECT_THROW(
+        {
+          try {
+            static_cast<void>(run(path));
+          } catch (const planetmodel::Error& error) {
+            const auto message = std::string{error.what()};
+            EXPECT_NE(message.find(member), std::string::npos) << message;
+            EXPECT_NE(message.find(what), std::string::npos) << message;
+            throw;
+          }
+        },
+        planetmodel::Error)
+        << text;
+  };
+  const auto read = [](const fs::path& path) {
+    return app::ReadResponseInput(path);
+  };
+  const auto run = [](const fs::path& path) { return app::RunResponse(path); };
+  const auto config =
+      [&](const std::string& times, const std::string& extra = "",
+          const std::string& output =
+              R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+          const std::string& model = R"({"deck": "ball.deck"})",
+          const std::string& load = kCap) {
+        return std::format(R"({{"model": {}, "lmax": 4, {} "forcing":
+                           {{"load": [{}]}},{} "output": {}}})",
+                           model, times, load, extra, output);
+      };
+  const auto even = std::string{R"("times": {"end_kyr": 2, "nodes": 3},)"};
+
+  refused(read,
+          config(R"("times": {"end_kyr": 2, "nodes": 3, "at_kyr": [0, 1]},)"),
+          "times", "gives the nodes twice");
+  refused(read, config(R"("times": {"start_kyr": 1},)"), "times",
+          "gives no nodes");
+  refused(read, config(R"("times": {"end_kyr": 2},)"), "times",
+          "gives `end_kyr` without `nodes`");
+  refused(read, config(R"("times": {"end_kyr": 2, "nodes": 1},)"),
+          "times.nodes", "fewer than two nodes");
+  refused(read,
+          config(R"("times": {"start_kyr": 2, "end_kyr": 2, "nodes": 3},)"),
+          "times.end_kyr", "is not later than start_kyr");
+  refused(read, config(R"("times": {"at_kyr": [0, 1, 1]},)"), "times.at_kyr[2]",
+          "is not later than the node before it");
+  refused(read, config(R"("times": {"at_kyr": [0]},)"), "times.at_kyr",
+          "fewer than two nodes");
+  refused(read, config(R"("times": {"start_kyr": 0, "at_kyr": [0, 1]},)"),
+          "times.start_kyr", "is given by `at_kyr`");
+  refused(read, config(R"("times": {"end_kyr": 2, "nodes": 3, "step": 1},)"),
+          "times.step", "not a recognised member");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+                 R"({"deck": "ball.deck"})",
+                 R"({"cap": {"latitude": 60, "longitude": 0, "width_deg": 10,
+                     "amplitude_kg_m2": 1.0}, "history_kyr": [[0, 1], [0, 2]]})"),
+          "forcing.load[0].history_kyr[1][0]", "is not later than the time");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+                 R"({"deck": "ball.deck"})",
+                 R"({"cap": {"latitude": 60, "longitude": 0, "width_deg": 10,
+                     "amplitude_kg_m2": 1.0}, "history_kyr": [[0, 1, 2]]})"),
+          "forcing.load[0].history_kyr[0]", "is not a pair");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+                 R"({"deck": "ball.deck"})",
+                 R"({"cap": {"latitude": 60, "longitude": 0, "width_deg": 10,
+                     "amplitude_kg_m2": 1.0}, "history_kyr": []})"),
+          "forcing.load[0].history_kyr", "holds no [time_kyr, factor] pair");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+                 R"({"deck": "ball.deck", "format": "elastic"})"),
+          "model.format", "no viscosity column");
+  refused(read, config(even, "", R"({"surface": "o.nc", "exchange": "o.txt"})"),
+          "output.exchange", "lacks `{node}`");
+  refused(read,
+          config("", "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})"),
+          "output.exchange", "holds `{node}`");
+  refused(read, config(even, "", R"({"surface": "o.nc", "volume": "v.nc"})"),
+          "output.volume", "not written for a viscoelastic run yet");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt",
+                               "exchange_nodes": [0, 3]})"),
+          "output.exchange_nodes[1]", "is not a node index in [0, 2]");
+  refused(read,
+          config(even, "", R"({"surface": "o.nc", "exchange_nodes": [0]})"),
+          "output.exchange_nodes", "need `output.exchange`");
+  refused(read, config("", "", R"({"surface": "o.nc", "exchange_nodes": [0]})"),
+          "output.exchange_nodes", "need a `times` block");
+  refused(read,
+          config("", R"( "solver": {"scheme": "backward_euler"},)",
+                 R"({"surface": "o.nc"})"),
+          "solver.scheme", "needs a `times` block");
+  refused(read,
+          config("", R"( "solver": {"step": "fixed_point"},)",
+                 R"({"surface": "o.nc"})"),
+          "solver.step", "needs a `times` block");
+  refused(read, config(even, R"( "solver": {"step": "picard"},)"),
+          "solver.step", "none of");
+  refused(read,
+          config("", "", R"({"surface": "o.nc"})", R"({"deck": "ball.deck"})",
+                 R"({"field": {"file": "f.nc", "time_origin_kyr": 2}})"),
+          "forcing.load[0].field.time_origin_kyr", "needs a `times` block");
+  for (const auto* member : {"rotation", "checkpoint", "kernels"}) {
+    refused(read, config(even, std::format(R"( "{}": {{}},)", member)), member,
+            "not a recognised member");
+  }
+  refused(run,
+          config(even, "", R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
+                 R"({"deck": "inviscid.deck"})"),
+          "model.deck", "gives no viscosity");
 }
 
 TEST_F(AppsTest, EvolveRunsAndARestartedRunMatchesAnUninterruptedOne) {
