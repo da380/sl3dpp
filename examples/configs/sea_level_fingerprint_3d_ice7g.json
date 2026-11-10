@@ -1,0 +1,12 @@
+{
+  "model": {"deck": "../data/earth_custom.elastic.deck", "format": "elastic",
+            "moduli": {"file": "../data/earth_custom_moduli_s40rts.nc"}},
+  "lmax": 64,
+  "forcing": {
+    "state": {"file": "../data/ice7g.nc", "date_kyr_bp": 0.0},
+    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
+            "width_deg": 8, "fraction": -0.1}
+  },
+  "rotation": "full",
+  "output": {"surface": "out/sea_level_fingerprint_3d_ice7g/sea_level_fingerprint_3d_ice7g.nc"}
+}

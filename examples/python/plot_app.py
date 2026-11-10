@@ -20,13 +20,21 @@ figures/sl3d/<config>/:
     response_tide_3d/body_tide.png
     response_tide_oscillating/oscillating.png   (with the _short and _long
                                                  runs' amplitudes and lags)
+    sea_level_fingerprint_melt/ocean.png        (with response_melt)
+    response_cap_weak/relaxation.png            (with response_cap_strong)
+    timestep_study/accuracy.png                 (the timestep_* runs)
 
 and, where the ICE-7G runs exist, sea_level_fingerprint_ice7g/fingerprint.png,
 sea_level_1d_ice7g/sea_level.png and
-sea_level_1d_ice7g_calibrated/calibration.png, and where the toy planet's
-runs exist (make_planet_deck.py), response_tide_planet/body_tide.png and
-response_tide_planet_relax/love_numbers.png. A missing output skips its
-figure.
+sea_level_1d_ice7g_calibrated/calibration.png; where those on the custom
+PREM deck with S40RTS exist too, sea_level_fingerprint_3d_ice7g/fingerprint.png
+and sea_level_3d_ice7g/sea_level.png (with sea_level_1d_ice7g_custom); where
+the toy planet's runs exist (make_planet_deck.py),
+response_tide_planet/body_tide.png and
+response_tide_planet_relax/love_numbers.png; and where the load from a file
+and from a table have run, response_load_field/agreement.png (with
+response_load_cap and response_load_coefficients). A missing output skips
+its figure.
 """
 from __future__ import annotations
 
@@ -38,12 +46,17 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
-from planetmodel.harmonics import analyse_grid
+from planetmodel import equiangular
+from planetmodel.harmonics import analyse_grid, synthesise, synthesise_grid
 from planetmodel.modelfile import read_model_file
 from planetmodel.surfacefile import read_surface_file
 
-from plotutil import (DATA, Example, map_axes, mark_sites, plot_field,
-                      save_figure, world_map)
+from inputs import distance_deg
+from plotutil import (DATA, HAVE_CARTOPY, Example, map_axes, mark_sites,
+                      plot_field, save_figure, world_map)
+
+if HAVE_CARTOPY:
+    import cartopy.crs as ccrs
 
 
 CONFIGS = Path("configs")  # the configs themselves
@@ -861,6 +874,458 @@ def response_tide_oscillating() -> None:
     save(fig, name, "oscillating")
 
 
+def at_point(values, grid, lat: float, lon: float) -> np.ndarray:
+    """A field's value at a place, from its expansion on the grid: values
+    (..., nlat, nlon) give (...)."""
+    coefficients = analyse_grid(np.asarray(values), grid)
+    return synthesise(coefficients, np.deg2rad(90.0 - lat),
+                      np.deg2rad(lon % 360.0))
+
+
+def refined(grid, fields: dict, nlat: int = 360) -> Example:
+    """Band-limited fields on the run's grid resampled onto an
+    equiangular grid of nlat x 2 nlat by their expansions, for smooth maps
+    of a run at a modest degree."""
+    fine = equiangular(nlat, 2 * nlat)
+    return Example.from_fields(fine.colatitudes, fine.longitudes, {
+        name: synthesise_grid(analyse_grid(values, grid), fine)
+        for name, values in fields.items()})
+
+
+def cover_land(ax) -> None:
+    """Grey land over a cartopy map, so that a sea-level map shows the
+    ocean alone (Natural Earth's 110 m land, cartopy's cached data)."""
+    if not HAVE_CARTOPY:
+        return
+    import cartopy.feature as cfeature
+
+    ax.add_feature(cfeature.NaturalEarthFeature("physical", "land", "110m"),
+                   facecolor="0.85", edgecolor="none", zorder=2)
+
+
+def sea_level_fingerprint_3d_ice7g() -> None:
+    """The fingerprint of 10% of ICE-7G's Greenland ice melted on PREM with
+    S40RTS's lateral moduli: the 3D fingerprint's sea level over the global
+    ocean and around the North Atlantic, and the 3D minus radial difference
+    over each, with the real coastlines."""
+    name = "sea_level_fingerprint_3d_ice7g"
+    path = OUT / name / f"{name}.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    sea = np.asarray(file.variables["sea_level_change"].values)
+    radial = np.asarray(file.variables["sea_level_change_radial_model"].values)
+    ex = refined(grid, {"sea": sea, "difference": 1e3 * (sea - radial)})
+    ocean = np.asarray(file.variables["ocean_function"].values) > 0.5
+    far = float(np.percentile(np.abs(1e3 * (sea - radial))[ocean], 99.0))
+    melt = (72.0, 320.0)
+    near = (-75.0, 15.0, 45.0, 85.0)  # the North Atlantic
+    fig = plt.figure(figsize=(12, 7.5))
+    panels = (  # field, region, colour limit, land covered, title
+        ("sea", None, 1.0, True,
+         "sea level change, 3D model, over the ocean (m)"),
+        ("sea", near, float(np.max(np.abs(sea[ocean]))), True,
+         "near field, over the ocean (m)"),
+        ("difference", None, far, True,
+         "3D minus radial model, over the ocean (mm)"),
+        ("difference", near, None, False,
+         "3D minus radial model, near field, land included (mm)"),
+    )
+    for k, (field, extent, limit, covered, title) in enumerate(panels):
+        ax = world_map(fig, 2, 2, k + 1, state=ICE7G,
+                       central_longitude=-30.0 if extent else 0.0,
+                       extent=extent)
+        mesh = plot_field(ax, ex, field, title=title, limit=limit)
+        if covered:
+            cover_land(ax)
+        mark_sites(ax, [melt])
+        fig.colorbar(mesh, ax=ax, shrink=0.7,
+                     extend="both" if limit is not None else "neither")
+    fig.suptitle("sl3d sea-level, the fingerprint of 10% of ICE-7G's Greenland "
+                 "ice melted, on PREM (no ocean) with S40RTS's lateral moduli "
+                 f"(lmax {grid.lmax})", fontsize=11)
+    fig.tight_layout()
+    save(fig, name, "fingerprint")
+
+
+def site_histories(path: Path, sites):
+    """A sea-level run's dates (kyr BP) and each site's relative sea level,
+    the sea level at each date less the present's, by site name."""
+    file = read_surface_file(path)
+    dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
+    sea = np.asarray(file.variables["sea_level_change"].values)
+    out = {}
+    for label, (lat, lon) in sites:
+        series = at_point(sea, file.grid, lat, lon)
+        out[label] = series - series[-1]
+    return dates, out
+
+
+def sea_level_3d_ice7g() -> None:
+    """GIA through time on ICE-7G on PREM (no ocean, a 100 km lithosphere,
+    two mantle viscosities) with S40RTS's lateral viscosity and moduli: the
+    sea-level change since 26 ka in 3D and 3D minus the deck's radial run
+    (land included: the largest differences lie under the former ice), and
+    the relative sea-level histories at three sites in both, with their
+    difference."""
+    name, radial_name = "sea_level_3d_ice7g", "sea_level_1d_ice7g_custom"
+    path = OUT / name / f"{name}.nc"
+    radial_path = OUT / radial_name / f"{radial_name}.nc"
+    if not (path.exists() and radial_path.exists()):
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
+    sea = np.asarray(file.variables["sea_level_change"].values)[-1]
+    radial = read_surface_file(radial_path)
+    sea_1d = np.asarray(radial.variables["sea_level_change"].values)[-1]
+    ex = refined(grid, {"sea": sea, "difference": sea - sea_1d})
+    sites = [("Hudson Bay", (60.0, 275.0)), ("Gulf of Bothnia", (64.0, 21.0)),
+             ("Barbados", (13.1, 300.4))]
+
+    fig = plt.figure(figsize=(13, 9))
+    grid_spec = fig.add_gridspec(2, 2, height_ratios=[1.0, 0.9])
+    for k, (field, title) in enumerate((
+            ("sea", f"sea level change, {dates[0]:g} ka to the present, "
+                    "3D model (m)"),
+            ("difference", "3D minus radial model (m)"))):
+        ax = fig.add_subplot(grid_spec[0, k], projection=ccrs.Robinson()) \
+            if HAVE_CARTOPY else fig.add_subplot(grid_spec[0, k])
+        if HAVE_CARTOPY:
+            ax.set_global()
+            ax.coastlines(linewidth=0.4, color="0.3")
+        mesh = plot_field(ax, ex, field, title=title)
+        mark_sites(ax, [site for _, site in sites], colors=["C0", "C1", "C2"])
+        fig.colorbar(mesh, ax=ax, shrink=0.75, orientation="horizontal",
+                     pad=0.04)
+    _, three = site_histories(path, sites)
+    _, one = site_histories(radial_path, sites)
+    ax = fig.add_subplot(grid_spec[1, 0])
+    ax_d = fig.add_subplot(grid_spec[1, 1])
+    for k, (label, _) in enumerate(sites):
+        ax.plot(dates, three[label], color=f"C{k}", label=f"{label}, 3D")
+        ax.plot(dates, one[label], color=f"C{k}", ls="--",
+                label=f"{label}, radial")
+        ax_d.plot(dates, three[label] - one[label], color=f"C{k}", label=label)
+    for a in (ax, ax_d):
+        a.invert_xaxis()
+        a.axhline(0.0, color="0.7", lw=0.5)
+        a.set_xlabel("kyr before present")
+    ax.set_ylabel("relative sea level (m, present = 0)")
+    ax.set_title("relative sea level, 3D (solid) and radial model (dashed)",
+                 fontsize=10)
+    ax.legend(fontsize=8, ncol=2, loc="upper right")
+    ax_d.set_ylabel("3D minus radial model (m)")
+    ax_d.set_title("the lateral structure's part", fontsize=10)
+    ax_d.legend(fontsize=8)
+    fig.suptitle("sl3d sea-level on ICE-7G: PREM (no ocean) with S40RTS's "
+                 "lateral viscosity and moduli, against its radial model "
+                 f"(lmax {grid.lmax})", fontsize=11)
+    fig.tight_layout()
+    save(fig, name, "sea_level")
+
+
+def ocean_load() -> None:
+    """What the ocean adds: one ice cap melted on the synthetic Earth,
+    through `response` (the ice's load alone) and through `sea-level` (the
+    fingerprint, the meltwater spread over the ocean): the displacement of
+    each, their difference (the ocean's load), and the sea-level change."""
+    name, alone = "sea_level_fingerprint_melt", "response_melt"
+    path, alone_path = OUT / name / f"{name}.nc", OUT / alone / f"{alone}.nc"
+    if not (path.exists() and alone_path.exists()):
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    with_ocean = np.asarray(file.variables["displacement"].values)
+    load_alone = np.asarray(read_surface_file(alone_path)
+                            .variables["displacement"].values)
+    ocean = np.asarray(file.variables["ocean_function"].values) > 0.5
+    sea = np.asarray(file.variables["sea_level_change"].values)
+    ex = Example.from_fields(grid.colatitudes, grid.longitudes, {
+        "alone": load_alone,
+        "difference": 1e2 * (with_ocean - load_alone),
+        "sea": np.where(ocean, sea, np.nan)})
+    cap = (50.0, 260.0)
+    lats = 90.0 - np.rad2deg(np.asarray(grid.colatitudes))[:, None]
+    lons = np.rad2deg(np.asarray(grid.longitudes))[None, :]
+    distance = np.broadcast_to(distance_deg(lats, lons, *cap), sea.shape)
+
+    fig = plt.figure(figsize=(12, 7.5))
+    ax = world_map(fig, 2, 2, 1, central_longitude=-100.0,
+                   extent=(-150.0, -50.0, 15.0, 85.0))
+    mesh = plot_field(ax, ex, "alone", title="displacement under the melt "
+                      "(response, the load alone; m)")
+    mark_sites(ax, [cap])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = world_map(fig, 2, 2, 2, central_longitude=-100.0)
+    mesh = plot_field(ax, ex, "difference", title="displacement, sea-level "
+                      "minus response: the ocean's load (cm)")
+    mark_sites(ax, [cap])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = world_map(fig, 2, 2, 3, central_longitude=-100.0)
+    mesh = plot_field(ax, ex, "sea", cmap="viridis", symmetric=False,
+                      title="sea level change over the ocean (m)")
+    mark_sites(ax, [cap])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = fig.add_subplot(2, 2, 4)
+    far = distance > 15.0
+    order = np.argsort(distance[far])
+    ax.plot(distance[far][order], 1e2 * load_alone[far][order], color="0.2",
+            lw=1.5, label="the load alone (response)")
+    for where, color, label in ((ocean, "C0", "with the ocean, under it"),
+                                (~ocean, "C5", "with the ocean, on land")):
+        pick = far & where
+        ax.plot(distance[pick], 1e2 * with_ocean[pick], ".", ms=1.0,
+                color=color, alpha=0.4, label=label)
+    ax.axhline(0.0, color="0.7", lw=0.5)
+    ax.set_xlim(15.0, 180.0)
+    ax.set_xlabel("distance from the cap's centre (degrees)")
+    ax.set_ylabel("displacement (cm)")
+    ax.set_title("away from the melt: the load alone, and with the ocean",
+                 fontsize=10)
+    ax.legend(fontsize=8, markerscale=8)
+    fig.suptitle("sl3d: 1 km of ice (a 3 degree cap) melted on the synthetic "
+                 "Earth, elastic, without rotation:\n`response` (the ice's "
+                 "load alone) against `sea-level` (the fingerprint, the "
+                 "meltwater in the ocean)", fontsize=11)
+    fig.tight_layout()
+    save(fig, name, "ocean")
+
+
+
+def response_cap_by_location() -> None:
+    """The same cap loaded and removed at two places of the synthetic 3D
+    viscoelastic Earth, over weak and over stiff mantle: the viscosity
+    file's lateral pattern with the two caps, and the displacement at each
+    cap's centre through time, 3D and radial model."""
+    runs = {"weak": "response_cap_weak", "strong": "response_cap_strong"}
+    paths = {k: OUT / n / f"{n}.nc" for k, n in runs.items()}
+    if not all(p.exists() for p in paths.values()):
+        return
+    centres = {}
+    for key, name in runs.items():
+        config = json.loads((CONFIGS / f"{name}.json").read_text())
+        cap = config["forcing"]["load"][0]["cap"]
+        centres[key] = (cap["latitude"], cap["longitude"])
+    model = read_model_file(DATA / "viscosity_log.nc").parts[0]
+    radius = np.asarray(model.mesh.r).ravel()
+    log_eta = np.asarray(model.variables["viscosity_perturbation"].values)
+    depth = 400.0e3
+    k = int(np.argmin(np.abs(radius.max() - radius - depth)
+                      + 1e9 * ~np.isfinite(log_eta[:, 0, 0])))
+    ex = Example.from_fields(model.grid.colatitudes, model.grid.longitudes,
+                             {"log_eta": log_eta[k]})
+
+    fig = plt.figure(figsize=(13, 4.5))
+    ax = map_axes(fig, 1, 3, 1, coastlines=False)
+    mesh = plot_field(ax, ex, "log_eta",
+                      title=f"ln($\\eta/\\eta_{{ref}}$) at "
+                            f"{(radius.max() - radius[k]) / 1e3:.0f} km depth")
+    mark_sites(ax, [centres["weak"], centres["strong"]], colors=["C0", "C3"])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    colors = {"weak": "C0", "strong": "C3"}
+    ax_d = fig.add_subplot(1, 3, 2)
+    ax_r = fig.add_subplot(1, 3, 3)
+    for key, path in paths.items():
+        file = read_surface_file(path)
+        times = np.asarray(file.time) / KYR
+        lat, lon = centres[key]
+        disp = at_point(file.variables["displacement"].values, file.grid,
+                        lat, lon)
+        radial = at_point(file.variables["displacement_radial_model"].values,
+                          file.grid, lat, lon)
+        local = at_point(log_eta[k], model.grid, lat, lon)
+        ax_d.plot(times, disp, color=colors[key],
+                  label=f"3D, over {key} mantle ({lat:g}, {lon:g})")
+        if key == "strong":  # the radial model's is the same at both
+            ax_d.plot(times, radial, color="k", ls="--", lw=0.9,
+                      label="radial model, at either")
+        ax_r.plot(times, disp - radial, color=colors[key],
+                  label=f"{key}: ln($\\eta/\\eta_{{ref}}$) = {local:+.2f} at "
+                        f"{(radius.max() - radius[k]) / 1e3:.0f} km")
+    ax_d.axhline(0.0, color="0.7", lw=0.5)
+    ax_d.set_xlabel("time (kyr)")
+    ax_d.set_ylabel("displacement at the cap's centre (m)")
+    ax_d.set_title("loaded at 0, removed over 6 to 6.5 kyr", fontsize=10)
+    ax_d.legend(fontsize=7)
+    ax_r.axhline(0.0, color="0.7", lw=0.5)
+    ax_r.set_xlabel("time (kyr)")
+    ax_r.set_ylabel("3D minus radial model (m)")
+    ax_r.set_title("the lateral structure's part", fontsize=10)
+    ax_r.legend(fontsize=8)
+    fig.suptitle("sl3d response: the same cap load over weak and over stiff "
+                 "mantle on the synthetic 3D viscoelastic Earth "
+                 "(viscosity_log.nc)", fontsize=11)
+    fig.tight_layout()
+    save(fig, "response_cap_weak", "relaxation")
+
+
+def response_load() -> None:
+    """One load history given three ways: an analytic cap with a history
+    (response_load_cap), the same cap sampled into a surface file on a time
+    axis read with a time origin (response_load_field), and its expansion
+    as a coefficient table with the cap's history (response_load_coefficients):
+    the forcing on the run's clock and on the file's axis, the displacement
+    at the cap's centre through time, and how far each run departs from the
+    analytic one anywhere on the grid."""
+    names = ["response_load_cap", "response_load_field",
+             "response_load_coefficients"]
+    paths = {n: OUT / n / f"{n}.nc" for n in names}
+    if not all(p.exists() for p in paths.values()):
+        return
+    term = json.loads((CONFIGS / "response_load_cap.json").read_text())[
+        "forcing"]["load"][0]
+    centre = (term["cap"]["latitude"], term["cap"]["longitude"])
+    history = np.asarray(term["history_kyr"])
+    field = json.loads((CONFIGS / "response_load_field.json").read_text())[
+        "forcing"]["load"][0]["field"]
+    origin = field.get("time_origin_kyr", 0.0)
+    stored = read_surface_file(CONFIGS / field["file"])
+    # the file's own axis, in its own time scale
+    stored_times = np.asarray(stored.time) * stored.scales.time / KYR
+    stored_load = at_point(stored.variables[field.get("name", "load")].values,
+                           stored.grid, *centre)
+    files = {n: read_surface_file(p) for n, p in paths.items()}
+    times = np.asarray(files[names[0]].time) / KYR
+    reference = np.asarray(files[names[0]].variables["displacement"].values)
+    styles = {"response_load_cap": ("C0", "-", "cap, history_kyr"),
+              "response_load_field": ("C1", "--",
+                                      f"field file, time_origin_kyr {origin:g}"),
+              "response_load_coefficients": ("C2", ":",
+                                             "coefficient table, history_kyr")}
+
+    fig, (ax_f, ax, ax_e) = plt.subplots(1, 3, figsize=(15, 4.4))
+    factor = np.interp(times, history[:, 0], history[:, 1])
+    ax_f.plot(times, factor, color="C0", lw=2.0, label="history_kyr of the "
+              "cap and the table (held beyond its ends)")
+    ax_f.plot(stored_times + origin, stored_load / stored_load.max(), "o",
+              color="C1", label="the file's stored times, read at "
+                                f"t - {origin:g} kyr")
+    ax_f.set_xlim(times[0], times[-1])
+    ax_f.set_ylim(-0.1, 1.35)
+    ax_f.set_xlabel("time on the run's clock, t (kyr)")
+    ax_f.set_ylabel("load over its largest, at the cap's centre")
+    ax_f.set_title("the forcing", fontsize=10)
+    ax_f.legend(fontsize=8, loc="upper right")
+    top = ax_f.secondary_xaxis("top", functions=(lambda t: t - origin,
+                                                 lambda u: u + origin))
+    top.set_xlabel("time on the file's axis (kyr)", fontsize=8, color="C1")
+    for n, file in files.items():
+        color, ls, label = styles[n]
+        disp = at_point(file.variables["displacement"].values, file.grid,
+                        *centre)
+        ax.plot(times, disp, color=color, ls=ls, lw=2.0 if ls == "-" else 1.5,
+                label=label)
+        if n != names[0]:
+            values = np.asarray(file.variables["displacement"].values)
+            departure = (np.max(np.abs(values - reference), axis=(1, 2))
+                         / np.max(np.abs(reference)))
+            ax_e.semilogy(times, np.where(departure > 0, departure, np.nan),
+                          color=color, label=label)
+    ax.set_xlabel("time on the run's clock (kyr)")
+    ax.set_ylabel("displacement at the cap's centre (m)")
+    ax.legend(fontsize=8, loc="lower left")
+    ax.set_title("the response, the same three ways", fontsize=10)
+    ax_e.set_xlabel("time on the run's clock (kyr)")
+    ax_e.set_ylabel("largest |difference| from the cap run, over its largest")
+    ax_e.set_title("agreement, everywhere on the grid", fontsize=10)
+    ax_e.legend(fontsize=8)
+    fig.suptitle("sl3d response: a load history from a file and from a "
+                 "coefficient table, on the radial viscoelastic Earth "
+                 "(prem8, 1e21 Pa s)", fontsize=11)
+    fig.tight_layout()
+    save(fig, "response_load_field", "agreement")
+
+
+def timestep_study() -> None:
+    """The time-stepping study of timestep_study.py: the error against the
+    step of the sea level at the two measurement dates by both schemes, and
+    of the viscosity kernels by both adjoints, each against its converged
+    reference, with first- and second-order guides and the step in
+    Maxwell times; and the kernels themselves at a 1 kyr step."""
+    import timestep_study as study
+
+    result = study.errors()
+    if result is None:
+        return
+    table, (ref_fields, ref_kernels) = result
+    tau_min, tau_max = study.maxwell_times_kyr()
+    fig = plt.figure(figsize=(14, 4.8))
+    styles = {"et": ("C0", "exponential trapezoid"),
+              "be": ("C3", "backward Euler"),
+              "discrete": ("C0", "discrete adjoint"),
+              "continuous": ("C1", "continuous adjoint")}
+    marks = {f"hudson_bay_{study.MID:g}ka": ("o", "-",
+                                            f"{study.MID:g} ka (mid-run)"),
+             f"hudson_bay_{study.END:g}ka": ("s", "--",
+                                            f"{study.END:g} ka (the end)")}
+    panels = (("sea_level", f"(a) the sea level, against "
+                            f"{study.step_kyr(ref_fields):g} kyr steps",
+               "relative L2 error over the sphere"),
+              ("kernel", f"(b) the viscosity kernel, against the discrete "
+                         f"one at {study.step_kyr(ref_kernels):g} kyr",
+               "relative error, (∫ δK$^2$ r$^2$ dr)$^{1/2}$"))
+    for k, (quantity, title, ylabel) in enumerate(panels):
+        ax = fig.add_subplot(1, 3, k + 1)
+        low = np.inf
+        for label, (steps, errs) in table[quantity].items():
+            kind, measurement = label.split()
+            color, name = styles[kind]
+            marker, ls, when = marks[measurement]
+            dt = np.array([study.step_kyr(n) for n in steps])
+            ax.loglog(dt, errs, color=color, ls=ls, marker=marker, ms=4,
+                      label=f"{name}, {when}")
+            low = min(low, np.min(errs))
+        dt = np.array([study.step_kyr(n) for n in study.STEPS])
+        for order, anchor in ((1, 0.6), (2, 0.6)):
+            guide = anchor * low * (dt / dt[-1]) ** order * 4
+            ax.loglog(dt, guide, color="0.6", lw=0.8, ls=":")
+            ax.text(dt[0], guide[0], f" order {order}", fontsize=8,
+                    color="0.4", va="center")
+        ax.set_xlabel("step (kyr)")
+        ax.set_xticks(dt, [f"{d:g}" if d >= 1 else f"1/{1 / d:g}" for d in dt])
+        ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+        ax.set_ylabel(ylabel)
+        ax.set_title(title, fontsize=10)
+        ax.legend(fontsize=7, loc="lower right")
+        ax.grid(True, which="major", color="0.9", lw=0.5)
+        top = ax.secondary_xaxis(
+            "top", functions=(lambda x: x / tau_min, lambda x: x * tau_min))
+        top.set_xticks(dt / tau_min, [f"{d / tau_min:.2g}" for d in dt])
+        top.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+        top.set_xlabel(f"step over the shortest Maxwell time "
+                       f"({tau_min:.2f} kyr)", fontsize=8)
+    # the kernels at a 1 kyr step against the reference
+    ax = fig.add_subplot(1, 3, 3)
+    measurement = f"hudson_bay_{study.END:g}ka"
+    found = study.runs_present()
+    one_kyr = int(round((study.START - study.END) / 1.0))
+    r0, k0 = study.kernel(found["discrete"][ref_kernels], measurement)
+    depth = (r0.max() - r0) / 1e3
+    scale = np.max(np.abs(k0))
+    ax.plot(k0 / scale, depth, color="k", lw=2.0,
+            label=f"reference ({study.step_kyr(ref_kernels):g} kyr)")
+    for adjoint in study.ADJOINTS:
+        if one_kyr in found.get(adjoint, {}):
+            _, kk = study.kernel(found[adjoint][one_kyr], measurement)
+            ax.plot(kk / scale, depth, color=styles[adjoint][0],
+                    label=f"{styles[adjoint][1]}, 1 kyr steps")
+    ax.set_ylim(2900.0, 0.0)
+    ax.axvline(0.0, color="0.7", lw=0.5)
+    ax.set_xlabel("viscosity kernel K(r), over the reference's largest")
+    ax.set_ylabel("depth (km)")
+    ax.set_title(f"(c) the kernel of the sea level at {study.END:g} ka",
+                 fontsize=10)
+    ax.legend(fontsize=7, loc="upper right")
+    fig.suptitle("sl3d: time-step accuracy on the radial viscoelastic Earth "
+                 "(prem8, 1e21 Pa s; Maxwell times "
+                 f"{tau_min:.2f} to {tau_max:.2f} kyr), the synthetic "
+                 "deglaciation 16 to 6 ka, Hudson Bay", fontsize=11)
+    fig.tight_layout()
+    save(fig, "timestep_study", "accuracy")
+
+
 if __name__ == "__main__":
     love_numbers()
     sea_level_fingerprint("sea_level_fingerprint",
@@ -893,3 +1358,9 @@ if __name__ == "__main__":
     response_tide_planet()
     response_tide_planet_relax()
     response_tide_oscillating()
+    sea_level_fingerprint_3d_ice7g()
+    sea_level_3d_ice7g()
+    ocean_load()
+    response_cap_by_location()
+    response_load()
+    timestep_study()

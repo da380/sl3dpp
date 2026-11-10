@@ -1,0 +1,10 @@
+{
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "lmax": 32,
+  "times": {"start_kyr": 0.0, "end_kyr": 12.0, "nodes": 49},
+  "forcing": {
+    "load": [{"field": {"file": "../data/load_cap_history.nc", "name": "load",
+                        "time_origin_kyr": 2.0}}]
+  },
+  "output": {"surface": "out/response_load_field/response_load_field.nc"}
+}

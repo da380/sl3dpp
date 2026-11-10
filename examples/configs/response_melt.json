@@ -1,0 +1,9 @@
+{
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
+  "lmax": 128,
+  "forcing": {
+    "load": [{"cap": {"latitude": 50.0, "longitude": 260.0, "width_deg": 3.0,
+                      "amplitude_kg_m2": -9.17e5}}]
+  },
+  "output": {"surface": "out/response_melt/response_melt.nc"}
+}

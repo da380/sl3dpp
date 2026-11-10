@@ -1,0 +1,12 @@
+{
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "lmax": 16,
+  "times": {"start_kyr_bp": 16.0, "end_kyr_bp": 6.0, "nodes": 21},
+  "forcing": {
+    "state": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "none",
+  "solver": {"scheme": "backward_euler"},
+  "output": {"surface": "out/timestep_be_n20/timestep_be_n20.nc"}
+}

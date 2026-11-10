@@ -166,6 +166,101 @@ draws each config's figures from `out/<config>/` into
   10 kyr |k2| = 0.787 lagging by 12.2°: the lag is largest between the
   elastic and the fluid limits. Against 96 nodes a period, 24 put k2
   within 0.7% and its lag within 0.4°. A fraction of a second each.
+- **`sea_level_fingerprint_melt.json`** with **`response_melt.json`** — what
+  the ocean adds: one ice change through both commands, elastic, on the
+  radial Earth of `../data/prem8.elastic.deck` at lmax 128. The
+  fingerprint melts a `cap_thickness` cap, 1 km at the centre of the
+  synthetic North America (50° N, 100° W) and 3° wide, without rotation
+  (so that what differs is the ocean alone); `response` applies the load
+  of the same melt, a `cap` of 917 kg m^-3 times -1 km. The fingerprint
+  loads only grounded ice, 917 x the change x (1 - C), and the cap lies
+  18° from the nearest coast, so the ocean function cuts 5e-8 of its mass:
+  the two loads agree to 1e-7 of their peak (the fingerprint writes
+  `ice_change` and `ocean_function`, from which this is checked). The melt,
+  6.4e17 kg, raises the ocean by 1.50 m on average (from -1.2 m near the
+  melt to +1.78 m far from it). The ice's load alone lifts the cap's
+  centre by 25.9 m; the meltwater's load changes the displacement by
+  -21 to +14 cm, pressing the ocean floor down by 11 cm on average and
+  lifting the cap's centre by a further 12 cm. A fraction of a second
+  each.
+- **`response_cap_weak.json`** and **`response_cap_strong.json`** — the
+  same Hudson Bay-sized cap (10° wide, 1.834e6 kg m^-2) switched on at 0,
+  held, and removed over 6 to 6.5 kyr, from 0 to 12 kyr in half-kyr steps
+  at lmax 16, on the synthetic 3D viscoelastic Earth
+  (`../data/viscosity_log.nc` on `../data/prem8.gia.deck`), at two places:
+  over weak mantle at (0°, 90° E) and over stiff mantle at (0°, 0°). The
+  file's log perturbation is a sin^2(theta) cos(2 phi) pattern about
+  1e21 Pa s, strongest in the upper mantle: ln(eta / eta_ref) = -0.35 and
+  +0.35 at the two centres at 400 km depth (0.70e21 and 1.42e21 Pa s), a
+  factor of two between them. Each writes the radial reference model's
+  response beside its own (`displacement_radial_model`), the same at both
+  places. Under the load the weak site subsides faster (by 21 m more than
+  the radial model after 1 kyr, the stiff one 19 m less, of about 255 m)
+  and after the load is removed it rebounds faster (20 m left at 12 kyr,
+  against 32 m in the radial model and 45 m at the stiff site). About 3 s
+  each on four threads, 13 to 15 fixed-point iterations a step.
+- **`response_load_cap.json`**, with **`response_load_field.json`** and
+  **`response_load_coefficients.json`** — one load history given three
+  ways, on the radial viscoelastic Earth of `../data/prem8.gia.deck` from 0
+  to 12 kyr in quarter-kyr steps at lmax 32: a Gaussian cap (60° N, 85° W,
+  5° wide, 1.834e6 kg m^-2) with the history `[[2, 0], [3, 1], [7, 1],
+  [7.5, 0]]` (`response_load_cap`, no inputs but the deck); the same cap
+  sampled into a surface file on a time axis, `../data/load_cap_history.nc`,
+  read as a `field` term (`response_load_field`); and its coefficient
+  table, `../data/load_cap_lm.txt`, as a `coefficients` term with the
+  cap's history (`response_load_coefficients`). The two files come from
+  `make_load_field.py` and `make_load_coefficients.py` (examples/README.md),
+  and `run_all.sh` runs these two configs once they exist. The file's own
+  time axis runs from 0 to 5.5 kyr (the load grows over its first
+  kiloyear, is held to 5 and removed by 5.5); `"time_origin_kyr": 2` reads
+  it at t - 2 kyr when the run's clock says t, so the file's time 0 is the
+  run's 2 kyr, and before it and after 7.5 kyr the file's first and last
+  (zero) loads are held. The coefficient table holds the LOAD's
+  coefficients in the exchange table's harmonics (an exchange table holds
+  the response's U and Phi, which are not a load). The field file is
+  sampled on the run's own Gauss–Legendre grid, so the run reads it
+  without interpolation, and the table is that field's expansion to the
+  run's lmax: the three responses agree to 1e-14 of their largest values.
+  The `load` written by the coefficient run is synthesised from the table
+  (band-limited), so it differs from the sampled cap's by about 1% at the
+  centre while the loads' coefficients, and so the responses, agree. About
+  1 s each.
+- **The time-step study**, `timestep_{et,be}_n<N>.json` (sea-level) and
+  `timestep_{discrete,continuous}_n<N>.json` (kernel1d) — one problem at
+  several step sizes: the synthetic deglaciation from 16 to 6 ka on the
+  radial Earth of `../data/prem8.gia.deck` (Maxwell times 0.11 to
+  0.43 kyr) at lmax 16, without rotation, with the sea level averaged over
+  a 4° cap at Hudson Bay measured at 10 ka (mid-run) and at 6 ka (the
+  end). N is the number of steps over the 10 kyr window, each N putting a
+  node at 10 ka; `et` and `be` are the forward run by the exponential
+  trapezoid and by backward Euler, `discrete` and `continuous` the
+  kernels by each adjoint (the exponential trapezoid forward). The configs
+  here are the short family, N = 10, 20 and 40 against N = 160, which
+  `run_all.sh` runs (about 8 s on four threads); `timestep_study.py`, from
+  `build/examples`, writes and runs the whole study, N = 5 to 80 (2 kyr to
+  1/8 kyr) against N = 320 (1/32 kyr), in about 15 s, and prints its
+  errors; `plot_app.py` draws them. Against the converged reference, at
+  1 kyr steps (about nine of the shortest Maxwell times) the sea level is
+  wrong by 0.5–0.6% (relative L2 over the sphere) under the exponential
+  trapezoid and 0.7–1.0% under backward Euler, and the measured values by
+  0.5–0.8%; the viscosity kernel is wrong by 3.3–4.0% by the discrete
+  adjoint and 13–15% by the continuous one. The errors, at 2, 1, 1/2, 1/4
+  and 1/8 kyr: sea level by the exponential trapezoid 1.7e-2, 6.2e-3,
+  2.0e-3, 5.5e-4, 1.4e-4 (at 10 ka; 1.1e-2 to 1.1e-4 at 6 ka), by backward
+  Euler 2.1e-2, 1.0e-2, 5.5e-3, 2.8e-3, 1.4e-3 (1.4e-2 to 1.1e-3 at 6 ka);
+  the kernel at 6 ka by the discrete adjoint 7.7e-2, 4.0e-2, 1.7e-2,
+  5.5e-3, 1.4e-3, by the continuous 0.33, 0.16, 5.9e-2, 1.8e-2, 4.9e-3.
+  Backward Euler is first order throughout; the exponential trapezoid and
+  both adjoints reach second order (1.9–2.0) only once the step comes down
+  to the Maxwell times, and converge more slowly above them. At the
+  reference step the two adjoints' kernels agree to 4e-4. The lesson: at
+  a given step the kernels are several times less accurate than the
+  fields they are kernels of (here six times by the discrete adjoint and
+  twenty-five by the continuous one). The discrete adjoint is the exact
+  gradient of the time-stepped model, not the exact gradient of the
+  Earth's: it inherits the time step's error, and more of it than the
+  fields carry. A step that serves the forward run may not serve the
+  kernels; refine it until the kernel stops changing.
 
 `../data/prem8.gia.deck` is `../data/prem8.elastic.deck` in planetmodel's
 GIA format, with a Maxwell mantle of 1e21 Pa s (the solid layers between
@@ -185,7 +280,59 @@ ICE-7G. They read
 (see `examples/README.md`); `run_all.sh` runs them once that file exists
 and skips them otherwise.
 
-## The toy planet
+## PREM with S40RTS on ICE-7G
+
+These run on the real Earth: ICE-7G (`../data/ice7g.nc`), and PREM without
+its ocean, a 100 km elastic lithosphere and Maxwell mantles of 5e20 Pa s
+above 670 km and 5e21 Pa s below (`../data/earth_custom.gia.deck` and
+`../data/earth_custom.elastic.deck`, written by `make_earth_deck.py`), with
+S40RTS's lateral structure built on that deck by `make_lateral_model.py`
+(the commands are in examples/README.md, ICE-7G). `run_all.sh` runs them
+once all these files exist, and skips them otherwise; they take minutes
+each, and want 8 threads.
+
+- `../data/earth_custom_moduli_s40rts.nc` (`--field moduli --kind
+  tomography --lmax 64`): the shear and bulk moduli from S40RTS's dlnVs,
+  with dlnVp = dlnVs / 2 at fixed density, on the mantle below the Moho.
+  dln mu has an rms of 1.7% over the mantle (4.5% at 100 km depth, 0.8%
+  at 1200 km), and dln kappa about a third of dlnVs (0.27 to 0.40 of it
+  with depth), its correlation with dln mu 0.999 or more at every depth.
+- `../data/earth_custom_viscosity_s40rts.nc` (`--field viscosity --kind
+  tomography --renormalise`, lmax 32): S40RTS's dlnVs through sl3d's
+  conversion chain (its density scaling and expansivity to a temperature,
+  then eta = eta_0 exp(-0.01 dT)), renormalised so that the lateral mean
+  of the viscosity is the deck's at every radius. ln(eta / eta_ref) about
+  the deck's viscosity runs from -2.98 to +3.57 (a factor of 20 below and
+  35 above), with an rms of 0.62 (0.07 at the core-mantle boundary, 0.56
+  at 150 km and up to 0.70 in the mid-mantle); renormalising lowers the
+  geometric mean by up to 27%. No lid: with this deck's 100 km elastic
+  lithosphere, the stiffest mantle beneath it is 5.7 times the deck's
+  5e20 Pa s, so `--lid` at 3e21 Pa s or more finds no lid anywhere.
+
+- **`sea_level_fingerprint_3d_ice7g.json`** — the fingerprint of
+  `sea_level_fingerprint_ice7g.json` (10% of ICE-7G's Greenland ice
+  melted, full rotational feedback) on the elastic deck with the S40RTS
+  moduli, at lmax 64: the 3D fingerprint, its zero-length step closed by
+  the fixed point in 9 iterations (residual 1.2e-10), with the radial
+  model's beside it (`*_radial_model`). The ocean rises by 0.62 m on
+  average (to 0.83 m far from Greenland) and falls by up to 4.5 m at
+  Greenland's coast. The lateral moduli change the sea level by up to
+  7 cm over the interior of Greenland, under the ice (stiffer mantle,
+  less rebound), and by a few millimetres over the ocean (within 3.3 mm
+  over 99% of it, -15 to +8 mm along Greenland's coasts). Measured with
+  `/usr/bin/time -v`: 27 s and 4.2 GB peak on four threads, 25 s and
+  4.5 GB on eight; at lmax 128 (eight threads) 3 min 24 s and 31 GB, the
+  same 9 iterations. Between lmax 64 and 128 the 3D minus radial
+  difference changes by 16% of its rms (7% in the degrees both hold).
+- **`sea_level_3d_ice7g.json`** with **`sea_level_1d_ice7g_custom.json`**
+  — GIA through time on ICE-7G, 26 ka to the present in half-kyr steps
+  (a node on every stored date) at lmax 32, full rotational feedback and
+  the hydrostatic moments, on the Maxwell deck with S40RTS's lateral
+  viscosity (`"reference": "file_radial"`, the deck's own viscosity, which
+  the renormalisation made the 3D model's mean) and its lateral moduli;
+  and the deck's radial run of the same (`sea_level_1d_ice7g_custom`),
+  which is the 3D run's radial reference model. RESULTS_A2
+
 
 These read the decks of a three-layer "toy Mars" (a fluid core, a 1e21
 Pa s Maxwell mantle and a 150 km elastic lid; radius 3390 km, surface

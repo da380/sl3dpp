@@ -1,0 +1,16 @@
+{
+  "model": {"deck": "../data/earth_custom.gia.deck", "format": "maxwell",
+            "viscosity": {"file": "../data/earth_custom_viscosity_s40rts.nc",
+                          "reference": "file_radial"},
+            "moduli": {"file": "../data/earth_custom_moduli_s40rts.nc"}},
+  "lmax": 32,
+  "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
+  "forcing": {
+    "state": {"file": "../data/ice7g.nc"},
+    "ice": {"file": "../data/ice7g.nc"}
+  },
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
+  "output": {"surface": "out/sea_level_3d_ice7g/sea_level_3d_ice7g.nc"}
+}
