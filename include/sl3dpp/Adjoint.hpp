@@ -135,9 +135,15 @@ struct IceKernels {
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
 
-  /// dJ / d kappa(r), dJ / d mu(r) and dJ / d rho(r): nodal arrays over
-  /// the material's full mesh, material units, pairing with a
-  /// MaterialDirection by the plain nodal sum — the transpose of
+  /// dJ / d kappa(r), dJ / d mu(r) and dJ / d rho(r), material units,
+  /// pairing with a PointMaterialDirection by the plain sum: the moduli's
+  /// at the memory points, (element, point) over the whole mesh, and the
+  /// density's at the GLL nodes. Each entry of the moduli's is the
+  /// kernel's value at its point times the point's quadrature weight
+  /// (MemoryPoints::weight times the element's Jacobian), so dividing by
+  /// the weight gives samples of the kernel as a function of radius; no
+  /// point is shared between elements, so its jumps across the mesh's
+  /// interfaces are kept. The transpose of
   /// TangentPerturbation::material (the branch moduli as fixed fractions
   /// of the unrelaxed modulus, the relaxation times held; the density
   /// with its gravity and the forcings, the sea level engine's gravity
@@ -215,9 +221,9 @@ class AdjointSolver {
     /// continuous adjoint displacement's pairing with the forward
     /// solution and memory, plus the lumped pairings at the observations
     /// — the commute error of the viscosity kernels, falling under
-    /// refinement. Both need the trajectory, the memory points at the
-    /// GLL nodes and no rotational feedback, and cost one unrelaxed solve
-    /// per node (two for the continuous form).
+    /// refinement. Both need the trajectory and no rotational feedback,
+    /// and cost one unrelaxed solve per node (two for the continuous
+    /// form).
     bool material_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for

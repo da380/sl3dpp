@@ -782,14 +782,13 @@ the sea level closure's response duals, the inertia dual); the material
 enters the tangent as forces on that solve, so the kernels are the
 pairings of y_n with each force's material derivative:
 
-- −(dK_eff) x_n: the nodal gradient of the degree form in the moduli
-  for the pair (y_n, x_n), `DegreeOperator::MaterialGradient` — the
-  band assembly's elastic integrands pointwise at the GLL nodes over
-  EVERY element of the system (the bulk product (X+Y)(X'+Y') for κ, the
-  combination 4/3 XX' + 1/3 YY' − 2/3(XY'+YX') + k²SS' + k²(k²−2)VV'
-  for μ, which is the deviatoric-scalar form the memory force uses), the
-  shear scaled by the effective factor 1 − Σ_k f_k (1 − w_k); x_n from
-  one unrelaxed solve under the node's memory and recorded loads;
+- −(dK_eff) x_n: the gradient of the degree form in the moduli at the
+  memory points for the pair (y_n, x_n), `DegreeOperator::PointGradient`
+  — the dilatation product for κ and the deviatoric-scalar form the
+  memory force uses for μ, at each point with its quadrature weight,
+  over EVERY element of the system — the shear scaled by the effective
+  factor 1 − Σ_k f_k (1 − w_k) at the points; x_n from one unrelaxed
+  solve under the node's memory and recorded loads;
 - the memory force of the base decayed memory m̃ with δμ_k = f_k δμ:
   Σ_k f_k W_q Σ_s w_s d_s(y_n) m̃_{k,s}, on the memory window;
 - the start: the transposed unrelaxed solve under the start duals and
@@ -799,17 +798,23 @@ The gradient lives on `DegreeOperator`, not on the operator's per-degree
 workspace, because that workspace covers the memory window only (the
 relaxing elements) and the kernels span the elastic lithosphere too.
 Discrete exact, continuous at the commute level (below, §13g); needs the
-trajectory, GLL memory points, no rotational feedback; the bulk pairing
-costs one unrelaxed solve per step.
+trajectory and no rotational feedback; the bulk pairing costs one
+unrelaxed solve per step. The kernels in κ and μ are held at the memory
+points, each entry the kernel's value there times the point's quadrature
+weight, and pair with a `PointMaterialDirection` by the plain sum;
+divided by the weights they are samples of the kernel in radius, with
+its jumps across the mesh's interfaces kept, since no point is shared
+between elements.
 
 GATES (`TestAdjoint`): `MaterialGradientIsTheTransposeOfTheVariation`
 — for random solution pairs of every degree the gradient paired with a
 random direction equals the pair's product with §13a's variation
 operator at 1e-12; `MaterialKernelsAreTheTangentTranspose` — the
 kernels paired with a smooth direction in κ and μ equal the material
-tangent's objective change at 1e-10 (they land at 1e-13), both
-schemes, and central differences on the shifted material land on them
-at second order with Richardson at 1e-6; the refusals.
+tangent's objective change at 1e-10, both schemes, with the memory
+points at the GLL nodes and at the Gauss points, and at the GLL points
+central differences on the shifted material land on them at second
+order with Richardson at 1e-6; the refusals.
 
 ### 13f. The material kernels, 3D
 

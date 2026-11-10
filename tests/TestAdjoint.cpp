@@ -787,13 +787,15 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
 }
 
 TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
-  // The discrete material kernels: their nodal pairing with a direction
-  // in kappa, mu AND rho equals the material tangent's objective change
-  // (the exact transpose, at solver precision), both schemes; and
-  // central differences of the objective on the shifted material (the
-  // rheology rebuilt at the same fractions and times, the sea level
-  // engine's gravity held) land on them at second order with Richardson
-  // at 1e-6. Refused without a trajectory.
+  // The discrete material kernels: their pairing with a direction in
+  // kappa and mu at the memory points AND in the nodal rho equals the
+  // material tangent's objective change (the exact transpose, at solver
+  // precision), both schemes, with the memory points at the GLL nodes
+  // and at the Gauss points; and at the GLL points, where the direction
+  // is a nodal one, central differences of the objective on the shifted
+  // material (the rheology rebuilt at the same fractions and times, the
+  // sea level engine's gravity held) land on them at second order with
+  // Richardson at 1e-6. Refused without a trajectory.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
   const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
@@ -850,9 +852,10 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     return std::pair(shifted, Rheology::Create(shifted, branches).value());
   };
 
+  for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    ViscoelasticOperator op(setup.rheology, kLmax,
-                            {.memory_points = MemoryPointSet::Gll});
+    ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
+    const auto atPoints = AtMemoryPoints(op.Points(), d);
     SeaLevelEvolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
@@ -864,24 +867,32 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
                                       .rtol = 1e-12,
                                       .material_kernels = true});
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
-    ASSERT_EQ(kernels.kappaKernel.size(), k0.size());
-    ASSERT_EQ(kernels.muKernel.size(), m0.size());
+    ASSERT_EQ(kernels.kappaKernel.size(), atPoints.kappa.size());
+    ASSERT_EQ(kernels.muKernel.size(), atPoints.mu.size());
     ASSERT_EQ(kernels.rhoKernel.size(), k0.size());
     auto paired = 0.0;
+    for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
+      paired += kernels.kappaKernel[i] * atPoints.kappa[i] +
+                kernels.muKernel[i] * atPoints.mu[i];
+    }
     for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-      paired += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i] +
-                kernels.rhoKernel[i] * d.rho[i];
+      paired += kernels.rhoKernel[i] * d.rho[i];
     }
 
     TangentPerturbation direction;
-    direction.material = AtGll(d);
+    direction.material = atPoints;
     const auto tangent = Objective(
         setup,
         TangentLinearSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
             .Run(times, direction, &trajectory),
         measurements);
     EXPECT_NEAR(paired, tangent, 1e-10 * std::abs(tangent))
-        << "scheme " << static_cast<int>(scheme);
+        << "scheme " << static_cast<int>(scheme) << ", points "
+        << static_cast<int>(set);
+    // The refusal without a trajectory.
+    EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
+                 std::invalid_argument);
+    if (set != MemoryPointSet::Gll) continue;
 
     auto functional = [&](double eps) {
       const auto [shifted, rheology] = rheologyAt(eps);
@@ -905,10 +916,6 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
     EXPECT_NEAR(richardson, paired, 1e-6 * std::abs(paired))
         << "scheme " << static_cast<int>(scheme);
-
-    // The refusal without a trajectory.
-    EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
-                 std::invalid_argument);
   }
 }
 
@@ -917,7 +924,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   // viscosity kernels: against the exact discrete ones (paired with a
   // direction in kappa and mu) they agree at the per-cent level in the
   // resolved regime and the gap falls under step refinement, both
-  // schemes; the lumped observation pairings are included (a measurement
+  // schemes, with the memory points at the GLL nodes and at the Gauss
+  // points; the lumped observation pairings are included (a measurement
   // mid-run and at the end).
   auto setup = Scene::Make(1e22);
   const auto& material = setup.material;
@@ -954,7 +962,7 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
   const auto gMid = setup.Smooth(rng, 1.0);
   const auto gEnd = setup.Smooth(rng, 0.5);
   const auto gDisp = setup.Smooth(rng, 0.4);
-  auto gap = [&](std::size_t npts, Scheme scheme) {
+  auto gap = [&](std::size_t npts, Scheme scheme, MemoryPointSet set) {
     auto times = std::vector<double>{};
     for (auto n = std::size_t{0}; n < npts; ++n) {
       times.push_back(10.0 * static_cast<double>(n) /
@@ -973,8 +981,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
     measurements[npts / 2].seaLevelDual = gMid;
     measurements[npts - 1].seaLevelDual = gEnd;
     measurements[npts - 1].displacementDual = gDisp;
-    ViscoelasticOperator op(setup.rheology, kLmax,
-                            {.memory_points = MemoryPointSet::Gll});
+    ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
+    const auto atPoints = AtMemoryPoints(op.Points(), d);
     SeaLevelEvolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
@@ -990,19 +998,23 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
                                     .material_kernels = true})
               .IceHistoryKernels(times, measurements, &trajectory);
       auto sum = 0.0;
+      for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
+        sum += kernels.kappaKernel[i] * atPoints.kappa[i] +
+               kernels.muKernel[i] * atPoints.mu[i];
+      }
       for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-        sum += kernels.kappaKernel[i] * d.kappa[i] + kernels.muKernel[i] * d.mu[i] +
-               kernels.rhoKernel[i] * d.rho[i];
+        sum += kernels.rhoKernel[i] * d.rho[i];
       }
       paired[method] = sum;
     }
     return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
            std::abs(paired[AdjointMethod::Discrete]);
   };
+  for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    const auto coarse = gap(5, scheme);
-    const auto fine = gap(9, scheme);
-    const auto finer = gap(17, scheme);
+    const auto coarse = gap(5, scheme, set);
+    const auto fine = gap(9, scheme, set);
+    const auto finer = gap(17, scheme, set);
     // a few per cent at 2.5 kyr steps (the first-order scheme the larger),
     // falling under refinement
     EXPECT_LT(coarse, 0.1) << "scheme " << static_cast<int>(scheme);

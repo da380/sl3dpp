@@ -238,27 +238,19 @@ IceKernels AdjointSolver::DiscreteSweep(
       throw std::invalid_argument(
           "the material kernels need the recorded forward trajectory");
     }
-    if (op.options_.memory_points != MemoryPointSet::Gll) {
-      throw std::invalid_argument(
-          "the material kernels need the memory points at the GLL nodes");
-    }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
           "the material kernels take no rotational feedback");
     }
-    const auto& rheology = op.GetRheology();
-    const auto muU = rheology.MuUnrelaxed();
+    // at the memory points, where the moduli's perturbations live
     for (auto k = std::size_t{0}; k < K; ++k) {
-      const auto& branch = rheology.BranchAt(k);
-      auto f = std::vector<double>(muU.size(), 0.0);
-      for (auto i = std::size_t{0}; i < f.size(); ++i) {
-        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
-      }
-      fractions.push_back(std::move(f));
+      const auto f = op.BranchFractionAtPoints(k);
+      fractions.emplace_back(f.begin(), f.end());
     }
-    kappaKernel.assign(muU.size(), 0.0);
-    muKernel.assign(muU.size(), 0.0);
-    densityDuals.Resize(muU.size());
+    const auto pointCount = op.UnrelaxedShearAtPoints().size();
+    kappaKernel.assign(pointCount, 0.0);
+    muKernel.assign(pointCount, 0.0);
+    densityDuals.Resize(op.BaseMaterial().Rho().size());
   }
   // The pairing of a dual solution with a base one at a degree's points:
   // -(dK/d kappa, dK/d mu) of the step's system (the bulk product and
@@ -272,9 +264,9 @@ IceKernels AdjointSolver::DiscreteSweep(
                            std::span<const double> x,
                            std::span<const double> factor,
                            const std::vector<double>* memory) {
-    // -(dK) over every element of the system (DegreeOperator's gradient,
-    // full-mesh nodal), the shear scaled by the effective factor ...
-    auto [kappa, mu] = deg.system.MaterialGradient(y, x, ncols);
+    // -(dK) over every element of the system (DegreeOperator's gradient
+    // at the memory points), the shear scaled by the effective factor ...
+    auto [kappa, mu] = deg.system.PointGradient(op.Points(), y, x, ncols);
     for (auto i = std::size_t{0}; i < kappa.size(); ++i) {
       kappa[i] = -kappa[i];
       mu[i] = -factor[i] * mu[i];
@@ -792,26 +784,18 @@ IceKernels AdjointSolver::ContinuousSweep(
       throw std::invalid_argument(
           "the material kernels need the recorded forward trajectory");
     }
-    if (op.options_.memory_points != MemoryPointSet::Gll) {
-      throw std::invalid_argument(
-          "the material kernels need the memory points at the GLL nodes");
-    }
     if (rotation != RotationalFeedback::None) {
       throw std::invalid_argument(
           "the material kernels take no rotational feedback");
     }
-    const auto& rheology = op.GetRheology();
-    const auto muU = rheology.MuUnrelaxed();
+    // at the memory points, where the moduli's perturbations live
     for (auto k = std::size_t{0}; k < K; ++k) {
-      const auto& branch = rheology.BranchAt(k);
-      auto f = std::vector<double>(muU.size(), 0.0);
-      for (auto i = std::size_t{0}; i < f.size(); ++i) {
-        f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
-      }
-      fractions.push_back(std::move(f));
+      const auto f = op.BranchFractionAtPoints(k);
+      fractions.emplace_back(f.begin(), f.end());
     }
-    kappaKernel.assign(muU.size(), 0.0);
-    muKernel.assign(muU.size(), 0.0);
+    const auto pointCount = op.UnrelaxedShearAtPoints().size();
+    kappaKernel.assign(pointCount, 0.0);
+    muKernel.assign(pointCount, 0.0);
   }
 
   auto vstate = op.ZeroState([](int l) { return 2 * (l + 1); });
@@ -1074,7 +1058,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   // forward state at a node, scaled by `weight` (the time weight times
   // the units constant), added to the kernels.
   DensityDuals densityDuals;
-  if (material) densityDuals.Resize(fractions[0].size());
+  if (material) densityDuals.Resize(op.BaseMaterial().Rho().size());
   auto pairMaterial = [&](const std::map<int, std::vector<double>>& lambda,
                           std::size_t node, double weight) {
     if (weight == 0.0) return;
@@ -1104,7 +1088,8 @@ IceKernels AdjointSolver::ContinuousSweep(
           y[static_cast<std::size_t>(c) * deg.ndof + d] *= cw;
         }
       }
-      auto [kappa, mu] = deg.system.MaterialGradient(y, x.at(l), ncols);
+      auto [kappa, mu] =
+          deg.system.PointGradient(op.Points(), y, x.at(l), ncols);
       for (auto j = std::size_t{0}; j < kappa.size(); ++j) {
         kappa[j] = -weight * kappa[j];
         mu[j] = -weight * mu[j];
