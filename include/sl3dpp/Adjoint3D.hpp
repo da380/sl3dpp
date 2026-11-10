@@ -188,7 +188,9 @@ class AdjointSolver3D {
   struct Options {
     /// Continuous (the default and preferred path) or Discrete: the
     /// exact transpose of the coupled time-stepped map, the transposed
-    /// within-step fixed point solved by the same iteration. Both carry
+    /// within-step fixed point solved by the same iteration (or, under
+    /// Viscoelastic3D::Options::solver = ConjugateGradients, the sea
+    /// level adjoint nested over that solve). Both carry
     /// the second-order sweep (SecondOrderKernels) and both are
     /// distributed over radius (docs/adjoints.md §17).
     AdjointMethod method = AdjointMethod::Continuous;

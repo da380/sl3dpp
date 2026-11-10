@@ -1067,7 +1067,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   }
 }
 
-TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
+void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
   // The discrete second-order sweep with lateral elastic moduli in the
   // background as well as lateral viscosity: the carried kernels equal the
   // first-order sweep's, <H u, w> = <H w, u>, and both equal the second-
@@ -1114,7 +1114,9 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
 
   Viscoelastic3D op(
       scene.rheology, kLmax, baseDelta,
-      {.memory_points = MemoryPointSet::Gll,
+      {.solver = solver,
+       .solve_rtol = 1e-12,
+       .memory_points = MemoryPointSet::Gll,
        .moduli = {.shear =
                       [](double r, double theta, double phi) {
                         return 0.1 * (0.5 + r * r) *
@@ -1209,6 +1211,16 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
   std::cout << "forward " << forward << " uvTerm+huW " << uvTerm + huW << " diff "
             << forward - (uvTerm + huW) << '\n';
   EXPECT_NEAR(forward, uvTerm + huW, 1e-8 * std::abs(forward));
+}
+
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
+  DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver::FixedPoint);
+}
+
+// The same with the steps closed by conjugate gradients, the discrete
+// transpose's and its derivative state's included.
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderConjugateGradientSteps) {
+  DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
 }
 
 TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli) {

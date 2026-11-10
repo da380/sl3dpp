@@ -1291,15 +1291,27 @@ zero-length step), the tangent-linear run's steps and start, the
 continuous sweep's reversed steps and its instantaneous problems
 (equilibria, jumps) all go through `Nest` under the option; the
 forward regenerations in the sweeps (a kept trajectory's steps rebuilt
-under recorded loads) through `Close`. The DISCRETE transpose stays
-the transposed fixed point: it transposes the converged linear solve,
-which is the same system whichever way the forward solved it (the
-machine-grade pairings hold with the forward on conjugate gradients),
-and its own iteration is the operator's transpose — the same
-symmetric operator — so it could be a conjugate-gradient solve on the
-dual solutions with the sea level adjoint as the closure, with the
-same nesting; that is the one place the fixed point's envelope still
-binds.
+under recorded loads) through `Close`. The DISCRETE transpose follows
+the option too. It transposes the converged linear solve, which is the
+same system whichever way the forward solved it, and its operator is
+the forward step's own: in the dual solutions y the transposed step is
+
+    (K_eff − Pᵀ W S) y = b₀ + Surfᵀ SLE†(Fᵀ r, g),
+
+b₀ the forces of the dual strain's source (and any added), F the unit
+load and tide forces, Surfᵀ the surface duals placed on the surface
+rows and the degree-0 moment row, and r = y less the reference response
+of the surface duals — the reference response of the forces, so Fᵀ r is
+the forces' contraction with the unit responses, what the transposed
+fixed point hands the engine's adjoint. Under the fixed point the pass
+of §13f iterates it on the dual strain; under conjugate gradients the
+sea level adjoint is the outer closure on r exactly as `Nest` runs the
+forward's (the solve is `OpenStep::Solve` on the same step, warm-started
+from r with the new surface duals' reference response, inexact by
+`solve_outer_factor`, the outer residual the warm start's, Anderson by
+the control's rule), for the first dual state and the second-order
+sweep's derivative state alike. Distributed, Fᵀ r is summed from each
+rank's rows.
 
 **Measured (lateral-coupling.md §5a'').** The §5a ladder at lmax 16,
 the second step: at 3x, 8/13/17 iterations against 12/21/21 passes at
@@ -1326,8 +1338,13 @@ GradientSteps` (the tangent along a lateral material direction against
 central differences of nested runs, Richardson at 1e-6),
 `DiscreteAdjoint3D.ContinuousMaterialKernelsAgreeUnderConjugate
 GradientSteps` (the continuous sweep's reversed steps and instantaneous
-problems nested, the discrete transpose on the fixed point, the gap
-closing under refinement), and the two radial-rank gates and the
+problems nested, the discrete transpose nested too, the gap closing
+under refinement), `DiscreteAdjoint3D.PairsWithTheTangentUnderConjugate
+GradientSteps`, `DiscreteAdjoint3D.MaterialKernelsPairWithTheTangent
+UnderConjugateGradientSteps` and `SecondOrderAdjoint3D.DiscreteMaterial
+HessianIsExactUnderConjugateGradientSteps` (the nested transpose exact:
+the kernels pair with the nested tangent and the Hessian with the
+second-order run at 1e-8), and the two radial-rank gates and the
 mpiexec lateral gate run the steps and the evolution on the
 conjugate-gradient solver. Probe: `Lateral.DISABLED_StepSolverLadder`.
 

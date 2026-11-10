@@ -791,7 +791,7 @@ Viscoelastic3D::Options::LateralModuli TestModuli() {
 
 }  // namespace
 
-TEST(DiscreteAdjoint3D, PairsWithTheTangentUnderLateralModuli) {
+void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
   // The exact transpose with lateral ELASTIC moduli in the background as
   // well as lateral viscosity: the discrete sweep's load duals and itau
   // kernel pair with the tangent-linear run's objective (the bulk term's
@@ -827,7 +827,7 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentUnderLateralModuli) {
         [](double, double theta, double phi) {
           return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
         },
-        {.moduli = TestModuli()});
+        {.solver = solver, .solve_rtol = 1e-12, .moduli = TestModuli()});
     ASSERT_TRUE(op.HasLateralModuli());
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
@@ -870,7 +870,18 @@ RotationalFeedback RotationOf(Scheme scheme) {
                                          : RotationalFeedback::None;
 }
 
-TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
+TEST(DiscreteAdjoint3D, PairsWithTheTangentUnderLateralModuli) {
+  PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver::FixedPoint);
+}
+
+// The same with the steps closed by conjugate gradients: the forward's
+// and the tangent's nested, the discrete transpose's the sea level
+// adjoint nested over the same solve.
+TEST(DiscreteAdjoint3D, PairsWithTheTangentUnderConjugateGradientSteps) {
+  PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+}
+
+void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
   // The material kernels at a laterally heterogeneous elastic background:
   // the discrete kappa(x) and mu(x) kernels paired with lateral directions
   // equal the 3D material tangent's objective change, both schemes.
@@ -897,7 +908,10 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
         [](double, double theta, double phi) {
           return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
         },
-        {.memory_points = MemoryPointSet::Gll, .moduli = TestModuli()});
+        {.solver = solver,
+         .solve_rtol = 1e-12,
+         .memory_points = MemoryPointSet::Gll,
+         .moduli = TestModuli()});
     SeaLevelEvolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationOf(scheme),
@@ -941,6 +955,17 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
       EXPECT_NE(lhs, 0.0) << name;
     }
   }
+}
+
+TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
+  MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver::FixedPoint);
+}
+
+// The same with the steps closed by conjugate gradients: the forward's
+// and the tangent's nested, the discrete transpose's the sea level
+// adjoint nested over the same solve.
+TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderConjugateGradientSteps) {
+  MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
 }
 
 TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
