@@ -149,6 +149,32 @@ TEST_F(FieldHistoryTest, RefusesOutsideTheSpanWhenAsked) {
                std::runtime_error);
 }
 
+TEST(FieldHistory, RefusesATimeAxisOfOneNode) {
+  // One node gives no interval to interpolate on: the file is refused
+  // with what to do, not read as values that are not numbers.
+  const auto path =
+      std::filesystem::temp_directory_path() /
+      ("sl3dpp_test_field_history_one_node_" + std::to_string(::getpid()) + ".nc");
+  const auto grid = pm::Equiangular(18, 36);
+  auto file = pm::SurfaceFile{};
+  file.grid = grid;
+  file.time = std::vector<double>{0.0};
+  file.source = "sl3dpp tests";
+  auto values = std::vector<double>(grid.Colatitudes().size() * grid.Longitudes().size(), 1.0);
+  file.variables.emplace(
+      "ice_thickness",
+      pm::SurfaceField("ice_thickness", std::move(values),
+                       {.support = "node", .time_interpolation = "linear",
+                        .lateral_interpolation = "cubic",
+                        .dimensions = pm::units::LENGTH}));
+  pm::WriteSurfaceFile(path, file);
+  const auto read = sl3dpp::io::FieldHistory::Read(path, sl3dpp::SurfaceGrid(8));
+  std::filesystem::remove(path);
+  ASSERT_FALSE(read);
+  EXPECT_NE(read.error().message.find("single node"), std::string::npos)
+      << read.error().message;
+}
+
 TEST(FieldHistory, RefusesWhatIsNotASurfaceFile) {
   const auto grid = sl3dpp::SurfaceGrid(4);
   const auto missing = sl3dpp::io::FieldHistory::Read(

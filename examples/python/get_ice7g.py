@@ -1,11 +1,12 @@
 """Writes data/ice7g.nc: the ICE-7G deglaciation history as a planetmodel
 surface file, for the examples and the sl3d configs.
 
-pyslfp's export_ice_history reads ICE-7G's stored time slices (every
-kiloyear from 26 to 21 ka, then every half kiloyear to the present, 48 in
-all) and writes the `ice_thickness` and `topography` histories on the
-dataset's own grid, in metres, at the stored dates alone. That is the form
-the synthetic Earth takes too, so anything run on data/synthetic_earth.nc
+This is make_ice_history.py --model ICE7G --download: pyslfp's
+export_ice_history reads ICE-7G's stored time slices (every kiloyear from
+26 to 21 ka, then every half kiloyear to the present, 48 in all) and
+writes the `ice_thickness` and `topography` histories on the dataset's own
+grid, in metres, at the stored dates alone. That is the form the
+synthetic Earth takes too, so anything run on data/synthetic_earth.nc
 runs on data/ice7g.nc:
 
     ExampleFingerprint --state data/ice7g.nc
@@ -27,8 +28,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from pyslfp.ice import export_ice_history
-from pyslfp.ice.ice_ng import standard_dates
+import make_ice_history
 
 
 def main() -> None:
@@ -41,14 +41,8 @@ def main() -> None:
                              "data/ice6g.nc / data/ice5g.nc for the other "
                              "versions)")
     args = parser.parse_args()
-    out = args.out or Path("data") / f"{args.version.lower()}.nc"
-    out.parent.mkdir(parents=True, exist_ok=True)
-
-    dates = standard_dates(args.version)
-    written = export_ice_history(out, version=args.version)
-    size = written.stat().st_size / 1e6
-    print(f"wrote {written} ({args.version}, {len(dates)} dates from "
-          f"{max(dates):g} ka to the present, {size:.1f} MB)")
+    make_ice_history.main(["--model", args.version, "--download"]
+                          + (["--out", str(args.out)] if args.out else []))
 
 
 if __name__ == "__main__":

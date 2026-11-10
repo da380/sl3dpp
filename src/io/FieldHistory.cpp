@@ -62,6 +62,14 @@ std::expected<FieldHistory, IoError> FieldHistory::Read(
     const FieldHistoryOptions& options) {
   try {
     const auto file = pm::ReadSurfaceFile(path);
+    // A time axis of one node gives no interval to interpolate on, and
+    // values read from it are not numbers: refused, with what to do.
+    if (file.time && file.time->size() < 2) {
+      return std::unexpected(IoError{std::format(
+          "{}: its time axis has a single node; write the fields as static, "
+          "or at least two dates",
+          path.string())});
+    }
     const auto& from = *file.grid;
     const auto src_size = from.NTheta() * from.NPhi();
 

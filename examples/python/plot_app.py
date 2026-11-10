@@ -16,14 +16,20 @@ figures/sl3d/<config>/:
     response_viscoelastic/displacement.png
     response1d_disk/displacement.png
     response1d_tide/love_numbers.png
+    response_tide_3d/body_tide.png
+    response_tide_oscillating/oscillating.png   (with the _short and _long
+                                                 runs' amplitudes and lags)
 
 and, where the ICE-7G runs exist, sea_level_fingerprint_ice7g/fingerprint.png,
 sea_level_1d_ice7g/sea_level.png and
-sea_level_1d_ice7g_calibrated/calibration.png. A missing output skips its
+sea_level_1d_ice7g_calibrated/calibration.png, and where the toy planet's
+runs exist (make_planet_deck.py), response_tide_planet/body_tide.png and
+response_tide_planet_relax/love_numbers.png. A missing output skips its
 figure.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import matplotlib
@@ -31,14 +37,16 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from planetmodel.harmonics import analyse_grid
 from planetmodel.modelfile import read_model_file
 from planetmodel.surfacefile import read_surface_file
 
-from plotutil import (DATA, Example, mark_sites, plot_field, save_figure,
-                      world_map)
+from plotutil import (DATA, Example, map_axes, mark_sites, plot_field,
+                      save_figure, world_map)
 
 
-OUT = Path("configs/out")  # a config's outputs are in OUT / <config>
+CONFIGS = Path("configs")  # the configs themselves
+OUT = CONFIGS / "out"  # a config's outputs are in OUT / <config>
 FIGURES = Path("figures/sl3d")  # its figures in FIGURES / <config>
 ICE7G = str(DATA / "ice7g.nc")
 KYR = 1.0e3 * 365.25 * 86400.0  # s
@@ -487,34 +495,52 @@ def response1d_disk() -> None:
     save(fig, "response1d_disk", "displacement")
 
 
-def response1d_tide() -> None:
-    """A degree-2 tidal potential switched on and held: the tidal Love
-    numbers of the radial viscoelastic Earth through time, from the elastic
-    values at the start towards the fluid limit, read from the exchange
-    tables of the nodes."""
-    tables = sorted((OUT / "response1d_tide").glob("response1d_tide_*.txt"))
+def exchange_table(path: Path):
+    """An exchange table: its named scalars (each a list of words) and its
+    rows by (l, m), each the complex coefficients (U, Phi)."""
+    scalars, rows = {}, {}
+    for line in path.read_text().splitlines():
+        if line.startswith("#") or not line.strip():
+            continue
+        words = line.split()
+        if words[0].isdigit():
+            u_re, u_im, phi_re, phi_im = (float(w) for w in words[2:6])
+            rows[(int(words[0]), int(words[1]))] = (complex(u_re, u_im),
+                                                    complex(phi_re, phi_im))
+        else:
+            scalars[words[0]] = words[1:]
+    return scalars, rows
+
+
+def held_tide(name: str):
+    """A held degree-2 tide's Love numbers through time, from the exchange
+    tables of a run's nodes: the times (kyr), h_2 and k_2. None when the
+    run has not been made."""
+    tables = sorted((OUT / name).glob(f"{name}_*.txt"))
     if not tables:
-        return
+        return None
     times, h2, k2 = [], [], []
     for table in tables:
-        scalars, rows = {}, {}
-        for line in table.read_text().splitlines():
-            if line.startswith("#"):
-                continue
-            words = line.split()
-            if words[0].isdigit():
-                rows[(int(words[0]), int(words[1]))] = [float(w)
-                                                        for w in words[2:]]
-            else:
-                scalars[words[0]] = words[1:]
+        scalars, rows = exchange_table(table)
         gravity = float(scalars["surface_gravity"][0])
         amplitude = float(scalars["tide_amplitude_m2_s2"][0])
         times.append(float(scalars["time_kyr"][0]))
         # the potential is the physical one, negative where it attracts, so
         # the conventional h_2 takes the opposite sign of g U / psi
-        h2.append(-gravity * rows[(2, 0)][0] / amplitude)
-        k2.append(rows[(2, 0)][2] / amplitude)
-    times = np.asarray(times)
+        h2.append(-gravity * rows[(2, 0)][0].real / amplitude)
+        k2.append(rows[(2, 0)][1].real / amplitude)
+    return np.asarray(times), np.asarray(h2), np.asarray(k2)
+
+
+def response1d_tide() -> None:
+    """A degree-2 tidal potential switched on and held: the tidal Love
+    numbers of the radial viscoelastic Earth through time, from the elastic
+    values at the start towards the fluid limit, read from the exchange
+    tables of the nodes."""
+    held = held_tide("response1d_tide")
+    if held is None:
+        return
+    times, h2, k2 = held
 
     fig, ax = plt.subplots(figsize=(7, 4.5))
     shown = np.where(times > 0.0, times, 0.5 * times[1])
@@ -528,6 +554,262 @@ def response1d_tide() -> None:
                  "viscoelastic Earth")
     fig.tight_layout()
     save(fig, "response1d_tide", "love_numbers")
+
+
+def tide_coefficients(name: str) -> dict[tuple[int, int], complex]:
+    """A config's tide coefficients by (degree, order), from its JSON."""
+    config = json.loads((CONFIGS / f"{name}.json").read_text())
+    coefficients = {}
+    for term in config["forcing"]["tide"]:
+        key = (term["degree"], term.get("order", 0))
+        coefficients[key] = coefficients.get(key, 0.0) + complex(
+            term["amplitude_m2_s2"], term.get("imaginary_m2_s2", 0.0))
+    return coefficients
+
+
+def degree_rms(coefficients) -> np.ndarray:
+    """Each degree's part of a field's rms over the sphere, from its real
+    orthonormal coefficients (planetmodel.harmonics' layout)."""
+    return np.sqrt(np.sum(coefficients**2, axis=(0, 2)) / (4.0 * np.pi))
+
+
+def peak(grid, values) -> tuple[float, float]:
+    """The (latitude, longitude) in degrees where a field is largest."""
+    i, j = np.unravel_index(np.argmax(values), values.shape)
+    return (90.0 - np.rad2deg(grid.colatitudes[i]),
+            np.rad2deg(grid.longitudes[j]))
+
+
+def response_tide_3d() -> None:
+    """The lunar body tide on the synthetic 3D elastic Earth: the radial
+    model's displacement, the lateral structure's part of the 3D model's
+    (3D minus radial) and the spectrum of that part by degree. The radial
+    model answers a degree-2 potential in degree 2 alone; everything the
+    3D model puts into the other degrees is the lateral coupling."""
+    name = "response_tide_3d"
+    path = OUT / name / f"{name}.nc"
+    if not path.exists():
+        return
+    file = read_surface_file(path)
+    grid = file.grid
+    disp = np.asarray(file.variables["displacement"].values)
+    radial = np.asarray(file.variables["displacement_radial_model"].values)
+    difference = disp - radial
+    ex = Example.from_fields(grid.colatitudes, grid.longitudes,
+                             {"radial": radial, "difference": 1e3 * difference})
+    moon = peak(grid, radial)  # the sub-lunar point
+    structure = [(58.0, -95.0), (-15.0, -110.0)]  # the craton, the ridge
+
+    fig = plt.figure(figsize=(12, 7))
+    ax = world_map(fig, 2, 2, 1)
+    mesh = plot_field(ax, ex, "radial",
+                      title="radial model: radial displacement (m)")
+    mark_sites(ax, [moon], colors=["gold"])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+    ax = world_map(fig, 2, 2, 2)
+    mesh = plot_field(ax, ex, "difference",
+                      title="3D minus radial model (mm)")
+    mark_sites(ax, [moon] + structure, colors=["gold", "C0", "C3"])
+    fig.colorbar(mesh, ax=ax, shrink=0.7)
+
+    whole = degree_rms(analyse_grid(disp, grid)) * 1e3
+    part = degree_rms(analyse_grid(difference, grid)) * 1e3
+    degrees = np.arange(whole.size)
+    others = degrees != 2
+    outside = np.sqrt(np.sum(whole[others] ** 2) / np.sum(whole**2))
+    ax = fig.add_subplot(2, 1, 2)
+    ax.semilogy(degrees, np.where(whole > 0.0, whole, np.nan), "o", ms=4,
+                color="0.3", label="3D model's displacement")
+    ax.semilogy(degrees, np.where(part > 0.0, part, np.nan), "-",
+                color="C3", label="3D minus radial model")
+    ax.set_xlabel("degree")
+    ax.set_ylabel("rms of the degree's part (mm)")
+    ax.set_xlim(-0.5, degrees[-1] + 0.5)
+    ax.text(0.75 * degrees[-1], 1e-4, "the floor beyond degree 15 is the "
+            "moduli file's linear lateral\ninterpolation onto the coupling's "
+            "grid, not its structure", ha="center", fontsize=8, color="0.3")
+    ax.set_title("by degree: the 3D model's response outside degree 2 is "
+                 f"{outside:.1e} of its rms, all of it the lateral coupling",
+                 fontsize=10)
+    ax.legend()
+    fig.suptitle("sl3d response: the lunar body tide on the synthetic 3D "
+                 "elastic Earth (gold: the sub-lunar point; blue: the stiff "
+                 "craton; red: the soft ridge)", fontsize=11)
+    fig.tight_layout()
+    save(fig, name, "body_tide")
+
+
+def response_tide_planet() -> None:
+    """The Sun's tide on the toy planet of make_planet_deck.py, elastic and
+    radial: the displacement and the potential perturbation, with the
+    planet's degree-2 Love numbers read off the exchange table, from each
+    order's coefficients over the potential's."""
+    name = "response_tide_planet"
+    path = OUT / name / f"{name}.nc"
+    table = OUT / name / f"{name}.txt"
+    if not (path.exists() and table.exists()):
+        return
+    scalars, rows = exchange_table(table)
+    gravity = float(scalars["surface_gravity"][0])
+    radius = float(scalars["radius"][0])
+    tide = tide_coefficients(name)
+    h2 = [(-gravity * rows[key][0] / psi).real for key, psi in tide.items()]
+    k2 = [(rows[key][1] / psi).real for key, psi in tide.items()]
+    file = read_surface_file(path)
+    grid = file.grid
+    ex = Example.from_fields(
+        grid.colatitudes, grid.longitudes,
+        {"displacement": 1e3 * np.asarray(file.variables["displacement"].values),
+         "potential": np.asarray(file.variables["potential"].values)})
+    sun = peak(grid, ex.fields["displacement"])
+
+    fig = plt.figure(figsize=(12, 4.2))
+    for k, (field, title) in enumerate((
+            ("displacement", "radial displacement (mm)"),
+            ("potential", "potential perturbation (m$^2$ s$^{-2}$)"))):
+        ax = map_axes(fig, 1, 2, k + 1, coastlines=False)
+        mesh = plot_field(ax, ex, field, title=title)
+        mark_sites(ax, [sun], colors=["gold"])
+        fig.colorbar(mesh, ax=ax, shrink=0.75)
+    spread = max(np.ptp(h2) / np.mean(h2), np.ptp(k2) / np.mean(k2))
+    fig.suptitle(
+        "sl3d response: the Sun's tide on the toy planet (radius "
+        f"{radius / 1e3:.0f} km, g = {gravity:.2f} m s$^{{-2}}$; gold: the "
+        "sub-solar point)\n"
+        f"degree-2 tidal Love numbers h$_2$ = {np.mean(h2):.4f}, "
+        f"k$_2$ = {np.mean(k2):.4f} (the three orders agree to "
+        f"{spread:.0e})", fontsize=11)
+    fig.tight_layout()
+    save(fig, name, "body_tide")
+
+
+def response_tide_planet_relax() -> None:
+    """A held degree-2 tide on the toy planet's Maxwell mantle: its tidal
+    Love numbers through time, beside the Earth's (response1d_tide) where
+    that has run."""
+    planet = held_tide("response_tide_planet_relax")
+    if planet is None:
+        return
+    earth = held_tide("response1d_tide")
+    fig, ax = plt.subplots(figsize=(7.5, 4.8))
+    for label, held, style in (("toy planet", planet, "o-"),
+                               ("Earth (prem8)", earth, "--")):
+        if held is None:
+            continue
+        times, h2, k2 = held
+        shown = np.where(times > 0.0, times, 0.5 * times[1])
+        ax.semilogx(shown, h2, style, ms=3, color="C0",
+                    label=f"$h_2$, {label}")
+        ax.semilogx(shown, k2, style, ms=3, color="C1",
+                    label=f"$k_2$, {label}")
+    ax.set_xlabel("time since the potential was applied (kyr; the first "
+                  "point is the elastic response)")
+    ax.set_ylabel("degree-2 tidal Love number")
+    ax.legend(fontsize=9)
+    ax.set_title("sl3d response: a held degree-2 tide on the toy planet's "
+                 "Maxwell mantle", fontsize=11)
+    fig.tight_layout()
+    save(fig, "response_tide_planet_relax", "love_numbers")
+
+
+def oscillation(name: str):
+    """An oscillating tide's run: its times (kyr), the potential over its
+    amplitude, h_2(t) and k_2(t) (the degree-2 displacement and potential
+    coefficients over the amplitude, h with the conventional sign), the
+    period, and the amplitude and lag (degrees) of h_2 and of k_2 over the
+    last cycle. None when the run has not been made."""
+    path = OUT / name / f"{name}.nc"
+    tables = sorted((OUT / name).glob(f"{name}_*.txt"))
+    if not (path.exists() and tables):
+        return None
+    tide = json.loads((CONFIGS / f"{name}.json").read_text())["forcing"]["tide"][0]
+    history = np.asarray(tide["history_kyr"])
+    rising = (history[:-1, 1] < 0.0) & (history[1:, 1] >= 0.0)
+    period = history[1:, 0][rising][0] - history[0, 0]  # sin(2 pi t / P)
+    gravity = float(exchange_table(tables[0])[0]["surface_gravity"][0])
+    file = read_surface_file(path)
+    times = np.asarray(file.time) / KYR
+    amplitude = tide["amplitude_m2_s2"]
+    u20 = analyse_grid(np.asarray(file.variables["displacement"].values),
+                       file.grid)[0, 2, 0]
+    phi20 = analyse_grid(np.asarray(file.variables["potential"].values),
+                         file.grid)[0, 2, 0]
+    h2, k2 = -gravity * u20 / amplitude, phi20 / amplitude
+    # over the last cycle: a sin(wt) + b cos(wt) + c = A sin(wt - lag) + c
+    last = times >= times[-1] - period - 1e-9
+    w = 2.0 * np.pi / period
+    basis = np.column_stack([np.sin(w * times[last]), np.cos(w * times[last]),
+                             np.ones(last.sum())])
+    fits = []
+    for series in (h2, k2):
+        (a, b, _), *_ = np.linalg.lstsq(basis, series[last], rcond=None)
+        fits.append((np.hypot(a, b), np.rad2deg(np.arctan2(-b, a))))
+    forcing = np.interp(times, history[:, 0], history[:, 1])
+    return times, forcing, h2, k2, period, fits
+
+
+def response_tide_oscillating() -> None:
+    """An oscillating degree-2 tide on the radial viscoelastic Earth: the
+    potential and the response through the run at one period, the response
+    lagging; and the Love numbers' amplitudes and lags at the three periods
+    of the oscillating configs that have run."""
+    name = "response_tide_oscillating"
+    run = oscillation(name)
+    if run is None:
+        return
+    times, forcing, h2, k2, period, ((h_abs, h_lag), (k_abs, k_lag)) = run
+    fig = plt.figure(figsize=(12, 7.5))
+    ax = fig.add_subplot(2, 1, 1)
+    ax.plot(times, forcing, color="0.3", label="the potential over its "
+                                               "amplitude")
+    ax.plot(times, h2, color="C0",
+            label="$h_2(t) = -g\\,U_{20}(t)\\,/$ amplitude")
+    ax.plot(times, k2, color="C1", label="$k_2(t) = \\Phi_{20}(t)\\,/$ "
+                                         "amplitude")
+    crest = times[-1] - 0.75 * period  # the potential's last crest
+    lagged = crest + k_lag / 360.0 * period  # k_2's
+    for at, color in ((crest, "0.3"), (lagged, "C1")):
+        ax.axvline(at, color=color, lw=0.8, ls=":")
+    ax.annotate("", xy=(lagged, 1.12), xytext=(crest, 1.12),
+                arrowprops={"arrowstyle": "->", "color": "C1"})
+    ax.text(lagged + 0.01 * times[-1], 1.12, f"{k_lag:.0f}$^\\circ$",
+            color="C1", va="center", fontsize=9)
+    ax.axhline(0.0, color="0.7", lw=0.5)
+    ax.set_ylim(-1.55, 1.25)
+    ax.set_xlabel("time (kyr)")
+    ax.set_ylabel("over the potential's amplitude")
+    ax.set_title(f"period {period:g} kyr; over the last cycle |h$_2$| = "
+                 f"{h_abs:.3f}, lagging {h_lag:.1f}$^\\circ$, and |k$_2$| = "
+                 f"{k_abs:.3f}, lagging {k_lag:.1f}$^\\circ$", fontsize=10)
+    ax.legend(fontsize=9, loc="lower center", ncol=3)
+
+    runs = [oscillation(n) for n in (f"{name}_short", name, f"{name}_long")]
+    runs = [run for run in runs if run is not None]
+    periods = np.array([run[4] for run in runs])
+    fits = np.array([run[5] for run in runs])  # (run, h or k, abs or lag)
+    held = held_tide("response1d_tide")
+    for column, ylabel in ((0, "amplitude"), (1, "lag behind the potential "
+                                                 "(degrees)")):
+        ax = fig.add_subplot(2, 2, 3 + column)
+        for k, label in enumerate(("$h_2$", "$k_2$")):
+            ax.semilogx(periods, fits[:, k, column], "o-", color=f"C{k}",
+                        label=label)
+            if column == 0 and held is not None:
+                ends = held[1 + k][[0, -1]]
+                for end, style in zip(ends, ("--", ":")):
+                    ax.axhline(end, color=f"C{k}", lw=0.8, ls=style)
+        ax.set_xlabel("period (kyr)")
+        ax.set_ylabel(ylabel)
+        ax.legend(fontsize=9)
+        if column == 0:
+            ax.set_title("the Love numbers' amplitudes (dashed: elastic, "
+                         "dotted: held 500 kyr)", fontsize=10)
+        else:
+            ax.set_title("their lags", fontsize=10)
+    fig.suptitle("sl3d response: an oscillating degree-2 tide on the radial "
+                 "viscoelastic Earth (prem8, a 1e21 Pa s mantle)")
+    fig.tight_layout()
+    save(fig, name, "oscillating")
 
 
 if __name__ == "__main__":
@@ -557,3 +839,7 @@ if __name__ == "__main__":
     response_viscoelastic()
     response1d_disk()
     response1d_tide()
+    response_tide_3d()
+    response_tide_planet()
+    response_tide_planet_relax()
+    response_tide_oscillating()

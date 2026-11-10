@@ -1,0 +1,11 @@
+{
+  "model": {"deck": "../data/planet.elastic.deck", "format": "elastic"},
+  "lmax": 32,
+  "forcing": {
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 0.04735},
+             {"degree": 2, "order": 1, "amplitude_m2_s2": 0.09571},
+             {"degree": 2, "order": 2, "amplitude_m2_s2": -0.10263}]
+  },
+  "output": {"surface": "out/response_tide_planet/response_tide_planet.nc",
+             "exchange": "out/response_tide_planet/response_tide_planet.txt"}
+}

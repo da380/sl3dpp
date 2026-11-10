@@ -18,7 +18,7 @@ cd build/examples/configs
 ../../apps/sl3d sea-level sea_level_1d.json   # or one at a time
 ```
 
-The synthetic configs need no data and run in about 40 s together on four
+The synthetic configs need no data and run in about 45 s together on four
 threads (`OMP_NUM_THREADS=4`); CI runs them with `run_all.sh`. They are
 sized for that, so their degrees are low; raise `lmax` and `nodes` for
 sharper results. `poetry run python plot_app.py`, from `build/examples`,
@@ -110,6 +110,50 @@ draws each config's figures from `out/<config>/` into
   the applied potential are the tidal Love numbers through time, from the
   elastic values at the start towards the fluid limit, which the figure
   draws; a fraction of a second.
+- **`response_tide_3d.json`** — the lunar body tide on the synthetic 3D
+  elastic Earth (`../data/synthetic_moduli.nc` on
+  `../data/prem8.elastic.deck`), at lmax 32:
+  `out/response_tide_3d/response_tide_3d.nc` (the 3D and the radial model's
+  surface responses) and `out/response_tide_3d/response_tide_3d.txt`. The
+  forcing is an instantaneous degree-2 tidal potential with (2,0), (2,1)
+  and (2,2) coefficients: the Moon (GM = 4.9028e12 m^3 s^-2) at its mean
+  distance d = 384400 km, at declination 20° N over longitude 100° W, whose
+  potential at the model's surface (a = 6368 km) has the amplitude
+  A = GM a^2 / d^3 = 3.50 m^2 s^-2; its coefficients in the exchange
+  table's harmonics are c_2m = -A (4 pi / 5) conj(Y_2m(70°, 260°)), the
+  physical potential (-A under the Moon): (2,0) 1.8009, (2,1)
+  -0.3793 + 2.1511 i and (2,2) 2.8196 + 1.0263 i m^2 s^-2. It is
+  illustrative, one instant of a Moon placed by hand, not an ephemeris,
+  and leaves out the Sun. The radial model's bulge reaches 0.21 m under the
+  Moon (h2 = 0.604); the lateral moduli change the response by 0.04 mm at
+  most, and the 3D model puts 7.0e-5 of its rms into degrees other than 2,
+  which the radial model cannot: the lateral coupling, which the figure
+  draws by degree. lmax 32 is the moduli file's own degree. The difference
+  between the 3D and the radial response changes by 0.5% between lmax 16
+  and 32 (0.4% of it lies above degree 16) and by 0.4% between 32 and 48
+  (0.06% above degree 32). Beyond degree 15 its spectrum sits at a floor
+  of about 1e-5 mm, which is the moduli file's linear lateral interpolation
+  onto the coupling's grid, not its structure (under a cubic lateral rule
+  the floor is hundreds of times lower). About 3 s and 0.9 GB on four
+  threads.
+- **`response_tide_oscillating.json`**, with
+  **`response_tide_oscillating_short.json`** and
+  **`response_tide_oscillating_long.json`** — a degree-2 tide oscillating
+  on the radial viscoelastic Earth of `../data/prem8.gia.deck`, whose
+  mantle's Maxwell times (viscosity over shear modulus) run from 0.11 to
+  0.43 kyr: the (2,0) coefficient of 1 m^2 s^-2 times sin(2 pi t / P),
+  with P = 1 kyr (0.1 kyr and 10 kyr in the other two), over six periods
+  at 24 nodes a period, at lmax 4:
+  `out/<config>/<config>.nc` and one exchange table at the last crest of
+  the potential. They are the output of `make_tide_history.py` (in
+  `build/examples`), whose amplitude history `history_kyr` has a point at
+  every node, where the run sees the forcing. With a unit potential the degree-2 coefficients
+  are the Love numbers at the forcing's frequency; over the last cycle at
+  P = 1 kyr |h2| = 0.811 lagging the potential by 23.0° and |k2| = 0.409
+  lagging by 24.1°, at 0.1 kyr |k2| = 0.301 lagging by 4.0°, and at
+  10 kyr |k2| = 0.787 lagging by 12.2°: the lag is largest between the
+  elastic and the fluid limits. Against 96 nodes a period, 24 put k2
+  within 0.7% and its lag within 0.4°. A fraction of a second each.
 
 `../data/prem8.gia.deck` is `../data/prem8.elastic.deck` in planetmodel's
 GIA format, with a Maxwell mantle of 1e21 Pa s (the solid layers between
@@ -128,3 +172,31 @@ ICE-7G. They read
 `../data/ice7g.nc`, which `python get_ice7g.py` writes from `build/examples`
 (see `examples/README.md`); `run_all.sh` runs them once that file exists
 and skips them otherwise.
+
+## The toy planet
+
+These read the decks of a three-layer "toy Mars" (a fluid core, a 1e21
+Pa s Maxwell mantle and a 150 km elastic lid; radius 3390 km, surface
+gravity 3.66 m s^-2), which `python make_planet_deck.py` writes from
+`build/examples` into `../data/planet.gia.deck` and
+`../data/planet.elastic.deck`; `run_all.sh` runs them once those exist
+and skips them otherwise.
+
+- **`response_tide_planet.json`** — the Sun's tide on the toy planet,
+  elastic and radial, at lmax 32:
+  `out/response_tide_planet/response_tide_planet.nc` and
+  `out/response_tide_planet/response_tide_planet.txt`. The potential is
+  the Sun's (GM = 1.32712e20 m^3 s^-2) at Mars's mean distance, 1.524 AU,
+  at declination 25° N (about Mars's obliquity) over longitude 0°:
+  A = 0.1287 m^2 s^-2 at the surface, so (2,0) 0.04735, (2,1) 0.09571 and
+  (2,2) -0.10263 m^2 s^-2 (real, the Sun over the prime meridian),
+  illustrative as the lunar tide above is. The figure reads the planet's
+  tidal Love numbers off the exchange table, each order's coefficients
+  over the potential's: h2 = 0.3390 and k2 = 0.1823, the three orders
+  agreeing to rounding, and a bulge of about 12 mm.
+- **`response_tide_planet_relax.json`** — a unit degree-2 potential
+  switched on and held on the planet's Maxwell deck, as
+  `response1d_tide.json` is on the Earth's, at the same nodes out to
+  500 kyr: the Love numbers relax from h2 = 0.34 and k2 = 0.18 to 1.83 and
+  0.99, most of the way between 1 and 10 kyr, several times later than
+  the Earth's under the same viscosity.

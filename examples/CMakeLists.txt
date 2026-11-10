@@ -3,7 +3,7 @@
 #
 #   data/                      every input: copied at configure time, written
 #                              by the build (the synthetic Earths) or by
-#                              get_ice7g.py
+#                              get_ice7g.py and the make_*.py scripts
 #   output/library/<example>/  each library example's outputs and its log
 #   figures/library/           the library examples' figures
 #   figures/sl3d/<config>/     the figures of the sl3d configs' outputs
@@ -136,7 +136,8 @@ endif()
 configure_file(${CMAKE_CURRENT_SOURCE_DIR}/README.md README.md COPYONLY)
 
 # The Python side, copied flat beside the executables: the plotting scripts,
-# the ICE-7G download, and the poetry file of their environment.
+# the ICE-7G download, the make_*.py scripts that write inputs for the sl3d
+# program, and the poetry file of their environment.
 file(GLOB SL3DPP_EXAMPLE_PYTHON LIST_DIRECTORIES false CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/python/*)
 foreach(python_file IN LISTS SL3DPP_EXAMPLE_PYTHON)
