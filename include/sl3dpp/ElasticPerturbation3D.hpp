@@ -60,6 +60,8 @@ class ElasticPerturbation3D {
     TruncationRule truncation = TruncationRule::Graded;
     double oversampling = 1.5;
     bool parallel = true;
+    /// The cache the transforms block for (SurfaceGrid::Options).
+    std::size_t cache_bytes = 0;
   };
 
   /// The material is copied into the rheology's shared storage, so the

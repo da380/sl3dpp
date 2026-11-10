@@ -363,7 +363,6 @@ class ViscoelasticOperator {
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
       weightSecondDerivatives_;
   mutable std::map<std::pair<int, double>, LoveNumbers> effectiveLove_;
-  mutable std::vector<double> unitUnrelaxed_;  // placeholder, see cpp
   mutable std::map<int, std::vector<double>> unrelaxedUnits_;
   mutable std::map<int, std::vector<double>> unrelaxedSplitUnits_;
 };

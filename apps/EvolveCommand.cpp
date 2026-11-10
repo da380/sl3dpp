@@ -744,8 +744,10 @@ std::string RunEvolve3D(const std::filesystem::path& config) {
                       rheology.error().message);
   Viscoelastic3D op(*rheology, input.lmax, viscosity->Delta(),
                     OperatorOptions(input, *rheology));
-  SeaLevelSolver solver(SurfaceGrid(input.lmax), op.ElasticLove(),
-                        ParametersOf(input, earth.material));
+  // the sea level grid blocks its transforms for the operator's cache
+  SeaLevelSolver solver(
+      SurfaceGrid(input.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
+      op.ElasticLove(), ParametersOf(input, earth.material));
   auto world = LoadWorld(input, top, solver);
   return RunWith<SeaLevelEvolution3D>(
       config, input, solver, world, "evolve",

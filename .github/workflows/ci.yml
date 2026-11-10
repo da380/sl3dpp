@@ -38,8 +38,8 @@ jobs:
   # it takes the pthread build, with the variable that build reads. Each test
   # runs on one OpenMP thread already (tests/CMakeLists.txt).
   #
-  # One Debug entry besides: the asserts, and the code at -O0. Its suite takes
-  # about eight times as long as Release's, about a minute on four cores.
+  # One Debug entry besides, for the asserts. It is compiled at -Og: at -O0
+  # the suite takes about five times as long, over an hour on four cores.
   build:
     name: ${{ matrix.compiler.cxx }} / ${{ matrix.build_type }}
     runs-on: ubuntu-24.04
@@ -55,6 +55,7 @@ jobs:
         include:
           - compiler: {cxx: g++-14, packages: g++-14 libopenblas-openmp-dev}
             build_type: Debug
+            flags: -DCMAKE_CXX_FLAGS_DEBUG="-Og -g"
 
     steps:
       - uses: actions/checkout@v5
@@ -70,6 +71,7 @@ jobs:
           cmake -S . -B build -G Ninja
           -DCMAKE_CXX_COMPILER=${{ matrix.compiler.cxx }}
           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          ${{ matrix.flags }}
 
       - name: Build
         run: cmake --build build --parallel
@@ -78,6 +80,42 @@ jobs:
         env:
           OPENBLAS_NUM_THREADS: 1
         run: ctest --test-dir build --parallel 4 --output-on-failure
+
+  # The distributed parts under a real MPI: the library built with
+  # SL3DPP_WITH_MPI against the runner's MPICH, and the mpiexec tests alone,
+  # on two to four ranks of one thread. The jobs above run the rest of the
+  # suite, the threads-as-ranks tests of the same partition among it.
+  mpi:
+    name: MPI
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            $BASE_PACKAGES g++-14 libopenblas-openmp-dev mpich libmpich-dev
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_CXX_COMPILER=g++-14
+          -DCMAKE_BUILD_TYPE=Release
+          -DSL3DPP_WITH_MPI=ON
+          -DSL3DPP_BUILD_EXAMPLES=OFF
+
+      - name: Build
+        run: >-
+          cmake --build build --parallel
+          --target TestDistributed TestAppsDistributed
+
+      - name: Test
+        env:
+          OPENBLAS_NUM_THREADS: 1
+        run: >-
+          ctest --test-dir build -R "Distributed\.Ranks"
+          --output-on-failure
 
   # The point of the install rules is that a separate project can consume
   # them, so consume them from one (tests/package), against nothing but the

@@ -61,6 +61,7 @@ ElasticPerturbation3D::ElasticPerturbation3D(const Material& material, int lmax,
                  .truncation = options.truncation,
                  .oversampling = options.oversampling,
                  .parallel = options.parallel,
+                 .cache_bytes = options.cache_bytes,
                  .memory_points = MemoryPointSet::Gll,
                  // The strain components of the spherical decomposition
                  // divide by r, so the element holding the centre carries

@@ -209,8 +209,10 @@ std::string RunStatic3D(const std::filesystem::path& config) {
 
   // The forcing: a Gaussian cap of surface mass density (kg m^-2 at its
   // centre) and a tidal potential coefficient (m^2 s^-2), each made
-  // non-dimensional under the model's scales.
-  const SurfaceGrid grid(input.lmax);
+  // non-dimensional under the model's scales. Every grid of the run blocks
+  // its transforms for the configured cache.
+  const auto cacheBytes = input.cache_mb << 20;
+  const SurfaceGrid grid(input.lmax, {.cache_bytes = cacheBytes});
   auto loadSi = grid.ZeroField();
   auto loadNd = grid.ZeroCoefficients();
   auto load = Viscoelastic3D::LoadCallable3D{};
@@ -247,7 +249,8 @@ std::string RunStatic3D(const std::filesystem::path& config) {
   // The radial model's response, on every rank alike (its solves are the
   // 1D ones): the reference of the 3D problem, and the whole answer
   // without lateral moduli.
-  const ElasticPerturbation3D reference(*material, input.lmax);
+  const ElasticPerturbation3D reference(*material, input.lmax,
+                                        {.cache_bytes = cacheBytes});
   auto sphForces = ElasticPerturbation3D::Forces{};
   if (input.load.set) sphForces = reference.LoadForces(loadNd);
   if (input.tide.set) {
@@ -273,7 +276,7 @@ std::string RunStatic3D(const std::filesystem::path& config) {
     // rheology has no viscous element to weight)
     auto probe = Viscoelastic3D::Options{};
     probe.transform_degrees = input.transform_degrees;
-    probe.cache_bytes = input.cache_mb << 20;
+    probe.cache_bytes = cacheBytes;
     probe.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
     const auto active = Viscoelastic3D::ActiveElementsFor(
         *elastic, input.lmax, reference.Coupling().Grid(), probe);

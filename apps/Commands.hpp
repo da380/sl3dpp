@@ -127,8 +127,9 @@ struct EvolveInput {
   /// node's grid may take below lmax (Viscoelastic3D::Options::
   /// transform_degrees); empty, every node at lmax.
   std::vector<int> transform_degrees;
-  /// The 3D commands' last-level cache the transforms block their work
-  /// for, in MiB (Viscoelastic3D::Options::cache_bytes); 0, the library's
+  /// The 3D commands' last-level cache every transform grid of the run
+  /// blocks its work for (the operator's, Viscoelastic3D::Options::
+  /// cache_bytes, and the sea level solver's), in MiB; 0, the library's
   /// default.
   std::size_t cache_mb = 0;
   /// With "hydrostatic", the moments of inertia difference is set from

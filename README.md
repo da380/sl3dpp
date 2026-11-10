@@ -536,7 +536,7 @@ The build type defaults to `Release`. The build produces the static library
 | `SL3DPP_BUILD_TESTS` | on at top level | The test suite |
 | `SL3DPP_BUILD_APPS` | on at top level | The `sl3d` program |
 | `SL3DPP_BUILD_EXAMPLES` | on at top level | The example drivers |
-| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing`, `substructure_prototype` and the cross-code exchange writers |
+| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing` and the cross-code exchange writers |
 | `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
 | `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
 | `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d evolve`, `kernel` and `static` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
@@ -594,9 +594,6 @@ With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
   Maxwell load Love-number histories under a Heaviside load (taus in
   seconds per layer, `inf` elastic), for the V1 tier in
   `benchmarks/viscoelastic/love/`.
-- `substructure_prototype [elements] [ngll] [parts] [nrhs] [decades]`
-  solves a synthetic system with the degree systems' band structure
-  directly and by substructuring, and compares the two.
 - `substructure_timing <deck> <lmax> [repeats] [parts...]` times the degree
   solves substructured over radial segments against the direct ones, and
   `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with

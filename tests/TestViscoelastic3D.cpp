@@ -339,6 +339,79 @@ TEST(Lateral, ThreadedStepMatchesSerial) {
   EXPECT_EQ(diff, 0.0);
 }
 
+TEST(Lateral, CacheSizeLeavesTheStepBitwiseUnchanged) {
+  // Options::cache_bytes reaches the coupling's grid, and a cache small
+  // enough that the batched transforms over the memory nodes take smaller
+  // chunks than under the default (16 KiB: 7 spin -2 fields at a time
+  // against 63, so the chunks fall differently through the batch) leaves
+  // two steps, their iteration counts and the memory they leave bit for
+  // bit as they are under the default.
+  constexpr auto kSmall = std::size_t{16} << 10;
+  auto body = Body::Make();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto delta = [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto iterations = std::vector<int>{};
+  auto run = [&](std::size_t cache) {
+    Viscoelastic3D::Options options;
+    options.cache_bytes = cache;
+    Viscoelastic3D op(body.rheology, kLmax, delta, options);
+    const auto& coupling = op.Coupling();
+    const auto& grid = coupling.Grid();
+    EXPECT_EQ(grid.Grid().ChunkingPolicy(),
+              cache > 0 ? GSHTrans::Chunking::ForCache(
+                              static_cast<GSHTrans::Chunking::Int>(cache))
+                        : GSHTrans::Chunking::Automatic());
+    if (cache > 0) {
+      // the chunk of a spin -2 batch (one copy of its block: a stored
+      // table) against the default's and the batch's
+      const auto block = static_cast<GSHTrans::Chunking::Int>(
+          sizeof(Complex) * grid.SpinCoefficientSize(-2));
+      const auto chunk = grid.Grid().ChunkingPolicy().Count(block, 1);
+      EXPECT_LT(chunk, GSHTrans::Chunking::Automatic().Count(block, 1));
+      EXPECT_LT(chunk, coupling.NodeCount());
+    }
+    auto state = op.ZeroState();
+    Viscoelastic3D::Solutions solutions;
+    for (auto i = 0; i < 2; ++i) {
+      auto result = op.Step(state, tau, Scheme::ExponentialTrapezoid, load);
+      EXPECT_TRUE(result.info.converged);
+      iterations.push_back(result.info.iterations);
+      state = std::move(result.state);
+      solutions = std::move(result.solutions);
+    }
+    return std::pair{std::move(state), std::move(solutions)};
+  };
+  const auto [standardState, standard] = run(0);
+  const auto [smallState, small] = run(kSmall);
+  EXPECT_EQ(iterations[0], iterations[2]);
+  EXPECT_EQ(iterations[1], iterations[3]);
+
+  auto scale = 0.0;
+  auto compare = [&](const std::map<int, std::vector<Complex>>& a,
+                     const std::map<int, std::vector<Complex>>& b) {
+    ASSERT_EQ(a.size(), b.size());
+    for (const auto& [l, x] : a) {
+      for (auto c : x) scale = std::max(scale, std::abs(c));
+      ASSERT_EQ(x, b.at(l)) << "degree " << l;
+    }
+  };
+  compare(standard.spheroidal, small.spheroidal);
+  compare(standard.toroidal, small.toroidal);
+  EXPECT_GT(scale, 0.0);
+  // and the memory the steps leave, branch by branch
+  ASSERT_EQ(standardState.m.size(), smallState.m.size());
+  for (auto k = std::size_t{0}; k < standardState.m.size(); ++k) {
+    for (auto c = 0; c < 2; ++c) {
+      ASSERT_EQ(standardState.m[k].c[c], smallState.m[k].c[c])
+          << "branch " << k << " component " << c;
+    }
+    ASSERT_EQ(standardState.m[k].r, smallState.m[k].r) << "branch " << k;
+  }
+}
+
 TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
   // A step that is done with finishes into its own buffers (the grid
   // workspace becomes the strain, the decayed memory advances in place);

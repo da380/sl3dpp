@@ -11,8 +11,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <cstddef>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <planetmodel/error.hpp>
 #include <planetmodel/grid.hpp>
@@ -28,6 +30,7 @@
 #include "Commands.hpp"
 #include "Common.hpp"
 #include "Ranks.hpp"
+#include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
@@ -287,6 +290,94 @@ TEST_F(AppsTest, StaticRespondsOnAToyModuliFile) {
   for (const auto name : {"radial_displacement", "deviatoric_strain",
                           "mu_relative"}) {
     EXPECT_TRUE(volume.HasField(0, name)) << name;
+  }
+}
+
+TEST_F(AppsTest, StaticIsBitwiseIndependentOfTheCache) {
+  // cache_mb reaches every transform grid of a static run (the forcing's,
+  // the radial reference's coupling and the 3D operator's), and the run is
+  // bit for bit the same under any setting. At lmax 24 the smallest
+  // setting, 1 MiB, cuts the couplings' batched spin -2 transforms into
+  // chunks of 53 fields against the default's 63, and the ball's mesh
+  // carries more nodes than a chunk, so the chunks fall differently
+  // through every batch: the surface file, the exchange table and the
+  // volume file are nevertheless the default's exactly.
+  constexpr auto kLmax = 24;
+  const auto deck = Deck();
+  const auto read =
+      sl3dpp::Deck::Read(deck, app::FormatOf(app::ModelFormat::Gia));
+  ASSERT_TRUE(read) << read.error().message;
+  const auto model = EarthModel::FromDeck(*read);
+  ASSERT_TRUE(model) << model.error().message;
+  // the chunk of a spin -2 batch (one copy of its block: a stored table)
+  const auto block = static_cast<GSHTrans::Chunking::Int>(
+      sizeof(std::complex<double>) * ((kLmax + 1) * (kLmax + 1) - 4));
+  const auto chunk = GSHTrans::Chunking::ForCache(1 << 20).Count(block, 1);
+  EXPECT_LT(chunk, GSHTrans::Chunking::Automatic().Count(block, 1));
+  // every element but the centre's carries nodes
+  const auto mesh = RadialMesh::Create(*model, {.lmax = kLmax});
+  ASSERT_TRUE(mesh);
+  EXPECT_GT(mesh->ElementCount() - 1, chunk);
+  const auto written = io::WriteModuli(
+      dir_ / "moduli.nc", *model, SurfaceGrid(8),
+      [](double, double theta, double) { return 0.1 * std::cos(theta); }, {},
+      {.name = "toy moduli", .elementMetres = 500e3});
+  ASSERT_TRUE(written) << written.error().message;
+
+  const auto run = [&](const std::string& name, std::string_view cache) {
+    const auto text = std::format(R"({{
+      "model": "ball.deck",
+      "lmax": {},
+      "moduli": {{"file": "moduli.nc"}},
+      "load": {{"latitude": 60, "longitude": 30, "width_deg": 10,
+               "amplitude_kg_m2": 1.0e6}},
+      "tide": {{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+               "imaginary_m2_s2": 0.5}},{}
+      "output": "{}/static.nc",
+      "exchange_output": "{}/static.txt",
+      "volume_output": "{}/static_volume.nc"}})",
+                                  kLmax, cache, name, name, name);
+    const auto summary = app::RunStatic3D(Write(name + ".json", text));
+    EXPECT_NE(summary.find("conjugate-gradient"), std::string::npos) << summary;
+  };
+  run("standard", "");
+  run("small", R"( "cache_mb": 1,)");
+
+  namespace pm = planetmodel;
+  const auto standard = pm::ReadSurfaceFile(dir_ / "standard" / "static.nc");
+  const auto small = pm::ReadSurfaceFile(dir_ / "small" / "static.nc");
+  for (const auto& [name, field] : standard.variables) {
+    EXPECT_EQ(field.values, small.variables.at(name).values) << name;
+  }
+  EXPECT_EQ(standard.meta.at("solve_iterations"),
+            small.meta.at("solve_iterations"));
+  EXPECT_EQ(standard.meta.at("solve_residual"),
+            small.meta.at("solve_residual"));
+
+  // the exchange tables' rows, the coefficients at 17 digits (the comment
+  // lines name the config)
+  const auto rows = [&](const std::string& name) {
+    auto in = std::ifstream(dir_ / name / "static.txt");
+    auto out = std::vector<std::string>{};
+    for (std::string line; std::getline(in, line);) {
+      if (!line.starts_with("#")) out.push_back(line);
+    }
+    return out;
+  };
+  const auto standardRows = rows("standard");
+  EXPECT_GT(standardRows.size(), static_cast<std::size_t>(kLmax));
+  EXPECT_EQ(standardRows, rows("small"));
+
+  const auto standardVolume =
+      pm::ReadModelFile(dir_ / "standard" / "static_volume.nc");
+  const auto smallVolume =
+      pm::ReadModelFile(dir_ / "small" / "static_volume.nc");
+  ASSERT_EQ(standardVolume.Parts().size(), smallVolume.Parts().size());
+  for (auto p = std::size_t{0}; p < standardVolume.Parts().size(); ++p) {
+    const auto& held = smallVolume.Parts()[p].variables;
+    for (const auto& [name, var] : standardVolume.Parts()[p].variables) {
+      EXPECT_EQ(var.values, held.at(name).values) << name << " in part " << p;
+    }
   }
 }
 

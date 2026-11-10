@@ -626,8 +626,10 @@ std::string RunKernel3D(const std::filesystem::path& config) {
                               .memory_points = o.memory_points,
                               .transform_degrees = o.transform_degrees});
   }
-  SeaLevelSolver solver(SurfaceGrid(input.run.lmax), op.ElasticLove(),
-                        ParametersOf(input.run, earth.material));
+  // the sea level grid blocks its transforms for the operator's cache
+  SeaLevelSolver solver(
+      SurfaceGrid(input.run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
+      op.ElasticLove(), ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
   const auto times = MakeTimes(input.run, solver.SolverScales());
   auto options = SeaLevelEvolution3D::Options{};

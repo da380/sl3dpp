@@ -371,7 +371,7 @@ These members are shared by `evolve1d`, `evolve`, `kernel1d` and `kernel`.
 | `coupled.rtol` | number | 1e-9 | `evolve` and `kernel`: the relative tolerance of each step's combined fixed point (in `kernel`, of the reversed sweep's steps too) |
 | `coupled.max_iterations` | integer | 60 | `evolve` and `kernel`: its iteration limit (likewise) |
 | `coupled.transform_degrees` | integers in [2, lmax] | absent | `evolve` and `kernel`: the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the viscosity's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
-| `coupled.cache_mb` | integer >= 0 | 0 | `evolve` and `kernel`: the last-level cache the lateral coupling's transforms block their work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it |
+| `coupled.cache_mb` | integer >= 0 | 0 | `evolve` and `kernel`: the last-level cache every transform grid of the run blocks its work for (the lateral coupling's and the sea level solver's), MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are bitwise independent of it: it sets only how many fields a batched transform takes at a time |
 | `shorelines` | word | `"frozen"` | `"frozen"`: the start's ocean function throughout (the linear equation); `"migrating"`: the ocean function follows flotation |
 | `calibrate_initial_sea_level` | object | absent | calibrate the initial sea level against `state.file` at the window's end (above); its members, all optional, follow |
 | `calibrate_initial_sea_level.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
@@ -557,7 +557,7 @@ The radial model's response to the same forcing is written beside it.
 | `solver.rtol` | number > 0 | 1e-10 | the conjugate gradients' relative residual |
 | `solver.max_iterations` | integer >= 1 | 200 | their budget |
 | `transform_degrees` | integers in [2, lmax] | absent | the transforms cut with depth, as `evolve`'s |
-| `cache_mb` | integer >= 0 | 0 | the transforms' cache in MiB, as `evolve`'s `coupled.cache_mb` |
+| `cache_mb` | integer >= 0 | 0 | the cache in MiB that every transform grid of the run blocks its work for (the forcing's, the radial reference's and the 3D operator's), as `evolve`'s `coupled.cache_mb`; the results are bitwise independent of it |
 | `output` | path | required | the surface file to write |
 | `exchange_output` | path | absent | the surface coefficients as a cross-code exchange table |
 | `volume_output` | path | absent | the response inside the body as a planetmodel model file |

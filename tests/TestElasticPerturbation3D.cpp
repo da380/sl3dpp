@@ -28,6 +28,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
 
 using namespace sl3dpp;
 
@@ -663,6 +664,77 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   std::cout << "kernel pairing " << predicted << ", finite difference " << difference << '\n';
   EXPECT_NEAR(predicted, difference, 1e-5 * std::abs(difference));
   EXPECT_NE(difference, 0.0);
+}
+
+TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveBitwiseUnchanged) {
+  // Options::cache_bytes reaches the coupling's grid, and a cache small
+  // enough that the batched transforms over the nodes take smaller chunks
+  // than under the default (16 KiB: 11 spin -2 fields at a time against
+  // 63, so the chunks fall differently through the batch) leaves the
+  // lateral solve, every conjugate-gradient residual and the static
+  // kernels bit for bit as they are under the default.
+  constexpr auto kSmall = std::size_t{16} << 10;
+  const auto material = MakeMaterial();
+  ElasticPerturbation3D standard(material, kLmax);
+  ElasticPerturbation3D small(material, kLmax, {.cache_bytes = kSmall});
+  const auto& coupling = small.Coupling();
+  const auto& grid = coupling.Grid();
+  EXPECT_EQ(grid.Grid().ChunkingPolicy(), GSHTrans::Chunking::ForCache(kSmall));
+  EXPECT_EQ(standard.Coupling().Grid().Grid().ChunkingPolicy(),
+            GSHTrans::Chunking::Automatic());
+  ASSERT_EQ(standard.Coupling().GridValueCount(), coupling.GridValueCount());
+  // the chunk of a spin -2 batch (one copy of its block: a stored table)
+  const auto block = static_cast<GSHTrans::Chunking::Int>(
+      sizeof(Complex) * grid.SpinCoefficientSize(-2));
+  const auto chunk = GSHTrans::Chunking::ForCache(kSmall).Count(block, 1);
+  EXPECT_LT(chunk, GSHTrans::Chunking::Automatic().Count(block, 1));
+  EXPECT_LT(chunk, coupling.NodeCount());
+
+  const auto top = [&] {
+    auto s = 0.0;
+    for (auto v : material.Moduli().L) s = std::max(s, v);
+    return s;
+  }();
+  auto load = grid.ZeroCoefficients();
+  for (auto l = 0; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      load[SurfaceGrid::Index(l, m)] = {1.0 / (1.0 + l), m == 0 ? 0.0 : 0.3 * m};
+    }
+  }
+  const auto dMu = Lateral(
+      coupling, [&](double r) { return 0.1 * top * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return std::sin(theta) * std::cos(theta) * std::cos(phi) +
+               0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta);
+      });
+  const auto dKappa = Lateral(
+      coupling, [&](double r) { return 0.1 * top * (1.0 - 0.5 * r); },
+      [](double theta, double phi) { return std::cos(theta); });
+  const auto options = ElasticPerturbation3D::SolveOptions{.rtol = 1e-13};
+  const auto [a, infoA] = standard.SolveLateral(load, dMu, dKappa, options);
+  const auto [b, infoB] = small.SolveLateral(load, dMu, dKappa, options);
+  EXPECT_TRUE(infoA.converged);
+  EXPECT_GT(infoA.iterations, 1);
+  EXPECT_EQ(infoA.iterations, infoB.iterations);
+  EXPECT_EQ(infoA.residuals, infoB.residuals);
+
+  auto scale = 0.0;
+  auto compare = [&](const std::map<int, std::vector<Complex>>& x,
+                     const std::map<int, std::vector<Complex>>& y) {
+    ASSERT_EQ(x.size(), y.size());
+    for (const auto& [l, u] : x) {
+      for (auto c : u) scale = std::max(scale, std::abs(c));
+      ASSERT_EQ(u, y.at(l)) << "degree " << l;
+    }
+  };
+  compare(a.spheroidal, b.spheroidal);
+  compare(a.toroidal, b.toroidal);
+  EXPECT_GT(scale, 0.0);
+  const auto ka = standard.StaticKernels(a, a);
+  const auto kb = small.StaticKernels(b, b);
+  EXPECT_FALSE(ka.mu.empty());
+  ASSERT_EQ(ka.mu, kb.mu);
+  ASSERT_EQ(ka.kappa, kb.kappa);
 }
 
 TEST(ElasticPerturbation3D, DISABLED_TimingAtHigherDegree) {
