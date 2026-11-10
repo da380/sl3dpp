@@ -5,6 +5,7 @@
 // (second order to solver precision at every step), and the continuous
 // sweep's gap closing under refinement — docs/adjoints.md.
 
+#include <numbers>
 #include <gtest/gtest.h>
 
 #include <cstdlib>
@@ -1153,3 +1154,125 @@ TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {
   }
 }
 
+
+TEST(DiscreteAdjoint3D, RotatingStepsSolveTheLateralSystem) {
+  // The rotational feedback about a laterally heterogeneous model. The
+  // run closes the rotation in closed form with the REFERENCE model's
+  // Love numbers inside each pass of the step's fixed point, the lateral
+  // part of the response to the centrifugal potential arriving through
+  // the iteration. Converged, that must be the centrifugal potential
+  // applied to the 3D model: a step re-solved by conjugate gradients
+  // under the recorded load and centrifugal coefficients (no sea level
+  // engine, no Love numbers) reproduces the run's surface displacement
+  // and potential at every degree, and its own degree-2, order-1
+  // potential gives the recorded polar motion (MacCullagh), its (2, 0)
+  // potential and the inertia moment of its degree-0 part the recorded
+  // axial rate. The centrifugal potential alone drives the other
+  // degrees too.
+  auto scene = Scene::Make(1e21);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto iceLoad = Ramp(scene.MeltLoad(-0.1), times.back());
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  using Solver = Viscoelastic3D::Options::StepSolver;
+  Viscoelastic3D op(scene.rheology, kLmax, baseDelta, {.moduli = TestModuli()});
+  Viscoelastic3D cg(scene.rheology, kLmax, baseDelta,
+                    {.solver = Solver::ConjugateGradients,
+                     .solve_rtol = 1e-13,
+                     .moduli = TestModuli()});
+  SeaLevelEvolution3D evolution(
+      op, scene.solver, scene.state,
+      {.rotation = RotationalFeedback::Full, .rtol = 1e-13, .coupled_rtol = 1e-13,
+       .record_stride = 1, .record_strain = true});
+  const auto run = evolution.Run(times, iceLoad);
+  const auto& material = scene.rheology.BaseMaterial().ModelScales();
+  const auto& sle = scene.solver.SolverScales();
+  auto ratio = [&](Dimensions dims) { return material.Factor(dims) / sle.Factor(dims); };
+  const auto toNdLength = ratio(Dimensions{.length = 1});
+  const auto toNdPotential = ratio(PotentialDimensions);
+  const auto toMatDensity = 1.0 / ratio(Dimensions{.mass = 1, .length = -2});
+  const auto toMatPotential = 1.0 / toNdPotential;
+  using Complex = std::complex<double>;
+  auto columns = [](const std::vector<Complex>& c, double factor) {
+    return [c, factor](int l, double) -> std::optional<std::vector<Complex>> {
+      auto out = std::vector<Complex>(l + 1);
+      for (auto m = 0; m <= l; ++m) out[m] = factor * c[SurfaceGrid::Index(l, m)];
+      return out;
+    };
+  };
+  const auto& grid = scene.solver.Grid();
+  for (auto n : {std::size_t{1}, std::size_t{4}}) {
+    const auto& prev = *run[n - 1].internalState;
+    const auto& here = run[n];
+    const auto dt = here.internalState->t - prev.t;
+    const auto solved =
+        cg.Step(prev, dt, Scheme::ExponentialTrapezoid,
+                columns(here.loadCoefficients, toMatDensity),
+                columns(here.tideCoefficients, toMatPotential));
+    const auto u = cg.Surface(solved.solutions, Component::U);
+    const auto phi = cg.Surface(solved.solutions, Component::Phi);
+    const auto uRun = grid.Expand(here.displacement);
+    const auto phiRun = grid.Expand(here.potential);
+    auto worstU = 0.0, worstPhi = 0.0, sizeU = 0.0, sizePhi = 0.0;
+    for (auto l = 0; l <= kLmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        worstU = std::max(worstU, std::abs(toNdLength * u.at(l)[m] - uRun[i]));
+        worstPhi = std::max(worstPhi, std::abs(toNdPotential * phi.at(l)[m] - phiRun[i]));
+        sizeU = std::max(sizeU, std::abs(uRun[i]));
+        sizePhi = std::max(sizePhi, std::abs(phiRun[i]));
+      }
+    }
+    const auto c = 1.0 - scene.solver.TransverseMarginFor(1.0);
+    const auto i21 = SurfaceGrid::Index(2, 1);
+    EXPECT_LT(worstU, 1e-9 * sizeU) << "node " << n;
+    EXPECT_LT(worstPhi, 1e-9 * sizePhi) << "node " << n;
+    // the polar motion from the 3D solution's own potential: c is the
+    // product of the engine's inertia and rotation factors
+    const auto psi21 = here.tideCoefficients[i21];
+    EXPECT_GT(std::abs(psi21), 0.0);
+    EXPECT_LT(std::abs(psi21 - c * toNdPotential * phi.at(2)[1]),
+              1e-9 * std::abs(psi21))
+        << "node " << n;
+    // the axial rate (the length of day) from the 3D solution's own
+    // (2, 0) potential, the inertia moment of its degree-0 part and the
+    // load's shell, with the factors formed here from the parameters
+    {
+      const auto& p = scene.solver.Parameters();
+      const auto kPi = std::numbers::pi;
+      const auto a = scene.solver.Radius();
+      const auto G = p.gravitational_constant / sle.Factor(GravitationalConstantDimensions);
+      const auto polar =
+          p.polar_moment_of_inertia / sle.Factor(Dimensions{.mass = 1, .length = 2});
+      const auto rate = p.rotation_frequency / sle.Factor(Dimensions{.time = -1});
+      const auto axialInertia = std::sqrt(5.0 / (9.0 * kPi)) * rate * a * a * a / (G * polar);
+      const auto trace = (4.0 / 3.0) * rate / polar;
+      const auto shell = (2.0 / 3.0) * rate * std::pow(a, 4) * std::sqrt(4.0 * kPi) / polar;
+      const auto moment = cg.InertiaMoment(solved.solutions) *
+                          ratio(Dimensions{.mass = 1, .length = 2});
+      const auto load0 = here.loadCoefficients[SurfaceGrid::Index(0, 0)].real();
+      const auto phi20 = toNdPotential * phi.at(2)[0].real();
+      const auto parts = std::array{-axialInertia * phi20, -trace * moment, -shell * load0};
+      const auto axial = parts[0] + parts[1] + parts[2];
+      // (the moment's part is about 1% of the rate here; the shell's
+      // vanishes with the load's mean)
+      EXPECT_GT(std::abs(parts[1]), 1e-3 * std::abs(axial));
+      EXPECT_NEAR(axial, here.angularVelocity[2], 1e-9 * std::abs(axial)) << "node " << n;
+    }
+    // the centrifugal potential alone on the 3D model, from rest
+    const auto rest = cg.ZeroState();
+    const auto tideOnly = cg.Step(rest, dt, Scheme::ExponentialTrapezoid, {},
+                                  columns(here.tideCoefficients, toMatPotential));
+    const auto ut = cg.Surface(tideOnly.solutions, Component::U);
+    auto size = std::vector<double>(kLmax + 1, 0.0);
+    for (auto l = 0; l <= kLmax; ++l) {
+      for (auto m = 0; m <= l; ++m) size[l] += std::norm(ut.at(l)[m]);
+      size[l] = std::sqrt(size[l]);
+    }
+    // (degree 4 at about 1% of degree 2 under these 10% moduli)
+    EXPECT_GT(size[4], 1e-3 * size[2]);
+    EXPECT_GT(size[0], 1e-4 * size[2]);
+  }
+}
