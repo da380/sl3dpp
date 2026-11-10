@@ -370,17 +370,13 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
         adjoint.IceHistoryKernels(times, measurements, &trajectory);
     const auto& coupling = op.Coupling();
     auto out = Result{};
+    auto atNodes = std::vector<double>(coupling.GridValueCount());
     for (auto node = 0; node < coupling.NodeCount(); ++node) {
-      const auto& grid = coupling.GridOf(node);
-      auto product = grid.FromFunction(direction);
-      const auto row =
-          std::span(kernels.logViscosityKernel3D[0])
-              .subspan(coupling.FieldOffset(node), coupling.FieldSizeOf(node));
-      for (auto x = std::size_t{0}; x < product.size(); ++x) {
-        product[x] *= row[x];
-      }
-      out.pairing += grid.Integrate(product);
+      const auto values = coupling.GridOf(node).FromFunction(direction);
+      std::ranges::copy(values, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                      coupling.FieldOffset(node)));
     }
+    out.pairing = VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
     out.spherical = kernels.itauKernelSpherical[0];
     out.loadDual = kernels.ice.loadDuals.front();
     return out;
@@ -412,7 +408,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     EXPECT_LT(spherical, tolerance) << label;
     EXPECT_LT(loadDual, tolerance) << label;
   };
-  // measured 4e-14 to 6e-14, and 3e-10 to 1.3e-9
+  // measured 1.4e-14 to 1.0e-13, and 3.4e-10 to 2.9e-9
   compare([](double, double, double) { return 0.0; }, 1e-12, "zero_lateral");
   compare(
       [](double, double theta, double phi) {

@@ -1405,6 +1405,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
     }
   }
+  // as densities per unit volume (the reductions as means over the sphere)
+  detail::KernelsToFields(coupling, out);
+  detail::KernelsToFields(coupling, derivatives);
   return {std::move(out), std::move(derivatives)};
 }
 

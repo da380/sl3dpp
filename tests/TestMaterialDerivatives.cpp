@@ -251,11 +251,7 @@ TEST(MaterialDerivatives, LoveNumberKernelsPairToTheDerivatives) {
   const auto derivatives = ComputeLoveNumberDerivatives(material, kLmax, d);
   const auto kernels = ComputeLoveNumberKernels(material, kLmax);
   auto pair = [&](const std::vector<double>& kappa, const std::vector<double>& mu) {
-    auto total = 0.0;
-    for (auto i = std::size_t{0}; i < k0.size(); ++i) {
-      total += kappa[i] * d.kappa[i] + mu[i] * d.mu[i];
-    }
-    return total;
+    return VolumePairing(mesh, kappa, d.kappa) + VolumePairing(mesh, mu, d.mu);
   };
   struct Check {
     const char* name;

@@ -751,15 +751,28 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   auto kernels = AssembleViews(times, std::move(loadDuals),
                                std::move(densityLoad), std::move(lumps),
                                oceanFunctions);
-  kernels.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
-  kernels.kappaKernel = std::move(kappaKernel);
-  kernels.muKernel = std::move(muKernel);
+  // the kernels and their derivatives as densities per unit volume
+  const auto& kernelMesh = op.BaseMaterial().Mesh();
+  auto samples = [&](std::vector<std::vector<double>> atPoints) {
+    auto nodal = op.ItauKernelsAtNodes(std::move(atPoints));
+    for (auto& branch : nodal) {
+      branch = detail::KernelSamples(kernelMesh, std::move(branch));
+    }
+    return nodal;
+  };
+  auto pointSamples = [&](std::vector<double> gradient) {
+    if (gradient.empty()) return gradient;
+    return detail::KernelSamples(op.Points(), kernelMesh, std::move(gradient));
+  };
+  kernels.itauKernel = samples(std::move(itauKernel));
+  kernels.kappaKernel = pointSamples(std::move(kappaKernel));
+  kernels.muKernel = pointSamples(std::move(muKernel));
   KernelDerivatives derivatives;
   DerivativeViews(derivatives, C, rhoI, rhoW, times, std::move(dloadDuals),
                   oceanFunctions);
-  derivatives.itauKernel = op.ItauKernelsAtNodes(std::move(dItauKernel));
-  derivatives.kappaKernel = std::move(dKappaKernel);
-  derivatives.muKernel = std::move(dMuKernel);
+  derivatives.itauKernel = samples(std::move(dItauKernel));
+  derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
+  derivatives.muKernel = pointSamples(std::move(dMuKernel));
   return {std::move(kernels), std::move(derivatives)};
 }
 
@@ -1395,15 +1408,28 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   auto kernels = AssembleViews(times, std::move(loadDuals),
                                std::move(densityLoad), std::move(lumps),
                                oceanFunctions);
-  kernels.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
-  kernels.kappaKernel = std::move(kappaKernel);
-  kernels.muKernel = std::move(muKernel);
+  // the kernels and their derivatives as densities per unit volume
+  const auto& kernelMesh = op.BaseMaterial().Mesh();
+  auto samples = [&](std::vector<std::vector<double>> atPoints) {
+    auto nodal = op.ItauKernelsAtNodes(std::move(atPoints));
+    for (auto& branch : nodal) {
+      branch = detail::KernelSamples(kernelMesh, std::move(branch));
+    }
+    return nodal;
+  };
+  auto pointSamples = [&](std::vector<double> gradient) {
+    if (gradient.empty()) return gradient;
+    return detail::KernelSamples(op.Points(), kernelMesh, std::move(gradient));
+  };
+  kernels.itauKernel = samples(std::move(itauKernel));
+  kernels.kappaKernel = pointSamples(std::move(kappaKernel));
+  kernels.muKernel = pointSamples(std::move(muKernel));
   KernelDerivatives derivatives;
   DerivativeViews(derivatives, C, rhoI, rhoW, times, std::move(dloadDuals),
                   oceanFunctions);
-  derivatives.itauKernel = op.ItauKernelsAtNodes(std::move(dItauKernel));
-  derivatives.kappaKernel = std::move(dKappaKernel);
-  derivatives.muKernel = std::move(dMuKernel);
+  derivatives.itauKernel = samples(std::move(dItauKernel));
+  derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
+  derivatives.muKernel = pointSamples(std::move(dMuKernel));
   return {std::move(kernels), std::move(derivatives)};
 }
 

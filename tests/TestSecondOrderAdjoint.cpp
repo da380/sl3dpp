@@ -23,10 +23,12 @@ namespace {
 /// A kernel object (kernels or their derivatives) paired with a direction
 /// in every argument: the thickness view against the thickness
 /// perturbation at every node, the initial sea level kernel against its
-/// perturbation, the itau kernel against its by the nodal sum.
+/// perturbation, the itau kernel against its and the material kernels
+/// against theirs (at the operator's memory points) by the volume pairing.
 template <class Kernels>
-double Pairing(const Scene& setup, const Kernels& kernels,
-               const TangentPerturbation& d) {
+double Pairing(const Scene& setup, const MemoryPoints& points,
+               const Kernels& kernels, const TangentPerturbation& d) {
+  const auto& mesh = setup.material.Mesh();
   auto total = 0.0;
   for (auto n = std::size_t{0}; n < d.iceThickness.size(); ++n) {
     total += setup.Surface(kernels.thickness[n], d.iceThickness[n]);
@@ -35,16 +37,14 @@ double Pairing(const Scene& setup, const Kernels& kernels,
     total += setup.Surface(kernels.initialSeaLevel, d.initialSeaLevel);
   }
   if (!d.itau.empty()) {
-    for (auto i = std::size_t{0}; i < d.itau[0].size(); ++i) {
-      total += kernels.itauKernel[0][i] * d.itau[0][i];
-    }
+    total += VolumePairing(mesh, kernels.itauKernel[0], d.itau[0]);
   }
   if (!kernels.kappaKernel.empty()) {
-    for (auto i = std::size_t{0}; i < d.material.kappa.size(); ++i) {
-      total += kernels.kappaKernel[i] * d.material.kappa[i];
+    if (!d.material.kappa.empty()) {
+      total += VolumePairing(points, mesh, kernels.kappaKernel, d.material.kappa);
     }
-    for (auto i = std::size_t{0}; i < d.material.mu.size(); ++i) {
-      total += kernels.muKernel[i] * d.material.mu[i];
+    if (!d.material.mu.empty()) {
+      total += VolumePairing(points, mesh, kernels.muKernel, d.material.mu);
     }
   }
   return total;
@@ -236,7 +236,7 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
                           {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     const auto [kernels, derivatives] =
         adjoint.SecondOrderKernels(times, measurements, run, v.itau, trajectory);
-    const auto predicted = Pairing(setup, derivatives, u);
+    const auto predicted = Pairing(setup, op.Points(), derivatives, u);
 
     auto gradientAt = [&](double eps) {
       auto b = branch;
@@ -252,7 +252,7 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
           movedEvolution.Run(times, FrozenLoad(setup, times, moved(eps))));
       AdjointSolver movedAdjoint(
           movedEvolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
-      return Pairing(setup,
+      return Pairing(setup, op.Points(),
                      movedAdjoint.IceHistoryKernels(times, measurements,
                                                     &movedTrajectory),
                      u);
@@ -297,8 +297,8 @@ TEST(SecondOrderAdjoint, HessianIsSymmetricAndAdjointToTheSecondOrderRun) {
         base.times, measurements, runU, u.itau, base.trajectory, base.oceans);
     const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
         base.times, measurements, runW, w.itau, base.trajectory, base.oceans);
-    const auto huW = Pairing(setup, alongU, w);
-    const auto hwU = Pairing(setup, alongW, u);
+    const auto huW = Pairing(setup, op.Points(), alongU, w);
+    const auto hwU = Pairing(setup, op.Points(), alongW, u);
     EXPECT_NEAR(huW, hwU, 1e-9 * std::abs(huW)) << "migrating " << migrating;
 
     const auto second = tangent.RunSecondOrder(
@@ -419,15 +419,12 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         ice += setup.Surface(derivatives.thickness[n], u.iceThickness[n]);
       }
-      auto viscosity = 0.0;
-      for (auto i = std::size_t{0}; i < u.itau[0].size(); ++i) {
-        viscosity += derivatives.itauKernel[0][i] * u.itau[0][i];
-      }
-      auto materialBlock = 0.0;
-      for (auto i = std::size_t{0}; i < u.material.kappa.size(); ++i) {
-        materialBlock += derivatives.kappaKernel[i] * u.material.kappa[i] +
-                         derivatives.muKernel[i] * u.material.mu[i];
-      }
+      const auto viscosity =
+          VolumePairing(mesh, derivatives.itauKernel[0], u.itau[0]);
+      const auto materialBlock =
+          VolumePairing(op.Points(), mesh, derivatives.kappaKernel,
+                        u.material.kappa) +
+          VolumePairing(op.Points(), mesh, derivatives.muKernel, u.material.mu);
       results[method] = {ice, viscosity, materialBlock,
                          Objective(setup, second, measurement)};
     }
@@ -590,8 +587,8 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     EXPECT_GT(MaxAbs(alongU.kappaKernel), 0.0);
     EXPECT_GT(MaxAbs(alongU.muKernel), 0.0);
 
-    const auto huW = Pairing(setup, alongU, w);
-    const auto hwU = Pairing(setup, alongW, u);
+    const auto huW = Pairing(setup, op.Points(), alongU, w);
+    const auto hwU = Pairing(setup, op.Points(), alongW, u);
     EXPECT_NEAR(huW, hwU, 1e-9 * std::abs(huW))
         << "scheme " << static_cast<int>(scheme) << " rotation "
         << static_cast<int>(rotation);
@@ -618,13 +615,13 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
       AdjointSolver movedAdjoint(movedEvolution, {.method = AdjointMethod::Discrete,
                                                   .rtol = 1e-12,
                                                   .material_kernels = true});
-      return Pairing(setup,
+      return Pairing(setup, op.Points(),
                      movedAdjoint.IceHistoryKernels(times, measurements,
                                                     &movedTrajectory),
                      u);
     };
     // The derivatives along w paired with u.
-    const auto predicted = Pairing(setup, alongW, u);
+    const auto predicted = Pairing(setup, op.Points(), alongW, u);
     auto fd = std::map<double, double>{};
     for (double eps : {0.1, 0.05}) {
       fd[eps] = (gradientAt(eps) - gradientAt(-eps)) / (2.0 * eps);

@@ -172,11 +172,11 @@ class ElasticPerturbation3D {
   [[nodiscard]] static double Pair(const Solutions& x, const Forces& spheroidal,
                                    const Forces& toroidal);
 
-  /// The static material kernels of a pair of solutions: dJ/d kappa(x),
-  /// dJ/d mu(x) over the grid values as angular densities per node (the
-  /// radial weight folded in, the itauKernel3D layout) for J = <y, K x>
-  /// — the transpose of Force: sum_node int (kappa dKappa + mu dMu)
-  /// dOmega = Pair(y, Force(x, dMu, dKappa)). With y the response to a
+  /// The static material kernels of a pair of solutions: the kernels in
+  /// kappa(x) and mu(x) for J = <y, K x>, densities per unit volume over
+  /// the grid values (the Kernels3D layout and convention) — the
+  /// transpose of Force: VolumePairing(kappa, dKappa) + VolumePairing(mu,
+  /// dMu) = Pair(y, Force(x, dMu, dKappa)). With y the response to a
   /// measurement's dual (SolveSurfaceDual), the kernels of that
   /// measurement of the static problem.
   struct Kernels {

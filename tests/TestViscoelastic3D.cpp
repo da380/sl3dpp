@@ -17,6 +17,7 @@
 #include <filesystem>
 #include <limits>
 #include <map>
+#include <numbers>
 #include <thread>
 #include <utility>
 #include <vector>
@@ -194,11 +195,12 @@ TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   }
 }
 
-TEST(Lateral, KernelDensitiesUndoTheRadialQuadrature) {
-  // VolumeDensity and RadialDensity of a Kernels3D-layout field: the
-  // per-volume values times each node's radial weight and r^2 give the
-  // field back, and the radial density times the weight is the angular
-  // integral, so an angle-uniform delta pairs as sum w k delta.
+TEST(Lateral, KernelPairingsCarryTheVolumeWeights) {
+  // A Kernels3D-layout field is a density per unit volume: VolumePairing
+  // restores each node's radial weight and r^2 to the angular integral,
+  // and SphericalMean is the angular integral over 4 pi, so an
+  // angle-uniform delta pairs as sum 4 pi w r^2 k delta
+  // (VolumePairingOfMeans) — the same as the field's own pairing.
   const auto body = Body::Make();
   Viscoelastic3D op(body.rheology, kLmax,
                     [](double, double, double) { return 0.0; });
@@ -207,21 +209,43 @@ TEST(Lateral, KernelDensitiesUndoTheRadialQuadrature) {
   auto kernel = std::vector<double>(
       static_cast<std::size_t>(coupling.NodeCount()) * fieldSize);
   for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] = Noise(i);
-  const auto volume = VolumeDensity(coupling, kernel);
-  const auto radial = RadialDensity(coupling, kernel);
-  ASSERT_EQ(radial.size(), static_cast<std::size_t>(coupling.NodeCount()));
+  auto direction = std::vector<double>(kernel.size());
+  for (auto i = std::size_t{0}; i < direction.size(); ++i) {
+    direction[i] = Noise(i + kernel.size());
+  }
+  const auto mean = SphericalMean(coupling, kernel);
+  ASSERT_EQ(mean.size(), static_cast<std::size_t>(coupling.NodeCount()));
+  auto expected = 0.0, magnitude = 0.0;
+  auto uniform = std::vector<double>(kernel.size());
+  auto perNode = std::vector<double>(mean.size());
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto r = coupling.RadiusOfNode(node);
     const auto w = coupling.WeightOfNode(node);
     const auto at = static_cast<std::size_t>(node) * fieldSize;
+    auto product = std::vector<double>(fieldSize);
+    auto size = std::vector<double>(fieldSize);
     for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-      EXPECT_NEAR(volume[at + x] * w * r * r, kernel[at + x], 1e-13);
+      product[x] = kernel[at + x] * direction[at + x];
+      size[x] = std::abs(kernel[at + x]) * (std::abs(direction[at + x]) + 1.0);
     }
+    expected += w * r * r * coupling.Grid().Integrate(product);
+    magnitude += w * r * r * coupling.Grid().Integrate(size);
     const auto slice = std::span(kernel).subspan(at, fieldSize);
-    EXPECT_NEAR(radial[node] * w, coupling.Grid().Integrate(slice), 1e-13);
+    EXPECT_NEAR(mean[node] * 4.0 * std::numbers::pi,
+                coupling.Grid().Integrate(slice), 1e-13);
+    perNode[node] = 0.5 + 0.1 * node;
+    for (auto x = std::size_t{0}; x < fieldSize; ++x) {
+      uniform[at + x] = perNode[node];
+    }
   }
-  EXPECT_THROW(static_cast<void>(VolumeDensity(
-                   coupling, std::span(kernel).first(kernel.size() - 1))),
+  const auto paired = VolumePairing(coupling, kernel, direction);
+  EXPECT_NEAR(paired, expected, 1e-13 * magnitude);
+  const auto ofMeans = VolumePairingOfMeans(coupling, mean, perNode);
+  EXPECT_NEAR(ofMeans, VolumePairing(coupling, kernel, uniform),
+              1e-13 * magnitude);
+  EXPECT_THROW(static_cast<void>(VolumePairing(
+                   coupling, std::span(kernel).first(kernel.size() - 1),
+                   direction)),
                std::invalid_argument);
 }
 

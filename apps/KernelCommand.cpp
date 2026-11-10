@@ -554,15 +554,15 @@ std::string RunKernel1D(const std::filesystem::path& config) {
           const std::filesystem::path& stem, const Built& built) {
         const auto kernels =
             adjoint.IceHistoryKernels(times, measurements, &trajectory, oceans);
-        // the radial viscosity kernels as densities in radius, SI:
-        // dJ = int K(r) d eta(r) dr per branch
-        auto eta = kernels.Viscosity(*rheology);
-        for (auto& branch : eta) branch = RadialDensity(mesh, branch);
+        // the radial viscosity kernels, densities per unit volume, SI:
+        // dJ = int K d eta dV = 4 pi int K(r) d eta(r) r^2 dr per branch
+        const auto eta = kernels.Viscosity(*rheology);
         const auto etaSi = matScales.Factor(ViscosityDimensions);
         const auto rSi = matScales.Length();
         auto out = std::ofstream(stem.string() + "_viscosity_kernel.txt");
         out << std::format("# sl3d kernel1d (sl3dpp {})\n", Version())
-            << "# dJ = int K(r) d eta(r) dr, SI (J in its SI unit)\n"
+            << "# K per unit volume: dJ = int K d eta dV = 4 pi int K(r) d eta(r) "
+               "r^2 dr, SI (J in its SI unit)\n"
             << "# r_m";
         for (auto b = std::size_t{0}; b < eta.size(); ++b) {
           out << std::format(" K_branch_{}", b);
@@ -574,7 +574,8 @@ std::string RunKernel1D(const std::filesystem::path& config) {
             out << std::format("{:.17g}", mesh.Radius(e, q) * rSi);
             for (auto b = std::size_t{0}; b < eta.size(); ++b) {
               out << std::format(" {:.17g}",
-                                 built.factor * eta[b][i] / (etaSi * rSi));
+                                 built.factor * eta[b][i] /
+                                     (etaSi * rSi * rSi * rSi));
             }
             out << '\n';
           }

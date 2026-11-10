@@ -144,7 +144,6 @@ int main(int argc, char** argv) {
 
   const auto& mesh = earth.material.Mesh();
   const auto& matScales = earth.material.ModelScales();
-  const auto w = mesh.Weights();
   for (auto method : {AdjointMethod::Continuous, AdjointMethod::Discrete}) {
     const auto continuous = method == AdjointMethod::Continuous;
     const std::string tag = continuous ? "continuous" : "discrete";
@@ -189,20 +188,21 @@ int main(int argc, char** argv) {
       }
     }
 
-    // The radial viscosity kernel as a density in radius: divide the
-    // nodal values by their quadrature weight w jac, convert eta and
-    // radius to SI. dJ = int K(r) d eta(r) dr.
+    // The radial viscosity kernel as a density in radius: the kernel is
+    // a density per unit volume, so the shell's 4 pi r^2 times it, with
+    // eta and radius in SI. dJ = int K(r) d eta(r) dr.
     const auto eta = kernels.Viscosity(earth.rheology);
     const auto etaSi = matScales.Factor(ViscosityDimensions);
     const auto rSi = matScales.Length();
     auto rows = std::vector<std::vector<double>>{};
     for (auto e = 0; e < mesh.ElementCount(); ++e) {
-      const auto jac = mesh.Jacobian(e);
       for (auto q = 0; q < mesh.NGll(); ++q) {
         const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
         if (earth.rheology.BranchAt(0).itau[i] <= 0.0) continue;
-        rows.push_back({mesh.Radius(e, q) * rSi / 1.0e3,  // km
-                        eta[0][i] / (w[q] * jac) / (etaSi * rSi)});
+        const auto r = mesh.Radius(e, q);
+        rows.push_back({r * rSi / 1.0e3,  // km
+                        4.0 * std::numbers::pi * r * r * eta[0][i] /
+                            (etaSi * rSi)});
       }
     }
     out.Series("viscosity_kernel_" + tag, {"r_km", "dJ_deta"}, rows);

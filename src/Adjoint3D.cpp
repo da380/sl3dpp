@@ -1421,6 +1421,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           std::span(out.muKernel3D).subspan(at, size));
     }
   }
+  // as densities per unit volume (the reductions as means over the sphere)
+  detail::KernelsToFields(coupling, out);
+  detail::KernelsToFields(coupling, derivatives);
   return {std::move(out), std::move(derivatives)};
 }
 
@@ -1438,32 +1441,73 @@ void CheckKernelLayout(const GridCoupling& coupling,
 
 }  // namespace
 
-std::vector<double> VolumeDensity(const GridCoupling& coupling,
-                                  std::span<const double> kernel) {
+namespace detail {
+
+void ToVolumeDensity(const GridCoupling& coupling, std::vector<double>& kernel) {
+  if (kernel.empty()) return;
   CheckKernelLayout(coupling, kernel);
-  auto out = std::vector<double>(kernel.begin(), kernel.end());
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto r = coupling.RadiusOfNode(node);
     const auto scale = 1.0 / (coupling.WeightOfNode(node) * r * r);
     const auto at = coupling.FieldOffset(node);
     for (auto x = at; x < at + coupling.FieldSizeOf(node); ++x) {
-      out[x] *= scale;
+      kernel[x] *= scale;
     }
   }
-  return out;
 }
 
-std::vector<double> RadialDensity(const GridCoupling& coupling,
+}  // namespace detail
+
+double VolumePairing(const GridCoupling& coupling, std::span<const double> kernel,
+                     std::span<const double> direction) {
+  CheckKernelLayout(coupling, kernel);
+  CheckKernelLayout(coupling, direction);
+  auto total = 0.0;
+  auto product = std::vector<double>{};
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto at = coupling.FieldOffset(node);
+    const auto size = coupling.FieldSizeOf(node);
+    product.resize(size);
+    for (auto x = std::size_t{0}; x < size; ++x) {
+      product[x] = kernel[at + x] * direction[at + x];
+    }
+    const auto r = coupling.RadiusOfNode(node);
+    total += coupling.WeightOfNode(node) * r * r *
+             coupling.GridOf(node).Integrate(product);
+  }
+  return total;
+}
+
+std::vector<double> SphericalMean(const GridCoupling& coupling,
                                   std::span<const double> kernel) {
+  constexpr auto kFourPi = 4.0 * 3.14159265358979323846;
   CheckKernelLayout(coupling, kernel);
   auto out = std::vector<double>{};
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto slice =
         kernel.subspan(coupling.FieldOffset(node), coupling.FieldSizeOf(node));
-    out.push_back(coupling.GridOf(node).Integrate(slice) /
-                  coupling.WeightOfNode(node));
+    out.push_back(coupling.GridOf(node).Integrate(slice) / kFourPi);
   }
   return out;
+}
+
+double VolumePairingOfMeans(const GridCoupling& coupling,
+                            std::span<const double> kernel,
+                            std::span<const double> direction) {
+  constexpr auto kFourPi = 4.0 * 3.14159265358979323846;
+  const auto nodes = static_cast<std::size_t>(coupling.NodeCount());
+  if (kernel.size() != nodes || direction.size() != nodes) {
+    throw std::invalid_argument(std::format(
+        "per-node arrays of {} and {} values; the coupling has {} nodes",
+        kernel.size(), direction.size(), nodes));
+  }
+  auto total = 0.0;
+  for (auto node = 0; node < coupling.NodeCount(); ++node) {
+    const auto r = coupling.RadiusOfNode(node);
+    total += kFourPi * coupling.WeightOfNode(node) * r * r * kernel[node] *
+             direction[node];
+  }
+  return total;
 }
 
 }  // namespace sl3dpp

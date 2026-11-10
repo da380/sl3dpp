@@ -132,10 +132,12 @@ struct LoveNumberOptions {
 /// The sensitivity kernels of the Love numbers in the bulk and shear
 /// moduli: for every channel of LoveNumbers (the load's force and
 /// potential pieces, the tangential load, the tide) and every degree,
-/// the nodal arrays dh_l/d kappa(r), dh_l/d mu(r) and so on over the
-/// material's full mesh — the number's SI units per unit modulus in the
-/// material's units, pairing with a MaterialDirection by the plain nodal
-/// sum to ComputeLoveNumberDerivatives' entry. The adjoint of the static
+/// the kernels of h_l, l_l and k_l in kappa(r) and mu(r) at the nodes of
+/// the material's full mesh, densities per unit volume (docs/adjoints.md,
+/// "The kernels' convention") — the number's SI units per unit modulus
+/// and volume in the material's units, pairing with a MaterialDirection
+/// as VolumePairing(mesh, kernel, direction) to
+/// ComputeLoveNumberDerivatives' entry. The adjoint of the static
 /// elastic problem: per degree the forcings' solutions x and the unit
 /// surface duals' solutions y, paired through
 /// DegreeOperator::MaterialGradient, so dh = -<y_U, (dK) x>. The degree-0

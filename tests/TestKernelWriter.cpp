@@ -8,8 +8,8 @@
  * file stores a shared element-edge radius once per side, so piecewise
  * fields pass as they are; deterministic noise is the hardest case for
  * any smoothing. A plain Value() read resolves a shared radius to the
- * element above, which the round trip accounts for. The pairing
- * dJ = sum_node int K p dOmega computed from the file's content then
+ * element above, which the round trip accounts for. The volume pairing
+ * dJ = int K p dV computed from the file's content then
  * matches the in-memory pairing to rounding; that in-memory pairing is
  * the directional derivative by TestAdjoint3D's Taylor test. Both memory
  * point sets are written, the Gauss default and GLL.
@@ -31,6 +31,7 @@
 #include <string>
 #include <vector>
 
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Material.hpp"
@@ -198,10 +199,7 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
           const auto wrote =
               values[static_cast<std::size_t>(expected) * fieldSize + x];
           const auto scaled =
-              field.Value(r * length, theta, phi) *
-              coupling.WeightOfNode(expected) *
-              coupling.RadiusOfNode(expected) *
-              coupling.RadiusOfNode(expected) * length * length * length;
+              field.Value(r * length, theta, phi) * length * length * length;
           worst = std::max(worst, std::abs(scaled - wrote));
           scale = std::max(scale, std::abs(wrote));
           ++x;
@@ -216,17 +214,12 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
     // data's integrity is the round trip above (a side-aware quadrature
     // pairs it the same way).
     const auto p = grid.FromFunction(Direction);
-    auto inMemory = 0.0;
-    auto product = std::vector<double>(fieldSize);
+    auto atNodes = std::vector<double>(values.size());
     for (auto node = 0; node < coupling.NodeCount(); ++node) {
-      const auto row =
-          std::span(values).subspan(static_cast<std::size_t>(node) * fieldSize,
-                                    fieldSize);
-      for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        product[x] = row[x] * p[x];
-      }
-      inMemory += grid.Integrate(product);
+      std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                  coupling.FieldOffset(node)));
     }
+    const auto inMemory = VolumePairing(coupling, values, atNodes);
     if (set == MemoryPointSet::Gauss) {
       const auto fromFile = FilePairing(file, "log_viscosity_kernel",
                                         coupling, mesh, length, p);
@@ -278,10 +271,10 @@ TEST(KernelWriter, ASmoothKernelForThePythonWhenAsked) {
   const auto fieldSize = grid.FieldSize();
 
   // A two-signed pattern with a peak beside a "receiver",
-  // write_kernel.cpp's shape, as the angular density K = w r^2 F of a
-  // volume density F whose radial profile is quadratic, so the pairing
-  // survives the file to rounding and the Python's own quadrature
-  // recovers it exactly (scripts/check_kernel_file.py).
+  // write_kernel.cpp's shape, as a volume density whose radial profile is
+  // quadratic, so the pairing survives the file to rounding and the
+  // Python's own quadrature recovers it exactly
+  // (scripts/check_kernel_file.py).
   const auto smooth = [](double r, double theta, double phi) {
     const auto delta = std::acos(
         std::clamp(std::cos(theta) * 0.5 +
@@ -294,27 +287,21 @@ TEST(KernelWriter, ASmoothKernelForThePythonWhenAsked) {
   };
   auto values = std::vector<double>(
       static_cast<std::size_t>(coupling.NodeCount()) * fieldSize);
+  auto atNodes = std::vector<double>(values.size());
+  const auto p = grid.FromFunction(Direction);
   for (auto node = 0; node < coupling.NodeCount(); ++node) {
     const auto r = coupling.RadiusOfNode(node);
-    const auto w = coupling.WeightOfNode(node) * r * r;
     auto x = std::size_t{0};
     for (const auto theta : grid.CoLatitudes()) {
       for (const auto phi : grid.Longitudes()) {
         values[static_cast<std::size_t>(node) * fieldSize + x++] =
-            w * smooth(r, theta, phi);
+            smooth(r, theta, phi);
       }
     }
+    std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                coupling.FieldOffset(node)));
   }
-  const auto p = grid.FromFunction(Direction);
-  auto pairing = 0.0;
-  auto product = std::vector<double>(fieldSize);
-  for (auto node = 0; node < coupling.NodeCount(); ++node) {
-    for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-      product[x] =
-          values[static_cast<std::size_t>(node) * fieldSize + x] * p[x];
-    }
-    pairing += grid.Integrate(product);
-  }
+  const auto pairing = VolumePairing(coupling, values, atNodes);
   const auto written = WriteKernels(
       std::filesystem::path(given), op, body.model,
       {{.name = "log_viscosity_kernel",

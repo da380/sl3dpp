@@ -381,17 +381,8 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
   // kernel paired with p, at the commute level.
   AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
   const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
-  const auto& coupling = op.Coupling();
-  auto paired = 0.0;
-  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-    const auto at = coupling.FieldOffset(rn);
-    const auto size = coupling.FieldSizeOf(rn);
-    auto product = std::vector<double>(size);
-    for (auto x = std::size_t{0}; x < size; ++x) {
-      product[x] = kernels.logViscosityKernel3D[0][at + x] * d.logViscosity[at + x];
-    }
-    paired += coupling.GridOf(rn).Integrate(product);
-  }
+  const auto paired =
+      VolumePairing(op.Coupling(), kernels.logViscosityKernel3D[0], d.logViscosity);
   const auto continuous = predicted[AdjointMethod::Continuous];
   EXPECT_LT(std::abs(paired - continuous), 0.1 * std::abs(continuous))
       << paired << " " << continuous << " discrete " << exact;

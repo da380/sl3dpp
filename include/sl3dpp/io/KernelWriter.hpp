@@ -9,13 +9,10 @@
  * the Python to read back, draw (planetmodel's cutaways and sections)
  * and integrate.
  *
- * A kernel arrives as Kernels3D holds it: an angular density on the
- * coupling's grid at each radial memory node, the radial quadrature
- * folded in (dJ = sum_node int K delta dOmega). The file stores it per
- * unit volume — each node's values divided by the node's radial weight
- * (GridCoupling::WeightOfNode) and by r^2 — in SI, so that
- * dJ = int K delta dV under the file's own scales, the convention of
- * planetmodel's write_kernel example. The field states the objective's
+ * A kernel arrives as Kernels3D holds it: its density per unit volume
+ * on the coupling's grid at each radial memory node. The file stores it
+ * in SI, so that dJ = int K delta dV under the file's own scales, the
+ * convention of planetmodel's write_kernel example. The field states the objective's
  * dimensions less three powers of length, and a meaning of the caller's:
  * the library ships no kernel names.
  *
@@ -59,8 +56,8 @@ struct KernelField {
   std::string meaning;
   Dimensions objective = {};
   /// The Kernels3D layout, [FieldOffset(node) + x] (each node on its
-  /// block's grid, carried to the lmax grid for the file),
-  /// non-dimensional under the model's scales.
+  /// block's grid, carried to the lmax grid for the file): the kernel's
+  /// density per unit volume, non-dimensional under the model's scales.
   std::span<const double> values;
 };
 
@@ -73,18 +70,14 @@ struct KernelFileOptions {
 
 /// Any scalar field over the memory nodes to write: a value per grid
 /// point of every node in the Kernels3D layout, non-dimensional under
-/// the model's scales, written in SI with the dimensions given. With
-/// per_volume the values are an angular density with the radial
-/// quadrature folded in (a kernel's), and the file stores them per unit
-/// volume (divided by the node's radial weight and r^2, the dimensions
-/// then stated less three powers of length); otherwise they are
-/// pointwise values written as they are.
+/// the model's scales, written in SI with the dimensions given:
+/// pointwise values, written as they are (a kernel's are its density
+/// per unit volume, as the library holds it).
 struct NodeField {
   std::string name;
   std::string meaning;
   Dimensions dimensions = {};
   std::span<const double> values;
-  bool per_volume = false;
 };
 
 /// A function of (r, theta, phi), r non-dimensional, sampled at every

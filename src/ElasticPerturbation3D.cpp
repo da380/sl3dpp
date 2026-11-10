@@ -536,12 +536,11 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
     const auto base = coupling.FieldOffset(rn);
     const auto size = coupling.FieldSizeOf(rn);
     const auto rr = coupling.RadiusOfNode(rn);
-    const auto wq = coupling.WeightOfNode(rn);
     for (auto xg = std::size_t{0}; xg < size; ++xg) {
       const auto i = base + xg;
-      out.kappa[i] = wq * Dy[i] * Dx[i];
-      out.mu[i] = wq * rr * rr *
-                  (12.0 * ey.r[i] * ex.r[i] +
+      // per unit volume: the node's weight w r^2 divided out
+      out.kappa[i] = Dy[i] * Dx[i] / (rr * rr);
+      out.mu[i] = (12.0 * ey.r[i] * ex.r[i] +
                    8.0 * (ey.c[1][i] * std::conj(ex.c[1][i])).real() +
                    4.0 * (ey.c[0][i] * std::conj(ex.c[0][i])).real());
     }

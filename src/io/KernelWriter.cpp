@@ -130,8 +130,7 @@ std::expected<void, IoError> WriteKernels(
                       .dimensions = Dimensions{.mass = kernel.objective.mass,
                                                .length = kernel.objective.length - 3,
                                                .time = kernel.objective.time},
-                      .values = kernel.values,
-                      .per_volume = true});
+                      .values = kernel.values});
   }
   return WriteNodeFields(path, coupling, mesh, model, fields, options);
 }
@@ -237,15 +236,8 @@ std::expected<void, IoError> WriteNodeFields(
       // is how the format holds a piecewise field — then the poles,
       // which the grid lacks, each the nearest ring's mean. Each value
       // is the SI value: the element's own polynomial through its memory
-      // points of the pointwise value, or of the angular density over
-      // the radial weight and r^2 for a kernel, re-dimensionalised.
-      const auto factor =
-          kernel.per_volume
-              ? scales.Factor(Dimensions{.mass = kernel.dimensions.mass,
-                                         .length = kernel.dimensions.length + 3,
-                                         .time = kernel.dimensions.time}) /
-                    (length * length * length)
-              : scales.Factor(kernel.dimensions);
+      // points of the pointwise value, re-dimensionalised.
+      const auto factor = scales.Factor(kernel.dimensions);
       // every node on the lmax grid (a deeper block's carried there)
       const auto values = coupling.OnSurfaceGrid(kernel.values);
       const auto nphi = grid.Longitudes().size();
@@ -282,11 +274,7 @@ std::expected<void, IoError> WriteNodeFields(
             const auto base =
                 run.firstNode + (e - run.firstElement) * np;
             for (auto p = 0; p < np; ++p) {
-              const auto r = coupling.RadiusOfNode(base + p);
-              const auto scale =
-                  kernel.per_volume
-                      ? factor / (coupling.WeightOfNode(base + p) * r * r)
-                      : factor;
+              const auto scale = factor;
               const auto at = std::span(values).subspan(
                   static_cast<std::size_t>(base + p) * fieldSize, fieldSize);
               for (auto x = std::size_t{0}; x < fieldSize; ++x) {

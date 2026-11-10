@@ -154,22 +154,14 @@ std::vector<double> OnCoupling(const GridCoupling& coupling,
   return out;
 }
 
-/// The grid pairing of a 3D kernel with an itau direction: the angular
-/// integral per memory node, summed.
+/// The volume pairing of a 3D kernel with an itau direction, per branch,
+/// summed.
 double GridPairing(const GridCoupling& coupling,
                    const std::vector<std::vector<double>>& kernel,
                    const std::vector<std::vector<double>>& direction) {
   auto total = 0.0;
   for (auto k = std::size_t{0}; k < kernel.size(); ++k) {
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto x = std::size_t{0}; x < size; ++x) {
-        product[x] = kernel[k][at + x] * direction[k][at + x];
-      }
-      total += coupling.GridOf(rn).Integrate(product);
-    }
+    total += VolumePairing(coupling, kernel[k], direction[k]);
   }
   return total;
 }
@@ -211,21 +203,6 @@ double MaxDiff(std::span<const double> a, std::span<const double> b) {
     out = std::max(out, std::abs(a[i] - b[i]));
   }
   return out;
-}
-
-double FieldPairing(const GridCoupling& coupling, std::span<const double> kernel,
-                    std::span<const double> direction) {
-  auto total = 0.0;
-  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-    const auto at = coupling.FieldOffset(rn);
-    const auto size = coupling.FieldSizeOf(rn);
-    auto product = std::vector<double>(size);
-    for (auto x = std::size_t{0}; x < size; ++x) {
-      product[x] = kernel[at + x] * direction[at + x];
-    }
-    total += coupling.GridOf(rn).Integrate(product);
-  }
-  return total;
 }
 
 /// A radial profile times an angular function over the grid values, in
@@ -311,10 +288,10 @@ double Pairing(const Scene& scene, const GridCoupling& coupling,
   }
   total += GridPairing(coupling, itau3D, d.itau);
   if (!d.material.kappa.empty() && !kappa3D.empty()) {
-    total += FieldPairing(coupling, kappa3D, d.material.kappa);
+    total += VolumePairing(coupling, kappa3D, d.material.kappa);
   }
   if (!d.material.mu.empty() && !mu3D.empty()) {
-    total += FieldPairing(coupling, mu3D, d.material.mu);
+    total += VolumePairing(coupling, mu3D, d.material.mu);
   }
   return total;
 }
@@ -1040,8 +1017,8 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
         ice += scene.Surface(alongU.ice.thickness[n], w.tangent.iceThickness[n]);
       }
       const auto viscosity = GridPairing(coupling, alongU.itauKernel3D, w.itau);
-      const auto material = FieldPairing(coupling, alongU.kappaKernel3D, w.material.kappa) +
-                            FieldPairing(coupling, alongU.muKernel3D, w.material.mu);
+      const auto material = VolumePairing(coupling, alongU.kappaKernel3D, w.material.kappa) +
+                            VolumePairing(coupling, alongU.muKernel3D, w.material.mu);
       const auto uvTerm = GridPairing(coupling, kernels.itauKernel3D, uw.itauUV);
       const auto forward =
           scene.Surface(g, second.back().seaLevelChange) - uvTerm;
@@ -1348,8 +1325,8 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
         ice += scene.Surface(alongU.ice.thickness[n], w.tangent.iceThickness[n]);
       }
       const auto viscosity = GridPairing(coupling, alongU.itauKernel3D, w.itau);
-      const auto material = FieldPairing(coupling, alongU.kappaKernel3D, w.material.kappa) +
-                            FieldPairing(coupling, alongU.muKernel3D, w.material.mu);
+      const auto material = VolumePairing(coupling, alongU.kappaKernel3D, w.material.kappa) +
+                            VolumePairing(coupling, alongU.muKernel3D, w.material.mu);
       const auto uvTerm = GridPairing(coupling, kernels.itauKernel3D, uw.itauUV);
       const auto forward =
           scene.Surface(g, second.back().seaLevelChange) - uvTerm;

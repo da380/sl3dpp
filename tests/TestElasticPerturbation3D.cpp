@@ -21,6 +21,7 @@
 #include <random>
 #include <vector>
 
+#include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/EarthModel.hpp"
@@ -285,15 +286,7 @@ TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
       });
   const auto kernels = born.StaticKernels(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> d) {
-    auto total = 0.0;
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernel[at + i] * d[at + i];
-      total += coupling.GridOf(rn).Integrate(product);
-    }
-    return total;
+    return VolumePairing(coupling, kernel, d);
   };
   const auto [sMu, tMu] = born.Force(x, dMu, {});
   const auto [sKappa, tKappa] = born.Force(x, {}, dKappa);
@@ -648,15 +641,7 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   EXPECT_TRUE(infoY.converged);
   const auto kernels = born.StaticKernels(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> v) {
-    auto total = 0.0;
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto i = std::size_t{0}; i < size; ++i) product[i] = kernel[at + i] * v[at + i];
-      total += coupling.GridOf(rn).Integrate(product);
-    }
-    return total;
+    return VolumePairing(coupling, kernel, v);
   };
   const auto predicted = -(pairing(kernels.mu, vMu) + pairing(kernels.kappa, vKappa));
   const auto eps = 1e-3;

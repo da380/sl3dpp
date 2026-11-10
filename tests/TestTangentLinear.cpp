@@ -179,9 +179,7 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       rhs += setup.Surface(kernels.loadDuals[n], deltas[n]);
     }
-    for (auto i = std::size_t{0}; i < ditau[0].size(); ++i) {
-      rhs += kernels.itauKernel[0][i] * ditau[0][i];
-    }
+    rhs += VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
 
     TangentLinearSolver tangent(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});

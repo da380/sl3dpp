@@ -10,6 +10,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/DegreeOperator.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 
 namespace sl3dpp {
@@ -330,12 +331,13 @@ LoveNumberKernels ComputeLoveNumberKernels(const Material& material, int lmax,
         const auto yc = std::span(y).subspan(static_cast<std::size_t>(c) * n,
                                              static_cast<std::size_t>(n));
         auto [gk, gm] = op.MaterialGradient(yc, xc, 1);
-        auto& kappa = (*kappas[c])[l];
-        auto& mu = (*mus[c])[l];
         for (auto i = std::size_t{0}; i < size; ++i) {
-          kappa[i] = -factors[c] * gk[i];
-          mu[i] = -factors[c] * gm[i];
+          gk[i] *= -factors[c];
+          gm[i] *= -factors[c];
         }
+        // as densities per unit volume
+        (*kappas[c])[l] = detail::KernelSamples(material.Mesh(), std::move(gk));
+        (*mus[c])[l] = detail::KernelSamples(material.Mesh(), std::move(gm));
       }
     }
   });

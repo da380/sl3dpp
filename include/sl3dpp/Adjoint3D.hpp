@@ -88,15 +88,16 @@ struct ForwardTrajectory3D {
  * @brief The 3D kernels. `ice` carries the ice-history views exactly as
  * the 1D IceKernels does.
  *
- * `itauKernel3D[k][FieldOffset(node) + x]` is dJ / d itau(x) for branch
- * k as an ANGULAR DENSITY on each radial memory node's own (oversampled)
- * grid (GridCoupling::GridOf; node * FieldSize + x on the one lmax grid
- * unless the transforms are cut with depth): dJ = sum_node int K
- * delta-itau dOmega, the radial quadrature folded in as in the 1D nodal
- * pairing; itau in material units. `itauKernelSpherical[k][node]` is its
- * angular integral — it pairs with angle-uniform perturbations exactly
- * as the 1D AdjointSolver's nodal kernel does at that (element, gll)
- * node, which is the zero-lateral bridge between the two. With the
+ * Every kernel is a density per unit volume (docs/adjoints.md, "The
+ * kernels' convention"). `itauKernel3D[k][FieldOffset(node) + x]` is the
+ * kernel in itau(x) for branch k sampled on each radial memory node's
+ * own (oversampled) grid (GridCoupling::GridOf; node * FieldSize + x on
+ * the one lmax grid unless the transforms are cut with depth): dJ = int
+ * K delta-itau dV = VolumePairing(coupling, K, delta-itau); itau in
+ * material units. `itauKernelSpherical[k][node]` is its mean over the
+ * sphere — the kernel of an angle-uniform perturbation, and for a model
+ * without lateral structure the 1D AdjointSolver's kernel at that point,
+ * which is the zero-lateral bridge between the two. With the
  * memory nodes at Gauss points the kernels live at the points (the itau
  * the step samples); laid out over the mesh's points, the reference's
  * ItauKernelsAtNodes carries the spherical reduction to the nodal itau
@@ -113,12 +114,11 @@ struct Kernels3D {
   std::vector<std::vector<double>> itauKernel3D;
   std::vector<std::vector<double>> itauKernelSpherical;
   std::vector<std::vector<double>> logViscosityKernel3D;
-  /// dJ / d kappa(x) and dJ / d mu(x) in the itauKernel3D layout (an
-  /// angular density per memory node, the radial quadrature folded in),
-  /// material units — the transpose of TangentPerturbation3D::material
-  /// (docs/adjoints.md) — and their angular integrals per node,
-  /// which pair with angle-uniform directions as the 1D kappaKernel and
-  /// muKernel do at that node. Empty unless Options::material_kernels
+  /// The kernels in kappa(x) and mu(x) in the itauKernel3D layout and
+  /// convention (per unit volume), material units — the transpose of
+  /// TangentPerturbation3D::material (docs/adjoints.md) — and their
+  /// means over the sphere per node, which are the 1D kappaKernel and
+  /// muKernel at that point for a model without lateral structure. Empty unless Options::material_kernels
   /// (with a trajectory; Discrete exact, Continuous at the commute level).
   std::vector<double> kappaKernel3D;
   std::vector<double> muKernel3D;
@@ -126,24 +126,38 @@ struct Kernels3D {
   std::vector<double> muKernelSpherical;
 };
 
-/// A kernel of the Kernels3D layout ([FieldOffset(node) + x], an angular
-/// density with each memory node's radial quadrature weight folded in) as
-/// a density per unit volume: each node's values divided by its radial
-/// weight (GridCoupling::WeightOfNode) and r^2, so that dJ = int K delta dV
-/// over the memory nodes' shells. Non-dimensional in the material's scheme
-/// like the kernel; Factor(objective) / Length^3 makes it SI. What
-/// io::WriteKernels stores, before it carries the values to the file's
-/// nodes.
-[[nodiscard]] std::vector<double> VolumeDensity(const GridCoupling& coupling,
+/// The volume pairing of a 3D kernel with a perturbation, both in the
+/// Kernels3D layout ([FieldOffset(node) + x]). A 3D kernel is a density
+/// per unit volume (docs/adjoints.md, "The kernels' convention"): its
+/// array holds samples K(x) at the grid points of the memory nodes, and
+///   dJ = int K delta dV ~ sum_node w_node r_node^2 int K delta dOmega,
+/// w the node's radial weight (GridCoupling::WeightOfNode) and the
+/// angular integral the node's grid's. Distributed, this rank's nodes'
+/// part: the ranks' sum is the pairing.
+[[nodiscard]] double VolumePairing(const GridCoupling& coupling,
+                                   std::span<const double> kernel,
+                                   std::span<const double> direction);
+
+/// The mean over the sphere of a 3D kernel at each memory node: the
+/// kernel of a spherically symmetric perturbation, which is what the 1D
+/// sweep gives at that point for a model without lateral structure.
+[[nodiscard]] std::vector<double> SphericalMean(const GridCoupling& coupling,
                                                 std::span<const double> kernel);
 
-/// A kernel of the Kernels3D layout as a density in radius, one value per
-/// memory node: the angular integral over the node's radial weight, so
-/// that an angle-uniform perturbation pairs as dJ = int k(r) delta(r) dr
-/// (the pairing the 1D nodal kernels make). Material scheme; per unit
-/// length, so Factor(objective) / Length makes it SI.
-[[nodiscard]] std::vector<double> RadialDensity(const GridCoupling& coupling,
-                                                std::span<const double> kernel);
+/// The volume pairing of per-node values (a SphericalMean, or a 1D
+/// kernel sampled at the coupling's nodes) with a spherically symmetric
+/// perturbation given per node: sum_node 4 pi w_node r_node^2 K delta.
+[[nodiscard]] double VolumePairingOfMeans(const GridCoupling& coupling,
+                                          std::span<const double> kernel,
+                                          std::span<const double> direction);
+
+namespace detail {
+/// A kernel accumulated as an angular density with each node's radial
+/// weight folded in (what the 3D sweeps and the static adjoint form) as
+/// the samples of its density per unit volume: each node's values over
+/// its radial weight and r^2.
+void ToVolumeDensity(const GridCoupling& coupling, std::vector<double>& kernel);
+}  // namespace detail
 
 /// A perturbation of the moduli over the coupling's grid values
 /// (material units): delta kappa(x) and delta mu(x) at the memory nodes,
@@ -182,6 +196,33 @@ struct KernelDerivatives3D {
   std::vector<double> kappaKernelSpherical;
   std::vector<double> muKernelSpherical;
 };
+
+namespace detail {
+/// A sweep's accumulated kernels (Kernels3D or KernelDerivatives3D) as
+/// the library holds them: every 3D field its density per unit volume,
+/// every per-node reduction (accumulated as the angular integral) the
+/// mean over the sphere.
+template <class Accumulated>
+void KernelsToFields(const GridCoupling& coupling, Accumulated& kernels) {
+  constexpr auto kFourPi = 4.0 * 3.14159265358979323846;
+  auto mean = [&](std::vector<double>& perNode) {
+    for (auto node = std::size_t{0}; node < perNode.size(); ++node) {
+      const auto r = coupling.RadiusOfNode(static_cast<int>(node));
+      perNode[node] /=
+          kFourPi * coupling.WeightOfNode(static_cast<int>(node)) * r * r;
+    }
+  };
+  for (auto& branch : kernels.itauKernel3D) ToVolumeDensity(coupling, branch);
+  for (auto& branch : kernels.logViscosityKernel3D) {
+    ToVolumeDensity(coupling, branch);
+  }
+  for (auto& branch : kernels.itauKernelSpherical) mean(branch);
+  ToVolumeDensity(coupling, kernels.kappaKernel3D);
+  ToVolumeDensity(coupling, kernels.muKernel3D);
+  mean(kernels.kappaKernelSpherical);
+  mean(kernels.muKernelSpherical);
+}
+}  // namespace detail
 
 class AdjointSolver3D {
  public:

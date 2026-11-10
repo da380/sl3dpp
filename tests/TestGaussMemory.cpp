@@ -436,10 +436,7 @@ TEST(GaussMemory, ItauKernelAgainstFiniteDifferences) {
     const auto kernels =
         adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.itauKernel[0].size(), ditau.size());
-    auto predicted = 0.0;
-    for (auto i = std::size_t{0}; i < ditau.size(); ++i) {
-      predicted += kernels.itauKernel[0][i] * ditau[i];
-    }
+    const auto predicted = VolumePairing(mesh, kernels.itauKernel[0], ditau);
     auto fd = std::map<double, double>{};
     for (auto eps : {0.02, 0.01}) {
       fd[eps] =

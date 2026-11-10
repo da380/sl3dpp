@@ -299,8 +299,8 @@ def kernels1d() -> None:
         ax.plot(kernel / scale, (radius[-1] - radius) / 1e3,
                 label=f"{stem} (J = {values[stem]:.3g})")
     ax.set_ylim(3000.0, 0.0)  # the viscous mantle lies above the core
-    ax.set_xlabel("viscosity kernel dJ/d$\\eta$(r), each scaled to its "
-                  "largest value")
+    ax.set_xlabel("viscosity kernel K(r) per unit volume "
+                  "(dJ = $\\int$ K d$\\eta$ dV), each scaled to its largest value")
     ax.set_ylabel("depth (km)")
     ax.axvline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8)

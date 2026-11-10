@@ -34,6 +34,7 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <numbers>
 #include <span>
 #include <string>
 
@@ -200,10 +201,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  // Slices and profiles for the plot. Kernels3D holds an angular density
-  // with the radial quadrature folded in: VolumeDensity divides out the
-  // node's radial weight and r^2, RadialDensity integrates over angle per
-  // unit radius; in SI, by the model length cubed and once.
+  // Slices and profiles for the plot. Kernels3D holds the density per
+  // unit volume, so a slice is its values at a node; a profile per unit
+  // radius is its mean over the sphere times 4 pi r^2 (SphericalMean); in
+  // SI, by the model length cubed and once.
   const auto& coupling = op.Coupling();
   const auto& kernelGrid = coupling.Grid();
   const auto fieldSize = kernelGrid.FieldSize();
@@ -222,10 +223,6 @@ int main(int argc, char** argv) {
   out.Scalar("decay_time_kyr", fit.decay_time);
   const auto displayUnit =
       std::array{1.0, 1.0 / examples::kYear};  // m; s to yr
-  auto volume = std::vector<std::vector<double>>{};
-  for (const auto& objective : objectives) {
-    volume.push_back(VolumeDensity(coupling, objective.kernel));
-  }
   for (const auto depthKm : {400.0, 1200.0, 2200.0}) {
     // the memory node nearest the depth
     const auto target = 1.0 - depthKm * 1.0e3 / modelLength;
@@ -243,24 +240,24 @@ int main(int argc, char** argv) {
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
       auto slice = std::vector<double>(fieldSize);
       for (auto x = std::size_t{0}; x < fieldSize; ++x) {
-        slice[x] = volume[k][static_cast<std::size_t>(node) * fieldSize + x] *
+        slice[x] = objectives[k].kernel[static_cast<std::size_t>(node) * fieldSize + x] *
                    objectives[k].unitSi * displayUnit[k] * perKm3;
       }
       out.Field(std::format("{}_{}km", objectives[k].name, depth), slice);
     }
   }
-  auto radial = std::vector<std::vector<double>>{};
+  auto mean = std::vector<std::vector<double>>{};
   for (const auto& objective : objectives) {
-    radial.push_back(RadialDensity(coupling, objective.kernel));
+    mean.push_back(SphericalMean(coupling, objective.kernel));
   }
   auto rows = std::vector<std::vector<double>>{};
   for (auto p = 0; p < coupling.NodeCount(); ++p) {
-    auto row =
-        std::vector<double>{coupling.RadiusOfNode(p) * modelLength / 1.0e3};
+    const auto r = coupling.RadiusOfNode(p);
+    auto row = std::vector<double>{r * modelLength / 1.0e3};
     for (auto k = std::size_t{0}; k < objectives.size(); ++k) {
-      // dJ/dr per km
-      row.push_back(radial[k][p] * objectives[k].unitSi * displayUnit[k] *
-                    1.0e3 / modelLength);
+      // dJ/dr per km: the shell's 4 pi r^2 times the mean density
+      row.push_back(4.0 * std::numbers::pi * r * r * mean[k][p] *
+                    objectives[k].unitSi * displayUnit[k] * 1.0e3 / modelLength);
     }
     rows.push_back(row);
   }

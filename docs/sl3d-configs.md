@@ -712,7 +712,9 @@ In the `output` directory:
 
 - `kernel1d`: `<name>_viscosity_kernel.txt`, the radial viscosity kernel of
   each Maxwell branch: under a header, columns `r_m` and `K_branch_<b>`, in
-  SI, so that dJ = integral of K(r) delta eta(r) dr with eta in Pa s. The
+  SI, a density per unit volume as the 3D kernels are: dJ = integral of
+  K delta eta dV = 4 pi integral of K(r) delta eta(r) r^2 dr, eta in
+  Pa s (neither the r^2 nor the 4 pi is in K). The
   rows are the radial mesh's nodes, element by element, so the radius of a
   shared element edge appears twice.
 - `kernel`: `<name>_viscosity_kernels.nc`, the 3D log-viscosity kernels as

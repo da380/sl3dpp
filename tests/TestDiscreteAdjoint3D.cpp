@@ -143,20 +143,13 @@ std::vector<double> OnCoupling(const GridCoupling& coupling,
   return out;
 }
 
+/// The volume pairing of per-branch kernels with per-branch directions.
 double GridPairing(const GridCoupling& coupling,
                    const std::vector<std::vector<double>>& kernel,
                    const std::vector<std::vector<double>>& direction) {
   auto total = 0.0;
   for (auto k = std::size_t{0}; k < kernel.size(); ++k) {
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto at = coupling.FieldOffset(rn);
-      const auto size = coupling.FieldSizeOf(rn);
-      auto product = std::vector<double>(size);
-      for (auto x = std::size_t{0}; x < size; ++x) {
-        product[x] = kernel[k][at + x] * direction[k][at + x];
-      }
-      total += coupling.GridOf(rn).Integrate(product);
-    }
+    total += VolumePairing(coupling, kernel[k], direction[k]);
   }
   return total;
 }
@@ -470,21 +463,6 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderRefinement) {
 
 namespace {
 
-double FieldPairing(const GridCoupling& coupling, std::span<const double> kernel,
-                    std::span<const double> direction) {
-  auto total = 0.0;
-  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-    const auto at = coupling.FieldOffset(rn);
-    const auto size = coupling.FieldSizeOf(rn);
-    auto product = std::vector<double>(size);
-    for (auto x = std::size_t{0}; x < size; ++x) {
-      product[x] = kernel[at + x] * direction[at + x];
-    }
-    total += coupling.GridOf(rn).Integrate(product);
-  }
-  return total;
-}
-
 /// A radial profile times an angular function over the grid values, in
 /// units of a nodal modulus.
 std::vector<double> LateralModulus(const GridCoupling& coupling,
@@ -578,8 +556,8 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel3D.size(), coupling.GridValueCount());
     ASSERT_EQ(kernels.muKernel3D.size(), coupling.GridValueCount());
-    const auto kappaRhs = FieldPairing(coupling, kernels.kappaKernel3D, d.kappa);
-    const auto muRhs = FieldPairing(coupling, kernels.muKernel3D, d.mu);
+    const auto kappaRhs = VolumePairing(coupling, kernels.kappaKernel3D, d.kappa);
+    const auto muRhs = VolumePairing(coupling, kernels.muKernel3D, d.mu);
 
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
@@ -612,11 +590,9 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
         uniform[at + x] = nodal[rn];
       }
     }
-    auto spherical = 0.0;
-    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      spherical += kernels.muKernelSpherical[rn] * nodal[rn];
-    }
-    const auto full = FieldPairing(coupling, kernels.muKernel3D, uniform);
+    const auto spherical =
+        VolumePairingOfMeans(coupling, kernels.muKernelSpherical, nodal);
+    const auto full = VolumePairing(coupling, kernels.muKernel3D, uniform);
     EXPECT_NEAR(spherical, full, 1e-12 * std::abs(full));
 
     // The refusal without a trajectory.
@@ -683,8 +659,8 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
                                                        .coupled_rtol = 1e-12,
                                                        .material_kernels = true})
                                .IceHistoryKernels(times, measurements, &trajectory);
-      paired[method] = FieldPairing(coupling, kernels.kappaKernel3D, dKappa) +
-                       FieldPairing(coupling, kernels.muKernel3D, dMu);
+      paired[method] = VolumePairing(coupling, kernels.kappaKernel3D, dKappa) +
+                       VolumePairing(coupling, kernels.muKernel3D, dMu);
     }
     return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
            std::abs(paired[AdjointMethod::Discrete]);
@@ -936,8 +912,8 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
                                         .coupled_rtol = 1e-12,
                                         .material_kernels = true});
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
-    const auto kappaRhs = FieldPairing(coupling, kernels.kappaKernel3D, d.kappa);
-    const auto muRhs = FieldPairing(coupling, kernels.muKernel3D, d.mu);
+    const auto kappaRhs = VolumePairing(coupling, kernels.kappaKernel3D, d.kappa);
+    const auto muRhs = VolumePairing(coupling, kernels.muKernel3D, d.mu);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
                                               .coupled_rtol = 1e-12});
@@ -1086,8 +1062,8 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
                                                        .coupled_rtol = 1e-12,
                                                        .material_kernels = true})
                                .IceHistoryKernels(times, measurements, &trajectory);
-      paired[method] = FieldPairing(coupling, kernels.kappaKernel3D, dKappa) +
-                       FieldPairing(coupling, kernels.muKernel3D, dMu);
+      paired[method] = VolumePairing(coupling, kernels.kappaKernel3D, dKappa) +
+                       VolumePairing(coupling, kernels.muKernel3D, dMu);
     }
     return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
            std::abs(paired[AdjointMethod::Discrete]);

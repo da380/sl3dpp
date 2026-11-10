@@ -437,10 +437,7 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
     const auto kernels =
         adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_FALSE(kernels.itauKernel.empty());
-    auto predicted = 0.0;
-    for (auto i = std::size_t{0}; i < ditau.size(); ++i) {
-      predicted += kernels.itauKernel[0][i] * ditau[i];
-    }
+    const auto predicted = VolumePairing(mesh, kernels.itauKernel[0], ditau);
 
     auto fd = std::map<double, double>{};
     for (double eps : {0.02, 0.01}) {
@@ -755,6 +752,11 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
       // against its exact discrete in ContinuousViscosityKernelsConverge.
       if (count == 0) continue;
       ASSERT_EQ(count, kernels.itauKernel[0].size());
+      // the reference pairs by the plain nodal sum: our density per unit
+      // volume times the nodes' volume weights
+      const auto nodalWeights =
+          MemoryPoints::Of(MemoryPointSet::Gll, mesh).VolumeWeights(mesh);
+      ASSERT_EQ(nodalWeights.size(), count);
       auto kScale = 0.0, kWorst = 0.0;
       for (auto i = std::size_t{0}; i < count; ++i) {
         std::getline(file, line);
@@ -768,7 +770,8 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
             << "radial meshes diverge at node " << i;
         kScale = std::max(kScale, std::abs(value));
         kWorst = std::max(
-            kWorst, std::abs(kernels.itauKernel[0][i] * itauSi - value));
+            kWorst, std::abs(kernels.itauKernel[0][i] * nodalWeights[i] * itauSi -
+                             value));
       }
       EXPECT_GT(kScale, 0.0);
       EXPECT_LT(kWorst, tol * kScale)
@@ -874,11 +877,9 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel.size(), atPoints.kappa.size());
     ASSERT_EQ(kernels.muKernel.size(), atPoints.mu.size());
-    auto paired = 0.0;
-    for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
-      paired += kernels.kappaKernel[i] * atPoints.kappa[i] +
-                kernels.muKernel[i] * atPoints.mu[i];
-    }
+    const auto paired =
+        VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa) +
+        VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu);
 
     TangentPerturbation direction;
     direction.material = atPoints;
@@ -921,13 +922,13 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
 }
 
 TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
-  // The kernels as functions. RadialDensity divides the quadrature
-  // weights out of the point-held kernels in kappa and mu and of the
-  // nodal itau kernel; the samples it gives with the points' weights
-  // make the same pairing; and the two memory point sets, two
+  // The kernels as functions. The point-held kernels in kappa and mu and
+  // the nodal itau kernel are densities per unit volume sampled at their
+  // points, which pair by the points' volume weights (an array of
+  // another layout is refused); and the two memory point sets, two
   // discretisations of one problem, give samples of the same functions:
   // the GLL set's, interpolated within each element to the Gauss points,
-  // against the Gauss set's, in the weighted L2 norm.
+  // against the Gauss set's, in the L2 norm weighted by volume.
   auto setup = Scene::Make(1e21);
   std::mt19937 rng(31);
   const auto& scales = setup.solver.SolverScales();
@@ -961,31 +962,24 @@ TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
                                   .material_kernels = true})
             .IceHistoryKernels(times, measurements, &trajectory);
     const auto& points = op.Points();
-    const auto weights = points.QuadratureWeights(mesh);
+    const auto weights = points.VolumeWeights(mesh);
     const auto radii = points.Radii(mesh);
     EXPECT_EQ(weights.size(), kernels.muKernel.size());
     EXPECT_EQ(radii.size(), weights.size());
     Functions f;
-    f.kappa = RadialDensity(points, mesh, kernels.kappaKernel);
-    f.mu = RadialDensity(points, mesh, kernels.muKernel);
-    f.itau = RadialDensity(mesh, kernels.itauKernel[0]);
-    // the weighted samples make the plain sum's pairing
-    auto plain = 0.0, weighted = 0.0;
-    for (auto i = std::size_t{0}; i < weights.size(); ++i) {
-      const auto delta = 0.3 + radii[i] * radii[i];
-      plain += kernels.muKernel[i] * delta;
-      weighted += weights[i] * f.mu[i] * delta;
-    }
-    EXPECT_NEAR(weighted, plain, 1e-13 * std::abs(plain));
+    f.kappa = kernels.kappaKernel;
+    f.mu = kernels.muKernel;
+    f.itau = kernels.itauKernel[0];
     // a kernel of another layout is refused
-    EXPECT_THROW((void)RadialDensity(points, mesh, std::vector<double>(3)),
-                 std::invalid_argument);
+    EXPECT_THROW(
+        (void)VolumePairing(points, mesh, std::vector<double>(3), kernels.muKernel),
+        std::invalid_argument);
     return f;
   };
   const auto gll = functionsAt(MemoryPointSet::Gll);
   const auto gauss = functionsAt(MemoryPointSet::Gauss);
   const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, mesh);
-  const auto weights = points.QuadratureWeights(mesh);
+  const auto weights = points.VolumeWeights(mesh);
   auto distance = [&](const std::vector<double>& nodal,
                       const std::vector<double>& atPoints) {
     const auto carried = points.Interpolate(nodal);
@@ -999,8 +993,9 @@ TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
   const auto kappa = distance(gll.kappa, gauss.kappa);
   const auto mu = distance(gll.mu, gauss.mu);
   // the nodal itau kernels of both sets, as functions at the GLL nodes
+  // (the node at the centre, without volume, has no weight)
   const auto nodalWeights =
-      MemoryPoints::Of(MemoryPointSet::Gll, mesh).QuadratureWeights(mesh);
+      MemoryPoints::Of(MemoryPointSet::Gll, mesh).VolumeWeights(mesh);
   auto diff = 0.0, size = 0.0;
   for (auto i = std::size_t{0}; i < nodalWeights.size(); ++i) {
     diff += nodalWeights[i] * (gll.itau[i] - gauss.itau[i]) * (gll.itau[i] - gauss.itau[i]);
@@ -1009,7 +1004,7 @@ TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
   const auto itau = std::sqrt(diff / size);
   std::cout << "functions, GLL against Gauss: kappa " << kappa << ", mu " << mu
             << ", itau " << itau << '\n';
-  // (they land at 3e-9, 5e-8 and 7e-7)
+  // (they land at 2.5e-9, 3.6e-8 and 7.1e-7)
   EXPECT_LT(kappa, 1e-6);
   EXPECT_LT(mu, 1e-6);
   EXPECT_LT(itau, 1e-5);
@@ -1092,12 +1087,9 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
                                     .rtol = 1e-12,
                                     .material_kernels = true})
               .IceHistoryKernels(times, measurements, &trajectory);
-      auto sum = 0.0;
-      for (auto i = std::size_t{0}; i < atPoints.mu.size(); ++i) {
-        sum += kernels.kappaKernel[i] * atPoints.kappa[i] +
-               kernels.muKernel[i] * atPoints.mu[i];
-      }
-      paired[method] = sum;
+      paired[method] =
+          VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa) +
+          VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu);
     }
     return std::abs(paired[AdjointMethod::Continuous] - paired[AdjointMethod::Discrete]) /
            std::abs(paired[AdjointMethod::Discrete]);

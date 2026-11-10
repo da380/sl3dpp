@@ -119,29 +119,30 @@ struct IceKernels {
   std::vector<std::vector<double>> density;
   std::vector<std::vector<double>> rate;  ///< size times - 1
 
-  /// dJ / d itau(r) per branch, nodal (element, gll) arrays over the
-  /// material's full mesh, itau in MATERIAL units; empty unless the
-  /// sweep was given the forward trajectory. Discrete: the exact
+  /// The kernel in itau(r) per branch: its density per unit volume at
+  /// the nodes, (element, gll) over the material's full mesh, so that
+  /// dJ = int K d itau dV = VolumePairing(mesh, K, d itau) (the
+  /// convention of every kernel here: docs/adjoints.md, "The kernels'
+  /// convention"); itau in MATERIAL units; empty unless the sweep was
+  /// given the forward trajectory. Discrete: the exact
   /// sensitivity through the scheme-weight derivatives. Continuous: the
   /// multiplier integral int W_k m-dagger / itau (d - m) dt. With the
   /// internal variables at Gauss points both accumulate there and reach
   /// the nodal itau through the interpolation's transpose.
   std::vector<std::vector<double>> itauKernel;
 
-  /// The viscosity kernels dJ / d eta(r) per branch from the itau
-  /// kernels: itau = mu / eta gives d itau / d eta = -itau^2 / mu, so an
+  /// The viscosity kernels per branch (per unit volume, as itauKernel)
+  /// from the itau kernels: itau = mu / eta gives d itau / d eta = -itau^2 / mu, so an
   /// elastic branch (itau = 0) has no viscosity sensitivity in this
   /// parameterisation. eta in material units.
   [[nodiscard]] std::vector<std::vector<double>> Viscosity(
       const Rheology& rheology) const;
 
-  /// dJ / d kappa(r) and dJ / d mu(r), material units, pairing with a
-  /// PointMaterialDirection by the plain sum: at the memory points,
-  /// (element, point) over the whole mesh. Each entry is the kernel's
-  /// value at its point times the point's quadrature weight
-  /// (MemoryPoints::weight times the element's Jacobian), so dividing by
-  /// the weight gives samples of the kernel as a function of radius; no
-  /// point is shared between elements, so its jumps across the mesh's
+  /// The kernels in kappa(r) and mu(r), material units: their densities
+  /// per unit volume at the memory points, (element, point) over the
+  /// whole mesh, pairing with a PointMaterialDirection as dJ = int K
+  /// delta dV = VolumePairing(points, mesh, K, delta). No point is shared
+  /// between elements, so the kernels' jumps across the mesh's
   /// interfaces are kept. The transpose of
   /// TangentPerturbation::material (the branch moduli as fixed fractions
   /// of the unrelaxed modulus, the relaxation times held;
@@ -175,24 +176,6 @@ struct KernelDerivatives {
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
 };
-
-/// A 1D kernel as a function of radius. The kernel arrays of IceKernels
-/// and KernelDerivatives pair with a perturbation by the plain sum, so
-/// each entry is the kernel's value at its point times the point's
-/// quadrature weight in radius; this divides the weights out, giving
-/// samples K(r_p) at the points (MemoryPoints::Radii) with
-///   dJ = int K(r) delta(r) dr ~ sum_p w_p K(r_p) delta(r_p),
-/// w the points' MemoryPoints::QuadratureWeights. Material scheme, per
-/// unit length. For a kernel held at the memory points (kappaKernel,
-/// muKernel) pass the operator's Points(); for a nodal one (itauKernel,
-/// IceKernels::Viscosity) the mesh alone. No point is shared between
-/// elements, so the function's jumps across the mesh's interfaces are
-/// kept.
-[[nodiscard]] std::vector<double> RadialDensity(
-    const MemoryPoints& points, const RadialMesh& mesh,
-    std::span<const double> kernel);
-[[nodiscard]] std::vector<double> RadialDensity(
-    const RadialMesh& mesh, std::span<const double> nodalKernel);
 
 namespace detail {
 /// The grounded views and the distributional/quelled assembly shared by

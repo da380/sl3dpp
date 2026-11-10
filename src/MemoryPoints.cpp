@@ -81,6 +81,19 @@ std::vector<double> MemoryPoints::QuadratureWeights(
   return out;
 }
 
+std::vector<double> MemoryPoints::VolumeWeights(const RadialMesh& mesh) const {
+  constexpr auto kFourPi = 4.0 * 3.14159265358979323846;
+  auto out = QuadratureWeights(mesh);
+  auto i = std::size_t{0};
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto p = 0; p < count; ++p, ++i) {
+      const auto r = RadiusAt(mesh, e, p);
+      out[i] *= kFourPi * r * r;
+    }
+  }
+  return out;
+}
+
 std::vector<double> MemoryPoints::Interpolate(
     std::span<const double> nodal) const {
   if (nodal.size() % ngll != 0) {
@@ -118,5 +131,79 @@ std::vector<double> MemoryPoints::InterpolateTranspose(
   }
   return out;
 }
+
+namespace {
+
+void CheckOnPoints(std::size_t size, std::size_t points) {
+  if (size != points) {
+    throw std::invalid_argument(std::format(
+        "an array of {} entries does not live on the {} points of the mesh",
+        size, points));
+  }
+}
+
+}  // namespace
+
+double VolumePairing(const MemoryPoints& points, const RadialMesh& mesh,
+                     std::span<const double> kernel,
+                     std::span<const double> direction) {
+  const auto weights = points.VolumeWeights(mesh);
+  CheckOnPoints(kernel.size(), weights.size());
+  CheckOnPoints(direction.size(), weights.size());
+  auto total = 0.0;
+  for (auto i = std::size_t{0}; i < weights.size(); ++i) {
+    total += weights[i] * kernel[i] * direction[i];
+  }
+  return total;
+}
+
+double VolumePairing(const RadialMesh& mesh, std::span<const double> nodalKernel,
+                     std::span<const double> nodalDirection) {
+  return VolumePairing(MemoryPoints::Of(MemoryPointSet::Gll, mesh), mesh,
+                       nodalKernel, nodalDirection);
+}
+
+namespace detail {
+
+std::vector<double> KernelSamples(const MemoryPoints& points,
+                                  const RadialMesh& mesh,
+                                  std::vector<double> gradient) {
+  const auto weights = points.VolumeWeights(mesh);
+  CheckOnPoints(gradient.size(), weights.size());
+  const auto np = static_cast<std::size_t>(points.count);
+  for (auto e = std::size_t{0}; e * np < gradient.size(); ++e) {
+    auto centre = np;  // the point without volume, if the element has one
+    for (auto p = std::size_t{0}; p < np; ++p) {
+      const auto i = e * np + p;
+      if (weights[i] > 0.0) {
+        gradient[i] /= weights[i];
+      } else {
+        centre = p;
+      }
+    }
+    if (centre == np) continue;
+    // the Lagrange polynomial through the element's other points
+    auto value = 0.0;
+    for (auto p = std::size_t{0}; p < np; ++p) {
+      if (p == centre) continue;
+      auto basis = 1.0;
+      for (auto q = std::size_t{0}; q < np; ++q) {
+        if (q == p || q == centre) continue;
+        basis *= (points.xi[centre] - points.xi[q]) / (points.xi[p] - points.xi[q]);
+      }
+      value += basis * gradient[e * np + p];
+    }
+    gradient[e * np + centre] = value;
+  }
+  return gradient;
+}
+
+std::vector<double> KernelSamples(const RadialMesh& mesh,
+                                  std::vector<double> gradient) {
+  return KernelSamples(MemoryPoints::Of(MemoryPointSet::Gll, mesh), mesh,
+                       std::move(gradient));
+}
+
+}  // namespace detail
 
 }  // namespace sl3dpp

@@ -128,7 +128,54 @@ any inversion driver are formulation-blind:
   thickness duals; bounded, with finite jumps at observations only;
   the initial-thickness dual vanishes identically.
 - `itauKernel` per branch over (element, gll) when a trajectory is
-  supplied, and `Viscosity(rheology)` mapping it to dJ/dη.
+  supplied, and `Viscosity(rheology)` mapping it to the viscosity's.
+
+### The kernels' convention
+
+Every kernel with respect to a field in the Earth — the relaxation
+times', the viscosity's, the moduli's, in the time-stepped and the
+static problems, their derivatives in the second-order sweeps — is a
+**density per unit volume**, held as samples of a function at the
+points where the parameter lives. With K the kernel and δ the
+perturbation of the parameter,
+
+    dJ = ∫ K δ dV.
+
+In 3D the samples are K(x) on each memory node's grid, and
+
+    dJ ≈ Σ_node w_node r_node² ∫ K δ dΩ
+
+(`VolumePairing(coupling, K, δ)`; w the node's radial quadrature
+weight). In 1D the samples are K(r) at the memory points or the nodes,
+and for the spherically symmetric perturbation δ(r)
+
+    dJ = 4π ∫ K(r) δ(r) r² dr ≈ Σ_p W_p K(r_p) δ(r_p),
+
+W_p = 4π r_p² times the point's radial quadrature weight
+(`MemoryPoints::VolumeWeights`, `VolumePairing(points, mesh, K, δ)`).
+Neither the r² nor the 4π is in the kernel: both belong to the volume.
+So a 1D kernel is the same function as the 3D kernel of the same
+model, and a 3D kernel's reduction per node (`…Spherical`,
+`SphericalMean`) is its mean over the sphere, the kernel of an
+angle-uniform perturbation.
+
+The values are non-dimensional in the material's scheme: the
+objective's unit per unit of the parameter and of volume. The programs
+write them in SI, the objective's unit per parameter unit per m³.
+
+The discrete and the continuous sweeps both approximate these
+functions. The sweeps accumulate the gradient with respect to each
+point value, which is the kernel times the point's volume weight, and
+divide the weights out on return; the pairing above with the weights
+restored is then the exact discrete derivative for the discrete
+sweeps. A node at the centre has no volume: its sample is the element's
+polynomial through the other nodes and its gradient entry is not kept.
+The entry is zero except for the nodal relaxation-time kernel of Gauss
+memory points in an element at the centre that relaxes, where the
+pairing misses the sensitivity to the value at the centre alone (about
+1e-5 of that element's).
+The kernels with respect to the ice history are fields on the surface
+grid and pair by ∫ · dS (below).
 
 Conventions (sl3dpp's, not pyslfp's): times are the forward driver's —
 increasing, SLE solver units; measurements are keyed by NODE INDEX into
@@ -206,9 +253,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 discrete transpose is built too, §12), `ForwardTrajectory3D` (a recording
 at any `SeaLevelEvolution3D::Options::record_stride`: the sweep rebuilds
 the gaps by forward steps from the kept states), and
-`Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, an
-ANGULAR DENSITY over memory node × coupling grid, radial quadrature
-folded in), its angular integral `itauKernelSpherical` (the 1D bridge),
+`Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, the
+density per unit volume over memory node × coupling grid, §4), its mean
+over the sphere `itauKernelSpherical` (the 1D bridge),
 and `logViscosityKernel3D` = −itau(x)·K (the operator's delta
 parameterisation).
 
@@ -776,9 +823,9 @@ viscosity path; its exact gate is the pairing identity with the discrete
 ### 13e. The material kernels, 1D
 
 `AdjointSolver::Options::material_kernels` has the discrete sweep form
-`IceKernels::kappaKernel` and `muKernel` — dJ/dκ(r), dJ/dμ(r), nodal
-over the full mesh in material units, pairing with a `MaterialDirection`
-by the plain nodal sum: the exact transpose of
+`IceKernels::kappaKernel` and `muKernel` — the kernels in κ(r) and
+μ(r) over the full mesh in material units, per unit volume (§4): the
+exact transpose of
 `TangentPerturbation::material`. The sweep already solves, per step,
 the transposed effective system for the dual y_n of the step's full
 solution (the duals of the next memory through the strain transpose,
@@ -804,11 +851,11 @@ relaxing elements) and the kernels span the elastic lithosphere too.
 Discrete exact, continuous at the commute level (below, §13g); needs the
 trajectory; formed under any rotational feedback; the bulk pairing costs
 one unrelaxed solve per step. The kernels in κ and μ are held at the memory
-points, each entry the kernel's value there times the point's quadrature
-weight, and pair with a `PointMaterialDirection` by the plain sum;
-divided by the weights they are samples of the kernel in radius, with
-its jumps across the mesh's interfaces kept, since no point is shared
-between elements.
+points as samples of the kernel per unit volume, and pair with a
+`PointMaterialDirection` by `VolumePairing` (§4); their jumps across
+the mesh's interfaces are kept, since no point is shared between
+elements. As functions the kernels of the two memory point sets agree
+to 1e-6 or better (`Adjoint.MaterialKernelsAreFunctionsOfRadius`).
 
 GATES (`TestAdjoint`): `MaterialGradientIsTheTransposeOfTheVariation`
 — for random solution pairs of every degree the gradient paired with a
@@ -823,9 +870,9 @@ order with Richardson at 1e-6; the refusals.
 ### 13f. The material kernels, 3D
 
 `AdjointSolver3D::Options::material_kernels` has the discrete 3D sweep
-form `Kernels3D::kappaKernel3D` and `muKernel3D` — dJ/dκ(x), dJ/dμ(x)
-in the itau kernel's layout (an angular density per memory node, the
-radial quadrature folded in) — and their spherical reductions, the
+form `Kernels3D::kappaKernel3D` and `muKernel3D` — the kernels in κ(x)
+and μ(x) in the itau kernel's layout, per unit volume (§4) — and their
+means over the sphere, the
 exact transpose of `TangentPerturbation3D::material`. The transposed
 fixed point already yields, per step, the dual solution y_n of the
 step's full solution (the force of the end strain's dual, the lateral
@@ -912,7 +959,7 @@ gated against `ComputeLoveNumberDerivatives` along a direction at 1e-10
 for every channel and degree
 (`MaterialDerivatives.LoveNumberKernelsPairToTheDerivatives`). In 3D
 `ElasticPerturbation3D::StaticKernels(y, x)` (the transpose of its
-`Force`, as angular densities on its grid) with `SolveSurfaceDual` for
+`Force`, per unit volume on its grid) with `SolveSurfaceDual` for
 the adjoint solution of a surface measurement; gated as the transpose
 of `Force` under the Hermitian pairing at 1e-10 and by the dual solve
 being the adjoint of the surface readout

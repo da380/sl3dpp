@@ -14,6 +14,7 @@
 #include <complex>
 #include <filesystem>
 #include <map>
+#include <numbers>
 #include <span>
 #include <vector>
 
@@ -360,8 +361,12 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   EXPECT_GT(scale, 0.0);
   EXPECT_LT(worst, 1e-12 * scale);
 
-  // The spherical reduction lives at the memory nodes: laid out over the
-  // whole mesh's points and carried to the nodes by the reference.
+  // The spherical reduction lives at the memory nodes: as the gradient
+  // with respect to the point values (the mean times the node's volume
+  // weight 4 pi w r^2), laid out over the whole mesh's points and carried
+  // to the nodes by the reference, it is the 1D kernel's gradient with
+  // respect to the nodal values (the kernel times the nodes' volume
+  // weights).
   const auto& coupling = op3.Coupling();
   const auto np = coupling.Points().count;
   const auto pointCount =
@@ -370,18 +375,24 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   for (const auto& spherical : kernels3.itauKernelSpherical) {
     auto full = std::vector<double>(pointCount, 0.0);
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto r = coupling.RadiusOfNode(rn);
       full[static_cast<std::size_t>(coupling.ElementOfNode(rn)) * np +
-           coupling.NodeInElementOf(rn)] = spherical[rn];
+           coupling.NodeInElementOf(rn)] =
+          spherical[rn] * 4.0 * std::numbers::pi * coupling.WeightOfNode(rn) * r * r;
     }
     atPoints.push_back(std::move(full));
   }
   const auto nodal = op3.Reference().ItauKernelsAtNodes(std::move(atPoints));
+  const auto& mesh = scene.material.Mesh();
+  const auto nodalWeights =
+      MemoryPoints::Of(MemoryPointSet::Gll, mesh).VolumeWeights(mesh);
   for (auto k = std::size_t{0}; k < nodal.size(); ++k) {
+    ASSERT_EQ(nodal[k].size(), nodalWeights.size());
     auto kScale = 0.0, kWorst = 0.0;
     for (auto i = std::size_t{0}; i < nodal[k].size(); ++i) {
-      kScale = std::max(kScale, std::abs(kernels1.itauKernel[k][i]));
-      kWorst =
-          std::max(kWorst, std::abs(nodal[k][i] - kernels1.itauKernel[k][i]));
+      const auto gradient1 = kernels1.itauKernel[k][i] * nodalWeights[i];
+      kScale = std::max(kScale, std::abs(gradient1));
+      kWorst = std::max(kWorst, std::abs(nodal[k][i] - gradient1));
     }
     EXPECT_GT(kScale, 0.0);
     EXPECT_LT(kWorst, 1e-10 * kScale) << "branch " << k;
@@ -441,17 +452,13 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     const auto& coupling = probe.Coupling();
     const auto& grid = coupling.Grid();
     const auto p = grid.FromFunction(direction);
-    const auto gridF = grid.FieldSize();
-    auto sum = 0.0;
-    auto product = std::vector<double>(gridF);
+    auto atNodes = std::vector<double>(coupling.GridValueCount());
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto row =
-          std::span(kernels.logViscosityKernel3D[0])
-              .subspan(static_cast<std::size_t>(rn) * gridF, gridF);
-      for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
-      sum += grid.Integrate(product);
+      std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                  coupling.FieldOffset(rn)));
     }
-    predicted[set] = sum;
+    predicted[set] =
+        VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
   }
   const auto eps = 0.1;
   const auto fd = (run(MemoryPointSet::Gauss, eps, nullptr) -

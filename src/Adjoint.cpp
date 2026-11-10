@@ -696,9 +696,19 @@ IceKernels AdjointSolver::DiscreteSweep(
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
-  out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
-  out.kappaKernel = std::move(kappaKernel);
-  out.muKernel = std::move(muKernel);
+  // the kernels as densities per unit volume: the weights divided out
+  {
+    const auto& mesh = op.BaseMaterial().Mesh();
+    out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
+    for (auto& branch : out.itauKernel) {
+      branch = detail::KernelSamples(mesh, std::move(branch));
+    }
+    if (material) {
+      out.kappaKernel =
+          detail::KernelSamples(op.Points(), mesh, std::move(kappaKernel));
+      out.muKernel = detail::KernelSamples(op.Points(), mesh, std::move(muKernel));
+    }
+  }
   return out;
 }
 
@@ -1264,9 +1274,19 @@ IceKernels AdjointSolver::ContinuousSweep(
 
   auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
-  out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
-  out.kappaKernel = std::move(kappaKernel);
-  out.muKernel = std::move(muKernel);
+  // the kernels as densities per unit volume: the weights divided out
+  {
+    const auto& mesh = op.BaseMaterial().Mesh();
+    out.itauKernel = op.ItauKernelsAtNodes(std::move(itauKernel));
+    for (auto& branch : out.itauKernel) {
+      branch = detail::KernelSamples(mesh, std::move(branch));
+    }
+    if (material) {
+      out.kappaKernel =
+          detail::KernelSamples(op.Points(), mesh, std::move(kappaKernel));
+      out.muKernel = detail::KernelSamples(op.Points(), mesh, std::move(muKernel));
+    }
+  }
   return out;
 }
 
@@ -1347,28 +1367,6 @@ IceKernels detail::AssembleIceViews(
   }
   out.loadDuals = std::move(loadDuals);
   return out;
-}
-
-std::vector<double> RadialDensity(const MemoryPoints& points,
-                                  const RadialMesh& mesh,
-                                  std::span<const double> kernel) {
-  const auto weights = points.QuadratureWeights(mesh);
-  if (kernel.size() != weights.size()) {
-    throw std::invalid_argument(std::format(
-        "a kernel of {} entries does not live on the {} points of the mesh",
-        kernel.size(), weights.size()));
-  }
-  auto out = std::vector<double>(kernel.size());
-  for (auto i = std::size_t{0}; i < out.size(); ++i) {
-    out[i] = kernel[i] / weights[i];
-  }
-  return out;
-}
-
-std::vector<double> RadialDensity(const RadialMesh& mesh,
-                                  std::span<const double> nodalKernel) {
-  return RadialDensity(MemoryPoints::Of(MemoryPointSet::Gll, mesh), mesh,
-                       nodalKernel);
 }
 
 }  // namespace sl3dpp

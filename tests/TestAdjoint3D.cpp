@@ -7,6 +7,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <functional>
@@ -369,16 +370,13 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     const auto& coupling = probe.Coupling();
     const auto& grid = coupling.Grid();
     const auto p = grid.FromFunction(direction);
-    const auto gridF = grid.FieldSize();
-    auto predicted = 0.0;
-    auto product = std::vector<double>(gridF);
+    auto atNodes = std::vector<double>(coupling.GridValueCount());
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-      const auto row = std::span(kernels.logViscosityKernel3D[0])
-                           .subspan(static_cast<std::size_t>(rn) * gridF,
-                                    gridF);
-      for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
-      predicted += grid.Integrate(product);
+      std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                  coupling.FieldOffset(rn)));
     }
+    const auto predicted =
+        VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
     const auto eps = 0.1;
     const double fd = (run(npts, eps, nullptr) - run(npts, -eps, nullptr)) /
                       (2.0 * eps);
@@ -452,22 +450,19 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
   Kernels3D kernels;
   const auto J0 = evaluate(0.0, &kernels);
 
-  // <K, p>: the angular-density pairing per memory node.
+  // <K, p>: the volume pairing over the memory nodes.
   Viscoelastic3D probe(scene.rheology, kLmax,
                        [](double, double, double) { return 0.0; });
   const auto& coupling = probe.Coupling();
   const auto& grid = coupling.Grid();
   const auto p = grid.FromFunction(direction);
-  const auto gridF = grid.FieldSize();
-  auto predicted = 0.0;
-  auto product = std::vector<double>(gridF);
+  auto atNodes = std::vector<double>(coupling.GridValueCount());
   for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
-    const auto row =
-        std::span(kernels.logViscosityKernel3D[0])
-            .subspan(static_cast<std::size_t>(rn) * gridF, gridF);
-    for (auto x = std::size_t{0}; x < gridF; ++x) product[x] = row[x] * p[x];
-    predicted += grid.Integrate(product);
+    std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                                coupling.FieldOffset(rn)));
   }
+  const auto predicted =
+      VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
   ASSERT_NE(predicted, 0.0);
 
   const auto hs = std::vector<double>{0.2, 0.1, 0.05, 0.025};
