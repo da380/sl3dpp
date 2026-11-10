@@ -35,6 +35,16 @@ using namespace sl3dpp;
 
 namespace {
 
+/// With the memory points at the GLL nodes, as in these tests, the points
+/// are the nodes: a nodal direction as one for the time-stepped problem,
+/// and back.
+[[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+[[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+
 constexpr auto kLmax = 16;
 
 /// The smooth cap of the solver tests (TestSeaLevel.cpp), the kernel
@@ -864,7 +874,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     }
 
     TangentPerturbation direction;
-    direction.material = d;
+    direction.material = AtGll(d);
     const auto tangent = Objective(
         setup,
         TangentLinearSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})

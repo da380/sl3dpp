@@ -20,6 +20,16 @@ using namespace kernel_scene;
 
 namespace {
 
+/// With the memory points at the GLL nodes, as in these tests, the points
+/// are the nodes: a nodal direction as one for the time-stepped problem,
+/// and back.
+[[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+[[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+
 /// A kernel object (kernels or their derivatives) paired with a direction
 /// in every argument: the thickness view against the thickness
 /// perturbation at every node, the initial sea level kernel against its
@@ -388,11 +398,11 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     TangentPerturbation u, v;
     u.iceThickness = scaled(fieldU, [](double s) { return s; });
     u.itau = setup.DeltaItau(0.1, [](double r) { return 0.3 + 0.7 * r * r; });
-    u.material = materialDirection(
-        [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+    u.material = AtGll(materialDirection(
+        [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); }));
     v.iceThickness = scaled(fieldV, [](double s) { return (1.0 - s) * (1.0 - s); });
     v.itau = setup.DeltaItau(0.1, [](double r) { return 1.0 + r; });
-    v.material = materialDirection([](double r) { return 1.0 - 0.5 * r; });
+    v.material = AtGll(materialDirection([](double r) { return 1.0 - 0.5 * r; }));
     auto measurement = std::map<std::size_t, Measurement>{};
     measurement[times.size() - 1].seaLevelDual = g;
     struct Blocks {
@@ -496,8 +506,8 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   };
   auto u = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.3 + 0.7 * r * r; });
-  u.material = materialDirection(
-      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  u.material = AtGll(materialDirection(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); }));
   // u with a density part too, for the PAIRINGS only (a density direction
   // drives no second-order run): the density kernel's derivative along w.
   auto uPair = u;
@@ -511,14 +521,14 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   }
   auto w = Direction(setup, rng, times.size(), false,
                      [](double r) { return 0.8 - 0.5 * r; });
-  w.material = materialDirection([](double r) { return 1.0 - 0.5 * r; });
+  w.material = AtGll(materialDirection([](double r) { return 1.0 - 0.5 * r; }));
 
   // The base moved along w by eps: the material shifted (the branch
   // moduli as the same fractions of the shifted unrelaxed modulus), the
   // inverse times by eps delta itau_w, the thickness by eps delta I_w.
   const auto& base = setup.rheology;
   auto rheologyAt = [&](double eps) {
-    const auto shifted = material.Shifted(w.material, eps);
+    const auto shifted = material.Shifted(Nodal(w.material), eps);
     const auto muU = base.MuUnrelaxed();
     const auto [kappa, mu] = shifted.Moduli().KappaMu();
     auto branches = std::vector<Rheology::Branch>{};

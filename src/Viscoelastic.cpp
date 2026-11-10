@@ -124,9 +124,16 @@ ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
   kappaAtPoints_ = atPoints(rheology.Kappa());
   const auto longTermAtPoints = muUnrelaxedAtPoints_;
   for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
-    const auto mu = sample(rheology.BranchAt(k).mu);
-    for (auto i = std::size_t{0}; i < mu.size(); ++i) {
-      muUnrelaxedAtPoints_[i] += mu[i];
+    branchFraction_.push_back(sample(rheology.BranchAt(k).mu));
+    for (auto i = std::size_t{0}; i < pointCount; ++i) {
+      muUnrelaxedAtPoints_[i] += branchFraction_.back()[i];
+    }
+  }
+  for (auto& fraction : branchFraction_) {
+    for (auto i = std::size_t{0}; i < pointCount; ++i) {
+      fraction[i] = muUnrelaxedAtPoints_[i] > 0.0
+                        ? fraction[i] / muUnrelaxedAtPoints_[i]
+                        : 0.0;
     }
   }
   for (auto k = std::size_t{0}; k < rheology_->BranchCount(); ++k) {
@@ -165,6 +172,15 @@ ViscoelasticOperator::ViscoelasticOperator(const Rheology& rheology, int lmax,
     }
     elasticPointShear_ = {points_.get(), elasticShear_, pointBulk_};
   }
+}
+
+PointMaterialDirection AtMemoryPoints(const MemoryPoints& points,
+                                      const MaterialDirection& nodal) {
+  const auto gll = points.set == MemoryPointSet::Gll;
+  auto at = [&](const std::vector<double>& a) {
+    return a.empty() || gll ? a : points.Interpolate(a);
+  };
+  return {.kappa = at(nodal.kappa), .mu = at(nodal.mu), .rho = nodal.rho};
 }
 
 ViscoelasticOperator::~ViscoelasticOperator() = default;

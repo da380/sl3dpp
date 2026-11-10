@@ -72,16 +72,16 @@ struct TangentPerturbation {
   /// over the material's mesh in its units; needs the recorded forward
   /// trajectory.
   std::vector<std::vector<double>> itau;
-  /// A perturbation of the material's moduli and density, delta kappa,
-  /// delta mu and delta rho nodal over the mesh (MaterialDirection), the
-  /// branch moduli following as fixed fractions of the unrelaxed modulus
-  /// and the relaxation times held (compose with `itau` for a viscosity
-  /// held instead); a density direction moves the gravity
-  /// self-consistently and the forcings with it, the sea level engine's
-  /// own gravity and radius held (SeaLevelParameters::body_from_table;
-  /// docs/adjoints.md §16). Needs the recorded trajectory, the
-  /// internal variables at the GLL nodes and no rotational feedback.
-  MaterialDirection material;
+  /// A perturbation of the material's moduli and density: delta kappa
+  /// and delta mu at the memory points and delta rho at the GLL nodes
+  /// (PointMaterialDirection), the branch moduli following as fixed
+  /// fractions of the unrelaxed modulus and the relaxation times held
+  /// (compose with `itau` for a viscosity held instead); a density
+  /// direction moves the gravity self-consistently and the forcings with
+  /// it, the sea level engine's own gravity and radius held
+  /// (SeaLevelParameters::body_from_table; docs/adjoints.md §16). Needs
+  /// the recorded trajectory and no rotational feedback.
+  PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
     return directLoad.empty() && iceThickness.empty() &&
@@ -103,8 +103,8 @@ struct SecondOrderDirection {
   std::vector<std::vector<double>> itauU;
   std::vector<std::vector<double>> itauV;
   std::vector<std::vector<double>> itauUV;
-  MaterialDirection materialU;
-  MaterialDirection materialV;
+  PointMaterialDirection materialU;
+  PointMaterialDirection materialV;
 };
 
 /**
@@ -228,7 +228,7 @@ class TangentLinearSolver {
   /// and the effective table's Love-number derivatives (the sea level
   /// closure's response channels), cached per dt.
   [[nodiscard]] std::shared_ptr<MaterialDrive> MakeMaterialDrive(
-      const MaterialDirection& d, const ForwardTrajectory& trajectory,
+      const PointMaterialDirection& d, const ForwardTrajectory& trajectory,
       std::span<const double> times) const;
 
   const SeaLevelEvolution* evolution_;

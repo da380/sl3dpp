@@ -80,6 +80,31 @@ struct ViscoelasticState {
 
 class ViscoelasticStep;
 
+/// A direction in the material for the time-stepped problem: the
+/// perturbations of kappa and mu at the memory points, (element, point)
+/// over the whole mesh, in material units — absolute, where
+/// ViscoelasticOperator::Options::moduli is relative — and of the density
+/// at the GLL nodes, (element, gll). The moduli enter as that option's
+/// perturbation does (the branch moduli as fixed fractions of the
+/// unrelaxed shear at the points, the relaxation times held), so a
+/// derivative along the direction is the derivative of the stepper under
+/// Options::moduli = eps * direction / modulus at eps = 0. Any of the
+/// three may be empty.
+struct PointMaterialDirection {
+  std::vector<double> kappa, mu, rho;
+
+  [[nodiscard]] bool Empty() const {
+    return kappa.empty() && mu.empty() && rho.empty();
+  }
+};
+
+/// A nodal direction (Material.hpp) as a direction for the time-stepped
+/// problem: the moduli interpolated to the memory points through each
+/// element's basis (the nodal arrays themselves at the GLL points), the
+/// density as it is.
+[[nodiscard]] PointMaterialDirection AtMemoryPoints(
+    const MemoryPoints& points, const MaterialDirection& nodal);
+
 class ViscoelasticOperator {
  public:
   struct Options {
@@ -277,6 +302,14 @@ class ViscoelasticOperator {
   [[nodiscard]] std::span<const double> BulkModulusAtPoints() const {
     return kappaAtPoints_;
   }
+  /// Branch k's share of the unrelaxed shear at the memory points,
+  /// mu_k / mu_U there (zero where mu_U vanishes): what a perturbation of
+  /// the unrelaxed shear gives the branch, and what Options::moduli
+  /// leaves unchanged.
+  [[nodiscard]] std::span<const double> BranchFractionAtPoints(
+      std::size_t k) const {
+    return branchFraction_.at(k);
+  }
 
   /// The branches' shear modulus at the memory points that a step's
   /// effective operators integrate there, sum_k mu_k w_k with w_k the
@@ -385,6 +418,7 @@ class ViscoelasticOperator {
   /// Options::moduli that enter as point terms: the long-term shear's
   /// (it does not relax) and the bulk modulus's.
   std::vector<double> muUnrelaxedAtPoints_, kappaAtPoints_;
+  std::vector<std::vector<double>> branchFraction_;
   std::vector<double> longTermShearShift_, pointBulk_;
   /// The branch moduli and inverse relaxation times at the memory points,
   /// (element, point) over the whole mesh: interpolated from the nodal

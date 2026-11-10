@@ -291,7 +291,7 @@ class AdjointSolver {
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions = {},
-      const MaterialDirection& material = {}) const;
+      const PointMaterialDirection& material = {}) const;
 
  private:
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> DiscreteSecondOrder(
@@ -301,7 +301,7 @@ class AdjointSolver {
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions,
-      const MaterialDirection& material) const;
+      const PointMaterialDirection& material) const;
   [[nodiscard]] std::pair<IceKernels, KernelDerivatives> ContinuousSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
@@ -309,7 +309,7 @@ class AdjointSolver {
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions,
-      const MaterialDirection& material) const;
+      const PointMaterialDirection& material) const;
   [[nodiscard]] IceKernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,

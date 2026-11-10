@@ -34,6 +34,20 @@
 
 using namespace sl3dpp;
 
+namespace {
+
+/// With the memory points at the GLL nodes, as in these tests, the points
+/// are the nodes: a nodal direction as one for the time-stepped problem,
+/// and back.
+[[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+[[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+
+}  // namespace
+
 #include "KernelScene.hpp"
 
 using namespace kernel_scene;
@@ -663,7 +677,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
     TangentLinearSolver tangent(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     TangentPerturbation direction;
-    direction.material = d;
+    direction.material = AtGll(d);
     const auto predicted =
         Objective(setup, tangent.Run(times, direction, &trajectory), measurements);
 
@@ -699,12 +713,151 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
     const auto run = recording.Run(times, direction, &trajectory);
     SecondOrderDirection withRho;
-    withRho.materialU = d;
+    withRho.materialU = AtGll(d);
     EXPECT_THROW((void)recording.RunSecondOrder(times, run, run, withRho, &trajectory),
                  std::invalid_argument);
   }
 }
 
+
+TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
+  // The same at the default memory points: along a direction in kappa and
+  // mu held at the Gauss points, and in the nodal density, the
+  // tangent-linear run matches central differences of the coupled run
+  // with the moduli perturbed at the points (ViscoelasticOperator::
+  // Options::moduli, the relative perturbation eps * direction / modulus)
+  // and the density shifted, at second order with Richardson landing at
+  // 1e-6, both schemes.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(31);
+  const auto baseTable = ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const SeaLevelSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[2].potentialDual = setup.Smooth(rng, 0.7);
+
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const ViscoelasticOperator reference(setup.rheology, kLmax);
+  ASSERT_EQ(reference.Points().set, MemoryPointSet::Gauss);
+  const auto& points = reference.Points();
+  const auto muU = reference.UnrelaxedShearAtPoints();
+  const auto kappa0 = reference.BulkModulusAtPoints();
+  PointMaterialDirection d;
+  d.kappa.assign(muU.size(), 0.0);
+  d.mu.assign(muU.size(), 0.0);
+  d.rho.assign(material.Rho().size(), 0.0);
+  auto profile = [](double r) {
+    return 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+  };
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      d.rho[i] = 0.5 * profile(mesh.Radius(e, q)) * material.Rho()[i];
+    }
+    if (material.IsFluid(e)) continue;
+    for (auto p = 0; p < points.count; ++p) {
+      const auto i = static_cast<std::size_t>(e) * points.count + p;
+      const auto value = profile(points.RadiusAt(mesh, e, p));
+      d.kappa[i] = 0.5 * value * kappa0[i];
+      d.mu[i] = value * muU[i];
+    }
+  }
+  // The stepper at eps along the direction: the moduli perturbed at the
+  // points, relative; the density shifted nodally, the branches kept.
+  const auto& base = setup.rheology;
+  auto operatorAt = [&](double eps) {
+    MaterialDirection density;
+    density.rho = d.rho;
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      branches.push_back(base.BranchAt(k));
+    }
+    const auto rheology =
+        Rheology::Create(material.Shifted(density, eps), branches).value();
+    ViscoelasticOperator::Options::PointModuli moduli;
+    moduli.shear.assign(muU.size(), 0.0);
+    moduli.bulk.assign(muU.size(), 0.0);
+    for (auto i = std::size_t{0}; i < muU.size(); ++i) {
+      if (muU[i] > 0.0) moduli.shear[i] = eps * d.mu[i] / muU[i];
+      if (kappa0[i] > 0.0) moduli.bulk[i] = eps * d.kappa[i] / kappa0[i];
+    }
+    return ViscoelasticOperator(rheology, kLmax, {.moduli = moduli});
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    SeaLevelEvolution evolution(op, solver, setup.state,
+                                {.scheme = scheme,
+                                 .rotation = RotationalFeedback::None,
+                                 .rtol = 1e-12,
+                                 .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, History(times, loads)));
+    TangentLinearSolver tangent(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    TangentPerturbation direction;
+    direction.material = d;
+    const auto predicted =
+        Objective(setup, tangent.Run(times, direction, &trajectory), measurements);
+
+    auto functional = [&](double eps) {
+      const auto moved = operatorAt(eps);
+      SeaLevelEvolution movedEvolution(moved, solver, setup.state,
+                                       {.scheme = scheme,
+                                        .rotation = RotationalFeedback::None,
+                                        .rtol = 1e-12});
+      return Objective(setup, movedEvolution.Run(times, History(times, loads)),
+                       measurements);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << "scheme " << static_cast<int>(scheme) << " "
+                            << fd[0.1] << " " << fd[0.05] << " " << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << "scheme " << static_cast<int>(scheme);
+    const auto richardson = (4.0 * fd[0.05] - fd[0.1]) / 3.0;
+    EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted))
+        << "scheme " << static_cast<int>(scheme);
+
+    // Each part of the direction alone, to the same standard: the three
+    // enter by different routes.
+    for (const auto* part : {"kappa", "mu", "rho"}) {
+      TangentPerturbation only;
+      if (part == std::string("kappa")) only.material.kappa = d.kappa;
+      if (part == std::string("mu")) only.material.mu = d.mu;
+      if (part == std::string("rho")) only.material.rho = d.rho;
+      EXPECT_NE(Objective(setup, tangent.Run(times, only, &trajectory), measurements),
+                0.0)
+          << part;
+    }
+  }
+  // A direction of the wrong size is refused.
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  SeaLevelEvolution evolution(op, solver, setup.state,
+                              {.rotation = RotationalFeedback::None,
+                               .record_stride = 1});
+  const auto trajectory = ForwardTrajectory::FromSnapshots(
+      evolution.Run(times, History(times, loads)));
+  TangentLinearSolver tangent(evolution, {.method = AdjointMethod::Discrete});
+  TangentPerturbation bad;
+  bad.material.mu.assign(3, 1.0);
+  EXPECT_THROW((void)tangent.Run(times, bad, &trajectory), std::invalid_argument);
+}
 
 TEST(TangentLinear, SecondOrderRunInTheMaterial) {
   // With directions u and v in the loads, the inverse relaxation times
@@ -808,17 +961,17 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     TangentPerturbation u, v;
     u.directLoad = deltaU;
     u.itau = ditauU;
-    u.material = dU;
+    u.material = AtGll(dU);
     v.directLoad = deltaV;
     v.itau = ditauV;
-    v.material = dV;
+    v.material = AtGll(dV);
     const auto tangentU = tangent.Run(times, u, &trajectory);
     const auto tangentV = tangent.Run(times, v, &trajectory);
     SecondOrderDirection uv;
     uv.itauU = ditauU;
     uv.itauV = ditauV;
-    uv.materialU = dU;
-    uv.materialV = dV;
+    uv.materialU = AtGll(dU);
+    uv.materialV = AtGll(dV);
     const auto second =
         tangent.RunSecondOrder(times, tangentU, tangentV, uv, &trajectory);
     const auto predicted = Objective(setup, second, measurements);
@@ -855,8 +1008,8 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     SecondOrderDirection vu;
     vu.itauU = ditauV;
     vu.itauV = ditauU;
-    vu.materialU = dV;
-    vu.materialV = dU;
+    vu.materialU = AtGll(dV);
+    vu.materialV = AtGll(dU);
     const auto swapped =
         tangent.RunSecondOrder(times, tangentV, tangentU, vu, &trajectory);
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -869,11 +1022,11 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     // other is the moduli–loads block, not zero.
     TangentPerturbation loadsOnly, materialOnly;
     loadsOnly.directLoad = deltaV;
-    materialOnly.material = dU;
+    materialOnly.material = AtGll(dU);
     const auto runLoads = tangent.Run(times, loadsOnly, &trajectory);
     const auto runMaterial = tangent.Run(times, materialOnly, &trajectory);
     SecondOrderDirection cross;
-    cross.materialU = dU;
+    cross.materialU = AtGll(dU);
     const auto mixed =
         tangent.RunSecondOrder(times, runMaterial, runLoads, cross, &trajectory);
     EXPECT_GT(std::abs(Objective(setup, mixed, measurements)), 0.0);

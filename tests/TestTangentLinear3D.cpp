@@ -36,6 +36,16 @@ using namespace sl3dpp;
 
 namespace {
 
+/// With the memory points at the GLL nodes, as in these tests, the points
+/// are the nodes: a nodal direction as one for the time-stepped problem,
+/// and back.
+[[maybe_unused]] PointMaterialDirection AtGll(const MaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+[[maybe_unused]] MaterialDirection Nodal(const PointMaterialDirection& d) {
+  return {.kappa = d.kappa, .mu = d.mu, .rho = d.rho};
+}
+
 constexpr auto kLmax = 8;
 
 double Cap(double theta, double phi, double colat0, double lon0,
@@ -674,7 +684,7 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
     const auto trajectory1 =
         ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
     TangentPerturbation d1;
-    d1.material = d;
+    d1.material = AtGll(d);
     const auto run1 = TangentLinearSolver(evolution1, {.rtol = 1e-12})
                           .Run(times, d1, &trajectory1);
 

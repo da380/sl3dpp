@@ -272,46 +272,51 @@ struct TangentLinearSolver::MaterialForcing {
 
 struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing {
   const SeaLevelEvolution* ev = nullptr;
-  MaterialDirection direction;  // kappa and mu, nodal
+  PointMaterialDirection direction;  // kappa and mu at the points, rho nodal
   const ForwardTrajectory* trajectory = nullptr;
   std::vector<double> dts;
-  // The branch fractions f_k = mu_k / mu_U at the nodes, zero where the
-  // unrelaxed modulus vanishes.
-  std::vector<std::vector<double>> fractions;
-  // The base (unrelaxed) material's variation along the direction: the
-  // start solve's, where every weight is one.
-  MaterialVariation unrelaxed;
-  // The effective material's variation per dt, delta mu scaled by
-  // (1 - sum_k f_k (1 - w_k)) at the nodes.
-  std::map<double, MaterialVariation> flavours;
+  // The branch fractions f_k = mu_k / mu_U at the memory points.
+  std::vector<std::span<const double>> fractions;
+  // The density's variation of the nodal material (the moduli's is zero:
+  // they are perturbed at the points), with a density direction.
+  std::optional<MaterialVariation> density;
+  // The effective shear's variation per dt at the points, delta mu scaled
+  // by (1 - sum_k f_k (1 - w_k)) there.
+  std::map<double, std::vector<double>> effectiveMu;
   std::optional<ForwardCursor> cursor;
 
-  const MaterialVariation& FlavourOf(double dt) {
-    auto found = flavours.find(dt);
-    if (found != flavours.end()) return found->second;
+  const std::vector<double>& EffectiveMuOf(double dt) {
+    auto found = effectiveMu.find(dt);
+    if (found != effectiveMu.end()) return found->second;
     const auto& op = *ev->op_;
     const auto scheme = ev->options_.scheme;
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
-    // delta mu_eff = delta mu (1 - sum_k f_k (1 - w_k)), the weights at the
-    // GLL nodes (the memory points).
-    MaterialDirection effective;
-    effective.kappa = direction.kappa;
-    effective.rho = direction.rho;
-    if (!direction.mu.empty()) {
-      effective.mu = direction.mu;
-      for (auto i = std::size_t{0}; i < effective.mu.size(); ++i) {
-        auto factor = 1.0;
-        for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
-          const auto w = scheme == Scheme::BackwardEuler ? weights[k].e[i]
-                                                         : 1.0 - weights[k].beta[i];
-          factor -= fractions[k][i] * (1.0 - w);
-        }
-        effective.mu[i] *= factor;
+    auto effective = direction.mu;
+    for (auto i = std::size_t{0}; i < effective.size(); ++i) {
+      auto factor = 1.0;
+      for (auto k = std::size_t{0}; k < fractions.size(); ++k) {
+        const auto w = scheme == Scheme::BackwardEuler ? weights[k].e[i]
+                                                       : 1.0 - weights[k].beta[i];
+        factor -= fractions[k][i] * (1.0 - w);
       }
+      effective[i] *= factor;
     }
-    return flavours
-        .emplace(dt, op.EffectiveMaterial(scheme, dt).Variation(effective))
-        .first->second;
+    return effectiveMu.emplace(dt, std::move(effective)).first->second;
+  }
+
+  /// The moduli's variation of a system along (delta kappa, delta mu) at
+  /// the points plus the density's of the nodal material, on x.
+  std::vector<double> ApplyVariation(const DegreeOperator& system,
+                                     std::span<const double> dmu,
+                                     std::span<const double> x,
+                                     int ncols) const {
+    auto out = system.ApplyPointVariation(ev->op_->Points(), direction.kappa,
+                                          dmu, x, ncols);
+    if (density) {
+      const auto add = system.ApplyVariation(*density, x, ncols);
+      for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += add[i];
+    }
+    return out;
   }
 
   /// The memory force of a memory state with the branch moduli's
@@ -349,13 +354,12 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
   /// (the load's traction piece through the surface gravity, the tide
   /// through the density, its derivative, gravity and the interfaces).
   void AddForcingVariation(const DegreeOperator& system, int l, int ncols,
-                           const MaterialVariation& variation,
                            const LoadCallable* loads, const LoadCallable* tides,
                            std::vector<double>& force) const {
-    if (direction.rho.empty() || loads == nullptr) return;
+    if (!density || loads == nullptr) return;
     const auto ndof = static_cast<std::size_t>(system.DofCount());
-    const auto dLoad = system.LoadVariation(variation, LoadPart::Both);
-    const auto dTide = system.TideVariation(variation, l == 0 ? 2 : -1);
+    const auto dLoad = system.LoadVariation(*density, LoadPart::Both);
+    const auto dTide = system.TideVariation(*density, l == 0 ? 2 : -1);
     const auto sigma = (*loads)(l, 0.0);
     const auto psi = tides != nullptr ? (*tides)(l, 0.0) : std::nullopt;
     for (auto c = 0; c < ncols; ++c) {
@@ -379,14 +383,15 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
       const LoadCallable* loads = nullptr, const LoadCallable* tides = nullptr) {
     const auto& op = *ev->op_;
     const auto scheme = ev->options_.scheme;
-    const auto& variation = FlavourOf(dt);
+    const auto none = std::vector<double>{};
+    const auto& effective = direction.mu.empty() ? none : EffectiveMuOf(dt);
     auto& opFlavour = op.FlavourOf(scheme, dt);
     auto out = std::map<int, std::vector<double>>{};
     for (const auto& [l, x] : full) {
       const auto& deg = op.Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
       const auto& system = op.EffectiveSystem(opFlavour, l);
-      auto force = system.ApplyVariation(variation, x, ncols);
+      auto force = ApplyVariation(system, effective, x, ncols);
       for (auto& v : force) v = -v;
       if (!direction.mu.empty()) {
         const auto memoryForce = MemoryVariationForce(deg, ncols, mem.at(l));
@@ -394,7 +399,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
           force[i] += memoryForce[i];
         }
       }
-      AddForcingVariation(system, l, ncols, variation, loads, tides, force);
+      AddForcingVariation(system, l, ncols, loads, tides, force);
       out.emplace(l, std::move(force));
     }
     return out;
@@ -413,7 +418,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     for (const auto& [l, x] : full) {
       const auto& deg = op.Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = deg.system.ApplyVariation(unrelaxed, x, ncols);
+      auto force = ApplyVariation(deg.system, direction.mu, x, ncols);
       for (auto& v : force) v = -v;
       if (mem != nullptr && !direction.mu.empty()) {
         const auto memoryForce = MemoryVariationForce(deg, ncols, mem->at(l));
@@ -421,7 +426,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
           force[i] += memoryForce[i];
         }
       }
-      AddForcingVariation(deg.system, l, ncols, unrelaxed, loads, tides, force);
+      AddForcingVariation(deg.system, l, ncols, loads, tides, force);
       out.emplace(l, std::move(force));
     }
     return out;
@@ -577,36 +582,36 @@ struct TangentLinearSolver::MaterialSecondDrive
 };
 
 std::shared_ptr<TangentLinearSolver::MaterialDrive>
-TangentLinearSolver::MakeMaterialDrive(const MaterialDirection& d,
+TangentLinearSolver::MakeMaterialDrive(const PointMaterialDirection& d,
                                        const ForwardTrajectory& trajectory,
                                        std::span<const double> times) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
-  if (op.options_.memory_points != MemoryPointSet::Gll) {
-    throw std::invalid_argument(
-        "the material tangent needs the internal variables at the GLL "
-        "nodes (ViscoelasticOperator::Options::memory_points)");
-  }
   if (ev.options_.rotation != RotationalFeedback::None) {
     throw std::invalid_argument(
         "the material tangent takes no rotational feedback");
   }
   const auto& rheology = op.GetRheology();
+  const auto pointCount = op.UnrelaxedShearAtPoints().size();
+  if ((!d.kappa.empty() && d.kappa.size() != pointCount) ||
+      (!d.mu.empty() && d.mu.size() != pointCount)) {
+    throw std::invalid_argument(
+        "a material direction's moduli live at the memory points, "
+        "(element, point)");
+  }
   auto drive = std::make_shared<MaterialDrive>();
   drive->ev = &ev;
   drive->direction = d;
   drive->trajectory = &trajectory;
   drive->dts = StepSizes(ev, times);
-  const auto muU = rheology.MuUnrelaxed();
   for (auto k = std::size_t{0}; k < rheology.BranchCount(); ++k) {
-    const auto& branch = rheology.BranchAt(k);
-    auto f = std::vector<double>(muU.size(), 0.0);
-    for (auto i = std::size_t{0}; i < f.size(); ++i) {
-      f[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] : 0.0;
-    }
-    drive->fractions.push_back(std::move(f));
+    drive->fractions.push_back(op.BranchFractionAtPoints(k));
   }
-  drive->unrelaxed = op.BaseMaterial().Variation(d);
+  if (!d.rho.empty()) {
+    MaterialDirection nodal;
+    nodal.rho = d.rho;
+    drive->density = op.BaseMaterial().Variation(nodal);
+  }
   drive->cursor.emplace(op, trajectory, drive->dts, ev.options_.scheme,
                         LoadColumnsOf(ev), TideColumnsOf(ev));
   return drive;

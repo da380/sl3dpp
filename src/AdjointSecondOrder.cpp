@@ -66,7 +66,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     const std::vector<std::vector<double>>& itau,
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
-    const MaterialDirection& material) const {
+    const PointMaterialDirection& material) const {
   if (times.size() < 2) {
     throw std::invalid_argument("times must hold at least two entries");
   }
@@ -169,7 +169,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const std::vector<std::vector<double>>& ditauPoints,
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
-    const MaterialDirection& direction) const {
+    const PointMaterialDirection& direction) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -258,7 +258,10 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   const bool material = options_.material_kernels;
   const bool materialV = !direction.kappa.empty() || !direction.mu.empty();
   auto tools = std::optional<MaterialTools>{};
-  if (material || materialV) tools.emplace(ev, direction);
+  if (material || materialV) {
+    tools.emplace(ev, MaterialDirection{direction.kappa, direction.mu,
+                                        direction.rho});
+  }
   std::vector<double> kappaKernel, muKernel, dKappaKernel, dMuKernel;
   DensityDuals densityDuals, dDensityDuals;
   if (material) {
@@ -828,7 +831,7 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     const std::vector<std::vector<double>>& ditauPoints,
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
-    const MaterialDirection& direction) const {
+    const PointMaterialDirection& direction) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -893,7 +896,10 @@ std::pair<IceKernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   const bool material = options_.material_kernels;
   const bool materialV = !direction.kappa.empty() || !direction.mu.empty();
   auto tools = std::optional<MaterialTools>{};
-  if (material || materialV) tools.emplace(ev, direction);
+  if (material || materialV) {
+    tools.emplace(ev, MaterialDirection{direction.kappa, direction.mu,
+                                        direction.rho});
+  }
   std::vector<double> kappaKernel, muKernel, dKappaKernel, dMuKernel;
   DensityDuals densityDuals, dDensityDuals;
   if (material) {

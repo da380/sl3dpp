@@ -672,18 +672,25 @@ cross-code comparison with AdGIA, which is what this is for.
 
 ### 13c. The material tangent, 1D
 
-`TangentPerturbation::material` (a `MaterialDirection` in κ and μ; ρ
-refused) runs the 1D tangent-linear along a direction of the moduli with
-the branch moduli as fixed fractions f_k = μ_k/μ_U of the unrelaxed
-modulus and the relaxation times held (compose with `itau` for a
-viscosity held instead). The material enters a step in two places
-and the start in one, and each is a force on the step's own systems:
+`TangentPerturbation::material` (a `PointMaterialDirection`: δκ and δμ
+at the memory points, δρ at the GLL nodes, §16) runs the 1D
+tangent-linear along a direction of the moduli with the branch moduli as
+fixed fractions f_k = μ_k/μ_U of the unrelaxed modulus at the points and
+the relaxation times held (compose with `itau` for a viscosity held
+instead). A perturbation of the moduli is a field at the memory points
+that enters by being integrated against the strain and the dilatation
+there, the rule of the 3D stepper's lateral moduli; the forward problem
+takes the same perturbation as `ViscoelasticOperator::Options::moduli`,
+and the tangent is its derivative. At the GLL points the points are the
+nodes and the direction is a nodal one (`AtMemoryPoints` carries a nodal
+direction to the points). The material enters a step in two places and
+the start in one, and each is a force on the step's own systems:
 
-- the effective system K_eff of a step (the effective material, whose
-  shear is μ_U − Σ_k μ_k (1 − w_k) with w_k the scheme's weight at the
-  GLL memory points): its variation along δμ_eff = δμ (1 − Σ_k f_k
-  (1 − w_k)), δκ, applied to the FULL base solution x_n of the step
-  (`DegreeOperator::ApplyVariation`, §13a), negated;
+- the effective system K_eff of a step (whose shear at the points is
+  μ_U − Σ_k μ_k (1 − w_k) with w_k the scheme's weight there): its
+  variation along δμ_eff = δμ (1 − Σ_k f_k (1 − w_k)), δκ at the points,
+  applied to the FULL base solution x_n of the step
+  (`DegreeOperator::ApplyPointVariation`), negated;
 - the memory force Σ_k μ_k ⟨m̃_k, ·⟩ of the base decayed memory m̃ =
   e m + α d₀ with δμ_k = f_k δμ in place of μ_k;
 - the start's unrelaxed solve: −K_U⁻¹ (δK_U) x₀ about the base start
@@ -698,9 +705,8 @@ sea level closure already reads — carries them, and the closure needs no
 Love-table derivative: acting on the full solution, the first term holds
 the material derivative of the load response too (adding δh_eff σ as a
 response channel would double count). The scheme weights depend on itau
-and dt only, so the memory recursion is unchanged. Refused: a density direction, memory points away
-from the GLL nodes (no effective material there), rotational feedback
-(the inertia and the rotational Love numbers would move too).
+and dt only, so the memory recursion is unchanged. Refused: rotational
+feedback (the rotational Love numbers would move too).
 
 GATE (`TangentLinear.MaterialDirectionMatchesDifferences`): along
 a smooth direction in κ and μ on the solid, both schemes, the tangent
@@ -711,6 +717,10 @@ landing at 1e-6 of the derivative. The steps are 1% and 0.5% of the
 moduli, wide enough for the truncation error to stand above the solves'
 1e-12 noise: the functional moves by parts in 1e-12 per unit step, and
 at narrower steps the ratio check reads noise.
+`TangentLinear.MaterialDirectionMatchesDifferencesAtGaussPoints` holds
+the same at the default memory points, along a direction in κ and μ at
+the Gauss points and in the nodal density, against differences of the
+run with `Options::moduli` perturbed and the density shifted.
 
 ### 13d. The material tangent, 3D
 
