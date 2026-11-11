@@ -429,7 +429,9 @@ void ToroidalViscoelastic::AccumulateMaterial(
   }
 }
 
-void ToroidalViscoelastic::Jump(State& state, const Fields& solutions) const {
+void ToroidalViscoelastic::Jump(
+    State& state, const Fields& solutions,
+    const std::vector<std::vector<double>>* factor) const {
   const auto& op = *op_;
   const auto K = op.GetRheology().BranchCount();
   for (const auto& [l, x] : solutions) {
@@ -442,8 +444,9 @@ void ToroidalViscoelastic::Jump(State& state, const Fields& solutions) const {
       for (auto s = 0; s < 2; ++s) {
         for (auto e = 0; e < deg.ne; ++e) {
           for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
             const auto itau =
-                op.pointItau_[k][static_cast<std::size_t>(deg.e0 + e) * deg.np + q];
+                factor != nullptr ? (*factor)[k][full] : op.pointItau_[k][full];
             if (itau == 0.0) continue;
             const auto node = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
             for (auto c = 0; c < ncols; ++c) {
@@ -507,7 +510,8 @@ ToroidalViscoelastic::Dual ToroidalViscoelastic::ZeroDual() const {
 }
 
 ToroidalViscoelastic::BaseStep ToroidalViscoelastic::Redo(
-    const State& prev, double dt, Scheme scheme, const Fields& force) const {
+    const State& prev, double dt, Scheme scheme, const Fields& force,
+    const Fields* memory) const {
   const auto& op = *op_;
   const bool implicit = scheme == Scheme::BackwardEuler;
   const auto& weights = op.SchemeWeightsOf(scheme, dt);
@@ -535,6 +539,11 @@ ToroidalViscoelastic::BaseStep ToroidalViscoelastic::Redo(
             }
           }
         }
+      }
+    }
+    if (memory != nullptr) {
+      if (const auto add = memory->find(l); add != memory->end()) {
+        for (auto i = std::size_t{0}; i < mem.size(); ++i) mem[i] += add->second[i];
       }
     }
     auto b = deg.MemoryForce(mem, ncols);
@@ -592,15 +601,36 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::MaterialForce(
 
 ToroidalViscoelastic::Fields ToroidalViscoelastic::StartMaterialResponse(
     std::span<const double> dmu, const Fields& baseStart) const {
+  return UnrelaxedMaterialResponse(dmu, baseStart, nullptr);
+}
+
+ToroidalViscoelastic::Fields ToroidalViscoelastic::UnrelaxedMaterialResponse(
+    std::span<const double> dmu, const Fields& solution,
+    const State* state) const {
+  const auto& op = *op_;
+  const auto K = op.GetRheology().BranchCount();
   auto minus = std::vector<double>(dmu.begin(), dmu.end());
   for (auto& v : minus) v = -v;
   auto out = Fields{};
-  for (const auto& [l, w] : baseStart) {
+  for (const auto& [l, w] : solution) {
     const auto& deg = Deg(l);
     const auto ncols = Columns(l);
-    out.emplace(l, deg.system.Solve(
-                       deg.WeightedDual(deg.Strain(w, ncols), minus, ncols),
-                       ncols));
+    auto force = deg.WeightedDual(deg.Strain(w, ncols), minus, ncols);
+    if (state != nullptr) {
+      const auto block = deg.Block(ncols);
+      const auto& mem = state->m.at(l);
+      auto branch = std::vector<double>(dmu.size());
+      for (auto k = std::size_t{0}; k < K; ++k) {
+        const auto fraction = op.BranchFractionAtPoints(k);
+        for (auto i = std::size_t{0}; i < dmu.size(); ++i) {
+          branch[i] = fraction[i] * dmu[i];
+        }
+        const auto part = deg.WeightedDual(
+            std::span(mem).subspan(k * 2 * block, 2 * block), branch, ncols);
+        for (auto i = std::size_t{0}; i < force.size(); ++i) force[i] += part[i];
+      }
+    }
+    out.emplace(l, deg.system.Solve(force, ncols));
   }
   return out;
 }
@@ -832,6 +862,287 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StartTransposed(
       }
     }
     out.emplace(l, std::move(y));
+  }
+  return out;
+}
+
+ToroidalViscoelastic::Fields ToroidalViscoelastic::SecondWeightDrive(
+    Scheme scheme, double dt, const State& prev, const State& next,
+    const std::vector<std::vector<double>>& ditauU,
+    const std::vector<std::vector<double>>& ditauV) const {
+  const auto& op = *op_;
+  const bool implicit = scheme == Scheme::BackwardEuler;
+  const auto K = op.GetRheology().BranchCount();
+  const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
+  auto out = Fields{};
+  for (const auto& [l, mPrev] : prev.m) {
+    const auto& deg = Deg(l);
+    const auto ncols = Columns(l);
+    const auto block = deg.Block(ncols);
+    const auto* d0 = implicit ? nullptr : &prev.strain.at(l);
+    const auto& d1 = next.strain.at(l);
+    auto extra = std::vector<double>(mPrev.size(), 0.0);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& d2w = d2weights[k];
+      for (auto s = 0; s < 2; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto dh2 = dt * dt * ditauU[k][full] * ditauV[k][full];
+            if (dh2 == 0.0) continue;
+            const auto node = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            const auto at = (k * 2 + s) * block + node;
+            const auto sn = s * block + node;
+            for (auto c = 0; c < ncols; ++c) {
+              extra[at + c] =
+                  implicit ? d2w.e[full] * dh2 * (mPrev[at + c] - d1[sn + c])
+                           : dh2 * (d2w.e[full] * mPrev[at + c] +
+                                    d2w.alpha[full] * (*d0)[sn + c] +
+                                    d2w.beta[full] * d1[sn + c]);
+            }
+          }
+        }
+      }
+    }
+    out.emplace(l, std::move(extra));
+  }
+  return out;
+}
+
+std::pair<ToroidalViscoelastic::Fields, ToroidalViscoelastic::Fields>
+ToroidalViscoelastic::StepTransposedSecond(Dual& dual, Dual& ddual, double dt,
+                                           Scheme scheme,
+                                           const Fields& surfaceDual,
+                                           const SecondOrderStep& second) const {
+  const auto& op = *op_;
+  const bool implicit = scheme == Scheme::BackwardEuler;
+  const auto& weights = op.SchemeWeightsOf(scheme, dt);
+  const auto& dweights = op.SchemeWeightDerivativesOf(scheme, dt);
+  const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
+  const auto K = op.GetRheology().BranchCount();
+  auto fractions = std::vector<std::span<const double>>{};
+  for (auto k = std::size_t{0}; k < K; ++k) {
+    fractions.push_back(op.BranchFractionAtPoints(k));
+  }
+  const auto meshPoints = op.pointItau_[0].size();
+  const bool shear = second.mu != nullptr;
+  // the step in h = dt itau of a branch at a point, and delta mu there
+  auto dhAt = [&](std::size_t k, std::size_t full) {
+    return second.ditau != nullptr ? dt * (*second.ditau)[k][full] : 0.0;
+  };
+  auto dmuAt = [&](std::size_t full) {
+    return second.dmu.empty() ? 0.0 : second.dmu[full];
+  };
+  // the end weight of a branch and its derivative in h
+  auto endWeight = [&](std::size_t k, std::size_t full) {
+    return implicit ? std::pair{1.0 - weights[k].e[full], -dweights[k].e[full]}
+                    : std::pair{weights[k].beta[full], dweights[k].beta[full]};
+  };
+  auto out = std::pair<Fields, Fields>{};
+  for (auto& [l, md] : dual.m) {
+    const auto& deg = Deg(l);
+    const auto ncols = Columns(l);
+    const auto block = deg.Block(ncols);
+    auto& dd = dual.strain.at(l);
+    auto& dmd = ddual.m.at(l);
+    auto& ddd = ddual.strain.at(l);
+    const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
+    // the duals of the end strain and their derivatives; the effective
+    // modulus's variation along v
+    auto summed = dd;
+    auto dsummed = ddd;
+    auto variation = std::vector<double>(meshPoints, 0.0);
+    for (auto e = 0; e < deg.ne; ++e) {
+      for (auto q = 0; q < deg.np; ++q) {
+        const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+        const auto point = static_cast<std::size_t>(e) * deg.np + q;
+        auto share = 1.0;
+        for (auto k = std::size_t{0}; k < K; ++k) {
+          const auto [b, db] = endWeight(k, full);
+          const auto dbv = db * dhAt(k, full);
+          share -= fractions[k][full] * b;
+          variation[full] -= deg.mu[k][point] * dbv;
+          for (auto s = 0; s < 2; ++s) {
+            for (auto c = 0; c < ncols; ++c) {
+              const auto sn = s * block + point * ncols + c;
+              const auto at = (k * 2 + s) * block + point * ncols + c;
+              summed[sn] += b * md[at];
+              dsummed[sn] += b * dmd[at] + dbv * md[at];
+            }
+          }
+        }
+        variation[full] += share * dmuAt(full);
+      }
+    }
+    auto rhs = deg.DualFromScalars(summed, ncols);
+    if (const auto g = surfaceDual.find(l); g != surfaceDual.end()) {
+      const auto dof = deg.system.SurfaceDof();
+      for (auto c = 0; c < ncols; ++c) {
+        rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
+      }
+    }
+    const auto& system = Effective(scheme, dt, l);
+    auto y = system.Solve(rhs, ncols);
+    const auto sy = deg.Strain(y, ncols);
+    auto drhs = deg.DualFromScalars(dsummed, ncols);
+    {
+      const auto moved = deg.WeightedDual(sy, variation, ncols);
+      for (auto i = std::size_t{0}; i < drhs.size(); ++i) drhs[i] -= moved[i];
+    }
+    auto dy = system.Solve(drhs, ncols);
+    const auto dsy = deg.Strain(dy, ncols);
+    if (shear) {
+      const auto sx = deg.Strain(second.base->solutions.at(l), ncols);
+      const auto sxv = deg.Strain(second.tangent->solutions.at(l), ncols);
+      const auto& mem = second.base->decayed.at(l);
+      const auto& memv = second.tangent->decayed.at(l);
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          const auto point = static_cast<std::size_t>(e) * deg.np + q;
+          // the share's own derivative in h is in v's decayed memory:
+          // its drive carries the end weights' derivatives
+          auto share = 1.0;
+          for (auto k = std::size_t{0}; k < K; ++k) {
+            share -= fractions[k][full] * endWeight(k, full).first;
+          }
+          auto sum = 0.0, dsum = 0.0;
+          for (auto s = 0; s < 2; ++s) {
+            for (auto c = 0; c < ncols; ++c) {
+              const auto sn = s * block + point * ncols + c;
+              auto term = -share * sx[sn];
+              auto dterm = -share * sxv[sn];
+              for (auto k = std::size_t{0}; k < K; ++k) {
+                const auto at = (k * 2 + s) * block + point * ncols + c;
+                term += fractions[k][full] * mem[at];
+                dterm += fractions[k][full] * memv[at];
+              }
+              sum += wc[s] * sy[sn] * term;
+              dsum += wc[s] * (dsy[sn] * term + sy[sn] * dterm);
+            }
+          }
+          (*second.mu)[full] += deg.Wq[point] * sum;
+          (*second.dMu)[full] += deg.Wq[point] * dsum;
+        }
+      }
+    }
+    std::ranges::fill(dd, 0.0);
+    std::ranges::fill(ddd, 0.0);
+    const auto& mPrev = second.basePrev->m.at(l);
+    const auto& d1 = second.baseNext->strain.at(l);
+    const auto* d0 = implicit ? nullptr : &second.basePrev->strain.at(l);
+    const auto& mPrevV = second.tangentPrev->m.at(l);
+    const auto& d1V = second.tangentNext->strain.at(l);
+    const auto* d0V = implicit ? nullptr : &second.tangentPrev->strain.at(l);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& w = weights[k];
+      const auto& dw = dweights[k];
+      const auto& d2w = d2weights[k];
+      for (auto s = 0; s < 2; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto point = static_cast<std::size_t>(e) * deg.np + q;
+            const auto factor = wc[s] * deg.mu[k][point] * deg.Wq[point];
+            const auto dfactor =
+                wc[s] * fractions[k][full] * dmuAt(full) * deg.Wq[point];
+            const auto dh = dhAt(k, full);
+            const auto node = point * ncols;
+            const auto at = (k * 2 + s) * block + node;
+            for (auto c = 0; c < ncols; ++c) {
+              const auto sn = s * block + node + c;
+              const auto mt = md[at + c] + factor * sy[sn];
+              const auto dmt =
+                  dmd[at + c] + dfactor * sy[sn] + factor * dsy[sn];
+              // the forward step's derivative in h, on the base
+              // trajectory, on v's tangent, and once more in h
+              auto first = 0.0, along = 0.0, again = 0.0;
+              if (implicit) {
+                first = dw.e[full] * (mPrev[at + c] - d1[sn]);
+                along = dw.e[full] * (mPrevV[at + c] - d1V[sn]);
+                again = d2w.e[full] * (mPrev[at + c] - d1[sn]);
+              } else {
+                first = dw.e[full] * mPrev[at + c] +
+                        dw.alpha[full] * (*d0)[sn] + dw.beta[full] * d1[sn];
+                along = dw.e[full] * mPrevV[at + c] +
+                        dw.alpha[full] * (*d0V)[sn] + dw.beta[full] * d1V[sn];
+                again = d2w.e[full] * mPrev[at + c] +
+                        d2w.alpha[full] * (*d0)[sn] + d2w.beta[full] * d1[sn];
+              }
+              if (second.itau != nullptr) {
+                (*second.itau)[k][full] += dt * mt * first;
+              }
+              if (second.dItau != nullptr) {
+                (*second.dItau)[k][full] +=
+                    dt * (dmt * first + mt * (along + again * dh));
+              }
+              md[at + c] = w.e[full] * mt;
+              dmd[at + c] = w.e[full] * dmt + dw.e[full] * dh * mt;
+              if (!implicit) {
+                dd[sn] += w.alpha[full] * mt;
+                ddd[sn] += w.alpha[full] * dmt + dw.alpha[full] * dh * mt;
+              }
+            }
+          }
+        }
+      }
+    }
+    out.first.emplace(l, std::move(y));
+    out.second.emplace(l, std::move(dy));
+  }
+  return out;
+}
+
+std::pair<ToroidalViscoelastic::Fields, ToroidalViscoelastic::Fields>
+ToroidalViscoelastic::StartTransposedSecond(
+    const Dual& dual, const Dual& ddual, const Fields& surfaceDual,
+    std::span<const double> dmu, const Fields* baseStart,
+    const Fields* tangentStart, std::vector<double>* mu,
+    std::vector<double>* dMu) const {
+  auto out = std::pair<Fields, Fields>{};
+  for (const auto& [l, dd] : dual.strain) {
+    const auto& deg = Deg(l);
+    const auto ncols = Columns(l);
+    auto rhs = deg.DualFromScalars(dd, ncols);
+    if (const auto g = surfaceDual.find(l); g != surfaceDual.end()) {
+      const auto dof = deg.system.SurfaceDof();
+      for (auto c = 0; c < ncols; ++c) {
+        rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
+      }
+    }
+    auto y = deg.system.Solve(rhs, ncols);
+    const auto sy = deg.Strain(y, ncols);
+    auto drhs = deg.DualFromScalars(ddual.strain.at(l), ncols);
+    if (!dmu.empty()) {
+      const auto moved = deg.WeightedDual(sy, dmu, ncols);
+      for (auto i = std::size_t{0}; i < drhs.size(); ++i) drhs[i] -= moved[i];
+    }
+    auto dy = deg.system.Solve(drhs, ncols);
+    if (baseStart != nullptr && mu != nullptr) {
+      const auto dsy = deg.Strain(dy, ncols);
+      const auto sx = deg.Strain(baseStart->at(l), ncols);
+      const auto sxv = deg.Strain(tangentStart->at(l), ncols);
+      const auto block = deg.Block(ncols);
+      const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto point = static_cast<std::size_t>(e) * deg.np + q;
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          auto sum = 0.0, dsum = 0.0;
+          for (auto s = 0; s < 2; ++s) {
+            for (auto c = 0; c < ncols; ++c) {
+              const auto sn = s * block + point * ncols + c;
+              sum += wc[s] * sy[sn] * sx[sn];
+              dsum += wc[s] * (dsy[sn] * sx[sn] + sy[sn] * sxv[sn]);
+            }
+          }
+          (*mu)[full] -= deg.Wq[point] * sum;
+          (*dMu)[full] -= deg.Wq[point] * dsum;
+        }
+      }
+    }
+    out.first.emplace(l, std::move(y));
+    out.second.emplace(l, std::move(dy));
   }
   return out;
 }

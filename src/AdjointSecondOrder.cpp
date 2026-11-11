@@ -18,6 +18,7 @@
 #include "sl3dpp/TangentLinear.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -131,10 +132,6 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
                        std::vector<double>(op.pointItau_[0].size(), 0.0));
   } else {
     ditauPoints = op.ItauPerturbationAtPoints(itau);
-  }
-  if (!trajectory.toroidal.empty()) {
-    throw std::invalid_argument(
-        "the second-order sweeps do not take a source-driven trajectory yet");
   }
   return options_.method == AdjointMethod::Discrete
              ? DiscreteSecondOrder(times, measurements, tangent, ditauPoints,
@@ -282,6 +279,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
       duals.tangentialPotentialDual = m.tangentialPotentialDual;
+      duals.toroidalPotentialDual = m.toroidalPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
@@ -365,6 +363,58 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
   auto dloadDuals = std::vector<std::vector<double>>(times.size());
 
+  // The toroidal systems (docs/adjoints.md §19), where the base run or
+  // v's twists or the moment kernels are wanted: their transposed
+  // recurrence with its derivative along v, forced by the dual of the
+  // surface W, which no parameter moves; and the moment kernels with
+  // their derivatives, the strain at the points of each step's dual
+  // solutions and of their derivatives.
+  using Twist = detail::ToroidalTrajectories;
+  const bool moments = !options_.moment_points.empty();
+  const bool twisting =
+      moments || !trajectory.toroidal.empty() || Twist::Twists(tangent);
+  auto toroidal = std::optional<ToroidalViscoelastic>{};
+  auto twist = std::optional<Twist>{};
+  auto tdual = ToroidalViscoelastic::Dual{};
+  auto dtdual = ToroidalViscoelastic::Dual{};
+  auto momentKernels =
+      std::vector<std::vector<SphericalTensor>>(moments ? times.size() : 0);
+  auto dMomentKernels = momentKernels;
+  if (twisting) {
+    toroidal.emplace(op);
+    twist = Twist::Make(*toroidal, scheme, true, &trajectory, tangent,
+                        &ditauPoints, direction.mu);
+    tdual = toroidal->ZeroDual();
+    dtdual = toroidal->ZeroDual();
+  }
+  auto toroidalSurfaceDual = [&](const GRDSolver::AdjointResponse& adj) {
+    auto out = ToroidalViscoelastic::Fields{};
+    if (adj.toroidalResponseDual.empty()) return out;
+    for (auto l = 1; l <= lmax; ++l) {
+      out.emplace(l, detail::ColumnDualsOf(adj.toroidalResponseDual, l,
+                                           ev.toNdLength_));
+    }
+    return out;
+  };
+  auto momentKernelsOf = [&](const std::vector<std::vector<double>>& y,
+                             const ToroidalViscoelastic::Fields& yT) {
+    auto byDegree = std::map<int, std::vector<double>>{};
+    for (auto l = 0; l <= lmax; ++l) byDegree.emplace(l, y[l]);
+    return detail::MomentKernelsOfDuals(op, *toroidal, solver.SolverScales(),
+                                        ev.toNdLength_, options_.moment_points,
+                                        byDegree, yT);
+  };
+  // A base solution under its sources' forces too.
+  auto withSources = [&](std::map<int, std::vector<double>> x, std::size_t node) {
+    if (trajectory.sourceForces.empty()) return x;
+    for (const auto& [l, f] : trajectory.sourceForces[node].spheroidal) {
+      const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+      auto& to = x.at(l);
+      for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+    }
+    return x;
+  };
+
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = dts[n - 1];
@@ -383,8 +433,9 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     std::map<int, std::vector<double>> xn, xvn, memv;
     auto factor = std::vector<double>{};
     if (material) {
-      xn = op.SolveElastic(fwdN, loadsOf(trajectory.loads[n]),
-                           tidesOf(trajectory.tides[n]));
+      xn = withSources(op.SolveElastic(fwdN, loadsOf(trajectory.loads[n]),
+                                       tidesOf(trajectory.tides[n])),
+                       n);
       xvn = tools->TangentSolution(tangent[n], xn, &fwdN.m);
       auto vstep = op.StartStep(vPrev, dt, scheme,
                                 loadsOf(tangent[n - 1].loadCoefficients),
@@ -528,6 +579,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     using Pairs = std::pair<std::vector<double>, std::vector<double>>;
     auto materialByDegree = std::vector<Pairs>(material ? lmax + 1 : 0);
     auto dMaterialByDegree = std::vector<Pairs>(material ? lmax + 1 : 0);
+    auto dys = std::vector<std::vector<double>>(moments ? lmax + 1 : 0);
     detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
@@ -536,6 +588,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       auto drhs = dxd[l];
       addSurfaceDuals(deg, l, ncols, dadj, drhs);
       const auto dy = systems[l]->Solve(drhs, ncols);
+      if (moments) dys[l] = dy;
       const auto dsy = deg.Strain(dy, ncols);
       const auto wdsy = deg.ApplyWeights(dsy, ncols);
       const auto& sy = sys[l];
@@ -657,6 +710,33 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       AddPairs(kappaKernel, muKernel, materialByDegree[l]);
       AddPairs(dKappaKernel, dMuKernel, dMaterialByDegree[l]);
     }
+    if (twisting) {
+      ToroidalViscoelastic::SecondOrderStep along;
+      along.ditau = &ditauPoints;
+      along.dmu = direction.mu;
+      along.basePrev = &twist->BaseState(n - 1);
+      along.baseNext = &twist->BaseState(n);
+      along.tangentPrev = &twist->TangentState(n - 1);
+      along.tangentNext = &twist->TangentState(n);
+      along.itau = &itauKernel;
+      along.dItau = &dItauKernel;
+      auto baseStep = ToroidalViscoelastic::BaseStep{};
+      auto tangentStep = ToroidalViscoelastic::BaseStep{};
+      if (material) {
+        baseStep = twist->BaseStepTo(n, dt);
+        tangentStep = twist->TangentStepTo(n, dt, baseStep);
+        along.base = &baseStep;
+        along.tangent = &tangentStep;
+        along.mu = &muKernel;
+        along.dMu = &dMuKernel;
+      }
+      const auto [yT, dyT] = toroidal->StepTransposedSecond(
+          tdual, dtdual, dt, scheme, toroidalSurfaceDual(adj), along);
+      if (moments) {
+        momentKernels[n] = momentKernelsOf(ys, yT);
+        dMomentKernels[n] = momentKernelsOf(dys, dyT);
+      }
+    }
   }
 
   // The start: the transposed instantaneous elastic solve at times[0],
@@ -684,7 +764,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto adj0 = adjointSolve(0.0, sigmaDual, psiDual, 0, true, directLoadKernels[0]);
     // The first start duals' solutions, where the material needs them.
     auto y0 = std::vector<std::vector<double>>(lmax + 1);
-    if (material || materialV) {
+    if (material || materialV || moments) {
       for (auto l = 0; l <= lmax; ++l) {
         const auto& deg = op.Deg(l);
         const auto ncols = 2 * (l + 1);
@@ -708,17 +788,44 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto [dsigmaDual, dpsiDual] = pack(dsigBy, dpsiBy);
     const auto dadj0 =
         adjointSolve(0.0, dsigmaDual, dpsiDual, 0, false, dloadDuals[0]);
-    if (material) {
-      const auto x0 = op.SolveElastic(cursor.State(0), loadsOf(trajectory.loads[0]),
-                                      tidesOf(trajectory.tides[0]));
-      const auto xv0 = tools->TangentSolution(tangent[0], x0, nullptr);
-      const auto ones = std::vector<double>(tools->PointCount(), 1.0);
+    // The derivative start duals' solutions.
+    auto dy0s = std::vector<std::vector<double>>(lmax + 1);
+    if (material || moments) {
       for (auto l = 0; l <= lmax; ++l) {
         const auto& deg = op.Deg(l);
         const auto ncols = 2 * (l + 1);
         auto drhs = dxd0[l];
         addSurfaceDuals(deg, l, ncols, dadj0, drhs);
-        const auto dy0 = deg.system.Solve(drhs, ncols);
+        dy0s[l] = deg.system.Solve(drhs, ncols);
+      }
+    }
+    if (twisting) {
+      auto baseStart = ToroidalViscoelastic::Fields{};
+      auto tangentStart = ToroidalViscoelastic::Fields{};
+      if (material) {
+        baseStart = twist->BaseStart();
+        tangentStart = twist->TangentStart(baseStart);
+      }
+      const auto [yT, dyT] = toroidal->StartTransposedSecond(
+          tdual, dtdual, toroidalSurfaceDual(adj0), direction.mu,
+          material ? &baseStart : nullptr, material ? &tangentStart : nullptr,
+          material ? &muKernel : nullptr, material ? &dMuKernel : nullptr);
+      if (moments) {
+        momentKernels[0] = momentKernelsOf(y0, yT);
+        dMomentKernels[0] = momentKernelsOf(dy0s, dyT);
+      }
+    }
+    if (material) {
+      const auto x0 = withSources(
+          op.SolveElastic(cursor.State(0), loadsOf(trajectory.loads[0]),
+                          tidesOf(trajectory.tides[0])),
+          0);
+      const auto xv0 = tools->TangentSolution(tangent[0], x0, nullptr);
+      const auto ones = std::vector<double>(tools->PointCount(), 1.0);
+      for (auto l = 0; l <= lmax; ++l) {
+        const auto& deg = op.Deg(l);
+        const auto ncols = 2 * (l + 1);
+        const auto& dy0 = dy0s[l];
         const auto sy0 = deg.Strain(y0[l], ncols);
         AddPairs(kappaKernel, muKernel,
                  MaterialTools::MaterialPairing(op.Points(), deg, ncols, y0[l], sy0, x0.at(l), ones, nullptr, tools->fractions));
@@ -785,6 +892,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   derivatives.itauKernel = samples(std::move(dItauKernel));
   derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
   derivatives.muKernel = pointSamples(std::move(dMuKernel));
+  kernels.momentKernels = std::move(momentKernels);
+  derivatives.momentKernels = std::move(dMomentKernels);
   return {std::move(kernels), std::move(derivatives)};
 }
 
@@ -1211,8 +1320,107 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // itself moving (delta mu_k = f_k delta mu_v: the weight scales by
   // delta mu_v / mu_U).
   const bool muMoves = materialV && !tools->muRatio.empty();
+  // The toroidal adjoint and its derivative along v (docs/adjoints.md
+  // §19), where the base run or v's twists or the moment kernels are
+  // wanted: the toroidal systems in reversed time with a jump at each
+  // measurement of W; the derivative state under v's drive on the
+  // adjoint steps and v's material force on them, its jump by v's
+  // perturbation of the inverse relaxation times and by the jump
+  // solution's own derivative. The pairings take the derivative state
+  // with the forward toroidal trajectory and the state with v's.
+  using Twist = detail::ToroidalTrajectories;
+  using TwistFields = ToroidalViscoelastic::Fields;
+  const bool moments = !options_.moment_points.empty();
+  const bool twisting =
+      moments || !trajectory.toroidal.empty() || Twist::Twists(tangent);
+  auto toroidal = std::optional<ToroidalViscoelastic>{};
+  auto twist = std::optional<Twist>{};
+  auto tadj = ToroidalViscoelastic::State{};
+  auto dtadj = ToroidalViscoelastic::State{};
+  if (twisting) {
+    toroidal.emplace(op);
+    twist = Twist::Make(*toroidal, scheme, false, &trajectory, tangent,
+                        &ditauPoints, direction.mu);
+    tadj = twist->rest;
+    dtadj = twist->rest;
+  }
+  auto momentKernels = std::vector<std::vector<SphericalTensor>>(
+      moments ? times.size() : 0,
+      std::vector<SphericalTensor>(options_.moment_points.size()));
+  auto dMomentKernels = momentKernels;
+  // The moment kernels' part of an adjoint displacement: its strain at
+  // the points, scaled.
+  auto addMoments = [&](const Fields& lambda, const TwistFields& twisted,
+                        std::size_t node, double weight,
+                        std::vector<std::vector<SphericalTensor>>& kernels) {
+    const auto strains = detail::MomentKernelsOfDuals(
+        op, *toroidal, solver.SolverScales(), ev.toNdLength_,
+        options_.moment_points, lambda, twisted, false);
+    for (auto p = std::size_t{0}; p < strains.size(); ++p) {
+      auto& to = kernels[node][p];
+      const auto& e = strains[p];
+      to.rr += weight * e.rr;
+      to.tt += weight * e.tt;
+      to.pp += weight * e.pp;
+      to.rt += weight * e.rt;
+      to.rp += weight * e.rp;
+      to.tp += weight * e.tp;
+    }
+  };
+  // The regular adjoint toroidal displacement under the current memory,
+  // and its derivative: the derivative state's plus v's unrelaxed
+  // material response on the adjoint displacement.
+  auto regularTwists = [&] {
+    auto regular = toroidal->SolveElastic(tadj, {});
+    auto derivative = toroidal->SolveElastic(dtadj, {});
+    if (!direction.mu.empty()) {
+      for (const auto& [l, w] :
+           toroidal->UnrelaxedMaterialResponse(direction.mu, regular, &tadj)) {
+        auto& to = derivative.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += w[i];
+      }
+    }
+    return std::pair(std::move(regular), std::move(derivative));
+  };
+  // The shear pairings of an adjoint toroidal displacement and its
+  // derivative at a node.
+  auto pairTwists = [&](const TwistFields& lambda, const TwistFields& dlambda,
+                        std::size_t node, double weight) {
+    if (lambda.empty()) return;
+    const auto& forward = twist->BaseState(node);
+    const auto x = twist->BaseSolution(node);
+    toroidal->AccumulateMaterial(lambda, forward, x, weight, muKernel);
+    toroidal->AccumulateMaterial(dlambda, forward, x, weight, dMuKernel);
+    toroidal->AccumulateMaterial(lambda, twist->TangentState(node),
+                                 twist->TangentSolution(node, x), weight,
+                                 dMuKernel);
+  };
+  // The toroidal share of the kernel in the inverse relaxation times and
+  // of its derivative: the derivative state, v's tangent trajectory, and
+  // the integrand's own dependence (the branch weight with delta mu, the
+  // relaxation time with delta itau).
+  auto twistItau = [&](std::size_t node, double weight) {
+    auto term = std::vector<std::vector<double>>(
+        K, std::vector<double>(meshSize, 0.0));
+    const auto& forward = twist->BaseState(node);
+    toroidal->AccumulateItau(tadj, forward, weight, term);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto i = std::size_t{0}; i < meshSize; ++i) {
+        if (term[k][i] == 0.0) continue;
+        const auto itau = op.pointItau_[k][i];
+        const auto ratio = itau > 0.0 ? ditauPoints[k][i] / itau : 0.0;
+        const auto muRatio = muMoves ? tools->muRatio[i] : 0.0;
+        itauKernel[k][i] += term[k][i];
+        dItauKernel[k][i] += (muRatio - ratio) * term[k][i];
+      }
+    }
+    toroidal->AccumulateItau(dtadj, forward, weight, dItauKernel);
+    toroidal->AccumulateItau(tadj, twist->TangentState(node), weight,
+                             dItauKernel);
+  };
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (weight == 0.0) return;
+    if (twisting) twistItau(node, pairing * weight);
     const auto& fwd = cursor.State(node);
     const auto& tl = *tangent[node].internalState;
     for (const auto& [l, mdual] : vs.state.m) {
@@ -1307,6 +1515,14 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     ForwardAt out;
     out.x = op.SolveElastic(fwd, loadsOf(trajectory.loads[node]),
                             tidesOf(trajectory.tides[node]));
+    if (!trajectory.sourceForces.empty()) {
+      // the base solution under its sources' forces too
+      for (const auto& [l, f] : trajectory.sourceForces[node].spheroidal) {
+        const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+        auto& to = out.x.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+      }
+    }
     out.m = fwd.m;
     out.xv = tools->TangentSolution(tangent[node], out.x,
                                     node == 0 ? nullptr : &fwd.m);
@@ -1326,11 +1542,21 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // memory and closed load, and its derivative: the derivative state's
   // plus v's unrelaxed force's response on the adjoint displacement.
   auto accumulateMaterial = [&](std::size_t node, double weight) {
-    if (!material || weight == 0.0) return;
+    if ((!material && !moments) || weight == 0.0) return;
     const auto lambda = fullOf(vs);
     auto dlambda = fullOf(ds);
-    tools->AddUnrelaxedResponse(dlambda, lambda, &vs.state.m);
-    pairBoth(lambda, dlambda, node, pairing * weight);
+    if (tools.has_value()) {
+      tools->AddUnrelaxedResponse(dlambda, lambda, &vs.state.m);
+    }
+    if (material) pairBoth(lambda, dlambda, node, pairing * weight);
+    if (twisting) {
+      const auto [regular, derivative] = regularTwists();
+      if (material) pairTwists(regular, derivative, node, pairing * weight);
+      if (moments) {
+        addMoments(lambda, regular, node, pairing * weight, momentKernels);
+        addMoments(dlambda, derivative, node, pairing * weight, dMomentKernels);
+      }
+    }
   };
 
   auto observe = [&](std::size_t node) {
@@ -1354,6 +1580,54 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     }
     // the lumped adjoint displacement of the observation, no time weight
     if (material) pairBoth(xJ, dxJ, node, pairing);
+    if (twisting) {
+      // the toroidal jump: the unrelaxed toroidal response to the
+      // adjoint traction of a measurement of W, and its derivative
+      auto lumpTwist = TwistFields{};
+      auto dLumpTwist = TwistFields{};
+      const auto& dual = found->second.toroidalPotentialDual;
+      if (!dual.empty()) {
+        const auto zw = detail::TractionPotentialOfTangentialDual(grid, dual);
+        const auto columns = ev.Columns(zw, ev.toMatDensity_);
+        auto forces = TwistFields{};
+        for (auto l = 1; l <= op.LMax(); ++l) {
+          const auto& system = toroidal->Unrelaxed(l);
+          const auto unit = system.Tangential();
+          const auto amps = *columns(l, 0.0);
+          const auto ndof = static_cast<std::size_t>(system.DofCount());
+          auto b = std::vector<double>(ndof * amps.size());
+          for (auto c = std::size_t{0}; c < amps.size(); ++c) {
+            for (auto d = std::size_t{0}; d < ndof; ++d) {
+              b[c * ndof + d] = unit[d] * amps[c];
+            }
+          }
+          forces.emplace(l, std::move(b));
+        }
+        lumpTwist = toroidal->SolveElastic(twist->rest, forces);
+        toroidal->Jump(tadj, lumpTwist);
+        toroidal->Jump(dtadj, lumpTwist, &ditauPoints);
+        if (direction.mu.empty()) {
+          dLumpTwist = lumpTwist;
+          for (auto& [l, w] : dLumpTwist) std::ranges::fill(w, 0.0);
+        } else {
+          dLumpTwist = toroidal->StartMaterialResponse(direction.mu, lumpTwist);
+          toroidal->Jump(dtadj, dLumpTwist);
+        }
+        const auto [regular, derivative] = regularTwists();
+        toroidal->SetStrain(tadj, regular);
+        toroidal->SetStrain(dtadj, derivative);
+        if (material) pairTwists(lumpTwist, dLumpTwist, node, pairing);
+      }
+      if (moments) {
+        addMoments(xJ, lumpTwist, node, pairing, momentKernels);
+        auto dSolutions = dxJ;
+        if (dSolutions.empty()) {
+          dSolutions = xJ;
+          for (auto& [l, x] : dSolutions) std::ranges::fill(x, 0.0);
+        }
+        addMoments(dSolutions, dLumpTwist, node, pairing, dMomentKernels);
+      }
+    }
     auto early = smoothEquilibrium(vs, node, nullptr);
     auto extra = Fields{};
     if (materialV) {
@@ -1398,6 +1672,18 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     if (materialV) force = tools->Force(dt, record.full, record.mem);
     dDensityLate[n - 1] = reversedStep(ds, dt, n - 1, &drive,
                                        materialV ? &force : nullptr, nullptr);
+    if (twisting) {
+      const auto twistBefore = tadj;
+      auto twistForce = TwistFields{};
+      if (!direction.mu.empty()) {
+        twistForce = toroidal->MaterialForce(
+            dt, scheme, direction.mu, toroidal->Redo(tadj, dt, scheme, {}));
+      }
+      tadj = toroidal->Step(tadj, dt, scheme, {}).first;
+      const auto twistDrive = toroidal->FirstOrderDrive(
+          false, scheme, dt, twistBefore, tadj, ditauPoints);
+      dtadj = toroidal->Step(dtadj, dt, scheme, twistForce, &twistDrive).first;
+    }
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     accumulateMaterial(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
@@ -1461,6 +1747,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   derivatives.itauKernel = samples(std::move(dItauKernel));
   derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
   derivatives.muKernel = pointSamples(std::move(dMuKernel));
+  kernels.momentKernels = std::move(momentKernels);
+  derivatives.momentKernels = std::move(dMomentKernels);
   return {std::move(kernels), std::move(derivatives)};
 }
 

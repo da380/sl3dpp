@@ -337,10 +337,7 @@ Kernels AdjointSolver::DiscreteSweep(
   // The moment kernels: the strain at the given points of each step's
   // dual solution, spheroidal (the transposed effective solve's) and
   // toroidal (the toroidal systems' own transposed recurrence, forced by
-  // the dual of the surface W). The dual of a step's forces is its dual
-  // solution, column by real column; a source's forces are the
-  // conjugate-paired strain functional, so the kernel is the strain of
-  // the dual solution with its m > 0 columns halved.
+  // the dual of the surface W).
   const bool moments = !options_.moment_points.empty();
   // About a source-driven trajectory the toroidal systems carry memory,
   // and the kernel in the relaxation times has their part.
@@ -364,39 +361,9 @@ Kernels AdjointSolver::DiscreteSweep(
   };
   auto momentKernelsOf = [&](const std::map<int, std::vector<double>>& y,
                              const ToroidalViscoelastic::Fields& yT) {
-    auto asComplex = [](const std::map<int, std::vector<double>>& from) {
-      auto out = std::map<int, std::vector<Complex>>{};
-      for (const auto& [l, x] : from) {
-        const auto ndof = x.size() / (2 * (static_cast<std::size_t>(l) + 1));
-        auto c = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1));
-        for (auto m = 0; m <= l; ++m) {
-          const auto weight = m == 0 ? 1.0 : 0.5;
-          for (auto d = std::size_t{0}; d < ndof; ++d) {
-            c[static_cast<std::size_t>(m) * ndof + d] =
-                weight *
-                Complex(x[static_cast<std::size_t>(m) * ndof + d],
-                        x[static_cast<std::size_t>(l + 1 + m) * ndof + d]);
-          }
-        }
-        out.emplace(l, std::move(c));
-      }
-      return out;
-    };
-    const auto fields = DegreeFields{.spheroidal = asComplex(y),
-                                     .toroidal = asComplex(yT)};
-    const auto toMatMoment = detail::MomentToMaterial(op, solver.SolverScales());
-    auto out = std::vector<SphericalTensor>{};
-    for (auto point : options_.moment_points) {
-      point.radius /= ev.toNdLength_;
-      auto e = PointStrain(
-          op.BaseMaterial(), lmax,
-          [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); },
-          [&](int l) -> const ToroidalOperator& { return toroidal->Unrelaxed(l); },
-          fields, point);
-      for (auto* c : {&e.rr, &e.tt, &e.pp, &e.rt, &e.rp, &e.tp}) *c *= toMatMoment;
-      out.push_back(e);
-    }
-    return out;
+    return detail::MomentKernelsOfDuals(op, *toroidal, solver.SolverScales(),
+                                        ev.toNdLength_, options_.moment_points,
+                                        y, yT);
   };
 
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());

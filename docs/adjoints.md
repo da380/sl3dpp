@@ -1895,8 +1895,57 @@ potential of the derivative's rotation. Both are added, in 1D and in
 3D; a measurement of the displacement or of the tangential potentials
 depends on the second at the per-cent level.
 
-**What is not yet taken.** The radial model's second-order sweeps
-refuse a source-driven trajectory (a radial model runs through the 3D
-class with no lateral structure). The 3D moment and tide kernels of
-the continuous sweep, and the discrete moment kernels, are formed on
-one process.
+**The radial model's second order.** Its toroidal systems step on
+their own (`ToroidalViscoelastic`), so their second order is their own
+too, beside the spheroidal one. With the step written as the decayed
+memory m~_k = e_k m_k + alpha_k d_0 (plus a drive), the effective solve
+K_eff W = F(m~) + f and the update m_k' = m~_k + beta_k d_1:
+
+- *The second-order run.* The drive on a step is each direction's
+  perturbation of the inverse relaxation times on the other's toroidal
+  tangent trajectory (`FirstOrderDrive` on its recorded states), the
+  two on the base trajectory through the weights' second derivatives
+  (`SecondWeightDrive`, the discrete flavour), and each direction's
+  shear modulus on the other's tangent step (`MaterialForce` on that
+  step formed again: its decayed memory with its drive, its solution
+  under its sources' forces and its own material force). A tangent
+  run records its toroidal states and its perturbed sources' forces
+  for this (`detail/ToroidalSecondOrder.hpp` forms the steps again).
+- *The discrete sweep.* The transposed recurrence carries the
+  derivatives of its duals beside the duals
+  (`StepTransposedSecond`, `StartTransposedSecond`): the end weights'
+  derivatives act on the memory duals, the effective modulus's
+  variation (delta mu's share, and the end weights' through delta
+  itau) on the dual solution as a source of its derivative, and the
+  branch moduli's variation on the dual solution's strain as a source
+  of the memory duals' derivatives. The dual of the surface W is the
+  measurement's own and no parameter moves it. The kernel in the
+  inverse relaxation times is the dual of the decayed memory with the
+  forward step's derivative in h; its derivative has that pairing with
+  the derivative dual, with v's tangent states, and with the weights'
+  second derivatives. The shear kernel's derivative pairs the
+  derivative dual solution with the base step and the dual solution
+  with v's tangent step; the end weights' derivatives in the share are
+  in the tangent step's decayed memory, whose drive carries them.
+- *The continuous sweep.* The toroidal adjoint state is stepped in
+  reversed time by the forward machinery, and its derivative likewise
+  under v's drive on the adjoint steps and v's material force on them;
+  at a measurement of W the derivative state jumps by v's perturbation
+  of the inverse relaxation times on the jump solution's strain and by
+  the strain of the jump solution's own derivative (the unrelaxed
+  response to delta mu on it). The pairings take the derivative state
+  with the forward toroidal trajectory, the state with v's, and the
+  integrand's own dependence (the branch weight with delta mu, the
+  relaxation time with delta itau).
+
+Both sweeps return the moment kernels and their derivatives along v
+where points are given: the strain at the points of the dual solutions
+(discrete) or of the adjoint displacements, regular and lumped
+(continuous), spheroidal and toroidal, and of their derivatives. The
+toroidal systems are swept wherever the base run or v's twists, so the
+block of the sources against the parameters is formed about a
+load-driven run too.
+
+**What is not yet taken.** The 3D continuous second-order sweep forms
+no moment rows. The 3D moment and tide kernels of the continuous
+sweep, and the discrete moment kernels, are formed on one process.

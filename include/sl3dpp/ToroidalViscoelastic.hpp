@@ -105,6 +105,15 @@ class ToroidalViscoelastic {
       const State& next,
       const std::vector<std::vector<double>>& ditauPoints) const;
 
+  /// The memory increment of the discrete second-order run on a step of
+  /// the base trajectory: the scheme weights' second derivatives, for two
+  /// perturbations of the inverse relaxation times at the memory points
+  /// (the toroidal twin of TangentLinearSolver::SecondWeightDrive).
+  [[nodiscard]] Fields SecondWeightDrive(
+      Scheme scheme, double dt, const State& prev, const State& next,
+      const std::vector<std::vector<double>>& ditauU,
+      const std::vector<std::vector<double>>& ditauV) const;
+
   /// The surface value of W per degree and column.
   [[nodiscard]] Fields Surface(const Fields& solutions) const;
 
@@ -131,7 +140,11 @@ class ToroidalViscoelastic {
   /// The jump of the internal variables by the strain of `solutions` over
   /// each branch's relaxation time, m_k += itau_k d: the continuous
   /// adjoint's jump at an observation. The strain cache is cleared.
-  void Jump(State& state, const Fields& solutions) const;
+  /// With `factor`, per branch at the memory points of the whole mesh, in
+  /// place of the inverse relaxation times (their perturbation, for the
+  /// jump's derivative).
+  void Jump(State& state, const Fields& solutions,
+            const std::vector<std::vector<double>>* factor = nullptr) const;
 
   // -- the moduli ---------------------------------------------------------------
   //
@@ -146,8 +159,11 @@ class ToroidalViscoelastic {
     Fields decayed;
     Fields solutions;
   };
+  /// `memory`, when given, joins the decayed memory (a tangent-linear
+  /// step's drive: the step of a tangent run again).
   [[nodiscard]] BaseStep Redo(const State& prev, double dt, Scheme scheme,
-                              const Fields& force) const;
+                              const Fields& force,
+                              const Fields* memory = nullptr) const;
 
   /// The force of delta mu on the step: minus the effective system's
   /// variation on the base step's solution, plus the force of its decayed
@@ -159,6 +175,12 @@ class ToroidalViscoelastic {
   /// their variation on the base start solution.
   [[nodiscard]] Fields StartMaterialResponse(std::span<const double> dmu,
                                              const Fields& baseStart) const;
+  /// The response of an unrelaxed solution to delta mu: the unrelaxed
+  /// systems under minus their variation on `solution` and, with a
+  /// state, the force of its memory with the branch moduli's variation.
+  [[nodiscard]] Fields UnrelaxedMaterialResponse(std::span<const double> dmu,
+                                                 const Fields& solution,
+                                                 const State* state) const;
 
   // -- the transpose, for the discrete adjoint ---------------------------------
 
@@ -205,6 +227,51 @@ class ToroidalViscoelastic {
                                        const Fields& surfaceDual,
                                        const Fields* baseStart = nullptr,
                                        std::vector<double>* mu = nullptr) const;
+
+  // -- second order, for the discrete adjoint ----------------------------------
+  //
+  // The derivative of the transposed recurrence along a direction v in
+  // the inverse relaxation times and the shear modulus (each at the
+  // memory points of the whole mesh), about a base trajectory, with v's
+  // tangent-linear trajectory: the duals' derivatives are carried beside
+  // the duals, and the kernels' derivatives are formed with the kernels.
+
+  struct SecondOrderStep {
+    /// v's direction; either may be absent.
+    const std::vector<std::vector<double>>* ditau = nullptr;
+    std::span<const double> dmu{};
+    /// The step's states on the base trajectory and on v's tangent one.
+    const State* basePrev = nullptr;
+    const State* baseNext = nullptr;
+    const State* tangentPrev = nullptr;
+    const State* tangentNext = nullptr;
+    /// The kernel in the inverse relaxation times and its derivative,
+    /// per branch (the layout of ItauPairing's).
+    std::vector<std::vector<double>>* itau = nullptr;
+    std::vector<std::vector<double>>* dItau = nullptr;
+    /// For the kernel in the shear modulus and its derivative: the base
+    /// step and v's tangent step again (their decayed memories and
+    /// solutions, the tangent's memory with its drive), and where the
+    /// two are added. All absent for none.
+    const BaseStep* base = nullptr;
+    const BaseStep* tangent = nullptr;
+    std::vector<double>* mu = nullptr;
+    std::vector<double>* dMu = nullptr;
+  };
+  /// StepTransposed with its derivative: `dual` and `ddual` are carried
+  /// back together, and the dual solutions and their derivatives are
+  /// returned. The surface dual does not depend on the parameters.
+  [[nodiscard]] std::pair<Fields, Fields> StepTransposedSecond(
+      Dual& dual, Dual& ddual, double dt, Scheme scheme,
+      const Fields& surfaceDual, const SecondOrderStep& second) const;
+  /// StartTransposed with its derivative along delta mu (empty for
+  /// none); with the base start solution and v's tangent start solution,
+  /// the start's parts of the shear kernel and of its derivative.
+  [[nodiscard]] std::pair<Fields, Fields> StartTransposedSecond(
+      const Dual& dual, const Dual& ddual, const Fields& surfaceDual,
+      std::span<const double> dmu, const Fields* baseStart = nullptr,
+      const Fields* tangentStart = nullptr, std::vector<double>* mu = nullptr,
+      std::vector<double>* dMu = nullptr) const;
 
  private:
   struct Degree;

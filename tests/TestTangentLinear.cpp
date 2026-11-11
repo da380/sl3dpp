@@ -1883,3 +1883,186 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     EXPECT_GT(std::abs(Objective(setup, mixed, measurements)), 0.0);
   }
 }
+
+TEST(TangentLinear, SecondOrderRunAboutASourceDrivenRun) {
+  // About a run under point sources, with directions u and v in the
+  // inverse relaxation times, the moduli AND the sources' moments: the
+  // second-order run is the derivative at the base point along u of the
+  // first-order run along v (central differences at second order,
+  // Richardson to 1e-6), and symmetric in u and v; the toroidal systems'
+  // share with it, measured in every field and in the toroidal potential
+  // alone, for both schemes.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(83);
+  const auto baseTable =
+      ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const GRDSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  const auto& sle = solver.SolverScales();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto at = BodyPoint{.radius = surface - 400e3 / sle.Length(),
+                            .colatitude = 1.1,
+                            .longitude = 4.0};
+  const auto moment0 = SphericalTensor{.rr = 0.9 * unit, .tt = -0.2 * unit,
+                                       .pp = -0.7 * unit, .rt = 0.3 * unit,
+                                       .rp = -0.7 * unit, .tp = 0.6 * unit};
+  const auto momentU = SphericalTensor{.rr = -0.4 * unit, .tt = 0.8 * unit,
+                                       .pp = -0.4 * unit, .rt = 0.5 * unit,
+                                       .rp = 0.1 * unit, .tp = -0.3 * unit};
+  const auto momentV = SphericalTensor{.rr = 0.2 * unit, .tt = 0.3 * unit,
+                                       .pp = -0.5 * unit, .rt = -0.6 * unit,
+                                       .rp = 0.4 * unit, .tp = 0.7 * unit};
+  auto combined = [](const SphericalTensor& a, double s, const SphericalTensor& b) {
+    return SphericalTensor{.rr = a.rr + s * b.rr, .tt = a.tt + s * b.tt,
+                           .pp = a.pp + s * b.pp, .rt = a.rt + s * b.rt,
+                           .rp = a.rp + s * b.rp, .tp = a.tp + s * b.tp};
+  };
+  auto forcingAt = [&](double eps) {
+    return Evolution::Forcing{.sources = [&, eps](double) {
+      return std::vector<PointSource>{
+          {.at = at, .moment = combined(moment0, eps, momentU)}};
+    }};
+  };
+  auto alongSources = [&](const SphericalTensor& moment) {
+    return std::vector<std::vector<PointSource>>(
+        times.size(), std::vector<PointSource>{{.at = at, .moment = moment}});
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 0.8);
+  measurements[2].potentialDual = setup.Smooth(rng, 0.7);
+  measurements[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
+  auto toroidalAlone = std::map<std::size_t, Measurement>{};
+  toroidalAlone[0].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  toroidalAlone[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  const auto ditauU = setup.DeltaItau(0.1);
+  const auto ditauV =
+      setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto kappaMu = material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
+  auto materialDirection = [&](const std::function<double(double)>& profile) {
+    MaterialDirection d;
+    d.kappa.assign(k0.size(), 0.0);
+    d.mu.assign(m0.size(), 0.0);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (material.IsFluid(e)) continue;
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto p = 0.1 * profile(mesh.Radius(e, q));
+        d.kappa[i] = 0.5 * p * k0[i];
+        d.mu[i] = p * m0[i];
+      }
+    }
+    return d;
+  };
+  const auto dU = materialDirection(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  const auto dV = materialDirection([](double r) { return 1.0 - 0.5 * r; });
+  const auto& base = setup.rheology;
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(dU, eps);
+    const auto muU = base.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      auto branch = base.BranchAt(k);
+      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+        branch.itau[i] += eps * ditauU[k][i];
+      }
+      branches.push_back(std::move(branch));
+    }
+    return Rheology::Create(shifted, branches).value();
+  };
+  const auto& all = measurements;
+  const auto& alone = toroidalAlone;
+
+  for (const auto* measured : {&all, &alone})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label =
+        std::string(measured == &alone ? "the toroidal dual alone, " : "") +
+        "scheme " + std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax,
+                            {.memory_points = MemoryPointSet::Gll});
+    Evolution evolution(op, solver, setup.state,
+                        {.scheme = scheme,
+                         .rotation = RotationalFeedback::None,
+                         .rtol = 1e-12,
+                         .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, forcingAt(0.0)));
+    TangentLinearSolver tangent(
+        evolution,
+        {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    TangentPerturbation u, v;
+    u.itau = ditauU;
+    u.material = AtGll(dU);
+    u.sources = alongSources(momentU);
+    v.itau = ditauV;
+    v.material = AtGll(dV);
+    v.sources = alongSources(momentV);
+    const auto tangentU = tangent.Run(times, u, &trajectory);
+    const auto tangentV = tangent.Run(times, v, &trajectory);
+    SecondOrderDirection uv;
+    uv.itauU = ditauU;
+    uv.itauV = ditauV;
+    uv.materialU = AtGll(dU);
+    uv.materialV = AtGll(dV);
+    const auto second =
+        tangent.RunSecondOrder(times, tangentU, tangentV, uv, &trajectory);
+    const auto predicted = Objective(setup, second, *measured);
+    ASSERT_NE(predicted, 0.0) << label;
+
+    auto firstOrderAt = [&](double eps) {
+      const auto rheology = rheologyAt(eps);
+      ViscoelasticOperator moved(rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gll});
+      Evolution movedEvolution(moved, solver, setup.state,
+                               {.scheme = scheme,
+                                .rotation = RotationalFeedback::None,
+                                .rtol = 1e-12,
+                                .record_stride = 1});
+      const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
+          movedEvolution.Run(times, forcingAt(eps)));
+      TangentLinearSolver along(
+          movedEvolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+      return Objective(setup, along.Run(times, v, &movedTrajectory), *measured);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (firstOrderAt(eps) - firstOrderAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << label << " " << fd[0.1] << " " << fd[0.05] << " "
+                            << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << label;
+    EXPECT_NEAR((4.0 * fd[0.05] - fd[0.1]) / 3.0, predicted,
+                1e-6 * std::abs(predicted))
+        << label;
+
+    SecondOrderDirection vu;
+    vu.itauU = ditauV;
+    vu.itauV = ditauU;
+    vu.materialU = AtGll(dV);
+    vu.materialV = AtGll(dU);
+    const auto swapped =
+        tangent.RunSecondOrder(times, tangentV, tangentU, vu, &trajectory);
+    EXPECT_NEAR(Objective(setup, swapped, *measured), predicted,
+                1e-10 * std::abs(predicted))
+        << label;
+  }
+}

@@ -18,6 +18,7 @@
 #include <stdexcept>
 #include <vector>
 
+#include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -43,6 +44,52 @@ inline std::vector<Complex> CoefficientDualFromColumnDuals(
       out[SurfaceGrid::Index(l, m)] =
           0.5 * factor * Complex(cols[m], cols[static_cast<std::size_t>(l) + 1 + m]);
     }
+  }
+  return out;
+}
+
+/// The moment kernels of dual solutions: the strain at the given points
+/// (solver units) of a step's dual solutions, spheroidal and toroidal,
+/// as real columns. The dual of a step's forces is its dual solution,
+/// column by real column; a source's forces are the conjugate-paired
+/// strain functional, so the kernel is the strain of the dual solution
+/// with its m > 0 columns halved. Not `halved`: the natural columns as
+/// the coefficients of a real field (a continuous adjoint displacement).
+inline std::vector<SphericalTensor> MomentKernelsOfDuals(
+    const ViscoelasticOperator& op, const ToroidalViscoelastic& toroidal,
+    const Scales& sle, double toNdLength, std::span<const BodyPoint> points,
+    const std::map<int, std::vector<double>>& y,
+    const std::map<int, std::vector<double>>& yT, bool halved = true) {
+  auto asComplex = [halved](const std::map<int, std::vector<double>>& from) {
+    auto out = std::map<int, std::vector<Complex>>{};
+    for (const auto& [l, x] : from) {
+      const auto ndof = x.size() / (2 * (static_cast<std::size_t>(l) + 1));
+      auto c = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1));
+      for (auto m = 0; m <= l; ++m) {
+        const auto weight = m == 0 || !halved ? 1.0 : 0.5;
+        for (auto d = std::size_t{0}; d < ndof; ++d) {
+          c[static_cast<std::size_t>(m) * ndof + d] =
+              weight * Complex(x[static_cast<std::size_t>(m) * ndof + d],
+                               x[static_cast<std::size_t>(l + 1 + m) * ndof + d]);
+        }
+      }
+      out.emplace(l, std::move(c));
+    }
+    return out;
+  };
+  const auto fields =
+      DegreeFields{.spheroidal = asComplex(y), .toroidal = asComplex(yT)};
+  const auto toMatMoment = MomentToMaterial(op, sle);
+  auto out = std::vector<SphericalTensor>{};
+  for (auto point : points) {
+    point.radius /= toNdLength;
+    auto e = PointStrain(
+        op.BaseMaterial(), op.LMax(),
+        [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); },
+        [&](int l) -> const ToroidalOperator& { return toroidal.Unrelaxed(l); },
+        fields, point);
+    for (auto* c : {&e.rr, &e.tt, &e.pp, &e.rt, &e.rp, &e.tp}) *c *= toMatMoment;
+    out.push_back(e);
   }
   return out;
 }
@@ -377,7 +424,8 @@ struct AdjointSolver::MaterialTools {
   }
 
   /// v's full tangent solution at a node from its recorded snapshot: the
-  /// unrelaxed solve under the snapshot's loads and memory, plus v's own
+  /// unrelaxed solve under the snapshot's loads, memory and (where v
+  /// perturbs the sources) its sources' forces, plus v's own
   /// unrelaxed material force's response on the base solution and memory
   /// there (empty for the start).
   [[nodiscard]] Fields TangentSolution(const Evolution::Snapshot& snap,
@@ -386,6 +434,14 @@ struct AdjointSolver::MaterialTools {
     auto x = op->SolveElastic(*snap.internalState,
                               ev->Columns(snap.loadCoefficients, ev->toMatDensity_),
                               ev->Columns(snap.tideCoefficients, ev->toMatPotential_));
+    if (snap.sourceForces) {
+      // v perturbs the sources: its solution is under their forces too
+      for (const auto& [l, f] : snap.sourceForces->spheroidal) {
+        const auto add = op->UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+        auto& to = x.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+      }
+    }
     AddUnrelaxedResponse(x, baseFull, baseMem);
     return x;
   }

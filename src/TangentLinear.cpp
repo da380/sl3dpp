@@ -1,6 +1,7 @@
 #include "sl3dpp/TangentLinear.hpp"
 
 #include "sl3dpp/detail/InteriorSources.hpp"
+#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 
 #include <format>
 #include <optional>
@@ -493,6 +494,10 @@ struct TangentLinearSolver::MaterialSecondDrive
     const auto& snap = part.b[node];
     auto x = op.SolveElastic(*snap.internalState, Loads(snap.loadCoefficients),
                              Tides(snap.tideCoefficients));
+    if (snap.sourceForces) {
+      // b perturbs the sources: its solution is under their forces too
+      AddUnrelaxed(x, snap.sourceForces->spheroidal);
+    }
     if (part.bMaterial) {
       const auto extra = part.bMaterial->UnrelaxedResponse(
           part.bMaterial->UnrelaxedForceOn(baseFull, baseMemory));
@@ -504,11 +509,34 @@ struct TangentLinearSolver::MaterialSecondDrive
     return x;
   }
 
+  /// Adds the unrelaxed response to degree forces.
+  void AddUnrelaxed(std::map<int, std::vector<double>>& x,
+                    const std::map<int, std::vector<double>>& forces) const {
+    const auto& op = *ev->op_;
+    for (const auto& [l, f] : forces) {
+      const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+      auto& to = x.at(l);
+      for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+    }
+  }
+
+  /// The base run's full solution at a node: the unrelaxed solve under
+  /// the recorded loads and, about a source-driven run, the sources'
+  /// forces.
+  std::map<int, std::vector<double>> BaseSolution(const ViscoelasticState& state,
+                                                  std::size_t node) const {
+    auto x = ev->op_->SolveElastic(state, Loads(trajectory->loads[node]),
+                                   Tides(trajectory->tides[node]));
+    if (!trajectory->sourceForces.empty()) {
+      AddUnrelaxed(x, trajectory->sourceForces[node].spheroidal);
+    }
+    return x;
+  }
+
   std::map<int, std::vector<double>> StartResponse() override {
     const auto& op = *ev->op_;
     const auto& base0 = cursor->State(0);
-    const auto x0 = op.SolveElastic(base0, Loads(trajectory->loads[0]),
-                                    Tides(trajectory->tides[0]));
+    const auto x0 = BaseSolution(base0, 0);
     auto total = std::map<int, std::vector<double>>{};
     for (const auto& part : parts) {
       const auto xb = TangentSolution(part, 0, x0, nullptr);
@@ -524,8 +552,7 @@ struct TangentLinearSolver::MaterialSecondDrive
     const auto scheme = ev->options_.scheme;
     const ViscoelasticState basePrev = cursor->State(node - 1);
     const auto& baseN = cursor->State(node);
-    const auto xN = op.SolveElastic(baseN, Loads(trajectory->loads[node]),
-                                    Tides(trajectory->tides[node]));
+    const auto xN = BaseSolution(baseN, node);
     auto total = std::map<int, std::vector<double>>{};
     for (const auto& part : parts) {
       const auto xb = TangentSolution(part, node, xN, &baseN.m);
@@ -880,9 +907,106 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
           {driveV, tangentU, driveU, pointsOf(direction.itauU)});
     }
   }
+  // The toroidal systems, where the base or either run twists: each
+  // direction's relaxation times on the other's toroidal trajectory (and
+  // the two on the base's, through the weights' second derivatives), and
+  // each direction's shear modulus on the other's toroidal steps.
+  using Twist = detail::ToroidalTrajectories;
+  ToroidalDrive toroidalDrive{};
+  const bool twists = (trajectory != nullptr && !trajectory->toroidal.empty()) ||
+                      Twist::Twists(tangentU) || Twist::Twists(tangentV);
+  auto atPoints = [&](const std::vector<std::vector<double>>& itau) {
+    return itau.empty() ? std::vector<std::vector<double>>{}
+                        : op.ItauPerturbationAtPoints(itau);
+  };
+  const auto uTimes = atPoints(direction.itauU);
+  const auto vTimes = atPoints(direction.itauV);
+  const auto uvTimes = atPoints(direction.itauUV);
+  const auto& muU = direction.materialU.mu;
+  const auto& muV = direction.materialV.mu;
+  auto twistOf = std::make_shared<std::optional<std::pair<Twist, Twist>>>();
+  if (twists && (!uTimes.empty() || !vTimes.empty() || !uvTimes.empty() ||
+                 !muU.empty() || !muV.empty())) {
+    requireRecorded();
+    auto along = [&, twistOf](const ToroidalViscoelastic& toroidal)
+        -> const std::pair<Twist, Twist>& {
+      if (!twistOf->has_value()) {
+        twistOf->emplace(
+            Twist::Make(toroidal, scheme, discrete, trajectory, tangentU,
+                        uTimes.empty() ? nullptr : &uTimes, muU),
+            Twist::Make(toroidal, scheme, discrete, trajectory, tangentV,
+                        vTimes.empty() ? nullptr : &vTimes, muV));
+      }
+      return **twistOf;
+    };
+    auto add = [](ToroidalViscoelastic::Fields& total,
+                  ToroidalViscoelastic::Fields term) {
+      for (auto& [l, value] : term) {
+        auto& to = total[l];
+        if (to.empty()) {
+          to = std::move(value);
+        } else {
+          for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += value[i];
+        }
+      }
+    };
+    toroidalDrive.step = [&, along, add](const ToroidalViscoelastic& toroidal,
+                                         std::size_t node, double dt) {
+      const auto& [u, v] = along(toroidal);
+      auto out = std::pair<ToroidalViscoelastic::Fields,
+                           ToroidalViscoelastic::Fields>{};
+      if (!uTimes.empty()) {
+        add(out.first,
+            toroidal.FirstOrderDrive(discrete, scheme, dt, v.TangentState(node - 1),
+                                     v.TangentState(node), uTimes));
+      }
+      if (!vTimes.empty()) {
+        add(out.first,
+            toroidal.FirstOrderDrive(discrete, scheme, dt, u.TangentState(node - 1),
+                                     u.TangentState(node), vTimes));
+      }
+      if (!uvTimes.empty()) {
+        add(out.first,
+            toroidal.FirstOrderDrive(discrete, scheme, dt, u.BaseState(node - 1),
+                                     u.BaseState(node), uvTimes));
+      }
+      if (both && discrete) {
+        add(out.first,
+            toroidal.SecondWeightDrive(scheme, dt, u.BaseState(node - 1),
+                                       u.BaseState(node), uTimes, vTimes));
+      }
+      if (!muU.empty() || !muV.empty()) {
+        const auto baseStep = u.BaseStepTo(node, dt);
+        if (!muU.empty()) {
+          add(out.second, toroidal.MaterialForce(
+                              dt, scheme, muU, v.TangentStepTo(node, dt, baseStep)));
+        }
+        if (!muV.empty()) {
+          add(out.second, toroidal.MaterialForce(
+                              dt, scheme, muV, u.TangentStepTo(node, dt, baseStep)));
+        }
+      }
+      return out;
+    };
+    if (!muU.empty() || !muV.empty()) {
+      toroidalDrive.start = [&, along, add](const ToroidalViscoelastic& toroidal) {
+        const auto& [u, v] = along(toroidal);
+        const auto baseStart = u.BaseStart();
+        auto out = ToroidalViscoelastic::Fields{};
+        if (!muU.empty()) {
+          add(out, toroidal.StartMaterialResponse(muU, v.TangentStart(baseStart)));
+        }
+        if (!muV.empty()) {
+          add(out, toroidal.StartMaterialResponse(muV, u.TangentStart(baseStart)));
+        }
+        return out;
+      };
+    }
+  }
   // No direct load under the sharp flotation rule.
   const Direct none = [](std::size_t) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, none, drive, material.get());
+  return March(times, oceanFunctions, none, drive, material.get(), {}, {},
+               toroidalDrive);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::March(
@@ -997,6 +1121,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   auto toroidal = std::optional<ToroidalViscoelastic>{};
   auto tstate = ToroidalViscoelastic::State{};
   auto twist = ToroidalViscoelastic::Fields{};
+  auto nodeForces = RadialSourceForces{};  // the node's perturbed sources'
   if (twisting) {
     toroidal.emplace(op);
     tstate = toroidal->ZeroState();
@@ -1026,7 +1151,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     if (material != nullptr) startResponse = material->StartResponse();
     if (sourced) {
       // the sources' unrelaxed response joins the start's
-      const auto forces = sourceForcesAt(0);
+      nodeForces = sourceForcesAt(0);
+      const auto& forces = nodeForces;
       for (const auto& [l, f] : forces.spheroidal) {
         auto x = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
         auto& to = startResponse[l];
@@ -1105,6 +1231,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
       snapshot.internalState = vstate;
       snapshot.loadCoefficients = sigma;
       snapshot.tideCoefficients = psi;
+      // a second-order run forms this run's solutions again from them
+      if (twisting) snapshot.toroidalState = tstate;
+      if (sourced) snapshot.sourceForces = nodeForces;
     }
     snapshots.push_back(std::move(snapshot));
   };
@@ -1123,6 +1252,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
       auto forces = RadialSourceForces{};
       if (sourced) {
         forces = sourceForcesAt(node);
+        nodeForces = forces;
         step.AddForce(forces.spheroidal);
       }
       auto increment = ToroidalViscoelastic::Fields{};
