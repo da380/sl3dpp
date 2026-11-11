@@ -226,7 +226,7 @@ Deliberately out of scope:
   solves inside (`OpenStep::Nest`; docs/adjoints.md §13n); the
   evolution, the tangent and the continuous sweep use it, the discrete
   transpose stays a fixed point. The fixed point remains the default.
-- **With sea level.** `SeaLevelEvolution3D` folds the ocean load and
+- **With sea level.** `Evolution3D` folds the ocean load and
   rotation into one combined fixed point per step (`coupled_rtol`,
   `max_coupled_iterations`); a node that does not converge is reported in
   its snapshot. Under migrating shorelines (`RunMigrating`) each pass
@@ -272,7 +272,7 @@ Deliberately out of scope:
   point values, expansion coefficients, rotation components, and the decay
   time of a site's series (Al-Attar & Tromp 2014, Appendix C) as per-node
   weights.
-- **Ice-history kernels.** `IceKernels` carries pyslfp's three views: the
+- **Ice-history kernels.** `Kernels` carries pyslfp's three views: the
   discrete view (duals of the load at each node), the distributional view
   (a density in time plus the instantaneous amplitude of each
   measurement; Yu et al. 2025 §3.7), and the quelled view (the kernel
@@ -282,7 +282,7 @@ Deliberately out of scope:
   linear with the time-reversed C(t) as its coefficients (Yu et al. 2025,
   §3.3; the shoreline-motion singular terms cancel), the grounding factors
   are per node, and the initial sea level kernel
-  ρ_w Σₙ (Cₙ − C₀) loadDualsₙ is formed (zero under frozen shorelines).
+  ρ_w Σₙ (Cₙ − C₀) directLoadKernelsₙ is formed (zero under frozen shorelines).
 - **Viscosity kernels**, in the multiplier form of Yu et al. (2025), as
   pyslfp: in 1D, dJ/d itau = ∫ W_k m†/itau (d − m) dt per branch, mapped to
   dJ/dη by dη = −η² d(itau)/μ; in 3D, μ_k m†:(d − m)/itau per branch and
@@ -402,14 +402,14 @@ Deliberately out of scope:
   core carries no lateral moduli. The instantaneous problem under them
   (the run's start, the sweeps' starts, jumps and equilibria) is a
   coupled fixed point: a zero-length open step (`StartStep` with dt =
-  0). `SeaLevelEvolution3D::Instantaneous` is the run's start as a solve
+  0). `Evolution3D::Instantaneous` is the run's start as a solve
   of its own, the elastic sea-level fingerprint of a laterally
   heterogeneous Earth (the run's first node is the same code). The tangent, both first-order adjoints and the second-order
   sweeps carry lateral moduli in the background (the branch moduli's
   shear factor, the lateral unrelaxed solves, the dilatation's block in
   the discrete transpose).
 - **Material kernels** (`Options::material_kernels`): dJ/dκ and dJ/dμ,
-  nodal in 1D (`IceKernels::kappaKernel`, `muKernel`) and on the
+  nodal in 1D (`Kernels::kappaKernel`, `muKernel`) and on the
   coupling's grid in 3D with spherical reductions
   (`Kernels3D::kappaKernel3D`, `muKernel3D`). By the discrete sweeps they
   are the exact transposes of the material tangents (in 1D through the
@@ -465,7 +465,7 @@ Deliberately out of scope:
   re-dimensionalise on exit; components exchange non-dimensional numbers
   (`EarthModel::Dimensionless`). `Fingerprint`, `LoveNumbers` and the `io/`
   classes are SI at their interfaces; the evolution and adjoint drivers
-  work in the sea level solver's units (`SeaLevelSolver::SolverScales()`).
+  work in the sea level solver's units (`GRDSolver::SolverScales()`).
 - **The scheme** is planetmodel's `geophysical`: length the body's surface
   radius, density the Earth's mean density ρ̄, time fixed by G ρ̄ T² = 1
   (about 1648 s), so G = 1 internally. `Scales.hpp` mirrors planetmodel's

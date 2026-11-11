@@ -128,7 +128,7 @@ TEST(SeaLevel, FromTopography) {
                std::invalid_argument);
 }
 
-TEST(SeaLevelSolver, RigidEarthEustaticLimit) {
+TEST(GRDSolver, RigidEarthEustaticLimit) {
   // With every Love number zero the sea level change is the uniform
   // eustatic value -int load dS / (rho_w A) over the whole sphere.
   auto table = TestTable();
@@ -154,13 +154,13 @@ TEST(SeaLevelSolver, RigidEarthEustaticLimit) {
   const auto area = a * a * grid.Integrate(ocean);
   const auto mass = a * a * grid.Integrate(load);
   const auto eustatic = -mass / (1000.0 * area);
-  for (auto i = std::size_t{0}; i < result.seaLevelChange.size(); i += 29) {
-    EXPECT_NEAR(result.seaLevelChange[i], eustatic, 1e-9 * std::abs(eustatic));
+  for (auto i = std::size_t{0}; i < result.relativeSeaLevelChange.size(); i += 29) {
+    EXPECT_NEAR(result.relativeSeaLevelChange[i], eustatic, 1e-9 * std::abs(eustatic));
   }
   EXPECT_NEAR(result.displacement[0], 0.0, 1e-15);
 }
 
-TEST(SeaLevelSolver, ConservesMassAndConverges) {
+TEST(GRDSolver, ConservesMassAndConverges) {
   Fingerprint fingerprint(32, TestTable());
   fingerprint.SetAnalyticTestState();
   const auto& grid = fingerprint.Grid();
@@ -170,7 +170,7 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
   auto iceChange = std::vector<double>(ice.size());
   for (auto i = std::size_t{0}; i < ice.size(); ++i)
     iceChange[i] = -0.1 * ice[i];
-  auto load = fingerprint.LoadFromIceThicknessChange(iceChange);
+  auto load = fingerprint.DirectLoadFromIceThicknessChange(iceChange);
   auto result = fingerprint.SolveForIceChange(iceChange);
   EXPECT_TRUE(result.converged);
   EXPECT_LT(result.iterations, 40);
@@ -179,7 +179,7 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
   auto oceanGain = std::vector<double>(load.size());
   for (auto i = std::size_t{0}; i < load.size(); ++i) {
     oceanGain[i] =
-        1000.0 * fingerprint.OceanFunction()[i] * result.seaLevelChange[i];
+        1000.0 * fingerprint.OceanFunction()[i] * result.relativeSeaLevelChange[i];
   }
   const auto gained = grid.Integrate(oceanGain);
   const auto removed = -grid.Integrate(load);
@@ -192,7 +192,7 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
 
   // Far-field sea level rises, near-field falls: the fingerprint shape.
   auto min = 1e300, max = -1e300;
-  for (auto v : result.seaLevelChange) {
+  for (auto v : result.relativeSeaLevelChange) {
     min = std::min(min, v);
     max = std::max(max, v);
   }
@@ -200,13 +200,13 @@ TEST(SeaLevelSolver, ConservesMassAndConverges) {
   EXPECT_GT(max, 0.0);
 }
 
-TEST(SeaLevelSolver, AdjointDotProductIdentity) {
+TEST(GRDSolver, AdjointDotProductIdentity) {
   // The generalised solve against its adjoint: the defining identity
   //   <g, outputs(inputs)> = <adjoint(g), inputs>
   // holds to solver tolerance for every channel at once.
   const auto lmax = 24;
   auto table = TestTable();
-  SeaLevelSolver solver(SurfaceGrid(lmax), table, SeaLevelParameters{});
+  GRDSolver solver(SurfaceGrid(lmax), table, SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto a = solver.Radius();
 
@@ -226,7 +226,7 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
                         RotationalFeedback::Full}) {
     const auto& state = *chosen;
-    SeaLevelSolver::GeneralisedForcing forcing;
+    GRDSolver::GeneralisedForcing forcing;
     forcing.rotation = rotation;
     const double sigma =
         solver.SolverScales().Factor(Dimensions{.mass = 1, .length = -2});
@@ -244,11 +244,11 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
         }));
     forcing.inertiaMomentChange = 1e-7;
 
-    SeaLevelSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
+    GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
     const auto response = solver.SolveGeneralised(state, forcing, options);
     ASSERT_TRUE(response.converged);
 
-    SeaLevelSolver::AdjointForcing duals;
+    GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
     duals.seaLevelDual = grid.FromFunction([&](double theta, double phi) {
       return Cap(theta, phi, 0.9, 1.2, 0.5);
@@ -269,7 +269,7 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
       return a * a * grid.Integrate(fg);
     };
     const double lhs =
-        surface(duals.seaLevelDual, response.seaLevelChange) +
+        surface(duals.seaLevelDual, response.relativeSeaLevelChange) +
         surface(duals.displacementDual, response.displacement) +
         surface(duals.potentialDual, response.potential) +
         duals.angularVelocityDual[0] * response.angularVelocity[0] +
@@ -287,7 +287,7 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
   }
 }
 
-TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
+TEST(GRDSolver, WithoutAnOceanIsTheSolidBodysResponse) {
   // A state with no ocean carries no water load: the solve is the solid
   // body's response to the forcing, rotation included. Its oracle is the
   // solve WITH an ocean, whose converged total load (direct plus the
@@ -295,7 +295,7 @@ TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
   // the same displacement, potential and rotation, and a sea level change
   // differing by the uniform shift that conserves the water.
   const auto lmax = 24;
-  SeaLevelSolver solver(SurfaceGrid(lmax), TestTable(), SeaLevelParameters{});
+  GRDSolver solver(SurfaceGrid(lmax), TestTable(), SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto length = solver.SolverScales().Length();
   const auto sigma =
@@ -315,10 +315,10 @@ TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
     for (const auto x : v) worst = std::max(worst, std::abs(x));
     return worst;
   };
-  SeaLevelSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
+  GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
                         RotationalFeedback::Full}) {
-    SeaLevelSolver::GeneralisedForcing forcing;
+    GRDSolver::GeneralisedForcing forcing;
     forcing.rotation = rotation;
     forcing.directLoad = grid.FromFunction([&](double theta, double phi) {
       return 150.0 * Cap(theta, phi, 0.4, 0.7, 0.5) / sigma;
@@ -334,7 +334,7 @@ TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
     auto total = forcing;
     for (auto i = std::size_t{0}; i < total.directLoad.size(); ++i) {
       total.directLoad[i] += solver.WaterDensity() *
-                             withOcean.oceanFunction[i] * wet.seaLevelChange[i];
+                             withOcean.oceanFunction[i] * wet.relativeSeaLevelChange[i];
     }
     const auto solid = solver.SolveGeneralised(dry, total, options);
     EXPECT_TRUE(solid.converged);
@@ -347,13 +347,13 @@ TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
                         std::abs(solid.displacement[i] - wet.displacement[i]));
       worstPhi =
           std::max(worstPhi, std::abs(solid.potential[i] - wet.potential[i]));
-      const auto shift = wet.seaLevelChange[i] - solid.seaLevelChange[i];
+      const auto shift = wet.relativeSeaLevelChange[i] - solid.relativeSeaLevelChange[i];
       lowest = std::min(lowest, shift);
       highest = std::max(highest, shift);
     }
     EXPECT_LT(worstU, 1e-10 * maxAbs(wet.displacement)) << "rotation " << mode;
     EXPECT_LT(worstPhi, 1e-10 * maxAbs(wet.potential)) << "rotation " << mode;
-    EXPECT_LT(highest - lowest, 1e-10 * maxAbs(wet.seaLevelChange))
+    EXPECT_LT(highest - lowest, 1e-10 * maxAbs(wet.relativeSeaLevelChange))
         << "rotation " << mode;
     for (auto k = 0; k < 3; ++k) {
       EXPECT_NEAR(solid.angularVelocity[k], wet.angularVelocity[k],
@@ -362,12 +362,12 @@ TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
     }
   }
 
-  SeaLevelSolver::NonlinearForcing moving;
+  GRDSolver::NonlinearForcing moving;
   moving.iceThicknessChange.assign(grid.FieldSize(), 0.0);
   EXPECT_THROW((void)solver.SolveNonlinear(dry, moving), std::invalid_argument);
 }
 
-TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
+TEST(GRDSolver, NonlinearMassBudgetAndLinearLimit) {
   auto table = TestTable();
   Fingerprint fingerprint(32, table);
   fingerprint.SetAnalyticTestState(5.0);  // some mid-latitude ice to move
@@ -387,10 +387,10 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
   // A small perturbation: migration is second order, so the two solutions
   // agree to a fraction of a percent while not being identical.
   auto scale = 0.0, diff = 0.0;
-  for (auto i = std::size_t{0}; i < linear.seaLevelChange.size(); ++i) {
-    scale = std::max(scale, std::abs(linear.seaLevelChange[i]));
+  for (auto i = std::size_t{0}; i < linear.relativeSeaLevelChange.size(); ++i) {
+    scale = std::max(scale, std::abs(linear.relativeSeaLevelChange[i]));
     diff = std::max(
-        diff, std::abs(linear.seaLevelChange[i] - nonlinear.seaLevelChange[i]));
+        diff, std::abs(linear.relativeSeaLevelChange[i] - nonlinear.relativeSeaLevelChange[i]));
   }
   EXPECT_LT(diff, 5e-2 * scale);
   EXPECT_GT(diff, 0.0);
@@ -411,18 +411,18 @@ TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {
         for (auto& x : v) x /= length;
         return v;
       }());
-  SeaLevelSolver::NonlinearForcing forcing;
+  GRDSolver::NonlinearForcing forcing;
   forcing.iceThicknessChange.resize(iceChange.size());
   for (auto i = std::size_t{0}; i < iceChange.size(); ++i) {
     forcing.iceThicknessChange[i] = iceChange[i] / length;
   }
-  SeaLevelSolver::Options options;
+  GRDSolver::Options options;
   options.rtol = 1e-11;
   options.max_iterations = 100;
   const auto result = solver.SolveNonlinear(state, forcing, options);
   ASSERT_TRUE(result.response.converged);
 
-  auto budget = [&](const SeaLevelSolver::State& s) {
+  auto budget = [&](const GRDSolver::State& s) {
     auto total = std::vector<double>(s.seaLevel.size());
     for (auto i = std::size_t{0}; i < total.size(); ++i) {
       total[i] =

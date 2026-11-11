@@ -114,7 +114,7 @@ SeaLevelParameters WithHydrostaticMoments(SeaLevelParameters parameters,
   return parameters;
 }
 
-SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
+GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
                                SeaLevelParameters parameters)
     : grid_(std::move(grid)), parameters_(parameters) {
   const auto lmax = grid_.LMax();
@@ -197,7 +197,7 @@ SeaLevelSolver::SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
       traceFactor_ * mc_ * uniformRotationFactor_;
 }
 
-std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
+std::vector<std::complex<double>> GRDSolver::CentrifugalCoefficients(
     const std::array<double, 3>& omega) const {
   auto psi = grid_.ZeroCoefficients();
   psi[SurfaceGrid::Index(2, 1)] = ComplexFromRealPair(
@@ -207,7 +207,7 @@ std::vector<std::complex<double>> SeaLevelSolver::CentrifugalCoefficients(
   return psi;
 }
 
-std::array<double, 3> SeaLevelSolver::CentrifugalDual(
+std::array<double, 3> GRDSolver::CentrifugalDual(
     std::span<const std::complex<double>> tideDual) const {
   // Pair(a, b) = sum_l a_l0 b_l0 + 2 sum_{m>0} Re(a conj b) equals the
   // plain real-pair pairing under RealPairFromComplex, so the transpose
@@ -218,11 +218,11 @@ std::array<double, 3> SeaLevelSolver::CentrifugalDual(
               uniformRotationFactor_ * tideDual[SurfaceGrid::Index(0, 0)].real()};
 }
 
-double SeaLevelSolver::IntegrateSurface(std::span<const double> field) const {
+double GRDSolver::IntegrateSurface(std::span<const double> field) const {
   return radius_ * radius_ * grid_.Integrate(field);
 }
 
-SeaLevelSolver::State SeaLevelSolver::MakeState(
+GRDSolver::State GRDSolver::MakeState(
     std::vector<double> iceThickness, std::vector<double> seaLevel,
     std::span<const char> forcedLand) const {
   if (iceThickness.size() != grid_.FieldSize() ||
@@ -245,7 +245,34 @@ SeaLevelSolver::State SeaLevelSolver::MakeState(
   return state;
 }
 
-SeaLevelSolver::State SeaLevelSolver::NoOceanState() const {
+std::vector<double> GRDSolver::DirectLoadFromIceThicknessChange(
+    const State& state, std::span<const double> iceThicknessChange) const {
+  if (iceThicknessChange.size() != grid_.FieldSize() ||
+      state.oceanFunction.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the fields do not live on the grid");
+  }
+  auto out = std::vector<double>(iceThicknessChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
+    out[i] =
+        iceDensity_ * (1.0 - state.oceanFunction[i]) * iceThicknessChange[i];
+  }
+  return out;
+}
+
+std::vector<double> GRDSolver::LoadFromSeaLevelChange(
+    const State& state, std::span<const double> seaLevelChange) const {
+  if (seaLevelChange.size() != grid_.FieldSize() ||
+      state.oceanFunction.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the fields do not live on the grid");
+  }
+  auto out = std::vector<double>(seaLevelChange.size());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
+    out[i] = waterDensity_ * state.oceanFunction[i] * seaLevelChange[i];
+  }
+  return out;
+}
+
+GRDSolver::State GRDSolver::NoOceanState() const {
   State state;
   state.iceThickness.assign(grid_.FieldSize(), 0.0);
   state.seaLevel.assign(grid_.FieldSize(), 0.0);
@@ -266,14 +293,14 @@ SeaLevelSolver::State SeaLevelSolver::NoOceanState() const {
  * trace of the inertia perturbation through the axial Love numbers and the
  * uniform shell term.
  */
-struct SeaLevelSolver::Rotation {
+struct GRDSolver::Rotation {
   std::array<double, 3> omega{0.0, 0.0, 0.0};
   Block2 disp2{};             // full degree-2 displacement (forcing + tidal)
   Block2 grav2{};             // likewise the potential, without the centrifugal
   Block2 centrifugal{};       // the degree-2 centrifugal potential
   double centrifugal0 = 0.0;  // its degree-0 part
 
-  Rotation(const SeaLevelSolver& s, const Block2& load2, double load0,
+  Rotation(const GRDSolver& s, const Block2& load2, double load0,
            const std::optional<Block2>& staticDisp2,
            const std::optional<Block2>& staticGrav2, double displacementLoad0,
            double potentialLoad0, double inertiaMoment,
@@ -314,7 +341,7 @@ struct SeaLevelSolver::Rotation {
 // -- the generalised linear solve
 // ---------------------------------------------------
 
-SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
+GRDSolver::Response GRDSolver::SolveGeneralised(
     const State& state, const GeneralisedForcing& forcing,
     Options options) const {
   const auto fieldSize = grid_.FieldSize();
@@ -402,7 +429,7 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
       (!forcing.directLoad.empty() && MaxAbs(forcing.directLoad) > 0.0);
 
   Response response;
-  response.seaLevelChange.assign(fieldSize, 0.0);
+  response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
   if (!anyForcing) return response;
@@ -541,7 +568,7 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
     potLm[SurfaceGrid::Index(0, 0)] += kc_ * rotation.centrifugal0;
   }
 
-  response.seaLevelChange = std::move(slc);
+  response.relativeSeaLevelChange = std::move(slc);
   response.displacement = grid_.Synthesise(dispLm);
   response.potential = grid_.Synthesise(potLm);
   response.angularVelocity = omega;
@@ -551,7 +578,7 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
   return response;
 }
 
-SeaLevelSolver::Response SeaLevelSolver::Solve(const State& state,
+GRDSolver::Response GRDSolver::Solve(const State& state,
                                                std::vector<double> directLoad,
                                                RotationalFeedback rotation,
                                                Options options) const {
@@ -564,7 +591,7 @@ SeaLevelSolver::Response SeaLevelSolver::Solve(const State& state,
 // -- the adjoint solve
 // -----------------------------------------------------------
 
-SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
+GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     const State& state, const AdjointForcing& forcing, Options options) const {
   const auto fieldSize = grid_.FieldSize();
   const auto coefSize = grid_.CoefficientSize();
@@ -742,7 +769,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
 // -- the nonlinear (migrating shoreline) solve
 // ---------------------------------------
 
-SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
+GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     const State& state, const NonlinearForcing& forcing,
     Options options) const {
   const auto fieldSize = grid_.FieldSize();
@@ -947,7 +974,7 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
   out.finalState.oceanFunction = std::move(currentOcean);
   out.finalState.oceanArea = IntegrateSurface(out.finalState.oceanFunction);
   out.finalState.forcedLand = state.forcedLand;
-  out.response.seaLevelChange = std::move(slcData);
+  out.response.relativeSeaLevelChange = std::move(slcData);
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);
   out.response.angularVelocity = omega;

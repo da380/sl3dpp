@@ -152,12 +152,12 @@ def sea_level_fingerprint(name: str, title: str, synthetic: bool) -> None:
     path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
-    ex = surface(path, ["ice_change", "sea_level_change", "displacement",
+    ex = surface(path, ["ice_change", "relative_sea_level_change", "displacement",
                         "potential"])
     fig = plt.figure(figsize=(11, 7))
     panels = [
         ("ice_change", "ice thickness change (m)", "Blues_r", False),
-        ("sea_level_change", "sea level change (m)", "RdBu_r", True),
+        ("relative_sea_level_change", "sea level change (m)", "RdBu_r", True),
         ("displacement", "vertical displacement (m)", "RdBu_r", True),
         ("potential", "potential perturbation (m$^2$ s$^{-2}$)", "RdBu_r",
          True),
@@ -185,7 +185,7 @@ def sea_level_fingerprint_3d() -> None:
     file = read_surface_file(path)
     grid = file.grid
     fields = {}
-    for field in ("sea_level_change", "displacement"):
+    for field in ("relative_sea_level_change", "displacement"):
         values = np.asarray(file.variables[field].values)
         radial = np.asarray(file.variables[f"{field}_radial_model"].values)
         fields[field] = values
@@ -196,8 +196,8 @@ def sea_level_fingerprint_3d() -> None:
 
     fig = plt.figure(figsize=(12, 7))
     panels = (
-        ("sea_level_change", "sea level change, 3D model (m)"),
-        ("sea_level_change_difference", "sea level, 3D minus radial model "
+        ("relative_sea_level_change", "sea level change, 3D model (m)"),
+        ("relative_sea_level_change_difference", "sea level, 3D minus radial model "
          "(cm)"),
         ("displacement", "vertical displacement, 3D model (m)"),
         ("displacement_difference", "displacement, 3D minus radial model "
@@ -225,7 +225,7 @@ def histories(path: Path):
     """A sea-level run's grid, node dates (kyr BP) and sea-level change."""
     file = read_surface_file(path)
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
-    sea_level = np.asarray(file.variables["sea_level_change"].values)
+    sea_level = np.asarray(file.variables["relative_sea_level_change"].values)
     return file.grid, dates, sea_level
 
 
@@ -243,9 +243,9 @@ def sea_level() -> None:
     for k, (name, path) in enumerate(runs):
         grid, dates, sea_level = histories(path)
         ex = Example.from_fields(grid.colatitudes, grid.longitudes,
-                                 {"sea_level_change": sea_level[-1]})
+                                 {"relative_sea_level_change": sea_level[-1]})
         ax = world_map(fig, 2, 2, k + 1)
-        mesh = plot_field(ax, ex, "sea_level_change",
+        mesh = plot_field(ax, ex, "relative_sea_level_change",
                           title=f"{name}: sea level change, "
                                 f"{dates[0]:g} ka to the present (m)")
         mark_sites(ax, [site for _, site in sites], colors=["C0", "C1", "C2"])
@@ -283,9 +283,9 @@ def sea_level_calibrated(name: str, reference: str, state: str | None,
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
     calibrated = np.asarray(file.variables["initial_sea_level"].values)
     ocean = np.asarray(file.variables["ocean_function"].values)
-    sea_level = np.asarray(file.variables["sea_level_change"].values)
+    sea_level = np.asarray(file.variables["relative_sea_level_change"].values)
     fields = {"flooded": ocean[-1] - ocean[0],
-              "sea_level_change": sea_level[-1]}
+              "relative_sea_level_change": sea_level[-1]}
     reference_path = OUT / reference / f"{reference}.nc"
     if reference_path.exists():
         held = read_surface_file(reference_path).variables
@@ -305,7 +305,7 @@ def sea_level_calibrated(name: str, reference: str, state: str | None,
                       title=f"ocean function, present minus {dates[0]:g} ka")
     fig.colorbar(mesh, ax=ax, shrink=0.7)
     ax = world_map(fig, 2, 2, 3, state=state)
-    mesh = plot_field(ax, ex, "sea_level_change",
+    mesh = plot_field(ax, ex, "relative_sea_level_change",
                       title=f"sea level change, {dates[0]:g} ka to the "
                             "present (m)")
     fig.colorbar(mesh, ax=ax, shrink=0.7)
@@ -328,9 +328,9 @@ def sea_level_ice7g() -> None:
     fig = plt.figure(figsize=(12, 7.5))
     for k, index in enumerate([dates.size // 2, dates.size - 1]):
         ex = Example.from_fields(grid.colatitudes, grid.longitudes,
-                                 {"sea_level_change": sea_level[index]})
+                                 {"relative_sea_level_change": sea_level[index]})
         ax = world_map(fig, 2, 2, k + 1, state=ICE7G)
-        mesh = plot_field(ax, ex, "sea_level_change",
+        mesh = plot_field(ax, ex, "relative_sea_level_change",
                           title=f"sea level change, {dates[0]:g} to "
                                 f"{dates[index]:g} ka (m)")
         mark_sites(ax, [site for _, site in sites], colors=["C0", "C1", "C2"])
@@ -914,8 +914,8 @@ def sea_level_fingerprint_3d_ice7g() -> None:
         return
     file = read_surface_file(path)
     grid = file.grid
-    sea = np.asarray(file.variables["sea_level_change"].values)
-    radial = np.asarray(file.variables["sea_level_change_radial_model"].values)
+    sea = np.asarray(file.variables["relative_sea_level_change"].values)
+    radial = np.asarray(file.variables["relative_sea_level_change_radial_model"].values)
     ex = refined(grid, {"sea": sea, "difference": 1e3 * (sea - radial)})
     ocean = np.asarray(file.variables["ocean_function"].values) > 0.5
     far = float(np.percentile(np.abs(1e3 * (sea - radial))[ocean], 99.0))
@@ -954,7 +954,7 @@ def site_histories(path: Path, sites):
     the sea level at each date less the present's, by site name."""
     file = read_surface_file(path)
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
-    sea = np.asarray(file.variables["sea_level_change"].values)
+    sea = np.asarray(file.variables["relative_sea_level_change"].values)
     out = {}
     for label, (lat, lon) in sites:
         series = at_point(sea, file.grid, lat, lon)
@@ -977,9 +977,9 @@ def sea_level_3d_ice7g() -> None:
     file = read_surface_file(path)
     grid = file.grid
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
-    sea = np.asarray(file.variables["sea_level_change"].values)[-1]
+    sea = np.asarray(file.variables["relative_sea_level_change"].values)[-1]
     radial = read_surface_file(radial_path)
-    sea_1d = np.asarray(radial.variables["sea_level_change"].values)[-1]
+    sea_1d = np.asarray(radial.variables["relative_sea_level_change"].values)[-1]
     ex = refined(grid, {"sea": sea, "difference": sea - sea_1d})
     sites = [("Hudson Bay", (60.0, 275.0)), ("Gulf of Bothnia", (64.0, 21.0)),
              ("Barbados", (13.1, 300.4))]
@@ -1041,7 +1041,7 @@ def ocean_load() -> None:
     load_alone = np.asarray(read_surface_file(alone_path)
                             .variables["displacement"].values)
     ocean = np.asarray(file.variables["ocean_function"].values) > 0.5
-    sea = np.asarray(file.variables["sea_level_change"].values)
+    sea = np.asarray(file.variables["relative_sea_level_change"].values)
     ex = Example.from_fields(grid.colatitudes, grid.longitudes, {
         "alone": load_alone,
         "difference": 1e2 * (with_ocean - load_alone),

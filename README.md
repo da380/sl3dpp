@@ -482,14 +482,14 @@ const auto rheology = Rheology::FromModel(material, model).value();
 
 // The viscoelastic operator and the sea-level solver.
 const auto op = ViscoelasticOperator(rheology, lmax);
-const auto solver = SeaLevelSolver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+const auto solver = GRDSolver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
                                    SeaLevelParameters{});
 // The present-day ice thickness and sea level, on solver.Grid().
 const auto state = solver.MakeState(iceThickness, seaLevel);
 
-// The evolution under an ice-load history iceLoad(t), sampled at `times`.
-auto evolution = SeaLevelEvolution(op, solver, state, {});
-const auto snapshots = evolution.Run(times, iceLoad);
+// The evolution under an ice-load history directLoad(t), sampled at `times`.
+auto evolution = Evolution(op, solver, state, {});
+const auto snapshots = evolution.Run(times, directLoad);
 // Each snapshot: sea-level change, displacement, potential, angular velocity.
 ```
 
@@ -499,13 +499,13 @@ The other entry points follow the same pattern:
 - **Fingerprints.** `Fingerprint(lmax, ComputeLoveNumbers(material, lmax))`,
   then `SetState(iceThickness, seaLevel)` and `SolveForIceChange(change)`,
   all in SI. On laterally varying elastic moduli,
-  `SeaLevelEvolution3D(op, solver, state).Instantaneous(load)`, `op` a
+  `Evolution3D(op, solver, state).Instantaneous(load)`, `op` a
   `Viscoelastic3D` with `Options::moduli` set, in the solver's units.
 - **3D.** `Viscoelastic3D(rheology, lmax, delta)`, with `delta(r, theta, phi)`
-  the log-viscosity perturbation, driven by `SeaLevelEvolution3D` as above.
+  the log-viscosity perturbation, driven by `Evolution3D` as above.
 - **Kernels.** Run the evolution with `{.record_stride = n}`, build a
   `ForwardTrajectory` (or `ForwardTrajectory3D`) from the snapshots, and call
-  `AdjointSolver(evolution).IceHistoryKernels(times, measurements, &trajectory)`
+  `AdjointSolver(evolution).FirstOrderKernels(times, measurements, &trajectory)`
   (`AdjointSolver3D` in 3D), with `measurements` the duals of the observed
   quantities, keyed by time node.
 
@@ -516,8 +516,8 @@ the returned diagnostics or thrown.
 
 - Decks are read in SI, and every internal component works in
   non-dimensional units. `Fingerprint` and `LoveNumbers` are SI at their
-  interface. The time-dependent drivers (`SeaLevelEvolution`,
-  `SeaLevelEvolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
+  interface. The time-dependent drivers (`Evolution`,
+  `Evolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
   times, loads and fields in the sea-level solver's units: convert with
   `solver.SolverScales()`.
 - Spherical harmonics are complex, fully normalised, with the Condon–Shortley

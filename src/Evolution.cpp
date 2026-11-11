@@ -8,9 +8,9 @@
 
 namespace sl3dpp {
 
-SeaLevelEvolution::SeaLevelEvolution(const ViscoelasticOperator& op,
-                                     const SeaLevelSolver& solver,
-                                     SeaLevelSolver::State state,
+Evolution::Evolution(const ViscoelasticOperator& op,
+                                     const GRDSolver& solver,
+                                     GRDSolver::State state,
                                      Options options)
     : op_(&op), solver_(&solver), state_(std::move(state)), options_(options) {
   if (op.LMax() != solver.Grid().LMax()) {
@@ -36,7 +36,7 @@ SeaLevelEvolution::SeaLevelEvolution(const ViscoelasticOperator& op,
   toMatTime_ = 1.0 / ratio(Dimensions{.time = 1});
 }
 
-LoadCallable SeaLevelEvolution::Columns(
+LoadCallable Evolution::Columns(
     const std::vector<std::complex<double>>& coefficients,
     double factor) const {
   return [coefficients, factor](int l,
@@ -51,7 +51,7 @@ LoadCallable SeaLevelEvolution::Columns(
   };
 }
 
-std::vector<std::complex<double>> SeaLevelEvolution::Coefficients(
+std::vector<std::complex<double>> Evolution::Coefficients(
     const std::map<int, std::vector<double>>& perDegree, double factor) const {
   auto out = solver_->Grid().ZeroCoefficients();
   for (const auto& [l, columns] : perDegree) {
@@ -78,7 +78,7 @@ void CheckTimes(std::span<const double> times) {
 
 }  // namespace
 
-void SeaLevelEvolution::SetBackgroundState(SeaLevelSolver::State state) {
+void Evolution::SetBackgroundState(GRDSolver::State state) {
   const auto fieldSize = solver_->Grid().FieldSize();
   if (state.iceThickness.size() != fieldSize ||
       state.seaLevel.size() != fieldSize ||
@@ -89,21 +89,21 @@ void SeaLevelEvolution::SetBackgroundState(SeaLevelSolver::State state) {
   state_ = std::move(state);
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Run(
+std::vector<Evolution::Snapshot> Evolution::Run(
     std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad) {
+    const std::function<std::vector<double>(double)>& directLoad) {
   CheckTimes(times);
-  return March(times, &iceLoad, nullptr, false);
+  return March(times, &directLoad, nullptr, false);
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::RunMigrating(
+std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   CheckTimes(times);
   return March(times, nullptr, &iceThickness, false);
 }
 
-void SeaLevelEvolution::Restore(const Checkpoint& from,
+void Evolution::Restore(const Checkpoint& from,
                                 std::span<const double> times) {
   CheckTimes(times);
   if (times[0] != from.t) {
@@ -118,23 +118,23 @@ void SeaLevelEvolution::Restore(const Checkpoint& from,
   psi_ = from.tideCoefficients;
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::Resume(
+std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
-    const std::function<std::vector<double>(double)>& iceLoad) {
+    const std::function<std::vector<double>(double)>& directLoad) {
   Restore(from, times);
-  return March(times, &iceLoad, nullptr, true);
+  return March(times, &directLoad, nullptr, true);
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::ResumeMigrating(
+std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   Restore(from, times);
   return March(times, nullptr, &iceThickness, true);
 }
 
-std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
+std::vector<Evolution::Snapshot> Evolution::March(
     std::span<const double> times,
-    const std::function<std::vector<double>(double)>* iceLoad,
+    const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
     bool resumed) {
   const auto& op = *op_;
@@ -166,7 +166,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
     }
   }
 
-  SeaLevelSolver::Options sleOptions;
+  GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
   auto nonlinearOptions = sleOptions;
@@ -189,13 +189,13 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
   // Solvers for the unrelaxed table and the per-dt effective tables, each
   // under the caller's parameters; the Love tables themselves are cached
   // by the operator, so a repeated dt costs a table conversion only.
-  auto flavours = std::map<double, SeaLevelSolver>{};
-  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+  auto flavours = std::map<double, GRDSolver>{};
+  auto solverFor = [&](double dt) -> const GRDSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
       found =
           flavours
-              .emplace(dt, SeaLevelSolver(grid,
+              .emplace(dt, GRDSolver(grid,
                                           dt == 0.0 ? op.ElasticLoveNumbers()
                                                     : op.EffectiveLoveNumbers(
                                                           options_.scheme, dt),
@@ -220,11 +220,11 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
   };
 
   auto loadGrid = std::vector<double>{};
-  auto response = SeaLevelSolver::Response{};
+  auto response = GRDSolver::Response{};
   auto ocean = std::vector<double>{};  // the node's C, migrating only
   if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
-    response.seaLevelChange.assign(fieldSize, 0.0);
+    response.relativeSeaLevelChange.assign(fieldSize, 0.0);
     response.displacement.assign(fieldSize, 0.0);
     response.potential.assign(fieldSize, 0.0);
     sigma_ = grid.ZeroCoefficients();
@@ -233,13 +233,13 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
   } else if (!resumed) {
     // The instantaneous elastic response at the start: the right limit,
     // so a load switched on at times[0] is stepped at full order.
-    loadGrid = (*iceLoad)(times[0]);
+    loadGrid = (*directLoad)(times[0]);
     const auto& elasticSolver = solverFor(0.0);
-    SeaLevelSolver::GeneralisedForcing forcing;
+    GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = loadGrid;
     forcing.rotation = options_.rotation;
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
-    sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+    sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     psi_ = options_.rotation == RotationalFeedback::None
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(response.angularVelocity);
@@ -250,10 +250,10 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
   }
 
   auto snapshots = std::vector<Snapshot>{};
-  auto record = [&](double t, SeaLevelSolver::Response& r, bool keepState) {
+  auto record = [&](double t, GRDSolver::Response& r, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
-    snapshot.seaLevelChange = std::move(r.seaLevelChange);
+    snapshot.relativeSeaLevelChange = std::move(r.relativeSeaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;
@@ -295,7 +295,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
       // The step's equilibrium is the nonlinear equation from the
       // background, the memory field entering through the response
       // channels (pyslfp's `_run_migrating`).
-      SeaLevelSolver::NonlinearForcing moving;
+      GRDSolver::NonlinearForcing moving;
       moving.iceThicknessChange = (*iceThickness)(times[node]);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         moving.iceThicknessChange[i] -= state_.iceThickness[i];
@@ -315,8 +315,8 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
           detail::MigratedLoadCoefficients(solver, state_, solved.finalState);
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
-      SeaLevelSolver::GeneralisedForcing coupled;
-      loadGrid = (*iceLoad)(times[node]);
+      GRDSolver::GeneralisedForcing coupled;
+      loadGrid = (*directLoad)(times[node]);
       coupled.directLoad = loadGrid;
       coupled.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
@@ -325,7 +325,7 @@ std::vector<SeaLevelEvolution::Snapshot> SeaLevelEvolution::March(
       coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
       coupled.rotation = options_.rotation;
       response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-      sigma_ = totalLoadCoefficients(loadGrid, response.seaLevelChange);
+      sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     }
     psi_ = options_.rotation == RotationalFeedback::None
                ? grid.ZeroCoefficients()

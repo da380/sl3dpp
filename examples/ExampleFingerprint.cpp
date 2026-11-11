@@ -70,7 +70,7 @@ int main(int argc, char** argv) {
   out.Field("ice_thickness_m", ice);
   out.Field("ocean_function", fingerprint.OceanFunction());
   out.Field("ice_change_m", iceChange);
-  out.Field("sea_level_change_m", result.seaLevelChange);
+  out.Field("relative_sea_level_change_m", result.relativeSeaLevelChange);
   out.Field("displacement_m", result.displacement);
   out.Field("potential_m2s2", result.potential);
   out.Scalar("omega_x_rad_s", result.angularVelocity[0]);

@@ -21,7 +21,7 @@ using detail::NodeWeights;
 using detail::CheckGrids;
 
 ForwardTrajectory ForwardTrajectory::FromSnapshots(
-    std::span<const SeaLevelEvolution::Snapshot> snapshots) {
+    std::span<const Evolution::Snapshot> snapshots) {
   ForwardTrajectory out;
   for (const auto& snapshot : snapshots) {
     out.states.push_back(snapshot.internalState);
@@ -31,7 +31,7 @@ ForwardTrajectory ForwardTrajectory::FromSnapshots(
   return out;
 }
 
-std::vector<std::vector<double>> IceKernels::Viscosity(
+std::vector<std::vector<double>> Kernels::Viscosity(
     const Rheology& rheology) const {
   if (itauKernel.empty()) {
     throw std::invalid_argument(
@@ -53,7 +53,7 @@ std::vector<std::vector<double>> IceKernels::Viscosity(
 }
 
 std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const SeaLevelEvolution::Snapshot> snapshots) {
+    std::span<const Evolution::Snapshot> snapshots) {
   auto out = std::vector<std::vector<double>>{};
   for (const auto& snapshot : snapshots) {
     if (snapshot.oceanFunction.empty()) {
@@ -66,11 +66,11 @@ std::vector<std::vector<double>> OceanFunctionsOf(
   return out;
 }
 
-AdjointSolver::AdjointSolver(const SeaLevelEvolution& evolution,
+AdjointSolver::AdjointSolver(const Evolution& evolution,
                              Options options)
     : evolution_(&evolution), options_(options) {}
 
-IceKernels AdjointSolver::IceHistoryKernels(
+Kernels AdjointSolver::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
@@ -123,12 +123,12 @@ IceKernels AdjointSolver::IceHistoryKernels(
     }
   }
   if (ev.options_.rotation == RotationalFeedback::Full) {
-    // The forward run's stability condition (see SeaLevelEvolution::Run).
+    // The forward run's stability condition (see Evolution::Run).
     const auto kHyd = FluidTidalNumber(ev.op_->BaseMaterial(), 2);
     if (ev.solver_->TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(
           "the transverse rotational feedback is unstable; see "
-          "SeaLevelEvolution::Run");
+          "Evolution::Run");
     }
   }
   return options_.method == AdjointMethod::Discrete
@@ -139,7 +139,7 @@ IceKernels AdjointSolver::IceHistoryKernels(
 // -- the discrete transpose
 // ---------------------------------------------------
 
-IceKernels AdjointSolver::DiscreteSweep(
+Kernels AdjointSolver::DiscreteSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
@@ -169,18 +169,18 @@ IceKernels AdjointSolver::DiscreteSweep(
   const auto K = op.GetRheology().BranchCount();
   const auto N = times.size() - 1;
 
-  SeaLevelSolver::Options sleOptions;
+  GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
 
   // The flavoured solvers, as the forward run builds them (keyed by the
   // material dt; 0 is the unrelaxed table).
-  auto flavours = std::map<double, SeaLevelSolver>{};
-  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+  auto flavours = std::map<double, GRDSolver>{};
+  auto solverFor = [&](double dt) -> const GRDSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, SeaLevelSolver(
+                  .emplace(dt, GRDSolver(
                                    grid,
                                    dt == 0.0 ? op.ElasticLoveNumbers()
                                              : op.EffectiveLoveNumbers(
@@ -296,7 +296,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   auto engineDuals = [&](const std::vector<Complex>& sigmaDual,
                          const std::vector<Complex>& psiDual,
                          std::size_t node) {
-    SeaLevelSolver::AdjointForcing duals;
+    GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
     duals.oceanFunctionOverride = overrideAt(node);
     const auto& Cn = oceanAt(node);
@@ -322,7 +322,7 @@ IceKernels AdjointSolver::DiscreteSweep(
     return std::pair(std::move(duals), std::move(synth));
   };
 
-  auto loadDuals = std::vector<std::vector<double>>(times.size());
+  auto directLoadKernels = std::vector<std::vector<double>>(times.size());
 
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
@@ -410,9 +410,9 @@ IceKernels AdjointSolver::DiscreteSweep(
                       "converge (error {})",
                       n, adj.error));
     }
-    loadDuals[n].assign(fieldSize, 0.0);
+    directLoadKernels[n].assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      loadDuals[n][i] = adj.directLoadDual[i] + synth[i] / r2;
+      directLoadKernels[n][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
 
     // The forward states this step's itau sensitivity pairs with.
@@ -620,9 +620,9 @@ IceKernels AdjointSolver::DiscreteSweep(
       throw std::runtime_error(
           "the adjoint elastic sea level solve did not converge");
     }
-    loadDuals[0].assign(fieldSize, 0.0);
+    directLoadKernels[0].assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      loadDuals[0][i] = adj.directLoadDual[i] + synth[i] / r2;
+      directLoadKernels[0][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
@@ -665,7 +665,7 @@ IceKernels AdjointSolver::DiscreteSweep(
   // adjoint of each measurement, independent of the time grid.
   auto lumps = std::map<std::size_t, std::vector<double>>{};
   for (const auto& [node, m] : measurements) {
-    SeaLevelSolver::AdjointForcing duals;
+    GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
     duals.oceanFunctionOverride = overrideAt(node);
     duals.seaLevelDual = m.seaLevelDual;
@@ -690,11 +690,11 @@ IceKernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       const double lumped =
           lump == lumps.end() ? 0.0 : lump->second[i];
-      densityLoad[n][i] = (loadDuals[n][i] - lumped) / w[n];
+      densityLoad[n][i] = (directLoadKernels[n][i] - lumped) / w[n];
     }
   }
 
-  auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
+  auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   // the kernels as densities per unit volume: the weights divided out
   {
@@ -715,7 +715,7 @@ IceKernels AdjointSolver::DiscreteSweep(
 // -- the continuous adjoint, discretised
 // --------------------------------------
 
-IceKernels AdjointSolver::ContinuousSweep(
+Kernels AdjointSolver::ContinuousSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
@@ -744,16 +744,16 @@ IceKernels AdjointSolver::ContinuousSweep(
   const auto K = op.GetRheology().BranchCount();
   const auto N = times.size() - 1;
 
-  SeaLevelSolver::Options sleOptions;
+  GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
 
-  auto flavours = std::map<double, SeaLevelSolver>{};
-  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+  auto flavours = std::map<double, GRDSolver>{};
+  auto solverFor = [&](double dt) -> const GRDSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, SeaLevelSolver(
+                  .emplace(dt, GRDSolver(
                                    grid,
                                    dt == 0.0 ? op.ElasticLoveNumbers()
                                              : op.EffectiveLoveNumbers(
@@ -806,7 +806,7 @@ IceKernels AdjointSolver::ContinuousSweep(
     std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
-    SeaLevelSolver::GeneralisedForcing f;
+    GRDSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(node);
     if (!m.seaLevelDual.empty()) f.directLoad = m.seaLevelDual;
@@ -840,7 +840,7 @@ IceKernels AdjointSolver::ContinuousSweep(
           "the instantaneous adjoint fingerprint did not converge");
     }
     Jump out;
-    out.xiA = resp.seaLevelChange;
+    out.xiA = resp.relativeSeaLevelChange;
     const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -947,7 +947,7 @@ IceKernels AdjointSolver::ContinuousSweep(
   // and centrifugal coefficients the next reversed step starts from.
   auto smoothEquilibrium = [&](std::size_t node) {
     const auto solutions = op.SolveElastic(vstate);
-    SeaLevelSolver::GeneralisedForcing f;
+    GRDSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(node);
     f.displacementResponse =
@@ -965,13 +965,13 @@ IceKernels AdjointSolver::ContinuousSweep(
     const auto& Cn = oceanAt(node);
     auto sig = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sig[i] = rhoW * Cn[i] * resp.seaLevelChange[i];
+      sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
     psiC = rotation != RotationalFeedback::None
                ? solver.CentrifugalCoefficients(resp.angularVelocity)
                : grid.ZeroCoefficients();
-    return resp.seaLevelChange;
+    return resp.relativeSeaLevelChange;
   };
 
   // The density is discontinuous at each observation (a finite jump), so
@@ -1212,7 +1212,7 @@ IceKernels AdjointSolver::ContinuousSweep(
     const auto step =
         op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),
                      ev.Columns(psiC, ev.toMatPotential_));
-    SeaLevelSolver::GeneralisedForcing f;
+    GRDSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(n - 1);
     f.displacementResponse = ev.Coefficients(
@@ -1225,11 +1225,11 @@ IceKernels AdjointSolver::ContinuousSweep(
       throw std::runtime_error(std::format(
           "the adjoint coupled solve at node {} did not converge", n - 1));
     }
-    densityLate[n - 1] = resp.seaLevelChange;
+    densityLate[n - 1] = resp.relativeSeaLevelChange;
     const auto& Cn = oceanAt(n - 1);
     auto sig = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sig[i] = rhoW * Cn[i] * resp.seaLevelChange[i];
+      sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     sigmaC = grid.Expand(sig);
     psiC = rotation != RotationalFeedback::None
@@ -1252,10 +1252,10 @@ IceKernels AdjointSolver::ContinuousSweep(
   // time, and at an observation the node weight splits across the
   // discontinuity: the half-interval towards the present pairs with the
   // late side, the half towards times[0] with the early side.
-  std::vector<std::vector<double>> loadDuals(times.size()),
+  std::vector<std::vector<double>> directLoadKernels(times.size()),
       densityLoad(times.size());
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    loadDuals[n].assign(fieldSize, 0.0);
+    directLoadKernels[n].assign(fieldSize, 0.0);
     densityLoad[n].assign(fieldSize, 0.0);
     const auto* late = densityLate[n].empty() ? nullptr : &densityLate[n];
     const auto* early =
@@ -1266,13 +1266,13 @@ IceKernels AdjointSolver::ContinuousSweep(
       const double lateV = late == nullptr ? 0.0 : (*late)[i] * perTime;
       const double earlyV = early == nullptr ? 0.0 : (*early)[i] * perTime;
       const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
-      loadDuals[n][i] =
+      directLoadKernels[n][i] =
           smooth + (lump == lumps.end() ? 0.0 : lump->second[i]);
       densityLoad[n][i] = smooth / totalW;
     }
   }
 
-  auto out = AssembleViews(times, std::move(loadDuals), std::move(densityLoad),
+  auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   // the kernels as densities per unit volume: the weights divided out
   {
@@ -1293,24 +1293,24 @@ IceKernels AdjointSolver::ContinuousSweep(
 // -- the shared views
 // ----------------------------------------------------------
 
-IceKernels AdjointSolver::AssembleViews(
-    std::span<const double> times, std::vector<std::vector<double>> loadDuals,
+Kernels AdjointSolver::AssembleViews(
+    std::span<const double> times, std::vector<std::vector<double>> directLoadKernels,
     std::vector<std::vector<double>> density,
     std::map<std::size_t, std::vector<double>> lumps,
     std::span<const std::vector<double>> oceanFunctions) const {
   return detail::AssembleIceViews(
       evolution_->state_.oceanFunction, evolution_->solver_->IceDensity(),
-      times, std::move(loadDuals), std::move(density), std::move(lumps),
+      times, std::move(directLoadKernels), std::move(density), std::move(lumps),
       oceanFunctions, evolution_->solver_->WaterDensity());
 }
 
-IceKernels detail::AssembleIceViews(
+Kernels detail::AssembleIceViews(
     std::span<const double> C, double rhoI, std::span<const double> times,
-    std::vector<std::vector<double>> loadDuals,
+    std::vector<std::vector<double>> directLoadKernels,
     std::vector<std::vector<double>> density,
     std::map<std::size_t, std::vector<double>> lumps,
     std::span<const std::vector<double>> oceanFunctions, double rhoW) {
-  const auto fieldSize = loadDuals.front().size();
+  const auto fieldSize = directLoadKernels.front().size();
 
   // The grounding factor rho_i (1 - C_n) at node n: the node's own ocean
   // function about a migrating trajectory, the background's when frozen.
@@ -1325,16 +1325,16 @@ IceKernels detail::AssembleIceViews(
     return out;
   };
 
-  IceKernels out;
+  Kernels out;
   out.times.assign(times.begin(), times.end());
   out.baseline.assign(fieldSize, 0.0);
-  for (const auto& ld : loadDuals) {
+  for (const auto& ld : directLoadKernels) {
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       out.baseline[i] -= rhoI * (1.0 - C[i]) * ld[i];
     }
   }
-  for (auto n = std::size_t{0}; n < loadDuals.size(); ++n) {
-    out.thickness.push_back(ground(loadDuals[n], n));
+  for (auto n = std::size_t{0}; n < directLoadKernels.size(); ++n) {
+    out.thickness.push_back(ground(directLoadKernels[n], n));
   }
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.thickness[0][i] += out.baseline[i];
@@ -1344,10 +1344,10 @@ IceKernels detail::AssembleIceViews(
   // zero under frozen shorelines (every C_n equals C).
   out.initialSeaLevel.assign(fieldSize, 0.0);
   if (!oceanFunctions.empty()) {
-    for (auto n = std::size_t{0}; n < loadDuals.size(); ++n) {
+    for (auto n = std::size_t{0}; n < directLoadKernels.size(); ++n) {
       const auto& Cn = oceanFunctions[n];
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-        out.initialSeaLevel[i] += rhoW * (Cn[i] - C[i]) * loadDuals[n][i];
+        out.initialSeaLevel[i] += rhoW * (Cn[i] - C[i]) * directLoadKernels[n][i];
       }
     }
   }
@@ -1361,11 +1361,11 @@ IceKernels detail::AssembleIceViews(
   auto tail = std::vector<double>(fieldSize, 0.0);
   out.rate.resize(times.size() - 1);
   for (std::size_t n = times.size() - 1; n >= 1; --n) {
-    const auto grounded = ground(loadDuals[n], n);
+    const auto grounded = ground(directLoadKernels[n], n);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) tail[i] += grounded[i];
     out.rate[n - 1] = tail;
   }
-  out.loadDuals = std::move(loadDuals);
+  out.directLoadKernels = std::move(directLoadKernels);
   return out;
 }
 

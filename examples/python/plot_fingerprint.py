@@ -19,7 +19,7 @@ mesh = plot_field(ax, ex, "ice_change_m", cmap="Blues_r", symmetric=False,
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 
 ax = world_map(fig, 2, 2, 2, state=ex)
-mesh = plot_field(ax, ex, "sea_level_change_m",
+mesh = plot_field(ax, ex, "relative_sea_level_change_m",
                   title="sea level change (m)")
 fig.colorbar(mesh, ax=ax, shrink=0.7)
 

@@ -63,14 +63,14 @@ struct ForwardTrajectory {
   /// The trajectory a recording run's snapshots carry (a run with
   /// Options::record_stride set).
   [[nodiscard]] static ForwardTrajectory FromSnapshots(
-      std::span<const SeaLevelEvolution::Snapshot> snapshots);
+      std::span<const Evolution::Snapshot> snapshots);
 };
 
 /// The ocean function of every node of a migrating run (RunMigrating),
 /// for the sweeps' linearisation about it; refused for a frozen run's
 /// snapshots, which carry none.
 [[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const SeaLevelEvolution::Snapshot> snapshots);
+    std::span<const Evolution::Snapshot> snapshots);
 
 /// The duals of one observation node's outputs: the gains of
 ///   J += int g_xi xi dS + int g_u u dS + int g_phi phi dS + g_omega . omega
@@ -83,19 +83,24 @@ struct Measurement {
 };
 
 /**
- * @brief Sensitivity kernels of one objective with respect to the ice
- * history, in three views (docs/adjoints.md; Yu et al. 2025 §3.7).
+ * @brief Sensitivity kernels of one objective. Two related kinds for the
+ * surface forcing: the LOAD kernels, with respect to the direct load (a
+ * mass per unit area, whatever its source), and the ICE kernels, with
+ * respect to the ice thickness history that makes a direct load through
+ * the grounding factor, in three views (docs/adjoints.md; Yu et al. 2025
+ * §3.7). With them, the kernels in the Earth's parameters.
  *
- * DISCRETE view: `loadDuals[n]` is the dual of the direct ice-load grid
- * at time node n — delta J = sum_n int loadDuals[n] delta f_n dS, exact
+ * DISCRETE view: `directLoadKernels[n]` is the load kernel at time node n
+ * — delta J = sum_n int directLoadKernels[n] delta f_n dS for a change
+ * delta f_n of the direct load there, exact
  * on the time grid (to the commute error for the continuous method);
- * `thickness[n]` the dual of ice thickness there under the grounding
+ * `thickness[n]` the ice kernel, the dual of ice thickness there under the grounding
  * factor rho_i (1 - C), with the initial-thickness `baseline` folded
  * into node 0 (valid when the forward load was rho_i (1 - C)(I_n - I_0));
  * about a migrating trajectory the grounding factor is the node's own
  * rho_i (1 - C_n), the baseline keeping the initial C. `initialSeaLevel`
  * is the dual of the initial sea level, rho_w sum_n (C_n - C_0)
- * loadDuals[n] (the initial sea level enters each node's load through the
+ * directLoadKernels[n] (the initial sea level enters each node's load through the
  * shorelines that moved): identically zero under frozen shorelines.
  *
  * DISTRIBUTIONAL view: the kernel is a continuous `density` (per unit
@@ -109,9 +114,9 @@ struct Measurement {
  * bounded with finite jumps at observations only; the initial-thickness
  * dual vanishes identically.
  */
-struct IceKernels {
+struct Kernels {
   std::vector<double> times;
-  std::vector<std::vector<double>> loadDuals;
+  std::vector<std::vector<double>> directLoadKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> baseline;
   std::vector<double> initialSeaLevel;
@@ -159,7 +164,7 @@ enum class AdjointMethod { Continuous, Discrete };
  * @brief The derivative of an objective's kernels along a direction v of
  * the model parameters: what the second-order adjoint returns, the
  * components of the Hessian's action on v. `thickness` and
- * `initialSeaLevel` are the derivatives of IceKernels' thickness and
+ * `initialSeaLevel` are the derivatives of Kernels' thickness and
  * initial-sea-level views (the same pairings; the thickness view's
  * baseline folded into node 0 as there), `itauKernel` that of the
  * inverse-relaxation-time kernels (per branch, nodal, material units).
@@ -170,7 +175,7 @@ struct KernelDerivatives {
   std::vector<std::vector<double>> thickness;
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;
-  /// The derivatives along v of the material kernels (IceKernels::
+  /// The derivatives along v of the material kernels (Kernels::
   /// kappaKernel, muKernel), in their layout: the material rows of the
   /// Hessian's action on v. Empty unless Options::material_kernels.
   std::vector<double> kappaKernel;
@@ -179,15 +184,15 @@ struct KernelDerivatives {
 
 namespace detail {
 /// The grounded views and the distributional/quelled assembly shared by
-/// the 1D and 3D sweeps: loadDuals complete (lumps folded in), density
+/// the 1D and 3D sweeps: directLoadKernels complete (lumps folded in), density
 /// the continuous part per unit time, lumps the delta amplitudes
 /// (load-dual space, by node).
 /// With `oceanFunctions` (one per node, about a migrating trajectory) the
 /// grounding factors are per node and the initial sea level dual is
 /// formed, with the water density `waterDensity`.
-[[nodiscard]] IceKernels AssembleIceViews(
+[[nodiscard]] Kernels AssembleIceViews(
     std::span<const double> oceanFunction, double iceDensity,
-    std::span<const double> times, std::vector<std::vector<double>> loadDuals,
+    std::span<const double> times, std::vector<std::vector<double>> directLoadKernels,
     std::vector<std::vector<double>> density,
     std::map<std::size_t, std::vector<double>> lumps,
     std::span<const std::vector<double>> oceanFunctions = {},
@@ -210,7 +215,7 @@ class AdjointSolver {
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
-    /// Also form the material kernels (IceKernels::kappaKernel,
+    /// Also form the material kernels (Kernels::kappaKernel,
     /// muKernel). Discrete: the pairing of each step's dual solution with
     /// the material derivative of the step's force, the exact transpose
     /// of the material tangent. Continuous: the time quadrature of the
@@ -227,8 +232,8 @@ class AdjointSolver {
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit AdjointSolver(const SeaLevelEvolution& evolution, Options options);
-  explicit AdjointSolver(const SeaLevelEvolution& evolution)
+  explicit AdjointSolver(const Evolution& evolution, Options options);
+  explicit AdjointSolver(const Evolution& evolution)
       : AdjointSolver(evolution, Options{}) {}
 
   /// The ice-history kernels of the objective the measurements define,
@@ -242,7 +247,7 @@ class AdjointSolver {
   /// trajectory instead of the frozen background shorelines, and the
   /// initial sea level kernel is formed; a recorded trajectory must then
   /// come from the same migrating run.
-  [[nodiscard]] IceKernels IceHistoryKernels(
+  [[nodiscard]] Kernels FirstOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory = nullptr,
@@ -270,7 +275,7 @@ class AdjointSolver {
    * per branch over the material's mesh (TangentPerturbation::itau);
    * empty for none.
    * @param trajectory The recorded forward trajectory; required here.
-   * @param oceanFunctions As for IceHistoryKernels, from the same
+   * @param oceanFunctions As for FirstOrderKernels, from the same
    * migrating run as the tangent-linear run.
    * @param material v's perturbation of the moduli
    * (TangentPerturbation::material), which the tangent run must have
@@ -284,38 +289,38 @@ class AdjointSolver {
    * §15). Continuous: the same terms in the continuous sweep, at the
    * commute level.
    */
-  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> SecondOrderKernels(
+  [[nodiscard]] std::pair<Kernels, KernelDerivatives> SecondOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions = {},
       const PointMaterialDirection& material = {}) const;
 
  private:
-  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> DiscreteSecondOrder(
+  [[nodiscard]] std::pair<Kernels, KernelDerivatives> DiscreteSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions,
       const PointMaterialDirection& material) const;
-  [[nodiscard]] std::pair<IceKernels, KernelDerivatives> ContinuousSecondOrder(
+  [[nodiscard]] std::pair<Kernels, KernelDerivatives> ContinuousSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      std::span<const SeaLevelEvolution::Snapshot> tangent,
+      std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions,
       const PointMaterialDirection& material) const;
-  [[nodiscard]] IceKernels DiscreteSweep(
+  [[nodiscard]] Kernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
       std::span<const std::vector<double>> oceanFunctions) const;
-  [[nodiscard]] IceKernels ContinuousSweep(
+  [[nodiscard]] Kernels ContinuousSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
@@ -326,13 +331,13 @@ class AdjointSolver {
   struct MaterialTools;
   /// The grounded views and the distributional/quelled assembly shared by
   /// the two sweeps (lumps: the delta amplitudes, by node).
-  [[nodiscard]] IceKernels AssembleViews(
-      std::span<const double> times, std::vector<std::vector<double>> loadDuals,
+  [[nodiscard]] Kernels AssembleViews(
+      std::span<const double> times, std::vector<std::vector<double>> directLoadKernels,
       std::vector<std::vector<double>> density,
       std::map<std::size_t, std::vector<double>> lumps,
       std::span<const std::vector<double>> oceanFunctions) const;
 
-  const SeaLevelEvolution* evolution_;
+  const Evolution* evolution_;
   Options options_;
 };
 

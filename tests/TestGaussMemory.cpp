@@ -105,13 +105,13 @@ double RelativeGap(const std::vector<double>& a, const std::vector<double>& b) {
 // on the solver grid, Gauss or GLL memory chosen per operator.
 struct Scene {
   Body body;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
 
   static Scene Make() {
     auto body = Body::Make({.lmax = kLmax});
     const auto elastic = ViscoelasticOperator(body.rheology, kLmax);
-    auto solver = SeaLevelSolver(
+    auto solver = GRDSolver(
         SurfaceGrid(kLmax), elastic.ElasticLoveNumbers(), SeaLevelParameters{});
     auto fingerprint = Fingerprint(kLmax, elastic.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -152,13 +152,13 @@ struct Scene {
 
   /// The objective the measurements define on a forward run.
   [[nodiscard]] double Objective(
-      const std::vector<SeaLevelEvolution::Snapshot>& snapshots,
+      const std::vector<Evolution::Snapshot>& snapshots,
       const std::map<std::size_t, Measurement>& measurements) const {
     auto total = 0.0;
     for (const auto& [node, m] : measurements) {
       const auto& snap = snapshots[node];
       if (!m.seaLevelDual.empty()) {
-        total += Surface(m.seaLevelDual, snap.seaLevelChange);
+        total += Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
       }
       if (!m.displacementDual.empty()) {
         total += Surface(m.displacementDual, snap.displacement);
@@ -291,7 +291,7 @@ TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
   // agreement at discretisation level.
   auto body = Body::Make({.lmax = kLmax});
   const ViscoelasticOperator elastic(body.rheology, kLmax);
-  SeaLevelSolver solver(SurfaceGrid(kLmax), elastic.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(kLmax), elastic.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   Fingerprint fingerprint(kLmax, elastic.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
@@ -309,7 +309,7 @@ TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
   const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     auto out = std::vector<double>(load.size());
     for (auto i = std::size_t{0}; i < out.size(); ++i) {
       out[i] = (t / times.back()) * load[i];
@@ -320,9 +320,9 @@ TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
   auto finals = std::vector<std::vector<double>>{};
   for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss}) {
     const auto op = Operator(body.rheology, set);
-    SeaLevelEvolution evolution(op, solver, state, {.rtol = 1e-12});
-    const auto snapshots = evolution.Run(times, iceLoad);
-    finals.push_back(snapshots.back().seaLevelChange);
+    Evolution evolution(op, solver, state, {.rtol = 1e-12});
+    const auto snapshots = evolution.Run(times, directLoad);
+    finals.push_back(snapshots.back().relativeSeaLevelChange);
   }
   auto scale = 0.0, worst = 0.0;
   for (auto i = std::size_t{0}; i < finals[0].size(); ++i) {
@@ -335,7 +335,7 @@ TEST(GaussMemory, CoupledSeaLevelRunAgrees) {
 
 TEST(GaussMemory, DiscreteGradientIdentity) {
   // The exact transpose with the internal variables at the Gauss points:
-  // delta J = sum_n <loadDuals[n], delta f_n> to the solvers' tolerance,
+  // delta J = sum_n <directLoadKernels[n], delta f_n> to the solvers' tolerance,
   // for a full measurement set, both schemes.
   const auto scene = Scene::Make();
   auto rng = std::mt19937(7);
@@ -358,16 +358,16 @@ TEST(GaussMemory, DiscreteGradientIdentity) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     const auto op = Operator(scene.body.rheology, MemoryPointSet::Gauss);
-    auto evolution = SeaLevelEvolution(op, scene.solver, scene.state,
+    auto evolution = Evolution(op, scene.solver, scene.state,
                                        {.scheme = scheme, .rtol = 1e-12});
     const auto snapshots = evolution.Run(times, History(times, loads));
     const auto exact = scene.Objective(snapshots, measurements);
     const auto adjoint = AdjointSolver(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
-    const auto kernels = adjoint.IceHistoryKernels(times, measurements);
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements);
     auto predicted = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      predicted += scene.Surface(kernels.loadDuals[n], loads[n]);
+      predicted += scene.Surface(kernels.directLoadKernels[n], loads[n]);
     }
     EXPECT_NEAR(predicted, exact, 1e-8 * std::abs(exact))
         << "scheme " << static_cast<int>(scheme);
@@ -418,7 +418,7 @@ TEST(GaussMemory, ItauKernelAgainstFiniteDifferences) {
     const auto rheology =
         Rheology::Create(material, {std::move(branch)}).value();
     const auto op = Operator(rheology, MemoryPointSet::Gauss);
-    auto evolution = SeaLevelEvolution(op, scene.solver, scene.state,
+    auto evolution = Evolution(op, scene.solver, scene.state,
                                        {.scheme = scheme, .rtol = 1e-12});
     return scene.Objective(evolution.Run(times, History(times, loads)),
                            measurements);
@@ -426,7 +426,7 @@ TEST(GaussMemory, ItauKernelAgainstFiniteDifferences) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     const auto op = Operator(scene.body.rheology, MemoryPointSet::Gauss);
-    auto evolution = SeaLevelEvolution(
+    auto evolution = Evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto snapshots = evolution.Run(times, History(times, loads));
@@ -434,7 +434,7 @@ TEST(GaussMemory, ItauKernelAgainstFiniteDifferences) {
     const auto adjoint = AdjointSolver(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.itauKernel[0].size(), ditau.size());
     const auto predicted = VolumePairing(mesh, kernels.itauKernel[0], ditau);
     auto fd = std::map<double, double>{};
@@ -478,13 +478,13 @@ TEST(GaussMemory, KernelsAgreeWithGllAndContinuousConverges) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts - 1].seaLevelDual = scene.Smooth(local, 1.0);
     const auto op = Operator(scene.body.rheology, set);
-    auto evolution = SeaLevelEvolution(op, scene.solver, scene.state,
+    auto evolution = Evolution(op, scene.solver, scene.state,
                                        {.rtol = 1e-12, .record_stride = 1});
     const auto snapshots = evolution.Run(times, History(times, loads));
     const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
     const auto adjoint =
         AdjointSolver(evolution, {.method = method, .rtol = 1e-12});
-    return adjoint.IceHistoryKernels(times, measurements, &trajectory)
+    return adjoint.FirstOrderKernels(times, measurements, &trajectory)
         .itauKernel[0];
   };
   auto relative = [](const std::vector<double>& a,

@@ -41,7 +41,7 @@
  * Conventions are the evolution's: times increasing in SLE units, grids in
  * the solver's units, the itau perturbation nodal (element, gll) per
  * branch over the material's mesh in MATERIAL units (the layout of
- * IceKernels::itauKernel, which pairs with it by the plain nodal sum).
+ * Kernels::itauKernel, which pairs with it by the plain nodal sum).
  */
 
 #include <complex>
@@ -126,9 +126,9 @@ class TangentLinearSolver {
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit TangentLinearSolver(const SeaLevelEvolution& evolution,
+  explicit TangentLinearSolver(const Evolution& evolution,
                                Options options);
-  explicit TangentLinearSolver(const SeaLevelEvolution& evolution)
+  explicit TangentLinearSolver(const Evolution& evolution)
       : TangentLinearSolver(evolution, Options{}) {}
 
   /// The derivative of the run over `times` along `direction`. With an
@@ -138,7 +138,7 @@ class TangentLinearSolver {
   /// grid per node from a migrating run (OceanFunctionsOf its snapshots),
   /// the run linearises about that trajectory instead of the frozen
   /// background shorelines.
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> Run(
+  [[nodiscard]] std::vector<Evolution::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation& direction,
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
@@ -161,10 +161,10 @@ class TangentLinearSolver {
   /// v's on u's, the start's alike (docs/adjoints.md §15). Symmetric
   /// in u and v. pyslfp's `second_order_tangent_linear_ice_history` under
   /// the sharp flotation rule, extended to the moduli.
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunSecondOrder(
+  [[nodiscard]] std::vector<Evolution::Snapshot> RunSecondOrder(
       std::span<const double> times,
-      std::span<const SeaLevelEvolution::Snapshot> tangentU,
-      std::span<const SeaLevelEvolution::Snapshot> tangentV,
+      std::span<const Evolution::Snapshot> tangentU,
+      std::span<const Evolution::Snapshot> tangentV,
       const SecondOrderDirection& direction,
       const ForwardTrajectory* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
@@ -191,7 +191,7 @@ class TangentLinearSolver {
   struct MaterialForcing;
   struct MaterialDrive;
   struct MaterialSecondDrive;
-  [[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> March(
+  [[nodiscard]] std::vector<Evolution::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
@@ -210,13 +210,13 @@ class TangentLinearSolver {
   /// The material-unit step sizes of the time grid, and the evolution's
   /// column callables of recorded load and centrifugal coefficients.
   [[nodiscard]] static std::vector<double> StepSizes(
-      const SeaLevelEvolution& ev, std::span<const double> times);
+      const Evolution& ev, std::span<const double> times);
   [[nodiscard]] static std::function<LoadCallable(
       const std::vector<std::complex<double>>&)>
-  LoadColumnsOf(const SeaLevelEvolution& ev);
+  LoadColumnsOf(const Evolution& ev);
   [[nodiscard]] static std::function<LoadCallable(
       const std::vector<std::complex<double>>&)>
-  TideColumnsOf(const SeaLevelEvolution& ev);
+  TideColumnsOf(const Evolution& ev);
 
   /// The material drive of a step: the per-dt effective variation, the
   /// force -(dK_eff) x on the base step's full solution plus the memory
@@ -227,7 +227,7 @@ class TangentLinearSolver {
       const PointMaterialDirection& d, const ForwardTrajectory& trajectory,
       std::span<const double> times) const;
 
-  const SeaLevelEvolution* evolution_;
+  const Evolution* evolution_;
   Options options_;
 };
 

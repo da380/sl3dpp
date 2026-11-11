@@ -72,7 +72,7 @@ int main(int argc, char** argv) {
   Viscoelastic3D radial(rheology, lmax,
                         [](double, double, double) { return 0.0; });
 
-  SeaLevelSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
+  GRDSolver solver(SurfaceGrid(lmax), lateral.ElasticLove(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -91,7 +91,7 @@ int main(int argc, char** argv) {
   // The grounded load relative to 21 ka, a callable of solver time.
   const auto& C = state.oceanFunction;
   const auto startSi = -startKyr * kyr;
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ice =
         history.Values("ice_thickness", startSi + t * scales.Time());
     auto load = std::vector<double>(grid.FieldSize());
@@ -106,15 +106,15 @@ int main(int argc, char** argv) {
     times.push_back(startKyr * kyr * n / (nodes - 1) / scales.Time());
   }
 
-  const auto report = examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(
+  const auto report = examples::NodeReporter<Evolution3D::Snapshot>(
       nodes - 1, scales.Time());
   examples::Say(
       std::format("the run on the file's viscosity, {} steps:", nodes - 1));
-  SeaLevelEvolution3D run3(lateral, solver, state, {.on_snapshot = report});
-  const auto with = run3.Run(times, iceLoad);
+  Evolution3D run3(lateral, solver, state, {.on_snapshot = report});
+  const auto with = run3.Run(times, directLoad);
   examples::Say("its radial twin:");
-  SeaLevelEvolution3D run1(radial, solver, state, {.on_snapshot = report});
-  const auto without = run1.Run(times, iceLoad);
+  Evolution3D run1(radial, solver, state, {.on_snapshot = report});
+  const auto without = run1.Run(times, directLoad);
   for (const auto& snapshot : with) {
     if (!snapshot.converged) {
       std::cerr << "the coupled fixed point did not converge at t = "
@@ -132,12 +132,12 @@ int main(int argc, char** argv) {
       "reference, ice history of " +
       options.state.string() + " from 21 ka (SI)");
   out.Grid(grid);
-  out.Field("slc_lateral_m", with.back().seaLevelChange, length);
-  out.Field("slc_radial_m", without.back().seaLevelChange, length);
+  out.Field("slc_lateral_m", with.back().relativeSeaLevelChange, length);
+  out.Field("slc_radial_m", without.back().relativeSeaLevelChange, length);
   auto difference = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < difference.size(); ++i) {
     difference[i] =
-        with.back().seaLevelChange[i] - without.back().seaLevelChange[i];
+        with.back().relativeSeaLevelChange[i] - without.back().relativeSeaLevelChange[i];
   }
   out.Field("slc_difference_m", difference, length);
   out.Field("ice_21ka_m", start.iceThickness);
@@ -158,9 +158,9 @@ int main(int argc, char** argv) {
     for (const auto& site : sites) {
       const auto dual = CapMeanDual(grid, a, site, 0.05);
       row.push_back(length *
-                    PairedValue(grid, a, dual, with[n].seaLevelChange));
+                    PairedValue(grid, a, dual, with[n].relativeSeaLevelChange));
       row.push_back(length *
-                    PairedValue(grid, a, dual, without[n].seaLevelChange));
+                    PairedValue(grid, a, dual, without[n].relativeSeaLevelChange));
     }
     row.push_back(static_cast<double>(with[n].coupledIterations));
     rows.push_back(row);

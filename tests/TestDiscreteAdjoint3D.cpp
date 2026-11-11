@@ -53,8 +53,8 @@ struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
   std::vector<double> iceNd;
 
   static Scene Make(double viscositySI) {
@@ -79,7 +79,7 @@ struct Scene {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator reference(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -164,13 +164,13 @@ std::function<std::vector<double>(double)> Ramp(const std::vector<double>& load,
 }
 
 double Objective(const Scene& scene,
-                 const std::vector<SeaLevelEvolution3D::Snapshot>& snapshots,
+                 const std::vector<Evolution3D::Snapshot>& snapshots,
                  const std::map<std::size_t, Measurement>& measurements) {
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
     if (!m.seaLevelDual.empty()) {
-      total += scene.Surface(m.seaLevelDual, snap.seaLevelChange);
+      total += scene.Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += scene.Surface(m.displacementDual, snap.displacement);
@@ -212,7 +212,7 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
-  const auto iceLoad = Ramp(load, times.back());
+  const auto directLoad = Ramp(load, times.back());
   auto deltas = std::vector<std::vector<double>>{};
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
@@ -236,15 +236,15 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
     Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
       return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
     });
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                         .rtol = 1e-12,
                                         .coupled_rtol = 1e-12});
-    const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
                                               .coupled_rtol = 1e-12});
@@ -255,7 +255,7 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
 
     auto loadsRhs = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      loadsRhs += scene.Surface(kernels.ice.loadDuals[n], deltas[n]);
+      loadsRhs += scene.Surface(kernels.ice.directLoadKernels[n], deltas[n]);
     }
     const auto itauRhs = GridPairing(op.Coupling(), kernels.itauKernel3D, ditau);
     const auto lhs = Objective(scene, tangent.Run(times, d, &trajectory), measurements);
@@ -275,13 +275,13 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
         << "scheme " << static_cast<int>(scheme);
 
     // A stride-2 trajectory serves the same sweep.
-    SeaLevelEvolution3D sparse(
+    Evolution3D sparse(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 2});
     const auto sparseTrajectory =
-        ForwardTrajectory3D::FromSnapshots(sparse.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(sparse.Run(times, directLoad));
     const auto again =
-        adjoint.IceHistoryKernels(times, measurements, &sparseTrajectory);
+        adjoint.FirstOrderKernels(times, measurements, &sparseTrajectory);
     EXPECT_NEAR(GridPairing(op.Coupling(), again.itauKernel3D, ditau), itauRhs,
                 1e-9 * std::abs(itauRhs));
   }
@@ -295,7 +295,7 @@ TEST(DiscreteAdjoint3D, ZeroLateralMatchesThe1DDiscreteSweep) {
   std::mt19937 rng(17);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * scene.Kyr());
-  const auto iceLoad = Ramp(scene.MeltLoad(-0.1), times.back());
+  const auto directLoad = Ramp(scene.MeltLoad(-0.1), times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[5].seaLevelDual = scene.Smooth(rng, 1.0);
   measurements[3].displacementDual = scene.Smooth(rng, -0.6);
@@ -303,32 +303,32 @@ TEST(DiscreteAdjoint3D, ZeroLateralMatchesThe1DDiscreteSweep) {
 
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
+  Evolution evolution1(op1, scene.solver, scene.state,
                                {.rtol = 1e-12, .record_stride = 1});
   const auto trajectory1 =
-      ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
+      ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
   const auto kernels1 =
       AdjointSolver(evolution1, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-          .IceHistoryKernels(times, measurements, &trajectory1);
+          .FirstOrderKernels(times, measurements, &trajectory1);
 
   Viscoelastic3D op3(scene.rheology, kLmax,
                      [](double, double, double) { return 0.0; },
                      {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution3D evolution3(
+  Evolution3D evolution3(
       op3, scene.solver, scene.state,
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto trajectory3 =
-      ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, iceLoad));
+      ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
   const auto kernels3 =
       AdjointSolver3D(evolution3, {.method = AdjointMethod::Discrete,
                                    .rtol = 1e-12,
                                    .coupled_rtol = 1e-12})
-          .IceHistoryKernels(times, measurements, &trajectory3);
+          .FirstOrderKernels(times, measurements, &trajectory3);
 
   auto scale = 0.0, worst = 0.0;
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    scale = std::max(scale, MaxAbs(kernels1.loadDuals[n]));
-    worst = std::max(worst, MaxDiff(kernels3.ice.loadDuals[n], kernels1.loadDuals[n]));
+    scale = std::max(scale, MaxAbs(kernels1.directLoadKernels[n]));
+    worst = std::max(worst, MaxDiff(kernels3.ice.directLoadKernels[n], kernels1.directLoadKernels[n]));
   }
   EXPECT_GT(scale, 0.0);
   EXPECT_LT(worst, 1e-8 * scale);
@@ -354,7 +354,7 @@ TEST(DiscreteAdjoint3D, MachineGradeTaylorTest) {
   auto scene = Scene::Make(1e22);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
-  const auto iceLoad = Ramp(scene.MeltLoad(-0.1), times.back());
+  const auto directLoad = Ramp(scene.MeltLoad(-0.1), times.back());
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -369,17 +369,17 @@ TEST(DiscreteAdjoint3D, MachineGradeTaylorTest) {
                       [&](double r, double theta, double phi) {
                         return baseDelta(r, theta, phi) + h * direction(theta, phi);
                       });
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rtol = 1e-12, .coupled_rtol = 1e-12,
          .record_stride = kernelsOut != nullptr ? 1 : 0});
-    const auto snapshots = evolution.Run(times, iceLoad);
+    const auto snapshots = evolution.Run(times, directLoad);
     if (kernelsOut != nullptr) {
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       *kernelsOut = AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                                .rtol = 1e-12,
                                                .coupled_rtol = 1e-12})
-                        .IceHistoryKernels(times, measurements, &trajectory);
+                        .FirstOrderKernels(times, measurements, &trajectory);
     }
     return Objective(scene, snapshots, measurements);
   };
@@ -428,7 +428,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderRefinement) {
   for (const auto nodes : {9, 17}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
@@ -440,10 +440,10 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderRefinement) {
       const auto kernels =
           AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
                                       .coupled_rtol = 1e-12})
-              .IceHistoryKernels(times, measurements, &trajectory);
+              .FirstOrderKernels(times, measurements, &trajectory);
       auto loads = 0.0;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
-        loads += scene.Surface(kernels.ice.loadDuals[n], Ramp(load, span)(times[n]));
+        loads += scene.Surface(kernels.ice.directLoadKernels[n], Ramp(load, span)(times[n]));
       }
       results[method] = {loads, GridPairing(op.Coupling(),
                                             kernels.logViscosityKernel3D, {p})};
@@ -500,7 +500,7 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
-  const auto iceLoad = Ramp(load, times.back());
+  const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
@@ -529,12 +529,12 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
                         return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
                       },
                       {.memory_points = set});
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = rotation,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
     MaterialDirection3D d;
     d.kappa = LateralModulus(
@@ -553,7 +553,7 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
                                         .rtol = 1e-12,
                                         .coupled_rtol = 1e-12,
                                         .material_kernels = true});
-    const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.kappaKernel3D.size(), coupling.GridValueCount());
     ASSERT_EQ(kernels.muKernel3D.size(), coupling.GridValueCount());
     const auto kappaRhs = VolumePairing(coupling, kernels.kappaKernel3D, d.kappa);
@@ -596,7 +596,7 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
     EXPECT_NEAR(spherical, full, 1e-12 * std::abs(full));
 
     // The refusal without a trajectory.
-    EXPECT_THROW((void)adjoint.IceHistoryKernels(times, measurements),
+    EXPECT_THROW((void)adjoint.FirstOrderKernels(times, measurements),
                  std::invalid_argument);
   }
 }
@@ -628,18 +628,18 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
       times.push_back(10.0 * static_cast<double>(n) /
                       static_cast<double>(npts - 1) * scene.Kyr());
     }
-    const auto iceLoad = Ramp(load, times.back());
+    const auto directLoad = Ramp(load, times.back());
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts / 2].seaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                       {.memory_points = MemoryPointSet::Gauss});
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = rotation,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
     const auto dKappa = LateralModulus(
         coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
@@ -658,7 +658,7 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
                                                        .rtol = 1e-12,
                                                        .coupled_rtol = 1e-12,
                                                        .material_kernels = true})
-                               .IceHistoryKernels(times, measurements, &trajectory);
+                               .FirstOrderKernels(times, measurements, &trajectory);
       paired[method] = VolumePairing(coupling, kernels.kappaKernel3D, dKappa) +
                        VolumePairing(coupling, kernels.muKernel3D, dMu);
     }
@@ -688,7 +688,7 @@ TEST(DiscreteAdjoint3D, ZeroLateralMaterialKernelsMatchThe1D) {
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.0 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
-  const auto iceLoad = Ramp(load, times.back());
+  const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[times.size() - 1].seaLevelDual = scene.Smooth(rng, 1.0);
   measurements[2].displacementDual = scene.Smooth(rng, 0.5);
@@ -697,34 +697,34 @@ TEST(DiscreteAdjoint3D, ZeroLateralMaterialKernelsMatchThe1D) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op1(scene.rheology, kLmax,
                              {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
+    Evolution evolution1(op1, scene.solver, scene.state,
                                  {.scheme = scheme,
                                   .rotation = RotationalFeedback::None,
                                   .rtol = 1e-12,
                                   .record_stride = 1});
     const auto trajectory1 =
-        ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
+        ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
     const auto kernels1 =
         AdjointSolver(evolution1, {.method = AdjointMethod::Discrete,
                                    .rtol = 1e-12,
                                    .material_kernels = true})
-            .IceHistoryKernels(times, measurements, &trajectory1);
+            .FirstOrderKernels(times, measurements, &trajectory1);
 
     Viscoelastic3D op3(scene.rheology, kLmax,
                        [](double, double, double) { return 0.0; },
                        {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution3D evolution3(
+    Evolution3D evolution3(
         op3, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationalFeedback::None,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory3 =
-        ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
     const auto kernels3 =
         AdjointSolver3D(evolution3, {.method = AdjointMethod::Discrete,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .material_kernels = true})
-            .IceHistoryKernels(times, measurements, &trajectory3);
+            .FirstOrderKernels(times, measurements, &trajectory3);
     const auto& coupling = op3.Coupling();
     auto scaleK = 0.0, scaleM = 0.0;
     for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
@@ -778,7 +778,7 @@ void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver s
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
-  const auto iceLoad = Ramp(load, times.back());
+  const auto directLoad = Ramp(load, times.back());
   auto deltas = std::vector<std::vector<double>>{};
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
@@ -805,15 +805,15 @@ void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver s
         },
         {.solver = solver, .solve_rtol = 1e-12, .moduli = TestModuli()});
     ASSERT_TRUE(op.HasLateralModuli());
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                         .rtol = 1e-12,
                                         .coupled_rtol = 1e-12});
-    const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
                                               .coupled_rtol = 1e-12});
@@ -823,7 +823,7 @@ void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver s
     const auto ditau = TangentLinearSolver3D::ItauOfLogViscosity(op, d.logViscosity);
     auto loadsRhs = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      loadsRhs += scene.Surface(kernels.ice.loadDuals[n], deltas[n]);
+      loadsRhs += scene.Surface(kernels.ice.directLoadKernels[n], deltas[n]);
     }
     const auto itauRhs = GridPairing(op.Coupling(), kernels.itauKernel3D, ditau);
     const auto lhs = Objective(scene, tangent.Run(times, d, &trajectory), measurements);
@@ -866,7 +866,7 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
-  const auto iceLoad = Ramp(load, times.back());
+  const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
@@ -888,12 +888,12 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
          .solve_rtol = 1e-12,
          .memory_points = MemoryPointSet::Gll,
          .moduli = TestModuli()});
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationOf(scheme),
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
     MaterialDirection3D d;
     d.kappa = LateralModulus(
@@ -911,7 +911,7 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
                                         .rtol = 1e-12,
                                         .coupled_rtol = 1e-12,
                                         .material_kernels = true});
-    const auto kernels = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto kappaRhs = VolumePairing(coupling, kernels.kappaKernel3D, d.kappa);
     const auto muRhs = VolumePairing(coupling, kernels.muKernel3D, d.mu);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
@@ -966,7 +966,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
   for (const auto nodes : {9, 17}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
@@ -978,10 +978,10 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
       const auto kernels =
           AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
                                       .coupled_rtol = 1e-12})
-              .IceHistoryKernels(times, measurements, &trajectory);
+              .FirstOrderKernels(times, measurements, &trajectory);
       auto loads = 0.0;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
-        loads += scene.Surface(kernels.ice.loadDuals[n], Ramp(load, span)(times[n]));
+        loads += scene.Surface(kernels.ice.directLoadKernels[n], Ramp(load, span)(times[n]));
       }
       results[method] = {loads, GridPairing(op.Coupling(),
                                             kernels.logViscosityKernel3D, {p})};
@@ -1028,7 +1028,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
       times.push_back(10.0 * static_cast<double>(n) /
                       static_cast<double>(npts - 1) * scene.Kyr());
     }
-    const auto iceLoad = Ramp(load, times.back());
+    const auto directLoad = Ramp(load, times.back());
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts / 2].seaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
@@ -1037,12 +1037,12 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
                        .solve_rtol = 1e-12,
                        .memory_points = MemoryPointSet::Gauss,
                        .moduli = TestModuli()});
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationalFeedback::None,
          .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
     const auto dKappa = LateralModulus(
         coupling, scene.material, k0, [](double r) { return 0.05 * (1.0 - 0.5 * r); },
@@ -1061,7 +1061,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
                                                        .rtol = 1e-12,
                                                        .coupled_rtol = 1e-12,
                                                        .material_kernels = true})
-                               .IceHistoryKernels(times, measurements, &trajectory);
+                               .FirstOrderKernels(times, measurements, &trajectory);
       paired[method] = VolumePairing(coupling, kernels.kappaKernel3D, dKappa) +
                        VolumePairing(coupling, kernels.muKernel3D, dMu);
     }
@@ -1125,7 +1125,7 @@ TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {
   for (const auto nodes : {9, 17, 33}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12,
          .record_stride = 1, .record_strain = recordStrain});
@@ -1138,10 +1138,10 @@ TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {
       const auto kernels =
           AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
                                       .coupled_rtol = 1e-12})
-              .IceHistoryKernels(times, measurements, &trajectory);
+              .FirstOrderKernels(times, measurements, &trajectory);
       auto loads = 0.0;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
-        loads += scene.Surface(kernels.ice.loadDuals[n], Ramp(load, span)(times[n]));
+        loads += scene.Surface(kernels.ice.directLoadKernels[n], Ramp(load, span)(times[n]));
       }
       results[method] = {loads, GridPairing(op.Coupling(),
                                             kernels.logViscosityKernel3D, {p})};
@@ -1173,7 +1173,7 @@ TEST(DiscreteAdjoint3D, RotatingStepsSolveTheLateralSystem) {
   auto scene = Scene::Make(1e21);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
-  const auto iceLoad = Ramp(scene.MeltLoad(-0.1), times.back());
+  const auto directLoad = Ramp(scene.MeltLoad(-0.1), times.back());
   auto baseDelta = [](double, double theta, double phi) {
     return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   };
@@ -1183,11 +1183,11 @@ TEST(DiscreteAdjoint3D, RotatingStepsSolveTheLateralSystem) {
                     {.solver = Solver::ConjugateGradients,
                      .solve_rtol = 1e-13,
                      .moduli = TestModuli()});
-  SeaLevelEvolution3D evolution(
+  Evolution3D evolution(
       op, scene.solver, scene.state,
       {.rotation = RotationalFeedback::Full, .rtol = 1e-13, .coupled_rtol = 1e-13,
        .record_stride = 1, .record_strain = true});
-  const auto run = evolution.Run(times, iceLoad);
+  const auto run = evolution.Run(times, directLoad);
   const auto& material = scene.rheology.BaseMaterial().ModelScales();
   const auto& sle = scene.solver.SolverScales();
   auto ratio = [&](Dimensions dims) { return material.Factor(dims) / sle.Factor(dims); };

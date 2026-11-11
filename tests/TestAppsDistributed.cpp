@@ -135,7 +135,7 @@ TEST_F(AppsOverRanks, SeaLevelMatchesOneProcessAndResumesFromRankCheckpoints) {
     const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
     const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
     const auto resumed = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
-    for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+    for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
       EXPECT_LT(Relative(distributed.variables.at(name).values,
                          reference.variables.at(name).values),
                 1e-10)
@@ -187,7 +187,7 @@ TEST_F(AppsOverRanks, CalibratedMigratingSeaLevelMatchesOneProcess) {
   const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
   const auto resumed = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
   for (const auto* name :
-       {"sea_level_change", "initial_sea_level", "ocean_function"}) {
+       {"relative_sea_level_change", "initial_sea_level", "ocean_function"}) {
     EXPECT_LT(Relative(distributed.variables.at(name).values,
                        reference.variables.at(name).values),
               1e-8)
@@ -302,7 +302,7 @@ TEST_F(AppsOverRanks, SeaLevelUnderLateralModuliMatchesOneProcess) {
   if (Rank() != 0) return;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
   const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_LT(Relative(distributed.variables.at(name).values,
                        reference.variables.at(name).values),
               1e-10)
@@ -369,8 +369,8 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
     const auto distributed =
         pm::ReadSurfaceFile(dir_ / "out" / std::format("over_{}.nc", step));
     for (const auto* name :
-         {"sea_level_change", "displacement", "potential",
-          "sea_level_change_radial_model", "displacement_radial_model",
+         {"relative_sea_level_change", "displacement", "potential",
+          "relative_sea_level_change_radial_model", "displacement_radial_model",
           "potential_radial_model"}) {
       EXPECT_LT(Relative(distributed.variables.at(name).values,
                          reference.variables.at(name).values),
@@ -392,7 +392,7 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
   if (Rank() != 0) return;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "radial_one.nc");
   const auto first = pm::ReadSurfaceFile(dir_ / "out" / "radial_over.nc");
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(first.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
@@ -436,7 +436,7 @@ TEST_F(AppsOverRanks, RadialSeaLevelIsTheFirstRanksAlone) {
   EXPECT_FALSE(fs::exists(dir_ / "ckpt" / "rank_0000"));
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
   const auto first = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(first.variables.at(name).values,
               reference.variables.at(name).values)
         << name;

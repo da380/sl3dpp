@@ -23,8 +23,8 @@ namespace sl3dpp::detail {
 /// at times[0], on the solver's grid) to 1e-6 of its largest value, and its
 /// ocean function the flotation one, since the shorelines follow flotation
 /// from the first node.
-void CheckMigratingStart(const SeaLevelSolver& solver,
-                         const SeaLevelSolver::State& background,
+void CheckMigratingStart(const GRDSolver& solver,
+                         const GRDSolver::State& background,
                          std::span<const double> startIce);
 
 /// The surface load of a converged nonlinear state relative to the
@@ -32,7 +32,7 @@ void CheckMigratingStart(const SeaLevelSolver& solver,
 /// as m >= 0 coefficients in the solver's units: what the radial step
 /// finishes under, so that it sees the load its sea level solution saw.
 [[nodiscard]] std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const SeaLevelSolver& solver, const SeaLevelSolver::State& background,
-    const SeaLevelSolver::State& final);
+    const GRDSolver& solver, const GRDSolver::State& background,
+    const GRDSolver::State& final);
 
 }  // namespace sl3dpp::detail

@@ -28,7 +28,7 @@ namespace sl3dpp::detail {
 
 using Complex = std::complex<double>;
 
-/// The transpose of SeaLevelEvolution::Columns under the plain per-column
+/// The transpose of Evolution::Columns under the plain per-column
 /// pairing on the degree side and the L2 coefficient pairing of real
 /// fields on the other: per-degree column duals to a coefficient dual.
 /// The pairing weights m > 0 twice, so those entries halve; the m = 0
@@ -47,7 +47,7 @@ inline std::vector<Complex> CoefficientDualFromColumnDuals(
   return out;
 }
 
-/// The transpose of SeaLevelEvolution::Coefficients: a coefficient dual
+/// The transpose of Evolution::Coefficients: a coefficient dual
 /// to one degree's column duals (the m > 0 entries doubled by the
 /// pairing).
 inline std::vector<double> ColumnDualsOf(std::span<const Complex> dual, int l,
@@ -166,7 +166,7 @@ struct AdjointSolver::MaterialTools {
   using Degree = ViscoelasticOperator::Degree;
   using Fields = std::map<int, std::vector<double>>;
 
-  const SeaLevelEvolution* ev = nullptr;
+  const Evolution* ev = nullptr;
   const ViscoelasticOperator* op = nullptr;
   /// v's direction: the moduli at the memory points.
   PointMaterialDirection direction;
@@ -178,7 +178,7 @@ struct AdjointSolver::MaterialTools {
   /// v's variation of the effective shear of a dt at the points.
   std::map<double, std::vector<double>> effectiveMu;
 
-  MaterialTools(const SeaLevelEvolution& evolution,
+  MaterialTools(const Evolution& evolution,
                 const PointMaterialDirection& d)
       : ev(&evolution), op(&*evolution.op_), direction(d) {
     const auto& rheology = op->GetRheology();
@@ -346,7 +346,7 @@ struct AdjointSolver::MaterialTools {
   /// unrelaxed solve under the snapshot's loads and memory, plus v's own
   /// unrelaxed material force's response on the base solution and memory
   /// there (empty for the start).
-  [[nodiscard]] Fields TangentSolution(const SeaLevelEvolution::Snapshot& snap,
+  [[nodiscard]] Fields TangentSolution(const Evolution::Snapshot& snap,
                                        const Fields& baseFull,
                                        const Fields* baseMem) const {
     auto x = op->SolveElastic(*snap.internalState,

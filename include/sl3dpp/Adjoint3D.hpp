@@ -27,7 +27,7 @@
  * Conventions follow Adjoint.hpp: times increasing in SLE units,
  * measurements keyed by node index, duals paired by the surface
  * integral; itau in MATERIAL units. About a migrating-shoreline run
- * (SeaLevelEvolution3D::RunMigrating) the sweep linearises about the run's
+ * (Evolution3D::RunMigrating) the sweep linearises about the run's
  * ocean functions, node by node, as the 1D continuous sweep does.
  */
 
@@ -75,18 +75,18 @@ struct ForwardTrajectory3D {
   }
 
   [[nodiscard]] static ForwardTrajectory3D FromSnapshots(
-      std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
+      std::span<const Evolution3D::Snapshot> snapshots);
 };
 
 /// The ocean function of every node of a migrating 3D run (RunMigrating),
 /// for the sweep's linearisation about it; refused for a frozen run's
 /// snapshots, which carry none.
 [[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const SeaLevelEvolution3D::Snapshot> snapshots);
+    std::span<const Evolution3D::Snapshot> snapshots);
 
 /**
  * @brief The 3D kernels. `ice` carries the ice-history views exactly as
- * the 1D IceKernels does.
+ * the 1D Kernels does.
  *
  * Every kernel is a density per unit volume (docs/adjoints.md, "The
  * kernels' convention"). `itauKernel3D[k][FieldOffset(node) + x]` is the
@@ -110,7 +110,7 @@ struct ForwardTrajectory3D {
  * rank order are the whole mesh's), and `ice` is every rank's alike.
  */
 struct Kernels3D {
-  IceKernels ice;
+  Kernels ice;
   std::vector<std::vector<double>> itauKernel3D;
   std::vector<std::vector<double>> itauKernelSpherical;
   std::vector<std::vector<double>> logViscosityKernel3D;
@@ -261,9 +261,9 @@ class AdjointSolver3D {
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution,
+  explicit AdjointSolver3D(const Evolution3D& evolution,
                            Options options);
-  explicit AdjointSolver3D(const SeaLevelEvolution3D& evolution)
+  explicit AdjointSolver3D(const Evolution3D& evolution)
       : AdjointSolver3D(evolution, Options{}) {}
 
   /// The kernels over the forward time grid, by Options::method; with a
@@ -276,7 +276,7 @@ class AdjointSolver3D {
   /// evolution's operator's collectives), collective: every rank passes
   /// the same times, measurements and ocean functions, and its own
   /// trajectory (its forward run's).
-  [[nodiscard]] Kernels3D IceHistoryKernels(
+  [[nodiscard]] Kernels3D FirstOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory = nullptr,
@@ -319,7 +319,7 @@ class AdjointSolver3D {
   [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> SecondOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      std::span<const Evolution3D::Snapshot> tangent,
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory3D& trajectory,
       std::span<const std::vector<double>> oceanFunctions = {},
@@ -328,29 +328,29 @@ class AdjointSolver3D {
  private:
   /// The discrete transpose (AdjointDiscrete3D.cpp), carrying the
   /// derivative dual state along v when a tangent run is given
-  /// (IceHistoryKernels and SecondOrderKernels share it).
+  /// (FirstOrderKernels and SecondOrderKernels share it).
   [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory,
       std::span<const std::vector<double>> oceanFunctions,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      std::span<const Evolution3D::Snapshot> tangent,
       const std::vector<std::vector<double>>* ditau,
       const MaterialDirection3D* material) const;
 
   /// The continuous sweep, carrying the derivative state along v when a
-  /// tangent run is given (IceHistoryKernels and SecondOrderKernels
+  /// tangent run is given (FirstOrderKernels and SecondOrderKernels
   /// share it).
   [[nodiscard]] std::pair<Kernels3D, KernelDerivatives3D> Sweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory,
       std::span<const std::vector<double>> oceanFunctions,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangent,
+      std::span<const Evolution3D::Snapshot> tangent,
       const std::vector<std::vector<double>>* ditau,
       const MaterialDirection3D* material) const;
 
-  const SeaLevelEvolution3D* evolution_;
+  const Evolution3D* evolution_;
   Options options_;
 };
 

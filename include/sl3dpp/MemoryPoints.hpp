@@ -123,7 +123,7 @@ struct PointShear {
 ///      ~ sum_p W_p K(r_p) delta(r_p),
 /// W the points' MemoryPoints::VolumeWeights. For a kernel at the memory
 /// points (kappaKernel, muKernel) pass the operator's Points(); for a
-/// nodal one (itauKernel, IceKernels::Viscosity, the Love numbers') the
+/// nodal one (itauKernel, Kernels::Viscosity, the Love numbers') the
 /// mesh alone. Refused when the arrays are not the mesh's points'.
 [[nodiscard]] double VolumePairing(const MemoryPoints& points,
                                    const RadialMesh& mesh,

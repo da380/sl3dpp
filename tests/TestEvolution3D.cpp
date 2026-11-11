@@ -31,8 +31,8 @@ struct Setup {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
   std::vector<double> iceNd;
 
   static Setup Make() {
@@ -56,7 +56,7 @@ struct Setup {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator reference(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -89,30 +89,30 @@ TEST(LateralGate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto times = std::vector<double>{0.0, kyr, 2 * kyr, 4 * kyr};
   auto load = setup.MeltLoad(-0.1);
-  auto iceLoad = [&](double) { return load; };
+  auto directLoad = [&](double) { return load; };
 
   // The 1D coupled loop.
   ViscoelasticOperator op1(setup.rheology, kLmax);
-  SeaLevelEvolution evolution1(op1, setup.solver, setup.state, {.rtol = 1e-11});
-  const auto reference = evolution1.Run(times, iceLoad);
+  Evolution evolution1(op1, setup.solver, setup.state, {.rtol = 1e-11});
+  const auto reference = evolution1.Run(times, directLoad);
 
   // The 3D coupled loop with no lateral perturbation.
   Viscoelastic3D op3(setup.rheology, kLmax,
                      [](double, double, double) { return 0.0; });
-  SeaLevelEvolution3D evolution3(op3, setup.solver, setup.state,
+  Evolution3D evolution3(op3, setup.solver, setup.state,
                                  {.rtol = 1e-11, .coupled_rtol = 1e-10});
-  const auto coupled = evolution3.Run(times, iceLoad);
+  const auto coupled = evolution3.Run(times, directLoad);
 
   ASSERT_EQ(coupled.size(), reference.size());
   for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
     EXPECT_TRUE(coupled[node].converged);
     if (node > 0) EXPECT_LE(coupled[node].coupledIterations, 4);
     auto scale = 0.0, diff = 0.0;
-    for (auto i = std::size_t{0}; i < reference[node].seaLevelChange.size();
+    for (auto i = std::size_t{0}; i < reference[node].relativeSeaLevelChange.size();
          ++i) {
-      scale = std::max(scale, std::abs(reference[node].seaLevelChange[i]));
-      diff = std::max(diff, std::abs(coupled[node].seaLevelChange[i] -
-                                     reference[node].seaLevelChange[i]));
+      scale = std::max(scale, std::abs(reference[node].relativeSeaLevelChange[i]));
+      diff = std::max(diff, std::abs(coupled[node].relativeSeaLevelChange[i] -
+                                     reference[node].relativeSeaLevelChange[i]));
     }
     EXPECT_LT(diff, 1e-8 * scale) << "node " << node;
     for (auto i = 0; i < 3; ++i) {
@@ -131,21 +131,21 @@ TEST(Lateral, CoupledLateralEvolutionRunsAndConservesMass) {
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3 * kyr};
   auto load = setup.MeltLoad(-0.1);
-  auto iceLoad = [&](double) { return load; };
+  auto directLoad = [&](double) { return load; };
 
   // A strong lateral pattern: one decade peak to peak.
   Viscoelastic3D op(
       setup.rheology, kLmax, [](double, double theta, double phi) {
         return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
       });
-  SeaLevelEvolution3D evolution(op, setup.solver, setup.state, {});
-  const auto run = evolution.Run(times, iceLoad);
+  Evolution3D evolution(op, setup.solver, setup.state, {});
+  const auto run = evolution.Run(times, directLoad);
 
   // The zero-lateral twin, for comparison of the physics.
   Viscoelastic3D flat(setup.rheology, kLmax,
                       [](double, double, double) { return 0.0; });
-  SeaLevelEvolution3D twin(flat, setup.solver, setup.state, {});
-  const auto uniform = twin.Run(times, iceLoad);
+  Evolution3D twin(flat, setup.solver, setup.state, {});
+  const auto uniform = twin.Run(times, directLoad);
 
   auto maxRelDiff = 0.0;
   for (auto node = std::size_t{1}; node < run.size(); ++node) {
@@ -155,7 +155,7 @@ TEST(Lateral, CoupledLateralEvolutionRunsAndConservesMass) {
     auto gain = std::vector<double>(grid.FieldSize());
     for (auto i = std::size_t{0}; i < gain.size(); ++i) {
       gain[i] = setup.solver.WaterDensity() * setup.state.oceanFunction[i] *
-                run[node].seaLevelChange[i];
+                run[node].relativeSeaLevelChange[i];
     }
     const auto a = setup.solver.Radius();
     const auto gained = a * a * grid.Integrate(gain);
@@ -164,10 +164,10 @@ TEST(Lateral, CoupledLateralEvolutionRunsAndConservesMass) {
 
     // The lateral viscosity changes the physics measurably.
     auto scale = 0.0, diff = 0.0;
-    for (auto i = std::size_t{0}; i < run[node].seaLevelChange.size(); ++i) {
-      scale = std::max(scale, std::abs(uniform[node].seaLevelChange[i]));
-      diff = std::max(diff, std::abs(run[node].seaLevelChange[i] -
-                                     uniform[node].seaLevelChange[i]));
+    for (auto i = std::size_t{0}; i < run[node].relativeSeaLevelChange.size(); ++i) {
+      scale = std::max(scale, std::abs(uniform[node].relativeSeaLevelChange[i]));
+      diff = std::max(diff, std::abs(run[node].relativeSeaLevelChange[i] -
+                                     uniform[node].relativeSeaLevelChange[i]));
     }
     maxRelDiff = std::max(maxRelDiff, diff / scale);
   }
@@ -181,33 +181,33 @@ TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3 * kyr};
   auto load = setup.MeltLoad(-0.1);
-  auto iceLoad = [&](double) { return load; };
+  auto directLoad = [&](double) { return load; };
   Viscoelastic3D op(
       setup.rheology, kLmax, [](double, double theta, double phi) {
         return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
       });
 
   auto checkpoints =
-      std::map<std::size_t, SeaLevelEvolution3D::Checkpoint>{};
-  auto options = SeaLevelEvolution3D::Options{};
+      std::map<std::size_t, Evolution3D::Checkpoint>{};
+  auto options = Evolution3D::Options{};
   options.checkpoint_stride = 1;
   options.on_checkpoint = [&](std::size_t node,
-                              const SeaLevelEvolution3D::Checkpoint& cp) {
+                              const Evolution3D::Checkpoint& cp) {
     checkpoints.emplace(node, cp);
   };
-  SeaLevelEvolution3D whole(op, setup.solver, setup.state, options);
-  const auto full = whole.Run(times, iceLoad);
+  Evolution3D whole(op, setup.solver, setup.state, options);
+  const auto full = whole.Run(times, directLoad);
   ASSERT_EQ(checkpoints.size(), times.size());
 
-  SeaLevelEvolution3D resumed(op, setup.solver, setup.state, {});
+  Evolution3D resumed(op, setup.solver, setup.state, {});
   const auto tail = resumed.Resume(
       checkpoints.at(1),
-      std::vector<double>(times.begin() + 1, times.end()), iceLoad);
+      std::vector<double>(times.begin() + 1, times.end()), directLoad);
   ASSERT_EQ(tail.size(), times.size() - 2);
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[2 + k];
     const auto& b = tail[k];
-    EXPECT_EQ(a.seaLevelChange, b.seaLevelChange) << "node " << 2 + k;
+    EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange) << "node " << 2 + k;
     EXPECT_EQ(a.displacement, b.displacement) << "node " << 2 + k;
     EXPECT_EQ(a.potential, b.potential) << "node " << 2 + k;
     EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 2 + k;

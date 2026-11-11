@@ -32,7 +32,7 @@
  * branch moduli's variation, and the bulk term through the scalar
  * pipeline; the start's unrelaxed response alike.
  *
- * Conventions follow SeaLevelEvolution3D: times increasing in SLE units,
+ * Conventions follow Evolution3D: times increasing in SLE units,
  * grids in the solver's units; an itau perturbation is per branch over
  * the coupling's grid values ([FieldOffset(node) + x], the layout of
  * Kernels3D::itauKernel3D) in MATERIAL units, and the log-viscosity
@@ -93,7 +93,7 @@ class TangentLinearSolver3D {
   struct Options {
     AdjointMethod method = AdjointMethod::Continuous;
     /// The SLE's own tolerance per pass, and the combined fixed point's
-    /// controls (as SeaLevelEvolution3D::Options).
+    /// controls (as Evolution3D::Options).
     double rtol = 1e-9;
     int anderson_memory = 5;
     int max_coupled_iterations = 60;
@@ -106,9 +106,9 @@ class TangentLinearSolver3D {
     std::function<void(std::size_t node)> on_node{};
   };
 
-  explicit TangentLinearSolver3D(const SeaLevelEvolution3D& evolution,
+  explicit TangentLinearSolver3D(const Evolution3D& evolution,
                                  Options options);
-  explicit TangentLinearSolver3D(const SeaLevelEvolution3D& evolution)
+  explicit TangentLinearSolver3D(const Evolution3D& evolution)
       : TangentLinearSolver3D(evolution, Options{}) {}
 
   /// The derivative of the run over `times` along `direction`. With an
@@ -117,7 +117,7 @@ class TangentLinearSolver3D {
   /// under the recorded loads, with the run's own iteration). With
   /// `oceanFunctions` from a migrating run the run linearises about that
   /// trajectory. Distributed over radius like the evolution, collective.
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> Run(
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
@@ -134,10 +134,10 @@ class TangentLinearSolver3D {
   /// drive) and of v's on u's, the start's alike (docs/adjoints.md
   /// §15). Symmetric in u and v; the 3D form of
   /// TangentLinearSolver::RunSecondOrder.
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunSecondOrder(
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> RunSecondOrder(
       std::span<const double> times,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangentU,
-      std::span<const SeaLevelEvolution3D::Snapshot> tangentV,
+      std::span<const Evolution3D::Snapshot> tangentU,
+      std::span<const Evolution3D::Snapshot> tangentV,
       const SecondOrderDirection3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
       std::span<const std::vector<double>> oceanFunctions = {}) const;
@@ -174,7 +174,7 @@ class TangentLinearSolver3D {
   struct MaterialDrive3D;
   struct MaterialSecondDrive3D;
   class ForwardCursor3D;
-  [[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> March(
+  [[nodiscard]] std::vector<Evolution3D::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
@@ -202,7 +202,7 @@ class TangentLinearSolver3D {
       const std::vector<std::complex<double>>&)>
   TideColumnsOf() const;
 
-  const SeaLevelEvolution3D* evolution_;
+  const Evolution3D* evolution_;
   Options options_;
 };
 

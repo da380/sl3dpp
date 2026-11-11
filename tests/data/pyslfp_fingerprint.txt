@@ -2,7 +2,7 @@
 # pyslfp 4.0.0, 2026-11-04; Love table: tests/data/pyslfp_love_numbers.txt
 # coefficients in the real orthonormal no-CS (pyshtools) basis, SI
 ocean_area 428700597362759.94
-field sea_level_change
+field relative_sea_level_change
 0 0 16.213952372177832 0
 1 0 -6.5916675269724196 0
 1 1 7.6549213257905999e-16 0.15972367141073712

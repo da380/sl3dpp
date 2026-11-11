@@ -64,8 +64,8 @@ struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
   std::vector<double> iceNd;
 
   static Scene Make(double viscositySI) {
@@ -90,7 +90,7 @@ struct Scene {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator reference(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -311,7 +311,7 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     thickness.push_back(scene.Smooth(rng, 100.0 * scene.Metre()));
   }
-  const auto iceLoad = FrozenLoad(scene, times, thickness);
+  const auto directLoad = FrozenLoad(scene, times, thickness);
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[5].seaLevelDual = scene.Smooth(rng, 1.0);
   measurements[3].displacementDual = scene.Smooth(rng, -0.6);
@@ -342,12 +342,12 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
   // 1D.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution evolution1(op1, scene.solver, scene.state,
+  Evolution evolution1(op1, scene.solver, scene.state,
                                {.rotation = RotationalFeedback::None,
                                 .rtol = 1e-12,
                                 .record_stride = 1});
   const auto trajectory1 =
-      ForwardTrajectory::FromSnapshots(evolution1.Run(times, iceLoad));
+      ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
   TangentPerturbation v1;
   v1.iceThickness = deltaIce;
   v1.itau = {ditau1};
@@ -366,14 +366,14 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
   Viscoelastic3D op3(scene.rheology, kLmax,
                      [](double, double, double) { return 0.0; },
                      {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution3D evolution3(
+  Evolution3D evolution3(
       op3, scene.solver, scene.state,
       {.rotation = RotationalFeedback::None,
        .rtol = 1e-12,
        .coupled_rtol = 1e-12,
        .record_stride = 1});
   const auto trajectory3 =
-      ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, iceLoad));
+      ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
   const auto& coupling = op3.Coupling();
   auto ditau3 = std::vector<double>(coupling.GridValueCount(), 0.0);
   for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
@@ -505,17 +505,17 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
     measurements[times.size() - 1].seaLevelDual = g;
 
     auto make = [&](double eps, const std::function<double(double, double)>& p,
-                    Viscoelastic3D** opOut, SeaLevelEvolution3D** evOut) {
+                    Viscoelastic3D** opOut, Evolution3D** evOut) {
       *opOut = new Viscoelastic3D(scene.rheology, kLmax,
                                   [&, eps](double r, double theta, double phi) {
                                     return baseDelta(r, theta, phi) + eps * p(theta, phi);
                                   });
-      *evOut = new SeaLevelEvolution3D(
+      *evOut = new Evolution3D(
           **opOut, scene.solver, scene.state,
           {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     };
     Viscoelastic3D* op = nullptr;
-    SeaLevelEvolution3D* evolution = nullptr;
+    Evolution3D* evolution = nullptr;
     make(0.0, pU, &op, &evolution);
     const auto& coupling = op->Coupling();
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
@@ -536,7 +536,7 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
     const auto runU = tangent.Run(times, u.tangent, &trajectory);
     const auto runW = tangent.Run(times, w.tangent, &trajectory);
     AdjointSolver3D adjoint(*evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
-    const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto [kernelsU, alongU] =
         adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory);
     const auto [kernelsW, alongW] =
@@ -558,7 +558,7 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
     uw.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(
         *op, OnCoupling(coupling, pU), OnCoupling(coupling, pW));
     const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
-    const auto forward = scene.Surface(g, second.back().seaLevelChange);
+    const auto forward = scene.Surface(g, second.back().relativeSeaLevelChange);
     // F''[u, w] of the log parameterisation carries the uv term, whose
     // dual is the first-order kernel paired with itau_uv.
     const auto uvTerm = GridPairing(coupling, first.itauKernel3D, uw.itauUV);
@@ -568,7 +568,7 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
     // by eps p_u, the thickness by eps delta I_u) paired with w.
     auto gradientAt = [&](double eps) {
       Viscoelastic3D* movedOp = nullptr;
-      SeaLevelEvolution3D* movedEv = nullptr;
+      Evolution3D* movedEv = nullptr;
       make(eps, pU, &movedOp, &movedEv);
       auto moved = thickness;
       for (auto n = std::size_t{0}; n < moved.size(); ++n) {
@@ -580,7 +580,7 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
           movedEv->Run(times, FrozenLoad(scene, times, moved)));
       const auto kernels =
           AdjointSolver3D(*movedEv, {.rtol = 1e-12, .coupled_rtol = 1e-12})
-              .IceHistoryKernels(times, measurements, &movedTrajectory);
+              .FirstOrderKernels(times, measurements, &movedTrajectory);
       // w's itau direction at the moved operator: -itau(eps) p_w.
       Direction3D wAt = w;
       wAt.itau = TangentLinearSolver3D::ItauOfLogViscosity(
@@ -655,9 +655,9 @@ TEST(SecondOrderAdjoint3D, DiscreteLateralHessianIsExact) {
         scene.rheology, kLmax, [&, eps](double r, double theta, double phi) {
           return baseDelta(r, theta, phi) + eps * pU(theta, phi);
         });
-    auto evolution = std::make_unique<SeaLevelEvolution3D>(
+    auto evolution = std::make_unique<Evolution3D>(
         *op, scene.solver, scene.state,
-        SeaLevelEvolution3D::Options{
+        Evolution3D::Options{
             .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     return std::pair(std::move(op), std::move(evolution));
   };
@@ -686,7 +686,7 @@ TEST(SecondOrderAdjoint3D, DiscreteLateralHessianIsExact) {
   const auto runU = tangent.Run(times, u.tangent, &trajectory);
   const auto runW = tangent.Run(times, w.tangent, &trajectory);
   AdjointSolver3D adjoint(*evolution, adjointOptions);
-  const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+  const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
   const auto [kernelsU, alongU] =
       adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory);
   const auto [kernelsW, alongW] =
@@ -710,7 +710,7 @@ TEST(SecondOrderAdjoint3D, DiscreteLateralHessianIsExact) {
   uw.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(
       *op, OnCoupling(coupling, pU), OnCoupling(coupling, pW));
   const auto second = tangent.RunSecondOrder(times, runU, runW, uw, &trajectory);
-  const auto forward = scene.Surface(g, second.back().seaLevelChange);
+  const auto forward = scene.Surface(g, second.back().relativeSeaLevelChange);
   const auto uvTerm = GridPairing(coupling, first.itauKernel3D, uw.itauUV);
   EXPECT_NEAR(forward, uvTerm + huW, 1e-8 * std::abs(forward));
 
@@ -728,7 +728,7 @@ TEST(SecondOrderAdjoint3D, DiscreteLateralHessianIsExact) {
     const auto movedTrajectory = ForwardTrajectory3D::FromSnapshots(
         movedEv->Run(times, FrozenLoad(scene, times, moved)));
     const auto kernels = AdjointSolver3D(*movedEv, adjointOptions)
-                             .IceHistoryKernels(times, measurements, &movedTrajectory);
+                             .FirstOrderKernels(times, measurements, &movedTrajectory);
     Direction3D wAt = w;
     wAt.itau = TangentLinearSolver3D::ItauOfLogViscosity(
         *movedOp, OnCoupling(movedOp->Coupling(), pW));
@@ -800,7 +800,7 @@ void DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback rotation) {
 
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                     {.memory_points = MemoryPointSet::Gauss});
-  SeaLevelEvolution3D evolution(
+  Evolution3D evolution(
       op, scene.solver, scene.state,
       {.rotation = rotation,
        .rtol = 1e-12,
@@ -847,7 +847,7 @@ void DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback rotation) {
                                       .rtol = 1e-12,
                                       .coupled_rtol = 1e-12,
                                       .material_kernels = true});
-  const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+  const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
   const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
       times, measurements, runU, u.itau, trajectory, {}, u.material);
   const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
@@ -881,7 +881,7 @@ void DiscreteMaterialHessianIsExactAndSymmetric(RotationalFeedback rotation) {
   auto forward = 0.0;
   for (const auto& [node, m] : measurements) {
     if (!m.seaLevelDual.empty()) {
-      forward += scene.Surface(m.seaLevelDual, second[node].seaLevelChange);
+      forward += scene.Surface(m.seaLevelDual, second[node].relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       forward += scene.Surface(m.displacementDual, second[node].displacement);
@@ -952,7 +952,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rotation = RotationalFeedback::Full,
          .rtol = 1e-12,
@@ -1021,7 +1021,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
                             VolumePairing(coupling, alongU.muKernel3D, w.material.mu);
       const auto uvTerm = GridPairing(coupling, kernels.itauKernel3D, uw.itauUV);
       const auto forward =
-          scene.Surface(g, second.back().seaLevelChange) - uvTerm;
+          scene.Surface(g, second.back().relativeSeaLevelChange) - uvTerm;
       results[method] = {ice, viscosity, material, forward};
     }
     const auto& d = results[AdjointMethod::Discrete];
@@ -1103,7 +1103,7 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
                   .bulk = [](double r, double theta, double) {
                     return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
                   }}});
-  SeaLevelEvolution3D evolution(
+  Evolution3D evolution(
       op, scene.solver, scene.state,
       {.rotation = RotationalFeedback::None,
        .rtol = 1e-12,
@@ -1150,7 +1150,7 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
                                       .rtol = 1e-12,
                                       .coupled_rtol = 1e-12,
                                       .material_kernels = true});
-  const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+  const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
   const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
       times, measurements, runU, u.itau, trajectory, {}, u.material);
   const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
@@ -1178,7 +1178,7 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
   auto forward = 0.0;
   for (const auto& [node, m] : measurements) {
     if (!m.seaLevelDual.empty()) {
-      forward += scene.Surface(m.seaLevelDual, second[node].seaLevelChange);
+      forward += scene.Surface(m.seaLevelDual, second[node].relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       forward += scene.Surface(m.displacementDual, second[node].displacement);
@@ -1260,7 +1260,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, scene.solver, scene.state,
         {.rotation = RotationalFeedback::None,
          .rtol = 1e-12,
@@ -1329,7 +1329,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
                             VolumePairing(coupling, alongU.muKernel3D, w.material.mu);
       const auto uvTerm = GridPairing(coupling, kernels.itauKernel3D, uw.itauUV);
       const auto forward =
-          scene.Surface(g, second.back().seaLevelChange) - uvTerm;
+          scene.Surface(g, second.back().relativeSeaLevelChange) - uvTerm;
       results[method] = {ice, viscosity, material, forward};
     }
     const auto& d = results[AdjointMethod::Discrete];

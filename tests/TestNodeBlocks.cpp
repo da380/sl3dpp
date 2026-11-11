@@ -315,7 +315,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
   // without lateral viscosity, to the forward's agreement with it.
   const auto body = Body::Make(1e22);
   ViscoelasticOperator reference(body.rheology, kLmax);
-  SeaLevelSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
@@ -334,7 +334,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
   }
   const auto times =
       std::vector<double>{0.0, 2.5 * kyr, 5.0 * kyr, 7.5 * kyr, 10.0 * kyr};
-  const auto iceLoad = [&](double t) {
+  const auto directLoad = [&](double t) {
     auto out = melt;
     for (auto& v : out) v *= t / times.back();
     return out;
@@ -360,14 +360,14 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
         {.eps = kEps,
          .transform_degrees = blocks ? Degrees() : std::vector<int>{}});
     EXPECT_EQ(op.Coupling().BlockCount() > 1, blocks);
-    SeaLevelEvolution3D evolution(
+    Evolution3D evolution(
         op, solver, state,
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
-    const auto snapshots = evolution.Run(times, iceLoad);
+    const auto snapshots = evolution.Run(times, directLoad);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
     AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto& coupling = op.Coupling();
     auto out = Result{};
     auto atNodes = std::vector<double>(coupling.GridValueCount());
@@ -378,7 +378,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     }
     out.pairing = VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
     out.spherical = kernels.itauKernelSpherical[0];
-    out.loadDual = kernels.ice.loadDuals.front();
+    out.loadDual = kernels.ice.directLoadKernels.front();
     return out;
   };
   auto relative = [](std::span<const double> a, std::span<const double> b) {

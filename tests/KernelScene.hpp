@@ -42,8 +42,8 @@ struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
 
   static Scene Make(double viscositySI) {
     auto deck =
@@ -67,7 +67,7 @@ struct Scene {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator op(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, op.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -144,13 +144,13 @@ struct Scene {
 
 /// The objective the measurements define, evaluated on snapshots.
 inline double Objective(const Scene& setup,
-                 const std::vector<SeaLevelEvolution::Snapshot>& snapshots,
+                 const std::vector<Evolution::Snapshot>& snapshots,
                  const std::map<std::size_t, Measurement>& measurements) {
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
     if (!m.seaLevelDual.empty()) {
-      total += setup.Surface(m.seaLevelDual, snap.seaLevelChange);
+      total += setup.Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += setup.Surface(m.displacementDual, snap.displacement);

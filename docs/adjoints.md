@@ -71,7 +71,7 @@ code; what follows fixes the sl3dpp mapping only.
   plain transpose of `Degree::Strain` under the nodal pairing); the
   unit load/tide responses contract them to load/tide coefficient
   duals; those join the measurement duals through the engine adjoint
-  (`SeaLevelSolver::SolveAdjoint`, the sea-level solver's transpose); its channel
+  (`GRDSolver::SolveAdjoint`, the sea-level solver's transpose); its channel
   duals force one symmetric effective solve per degree; the weight
   recursion closes m† and d†. The start is the transposed
   instantaneous elastic solve. Yu et al. §3; pyslfp lines 1554–1663.
@@ -97,7 +97,7 @@ code; what follows fixes the sl3dpp mapping only.
   the split trapezoid (the adjoint state jumps at observations; the
   self-adjoint channel mapping poses the adjoint in the g-weighted
   energy form, so the carried radial state is g × the true multiplier —
-  hence a division by g in material units). `IceKernels::Viscosity`
+  hence a division by g in material units). `Kernels::Viscosity`
   maps to dJ/dη via dη = −η² d(itau)/μ per branch, as pyslfp.
 - **Checkpointing.** The forward `record_stride` already stores the
   internal state every stride-th node and the per-node load/tide
@@ -111,12 +111,12 @@ code; what follows fixes the sl3dpp mapping only.
 
 ## 4. Result type and views
 
-`IceKernels` carries the same three views as pyslfp, so the gates and
+`Kernels` carries the same three views as pyslfp, so the gates and
 any inversion driver are formulation-blind:
 
-- **Discrete view**: `loadDuals[n]` (dual of the direct load grid at
+- **Discrete view**: `directLoadKernels[n]` (dual of the direct load grid at
   node n), `thickness[n]` (grounding factor ρ_i (1−C) applied, the
-  baseline −ρ_i (1−C) Σ_n loadDuals folded into node 0), `baseline`,
+  baseline −ρ_i (1−C) Σ_n directLoadKernels folded into node 0), `baseline`,
   `initialSeaLevel` (≡ 0 under frozen shorelines). Exact pairing on
   the time grid.
 - **Distributional view** (Yu et al. §3.7, eq. 81): per-time `density`
@@ -185,18 +185,18 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 ## 5. Architecture
 
-- `Adjoint.hpp`: `Measurement`, `IceKernels`, `KernelDerivatives`,
+- `Adjoint.hpp`: `Measurement`, `Kernels`, `KernelDerivatives`,
   `ForwardTrajectory` (built from recorded snapshots) and
-  `AdjointSolver`, which borrows a `SeaLevelEvolution` (the operator,
+  `AdjointSolver`, which borrows a `Evolution` (the operator,
   solver, state and unit ratios the sweeps need). Its
-  `IceHistoryKernels` runs either 1D sweep by `Options::method`
+  `FirstOrderKernels` runs either 1D sweep by `Options::method`
   (`Adjoint.cpp`); its `SecondOrderKernels` the second-order sweeps
   (`AdjointSecondOrder.cpp`, §9). The pieces they share (the reverse
   trajectory cursor, the dual packers, the node weights, the measurement
   check) are in `detail/AdjointInternals.hpp`.
 - `Adjoint3D.hpp`: `ForwardTrajectory3D`, `Kernels3D`,
   `KernelDerivatives3D` and `AdjointSolver3D` over a
-  `SeaLevelEvolution3D`. `IceHistoryKernels` and `SecondOrderKernels` run
+  `Evolution3D`. `FirstOrderKernels` and `SecondOrderKernels` run
   the continuous sweep, one core in `Adjoint3D.cpp` (§6a, §11);
   `Options::method = Discrete` the discrete transpose in
   `AdjointDiscrete3D.cpp` (§12).
@@ -251,9 +251,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 `Adjoint3D.hpp/cpp`: `AdjointSolver3D` (the continuous sweep; the
 discrete transpose is built too, §12), `ForwardTrajectory3D` (a recording
-at any `SeaLevelEvolution3D::Options::record_stride`: the sweep rebuilds
+at any `Evolution3D::Options::record_stride`: the sweep rebuilds
 the gaps by forward steps from the kept states), and
-`Kernels3D`: the 1D `IceKernels` views, `itauKernel3D` (per branch, the
+`Kernels3D`: the 1D `Kernels` views, `itauKernel3D` (per branch, the
 density per unit volume over memory node × coupling grid, §4), its mean
 over the sphere `itauKernelSpherical` (the 1D bridge),
 and `logViscosityKernel3D` = −itau(x)·K (the operator's delta
@@ -523,7 +523,7 @@ continuous drive α q⁰ + β q¹, q = (d − m) δitau/itau, is pointwise too.
 The forward trajectory is served forwards by `ForwardCursor3D`: kept
 states as recorded, the gaps rebuilt by forward coupled steps under the
 recorded loads with the run's own iteration (the adjoint's rebuild, in
-the forward direction). Snapshots are `SeaLevelEvolution3D`'s, recording
+the forward direction). Snapshots are `Evolution3D`'s, recording
 the tangent state with its strain for the second-order run.
 
 GATES (`TestTangentLinear3D`, lmax 8): zero-lateral — with δ = 0 at the
@@ -558,7 +558,7 @@ pairing itself — with the same null-basis metric. The result is
 derivatives, the itau kernel's derivative on the grid and its spherical
 reduction, and the log-viscosity kernel's derivative
 −(δitau K + itau dK), the Hessian-vector product of the log
-parameterisation. `IceHistoryKernels` is the same sweep with no
+parameterisation. `FirstOrderKernels` is the same sweep with no
 tangent run, so the first-order gates guard it too.
 
 GATES (`TestSecondOrderAdjoint3D`, lmax 8): zero-lateral — with δ = 0 at
@@ -823,7 +823,7 @@ viscosity path; its exact gate is the pairing identity with the discrete
 ### 13e. The material kernels, 1D
 
 `AdjointSolver::Options::material_kernels` has the discrete sweep form
-`IceKernels::kappaKernel` and `muKernel` — the kernels in κ(r) and
+`Kernels::kappaKernel` and `muKernel` — the kernels in κ(r) and
 μ(r) over the full mesh in material units, per unit volume (§4): the
 exact transpose of
 `TangentPerturbation::material`. The sweep already solves, per step,
@@ -1133,7 +1133,7 @@ closure with response channels. `Viscoelastic3D::StartStep` accepts
 dt = 0: a zero-length step (β = 0, m̃ = m, the effective systems the
 unrelaxed ones, the lateral weight −δμ_U), whose within-step fixed point
 with the sea level engine IS the instantaneous coupled solve. Under
-lateral moduli the evolution's start is such a step (`SeaLevelEvolution3D`,
+lateral moduli the evolution's start is such a step (`Evolution3D`,
 one coupled pass for the start and the steps), the tangent's
 node 0 likewise with the material drive's start forces on it
 (`MaterialForcing3D::ApplyStart`), the discrete sweep runs its step
@@ -1147,7 +1147,7 @@ with v's material source). Without lateral moduli the Love-number
 closures are kept.
 
 The evolution's start is also a solve of its own,
-`SeaLevelEvolution3D::Instantaneous(load)`: the instantaneous elastic
+`Evolution3D::Instantaneous(load)`: the instantaneous elastic
 response of the sea level problem to a direct load, the linear equation
 on the background state's shorelines coupled to the rotational feedback,
 by the zero-length step's fixed point (or the nested closure of §13n)
@@ -1589,7 +1589,7 @@ the continuous 3D adjoint and the 3D tangent-linear runs do:
   degree-0 moment row join the forces on the rank holding their rows
   (`DegreeOperator::Holds`); the transposed fixed point's residual is the
   ranks' maximum, as the forward's. The forward step's conventions
-  (`SeaLevelEvolution3D::March`) transposed.
+  (`Evolution3D::March`) transposed.
 - **The 3D material tangent, the 3D material kernels of both sweeps and
   the material directions of the 3D second-order sweeps** need nothing
   of their own: their pieces — the Born force assembled on the rank's own

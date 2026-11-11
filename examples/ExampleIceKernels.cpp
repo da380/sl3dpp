@@ -55,7 +55,7 @@ int main(int argc, char** argv) {
   examples::Say("building the model, the operator and the sea level solver");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
-  SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -88,7 +88,7 @@ int main(int argc, char** argv) {
   for (auto n = 0; n < nodes; ++n) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ramp = t / times.back();
     auto load = std::vector<double>(unitLoad.size());
     for (auto i = std::size_t{0}; i < load.size(); ++i)
@@ -105,12 +105,12 @@ int main(int argc, char** argv) {
   constexpr auto stride = 2;
   examples::Say(std::format(
       "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
-  SeaLevelEvolution evolution(
+  Evolution evolution(
       op, solver, state,
       {.record_stride = stride,
-       .on_snapshot = examples::NodeReporter<SeaLevelEvolution::Snapshot>(
+       .on_snapshot = examples::NodeReporter<Evolution::Snapshot>(
            nodes - 1, scales.Time())});
-  const auto snapshots = evolution.Run(times, iceLoad);
+  const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
 
   // The objective: the cap-weighted mean sea-level change at a site off
@@ -156,7 +156,7 @@ int main(int argc, char** argv) {
         evolution,
         {.method = method, .on_node = examples::SweepReporter(nodes - 1)});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
 
     // The rate kernels of four intervals, PROJECTED onto the grounded
     // present-day ice: only

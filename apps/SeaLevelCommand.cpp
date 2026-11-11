@@ -5,12 +5,12 @@
  * surface files. Without a `times` block it is the elastic fingerprint of
  * an ice change on the state, one solve of the linear equation: with the
  * radial model's Love numbers (Fingerprint), or, under lateral moduli, the
- * instantaneous response of the 3-D problem (SeaLevelEvolution3D::
+ * instantaneous response of the 3-D problem (Evolution3D::
  * Instantaneous, distributed over radial segments on several ranks) with
  * the radial model's fingerprint beside it, written as a surface file of
  * static fields. With a `times` block it is GIA through time under an ice
- * history: the radial model's evolution (SeaLevelEvolution), or, under a
- * lateral viscosity or lateral moduli, the 3-D one (SeaLevelEvolution3D,
+ * history: the radial model's evolution (Evolution), or, under a
+ * lateral viscosity or lateral moduli, the 3-D one (Evolution3D,
  * distributed over radial segments on several ranks), written as a
  * surface file with a slice per node and restartable from disk
  * checkpoints. The `model` block alone decides between 1-D and 3-D.
@@ -53,7 +53,7 @@ namespace {
 /// One node of the accumulated history, SI, kept across restarts.
 struct Node {
   double date_kyr_bp = 0.0;
-  std::vector<double> seaLevelChange;
+  std::vector<double> relativeSeaLevelChange;
   std::vector<double> displacement;
   std::vector<double> potential;
   std::array<double, 3> angularVelocity{};
@@ -72,10 +72,10 @@ constexpr auto kMagic = std::uint64_t{0x534c3344434b5031};  // "SL3DCKP1"
 constexpr auto kKind1D = std::uint64_t{1};
 constexpr auto kKind3D = std::uint64_t{2};
 
-constexpr std::uint64_t KindOf(const SeaLevelEvolution::Checkpoint&) {
+constexpr std::uint64_t KindOf(const Evolution::Checkpoint&) {
   return kKind1D;
 }
-constexpr std::uint64_t KindOf(const SeaLevelEvolution3D::Checkpoint&) {
+constexpr std::uint64_t KindOf(const Evolution3D::Checkpoint&) {
   return kKind3D;
 }
 
@@ -175,7 +175,7 @@ constexpr auto kInitialStateMagic =
     std::uint64_t{0x534c334449535431};  // "SL3DIST1"
 
 void WriteInitialState(const std::filesystem::path& directory,
-                       std::uint64_t hash, const SeaLevelSolver::State& state) {
+                       std::uint64_t hash, const GRDSolver::State& state) {
   std::filesystem::create_directories(directory);
   const auto path = directory / kInitialStateName;
   const auto partial = directory / ".initial_state.partial";
@@ -196,9 +196,9 @@ void WriteInitialState(const std::filesystem::path& directory,
 }
 
 /// The calibrated initial state of this run, if the directory keeps one.
-std::optional<SeaLevelSolver::State> ReadInitialState(
+std::optional<GRDSolver::State> ReadInitialState(
     const std::filesystem::path& directory, std::uint64_t hash,
-    const SeaLevelSolver::State& background) {
+    const GRDSolver::State& background) {
   auto in = std::ifstream(directory / kInitialStateName, std::ios::binary);
   if (!in || GetOne<std::uint64_t>(in) != kInitialStateMagic ||
       GetOne<std::uint64_t>(in) != hash) {
@@ -298,7 +298,7 @@ void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
     PutOne(out, static_cast<std::uint64_t>(history.size()));
     for (const auto& kept : history) {
       PutOne(out, kept.date_kyr_bp);
-      PutVector(out, kept.seaLevelChange);
+      PutVector(out, kept.relativeSeaLevelChange);
       PutVector(out, kept.displacement);
       PutVector(out, kept.potential);
       Put(out, kept.angularVelocity.data(), 3 * sizeof(double));
@@ -356,7 +356,7 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
     for (auto k = std::uint64_t{0}; k < nodes; ++k) {
       auto kept = Node{};
       kept.date_kyr_bp = GetOne<double>(in);
-      kept.seaLevelChange = GetVector(in);
+      kept.relativeSeaLevelChange = GetVector(in);
       kept.displacement = GetVector(in);
       kept.potential = GetVector(in);
       in.read(reinterpret_cast<char*>(kept.angularVelocity.data()),
@@ -496,7 +496,7 @@ void WriteHistoryFile(const SeaLevelInput& input,
     file.variables.emplace(name,
                            pm::SurfaceField(name, std::move(values), options));
   };
-  put("sea_level_change", gather(&Node::seaLevelChange), pm::units::LENGTH,
+  put("relative_sea_level_change", gather(&Node::relativeSeaLevelChange), pm::units::LENGTH,
       "sea-level change from the window's start");
   put("displacement", gather(&Node::displacement), pm::units::LENGTH,
       "radial surface displacement");
@@ -508,7 +508,7 @@ void WriteHistoryFile(const SeaLevelInput& input,
     options.dimensions = pm::units::LENGTH;
     options.meaning =
         "the initial sea level the run started from; the sea level at a node "
-        "is this plus sea_level_change there";
+        "is this plus relative_sea_level_change there";
     file.variables.emplace(
         "initial_sea_level",
         pm::SurfaceField(
@@ -551,7 +551,7 @@ std::string Meaning(const SeaLevelRun& run, const BuiltEarth& earth) {
 template <class Evolution>
 std::string RunWith(
     const std::filesystem::path& config, const SeaLevelInput& input,
-    const Json& top, std::string_view meaning, const SeaLevelSolver& solver,
+    const Json& top, std::string_view meaning, const GRDSolver& solver,
     Loaded& world,
     const std::function<Evolution(typename Evolution::Options)>& make,
     const std::function<void(const typename Evolution::Snapshot&, double)>&
@@ -563,7 +563,7 @@ std::string RunWith(
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto times = MakeTimes(run, scales);
-  const auto iceLoad = IceLoadOf(run, solver, world);
+  const auto directLoad = IceLoadOf(run, solver, world);
   const auto migrating = run.ocean.shorelines == Shorelines::Migrating;
   const auto thickness = migrating
                              ? IceThicknessOf(run, solver, world)
@@ -576,10 +576,10 @@ std::string RunWith(
     auto kept = Node{};
     kept.date_kyr_bp = DateKyrBp(run, scales, snapshot.t);
     check(snapshot, kept.date_kyr_bp);
-    kept.seaLevelChange = snapshot.seaLevelChange;
+    kept.relativeSeaLevelChange = snapshot.relativeSeaLevelChange;
     kept.displacement = snapshot.displacement;
     kept.potential = snapshot.potential;
-    for (auto& v : kept.seaLevelChange) v *= length;
+    for (auto& v : kept.relativeSeaLevelChange) v *= length;
     for (auto& v : kept.displacement) v *= length;
     for (auto& v : kept.potential) v *= toPotential;
     for (auto k = 0; k < 3; ++k) {
@@ -624,7 +624,7 @@ std::string RunWith(
   // (a resumption reads back the calibrated state its run kept).
   auto origin = std::string{"the state file at the window's start"};
   if (run.ocean.calibrate) {
-    auto restored = std::optional<SeaLevelSolver::State>{};
+    auto restored = std::optional<GRDSolver::State>{};
     if (resumed) {
       restored = ReadInitialState(directory, hash, world.background);
     }
@@ -681,13 +681,13 @@ std::string RunWith(
                                                       remaining, thickness));
         } else {
           static_cast<void>(
-              evolution.Resume(resumed->checkpoint, remaining, iceLoad));
+              evolution.Resume(resumed->checkpoint, remaining, directLoad));
         }
       }
     } else if (migrating) {
       static_cast<void>(evolution.RunMigrating(times, thickness));
     } else {
-      static_cast<void>(evolution.Run(times, iceLoad));
+      static_cast<void>(evolution.Run(times, directLoad));
     }
   } catch (const WalltimeReached& at) {
     // with restart false, the same config would start over again
@@ -800,7 +800,7 @@ planetmodel::SurfaceFile FingerprintFile(
     const std::filesystem::path& config, const SeaLevelRun& run,
     const SurfaceGrid& grid, std::string title,
     const std::vector<double>& thicknessChange,
-    const std::vector<double>& seaLevelChange,
+    const std::vector<double>& relativeSeaLevelChange,
     const std::vector<double>& displacement,
     const std::vector<double>& potential,
     const std::array<double, 3>& angularVelocity,
@@ -830,7 +830,7 @@ planetmodel::SurfaceFile FingerprintFile(
   const auto length = pm::units::LENGTH;
   PutStatic(file, "ice_change", thicknessChange, length,
             "the ice-thickness change applied");
-  PutStatic(file, "sea_level_change", seaLevelChange, length,
+  PutStatic(file, "relative_sea_level_change", relativeSeaLevelChange, length,
             "sea-level change of the fingerprint");
   PutStatic(file, "displacement", displacement, length,
             "radial surface displacement");
@@ -863,7 +863,7 @@ std::string RunFingerprint(const std::filesystem::path& config,
   auto file = FingerprintFile(
       config, input.run, radial.fingerprint.Grid(),
       "elastic sea-level fingerprint", radial.forcing.thicknessChange,
-      result.seaLevelChange, result.displacement, result.potential,
+      result.relativeSeaLevelChange, result.displacement, result.potential,
       result.angularVelocity, radial.fingerprint.OceanFunction());
   file.meta.emplace("sle_iterations",
                     std::vector<long long>{result.iterations});
@@ -875,7 +875,7 @@ std::string RunFingerprint(const std::filesystem::path& config,
 
 /// The elastic fingerprint on a laterally heterogeneous Earth: the
 /// instantaneous response of the 3-D sea level problem to the ice change
-/// on the state (SeaLevelEvolution3D::Instantaneous), the linear sea level
+/// on the state (Evolution3D::Instantaneous), the linear sea level
 /// equation on the state's shorelines coupled to the lateral moduli's
 /// unrelaxed solid by the fixed point of a zero-length step (or the sea
 /// level closure nested over conjugate-gradient solves, solver.step). The
@@ -897,7 +897,7 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
                           OperatorOptionsOf(run, earth, *elastic));
   // the sea level grid blocks its transforms for the operator's cache
   const auto parameters = ParametersOf(run, earth.material);
-  SeaLevelSolver solver(
+  GRDSolver solver(
       SurfaceGrid(run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
       op.ElasticLove(), parameters);
   const auto& grid = solver.Grid();
@@ -917,13 +917,13 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
               forcing.thicknessChange[i] / length;
   }
 
-  auto options = SeaLevelEvolution3D::Options{};
+  auto options = Evolution3D::Options{};
   options.rotation = run.rotation;
   options.rtol = run.solver.rtol;
   options.coupled_rtol = run.solver.step_rtol;
   options.max_coupled_iterations = run.solver.step_max_iterations;
-  SeaLevelEvolution3D evolution(op, solver, state, options);
-  auto response = SeaLevelEvolution3D::Snapshot{};
+  Evolution3D evolution(op, solver, state, options);
+  auto response = Evolution3D::Snapshot{};
   try {
     response = evolution.Instantaneous(load);
   } catch (const std::runtime_error& error) {
@@ -941,10 +941,10 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
   const auto radial = SolveRadialFingerprint(run, top, earth);
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toFrequency = scales.Factor(Dimensions{.time = -1});
-  auto seaLevelChange = response.seaLevelChange;
+  auto relativeSeaLevelChange = response.relativeSeaLevelChange;
   auto displacement = response.displacement;
   auto potential = response.potential;
-  for (auto& v : seaLevelChange) v *= length;
+  for (auto& v : relativeSeaLevelChange) v *= length;
   for (auto& v : displacement) v *= length;
   for (auto& v : potential) v *= toPotential;
   auto omega = response.angularVelocity;
@@ -953,7 +953,7 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
   auto file = FingerprintFile(
       config, run, grid,
       "elastic sea-level fingerprint of a laterally heterogeneous Earth",
-      forcing.thicknessChange, seaLevelChange, displacement, potential, omega,
+      forcing.thicknessChange, relativeSeaLevelChange, displacement, potential, omega,
       state.oceanFunction);
   const auto conjugate = run.solver.step ==
                          Viscoelastic3D::Options::StepSolver::ConjugateGradients;
@@ -977,8 +977,8 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
   file.meta.emplace("omega_z_radial_model_rad_s",
                     std::vector<double>{radialOmega[2]});
   const auto lengthDims = pm::units::LENGTH;
-  PutStatic(file, "sea_level_change_radial_model",
-            radial.result.seaLevelChange, lengthDims,
+  PutStatic(file, "relative_sea_level_change_radial_model",
+            radial.result.relativeSeaLevelChange, lengthDims,
             "sea-level change of the radial model's fingerprint of the same "
             "ice change");
   PutStatic(file, "displacement_radial_model", radial.result.displacement,
@@ -1007,16 +1007,16 @@ std::string Run1D(const std::filesystem::path& config,
   const auto& run = input.run;
   const auto rheology = RheologyOf(earth, top);
   ViscoelasticOperator op(rheology, run.lmax);
-  SeaLevelSolver solver(SurfaceGrid(run.lmax), op.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(run.lmax), op.ElasticLoveNumbers(),
                         ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
-  return RunWith<SeaLevelEvolution>(
+  return RunWith<Evolution>(
       config, input, top, meaning, solver, world,
-      [&](SeaLevelEvolution::Options options) {
-        return SeaLevelEvolution(op, solver, world.background,
+      [&](Evolution::Options options) {
+        return Evolution(op, solver, world.background,
                                  std::move(options));
       },
-      [](const SeaLevelEvolution::Snapshot& snapshot, double date_kyr_bp) {
+      [](const Evolution::Snapshot& snapshot, double date_kyr_bp) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
               "the sea level solve did not converge at {:.6g} kyr BP "
@@ -1036,19 +1036,19 @@ std::string Run3D(const std::filesystem::path& config,
   Viscoelastic3D op(rheology, run.lmax, DeltaOf(earth),
                     OperatorOptionsOf(run, earth, rheology));
   // the sea level grid blocks its transforms for the operator's cache
-  SeaLevelSolver solver(
+  GRDSolver solver(
       SurfaceGrid(run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
       op.ElasticLove(), ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
-  return RunWith<SeaLevelEvolution3D>(
+  return RunWith<Evolution3D>(
       config, input, top, meaning, solver, world,
-      [&](SeaLevelEvolution3D::Options options) {
+      [&](Evolution3D::Options options) {
         options.coupled_rtol = run.solver.step_rtol;
         options.max_coupled_iterations = run.solver.step_max_iterations;
-        return SeaLevelEvolution3D(op, solver, world.background,
+        return Evolution3D(op, solver, world.background,
                                    std::move(options));
       },
-      [](const SeaLevelEvolution3D::Snapshot& snapshot, double date_kyr_bp) {
+      [](const Evolution3D::Snapshot& snapshot, double date_kyr_bp) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
               "the coupled fixed point or its sea level solve did not "

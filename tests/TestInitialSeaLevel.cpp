@@ -52,7 +52,7 @@ struct Body {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
+  GRDSolver solver;
 
   static Body Make(int lmax, bool viscous, double eta = 1e21) {
     auto deck =
@@ -83,7 +83,7 @@ struct Body {
       return Rheology::Maxwell(material, viscosity).value();
     }();
     ViscoelasticOperator op(rheology, lmax);
-    SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     return Body{std::move(model), std::move(material), std::move(rheology),
                 std::move(solver)};
@@ -186,7 +186,7 @@ struct MarineCap {
 
 /// The frozen-shoreline load of a thickness history relative to its start.
 std::function<std::vector<double>(double)> FrozenLoad(
-    const SeaLevelSolver& solver, const SeaLevelSolver::State& state,
+    const GRDSolver& solver, const GRDSolver::State& state,
     std::function<std::vector<double>(double)> thickness, double t0) {
   const auto first = thickness(t0);
   return [&solver, &state, thickness = std::move(thickness), first](double t) {
@@ -200,7 +200,7 @@ std::function<std::vector<double>(double)> FrozenLoad(
 }
 
 /// The analytic test state on the body's grid, solver units.
-SeaLevelSolver::State AnalyticState(const Body& body,
+GRDSolver::State AnalyticState(const Body& body,
                                     const ViscoelasticOperator& op) {
   Fingerprint fingerprint(body.solver.Grid().LMax(), op.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
@@ -241,7 +241,7 @@ TEST(InitialSeaLevel, FrozenCalibrationIsOneLinearStep) {
   };
   const auto load = FrozenLoad(body.solver, guess, melt, 0.0);
 
-  SeaLevelEvolution evolution(op, body.solver, guess, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, guess, {.rtol = 1e-12});
   const auto calibration = CalibrateInitialSeaLevel(
       evolution, times, IceHistory::Frozen(load), target);
   EXPECT_TRUE(calibration.converged);
@@ -249,11 +249,11 @@ TEST(InitialSeaLevel, FrozenCalibrationIsOneLinearStep) {
   EXPECT_EQ(calibration.state.oceanFunction, guess.oceanFunction);
   EXPECT_EQ(evolution.BackgroundState().seaLevel, calibration.state.seaLevel);
 
-  SeaLevelEvolution fresh(op, body.solver, calibration.state, {.rtol = 1e-12});
+  Evolution fresh(op, body.solver, calibration.state, {.rtol = 1e-12});
   const auto run = fresh.Run(times, load);
   auto reached = calibration.state.seaLevel;
   for (auto i = std::size_t{0}; i < reached.size(); ++i) {
-    reached[i] += run.back().seaLevelChange[i];
+    reached[i] += run.back().relativeSeaLevelChange[i];
   }
   EXPECT_LT(MaxDiff(reached, target), 1e-9 * MaxAbs(target));
 
@@ -281,11 +281,11 @@ TEST(InitialSeaLevel, WeightedCalibrationUpdatesOnlyWhereWeighted) {
     return out;
   };
   const auto load = FrozenLoad(body.solver, truth, melt, 0.0);
-  SeaLevelEvolution forward(op, body.solver, truth, {.rtol = 1e-12});
+  Evolution forward(op, body.solver, truth, {.rtol = 1e-12});
   const auto run = forward.Run(times, load);
   auto final = truth.seaLevel;
   for (auto i = std::size_t{0}; i < final.size(); ++i) {
-    final[i] += run.back().seaLevelChange[i];
+    final[i] += run.back().relativeSeaLevelChange[i];
   }
   const auto weights = grid.FromFunction([](double theta, double) {
     return std::abs(theta - 0.5 * std::numbers::pi) <
@@ -295,7 +295,7 @@ TEST(InitialSeaLevel, WeightedCalibrationUpdatesOnlyWhereWeighted) {
   });
   auto guess = truth;  // the truth's shorelines, the final sea level
   guess.seaLevel = final;
-  SeaLevelEvolution evolution(op, body.solver, guess, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, guess, {.rtol = 1e-12});
   const auto calibration = CalibrateInitialSeaLevel(
       evolution, times, IceHistory::Frozen(load), final, {.weights = weights});
   ASSERT_TRUE(calibration.converged);
@@ -305,7 +305,7 @@ TEST(InitialSeaLevel, WeightedCalibrationUpdatesOnlyWhereWeighted) {
       EXPECT_EQ(calibration.state.seaLevel[i], final[i]) << "point " << i;
     } else {
       const auto reached = calibration.state.seaLevel[i] +
-                           calibration.snapshots.back().seaLevelChange[i];
+                           calibration.snapshots.back().relativeSeaLevelChange[i];
       worst = std::max(worst, std::abs(reached - final[i]));
     }
   }
@@ -345,18 +345,18 @@ TEST(InitialSeaLevel, FrozenCalibrationIn3D) {
   Viscoelastic3D op(body.rheology, lmax, [](double, double theta, double phi) {
     return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
   });
-  SeaLevelEvolution3D evolution(op, body.solver, guess,
+  Evolution3D evolution(op, body.solver, guess,
                                 {.rtol = 1e-12, .coupled_rtol = 1e-11});
   const auto calibration = CalibrateInitialSeaLevel(
       evolution, times, IceHistory::Frozen(load), target);
   EXPECT_TRUE(calibration.converged);
   EXPECT_EQ(calibration.state.oceanFunction, guess.oceanFunction);
-  SeaLevelEvolution3D fresh(op, body.solver, calibration.state,
+  Evolution3D fresh(op, body.solver, calibration.state,
                             {.rtol = 1e-12, .coupled_rtol = 1e-11});
   const auto run = fresh.Run(times, load);
   auto reached = calibration.state.seaLevel;
   for (auto i = std::size_t{0}; i < reached.size(); ++i) {
-    reached[i] += run.back().seaLevelChange[i];
+    reached[i] += run.back().relativeSeaLevelChange[i];
   }
   EXPECT_LT(MaxDiff(reached, target), 1e-8 * MaxAbs(target));
 }
@@ -380,7 +380,7 @@ TEST(Migrating, MatchesFrozenWhenShorelinesCannotMove) {
   // The nonlinear solve forms its load from the absolute fields (3 km of
   // ocean, 5 km of ice) for a change of metres, so its error has a
   // round-off floor near 1e-11: pyslfp's tolerance for this test.
-  SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-9});
+  Evolution evolution(op, body.solver, state, {.rtol = 1e-9});
   const auto frozen =
       evolution.Run(cap.times, FrozenLoad(body.solver, state, thinning, 0.0));
   const auto moving = evolution.RunMigrating(cap.times, thinning);
@@ -389,8 +389,8 @@ TEST(Migrating, MatchesFrozenWhenShorelinesCannotMove) {
     EXPECT_TRUE(moving[n].converged);
     EXPECT_TRUE(frozen[n].oceanFunction.empty());
     EXPECT_EQ(moving[n].oceanFunction, state.oceanFunction) << "node " << n;
-    const auto top = MaxAbs(frozen[n].seaLevelChange);
-    EXPECT_LE(MaxDiff(frozen[n].seaLevelChange, moving[n].seaLevelChange),
+    const auto top = MaxAbs(frozen[n].relativeSeaLevelChange);
+    EXPECT_LE(MaxDiff(frozen[n].relativeSeaLevelChange, moving[n].relativeSeaLevelChange),
               1e-6 * std::max(top, 1e-300))
         << "node " << n;
   }
@@ -404,7 +404,7 @@ TEST(Migrating, ShorelinesMoveAndConserveMass) {
   ViscoelasticOperator op(body.rheology, kLmax);
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-  SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   const auto thickness = [&](double t) { return cap.Thickness(t); };
   const auto run = evolution.RunMigrating(cap.times, thickness);
   const auto& C0 = state.oceanFunction;
@@ -416,7 +416,7 @@ TEST(Migrating, ShorelinesMoveAndConserveMass) {
   auto water = std::vector<double>(C0.size());
   auto grounded = std::vector<double>(C0.size());
   for (auto i = std::size_t{0}; i < C0.size(); ++i) {
-    const auto finalSea = state.seaLevel[i] + run.back().seaLevelChange[i];
+    const auto finalSea = state.seaLevel[i] + run.back().relativeSeaLevelChange[i];
     water[i] = body.solver.WaterDensity() *
                (Cf[i] * finalSea - C0[i] * state.seaLevel[i]);
     grounded[i] = -body.solver.IceDensity() * (1.0 - C0[i]) *
@@ -427,8 +427,8 @@ TEST(Migrating, ShorelinesMoveAndConserveMass) {
 
   const auto frozen =
       evolution.Run(cap.times, FrozenLoad(body.solver, state, thickness, 0.0));
-  EXPECT_GT(MaxDiff(frozen.back().seaLevelChange, run.back().seaLevelChange),
-            1e-3 * MaxAbs(run.back().seaLevelChange));
+  EXPECT_GT(MaxDiff(frozen.back().relativeSeaLevelChange, run.back().relativeSeaLevelChange),
+            1e-3 * MaxAbs(run.back().relativeSeaLevelChange));
 }
 
 TEST(Migrating, ElasticLimitIsTheNonlinearSolveDateByDate) {
@@ -436,19 +436,19 @@ TEST(Migrating, ElasticLimitIsTheNonlinearSolveDateByDate) {
   ViscoelasticOperator op(body.rheology, kLmax);
   const auto cap = MarineCap::Make(body, 4);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-  SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   const auto run = evolution.RunMigrating(
       cap.times, [&](double t) { return cap.Thickness(t); });
   for (auto n = std::size_t{1}; n < run.size(); ++n) {
-    auto forcing = SeaLevelSolver::NonlinearForcing{};
+    auto forcing = GRDSolver::NonlinearForcing{};
     forcing.iceThicknessChange = cap.Thickness(cap.times[n]);
     for (auto i = std::size_t{0}; i < state.iceThickness.size(); ++i) {
       forcing.iceThicknessChange[i] -= state.iceThickness[i];
     }
     const auto want = body.solver.SolveNonlinear(
         state, forcing, {.rtol = 1e-12, .max_iterations = 50});
-    const auto top = MaxAbs(want.response.seaLevelChange);
-    EXPECT_LT(MaxDiff(run[n].seaLevelChange, want.response.seaLevelChange),
+    const auto top = MaxAbs(want.response.relativeSeaLevelChange);
+    EXPECT_LT(MaxDiff(run[n].relativeSeaLevelChange, want.response.relativeSeaLevelChange),
               1e-7 * top)
         << "node " << n;
     EXPECT_EQ(run[n].oceanFunction, want.finalState.oceanFunction);
@@ -461,23 +461,23 @@ TEST(Migrating, AResumedRunIsTheUninterruptedOne) {
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  auto checkpoints = std::map<std::size_t, SeaLevelEvolution::Checkpoint>{};
-  auto options = SeaLevelEvolution::Options{.rtol = 1e-12};
+  auto checkpoints = std::map<std::size_t, Evolution::Checkpoint>{};
+  auto options = Evolution::Options{.rtol = 1e-12};
   options.checkpoint_stride = 1;
   options.on_checkpoint = [&](std::size_t node,
-                              const SeaLevelEvolution::Checkpoint& cp) {
+                              const Evolution::Checkpoint& cp) {
     checkpoints.emplace(node, cp);
   };
-  SeaLevelEvolution whole(op, body.solver, state, options);
+  Evolution whole(op, body.solver, state, options);
   const auto full = whole.RunMigrating(cap.times, thickness);
   ASSERT_EQ(checkpoints.size(), cap.times.size());
-  SeaLevelEvolution again(op, body.solver, state, {.rtol = 1e-12});
+  Evolution again(op, body.solver, state, {.rtol = 1e-12});
   const auto rest = std::vector<double>(cap.times.begin() + 2, cap.times.end());
   const auto resumed =
       again.ResumeMigrating(checkpoints.at(2), rest, thickness);
   ASSERT_EQ(resumed.size(), rest.size() - 1);
   for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
-    EXPECT_EQ(resumed[k].seaLevelChange, full[k + 3].seaLevelChange);
+    EXPECT_EQ(resumed[k].relativeSeaLevelChange, full[k + 3].relativeSeaLevelChange);
     EXPECT_EQ(resumed[k].oceanFunction, full[k + 3].oceanFunction);
   }
 }
@@ -489,7 +489,7 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
   ViscoelasticOperator op(body.rheology, kLmax);
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-  SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   auto measurement = Measurement{};
   measurement.seaLevelDual = body.Smooth(1.0, 6);
   const auto measurements =
@@ -499,9 +499,9 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
   for (const auto method :
        {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const AdjointSolver adjoint(evolution, {.method = method, .rtol = 1e-12});
-    const auto frozen = adjoint.IceHistoryKernels(cap.times, measurements);
+    const auto frozen = adjoint.FirstOrderKernels(cap.times, measurements);
     const auto about =
-        adjoint.IceHistoryKernels(cap.times, measurements, nullptr, constant);
+        adjoint.FirstOrderKernels(cap.times, measurements, nullptr, constant);
     for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
       EXPECT_EQ(frozen.thickness[n], about.thickness[n]) << "node " << n;
     }
@@ -519,7 +519,7 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   auto measurement = Measurement{};
   measurement.seaLevelDual = body.Smooth(1.0, 12);
@@ -527,17 +527,17 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
   const auto kernels =
       AdjointSolver(evolution,
                     {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-          .IceHistoryKernels(cap.times, {{cap.times.size() - 1, measurement}},
+          .FirstOrderKernels(cap.times, {{cap.times.size() - 1, measurement}},
                              nullptr, OceanFunctionsOf(run));
   EXPECT_GT(MaxAbs(kernels.initialSeaLevel), 0.0);
 
-  auto functional = [&](const SeaLevelSolver::State& start,
+  auto functional = [&](const GRDSolver::State& start,
                         const std::function<std::vector<double>(double)>& ice) {
-    SeaLevelEvolution trial(op, body.solver, start, {.rtol = 1e-12});
+    Evolution trial(op, body.solver, start, {.rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, ice);
     auto product = g;
     for (auto i = std::size_t{0}; i < g.size(); ++i) {
-      product[i] *= snaps.back().seaLevelChange[i];
+      product[i] *= snaps.back().relativeSeaLevelChange[i];
     }
     return body.Integrate(product);
   };
@@ -601,7 +601,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
     ViscoelasticOperator op(body.rheology, kLmax);
     const auto cap = MarineCap::Make(body, nodes);
     const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-    SeaLevelEvolution evolution(op, body.solver, state, {.rtol = 1e-12});
+    Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
     const auto thickness = [&](double t) { return cap.Thickness(t); };
     const auto run = evolution.RunMigrating(cap.times, thickness);
     const auto oceans = OceanFunctionsOf(run);
@@ -621,7 +621,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
       return &deltaAt.at(static_cast<int>(n / per));
     };
     auto functional = [&](double sign) {
-      SeaLevelEvolution trial(op, body.solver, state, {.rtol = 1e-12});
+      Evolution trial(op, body.solver, state, {.rtol = 1e-12});
       const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
         auto out = cap.Thickness(t);
         for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
@@ -638,7 +638,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
       }
       auto product = g;
       for (auto i = std::size_t{0}; i < g.size(); ++i) {
-        product[i] *= snaps.back().seaLevelChange[i];
+        product[i] *= snaps.back().relativeSeaLevelChange[i];
       }
       return body.Integrate(product);
     };
@@ -648,7 +648,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
          {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels =
           AdjointSolver(evolution, {.method = method, .rtol = 1e-12})
-              .IceHistoryKernels(cap.times,
+              .FirstOrderKernels(cap.times,
                                  {{cap.times.size() - 1, measurement}}, nullptr,
                                  oceans);
       auto predicted = 0.0;
@@ -691,7 +691,7 @@ struct MarineTruth {
   Body body = Body::Make(kLmax, true);
   ViscoelasticOperator op{body.rheology, kLmax};
   MarineCap cap = MarineCap::Make(body, 6);
-  SeaLevelSolver::State truth;
+  GRDSolver::State truth;
   std::vector<double> final;
 
   MarineTruth() {
@@ -702,12 +702,12 @@ struct MarineTruth {
     auto sea = cap.sea0;
     for (auto i = std::size_t{0}; i < sea.size(); ++i) sea[i] += bump[i];
     truth = body.solver.MakeState(cap.ice0, sea);
-    SeaLevelEvolution evolution(op, body.solver, truth, {.rtol = 1e-12});
+    Evolution evolution(op, body.solver, truth, {.rtol = 1e-12});
     const auto run = evolution.RunMigrating(cap.times, Thickness());
     EXPECT_NE(run.back().oceanFunction, truth.oceanFunction);
     final = truth.seaLevel;
     for (auto i = std::size_t{0}; i < final.size(); ++i) {
-      final[i] += run.back().seaLevelChange[i];
+      final[i] += run.back().relativeSeaLevelChange[i];
     }
   }
 
@@ -733,7 +733,7 @@ TEST(InitialSeaLevel, FinalMisfitGradientMatchesCentralDifferences) {
   });
   for (auto i = std::size_t{0}; i < target.size(); ++i) target[i] += tilt[i];
   const auto history = IceHistory::Migrating(setting.Thickness());
-  SeaLevelEvolution evolution(setting.op, body.solver, setting.truth,
+  Evolution evolution(setting.op, body.solver, setting.truth,
                               {.rtol = 1e-12});
   const auto base = ComputeFinalSeaLevelMisfit(
       evolution, setting.cap.times, history, target, {}, true,
@@ -786,7 +786,7 @@ TEST(InitialSeaLevel, CalibrationRecoversTheTruthUnderMigratingShorelines) {
       body.solver.MakeState(setting.truth.iceThickness, setting.final);
   for (const auto method :
        {CalibrationMethod::FixedPoint, CalibrationMethod::Gradient}) {
-    SeaLevelEvolution evolution(setting.op, body.solver, guess,
+    Evolution evolution(setting.op, body.solver, guess,
                                 {.rtol = 1e-12});
     const auto calibration = CalibrateInitialSeaLevel(
         evolution, setting.cap.times, history, setting.final,
@@ -801,7 +801,7 @@ TEST(InitialSeaLevel, CalibrationRecoversTheTruthUnderMigratingShorelines) {
   auto rates = std::map<CalibrationMethod, double>{};
   for (const auto method :
        {CalibrationMethod::FixedPoint, CalibrationMethod::Gradient}) {
-    SeaLevelEvolution evolution(setting.op, body.solver, guess,
+    Evolution evolution(setting.op, body.solver, guess,
                                 {.rtol = 1e-12});
     const auto plain = CalibrateInitialSeaLevel(evolution, setting.cap.times,
                                                 history, setting.final,
@@ -922,7 +922,7 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
     return out;
   };
 
-  SeaLevelEvolution evolution(op, body.solver, truth, {.rtol = 1e-10});
+  Evolution evolution(op, body.solver, truth, {.rtol = 1e-10});
   const auto run = evolution.RunMigrating(times, thickness);
   const auto frequency =
       body.solver.SolverScales().Factor(Dimensions{.time = -1});
@@ -940,7 +940,7 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
     EXPECT_NEAR(a * a * grid.Integrate(run[n].oceanFunction), want.oceanArea,
                 1e-10 * want.oceanArea);
     if (n == 0) continue;
-    const auto slc = grid.Expand(run[n].seaLevelChange);
+    const auto slc = grid.Expand(run[n].relativeSeaLevelChange);
     EXPECT_LT(MaxAbsDiff(slc, want.slc, length), tol * MaxAbs(want.slc))
         << "node " << n;
     const auto omegaScale =
@@ -956,7 +956,7 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
   // The misfit gradient against the reached sea level plus 50 m cos(theta).
   auto final = truth.seaLevel;
   for (auto i = std::size_t{0}; i < final.size(); ++i) {
-    final[i] += run.back().seaLevelChange[i];
+    final[i] += run.back().relativeSeaLevelChange[i];
   }
   auto target = final;
   const auto tilt = grid.FromFunction([&](double theta, double) {
@@ -976,7 +976,7 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
        {std::pair{"fixed_point", CalibrationMethod::FixedPoint},
         std::pair{"gradient", CalibrationMethod::Gradient}}) {
     const auto guess = body.solver.MakeState(ice0, final);
-    SeaLevelEvolution calibrating(op, body.solver, guess, {.rtol = 1e-10});
+    Evolution calibrating(op, body.solver, guess, {.rtol = 1e-10});
     const auto calibration = CalibrateInitialSeaLevel(
         calibrating, times, history, final,
         {.method = method,
@@ -1011,7 +1011,7 @@ constexpr auto kLmax3D = 8;
 struct Marine3D {
   Body body;
   MarineCap cap;
-  SeaLevelSolver::State state;
+  GRDSolver::State state;
 
   explicit Marine3D(int nodes = 5, double eta = 1e21)
       : body(Body::Make(kLmax3D, true, eta)),
@@ -1041,12 +1041,12 @@ TEST(Migrating3D, ZeroLateralRunIsThe1DMigratingRun) {
   const auto setting = Marine3D{};
   const auto& body = setting.body;
   ViscoelasticOperator op1(body.rheology, kLmax3D);
-  SeaLevelEvolution evolution1(op1, body.solver, setting.state,
+  Evolution evolution1(op1, body.solver, setting.state,
                                {.rtol = 1e-11});
   const auto reference =
       evolution1.RunMigrating(setting.cap.times, setting.Thickness());
   const auto op3 = setting.Operator(0.0);
-  SeaLevelEvolution3D evolution3(op3, body.solver, setting.state,
+  Evolution3D evolution3(op3, body.solver, setting.state,
                                  {.rtol = 1e-11, .coupled_rtol = 1e-10});
   const auto run =
       evolution3.RunMigrating(setting.cap.times, setting.Thickness());
@@ -1056,8 +1056,8 @@ TEST(Migrating3D, ZeroLateralRunIsThe1DMigratingRun) {
   for (auto n = std::size_t{0}; n < run.size(); ++n) {
     EXPECT_TRUE(run[n].converged) << "node " << n;
     EXPECT_EQ(run[n].oceanFunction, reference[n].oceanFunction) << "node " << n;
-    const auto top = MaxAbs(reference[n].seaLevelChange);
-    EXPECT_LE(MaxDiff(run[n].seaLevelChange, reference[n].seaLevelChange),
+    const auto top = MaxAbs(reference[n].relativeSeaLevelChange);
+    EXPECT_LE(MaxDiff(run[n].relativeSeaLevelChange, reference[n].relativeSeaLevelChange),
               1e-8 * std::max(top, 1e-300))
         << "node " << n;
   }
@@ -1071,11 +1071,11 @@ TEST(Migrating3D, LateralRunFloodsTheCapAndConservesMass) {
   const auto& body = setting.body;
   const auto& state = setting.state;
   const auto op = setting.Operator(1.15);
-  SeaLevelEvolution3D evolution(op, body.solver, state, {.rtol = 1e-11});
+  Evolution3D evolution(op, body.solver, state, {.rtol = 1e-11});
   const auto run =
       evolution.RunMigrating(setting.cap.times, setting.Thickness());
   const auto flat = setting.Operator(0.0);
-  SeaLevelEvolution3D twin(flat, body.solver, state, {.rtol = 1e-11});
+  Evolution3D twin(flat, body.solver, state, {.rtol = 1e-11});
   const auto uniform =
       twin.RunMigrating(setting.cap.times, setting.Thickness());
   const auto& C0 = state.oceanFunction;
@@ -1086,7 +1086,7 @@ TEST(Migrating3D, LateralRunFloodsTheCapAndConservesMass) {
     auto water = std::vector<double>(C0.size());
     auto grounded = std::vector<double>(C0.size());
     for (auto i = std::size_t{0}; i < C0.size(); ++i) {
-      const auto sea = state.seaLevel[i] + run[n].seaLevelChange[i];
+      const auto sea = state.seaLevel[i] + run[n].relativeSeaLevelChange[i];
       water[i] = body.solver.WaterDensity() *
                  (Cn[i] * sea - C0[i] * state.seaLevel[i]);
       grounded[i] =
@@ -1098,9 +1098,9 @@ TEST(Migrating3D, LateralRunFloodsTheCapAndConservesMass) {
         << "node " << n;
   }
   EXPECT_NE(run.back().oceanFunction, C0);
-  const auto top = MaxAbs(uniform.back().seaLevelChange);
+  const auto top = MaxAbs(uniform.back().relativeSeaLevelChange);
   const auto diff =
-      MaxDiff(run.back().seaLevelChange, uniform.back().seaLevelChange);
+      MaxDiff(run.back().relativeSeaLevelChange, uniform.back().relativeSeaLevelChange);
   EXPECT_GT(diff, 1e-3 * top);
   EXPECT_LT(diff, 0.5 * top);
 }
@@ -1109,24 +1109,24 @@ TEST(Migrating3D, AResumedRunIsTheUninterruptedOne) {
   const auto setting = Marine3D{};
   const auto& body = setting.body;
   const auto op = setting.Operator(1.15);
-  auto checkpoints = std::map<std::size_t, SeaLevelEvolution3D::Checkpoint>{};
-  auto options = SeaLevelEvolution3D::Options{.rtol = 1e-11};
+  auto checkpoints = std::map<std::size_t, Evolution3D::Checkpoint>{};
+  auto options = Evolution3D::Options{.rtol = 1e-11};
   options.checkpoint_stride = 1;
   options.on_checkpoint = [&](std::size_t node,
-                              const SeaLevelEvolution3D::Checkpoint& cp) {
+                              const Evolution3D::Checkpoint& cp) {
     checkpoints.emplace(node, cp);
   };
-  SeaLevelEvolution3D whole(op, body.solver, setting.state, options);
+  Evolution3D whole(op, body.solver, setting.state, options);
   const auto full = whole.RunMigrating(setting.cap.times, setting.Thickness());
   ASSERT_EQ(checkpoints.size(), setting.cap.times.size());
-  SeaLevelEvolution3D again(op, body.solver, setting.state, {.rtol = 1e-11});
+  Evolution3D again(op, body.solver, setting.state, {.rtol = 1e-11});
   const auto rest = std::vector<double>(setting.cap.times.begin() + 2,
                                         setting.cap.times.end());
   const auto resumed =
       again.ResumeMigrating(checkpoints.at(2), rest, setting.Thickness());
   ASSERT_EQ(resumed.size(), rest.size() - 1);
   for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
-    EXPECT_EQ(resumed[k].seaLevelChange, full[k + 3].seaLevelChange);
+    EXPECT_EQ(resumed[k].relativeSeaLevelChange, full[k + 3].relativeSeaLevelChange);
     EXPECT_EQ(resumed[k].oceanFunction, full[k + 3].oceanFunction);
     EXPECT_EQ(resumed[k].coupledIterations, full[k + 3].coupledIterations);
   }
@@ -1145,19 +1145,19 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
 
   ViscoelasticOperator op1(body.rheology, kLmax3D,
                            {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution evolution1(op1, body.solver, setting.state,
+  Evolution evolution1(op1, body.solver, setting.state,
                                {.rtol = 1e-12, .record_stride = 1});
   const auto run1 = evolution1.RunMigrating(times, setting.Thickness());
   const auto trajectory1 = ForwardTrajectory::FromSnapshots(run1);
   const auto kernels1 =
       AdjointSolver(evolution1,
                     {.method = AdjointMethod::Continuous, .rtol = 1e-12})
-          .IceHistoryKernels(times, measurements, &trajectory1,
+          .FirstOrderKernels(times, measurements, &trajectory1,
                              OceanFunctionsOf(run1));
 
   const auto op3 =
       setting.Operator(0.0, {.memory_points = MemoryPointSet::Gll});
-  SeaLevelEvolution3D evolution3(
+  Evolution3D evolution3(
       op3, body.solver, setting.state,
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto run3 = evolution3.RunMigrating(times, setting.Thickness());
@@ -1166,13 +1166,13 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
   EXPECT_EQ(oceans3, OceanFunctionsOf(run1));
   const auto kernels3 =
       AdjointSolver3D(evolution3, {.rtol = 1e-12, .coupled_rtol = 1e-12})
-          .IceHistoryKernels(times, measurements, &trajectory3, oceans3);
+          .FirstOrderKernels(times, measurements, &trajectory3, oceans3);
 
   // (the thickness kernels vanish once the cap is afloat: (1 - C_n) = 0)
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    EXPECT_GT(MaxAbs(kernels1.loadDuals[n]), 0.0) << "node " << n;
-    EXPECT_LT(MaxDiff(kernels3.ice.loadDuals[n], kernels1.loadDuals[n]),
-              1e-6 * MaxAbs(kernels1.loadDuals[n]))
+    EXPECT_GT(MaxAbs(kernels1.directLoadKernels[n]), 0.0) << "node " << n;
+    EXPECT_LT(MaxDiff(kernels3.ice.directLoadKernels[n], kernels1.directLoadKernels[n]),
+              1e-6 * MaxAbs(kernels1.directLoadKernels[n]))
         << "node " << n;
     EXPECT_LE(MaxDiff(kernels3.ice.thickness[n], kernels1.thickness[n]),
               1e-6 * MaxAbs(kernels1.thickness[n]))
@@ -1208,7 +1208,7 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
     const auto& body = setting.body;
     const auto& times = setting.cap.times;
     const auto op = setting.Operator(1.15);
-    SeaLevelEvolution3D evolution(op, body.solver, setting.state,
+    Evolution3D evolution(op, body.solver, setting.state,
                                   {.rtol = 1e-12, .coupled_rtol = 1e-12});
     const auto run = evolution.RunMigrating(times, setting.Thickness());
     const auto oceans = OceanFunctionsOf(run);
@@ -1226,7 +1226,7 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
       return &deltaAt.at(static_cast<int>(n / per));
     };
     auto functional = [&](double sign) {
-      SeaLevelEvolution3D trial(op, body.solver, setting.state,
+      Evolution3D trial(op, body.solver, setting.state,
                                 {.rtol = 1e-12, .coupled_rtol = 1e-12});
       const auto snaps = trial.RunMigrating(times, [&, sign](double t) {
         auto out = setting.cap.Thickness(t);
@@ -1244,14 +1244,14 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
       }
       auto product = g;
       for (auto i = std::size_t{0}; i < g.size(); ++i) {
-        product[i] *= snaps.back().seaLevelChange[i];
+        product[i] *= snaps.back().relativeSeaLevelChange[i];
       }
       return body.Integrate(product);
     };
     const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
     const auto kernels =
         AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12})
-            .IceHistoryKernels(times, {{times.size() - 1, measurement}},
+            .FirstOrderKernels(times, {{times.size() - 1, measurement}},
                                nullptr, oceans);
     auto predicted = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -1286,18 +1286,18 @@ TEST(Migrating3D, CalibrationRecoversTheTruth) {
   auto sea = setting.cap.sea0;
   for (auto i = std::size_t{0}; i < sea.size(); ++i) sea[i] += bump[i];
   const auto truth = body.solver.MakeState(setting.cap.ice0, sea);
-  SeaLevelEvolution3D forward(op, body.solver, truth, {.rtol = 1e-11});
+  Evolution3D forward(op, body.solver, truth, {.rtol = 1e-11});
   const auto run = forward.RunMigrating(setting.cap.times, setting.Thickness());
   EXPECT_NE(run.back().oceanFunction, truth.oceanFunction);
   auto final = truth.seaLevel;
   for (auto i = std::size_t{0}; i < final.size(); ++i) {
-    final[i] += run.back().seaLevelChange[i];
+    final[i] += run.back().relativeSeaLevelChange[i];
   }
   const auto history = IceHistory::Migrating(setting.Thickness());
   const auto guess = body.solver.MakeState(truth.iceThickness, final);
   for (const auto method :
        {CalibrationMethod::FixedPoint, CalibrationMethod::Gradient}) {
-    SeaLevelEvolution3D evolution(op, body.solver, guess, {.rtol = 1e-11});
+    Evolution3D evolution(op, body.solver, guess, {.rtol = 1e-11});
     const auto calibration =
         CalibrateInitialSeaLevel(evolution, setting.cap.times, history, final,
                                  {.method = method,

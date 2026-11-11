@@ -76,7 +76,7 @@ int main(int argc, char** argv) {
   const auto rheology =
       Rheology::Maxwell(earth.material, viscosity->Viscosity()).value();
   Viscoelastic3D op(rheology, lmax, viscosity->Delta());
-  SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLove(),
+  GRDSolver solver(SurfaceGrid(lmax), op.ElasticLove(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -92,7 +92,7 @@ int main(int argc, char** argv) {
   const auto history = io::FieldHistory::Read(options.state, grid).value();
   const auto& C = state.oceanFunction;
   const auto startSi = -startKyr * kyr;
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ice =
         history.Values("ice_thickness", startSi + t * scales.Time());
     auto load = std::vector<double>(grid.FieldSize());
@@ -111,15 +111,15 @@ int main(int argc, char** argv) {
   // forward one, so every stride-th forward state is kept and each sweep
   // rebuilds the ones between by forward steps from the last one kept.
   const auto stride = examples::CheckpointStride(nodes);
-  auto evolutionOptions = SeaLevelEvolution3D::Options{};
+  auto evolutionOptions = Evolution3D::Options{};
   evolutionOptions.record_stride = stride;
   evolutionOptions.on_snapshot =
-      examples::NodeReporter<SeaLevelEvolution3D::Snapshot>(nodes - 1,
+      examples::NodeReporter<Evolution3D::Snapshot>(nodes - 1,
                                                             scales.Time());
   examples::Say(std::format(
       "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));
-  SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
-  const auto snapshots = evolution.Run(times, iceLoad);
+  Evolution3D evolution(op, solver, state, evolutionOptions);
+  const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
 
   // The two observations, as node-keyed duals: J is in the solver's length
@@ -139,7 +139,7 @@ int main(int argc, char** argv) {
     if (dateKyr > decayFromKyr + 1e-9) continue;
     windowNodes.push_back(n);
     elapsed.push_back(decayFromKyr - dateKyr);
-    series.push_back(PairedValue(grid, a, dual, snapshots[n].seaLevelChange));
+    series.push_back(PairedValue(grid, a, dual, snapshots[n].relativeSeaLevelChange));
   }
   // The fit's uncertainties in the series' and times' own units: 1 m (in
   // solver units) and exact times.
@@ -153,10 +153,10 @@ int main(int argc, char** argv) {
                           {.on_node = examples::SweepReporter(nodes - 1)});
   examples::Say("adjoint sweep 1 of 2, the sea-level change:");
   const auto seaLevelKernels =
-      adjoint.IceHistoryKernels(times, seaLevel, &trajectory);
+      adjoint.FirstOrderKernels(times, seaLevel, &trajectory);
   examples::Say("adjoint sweep 2 of 2, the decay time:");
   const auto decayKernels =
-      adjoint.IceHistoryKernels(times, decay, &trajectory);
+      adjoint.FirstOrderKernels(times, decay, &trajectory);
 
   // The model file: values non-dimensional under the model's scales, each
   // with its objective's SI dimensions; J's SI unit per sweep unit is the
@@ -224,8 +224,8 @@ int main(int argc, char** argv) {
   out.Scalar("site_lat", site.latitude);
   out.Scalar("site_lon", site.longitude);
   out.Scalar(
-      "sea_level_change_m",
-      length * PairedValue(grid, a, dual, snapshots.back().seaLevelChange));
+      "relative_sea_level_change_m",
+      length * PairedValue(grid, a, dual, snapshots.back().relativeSeaLevelChange));
   out.Scalar("decay_time_kyr", fit.decay_time);
   const auto displayUnit =
       std::array{1.0, 1.0 / examples::kYear};  // m; s to yr
@@ -272,7 +272,7 @@ int main(int argc, char** argv) {
   std::cout << "wrote " << kernelFile.string() << " and " << table.string()
             << " (sea level change "
             << length *
-                   PairedValue(grid, a, dual, snapshots.back().seaLevelChange)
+                   PairedValue(grid, a, dual, snapshots.back().relativeSeaLevelChange)
             << " m, decay time " << fit.decay_time << " kyr)\n";
   return 0;
 }

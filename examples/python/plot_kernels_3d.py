@@ -53,7 +53,7 @@ for row, (name, label, unit) in enumerate((
 
 fig.suptitle(
     "3D log-viscosity kernels of two observations at the marked site "
-    f"(sea-level change since 21 ka {ex.scalars['sea_level_change_m']:.0f} m, "
+    f"(sea-level change since 21 ka {ex.scalars['relative_sea_level_change_m']:.0f} m, "
     f"decay time {ex.scalars['decay_time_kyr']:.2f} kyr)")
 fig.tight_layout()
 save_figure(fig, library_figure("viscosity_kernels_3d"))

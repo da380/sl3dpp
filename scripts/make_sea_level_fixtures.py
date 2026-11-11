@@ -171,7 +171,7 @@ def main() -> None:
         # m and m^2 s^-2, the ocean function unitless): recorded as given
         write_coefficients(lines, name, clm, 1.0)
     length = scales.factor(units.LENGTH)
-    write_coefficients(lines, "sea_level_change", model.expand_field(slc),
+    write_coefficients(lines, "relative_sea_level_change", model.expand_field(slc),
                        length)
     write_coefficients(lines, "displacement", model.expand_field(disp), length)
     write_coefficients(lines, "potential", model.expand_field(phi),
@@ -195,7 +195,7 @@ def main() -> None:
 
     lines = list(header)
     lines.append(f"ocean_area {state.ocean_area * length**2:.17g}")
-    write_coefficients(lines, "sea_level_change", model.expand_field(slc),
+    write_coefficients(lines, "relative_sea_level_change", model.expand_field(slc),
                        length)
     write_coefficients(lines, "displacement", model.expand_field(disp), length)
     write_coefficients(lines, "potential", model.expand_field(phi),

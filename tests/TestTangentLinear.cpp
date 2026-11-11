@@ -108,7 +108,7 @@ TEST(TangentLinear, LinearInTheLoads) {
   }
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme, .rtol = 1e-12});
     const auto base = evolution.Run(times, History(times, loads));
     const auto plus = evolution.Run(times, History(times, shifted));
@@ -119,9 +119,9 @@ TEST(TangentLinear, LinearInTheLoads) {
       const auto run = tangent.Run(times, direction);
       ASSERT_EQ(run.size(), times.size());
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
-        for (auto field : {&SeaLevelEvolution::Snapshot::seaLevelChange,
-                           &SeaLevelEvolution::Snapshot::displacement,
-                           &SeaLevelEvolution::Snapshot::potential}) {
+        for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
+                           &Evolution::Snapshot::displacement,
+                           &Evolution::Snapshot::potential}) {
           auto difference = plus[n].*field;
           for (auto i = std::size_t{0}; i < difference.size(); ++i) {
             difference[i] -= (base[n].*field)[i];
@@ -165,7 +165,7 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(
+    Evolution evolution(
         op, setup.solver, setup.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto snapshots = evolution.Run(times, History(times, loads));
@@ -174,10 +174,10 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
     AdjointSolver adjoint(evolution,
                           {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
     auto rhs = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      rhs += setup.Surface(kernels.loadDuals[n], deltas[n]);
+      rhs += setup.Surface(kernels.directLoadKernels[n], deltas[n]);
     }
     rhs += VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
 
@@ -196,7 +196,7 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
     loadsOnly.directLoad = deltas;
     auto loadsRhs = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      loadsRhs += setup.Surface(kernels.loadDuals[n], deltas[n]);
+      loadsRhs += setup.Surface(kernels.directLoadKernels[n], deltas[n]);
     }
     EXPECT_NEAR(Objective(setup, tangent.Run(times, loadsOnly), measurements),
                 loadsRhs, 1e-8 * std::abs(loadsRhs));
@@ -208,7 +208,7 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
 
     // A checkpointed trajectory serves the same run: the gaps are refilled
     // by forward steps, which amplify nothing.
-    SeaLevelEvolution sparse(op, setup.solver, setup.state,
+    Evolution sparse(op, setup.solver, setup.state,
                              {.scheme = scheme, .rtol = 1e-12, .record_stride = 2});
     const auto sparseTrajectory =
         ForwardTrajectory::FromSnapshots(sparse.Run(times, History(times, loads)));
@@ -255,7 +255,7 @@ TEST(TangentLinear, WithoutAnOceanThePairAreTransposes) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(
+    Evolution evolution(
         op, setup.solver, dry,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto snapshots = evolution.Run(times, History(times, loads));
@@ -276,10 +276,10 @@ TEST(TangentLinear, WithoutAnOceanThePairAreTransposes) {
     AdjointSolver adjoint(evolution,
                           {.method = AdjointMethod::Discrete, .rtol = 1e-12});
     const auto kernels =
-        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+        adjoint.FirstOrderKernels(times, measurements, &trajectory);
     auto loadsRhs = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      loadsRhs += setup.Surface(kernels.loadDuals[n], deltas[n]);
+      loadsRhs += setup.Surface(kernels.directLoadKernels[n], deltas[n]);
     }
     EXPECT_NEAR(alongLoads, loadsRhs, 1e-8 * std::abs(alongLoads))
         << "scheme " << static_cast<int>(scheme);
@@ -317,7 +317,7 @@ TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   for (const auto nodes : {5, 9}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
@@ -351,7 +351,7 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   const auto cap = MarineCap::Make(setup, 5);
   const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  SeaLevelEvolution evolution(op, setup.solver, state, {.rtol = 1e-12});
+  Evolution evolution(op, setup.solver, state, {.rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   const auto oceans = OceanFunctionsOf(run);
   std::mt19937 rng(3);
@@ -371,7 +371,7 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     }
     const auto start = setup.solver.MakeState(state.iceThickness, sea);
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
-    SeaLevelEvolution trial(op, setup.solver, start, {.rtol = 1e-12});
+    Evolution trial(op, setup.solver, start, {.rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
       auto out = cap.Thickness(t);
       for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
@@ -385,7 +385,7 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
     }
-    return setup.Surface(g, snaps.back().seaLevelChange);
+    return setup.Surface(g, snaps.back().relativeSeaLevelChange);
   };
   const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
 
@@ -402,14 +402,14 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]);
     }
-    EXPECT_EQ(MaxAbs(snaps[0].seaLevelChange), 0.0);
+    EXPECT_EQ(MaxAbs(snaps[0].relativeSeaLevelChange), 0.0);
   }
 
   // The discrete kernels' pairing: the thickness view (grounded by each
   // node's shorelines) and the initial sea level kernel.
   const auto kernels =
       AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-          .IceHistoryKernels(cap.times, measurement, nullptr, oceans);
+          .FirstOrderKernels(cap.times, measurement, nullptr, oceans);
   auto paired = setup.Surface(kernels.initialSeaLevel, deltaSea);
   for (auto n = std::size_t{1}; n < cap.times.size(); ++n) {
     paired += setup.Surface(kernels.thickness[n], deltaIce[n]);
@@ -417,13 +417,13 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   EXPECT_NEAR(paired, fd, 1e-7 * std::abs(fd));
 
   // Under frozen shorelines the initial sea level contributes nothing.
-  SeaLevelEvolution frozen(op, setup.solver, state, {.rtol = 1e-12});
+  Evolution frozen(op, setup.solver, state, {.rtol = 1e-12});
   TangentPerturbation seaOnly;
   seaOnly.initialSeaLevel = deltaSea;
   const auto still =
       TangentLinearSolver(frozen, {.rtol = 1e-12}).Run(cap.times, seaOnly);
   for (const auto& snap : still) {
-    EXPECT_EQ(MaxAbs(snap.seaLevelChange), 0.0);
+    EXPECT_EQ(MaxAbs(snap.relativeSeaLevelChange), 0.0);
   }
 }
 
@@ -467,7 +467,7 @@ TEST(TangentLinear, SecondOrderRunIsTheDerivativeOfTheFirst) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(
+    Evolution evolution(
         op, setup.solver, setup.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -495,7 +495,7 @@ TEST(TangentLinear, SecondOrderRunIsTheDerivativeOfTheFirst) {
       auto rheology =
           Rheology::Create(setup.material, {std::move(branch)}).value();
       ViscoelasticOperator moved(rheology, kLmax);
-      SeaLevelEvolution movedEvolution(
+      Evolution movedEvolution(
           moved, setup.solver, setup.state,
           {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
       const auto movedLoads = shifted(loads, eps);
@@ -522,8 +522,8 @@ TEST(TangentLinear, SecondOrderRunIsTheDerivativeOfTheFirst) {
         times, tangentV, tangentU, {.itauU = ditauV, .itauV = ditauU},
         &trajectory);
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      EXPECT_LT(MaxDiff(swapped[n].seaLevelChange, second[n].seaLevelChange),
-                1e-10 * MaxAbs(second[n].seaLevelChange) + 1e-300)
+      EXPECT_LT(MaxDiff(swapped[n].relativeSeaLevelChange, second[n].relativeSeaLevelChange),
+                1e-10 * MaxAbs(second[n].relativeSeaLevelChange) + 1e-300)
           << "node " << n;
       EXPECT_LT(MaxDiff(swapped[n].potential, second[n].potential),
                 1e-10 * MaxAbs(second[n].potential) + 1e-300);
@@ -554,12 +554,12 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
     }
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
         evolution.Run(times, History(times, loads)));
     TangentLinearSolver tangent(evolution, {.rtol = 1e-12, .record = true});
-    auto runs = std::vector<std::vector<SeaLevelEvolution::Snapshot>>{};
+    auto runs = std::vector<std::vector<Evolution::Snapshot>>{};
     for (auto seed = 0; seed < 2; ++seed) {
       TangentPerturbation d;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -570,7 +570,7 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     const auto second =
         tangent.RunSecondOrder(times, runs[0], runs[1], {}, &trajectory);
     for (const auto& snap : second) {
-      EXPECT_EQ(MaxAbs(snap.seaLevelChange), 0.0);
+      EXPECT_EQ(MaxAbs(snap.relativeSeaLevelChange), 0.0);
       EXPECT_EQ(MaxAbs(snap.displacement), 0.0);
       EXPECT_EQ(MaxAbs(snap.potential), 0.0);
     }
@@ -579,14 +579,14 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
   {
     const auto cap = MarineCap::Make(setup, 5);
     const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
-    SeaLevelEvolution evolution(op, setup.solver, state,
+    Evolution evolution(op, setup.solver, state,
                                 {.rtol = 1e-12, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         cap.times, [&](double t) { return cap.Thickness(t); });
     const auto oceans = OceanFunctionsOf(run);
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     TangentLinearSolver tangent(evolution, {.rtol = 1e-12, .record = true});
-    auto runs = std::vector<std::vector<SeaLevelEvolution::Snapshot>>{};
+    auto runs = std::vector<std::vector<Evolution::Snapshot>>{};
     for (auto seed = 0; seed < 2; ++seed) {
       TangentPerturbation d;
       for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
@@ -598,7 +598,7 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     const auto second = tangent.RunSecondOrder(cap.times, runs[0], runs[1],
                                                {}, &trajectory, oceans);
     for (auto n = std::size_t{0}; n < second.size(); ++n) {
-      EXPECT_EQ(MaxAbs(second[n].seaLevelChange), 0.0);
+      EXPECT_EQ(MaxAbs(second[n].relativeSeaLevelChange), 0.0);
       EXPECT_EQ(second[n].oceanFunction, oceans[n]);
     }
   }
@@ -628,7 +628,7 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
   for (const auto nodes : {17, 33}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
@@ -677,7 +677,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   held.body_from_table = false;
   held.mean_sea_floor_radius = baseTable.radius;
   held.gravitational_acceleration = baseTable.surface_gravity;
-  const SeaLevelSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  const GRDSolver solver(SurfaceGrid(kLmax), baseTable, held);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
   auto loads = std::vector<std::vector<double>>{};
@@ -729,7 +729,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax,
                             {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution evolution(op, solver, setup.state,
+    Evolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
@@ -747,7 +747,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
       const auto [shifted, rheology] = rheologyAt(eps);
       ViscoelasticOperator moved(rheology, kLmax,
                                  {.memory_points = MemoryPointSet::Gll});
-      SeaLevelEvolution movedEvolution(moved, solver, setup.state,
+      Evolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = RotationalFeedback::None,
                                         .rtol = 1e-12});
@@ -788,7 +788,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   held.body_from_table = false;
   held.mean_sea_floor_radius = baseTable.radius;
   held.gravitational_acceleration = baseTable.surface_gravity;
-  const SeaLevelSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  const GRDSolver solver(SurfaceGrid(kLmax), baseTable, held);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
   auto loads = std::vector<std::vector<double>>{};
@@ -845,7 +845,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
                         RotationalFeedback::Full})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(op, solver, setup.state,
+    Evolution evolution(op, solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = rotation,
                                  .rtol = 1e-12,
@@ -861,7 +861,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
 
     auto functional = [&](double eps) {
       const auto moved = operatorAt(eps);
-      SeaLevelEvolution movedEvolution(moved, solver, setup.state,
+      Evolution movedEvolution(moved, solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = rotation,
                                         .rtol = 1e-12});
@@ -897,7 +897,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
   }
   // A direction of the wrong size is refused.
   ViscoelasticOperator op(setup.rheology, kLmax);
-  SeaLevelEvolution evolution(op, solver, setup.state,
+  Evolution evolution(op, solver, setup.state,
                               {.rotation = RotationalFeedback::None,
                                .record_stride = 1});
   const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -997,7 +997,7 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax,
                             {.memory_points = MemoryPointSet::Gll});
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
@@ -1029,7 +1029,7 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
       const auto rheology = rheologyAt(eps);
       ViscoelasticOperator moved(rheology, kLmax,
                                  {.memory_points = MemoryPointSet::Gll});
-      SeaLevelEvolution movedEvolution(moved, setup.solver, setup.state,
+      Evolution movedEvolution(moved, setup.solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = RotationalFeedback::None,
                                         .rtol = 1e-12,
@@ -1062,8 +1062,8 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     const auto swapped =
         tangent.RunSecondOrder(times, tangentV, tangentU, vu, &trajectory);
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
-      EXPECT_LT(MaxDiff(swapped[n].seaLevelChange, second[n].seaLevelChange),
-                1e-10 * MaxAbs(second[n].seaLevelChange) + 1e-300)
+      EXPECT_LT(MaxDiff(swapped[n].relativeSeaLevelChange, second[n].relativeSeaLevelChange),
+                1e-10 * MaxAbs(second[n].relativeSeaLevelChange) + 1e-300)
           << "node " << n;
     }
 

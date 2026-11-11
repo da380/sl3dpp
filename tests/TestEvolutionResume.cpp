@@ -32,8 +32,8 @@ struct Scene {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
 
   static Scene Make() {
     auto deck =
@@ -56,7 +56,7 @@ struct Scene {
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
     ViscoelasticOperator op(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
                           SeaLevelParameters{});
     Fingerprint fingerprint(kLmax, op.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
@@ -85,7 +85,7 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
   });
   auto times = std::vector<double>{};
   for (auto n = 0; n < 9; ++n) times.push_back(0.02 * n);
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     auto load = std::vector<double>(mask.size());
     for (auto i = std::size_t{0}; i < load.size(); ++i) {
       load[i] = -1e-4 * (t / times.back()) * mask[i];
@@ -93,15 +93,15 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
     return load;
   };
 
-  auto checkpoints = std::map<std::size_t, SeaLevelEvolution::Checkpoint>{};
-  auto options = SeaLevelEvolution::Options{};
+  auto checkpoints = std::map<std::size_t, Evolution::Checkpoint>{};
+  auto options = Evolution::Options{};
   options.checkpoint_stride = 3;
   options.on_checkpoint = [&](std::size_t node,
-                              const SeaLevelEvolution::Checkpoint& cp) {
+                              const Evolution::Checkpoint& cp) {
     checkpoints.emplace(node, cp);
   };
-  SeaLevelEvolution whole(op, scene.solver, scene.state, options);
-  const auto full = whole.Run(times, iceLoad);
+  Evolution whole(op, scene.solver, scene.state, options);
+  const auto full = whole.Run(times, directLoad);
   ASSERT_EQ(full.size(), times.size());
   // the stride hands out nodes 0, 3, 6 and the last
   ASSERT_TRUE(checkpoints.contains(0) && checkpoints.contains(3) &&
@@ -110,16 +110,16 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
   EXPECT_EQ(checkpoints.at(3).t, times[3]);
 
   // a fresh evolution, resumed from node 3, marches the same history
-  SeaLevelEvolution resumed(op, scene.solver, scene.state, {});
+  Evolution resumed(op, scene.solver, scene.state, {});
   const auto tail = resumed.Resume(
       checkpoints.at(3),
-      std::vector<double>(times.begin() + 3, times.end()), iceLoad);
+      std::vector<double>(times.begin() + 3, times.end()), directLoad);
   ASSERT_EQ(tail.size(), times.size() - 4);
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[4 + k];
     const auto& b = tail[k];
     EXPECT_EQ(a.t, b.t);
-    EXPECT_EQ(a.seaLevelChange, b.seaLevelChange) << "node " << 4 + k;
+    EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange) << "node " << 4 + k;
     EXPECT_EQ(a.displacement, b.displacement) << "node " << 4 + k;
     EXPECT_EQ(a.potential, b.potential) << "node " << 4 + k;
     EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 4 + k;
@@ -129,7 +129,7 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
   EXPECT_THROW(static_cast<void>(resumed.Resume(
                    checkpoints.at(3),
                    std::vector<double>(times.begin() + 4, times.end()),
-                   iceLoad)),
+                   directLoad)),
                std::invalid_argument);
 }
 

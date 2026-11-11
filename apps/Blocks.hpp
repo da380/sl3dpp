@@ -144,7 +144,7 @@ struct SolverBlock {
   /// The relative tolerance and the iteration budget of the 3D closure.
   /// `sea-level` and the kernel commands: each step's combined fixed
   /// point over the strain, the ocean load and the rotation
-  /// (SeaLevelEvolution3D::Options::coupled_rtol, max_coupled_iterations;
+  /// (Evolution3D::Options::coupled_rtol, max_coupled_iterations;
   /// under lateral moduli the start's zero-length step too, and the
   /// fingerprint's one zero-length step). `response`:
   /// each step's closure (the fixed point or the conjugate gradients) and

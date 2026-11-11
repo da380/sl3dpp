@@ -36,14 +36,14 @@
 
 namespace sl3dpp {
 
-class SeaLevelEvolution {
+class Evolution {
  public:
   /// One node of the history: fields in the SLE solver's units on its
   /// grid; the load and tide coefficient vectors are in the MATERIAL's
   /// units (what the radial operator consumed).
   struct Snapshot {
     double t = 0.0;
-    std::vector<double> seaLevelChange;
+    std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
     std::array<double, 3> angularVelocity{};
@@ -108,23 +108,23 @@ class SeaLevelEvolution {
 
   /// The operator and solver are borrowed for the evolution's lifetime;
   /// the SLE grid's lmax must match the operator's.
-  SeaLevelEvolution(const ViscoelasticOperator& op,
-                    const SeaLevelSolver& solver, SeaLevelSolver::State state,
+  Evolution(const ViscoelasticOperator& op,
+                    const GRDSolver& solver, GRDSolver::State state,
                     Options options);
-  SeaLevelEvolution(const ViscoelasticOperator& op,
-                    const SeaLevelSolver& solver, SeaLevelSolver::State state)
-      : SeaLevelEvolution(op, solver, std::move(state), Options{}) {}
+  Evolution(const ViscoelasticOperator& op,
+                    const GRDSolver& solver, GRDSolver::State state)
+      : Evolution(op, solver, std::move(state), Options{}) {}
 
   /// Integrates over the time grid (SLE units, increasing; include any
-  /// breakpoints of the ice history). `iceLoad(t)` is the non-ocean
+  /// breakpoints of the ice history). `directLoad(t)` is the non-ocean
   /// surface load (grounded ice, sediment) at t, a grid field in the SLE
   /// solver's units, continuous for t > times[0]; the start is the
-  /// instantaneous elastic response to iceLoad(times[0]). Returns one
+  /// instantaneous elastic response to directLoad(times[0]). Returns one
   /// snapshot per node, the first included, and leaves the final internal
   /// state readable through FinalState().
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad);
+      const std::function<std::vector<double>(double)>& directLoad);
 
   /// Continues a run from a checkpoint: `times` is the remaining grid,
   /// its first entry the checkpoint's own node, and the snapshots come
@@ -132,7 +132,7 @@ class SeaLevelEvolution {
   /// uninterrupted run's.
   [[nodiscard]] std::vector<Snapshot> Resume(
       const Checkpoint& from, std::span<const double> times,
-      const std::function<std::vector<double>(double)>& iceLoad);
+      const std::function<std::vector<double>(double)>& directLoad);
 
   /// Integrates under migrating shorelines (pyslfp's `run_ice_history`
   /// with shorelines="migrating"): `iceThickness(t)` is the ice thickness
@@ -158,16 +158,16 @@ class SeaLevelEvolution {
   [[nodiscard]] const ViscoelasticState& FinalState() const { return vstate_; }
 
   /// The background surface state: the initial state of every run.
-  [[nodiscard]] const SeaLevelSolver::State& BackgroundState() const {
+  [[nodiscard]] const GRDSolver::State& BackgroundState() const {
     return state_;
   }
 
   /// Replaces the background state (a calibrated initial state, say);
   /// its fields must live on the solver's grid.
-  void SetBackgroundState(SeaLevelSolver::State state);
+  void SetBackgroundState(GRDSolver::State state);
 
   /// The sea level solver the evolution was built with.
-  [[nodiscard]] const SeaLevelSolver& Solver() const { return *solver_; }
+  [[nodiscard]] const GRDSolver& Solver() const { return *solver_; }
 
  private:
   friend class AdjointSolver;  // reuses the operator/solver/state/ratios
@@ -188,7 +188,7 @@ class SeaLevelEvolution {
   /// start, the members below holding the checkpoint's recurrence instead.
   [[nodiscard]] std::vector<Snapshot> March(
       std::span<const double> times,
-      const std::function<std::vector<double>(double)>* iceLoad,
+      const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
       bool resumed);
 
@@ -196,8 +196,8 @@ class SeaLevelEvolution {
   void Restore(const Checkpoint& from, std::span<const double> times);
 
   const ViscoelasticOperator* op_;
-  const SeaLevelSolver* solver_;
-  SeaLevelSolver::State state_;
+  const GRDSolver* solver_;
+  GRDSolver::State state_;
   Options options_;
   ViscoelasticState vstate_;
   // The running node's total-load and centrifugal coefficients

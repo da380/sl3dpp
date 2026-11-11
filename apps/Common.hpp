@@ -134,17 +134,17 @@ struct Loaded {
   io::FieldHistory state;
   io::FieldHistory ice;
   std::vector<double> ice0;  ///< the start's ice thickness, SI
-  SeaLevelSolver::State background;
+  GRDSolver::State background;
 };
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
-                               const SeaLevelSolver& solver);
+                               const GRDSolver& solver);
 
 /// The sea level the state file gives at the window's end, by the
 /// flotation construction, solver units: the calibration's target. Refused
 /// when the window's end lies outside the file's time span.
 [[nodiscard]] std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run,
                                                   const Json& top,
-                                                  const SeaLevelSolver& solver,
+                                                  const GRDSolver& solver,
                                                   const Loaded& world);
 
 /// The window's uniform time grid, SLE units, zero at its start.
@@ -160,24 +160,24 @@ struct Loaded {
 /// take it: a callable of SLE time over the solver grid. The references
 /// must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceLoadOf(
-    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world);
+    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
 
 /// The ice thickness the migrating runs take, solver units: the
 /// background's ice plus the history's change from the start's ice
 /// (world.ice0, as IceLoadOf measures it). The references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
-    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world);
+    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
 
 /// The run's ice history under its shorelines: IceLoadOf when frozen,
 /// IceThicknessOf when migrating.
 [[nodiscard]] IceHistory HistoryOf(const SeaLevelRun& run,
-                                   const SeaLevelSolver& solver,
+                                   const GRDSolver& solver,
                                    const Loaded& world);
 
 /// Rebuilds the world's start from the ice history: its ice at the
 /// window's start (world.ice0 too) under the given sea level, the ocean
 /// function by flotation.
-void StartFromIceHistory(const SeaLevelRun& run, const SeaLevelSolver& solver,
+void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess);
 
 /// Calibrates the world's initial sea level against the state file's sea
@@ -194,12 +194,12 @@ struct CalibrationSummary {
   std::size_t runs = 0;
 };
 CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
-                                  const SeaLevelSolver& solver, Loaded& world,
-                                  SeaLevelEvolution& evolution,
+                                  const GRDSolver& solver, Loaded& world,
+                                  Evolution& evolution,
                                   std::span<const double> times);
 CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
-                                  const SeaLevelSolver& solver, Loaded& world,
-                                  SeaLevelEvolution3D& evolution,
+                                  const GRDSolver& solver, Loaded& world,
+                                  Evolution3D& evolution,
                                   std::span<const double> times);
 
 }  // namespace sl3dpp::app

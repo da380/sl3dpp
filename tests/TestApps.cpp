@@ -1811,7 +1811,7 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
   EXPECT_TRUE(summary.ends_with("SLE iterations)")) << summary;
 
   const auto result = pm::ReadSurfaceFile(dir_ / "out" / "fingerprint.nc");
-  for (const auto name : {"ice_change", "sea_level_change", "displacement",
+  for (const auto name : {"ice_change", "relative_sea_level_change", "displacement",
                           "potential", "ocean_function"}) {
     EXPECT_TRUE(result.variables.contains(name)) << name;
   }
@@ -1823,7 +1823,7 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
     EXPECT_LE(value, 1.05);
   }
   // melting ice must raise the far-field sea: somewhere positive
-  const auto& change = result.variables.at("sea_level_change").values;
+  const auto& change = result.variables.at("relative_sea_level_change").values;
   auto largest = 0.0;
   for (const auto value : change) largest = std::max(largest, value);
   EXPECT_GT(largest, 0.0);
@@ -1868,7 +1868,7 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
   const auto byInput = pm::ReadSurfaceFile(dir_ / "out" / "input.nc");
   auto worst = 0.0;
   for (const auto& [name, want] :
-       {std::pair{"sea_level_change", &direct.seaLevelChange},
+       {std::pair{"relative_sea_level_change", &direct.relativeSeaLevelChange},
         std::pair{"displacement", &direct.displacement},
         std::pair{"potential", &direct.potential}}) {
     const auto departure =
@@ -1923,7 +1923,7 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   ASSERT_TRUE(reference.time);
   EXPECT_EQ(reference.time->size(), 5u);
   EXPECT_EQ(
-      pm::detail::TextOf(reference.variables.at("sea_level_change").attributes,
+      pm::detail::TextOf(reference.variables.at("relative_sea_level_change").attributes,
                          "time_support")
           .value_or(""),
       "node");
@@ -1946,7 +1946,7 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
   ASSERT_TRUE(rebuilt.time);
   EXPECT_EQ(*rebuilt.time, *reference.time);
-  for (const auto name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
@@ -1964,9 +1964,9 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   summary = app::RunSeaLevel(same);
   EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
   EXPECT_EQ(pm::ReadSurfaceFile(dir_ / "out" / "same.nc")
-                .variables.at("sea_level_change")
+                .variables.at("relative_sea_level_change")
                 .values,
-            reference.variables.at("sea_level_change").values);
+            reference.variables.at("relative_sea_level_change").values);
 
   // ...while another computation, or the same config over a changed input
   // file, is refused
@@ -2045,7 +2045,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
                              history->Values("ice_thickness", 0.0));
   auto worstOf = [&](const pm::SurfaceFile& file) {
     const auto& s0 = file.variables.at("initial_sea_level").values;
-    const auto& slc = file.variables.at("sea_level_change").values;
+    const auto& slc = file.variables.at("relative_sea_level_change").values;
     const auto last = slc.size() - target.size();
     auto worst = 0.0, scale = 0.0;
     for (auto i = std::size_t{0}; i < target.size(); ++i) {
@@ -2093,7 +2093,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
                 .find("read back"),
             std::string::npos);
   for (const auto name :
-       {"sea_level_change", "initial_sea_level", "ocean_function"}) {
+       {"relative_sea_level_change", "initial_sea_level", "ocean_function"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               moving.variables.at(name).values)
         << name;
@@ -2184,7 +2184,7 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
             "migrating");
   ASSERT_TRUE(reference.variables.contains("ocean_function"));
   const auto& s0 = reference.variables.at("initial_sea_level").values;
-  const auto& slc = reference.variables.at("sea_level_change").values;
+  const auto& slc = reference.variables.at("relative_sea_level_change").values;
   const auto last = slc.size() - target.size();
   auto worst = 0.0, scale = 0.0;
   for (auto i = std::size_t{0}; i < target.size(); ++i) {
@@ -2209,7 +2209,7 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
   EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
   const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
   for (const auto name :
-       {"sea_level_change", "initial_sea_level", "ocean_function"}) {
+       {"relative_sea_level_change", "initial_sea_level", "ocean_function"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
@@ -2262,7 +2262,7 @@ TEST_F(AppsTest, SeaLevel3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   }
   EXPECT_GE(attempts, 1);
   const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
-  for (const auto name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
@@ -2323,7 +2323,7 @@ TEST_F(AppsTest, SeaLevelPicks1DOr3DFromTheModelBlock) {
   const auto radial = pm::ReadSurfaceFile(dir_ / "out" / "radial.nc");
   const auto uniform = pm::ReadSurfaceFile(dir_ / "out" / "uniform.nc");
   auto worstRadial = 0.0, worstUniform = 0.0;
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     const auto& want = deck.variables.at(name).values;
     const auto r = Departure(radial.variables.at(name).values, want);
     const auto u = Departure(uniform.variables.at(name).values, want);
@@ -2356,7 +2356,7 @@ TEST_F(AppsTest, SeaLevelPicks1DOr3DFromTheModelBlock) {
 TEST_F(AppsTest, SeaLevelUnderLateralModuliMatchesTheLibrary) {
   // model.moduli reaches the 3-D evolution as Viscoelastic3D::Options::
   // moduli: the command under the prem8 deck's lateral viscosity and a
-  // toy lateral shear modulus is SeaLevelEvolution3D run here on the same
+  // toy lateral shear modulus is Evolution3D run here on the same
   // operator, background state and ice load, to rounding (the same
   // algorithm: equal to the bit here). Without the moduli the run differs
   // (by about 3e-3 relative).
@@ -2405,7 +2405,7 @@ TEST_F(AppsTest, SeaLevelUnderLateralModuliMatchesTheLibrary) {
   auto options = Viscoelastic3D::Options{};
   options.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
   const Viscoelastic3D op(*rheology, kLmax, viscosity->Delta(), options);
-  const SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLove(),
+  const GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLove(),
                               SeaLevelParameters{});
   const auto history =
       io::FieldHistory::Read(dir_ / "history.nc", solver.Grid());
@@ -2434,20 +2434,20 @@ TEST_F(AppsTest, SeaLevelUnderLateralModuliMatchesTheLibrary) {
     }
     return out;
   };
-  SeaLevelEvolution3D evolution(op, solver, state);
+  Evolution3D evolution(op, solver, state);
   const auto snapshots = evolution.Run(times, load);
   ASSERT_EQ(snapshots.size(), 4u);
   // the histories node after node, SI (the first node's zero: no load yet)
   auto worst = 0.0;
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     const auto factor = std::string_view{name} == "potential"
                             ? scales.Factor(PotentialDimensions)
                             : length;
     auto want = std::vector<double>{};
     for (const auto& snapshot : snapshots) {
       EXPECT_TRUE(snapshot.converged);
-      const auto& field = std::string_view{name} == "sea_level_change"
-                              ? snapshot.seaLevelChange
+      const auto& field = std::string_view{name} == "relative_sea_level_change"
+                              ? snapshot.relativeSeaLevelChange
                               : (std::string_view{name} == "displacement"
                                      ? snapshot.displacement
                                      : snapshot.potential);
@@ -2459,8 +2459,8 @@ TEST_F(AppsTest, SeaLevelUnderLateralModuliMatchesTheLibrary) {
   }
   RecordProperty("library_departure", std::format("{:.3e}", worst));
   const auto moved =
-      Departure(plain.variables.at("sea_level_change").values,
-                byCommand.variables.at("sea_level_change").values);
+      Departure(plain.variables.at("relative_sea_level_change").values,
+                byCommand.variables.at("relative_sea_level_change").values);
   RecordProperty("moduli_departure", std::format("{:.3e}", moved));
   EXPECT_GT(moved, 1e-6);
 }
@@ -2487,7 +2487,7 @@ TEST_F(AppsTest, SeaLevel3DStepSolversAgree) {
   const auto a = pm::ReadSurfaceFile(dir_ / "out" / "fixed.nc");
   const auto b = pm::ReadSurfaceFile(dir_ / "out" / "conjugate.nc");
   auto worst = 0.0;
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     const auto departure =
         Departure(b.variables.at(name).values, a.variables.at(name).values);
     worst = std::max(worst, departure);
@@ -2523,7 +2523,7 @@ std::string Prem8Fingerprint(const std::string& name,
 
 TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   // Without a times block, a laterally varying moduli file makes the
-  // fingerprint 3-D: the command is SeaLevelEvolution3D::Instantaneous on
+  // fingerprint 3-D: the command is Evolution3D::Instantaneous on
   // the stepper of a branchless rheology under the same moduli, solved
   // here on the same state and load, to rounding (equal to the bit here),
   // with the metadata of the 3-D solve. Its *_radial_model fields are the
@@ -2561,8 +2561,8 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   const auto byCommand = pm::ReadSurfaceFile(dir_ / "out" / "lateral.nc");
   const auto radial = pm::ReadSurfaceFile(dir_ / "out" / "radial.nc");
   for (const auto* name :
-       {"ice_change", "sea_level_change", "displacement", "potential",
-        "ocean_function", "sea_level_change_radial_model",
+       {"ice_change", "relative_sea_level_change", "displacement", "potential",
+        "ocean_function", "relative_sea_level_change_radial_model",
         "displacement_radial_model", "potential_radial_model"}) {
     EXPECT_TRUE(byCommand.variables.contains(name)) << name;
   }
@@ -2582,7 +2582,7 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   EXPECT_LE(residual.at(0), 1e-9);
 
   // the radial model's fields are the radial fingerprint's, to the bit
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(byCommand.variables.at(std::string{name} + "_radial_model").values,
               radial.variables.at(name).values)
         << name;
@@ -2608,7 +2608,7 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   options.moduli = {.shear = moduli->Shear(), .bulk = moduli->Bulk()};
   const Viscoelastic3D op(*elastic, kLmax,
                           [](double, double, double) { return 0.0; }, options);
-  const SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLove(),
+  const GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLove(),
                               SeaLevelParameters{});
   const auto history = io::FieldHistory::Read(dir_ / "history.nc", solver.Grid());
   ASSERT_TRUE(history);
@@ -2628,13 +2628,13 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
     load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
               thickness / length;
   }
-  SeaLevelEvolution3D evolution(op, solver, state);
+  Evolution3D evolution(op, solver, state);
   const auto response = evolution.Instantaneous(load);
   ASSERT_TRUE(response.converged);
   EXPECT_EQ(iterations.at(0), response.coupledIterations);
   auto worst = 0.0;
   for (const auto& [name, field, factor] :
-       {std::tuple{"sea_level_change", &response.seaLevelChange, length},
+       {std::tuple{"relative_sea_level_change", &response.relativeSeaLevelChange, length},
         std::tuple{"displacement", &response.displacement, length},
         std::tuple{"potential", &response.potential,
                    scales.Factor(PotentialDimensions)}}) {
@@ -2646,8 +2646,8 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   }
   RecordProperty("library_departure", std::format("{:.3e}", worst));
   const auto moved =
-      Departure(byCommand.variables.at("sea_level_change").values,
-                radial.variables.at("sea_level_change").values);
+      Departure(byCommand.variables.at("relative_sea_level_change").values,
+                radial.variables.at("relative_sea_level_change").values);
   RecordProperty("moduli_departure", std::format("{:.3e}", moved));
   EXPECT_GT(moved, 1e-5);
   EXPECT_LT(moved, 0.1);
@@ -2677,7 +2677,7 @@ TEST_F(AppsTest, SeaLevelFingerprintOnLaterallyUniformModuliIsTheRadialOne) {
   const auto uniform = pm::ReadSurfaceFile(dir_ / "out" / "uniform.nc");
   const auto radial = pm::ReadSurfaceFile(dir_ / "out" / "radial.nc");
   auto worst = 0.0;
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     const auto departure = Departure(uniform.variables.at(name).values,
                                      radial.variables.at(name).values);
     worst = std::max(worst, departure);
@@ -2730,7 +2730,7 @@ TEST_F(AppsTest, SeaLevelFingerprintStepSolversAgree) {
   EXPECT_GT(std::get<std::vector<long long>>(b.meta.at("solve_iterations")).at(0),
             0);
   auto worst = 0.0;
-  for (const auto* name : {"sea_level_change", "displacement", "potential"}) {
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     const auto departure =
         Departure(b.variables.at(name).values, a.variables.at(name).values);
     worst = std::max(worst, departure);

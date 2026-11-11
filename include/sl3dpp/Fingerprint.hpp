@@ -10,7 +10,7 @@
  * state. SI in, SI out: ice thicknesses and sea levels in metres, loads in
  * kg m^-2, the returned sea level change, displacement in metres, the
  * potential perturbation in m^2 s^-2 and the angular velocity change in
- * rad s^-1. Everything inside is the non-dimensional SeaLevelSolver.
+ * rad s^-1. Everything inside is the non-dimensional GRDSolver.
  */
 
 #include <array>
@@ -41,7 +41,7 @@ class Fingerprint {
       : Fingerprint(lmax, table, Options{}) {}
 
   [[nodiscard]] const SurfaceGrid& Grid() const { return solver_.Grid(); }
-  [[nodiscard]] const SeaLevelSolver& Solver() const { return solver_; }
+  [[nodiscard]] const GRDSolver& Solver() const { return solver_; }
 
   // -- the background state (SI metres)
   // -----------------------------------------
@@ -72,18 +72,18 @@ class Fingerprint {
 
   /// The surface mass load (kg m^-2) of an ice thickness change (metres):
   /// rho_ice (1 - C) Delta I, grounded ice only.
-  [[nodiscard]] std::vector<double> LoadFromIceThicknessChange(
+  [[nodiscard]] std::vector<double> DirectLoadFromIceThicknessChange(
       std::span<const double> iceThicknessChange) const;
 
   /// The surface mass load of a sea level change: rho_water C Delta SL.
-  [[nodiscard]] std::vector<double> LoadFromSeaLevelChange(
-      std::span<const double> seaLevelChange) const;
+  [[nodiscard]] std::vector<double> DirectLoadFromSeaLevelChange(
+      std::span<const double> relativeSeaLevelChange) const;
 
   // -- solves (SI)
   // ------------------------------------------------------------------
 
   struct Result {
-    std::vector<double> seaLevelChange;       ///< m
+    std::vector<double> relativeSeaLevelChange;       ///< m
     std::vector<double> displacement;         ///< m
     std::vector<double> potential;            ///< m^2 s^-2
     std::array<double, 3> angularVelocity{};  ///< rad s^-1
@@ -112,10 +112,10 @@ class Fingerprint {
  private:
   [[nodiscard]] std::vector<double> ToDimensionless(
       std::span<const double> field, Dimensions dimensions) const;
-  [[nodiscard]] Result FromResponse(SeaLevelSolver::Response response) const;
+  [[nodiscard]] Result FromResponse(GRDSolver::Response response) const;
 
-  SeaLevelSolver solver_;
-  SeaLevelSolver::State state_;
+  GRDSolver solver_;
+  GRDSolver::State state_;
   double rtol_;
   int andersonMemory_;
 };

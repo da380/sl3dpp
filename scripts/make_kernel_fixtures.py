@@ -32,7 +32,7 @@ from pyslfp.core import EarthModel, EarthState
 from pyslfp.ice import AnalyticalIceModel
 from pyslfp.love_numbers.material import Material
 from pyslfp.love_numbers.table import LoveNumbers
-from pyslfp.viscoelastic import Rheology, SeaLevelEvolution, ViscoelasticOperator
+from pyslfp.viscoelastic import Rheology, Evolution, ViscoelasticOperator
 from pyslfp.viscoelastic.evolution import KYR, Measurement
 
 from fixture_tools import data_dir, provenance
@@ -85,7 +85,7 @@ def main() -> None:
         0.0, LMAX, grid=earth.grid_name, sampling=earth.sampling,
         extend=earth.extend)
     state = EarthState(ice, sl, earth)
-    evolution = SeaLevelEvolution(op, state)
+    evolution = Evolution(op, state)
     scales = earth.parameters.scales
 
     # The measurement duals: the Cap formulas of the C++ gate, sampled on

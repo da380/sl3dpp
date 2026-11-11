@@ -122,7 +122,7 @@ void CheckTrajectory(const ForwardTrajectory* trajectory, std::size_t nodes) {
 }  // namespace
 
 /// The material-unit step sizes of the time grid.
-std::vector<double> TangentLinearSolver::StepSizes(const SeaLevelEvolution& ev,
+std::vector<double> TangentLinearSolver::StepSizes(const Evolution& ev,
                               std::span<const double> times) {
   auto dts = std::vector<double>{};
   for (auto n = std::size_t{0}; n + 1 < times.size(); ++n) {
@@ -133,7 +133,7 @@ std::vector<double> TangentLinearSolver::StepSizes(const SeaLevelEvolution& ev,
 
 std::function<LoadCallable(const std::vector<Complex>&)>
 TangentLinearSolver::LoadColumnsOf(
-    const SeaLevelEvolution& ev) {
+    const Evolution& ev) {
   return [&ev](const std::vector<Complex>& c) {
     return ev.Columns(c, ev.toMatDensity_);
   };
@@ -141,7 +141,7 @@ TangentLinearSolver::LoadColumnsOf(
 
 std::function<LoadCallable(const std::vector<Complex>&)>
 TangentLinearSolver::TideColumnsOf(
-    const SeaLevelEvolution& ev) {
+    const Evolution& ev) {
   return [&ev](const std::vector<Complex>& c) {
     return ev.Columns(c, ev.toMatPotential_);
   };
@@ -256,7 +256,7 @@ std::map<int, std::vector<double>> TangentLinearSolver::SecondWeightDrive(
   return out;
 }
 
-TangentLinearSolver::TangentLinearSolver(const SeaLevelEvolution& evolution,
+TangentLinearSolver::TangentLinearSolver(const Evolution& evolution,
                                          Options options)
     : evolution_(&evolution), options_(std::move(options)) {}
 
@@ -271,7 +271,7 @@ struct TangentLinearSolver::MaterialForcing {
 };
 
 struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing {
-  const SeaLevelEvolution* ev = nullptr;
+  const Evolution* ev = nullptr;
   PointMaterialDirection direction;  // kappa and mu at the points
   const ForwardTrajectory* trajectory = nullptr;
   std::vector<double> dts;
@@ -451,11 +451,11 @@ struct TangentLinearSolver::MaterialSecondDrive
     : TangentLinearSolver::MaterialForcing {
   struct Part {
     std::shared_ptr<MaterialDrive> a;
-    std::span<const SeaLevelEvolution::Snapshot> b;
+    std::span<const Evolution::Snapshot> b;
     std::shared_ptr<MaterialDrive> bMaterial;  // may be null
     std::vector<std::vector<double>> bDitauPoints;  // empty: no itau in b
   };
-  const SeaLevelEvolution* ev = nullptr;
+  const Evolution* ev = nullptr;
   AdjointMethod method = AdjointMethod::Continuous;
   const ForwardTrajectory* trajectory = nullptr;
   std::vector<Part> parts;
@@ -570,7 +570,7 @@ TangentLinearSolver::MakeMaterialDrive(const PointMaterialDirection& d,
   return drive;
 }
 
-std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
+std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
     std::span<const double> times, const TangentPerturbation& direction,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
@@ -666,10 +666,10 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::Run(
   return March(times, oceanFunctions, directAt, drive, material.get());
 }
 
-std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
+std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
     std::span<const double> times,
-    std::span<const SeaLevelEvolution::Snapshot> tangentU,
-    std::span<const SeaLevelEvolution::Snapshot> tangentV,
+    std::span<const Evolution::Snapshot> tangentU,
+    std::span<const Evolution::Snapshot> tangentV,
     const SecondOrderDirection& direction, const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
   const auto& ev = *evolution_;
@@ -683,7 +683,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   // Which first-order drives the run carries: v's trajectory with u's
   // perturbation, u's with v's, the forward one with itau_uv.
   struct Part {
-    std::span<const SeaLevelEvolution::Snapshot> along;  // empty: the base
+    std::span<const Evolution::Snapshot> along;  // empty: the base
     std::vector<std::vector<double>> ditau;
   };
   auto parts = std::vector<Part>{};
@@ -795,7 +795,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   return March(times, oceanFunctions, none, drive, material.get());
 }
 
-std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
+std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
     const Direct& directAt, const Drive& drive,
@@ -826,7 +826,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(
           "the transverse rotational feedback is unstable; see "
-          "SeaLevelEvolution::Run");
+          "Evolution::Run");
     }
   }
   const auto rhoW = solver.WaterDensity();
@@ -847,20 +847,20 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     }
     return grid.Expand(total);
   };
-  auto centrifugal = [&](const SeaLevelSolver::Response& r) {
+  auto centrifugal = [&](const GRDSolver::Response& r) {
     return rotation == RotationalFeedback::None
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(r.angularVelocity);
   };
-  SeaLevelSolver::Options sleOptions;
+  GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
-  auto flavours = std::map<double, SeaLevelSolver>{};
-  auto solverFor = [&](double dt) -> const SeaLevelSolver& {
+  auto flavours = std::map<double, GRDSolver>{};
+  auto solverFor = [&](double dt) -> const GRDSolver& {
     auto found = flavours.find(dt);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, SeaLevelSolver(
+                  .emplace(dt, GRDSolver(
                                    grid,
                                    dt == 0.0 ? op.ElasticLoveNumbers()
                                              : op.EffectiveLoveNumbers(
@@ -870,7 +870,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     }
     return found->second;
   };
-  auto checkConverged = [](const SeaLevelSolver::Response& r,
+  auto checkConverged = [](const GRDSolver::Response& r,
                            std::size_t node) {
     if (!r.converged) {
       throw std::runtime_error(std::format(
@@ -884,8 +884,8 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
   vstate.t = times[0] * ev.toMatTime_;
   auto sigma = grid.ZeroCoefficients();
   auto psi = grid.ZeroCoefficients();
-  auto response = SeaLevelSolver::Response{};
-  response.seaLevelChange.assign(fieldSize, 0.0);
+  auto response = GRDSolver::Response{};
+  response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
 
@@ -894,7 +894,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
   // perturbation gives none there).
   auto startResponse = std::map<int, std::vector<double>>{};
   if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
-    SeaLevelSolver::GeneralisedForcing forcing;
+    GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
@@ -914,7 +914,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     }
     response = solverFor(0.0).SolveGeneralised(ev.state_, forcing, sleOptions);
     checkConverged(response, 0);
-    sigma = totalLoadCoefficients(f0, response.seaLevelChange, 0);
+    sigma = totalLoadCoefficients(f0, response.relativeSeaLevelChange, 0);
     psi = centrifugal(response);
   }
   if (options_.record || material != nullptr) {
@@ -929,11 +929,11 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     }
   }
 
-  auto snapshots = std::vector<SeaLevelEvolution::Snapshot>{};
-  auto record = [&](std::size_t node, SeaLevelSolver::Response& r) {
-    SeaLevelEvolution::Snapshot snapshot;
+  auto snapshots = std::vector<Evolution::Snapshot>{};
+  auto record = [&](std::size_t node, GRDSolver::Response& r) {
+    Evolution::Snapshot snapshot;
     snapshot.t = times[node];
-    snapshot.seaLevelChange = std::move(r.seaLevelChange);
+    snapshot.relativeSeaLevelChange = std::move(r.relativeSeaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;
@@ -956,7 +956,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
                              ev.Columns(psi, ev.toMatPotential_));
     if (drive) step.AddMemory(drive(node, dt));
     if (material != nullptr) step.AddForce(material->Force(node, dt));
-    SeaLevelSolver::GeneralisedForcing coupled;
+    GRDSolver::GeneralisedForcing coupled;
     coupled.directLoad = directAt(node);
     coupled.displacementResponse =
         ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
@@ -968,7 +968,7 @@ std::vector<SeaLevelEvolution::Snapshot> TangentLinearSolver::March(
     coupled.oceanFunctionOverride = overrideAt(node);
     response = solverFor(dt).SolveGeneralised(ev.state_, coupled, sleOptions);
     checkConverged(response, node);
-    sigma = totalLoadCoefficients(coupled.directLoad, response.seaLevelChange,
+    sigma = totalLoadCoefficients(coupled.directLoad, response.relativeSeaLevelChange,
                                   node);
     psi = centrifugal(response);
     auto [next, solutions] = step.Finish(ev.Columns(sigma, ev.toMatDensity_),

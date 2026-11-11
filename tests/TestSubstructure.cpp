@@ -299,7 +299,7 @@ TEST(Substructure, ALateralEvolutionIsTheDirectOne) {
   const auto prem = Prem8(lmax);
   const auto rheology = prem.Maxwell();
   ViscoelasticOperator reference(rheology, lmax);
-  SeaLevelSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
@@ -322,7 +322,7 @@ TEST(Substructure, ALateralEvolutionIsTheDirectOne) {
   };
   auto run = [&](std::vector<int> cuts) {
     Viscoelastic3D op(rheology, lmax, delta, {.radial_cuts = std::move(cuts)});
-    SeaLevelEvolution3D evolution(op, solver, state,
+    Evolution3D evolution(op, solver, state,
                                   {.rtol = 1e-12, .coupled_rtol = 1e-12});
     return evolution.Run(times, [&](double) { return load; });
   };
@@ -331,7 +331,7 @@ TEST(Substructure, ALateralEvolutionIsTheDirectOne) {
   ASSERT_EQ(got.size(), want.size());
   for (auto n = std::size_t{1}; n < got.size(); ++n) {
     EXPECT_TRUE(got[n].converged);
-    EXPECT_LT(RelativeDifference(got[n].seaLevelChange, want[n].seaLevelChange),
+    EXPECT_LT(RelativeDifference(got[n].relativeSeaLevelChange, want[n].relativeSeaLevelChange),
               1e-10)
         << "node " << n;
     EXPECT_LT(RelativeDifference(got[n].displacement, want[n].displacement),

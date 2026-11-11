@@ -84,7 +84,7 @@ std::vector<double> Fingerprint::SeaLevel() const {
   return out;
 }
 
-std::vector<double> Fingerprint::LoadFromIceThicknessChange(
+std::vector<double> Fingerprint::DirectLoadFromIceThicknessChange(
     std::span<const double> iceThicknessChange) const {
   if (iceThicknessChange.size() != solver_.Grid().FieldSize()) {
     throw std::invalid_argument("the field does not live on the grid");
@@ -101,33 +101,33 @@ std::vector<double> Fingerprint::LoadFromIceThicknessChange(
   return out;
 }
 
-std::vector<double> Fingerprint::LoadFromSeaLevelChange(
-    std::span<const double> seaLevelChange) const {
-  if (seaLevelChange.size() != solver_.Grid().FieldSize()) {
+std::vector<double> Fingerprint::DirectLoadFromSeaLevelChange(
+    std::span<const double> relativeSeaLevelChange) const {
+  if (relativeSeaLevelChange.size() != solver_.Grid().FieldSize()) {
     throw std::invalid_argument("the field does not live on the grid");
   }
   const auto& scales = solver_.SolverScales();
   const double sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
   const auto length = scales.Length();
-  auto out = std::vector<double>(seaLevelChange.size());
+  auto out = std::vector<double>(relativeSeaLevelChange.size());
   for (auto i = std::size_t{0}; i < out.size(); ++i) {
     out[i] = solver_.WaterDensity() * state_.oceanFunction[i] *
-             (seaLevelChange[i] / length) * sigma;
+             (relativeSeaLevelChange[i] / length) * sigma;
   }
   return out;
 }
 
 Fingerprint::Result Fingerprint::FromResponse(
-    SeaLevelSolver::Response response) const {
+    GRDSolver::Response response) const {
   const auto& scales = solver_.SolverScales();
   const auto length = scales.Length();
   const auto potential = scales.Factor(PotentialDimensions);
   const double frequency = scales.Factor(Dimensions{.time = -1});
   Result out;
-  out.seaLevelChange = std::move(response.seaLevelChange);
+  out.relativeSeaLevelChange = std::move(response.relativeSeaLevelChange);
   out.displacement = std::move(response.displacement);
   out.potential = std::move(response.potential);
-  for (auto& v : out.seaLevelChange) v *= length;
+  for (auto& v : out.relativeSeaLevelChange) v *= length;
   for (auto& v : out.displacement) v *= length;
   for (auto& v : out.potential) v *= potential;
   for (auto i = 0; i < 3; ++i) {
@@ -144,7 +144,7 @@ Fingerprint::Result Fingerprint::Solve(std::span<const double> directLoad,
   if (state_.oceanFunction.empty()) {
     throw std::logic_error("set a background state before solving");
   }
-  SeaLevelSolver::Options options;
+  GRDSolver::Options options;
   options.rtol = rtol_;
   options.anderson_memory = andersonMemory_;
   return FromResponse(solver_.Solve(
@@ -155,7 +155,7 @@ Fingerprint::Result Fingerprint::Solve(std::span<const double> directLoad,
 Fingerprint::Result Fingerprint::SolveForIceChange(
     std::span<const double> iceThicknessChange,
     RotationalFeedback rotation) const {
-  return Solve(LoadFromIceThicknessChange(iceThicknessChange), rotation);
+  return Solve(DirectLoadFromIceThicknessChange(iceThicknessChange), rotation);
 }
 
 Fingerprint::Result Fingerprint::SolveNonlinear(
@@ -164,11 +164,11 @@ Fingerprint::Result Fingerprint::SolveNonlinear(
   if (state_.oceanFunction.empty()) {
     throw std::logic_error("set a background state before solving");
   }
-  SeaLevelSolver::Options options;
+  GRDSolver::Options options;
   options.rtol = rtol_;
   options.max_iterations = 50;
   options.anderson_memory = andersonMemory_;
-  SeaLevelSolver::NonlinearForcing forcing;
+  GRDSolver::NonlinearForcing forcing;
   forcing.iceThicknessChange =
       ToDimensionless(iceThicknessChange, Dimensions{.length = 1});
   forcing.rotation = rotation;

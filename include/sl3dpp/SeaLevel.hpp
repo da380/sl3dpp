@@ -81,7 +81,7 @@ struct SeaLevelParameters {
 /// the floating fraction (ice density / water density) of any ice standing
 /// on the ocean floor. T and I as pyslfp's `export_ice_history` writes them
 /// from ICE-5G/6G/7G; any consistent units (SI for Fingerprint, the
-/// solver's for SeaLevelSolver::MakeState). Refused when the sizes differ.
+/// solver's for GRDSolver::MakeState). Refused when the sizes differ.
 [[nodiscard]] std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
     const SeaLevelParameters& parameters = {});
@@ -92,7 +92,7 @@ struct SeaLevelParameters {
 /// component along the rotation axis.
 enum class RotationalFeedback { None, Axial, Full };
 
-class SeaLevelSolver {
+class GRDSolver {
  public:
   struct Options {
     double rtol = 1e-9;
@@ -103,7 +103,7 @@ class SeaLevelSolver {
 
   /// The grid is copied in; the SI table and parameters are converted to
   /// the solver's non-dimensional scheme here, once.
-  SeaLevelSolver(SurfaceGrid grid, const LoveNumbers& table,
+  GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
                  SeaLevelParameters parameters);
 
   [[nodiscard]] const SurfaceGrid& Grid() const { return grid_; }
@@ -193,6 +193,28 @@ class SeaLevelSolver {
   /// ocean function zero everywhere.
   [[nodiscard]] State NoOceanState() const;
 
+  // -- loads
+  // -------------------------------------------------------------------
+  //
+  // The DIRECT load is the part of the surface load that is given,
+  // whatever its source (ice, sediment, a change of the ocean's density
+  // or dynamics): a mass per unit area. The INDUCED load is the part the
+  // response makes, rho_w C times the relative sea level change. Their
+  // sum is the total load, or the load. These helpers make direct loads
+  // from the quantities they are usually given as, on a state's ocean
+  // function, all in the solver's units.
+
+  /// The direct load of a change of ice thickness: rho_i (1 - C) Delta I,
+  /// the grounded ice alone.
+  [[nodiscard]] std::vector<double> DirectLoadFromIceThicknessChange(
+      const State& state, std::span<const double> iceThicknessChange) const;
+
+  /// The load of a sea level change over the oceans, rho_w C Delta SL:
+  /// the direct load of a given change (an ocean-dynamic one, say), and
+  /// the induced load of the relative sea level change of a solve.
+  [[nodiscard]] std::vector<double> LoadFromSeaLevelChange(
+      const State& state, std::span<const double> seaLevelChange) const;
+
   // -- the generalised linear solve
   // ---------------------------------------------
 
@@ -215,7 +237,7 @@ class SeaLevelSolver {
   };
 
   struct Response {
-    std::vector<double> seaLevelChange;
+    std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
     std::array<double, 3> angularVelocity{0.0, 0.0, 0.0};

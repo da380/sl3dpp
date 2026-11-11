@@ -369,7 +369,7 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
   ViscoelasticOperator reference(body.rheology, lmax);
   Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
-  SeaLevelSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   const auto length = solver.SolverScales().Length();
   auto toNd = [&](std::vector<double> si) {
@@ -385,7 +385,7 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
     melt[i] =
         -0.1 * solver.IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
   }
-  const auto iceLoad = [&](double t) {
+  const auto directLoad = [&](double t) {
     auto out = melt;
     for (auto& v : out) v *= t / times.back();
     return out;
@@ -397,28 +397,28 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
   };
   const auto options = Viscoelastic3D::Options{
       .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
-  const auto evolutionOptions = SeaLevelEvolution3D::Options{
+  const auto evolutionOptions = Evolution3D::Options{
       .rtol = 1e-12, .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
   for (const auto migrating : {false, true}) {
-    auto run = [&](SeaLevelEvolution3D& evolution) {
+    auto run = [&](Evolution3D& evolution) {
       return migrating ? evolution.RunMigrating(times, thickness)
-                       : evolution.Run(times, iceLoad);
+                       : evolution.Run(times, directLoad);
     };
     const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
-    SeaLevelEvolution3D one(whole, solver, state, evolutionOptions);
+    Evolution3D one(whole, solver, state, evolutionOptions);
     const auto want = run(one);
     auto mine = options;
     mine.segments = share.segments;
     mine.collectives = share.collectives;
     const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
-    SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+    Evolution3D evolution(op, solver, state, evolutionOptions);
     const auto got = run(evolution);
     ASSERT_EQ(got.size(), want.size());
     auto worst = 0.0;
     for (auto n = std::size_t{0}; n < want.size(); ++n) {
       EXPECT_TRUE(got[n].converged) << "node " << n;
       worst = std::max(worst,
-                       Relative(got[n].seaLevelChange, want[n].seaLevelChange));
+                       Relative(got[n].relativeSeaLevelChange, want[n].relativeSeaLevelChange));
       if (migrating) {
         EXPECT_EQ(got[n].oceanFunction, want[n].oceanFunction) << n;
       }
@@ -442,7 +442,7 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
   ViscoelasticOperator reference(body.rheology, lmax);
   Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
-  SeaLevelSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   const auto length = solver.SolverScales().Length();
   auto toNd = [&](std::vector<double> si) {
@@ -459,7 +459,7 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
     melt[i] =
         -0.1 * solver.IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
   }
-  const auto iceLoad = [&](double t) {
+  const auto directLoad = [&](double t) {
     auto out = melt;
     for (auto& v : out) v *= t / times.back();
     return out;
@@ -477,7 +477,7 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
   const auto options = Viscoelastic3D::Options{
       .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
   const auto evolutionOptions =
-      SeaLevelEvolution3D::Options{.rtol = 1e-12,
+      Evolution3D::Options{.rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,
                                    .record_stride = 1};
@@ -485,13 +485,13 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
       .rtol = 1e-12, .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
   for (const auto migrating : {false, true}) {
     auto sweep = [&](const Viscoelastic3D& op) {
-      SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+      Evolution3D evolution(op, solver, state, evolutionOptions);
       const auto snapshots = migrating
                                  ? evolution.RunMigrating(times, thickness)
-                                 : evolution.Run(times, iceLoad);
+                                 : evolution.Run(times, directLoad);
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       AdjointSolver3D adjoint(evolution, adjointOptions);
-      return adjoint.IceHistoryKernels(
+      return adjoint.FirstOrderKernels(
           times, measurements, &trajectory,
           migrating ? OceanFunctionsOf(snapshots)
                     : std::vector<std::vector<double>>{});
@@ -504,9 +504,9 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
     const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
     const auto got = sweep(op);
     auto worstIce = 0.0;
-    for (auto n = std::size_t{0}; n < want.ice.loadDuals.size(); ++n) {
+    for (auto n = std::size_t{0}; n < want.ice.directLoadKernels.size(); ++n) {
       worstIce = std::max(
-          worstIce, Relative(got.ice.loadDuals[n], want.ice.loadDuals[n]));
+          worstIce, Relative(got.ice.directLoadKernels[n], want.ice.directLoadKernels[n]));
     }
     const auto& part = op.Coupling();
     const auto& all = whole.Coupling();
@@ -615,7 +615,7 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
   ViscoelasticOperator reference(body.rheology, lmax);
   Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
   fingerprint.SetAnalyticTestState(0.0);
-  auto solvers = std::vector<SeaLevelSolver>{};
+  auto solvers = std::vector<GRDSolver>{};
   for (auto rank = 0; rank < 2; ++rank) {
     solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
                          SeaLevelParameters{});
@@ -635,7 +635,7 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
     melt[i] = -0.1 * solvers[0].IceDensity() * (1.0 - state.oceanFunction[i]) *
               ice[i];
   }
-  const auto iceLoad = [&](double t) {
+  const auto directLoad = [&](double t) {
     auto out = melt;
     for (auto& v : out) v *= t / times.back();
     return out;
@@ -664,7 +664,7 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
       .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = share.cuts};
   const auto evolutionOptions =
-      SeaLevelEvolution3D::Options{.rotation = RotationalFeedback::Full,
+      Evolution3D::Options{.rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,
@@ -699,14 +699,14 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
   };
 
   struct Result {
-    std::map<AdjointMethod, std::vector<SeaLevelEvolution3D::Snapshot>> tangent;
+    std::map<AdjointMethod, std::vector<Evolution3D::Snapshot>> tangent;
     std::map<AdjointMethod, Kernels3D> kernels;
     std::map<AdjointMethod, std::pair<Kernels3D, KernelDerivatives3D>> second;
   };
-  auto run = [&](const Viscoelastic3D& op, const SeaLevelSolver& solver) {
-    SeaLevelEvolution3D evolution(op, solver, state, evolutionOptions);
+  auto run = [&](const Viscoelastic3D& op, const GRDSolver& solver) {
+    Evolution3D evolution(op, solver, state, evolutionOptions);
     const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, iceLoad));
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto direction = directionFor(op.Coupling());
     const auto itau = TangentLinearSolver3D::ItauOfLogViscosity(op, direction.logViscosity);
     Result out;
@@ -722,7 +722,7 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
                                           .max_coupled_iterations = 100,
                                           .coupled_rtol = 1e-11,
                                           .material_kernels = true});
-      out.kernels[method] = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+      out.kernels[method] = adjoint.FirstOrderKernels(times, measurements, &trajectory);
       out.second[method] = adjoint.SecondOrderKernels(
           times, measurements, out.tangent[method], itau, trajectory, {},
           direction.material);
@@ -746,10 +746,10 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
       const auto& w = want;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         worstTangent = std::max(
-            worstTangent, Relative(r.tangent.at(method)[n].seaLevelChange,
-                                   w.tangent.at(method)[n].seaLevelChange));
-        worstIce = std::max(worstIce, Relative(r.kernels.at(method).ice.loadDuals[n],
-                                               w.kernels.at(method).ice.loadDuals[n]));
+            worstTangent, Relative(r.tangent.at(method)[n].relativeSeaLevelChange,
+                                   w.tangent.at(method)[n].relativeSeaLevelChange));
+        worstIce = std::max(worstIce, Relative(r.kernels.at(method).ice.directLoadKernels[n],
+                                               w.kernels.at(method).ice.directLoadKernels[n]));
         worstSecond = std::max(
             worstSecond, Relative(r.second.at(method).second.ice.thickness[n],
                                   w.second.at(method).second.ice.thickness[n]));

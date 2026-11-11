@@ -176,7 +176,7 @@ def sea_level_at(directory: Path):
 
     file = read_surface_file(directory / f"{directory.name}.nc")
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
-    values = np.asarray(file.variables["sea_level_change"].values)
+    values = np.asarray(file.variables["relative_sea_level_change"].values)
     weights = np.asarray(file.grid.weights)[:, None] * np.ones(
         len(file.grid.longitudes))[None, :]
     picks = {}

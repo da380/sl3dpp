@@ -4,7 +4,7 @@
  * @file InitialSeaLevel.hpp
  * @brief The initial sea level of a run, calibrated so that the run reaches
  * a given final sea level, as pyslfp's
- * `SeaLevelEvolution.final_sea_level_misfit` and
+ * `Evolution.final_sea_level_misfit` and
  * `calibrate_initial_sea_level` (pyslfp 3.0.0; its docstrings and
  * `pyslfp_theory.tex`, "Calibrating the initial sea level", are the
  * authoritative statements).
@@ -52,11 +52,11 @@
 namespace sl3dpp {
 
 /// How a run treats its shorelines: held at the background state's
-/// (`SeaLevelEvolution::Run`) or following flotation (`RunMigrating`).
+/// (`Evolution::Run`) or following flotation (`RunMigrating`).
 enum class Shorelines { Frozen, Migrating };
 
 /// An ice history as either shoreline treatment takes it: under frozen
-/// shorelines the non-ocean surface load at t (`Run`'s iceLoad, built
+/// shorelines the non-ocean surface load at t (`Run`'s directLoad, built
 /// against the background state's ocean function), under migrating ones
 /// the ice thickness at t (`RunMigrating`'s iceThickness). Solver units.
 struct IceHistory {
@@ -64,8 +64,8 @@ struct IceHistory {
   std::function<std::vector<double>(double)> field;
 
   [[nodiscard]] static IceHistory Frozen(
-      std::function<std::vector<double>(double)> iceLoad) {
-    return {Shorelines::Frozen, std::move(iceLoad)};
+      std::function<std::vector<double>(double)> directLoad) {
+    return {Shorelines::Frozen, std::move(directLoad)};
   }
   [[nodiscard]] static IceHistory Migrating(
       std::function<std::vector<double>(double)> iceThickness) {
@@ -75,11 +75,11 @@ struct IceHistory {
 
 /// Runs the history from the evolution's background state, by `Run` or
 /// `RunMigrating`.
-[[nodiscard]] std::vector<SeaLevelEvolution::Snapshot> RunIceHistory(
-    SeaLevelEvolution& evolution, std::span<const double> times,
+[[nodiscard]] std::vector<Evolution::Snapshot> RunIceHistory(
+    Evolution& evolution, std::span<const double> times,
     const IceHistory& history);
-[[nodiscard]] std::vector<SeaLevelEvolution3D::Snapshot> RunIceHistory(
-    SeaLevelEvolution3D& evolution, std::span<const double> times,
+[[nodiscard]] std::vector<Evolution3D::Snapshot> RunIceHistory(
+    Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history);
 
 /// The misfit of a run's final sea level to a target, and its gradient
@@ -89,7 +89,7 @@ struct FinalSeaLevelMisfit {
   std::vector<double> residual;  ///< r = S0 + xi(t_f) - S_f
   /// dJ / dS0 in the surface pairing, empty when not asked for.
   std::vector<double> gradient;
-  std::vector<SeaLevelEvolution::Snapshot> snapshots;  ///< the forward run
+  std::vector<Evolution::Snapshot> snapshots;  ///< the forward run
 };
 
 /**
@@ -107,7 +107,7 @@ struct FinalSeaLevelMisfit {
  * not differentiable.
  */
 [[nodiscard]] FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
-    SeaLevelEvolution& evolution, std::span<const double> times,
+    Evolution& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     std::span<const double> weights = {}, bool gradient = true,
     AdjointSolver::Options adjoint = {.method = AdjointMethod::Discrete});
@@ -117,14 +117,14 @@ struct FinalSeaLevelMisfit3D {
   double value = 0.0;
   std::vector<double> residual;
   std::vector<double> gradient;
-  std::vector<SeaLevelEvolution3D::Snapshot> snapshots;
+  std::vector<Evolution3D::Snapshot> snapshots;
 };
 
 /// The misfit of a 3D run, as the 1D one; under migrating shorelines the
 /// initial sea level kernel comes from the 3D sweep `adjoint` selects
 /// (continuous by default) about the run's C(t).
 [[nodiscard]] FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
-    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     std::span<const double> weights = {}, bool gradient = true,
     const AdjointSolver3D::Options& adjoint = {});
@@ -161,8 +161,8 @@ struct CalibrationOptions {
 
 /// The outcome: the calibrated background state and the run from it.
 struct InitialSeaLevelCalibration {
-  SeaLevelSolver::State state;
-  std::vector<SeaLevelEvolution::Snapshot> snapshots;
+  GRDSolver::State state;
+  std::vector<Evolution::Snapshot> snapshots;
   /// The weighted rms residual of every run, solver units (frozen: the
   /// run's, then what is left where the weights vanish).
   std::vector<double> misfits;
@@ -190,14 +190,14 @@ struct InitialSeaLevelCalibration {
  * every run, so calibrate with an evolution that streams nothing.
  */
 [[nodiscard]] InitialSeaLevelCalibration CalibrateInitialSeaLevel(
-    SeaLevelEvolution& evolution, std::span<const double> times,
+    Evolution& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     const CalibrationOptions& options = {});
 
 /// The 3D calibration result, as the 1D one.
 struct InitialSeaLevelCalibration3D {
-  SeaLevelSolver::State state;
-  std::vector<SeaLevelEvolution3D::Snapshot> snapshots;
+  GRDSolver::State state;
+  std::vector<Evolution3D::Snapshot> snapshots;
   std::vector<double> misfits;
   std::vector<double> updates;
   bool converged = false;
@@ -209,7 +209,7 @@ struct InitialSeaLevelCalibration3D {
 /// iteration is the 1D one with 3D runs, the gradient method's sweep by
 /// `options.adjoint3D`. The evolution adopts the calibrated state.
 [[nodiscard]] InitialSeaLevelCalibration3D CalibrateInitialSeaLevel(
-    SeaLevelEvolution3D& evolution, std::span<const double> times,
+    Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     const CalibrationOptions& options = {});
 

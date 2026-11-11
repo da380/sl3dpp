@@ -124,7 +124,7 @@ inline Viscoelastic3D::State GetState3D(std::ifstream& in) {
 /// The recurrence of a 1D checkpoint: the per-degree internal variables
 /// and their strain cache.
 inline void PutState(std::ofstream& out,
-                     const SeaLevelEvolution::Checkpoint& cp) {
+                     const Evolution::Checkpoint& cp) {
   for (const auto* held : {&cp.m, &cp.strain}) {
     PutOne(out, static_cast<std::uint64_t>(held->size()));
     for (const auto& [degree, values] : *held) {
@@ -134,7 +134,7 @@ inline void PutState(std::ofstream& out,
   }
 }
 
-inline void GetState(std::ifstream& in, SeaLevelEvolution::Checkpoint& cp) {
+inline void GetState(std::ifstream& in, Evolution::Checkpoint& cp) {
   for (auto* held : {&cp.m, &cp.strain}) {
     const auto degrees = GetOne<std::uint64_t>(in);
     for (auto k = std::uint64_t{0}; k < degrees; ++k) {
@@ -147,7 +147,7 @@ inline void GetState(std::ifstream& in, SeaLevelEvolution::Checkpoint& cp) {
 /// The recurrence of a 3D checkpoint: the memory tensors and the
 /// strain's coefficients.
 inline void PutState(std::ofstream& out,
-                     const SeaLevelEvolution3D::Checkpoint& cp) {
+                     const Evolution3D::Checkpoint& cp) {
   PutOne(out, static_cast<std::uint64_t>(cp.m.size()));
   for (const auto& tensor : cp.m) PutTensor(out, tensor);
   PutOne(out, static_cast<std::uint64_t>(
@@ -155,7 +155,7 @@ inline void PutState(std::ofstream& out,
   if (cp.strainCoefficients) PutSpectral(out, *cp.strainCoefficients);
 }
 
-inline void GetState(std::ifstream& in, SeaLevelEvolution3D::Checkpoint& cp) {
+inline void GetState(std::ifstream& in, Evolution3D::Checkpoint& cp) {
   cp.m.resize(GetOne<std::uint64_t>(in));
   for (auto& tensor : cp.m) tensor = GetTensor(in);
   if (GetOne<std::uint64_t>(in) != 0) cp.strainCoefficients = GetSpectral(in);

@@ -800,10 +800,10 @@ The `times` block decides what is solved:
 
 Whether the run is 1D or 3D is decided by the `model` block alone. A run
 through time is 3D when the viscosity of `model.viscosity` or the moduli
-of `model.moduli` vary laterally: `SeaLevelEvolution3D`, each step
+of `model.moduli` vary laterally: `Evolution3D`, each step
 solving the combined fixed point of the strain, the ocean load and the
 rotation about the radial reference, over MPI ranks; otherwise it is the
-radial model's (`SeaLevelEvolution`), on the deck's viscosity column or
+radial model's (`Evolution`), on the deck's viscosity column or
 the radial viscosity of `model.viscosity`. The fingerprint is 3D when the
 moduli of `model.moduli` vary laterally (The fingerprint on lateral
 moduli, below), and radial otherwise, a radial moduli file leaving the
@@ -867,7 +867,7 @@ Gauss–Legendre grid:
 | Field | Unit | Meaning |
 | --- | --- | --- |
 | `ice_change` | m | the ice thickness change applied (before the grounded-ice mask) |
-| `sea_level_change` | m | the sea-level change |
+| `relative_sea_level_change` | m | the sea-level change |
 | `displacement` | m | the radial surface displacement |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
 | `ocean_function` | 1 | the ocean function of the state |
@@ -885,7 +885,7 @@ the state's own shorelines under the same ice change, rotation and
 moments, on the laterally heterogeneous elastic Earth. Its unrelaxed
 solid varies laterally, so the solid's response is no Love-number
 closure: the fingerprint is the instantaneous response of the 3D sea
-level problem (`SeaLevelEvolution3D::Instantaneous`), the combined fixed
+level problem (`Evolution3D::Instantaneous`), the combined fixed
 point of the strain, the ocean load and the rotation over a step of zero
 length about the radial reference (docs/adjoints.md §13k, §13n). It is
 what a 3D run through time solves at its start, here under the ice
@@ -918,7 +918,7 @@ beside them, so that the lateral moduli's effect is a subtraction:
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
-| `sea_level_change_radial_model` | m | the sea-level change of the radial model's fingerprint |
+| `relative_sea_level_change_radial_model` | m | the sea-level change of the radial model's fingerprint |
 | `displacement_radial_model` | m | its radial surface displacement |
 | `potential_radial_model` | m^2 s^-2 | its potential perturbation at the surface |
 
@@ -974,7 +974,7 @@ shorelines a cell flipping back and forth can keep the nonlinear solve,
 or the 3D fixed point, above a tight tolerance: loosen it). A 1D run
 refuses the solver members of the 3D step. Under lateral moduli the
 start's instantaneous response is the combined fixed point of a
-zero-length step (`SeaLevelEvolution3D`).
+zero-length step (`Evolution3D`).
 
 The output is a surface file on the run's Gauss–Legendre grid with one
 slice per time node, its time axis in seconds relative to the present
@@ -983,10 +983,10 @@ interpolation:
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
-| `sea_level_change` | m | the sea-level change from the window's start |
+| `relative_sea_level_change` | m | the sea-level change from the window's start |
 | `displacement` | m | the radial surface displacement |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
-| `initial_sea_level` | m | static: the initial sea level the run started from (the sea level at a node is this plus `sea_level_change` there) |
+| `initial_sea_level` | m | static: the initial sea level the run started from (the sea level at a node is this plus `relative_sea_level_change` there) |
 | `ocean_function` | 1 | migrating shorelines alone: the ocean function at each node |
 
 Its metadata record the shorelines (`shorelines`), where the initial sea

@@ -32,8 +32,8 @@ struct Setup {
   EarthModel model;
   Material material;
   Rheology rheology;
-  SeaLevelSolver solver;
-  SeaLevelSolver::State state;
+  GRDSolver solver;
+  GRDSolver::State state;
   std::vector<double> iceNd;  // the state's ice thickness, solver units
 
   static Setup Make(bool viscous) {
@@ -68,7 +68,7 @@ struct Setup {
     }();
 
     ViscoelasticOperator op(rheology, kLmax);
-    SeaLevelSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
+    GRDSolver solver(SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
                           SeaLevelParameters{});
 
     // The analytic test state, built through the fingerprint helper and
@@ -102,7 +102,7 @@ struct Setup {
 TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
   auto setup = Setup::Make(false);
   ViscoelasticOperator op(setup.rheology, kLmax);
-  SeaLevelEvolution evolution(op, setup.solver, setup.state, {.rtol = 1e-12});
+  Evolution evolution(op, setup.solver, setup.state, {.rtol = 1e-12});
 
   const auto tauScale = 1e10 / setup.solver.SolverScales().Time();
   const auto times = std::vector<double>{0.0, tauScale, 3.0 * tauScale};
@@ -114,12 +114,12 @@ TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
   auto reference = setup.solver.Solve(
       setup.state, load, RotationalFeedback::Full, {.rtol = 1e-12});
   auto scale = 0.0;
-  for (auto v : reference.seaLevelChange) scale = std::max(scale, std::abs(v));
+  for (auto v : reference.relativeSeaLevelChange) scale = std::max(scale, std::abs(v));
   for (const auto& snapshot : snapshots) {
     auto diff = 0.0;
-    for (auto i = std::size_t{0}; i < reference.seaLevelChange.size(); ++i) {
-      diff = std::max(diff, std::abs(snapshot.seaLevelChange[i] -
-                                     reference.seaLevelChange[i]));
+    for (auto i = std::size_t{0}; i < reference.relativeSeaLevelChange.size(); ++i) {
+      diff = std::max(diff, std::abs(snapshot.relativeSeaLevelChange[i] -
+                                     reference.relativeSeaLevelChange[i]));
     }
     EXPECT_LT(diff, 1e-9 * scale) << "t = " << snapshot.t;
     for (auto i = 0; i < 3; ++i) {
@@ -132,7 +132,7 @@ TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
 TEST(Evolution, ViscousMantleKeepsRelaxing) {
   auto setup = Setup::Make(true);
   ViscoelasticOperator op(setup.rheology, kLmax);
-  SeaLevelEvolution evolution(op, setup.solver, setup.state, {});
+  Evolution evolution(op, setup.solver, setup.state, {});
   const auto& scales = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
   auto times = std::vector<double>{};
@@ -147,7 +147,7 @@ TEST(Evolution, ViscousMantleKeepsRelaxing) {
   auto peaks = std::vector<double>{};
   for (const auto& snapshot : snapshots) {
     auto peak = 0.0;
-    for (auto v : snapshot.seaLevelChange) peak = std::max(peak, std::abs(v));
+    for (auto v : snapshot.relativeSeaLevelChange) peak = std::max(peak, std::abs(v));
     peaks.push_back(peak);
   }
   for (auto i = std::size_t{1}; i < peaks.size(); ++i) {
@@ -221,7 +221,7 @@ TEST(Evolution, WithoutAnOceanIsTheDirectlySteppedBody) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
-      SeaLevelEvolution evolution(
+      Evolution evolution(
           op, solver, solver.NoOceanState(),
           {.scheme = scheme, .rotation = rotation, .rtol = 1e-12});
       const auto snapshots = evolution.Run(times, loadAt);
@@ -282,7 +282,7 @@ TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
   ASSERT_EQ(setup.solver.Grid().NumberOfLongitudes(), 2 * kLmax + 1)
       << "the GSHTrans grid no longer coincides with pyshtools GLQ here";
   ViscoelasticOperator op(setup.rheology, kLmax);
-  SeaLevelEvolution evolution(op, setup.solver, setup.state, {.rtol = 1e-11});
+  Evolution evolution(op, setup.solver, setup.state, {.rtol = 1e-11});
   const auto& grid = setup.solver.Grid();
   const auto& scales = setup.solver.SolverScales();
 
@@ -292,10 +292,10 @@ TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
     timesSi.push_back(i * tFinal / 10.0);
     times.push_back(timesSi.back() / scales.Time());
   }
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     return setup.MeltLoad(-0.1 * (t / times.back()));
   };
-  auto snapshots = evolution.Run(times, iceLoad);
+  auto snapshots = evolution.Run(times, directLoad);
 
   // Parse the fixture and compare, SI, in coefficient space.
   std::ifstream file(std::filesystem::path(SL3DPP_TEST_DATA_DIR) /
@@ -317,7 +317,7 @@ TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
       row >> head >> node >> t >> omega[0] >> omega[1] >> omega[2];
       ASSERT_LT(static_cast<std::size_t>(node), snapshots.size());
       EXPECT_NEAR(timesSi[node], t, 1e-6 * std::max(t, 1.0));
-      ours = grid.Expand(snapshots[node].seaLevelChange);
+      ours = grid.Expand(snapshots[node].relativeSeaLevelChange);
       for (auto& v : ours) v *= length;
       if (node > 0) {
         const double omegaScale = std::max(

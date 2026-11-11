@@ -45,7 +45,7 @@ int main(int argc, char** argv) {
   examples::Say("building the model, the operator and the sea level solver");
   const auto earth = examples::Earth::Make(lmax, 1e21);
   ViscoelasticOperator op(earth.rheology, lmax);
-  SeaLevelSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+  GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
                         SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -81,7 +81,7 @@ int main(int argc, char** argv) {
     times.push_back(tEnd * n / (nodes - 1) / scales.Time());
   }
   const auto rampEnd = meltEnd / scales.Time();
-  auto iceLoad = [&](double t) {
+  auto directLoad = [&](double t) {
     const auto ramp = std::min(t / rampEnd, 1.0);
     auto load = std::vector<double>(unitLoad.size());
     for (auto i = std::size_t{0}; i < load.size(); ++i)
@@ -90,11 +90,11 @@ int main(int argc, char** argv) {
   };
 
   examples::Say(std::format("the forward run, {} steps:", nodes - 1));
-  SeaLevelEvolution evolution(
+  Evolution evolution(
       op, solver, state,
-      {.on_snapshot = examples::NodeReporter<SeaLevelEvolution::Snapshot>(
+      {.on_snapshot = examples::NodeReporter<Evolution::Snapshot>(
            nodes - 1, scales.Time())});
-  const auto snapshots = evolution.Run(times, iceLoad);
+  const auto snapshots = evolution.Run(times, directLoad);
 
   // Three sites, geographic degrees: near field (Amundsen Sea, inside
   // the fingerprint's fall region), mid field (Fremantle), far field
@@ -129,9 +129,9 @@ int main(int argc, char** argv) {
   for (auto n = std::size_t{0}; n < snapshots.size(); ++n) {
     const auto& s = snapshots[n];
     rows.push_back({times[n] * scales.Time() / (1.0e3 * examples::kYear),
-                    sample(s.seaLevelChange, sites[0]) * length,
-                    sample(s.seaLevelChange, sites[1]) * length,
-                    sample(s.seaLevelChange, sites[2]) * length,
+                    sample(s.relativeSeaLevelChange, sites[0]) * length,
+                    sample(s.relativeSeaLevelChange, sites[1]) * length,
+                    sample(s.relativeSeaLevelChange, sites[2]) * length,
                     s.angularVelocity[0] * omegaSi,
                     s.angularVelocity[1] * omegaSi,
                     s.angularVelocity[2] * omegaSi});
@@ -145,8 +145,8 @@ int main(int argc, char** argv) {
              {{sites[0].latitude, sites[0].longitude},
               {sites[1].latitude, sites[1].longitude},
               {sites[2].latitude, sites[2].longitude}});
-  out.Field("slc_end_of_melt_m", snapshots[meltNode].seaLevelChange, length);
-  out.Field("slc_final_m", snapshots.back().seaLevelChange, length);
+  out.Field("slc_end_of_melt_m", snapshots[meltNode].relativeSeaLevelChange, length);
+  out.Field("slc_final_m", snapshots.back().relativeSeaLevelChange, length);
   out.Field("displacement_final_m", snapshots.back().displacement, length);
   out.Scalar("melt_end_kyr", 5.0);
 

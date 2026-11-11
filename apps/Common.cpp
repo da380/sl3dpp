@@ -259,7 +259,7 @@ const Json& IceFileMember(const Json& top) {
 }  // namespace
 
 Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
-                 const SeaLevelSolver& solver) {
+                 const GRDSolver& solver) {
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   const auto length = solver.SolverScales().Length();
@@ -292,7 +292,7 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
 }
 
 std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
-                                    const SeaLevelSolver& solver,
+                                    const GRDSolver& solver,
                                     const Loaded& world) {
   const auto end_kyr_bp = run.times->end_kyr_bp;
   const auto end_si = -end_kyr_bp * KYR;
@@ -339,7 +339,7 @@ std::vector<double> MakeTimes(const SeaLevelRun& run, const Scales& scales) {
 }
 
 std::function<std::vector<double>(double)> IceLoadOf(
-    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world) {
+    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world) {
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   const auto& scales = solver.SolverScales();
@@ -361,7 +361,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
 }
 
 std::function<std::vector<double>(double)> IceThicknessOf(
-    const SeaLevelRun& run, const SeaLevelSolver& solver, const Loaded& world) {
+    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto time = scales.Time();
@@ -380,7 +380,7 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   };
 }
 
-IceHistory HistoryOf(const SeaLevelRun& run, const SeaLevelSolver& solver,
+IceHistory HistoryOf(const SeaLevelRun& run, const GRDSolver& solver,
                      const Loaded& world) {
   return run.ocean.shorelines == Shorelines::Frozen
              ? IceHistory::Frozen(IceLoadOf(run, solver, world))
@@ -403,7 +403,7 @@ CalibrationOptions CalibrationOptionsOf(const SeaLevelRun& run) {
 
 template <class Calibration>
 CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
-                         const SeaLevelSolver& solver, Loaded& world,
+                         const GRDSolver& solver, Loaded& world,
                          Calibration calibration) {
   for (const auto& snapshot : calibration.snapshots) {
     if (!snapshot.converged) {
@@ -430,7 +430,7 @@ CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
 
 }  // namespace
 
-void StartFromIceHistory(const SeaLevelRun& run, const SeaLevelSolver& solver,
+void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess) {
   const auto length = solver.SolverScales().Length();
   world.ice0 =
@@ -447,7 +447,7 @@ namespace {
 /// The calibration's start, pyslfp's construction: the ice history's ice
 /// at the window's start under the target sea level, as the guess.
 std::vector<double> PrepareCalibration(const SeaLevelRun& run, const Json& top,
-                                       const SeaLevelSolver& solver,
+                                       const GRDSolver& solver,
                                        Loaded& world) {
   auto target = FinalSeaLevelOf(run, top, solver, world);
   StartFromIceHistory(run, solver, world, target);
@@ -457,8 +457,8 @@ std::vector<double> PrepareCalibration(const SeaLevelRun& run, const Json& top,
 }  // namespace
 
 CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
-                                  const SeaLevelSolver& solver, Loaded& world,
-                                  SeaLevelEvolution& evolution,
+                                  const GRDSolver& solver, Loaded& world,
+                                  Evolution& evolution,
                                   std::span<const double> times) {
   const auto target = PrepareCalibration(run, top, solver, world);
   evolution.SetBackgroundState(world.background);
@@ -469,8 +469,8 @@ CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
 }
 
 CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
-                                  const SeaLevelSolver& solver, Loaded& world,
-                                  SeaLevelEvolution3D& evolution,
+                                  const GRDSolver& solver, Loaded& world,
+                                  Evolution3D& evolution,
                                   std::span<const double> times) {
   const auto target = PrepareCalibration(run, top, solver, world);
   evolution.SetBackgroundState(world.background);

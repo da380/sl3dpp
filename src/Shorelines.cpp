@@ -6,8 +6,8 @@
 
 namespace sl3dpp::detail {
 
-void CheckMigratingStart(const SeaLevelSolver& solver,
-                         const SeaLevelSolver::State& background,
+void CheckMigratingStart(const GRDSolver& solver,
+                         const GRDSolver::State& background,
                          std::span<const double> startIce) {
   const auto fieldSize = solver.Grid().FieldSize();
   if (startIce.size() != fieldSize) {
@@ -35,8 +35,8 @@ void CheckMigratingStart(const SeaLevelSolver& solver,
 }
 
 std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const SeaLevelSolver& solver, const SeaLevelSolver::State& background,
-    const SeaLevelSolver::State& final) {
+    const GRDSolver& solver, const GRDSolver::State& background,
+    const GRDSolver::State& final) {
   const auto fieldSize = solver.Grid().FieldSize();
   const auto& start = background;
   auto total = std::vector<double>(fieldSize);

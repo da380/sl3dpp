@@ -114,7 +114,7 @@ std::map<std::size_t, Measurement> Measurements(const Scene& setup,
 /// analytic state) or migrating (the marine cap), with its trajectory and
 /// ocean functions.
 struct Base {
-  SeaLevelSolver::State state;
+  GRDSolver::State state;
   std::vector<double> times;
   std::vector<std::vector<double>> oceans;
   ForwardTrajectory trajectory;
@@ -122,13 +122,13 @@ struct Base {
 
 Base MakeBase(const Scene& setup, const ViscoelasticOperator& op,
               std::mt19937& rng, bool migrating, Scheme scheme,
-              SeaLevelEvolution** evolution, std::vector<double>* thicknessOut) {
+              Evolution** evolution, std::vector<double>* thicknessOut) {
   Base base;
   if (migrating) {
     const auto cap = MarineCap::Make(setup, 6);
     base.state = setup.solver.MakeState(cap.ice0, cap.sea0);
     base.times = cap.times;
-    *evolution = new SeaLevelEvolution(
+    *evolution = new Evolution(
         op, setup.solver, base.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto run = (*evolution)->RunMigrating(
@@ -139,7 +139,7 @@ Base MakeBase(const Scene& setup, const ViscoelasticOperator& op,
     base.state = setup.state;
     for (auto n = 0; n < 6; ++n) base.times.push_back(2.0 * n * setup.Kyr());
     const auto thickness = RandomThickness(setup, rng, base.times.size());
-    *evolution = new SeaLevelEvolution(
+    *evolution = new Evolution(
         op, setup.solver, base.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto run = (*evolution)->Run(
@@ -160,7 +160,7 @@ TEST(SecondOrderAdjoint, KernelsAgreeWithTheFirstOrderSweep) {
   ViscoelasticOperator op(setup.rheology, kLmax);
   for (const bool migrating : {false, true}) {
     std::mt19937 rng(1);
-    SeaLevelEvolution* evolution = nullptr;
+    Evolution* evolution = nullptr;
     const auto base = MakeBase(setup, op, rng, migrating,
                                Scheme::ExponentialTrapezoid, &evolution, nullptr);
     const auto measurements = Measurements(setup, rng, base.times.size() - 1);
@@ -171,7 +171,7 @@ TEST(SecondOrderAdjoint, KernelsAgreeWithTheFirstOrderSweep) {
                                   {.method = method, .rtol = 1e-12, .record = true});
       const auto run = tangent.Run(base.times, v, &base.trajectory, base.oceans);
       AdjointSolver adjoint(*evolution, {.method = method, .rtol = 1e-12});
-      const auto first = adjoint.IceHistoryKernels(base.times, measurements,
+      const auto first = adjoint.FirstOrderKernels(base.times, measurements,
                                                    &base.trajectory, base.oceans);
       const auto [kernels, derivatives] = adjoint.SecondOrderKernels(
           base.times, measurements, run, v.itau, base.trajectory, base.oceans);
@@ -224,7 +224,7 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
 
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op(setup.rheology, kLmax);
-    SeaLevelEvolution evolution(
+    Evolution evolution(
         op, setup.solver, setup.state,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -245,7 +245,7 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
       }
       auto rheology = Rheology::Create(setup.material, {std::move(b)}).value();
       ViscoelasticOperator movedOp(rheology, kLmax);
-      SeaLevelEvolution movedEvolution(
+      Evolution movedEvolution(
           movedOp, setup.solver, setup.state,
           {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
       const auto movedTrajectory = ForwardTrajectory::FromSnapshots(
@@ -253,7 +253,7 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
       AdjointSolver movedAdjoint(
           movedEvolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
       return Pairing(setup, op.Points(),
-                     movedAdjoint.IceHistoryKernels(times, measurements,
+                     movedAdjoint.FirstOrderKernels(times, measurements,
                                                     &movedTrajectory),
                      u);
     };
@@ -279,7 +279,7 @@ TEST(SecondOrderAdjoint, HessianIsSymmetricAndAdjointToTheSecondOrderRun) {
   ViscoelasticOperator op(setup.rheology, kLmax);
   for (const bool migrating : {false, true}) {
     std::mt19937 rng(3);
-    SeaLevelEvolution* evolution = nullptr;
+    Evolution* evolution = nullptr;
     const auto base = MakeBase(setup, op, rng, migrating,
                                Scheme::ExponentialTrapezoid, &evolution, nullptr);
     const auto measurements = Measurements(setup, rng, base.times.size() - 1);
@@ -377,7 +377,7 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
@@ -555,7 +555,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
     u.material = AtMemoryPoints(op.Points(), nodalU);
     w.material = AtMemoryPoints(op.Points(), nodalW);
-    SeaLevelEvolution evolution(op, setup.solver, setup.state,
+    Evolution evolution(op, setup.solver, setup.state,
                                 {.scheme = scheme,
                                  .rotation = rotation,
                                  .rtol = 1e-12,
@@ -569,7 +569,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
     AdjointSolver adjoint(evolution, {.method = AdjointMethod::Discrete,
                                       .rtol = 1e-12,
                                       .material_kernels = true});
-    const auto first = adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
         times, measurements, runU, u.itau, trajectory, {}, u.material);
     const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
@@ -605,7 +605,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
 
     auto gradientAt = [&](double eps) {
       const auto movedOp = operatorAt(eps, set, w.material);
-      SeaLevelEvolution movedEvolution(movedOp, setup.solver, setup.state,
+      Evolution movedEvolution(movedOp, setup.solver, setup.state,
                                        {.scheme = scheme,
                                         .rotation = rotation,
                                         .rtol = 1e-12,
@@ -616,7 +616,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
                                                   .rtol = 1e-12,
                                                   .material_kernels = true});
       return Pairing(setup, op.Points(),
-                     movedAdjoint.IceHistoryKernels(times, measurements,
+                     movedAdjoint.FirstOrderKernels(times, measurements,
                                                     &movedTrajectory),
                      u);
     };

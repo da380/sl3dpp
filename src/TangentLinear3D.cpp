@@ -18,7 +18,7 @@ namespace sl3dpp {
 namespace {
 
 using Complex = std::complex<double>;
-using Snapshot = SeaLevelEvolution3D::Snapshot;
+using Snapshot = Evolution3D::Snapshot;
 using State = Viscoelastic3D::State;
 
 void CheckTimes(std::span<const double> times) {
@@ -205,7 +205,7 @@ void Accumulate(std::vector<GridCoupling::TensorField>& total,
 }  // namespace
 
 TangentLinearSolver3D::TangentLinearSolver3D(
-    const SeaLevelEvolution3D& evolution, Options options)
+    const Evolution3D& evolution, Options options)
     : evolution_(&evolution), options_(std::move(options)) {}
 
 std::vector<std::vector<double>> TangentLinearSolver3D::ItauOfLogViscosity(
@@ -401,7 +401,7 @@ struct TangentLinearSolver3D::MaterialDrive3D
   using Solutions = Viscoelastic3D::Solutions;
   using Complex = std::complex<double>;
   using Tensor = GridCoupling::TensorField;
-  const SeaLevelEvolution3D* ev = nullptr;
+  const Evolution3D* ev = nullptr;
   MaterialDirection3D direction;
   const ForwardTrajectory3D* trajectory = nullptr;
   ForwardCursor3D* cursor = nullptr;
@@ -623,7 +623,7 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
     std::shared_ptr<MaterialDrive3D> bMaterial;  // may be null
     std::vector<std::vector<double>> bDitau;    // empty: no itau in b
   };
-  const SeaLevelEvolution3D* ev = nullptr;
+  const Evolution3D* ev = nullptr;
   AdjointMethod method = AdjointMethod::Continuous;
   const ForwardTrajectory3D* trajectory = nullptr;
   ForwardCursor3D* cursor = nullptr;
@@ -1041,7 +1041,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(
           "the transverse rotational feedback is unstable; see "
-          "SeaLevelEvolution3D::Run");
+          "Evolution3D::Run");
     }
   }
   const auto rhoW = solver.WaterDensity();
@@ -1062,33 +1062,33 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     }
     return grid.Expand(total);
   };
-  auto centrifugal = [&](const SeaLevelSolver::Response& r) {
+  auto centrifugal = [&](const GRDSolver::Response& r) {
     return rotation == RotationalFeedback::None
                ? grid.ZeroCoefficients()
                : solver.CentrifugalCoefficients(r.angularVelocity);
   };
 
-  SeaLevelSolver::Options sleOptions;
+  GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
-  auto flavours = std::map<const LoveNumbers*, SeaLevelSolver>{};
-  auto solverFor = [&](const LoveNumbers& table) -> const SeaLevelSolver& {
+  auto flavours = std::map<const LoveNumbers*, GRDSolver>{};
+  auto solverFor = [&](const LoveNumbers& table) -> const GRDSolver& {
     auto found = flavours.find(&table);
     if (found == flavours.end()) {
       found =
           flavours
-              .emplace(&table, SeaLevelSolver(grid, table, solver.Parameters()))
+              .emplace(&table, GRDSolver(grid, table, solver.Parameters()))
               .first;
     }
     return found->second;
   };
 
   // Distributed, every rank solves the sea level equation alike and the
-  // first rank's answers serve all (SeaLevelEvolution3D::March).
+  // first rank's answers serve all (Evolution3D::March).
   const auto& collectives = op.GetOptions().collectives;
   auto sigma = grid.ZeroCoefficients();
   auto psi = grid.ZeroCoefficients();
-  auto response = SeaLevelSolver::Response{};
+  auto response = GRDSolver::Response{};
   auto agree = [&] {
     if (!collectives.Distributed()) return;
     for (auto* coefficients : {&sigma, &psi}) {
@@ -1096,7 +1096,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
           std::span(reinterpret_cast<double*>(coefficients->data()),
                     2 * coefficients->size()));
     }
-    for (auto* field : {&response.seaLevelChange, &response.displacement,
+    for (auto* field : {&response.relativeSeaLevelChange, &response.displacement,
                         &response.potential}) {
       collectives.share(*field);
     }
@@ -1108,17 +1108,17 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
 
   auto tstate = op.ZeroState();
   tstate.t = times[0] * ev.toMatTime_;
-  response.seaLevelChange.assign(fieldSize, 0.0);
+  response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
   // The coupled pass of a step, shared by the steps and, under lateral
   // moduli, the start as a zero-length step.
   auto step = std::optional<Viscoelastic3D::OpenStep>{};
-  const SeaLevelSolver* effectiveSolver = nullptr;
+  const GRDSolver* effectiveSolver = nullptr;
   auto f = std::vector<double>{};
   auto node = std::size_t{0};
   auto closure = [&](const Viscoelastic3D::Solutions& responses) {
-    SeaLevelSolver::GeneralisedForcing coupled;
+    GRDSolver::GeneralisedForcing coupled;
     coupled.directLoad = f;
     coupled.displacementResponse =
         ev.Coefficients(op.Surface(responses, Component::U), ev.toNdLength_);
@@ -1128,7 +1128,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     coupled.rotation = rotation;
     coupled.oceanFunctionOverride = overrideAt(node);
     response = effectiveSolver->SolveGeneralised(ev.state_, coupled, sleOptions);
-    sigma = totalLoadCoefficients(f, response.seaLevelChange, node);
+    sigma = totalLoadCoefficients(f, response.relativeSeaLevelChange, node);
     psi = centrifugal(response);
     agree();
     return std::pair{ev.Columns(sigma, ev.toMatDensity_),
@@ -1172,7 +1172,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
     step.reset();
   } else if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
-    SeaLevelSolver::GeneralisedForcing forcing;
+    GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
@@ -1193,7 +1193,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
       throw std::runtime_error(
           "the tangent-linear elastic sea level solve did not converge");
     }
-    sigma = totalLoadCoefficients(f0, response.seaLevelChange, 0);
+    sigma = totalLoadCoefficients(f0, response.relativeSeaLevelChange, 0);
     psi = centrifugal(response);
     agree();
   }
@@ -1211,11 +1211,11 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   }
 
   auto snapshots = std::vector<Snapshot>{};
-  auto record = [&](std::size_t node, SeaLevelSolver::Response& r,
+  auto record = [&](std::size_t node, GRDSolver::Response& r,
                     const Viscoelastic3D::StepInfo& info) {
     Snapshot snapshot;
     snapshot.t = times[node];
-    snapshot.seaLevelChange = std::move(r.seaLevelChange);
+    snapshot.relativeSeaLevelChange = std::move(r.relativeSeaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.angularVelocity = r.angularVelocity;

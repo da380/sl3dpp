@@ -131,7 +131,7 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
   constexpr auto lmax = 32;
   auto table =
       sl3dpp::LoveNumbers::FromFile(data / "pyslfp_love_numbers.txt").value();
-  sl3dpp::SeaLevelSolver solver(sl3dpp::SurfaceGrid(lmax), table,
+  sl3dpp::GRDSolver solver(sl3dpp::SurfaceGrid(lmax), table,
                                 sl3dpp::SeaLevelParameters{});
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
@@ -151,7 +151,7 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
     return c;
   };
 
-  sl3dpp::SeaLevelSolver::GeneralisedForcing forcing;
+  sl3dpp::GRDSolver::GeneralisedForcing forcing;
   forcing.oceanFunctionOverride = gridInput("ocean_function", {});
   forcing.directLoad = gridInput("direct_load", kSigma);
   forcing.displacementLoad = gridInput("displacement_load", kSigma);
@@ -184,8 +184,8 @@ TEST(SeaLevelGate, GeneralisedSolveMatchesPyslfp) {
   // The floor is the aliasing tail of near-lmax products, which differs
   // between grids; observed ~2e-9.
   constexpr auto tol = 5e-9;
-  EXPECT_LT(CoefficientError(toSi(response.seaLevelChange, {.length = 1}),
-                             fixture.fields.at("sea_level_change")),
+  EXPECT_LT(CoefficientError(toSi(response.relativeSeaLevelChange, {.length = 1}),
+                             fixture.fields.at("relative_sea_level_change")),
             tol);
   EXPECT_LT(CoefficientError(toSi(response.displacement, {.length = 1}),
                              fixture.fields.at("displacement")),
@@ -240,8 +240,8 @@ TEST(SeaLevelGate, SharpOceanFingerprintNearPyslfp) {
 
   auto toSi = [&](std::span<const double> field) { return grid.Expand(field); };
   constexpr auto tol = 8e-2;
-  EXPECT_LT(CoefficientError(toSi(result.seaLevelChange),
-                             fixture.fields.at("sea_level_change")),
+  EXPECT_LT(CoefficientError(toSi(result.relativeSeaLevelChange),
+                             fixture.fields.at("relative_sea_level_change")),
             tol);
   EXPECT_LT(CoefficientError(toSi(result.displacement),
                              fixture.fields.at("displacement")),
