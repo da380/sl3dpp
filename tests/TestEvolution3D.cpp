@@ -1040,3 +1040,76 @@ TEST(PointSourceEvolution, TheFactoredRouteIsTheGeneralOne) {
   Evolution wet(op, solver, setup.state, {.factor_sources = true});
   EXPECT_THROW((void)wet.Run(times, forcing), std::invalid_argument);
 }
+
+TEST(PointSourceEvolution, UnderLateralStructureTheStepSolversAgree) {
+  // Point sources and a stress glut under lateral viscosity and lateral
+  // moduli, with an ocean and the rotational feedback: the steps closed
+  // by the fixed point and by conjugate gradients, two different
+  // closures of the same lateral system, give the same fields at every
+  // node, the toroidal potential among them, and the lateral structure
+  // moves them from the radial model's.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, 0.4 * kyr, 1.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  const auto second = SourceAt(
+      setup, 150.0, 2.2, 1.0,
+      {.rr = -0.4, .tt = 0.8, .pp = -0.4, .rt = 0.5, .rp = 0.1, .tp = -0.3},
+      5e21);
+  const auto forcing = Evolution3D::Forcing{.sources = [&](double t) {
+    auto out = std::vector<PointSource>{thrust};
+    if (t >= times[1]) out.push_back(second);
+    return out;
+  }};
+  auto delta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto moduli = Viscoelastic3D::Options::LateralModuli{
+      .shear =
+          [](double r, double theta, double phi) {
+            return 0.1 * (0.5 + r * r) *
+                   (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                    0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+          },
+      .bulk = [](double r, double theta, double) {
+        return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+      }};
+  auto run = [&](Viscoelastic3D::Options::StepSolver step, bool lateral) {
+    auto options = Viscoelastic3D::Options{};
+    options.solver = step;
+    options.solve_rtol = 1e-12;
+    if (lateral) options.moduli = moduli;
+    Viscoelastic3D op(
+        setup.rheology, kLmax,
+        lateral ? std::function<double(double, double, double)>(delta)
+                : [](double, double, double) { return 0.0; },
+        options);
+    Evolution3D evolution(op, solver, setup.state,
+                          {.rtol = 1e-12, .coupled_rtol = 1e-11});
+    return evolution.Run(times, forcing);
+  };
+  using Solver = Viscoelastic3D::Options::StepSolver;
+  const auto fixed = run(Solver::FixedPoint, true);
+  const auto conjugate = run(Solver::ConjugateGradients, true);
+  const auto radial = run(Solver::FixedPoint, false);
+  for (auto node = std::size_t{0}; node < times.size(); ++node) {
+    EXPECT_TRUE(fixed[node].converged);
+    EXPECT_TRUE(conjugate[node].converged);
+    for (auto field : {&Evolution3D::Snapshot::relativeSeaLevelChange,
+                       &Evolution3D::Snapshot::displacement,
+                       &Evolution3D::Snapshot::potential,
+                       &Evolution3D::Snapshot::tangentialPotential,
+                       &Evolution3D::Snapshot::toroidalPotential}) {
+      EXPECT_LT(WorstDeparture(conjugate[node].*field, fixed[node].*field), 1e-7)
+          << "node " << node;
+    }
+    EXPECT_GT(WorstDeparture(fixed[node].displacement, radial[node].displacement),
+              1e-3)
+        << "node " << node;
+  }
+}

@@ -1,5 +1,7 @@
 #include "sl3dpp/TangentLinear3D.hpp"
 
+#include "sl3dpp/detail/InteriorSources3D.hpp"
+
 #include <complex>
 #include <format>
 #include <map>
@@ -905,7 +907,33 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (!direction.tide.empty()) {
     tideAt = [&](std::size_t node) { return direction.tide[node]; };
   }
-  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt);
+  Sources sourcesAt{};
+  if (!direction.sources.empty() || !direction.stressGluts.empty()) {
+    if (!direction.material.Empty()) {
+      throw std::invalid_argument(
+          "perturb the sources and the moduli in separate runs: the "
+          "tangent is linear in the two");
+    }
+    if (migrating) {
+      throw std::invalid_argument(
+          "a migrating run takes no interior sources: none to perturb");
+    }
+    if ((!direction.sources.empty() && direction.sources.size() != nodes) ||
+        (!direction.stressGluts.empty() &&
+         direction.stressGluts.size() != nodes)) {
+      throw std::invalid_argument(
+          "sources and stressGluts must give one entry per time node");
+    }
+    sourcesAt = [&](std::size_t node) {
+      return std::pair{direction.sources.empty() ? std::vector<PointSource>{}
+                                                 : direction.sources[node],
+                       direction.stressGluts.empty()
+                           ? std::vector<StressGlut>{}
+                           : direction.stressGluts[node]};
+    };
+  }
+  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
+               sourcesAt);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -1034,7 +1062,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
     const Direct& directAt, const Drive& drive,
-    const MaterialForcing3D* material, const Tide& tideAt) const {
+    const MaterialForcing3D* material, const Tide& tideAt,
+    const Sources& sourcesAt) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -1187,12 +1216,26 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
   if (tideAt) tideNow = tideAt(0);
-  if (lateral) {
+  // The perturbed sources' forces at a node, on the open step.
+  const bool sourced = static_cast<bool>(sourcesAt);
+  auto applySources = [&](std::size_t at) {
+    if (!sourced) return;
+    auto [points, gluts] = sourcesAt(at);
+    const auto forces = detail::ForcesOfSources3D(
+        op, solver.SolverScales(), ev.toNdLength_, std::move(points),
+        std::move(gluts));
+    step->AddDegreeForces(forces.spheroidal, forces.toroidal);
+  };
+  // the start as a zero-length step: under lateral moduli, and under
+  // perturbed sources, whose forces act on the degree systems directly
+  const bool stepStart = lateral || sourced;
+  if (stepStart) {
     // The start under lateral moduli: the instantaneous coupled fixed
     // point of a zero-length step, the material's start forces on it.
     f = directAt(0);
     step.emplace(op.StartStep(tstate, 0.0, scheme));
     if (material != nullptr) material->ApplyStart(*step);
+    applySources(0);
     effectiveSolver = &solverFor(step->EffectiveLove());
     auto [strain, info] = close();
     if (!info.converged || !response.converged) {
@@ -1236,11 +1279,11 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     psi = centrifugal(response);
     agree();
   }
-  if (!lateral && (options_.record || material != nullptr)) {
+  if (!stepStart && (options_.record || material != nullptr)) {
     op.PrimeStrain(tstate, ev.Columns(sigma, ev.toMatDensity_),
                    ev.Columns(psi, ev.toMatPotential_));
   }
-  if (!lateral && material != nullptr) {
+  if (!stepStart && material != nullptr) {
     // The start strain carries the start response too.
     op.AddStrainCoefficients(
         *tstate.strainCoefficients, *startResponse,
@@ -1282,6 +1325,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
                               ev.Columns(psi, ev.toMatPotential_)));
     if (drive) step->AddMemory(drive(node, dt));
     if (material != nullptr) material->Apply(node, dt, scheme, *step);
+    applySources(node);
     effectiveSolver = &solverFor(step->EffectiveLove());
     f = directAt(node);
     if (tideAt) tideNow = tideAt(node);

@@ -1830,6 +1830,16 @@ these carry the continuous method's commute error, falling at the
 scheme's order. The moment and tide kernels cost one unrelaxed solve
 per node side; `Options::tide_kernels` asks for the second.
 
+**In 3D.** The 3D tangent-linear run takes a perturbation of the
+sources (`TangentPerturbation3D::sources`, `stressGluts`): their forces
+join each step's, and the start is the zero-length step whether or not
+the moduli vary laterally. The discrete 3D sweep forms the moment
+kernels from each step's dual solutions, spheroidal and toroidal
+together (`AdjointSolver3D::Options::moment_points`, on one process);
+in the stepper's complex m >= 0 columns they are the coefficients of a
+real field as they stand.
+
 **What is not yet taken.** The second-order sweeps refuse a
-source-driven trajectory. The 3D classes do not take sources as
-parameters.
+source-driven trajectory. In 3D a source-driven run is not recorded
+for the kernels in the Earth's parameters, the continuous sweep forms
+no moment kernels, and the moment kernels are not distributed.

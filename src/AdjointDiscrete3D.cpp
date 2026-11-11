@@ -454,6 +454,38 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   if (trajectory != nullptr) {
     itauKernel.assign(K, std::vector<double>(values, 0.0));
   }
+  // The moment kernels: the strain at the given points of each step's
+  // dual solutions, spheroidal and toroidal (docs/adjoints.md §19).
+  const bool moments = !options_.moment_points.empty();
+  if (moments && collectives.Distributed()) {
+    throw std::invalid_argument(
+        "the moment kernels are formed on one process");
+  }
+  auto momentKernels =
+      std::vector<std::vector<SphericalTensor>>(moments ? times.size() : 0);
+  auto momentKernelsOf = [&](const Viscoelastic3D::Solutions& y) {
+    // the dual solutions are the coefficients of a real field in the
+    // stepper's complex m >= 0 columns, as PointStrain reads them
+    const auto fields = DegreeFields{.spheroidal = y.spheroidal,
+                                     .toroidal = y.toroidal};
+    const auto& base = op.GetRheology().BaseMaterial();
+    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+    const auto toMatMoment = solver.SolverScales().Factor(energy) /
+                             base.ModelScales().Factor(energy);
+    auto out = std::vector<SphericalTensor>{};
+    for (auto point : options_.moment_points) {
+      point.radius /= ev.toNdLength_;
+      auto e = PointStrain(
+          base, op.LMax(),
+          [&](int l) -> const DegreeOperator& { return op.UnrelaxedSpheroidal(l); },
+          [&](int l) -> const ToroidalOperator& { return op.UnrelaxedToroidal(l); },
+          fields, point);
+      for (auto* c : {&e.rr, &e.tt, &e.pp, &e.rt, &e.rp, &e.tp}) *c *= toMatMoment;
+      out.push_back(e);
+    }
+    return out;
+  };
+
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
   // The tide kernels, as the 1D discrete sweep forms them: a node's
   // prescribed tide enters its sea level solve and, beside the
@@ -818,7 +850,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           y.r[i] += src.r[i];
         });
         out = {std::move(adj), std::move(synth), std::move(e),
-               material || hasMaterialV ? std::move(xdag)
+               material || hasMaterialV || moments ? std::move(xdag)
                                         : Viscoelastic3D::Solutions{},
                psiDual};
         return coupling.Analyse(y);
@@ -974,7 +1006,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         if (!std::isfinite(change)) break;
         if (change <= control.rtol && solveInfo.converged) {
           out = {std::move(adj), std::move(synth), exit(solved, sph, tor),
-                 material || hasMaterialV ? std::move(solved)
+                 material || hasMaterialV || moments ? std::move(solved)
                                           : Viscoelastic3D::Solutions{},
                  psiDual};
           return true;
@@ -1016,6 +1048,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     }
     directLoadKernels[n] = loadDualOf(last.adj, last.synth);
     tideKernels[n] = tideKernelOf(last.adj, last.psiDual);
+    if (moments) momentKernels[n] = momentKernelsOf(last.xdag);
     // The effective modulus's factor 1 - sum_k f_k beta_k(x) at the grid
     // values (the material pairings' and v's effective shear weight's).
     auto factor = std::vector<double>{};
@@ -1292,10 +1325,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     // The first start dual's solution, where the material needs it.
     auto y0 = Viscoelastic3D::Solutions{};
     auto e0 = Tensor{};
-    if (material || hasMaterialV) {
+    if (material || hasMaterialV || moments) {
       addSurfaceDuals(sphForces, adj, sph);
       addToroidalDuals(torForces, adj, tor);
       y0 = op.SolveUnrelaxed(sphForces, torForces);
+      if (moments) momentKernels[0] = momentKernelsOf(y0);
+    }
+    if (material || hasMaterialV) {
       e0 = exit(y0, sph, tor);
     }
     if (second) {
@@ -1388,6 +1424,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
       std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
   out.ice.tideKernels = std::move(tideKernels);
+  out.ice.momentKernels = std::move(momentKernels);
   if (trajectory != nullptr) {
     out.itauKernel3D = std::move(itauKernel);
     out.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));

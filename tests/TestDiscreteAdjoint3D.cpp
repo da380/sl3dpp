@@ -425,6 +425,102 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
   }
 }
 
+TEST(DiscreteAdjoint3D, InteriorSourcesInThePair) {
+  // Point sources as parameters under lateral viscosity: the
+  // tangent-linear run along a perturbation of their moment tensors is
+  // the run under the perturbation, and the discrete sweep's moment
+  // kernels, the strain of its dual displacement at the sources, pair
+  // with the perturbation to the same number; every field measured, the
+  // toroidal potential among them, with an ocean and without one.
+  auto scene = Scene::Make(1e21);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(37);
+  std::normal_distribution<double> normal;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(0.5 * n * scene.Kyr());
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 800e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  auto perturbation = std::vector<std::vector<PointSource>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    auto at = std::vector<PointSource>{};
+    for (const auto& point : points) {
+      at.push_back({.at = point,
+                    .moment = {.rr = unit * normal(rng),
+                               .tt = unit * normal(rng),
+                               .pp = unit * normal(rng),
+                               .rt = unit * normal(rng),
+                               .rp = unit * normal(rng),
+                               .tp = unit * normal(rng)}});
+    }
+    perturbation.push_back(std::move(at));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].displacementDual = scene.Smooth(rng, 0.3);
+  measurements[0].toroidalPotentialDual = scene.Smooth(rng, 0.4);
+  measurements[2].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
+  measurements[3].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[3].potentialDual = scene.Smooth(rng, 0.4);
+  measurements[3].toroidalPotentialDual = scene.Smooth(rng, 0.6);
+  measurements[3].angularVelocityDual = {0.2, -0.4, 0.8};
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+
+  const auto dry = scene.solver.NoOceanState();
+  const auto& wet = scene.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto label = background == &dry ? "no ocean" : "ocean";
+    Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+      return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+    });
+    Evolution3D evolution(op, scene.solver, *background,
+                          {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto forward = Objective(
+        scene,
+        evolution.Run(times, Evolution3D::Forcing{.sources = [&](double t) {
+          return perturbation[nodeOf(t)];
+        }}),
+        measurements);
+    ASSERT_NE(forward, 0.0);
+    TangentPerturbation3D direction;
+    direction.sources = perturbation;
+    const auto along = Objective(
+        scene,
+        TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12})
+            .Run(times, direction),
+        measurements);
+    EXPECT_NEAR(along, forward, 1e-8 * std::abs(forward)) << label;
+
+    const auto kernels =
+        AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                    .rtol = 1e-12,
+                                    .coupled_rtol = 1e-12,
+                                    .moment_points = points})
+            .FirstOrderKernels(times, measurements);
+    ASSERT_EQ(kernels.ice.momentKernels.size(), times.size());
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      for (auto p = std::size_t{0}; p < points.size(); ++p) {
+        paired +=
+            kernels.ice.momentKernels[n][p].Contract(perturbation[n][p].moment);
+      }
+    }
+    EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label << " " << paired
+                                                        << " " << along;
+  }
+}
+
 TEST(DiscreteAdjoint3D, ZeroLateralMatchesThe1DDiscreteSweep) {
   // With delta = 0 at the GLL points the discrete 3D sweep is the 1D
   // discrete sweep through the grid pipeline: the load duals and the

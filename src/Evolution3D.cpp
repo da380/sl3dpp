@@ -9,6 +9,7 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/InteriorSources3D.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
 
 namespace sl3dpp {
@@ -179,53 +180,10 @@ class Evolution3D::Coupled {
   /// The node's point sources (solver units) as forces on the degree
   /// systems, the sum of theirs, in the material's units.
   void SetSources(const std::vector<PointSource>& sources,
-                  const std::vector<StressGlut>& stressGluts) {
-    sourceForces = DegreeFields{};
-    if (sources.empty() && stressGluts.empty()) return;
-    const auto& op = *owner_.op_;
-    const auto& material = op.GetRheology().BaseMaterial();
-    const auto& scales = material.ModelScales();
-    const auto& sle = owner_.solver_->SolverScales();
-    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
-    const auto toMatMoment = sle.Factor(energy) / scales.Factor(energy);
-    const std::function<const DegreeOperator&(int)> sph =
-        [&](int l) -> const DegreeOperator& {
-      return op.UnrelaxedSpheroidal(l);
-    };
-    const std::function<const ToroidalOperator&(int)> tor =
-        [&](int l) -> const ToroidalOperator& {
-      return op.UnrelaxedToroidal(l);
-    };
-    auto add = [&](DegreeFields forces) {
-      auto join = [](auto& to, auto& from) {
-        for (auto& [l, f] : from) {
-          auto& t = to[l];
-          if (t.empty()) {
-            t = std::move(f);
-          } else {
-            for (auto i = std::size_t{0}; i < t.size(); ++i) t[i] += f[i];
-          }
-        }
-      };
-      join(sourceForces.spheroidal, forces.spheroidal);
-      join(sourceForces.toroidal, forces.toroidal);
-    };
-    for (auto source : sources) {
-      source.at.radius /= owner_.toNdLength_;
-      for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
-                      &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
-        *c *= toMatMoment;
-      }
-      add(PointSourceForces(material, op.LMax(), sph, tor, source));
-    }
-    for (auto shell : stressGluts) {
-      shell.radius /= owner_.toNdLength_;
-      for (auto* c : {&shell.moment.rr, &shell.moment.tt, &shell.moment.pp,
-                      &shell.moment.rt, &shell.moment.rp, &shell.moment.tp}) {
-        for (auto& v : *c) v *= toMatMoment;
-      }
-      add(StressGlutForces(material, op.LMax(), sph, tor, shell));
-    }
+                  const std::vector<StressGlut>& gluts) {
+    sourceForces = detail::ForcesOfSources3D(
+        *owner_.op_, owner_.solver_->SolverScales(), owner_.toNdLength_, sources,
+        gluts);
   }
   [[nodiscard]] bool HasSources() const {
     return !sourceForces.spheroidal.empty();
