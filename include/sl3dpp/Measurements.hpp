@@ -93,6 +93,67 @@ enum class FieldChannel {
 [[nodiscard]] Measurement FieldMeasurement(FieldChannel channel,
                                            std::vector<double> dual);
 
+// -- displacement measurements ----------------------------------------------
+//
+// A measurement of the surface displacement is a vector weight w on the
+// surface, J = a^2 int w . u dOmega, with u = U r + grad_1 V - r x grad_1 W
+// (the gradient that of the unit sphere, V and W lengths). Its radial
+// part is the dual of U; its tangential part gives the duals of V and W.
+// In the continuous sweeps the weight is an adjoint traction, -w. The
+// weight is given as a vector field on the grid, or, to read the
+// displacement at one point along one direction, by the point and the
+// direction.
+
+/// A vector field on the surface by its components to the east, to the
+/// north and upwards, each a field on the grid; an empty component is
+/// absent.
+struct SurfaceVectorField {
+  std::vector<double> east;
+  std::vector<double> north;
+  std::vector<double> up;
+};
+
+/// The displacement u = U r + grad_1 V - r x grad_1 W as a vector field,
+/// from the fields U, V and W on the grid (an empty one is absent). The
+/// tangential part goes through the canonical components
+/// u^(+-) = sqrt(l (l + 1) / 2) (V_lm +- i W_lm) of the generalised
+/// spherical harmonics of upper index +-1 (Phinney & Burridge 1973;
+/// Dahlen & Tromp 1998, appendix C), so the grid must carry upper index 1
+/// (SurfaceGrid::Options::nmax).
+[[nodiscard]] SurfaceVectorField DisplacementField(
+    const SurfaceGrid& grid, std::span<const double> U,
+    std::span<const double> V, std::span<const double> W);
+
+/// The `Measurement` of the displacement against a vector weight w,
+/// J = a^2 int w . u dOmega: the upward component is the dual of U, and
+/// the tangential ones, expanded in their canonical components
+/// w^(+-)_lm, give the duals of V and W algebraically, with coefficients
+/// sqrt(l (l + 1) / 2) (w^+ + w^-)_lm and -i sqrt(l (l + 1) / 2)
+/// (w^+ - w^-)_lm. The grid must carry upper index 1. The weight carries
+/// the 1 / a^2 of the physical surface integral, as the scalar duals do.
+[[nodiscard]] Measurement DisplacementMeasurement(
+    const SurfaceGrid& grid, const SurfaceVectorField& weight);
+
+/// A direction at a point of the surface, by its components to the
+/// east, to the north and upwards; it need not be a unit vector (a
+/// line-of-sight direction is one, and the three axes read the
+/// components).
+struct SurfaceDirection {
+  double east = 0.0;
+  double north = 0.0;
+  double up = 0.0;
+};
+
+/// The `Measurement` of the displacement at `site` along `direction`,
+/// band-limited as PointDual is: paired with a band-limited displacement
+/// it reads direction . u at the site exactly, in the displacement's
+/// unit. The upward part is PointDual on the radial displacement; the
+/// horizontal part is the derivative of the grid's reproducing kernel
+/// along the direction, on V and (turned a quarter) on W.
+[[nodiscard]] Measurement PointDisplacementMeasurement(
+    const SurfaceGrid& grid, double a, GeographicPoint site,
+    SurfaceDirection direction);
+
 /// A component of the angular-velocity perturbation: X and Y drive
 /// polar motion, Z the length of day.
 enum class AngularVelocityComponent { X = 0, Y = 1, Z = 2 };

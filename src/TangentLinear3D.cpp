@@ -1122,7 +1122,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
                     2 * coefficients->size()));
     }
     for (auto* field : {&response.relativeSeaLevelChange, &response.displacement,
-                        &response.potential, &response.tangentialPotential}) {
+                        &response.potential, &response.tangentialPotential,
+                        &response.toroidalPotential}) {
       collectives.share(*field);
     }
     collectives.share(response.angularVelocity);
@@ -1153,6 +1154,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
         ev.Coefficients(op.Surface(responses, Component::Phi), ev.toNdPotential_);
     coupled.tangentialResponse =
         ev.Coefficients(op.Surface(responses, Component::V), ev.toNdLength_);
+    coupled.toroidalResponse =
+        ev.Coefficients(op.SurfaceToroidal(responses), ev.toNdLength_);
     coupled.inertiaMomentChange = step->InertiaMoment(responses) * ev.toNdMoment_;
     coupled.rotation = rotation;
     coupled.oceanFunctionOverride = overrideAt(node);
@@ -1217,6 +1220,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
           op.Surface(*startResponse, Component::Phi), ev.toNdPotential_);
       forcing.tangentialResponse = ev.Coefficients(
           op.Surface(*startResponse, Component::V), ev.toNdLength_);
+      forcing.toroidalResponse = ev.Coefficients(
+          op.SurfaceToroidal(*startResponse), ev.toNdLength_);
       // and, for the axial rotational feedback, its inertia moment
       forcing.inertiaMomentChange =
           op.InertiaMoment(*startResponse) * ev.toNdMoment_;
@@ -1253,6 +1258,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.tangentialPotential = std::move(r.tangentialPotential);
+    snapshot.toroidalPotential = std::move(r.toroidalPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.coupledIterations = info.iterations;
     snapshot.coupledResidual = info.residual;

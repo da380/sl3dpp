@@ -78,13 +78,22 @@ struct ForwardTrajectory {
 ///      + g_omega . omega
 /// at that node, V the potential of the tangential displacement (a
 /// measurement of the tangential displacement itself, int w . grad_1 V dS,
-/// has g_v = -div_1 w). Empty vectors are absent duals. The tangential
-/// dual is taken by the discrete sweeps; the continuous ones refuse it.
+/// has g_v = -div_1 w). Empty vectors are absent duals. In the
+/// continuous sweeps a displacement measurement is an adjoint traction,
+/// minus its vector weight: normal for the radial dual, tangential for
+/// V's.
 struct Measurement {
   std::vector<double> seaLevelDual;
   std::vector<double> displacementDual;
   std::vector<double> potentialDual;
   std::vector<double> tangentialPotentialDual;
+  /// The dual of the toroidal potential W of the tangential displacement,
+  /// u_t = grad_1 V - r x grad_1 W: the toroidal part of a displacement
+  /// measurement's weight. A radial model under a surface load and a
+  /// tide has no toroidal displacement, and its sweeps pass over this
+  /// dual; lateral structure makes one, which the discrete 3D sweep
+  /// carries and the continuous one refuses.
+  std::vector<double> toroidalPotentialDual;
   std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
 };
 

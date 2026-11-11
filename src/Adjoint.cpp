@@ -756,7 +756,6 @@ Kernels AdjointSolver::ContinuousSweep(
   const auto fieldSize = grid.FieldSize();
   const auto K = op.GetRheology().BranchCount();
   const auto N = times.size() - 1;
-  detail::RefuseTangential(measurements, "the continuous sweep");
 
   GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
@@ -817,7 +816,7 @@ Kernels AdjointSolver::ContinuousSweep(
   // that drive the radial jump.
   struct Jump {
     std::vector<double> xiA;
-    std::vector<Complex> lam, psiA, zu, zphi;  // zu/zphi empty when absent
+    std::vector<Complex> lam, psiA, zu, zphi, zv;  // z* empty when absent
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
     GRDSolver::GeneralisedForcing f;
@@ -838,6 +837,13 @@ Kernels AdjointSolver::ContinuousSweep(
         zetaPhi[i] = -g * m.potentialDual[i];
       }
       f.potentialLoad = zetaPhi;
+    }
+    // a measurement of V: its adjoint tangential traction
+    std::vector<Complex> tractionV;
+    if (!m.tangentialPotentialDual.empty()) {
+      tractionV = detail::TractionPotentialOfTangentialDual(
+          grid, m.tangentialPotentialDual);
+      f.tangentialTraction = grid.Synthesise(tractionV);
     }
     if (rotation != RotationalFeedback::None) {
       auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
@@ -867,6 +873,7 @@ Kernels AdjointSolver::ContinuousSweep(
                    : grid.ZeroCoefficients();
     if (!zetaU.empty()) out.zu = grid.Expand(zetaU);
     if (!zetaPhi.empty()) out.zphi = grid.Expand(zetaPhi);
+    out.zv = std::move(tractionV);
     return out;
   };
 
@@ -882,6 +889,8 @@ Kernels AdjointSolver::ContinuousSweep(
         j.zu.empty() ? LoadCallable{} : ev.Columns(j.zu, ev.toMatDensity_);
     const auto zphiCols =
         j.zphi.empty() ? LoadCallable{} : ev.Columns(j.zphi, ev.toMatDensity_);
+    const auto zvCols =
+        j.zv.empty() ? LoadCallable{} : ev.Columns(j.zv, ev.toMatDensity_);
     // One task per degree, largest first; the workspaces, unit responses
     // and channel columns resolved serially first.
     struct Task {
@@ -890,7 +899,7 @@ Kernels AdjointSolver::ContinuousSweep(
       const ViscoelasticOperator::Degree* deg = nullptr;
       const std::vector<double>* units = nullptr;
       const std::vector<double>* split = nullptr;
-      std::optional<std::vector<double>> lam, psi, zu, zphi;
+      std::optional<std::vector<double>> lam, psi, zu, zphi, zv;
     };
     auto tasks = std::vector<Task>{};
     for (auto& [l, m] : vstate.m) {
@@ -901,10 +910,11 @@ Kernels AdjointSolver::ContinuousSweep(
       task.units = &op.UnitResponses(nullptr, l);
       task.lam = lamCols(l, 0.0);
       task.psi = psiCols(l, 0.0);
-      if (zuCols || zphiCols) {
+      if (zuCols || zphiCols || zvCols) {
         task.split = &op.SplitUnitResponses(nullptr, l);
         if (zuCols) task.zu = zuCols(l, 0.0);
         if (zphiCols) task.zphi = zphiCols(l, 0.0);
+        if (zvCols) task.zv = zvCols(l, 0.0);
       }
       tasks.push_back(std::move(task));
     }
@@ -933,6 +943,7 @@ Kernels AdjointSolver::ContinuousSweep(
       add(task.units->data() + deg.ndof, *task.psi);
       if (task.zu) add(task.split->data(), *task.zu);
       if (task.zphi) add(task.split->data() + deg.ndof, *task.zphi);
+      if (task.zv) add(task.split->data() + 2 * deg.ndof, *task.zv);
       const auto dTilde = deg.Strain(x, ncols);
       if (material) lumpSolutions.at(l) = x;
       for (auto k = std::size_t{0}; k < K; ++k) {

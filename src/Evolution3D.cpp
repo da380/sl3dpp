@@ -234,7 +234,8 @@ class Evolution3D::Coupled {
                     2 * coefficients->size()));
     }
     for (auto* field : {&response.relativeSeaLevelChange, &response.displacement,
-                        &response.potential, &response.tangentialPotential}) {
+                        &response.potential, &response.tangentialPotential,
+                        &response.toroidalPotential}) {
       collectives.share(*field);
     }
     collectives.share(response.angularVelocity);
@@ -257,8 +258,11 @@ class Evolution3D::Coupled {
                                         owner.toNdPotential_);
     auto tangential = owner.Coefficients(op.Surface(responses, Component::V),
                                          owner.toNdLength_);
+    auto toroidal =
+        owner.Coefficients(op.SurfaceToroidal(responses), owner.toNdLength_);
     const auto moment = step->InertiaMoment(responses) * owner.toNdMoment_;
     if (migrating_) {
+      moving.toroidalResponse = std::move(toroidal);
       moving.displacementResponse = std::move(displacement);
       moving.potentialResponse = std::move(potential);
       moving.tangentialResponse = std::move(tangential);
@@ -276,6 +280,7 @@ class Evolution3D::Coupled {
       coupled.displacementResponse = std::move(displacement);
       coupled.potentialResponse = std::move(potential);
       coupled.tangentialResponse = std::move(tangential);
+      coupled.toroidalResponse = std::move(toroidal);
       coupled.inertiaMomentChange = moment;
       coupled.rotation = owner.options_.rotation;
       response =
@@ -391,6 +396,7 @@ Evolution3D::Snapshot Evolution3D::MakeSnapshot(
   snapshot.displacement = std::move(response.displacement);
   snapshot.potential = std::move(response.potential);
   snapshot.tangentialPotential = std::move(response.tangentialPotential);
+  snapshot.toroidalPotential = std::move(response.toroidalPotential);
   snapshot.angularVelocity = response.angularVelocity;
   snapshot.coupledIterations = info.iterations;
   snapshot.coupledResidual = info.residual;

@@ -50,6 +50,149 @@ TEST(MeasurementDuals, PointDualReadsABandLimitedFieldExactly) {
               smooth(site.CoLatitude(), site.Longitude()), 1e-10);
 }
 
+TEST(MeasurementDuals, PointDisplacementReadsADirection) {
+  // The displacement u = U r + grad_1 V - r x grad_1 W at a site along a
+  // direction: the measurement's three duals paired with band-limited U,
+  // V and W read direction . u exactly.
+  const auto grid = SurfaceGrid(16);
+  const auto a = 2.0;
+  auto f = [](double theta, double phi) {
+    return std::cos(theta) + 0.7 * std::sin(theta) * std::sin(phi) +
+           0.4 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
+  };
+  auto dTheta = [](double theta, double phi) {
+    return -std::sin(theta) + 0.7 * std::cos(theta) * std::sin(phi) +
+           0.8 * std::sin(theta) * std::cos(theta) * std::cos(2.0 * phi);
+  };
+  auto dPhiOverSin = [](double theta, double phi) {
+    return 0.7 * std::cos(phi) - 0.8 * std::sin(theta) * std::sin(2.0 * phi);
+  };
+  const auto field = grid.FromFunction(f);
+  for (const auto site : {GeographicPoint{-32.05, 115.74},
+                          GeographicPoint{71.3, 203.1}}) {
+    const auto theta = site.CoLatitude();
+    const auto phi = site.Longitude();
+    // the gradient's components: east (1 / sin) d_phi, north -d_theta
+    const auto gradEast = dPhiOverSin(theta, phi);
+    const auto gradNorth = -dTheta(theta, phi);
+    for (const auto d : {SurfaceDirection{.east = 1.0},
+                         SurfaceDirection{.north = 1.0},
+                         SurfaceDirection{.up = 1.0},
+                         SurfaceDirection{.east = 0.3, .north = -0.8, .up = 0.5}}) {
+      const auto m = PointDisplacementMeasurement(grid, a, site, d);
+      if (d.up != 0.0) {
+        EXPECT_NEAR(PairedValue(grid, a, m.displacementDual, field),
+                    d.up * f(theta, phi), 1e-10);
+      } else {
+        EXPECT_TRUE(m.displacementDual.empty());
+      }
+      if (d.east == 0.0 && d.north == 0.0) {
+        EXPECT_TRUE(m.tangentialPotentialDual.empty());
+        EXPECT_TRUE(m.toroidalPotentialDual.empty());
+        continue;
+      }
+      // V = f: direction . grad_1 f
+      EXPECT_NEAR(PairedValue(grid, a, m.tangentialPotentialDual, field),
+                  d.east * gradEast + d.north * gradNorth, 1e-10);
+      // W = f: -r x grad_1 f has the east part -d_theta f = north's
+      // gradient, and the north part -(1 / sin) d_phi f
+      EXPECT_NEAR(PairedValue(grid, a, m.toroidalPotentialDual, field),
+                  d.east * gradNorth - d.north * gradEast, 1e-10);
+    }
+  }
+}
+
+TEST(MeasurementDuals, AVectorWeightReadsTheDisplacement) {
+  // The displacement field of analytic V and W has the analytic
+  // gradient's components, and a vector weight's duals pair with U, V
+  // and W as the weight does with the displacement.
+  const auto grid = SurfaceGrid(16, {.nmax = 1});
+  const auto a = 2.0;
+  auto f = [](double theta, double phi) {
+    return std::cos(theta) + 0.7 * std::sin(theta) * std::sin(phi) +
+           0.4 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
+  };
+  auto dTheta = [](double theta, double phi) {
+    return -std::sin(theta) + 0.7 * std::cos(theta) * std::sin(phi) +
+           0.8 * std::sin(theta) * std::cos(theta) * std::cos(2.0 * phi);
+  };
+  auto dPhiOverSin = [](double theta, double phi) {
+    return 0.7 * std::cos(phi) - 0.8 * std::sin(theta) * std::sin(2.0 * phi);
+  };
+  const auto field = grid.FromFunction(f);
+  const auto gradEast = grid.FromFunction(dPhiOverSin);
+  const auto gradNorth = grid.FromFunction(
+      [&](double theta, double phi) { return -dTheta(theta, phi); });
+  auto worst = [](std::span<const double> x, std::span<const double> y,
+                  double sign) {
+    auto out = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - sign * y[i]));
+    }
+    return out;
+  };
+  // V = f: grad_1 f. W = f: -r x grad_1 f, east -d_theta f, north
+  // -(1 / sin) d_phi f.
+  const auto spheroidal = DisplacementField(grid, {}, field, {});
+  EXPECT_LT(worst(spheroidal.east, gradEast, 1.0), 1e-10);
+  EXPECT_LT(worst(spheroidal.north, gradNorth, 1.0), 1e-10);
+  const auto toroidal = DisplacementField(grid, {}, {}, field);
+  EXPECT_LT(worst(toroidal.east, gradNorth, 1.0), 1e-10);
+  EXPECT_LT(worst(toroidal.north, gradEast, -1.0), 1e-10);
+
+  // a weight with all three parts against a displacement with all three
+  auto g = [](double theta, double phi) {
+    return 0.5 - std::cos(theta) * std::cos(theta) +
+           0.3 * std::sin(theta) * std::cos(phi);
+  };
+  const auto other = grid.FromFunction(g);
+  auto weight = DisplacementField(grid, other, field, other);
+  for (auto* c : {&weight.east, &weight.north, &weight.up}) {
+    for (auto& v : *c) v /= a * a;
+  }
+  const auto U = grid.FromFunction(
+      [](double theta, double phi) { return std::sin(theta) * std::sin(phi); });
+  // V and W each with a part along the weight's own
+  auto mixedV = other, mixedW = field;
+  for (auto i = std::size_t{0}; i < mixedV.size(); ++i) {
+    mixedV[i] += 0.6 * field[i];
+    mixedW[i] -= 0.4 * other[i];
+  }
+  auto mixedU = U;
+  for (auto i = std::size_t{0}; i < mixedU.size(); ++i) mixedU[i] += other[i];
+  const auto u = DisplacementField(grid, mixedU, mixedV, mixedW);
+  auto dot = std::vector<double>(grid.FieldSize());
+  for (auto i = std::size_t{0}; i < dot.size(); ++i) {
+    dot[i] = weight.east[i] * u.east[i] + weight.north[i] * u.north[i] +
+             weight.up[i] * u.up[i];
+  }
+  const auto direct = a * a * grid.Integrate(dot);
+  const auto m = DisplacementMeasurement(grid, weight);
+  const auto paired = PairedValue(grid, a, m.displacementDual, mixedU) +
+                      PairedValue(grid, a, m.tangentialPotentialDual, mixedV) +
+                      PairedValue(grid, a, m.toroidalPotentialDual, mixedW);
+  EXPECT_GT(std::abs(direct), 0.1);
+  EXPECT_NEAR(paired, direct, 1e-10 * std::abs(direct));
+
+  // and the point measurement is the weight concentrated at the site
+  const GeographicPoint site{-32.05, 115.74};
+  const auto point = PointDisplacementMeasurement(
+      grid, a, site, {.east = 0.3, .north = -0.8, .up = 0.5});
+  const auto there = PairedValue(grid, a, point.displacementDual, U) +
+                     PairedValue(grid, a, point.tangentialPotentialDual, other) +
+                     PairedValue(grid, a, point.toroidalPotentialDual, field);
+  const auto theta = site.CoLatitude();
+  const auto phi = site.Longitude();
+  const auto gTheta = 2.0 * std::cos(theta) * std::sin(theta) +
+                      0.3 * std::cos(theta) * std::cos(phi);
+  const auto gPhiOverSin = -0.3 * std::sin(phi);
+  // u = U r + grad_1 g - r x grad_1 f at the site
+  const auto uEast = gPhiOverSin - dTheta(theta, phi);
+  const auto uNorth = -gTheta - dPhiOverSin(theta, phi);
+  const auto uUp = std::sin(theta) * std::sin(phi);
+  EXPECT_NEAR(there, 0.3 * uEast - 0.8 * uNorth + 0.5 * uUp, 1e-10);
+}
+
 TEST(MeasurementDuals, CoefficientDualReadsTheRealPair) {
   const auto grid = SurfaceGrid(8);
   const auto a = 3.0;

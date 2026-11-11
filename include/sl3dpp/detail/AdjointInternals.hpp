@@ -77,7 +77,7 @@ inline void CheckGrids(const Measurement& m, std::size_t fieldSize,
                 std::size_t node) {
   for (const auto* f :
        {&m.seaLevelDual, &m.displacementDual, &m.potentialDual,
-        &m.tangentialPotentialDual}) {
+        &m.tangentialPotentialDual, &m.toroidalPotentialDual}) {
     if (!f->empty() && f->size() != fieldSize) {
       throw std::invalid_argument(std::format(
           "the measurement at node {} does not live on the solver grid",
@@ -86,18 +86,37 @@ inline void CheckGrids(const Measurement& m, std::size_t fieldSize,
   }
 }
 
-/// Refuses a measurement of the tangential displacement's potential,
-/// where a sweep does not carry it.
-inline void RefuseTangential(
-    const std::map<std::size_t, Measurement>& measurements, const char* sweep) {
+/// Refuses a measurement with a toroidal part, where a sweep's model has
+/// toroidal surface displacement that the sweep does not carry.
+inline void RefuseToroidal(
+    const std::map<std::size_t, Measurement>& measurements) {
   for (const auto& [node, m] : measurements) {
-    if (!m.tangentialPotentialDual.empty()) {
-      throw std::invalid_argument(std::format(
-          "a measurement of the tangential displacement (node {}) is not "
-          "taken by {}: use a discrete sweep",
-          node, sweep));
+    for (const auto v : m.toroidalPotentialDual) {
+      if (v != 0.0) {
+        throw std::invalid_argument(std::format(
+            "the displacement measurement at node {} has a toroidal part, "
+            "which the continuous 3D sweep does not carry: use the "
+            "discrete one",
+            node));
+      }
     }
   }
+}
+
+/// The adjoint tangential traction of a measurement of the tangential
+/// displacement's potential V, as the coefficients of its potential in
+/// load units: the measurement int g_v V dS is that of the tangential
+/// displacement against the vector weight grad_1 a, g_v = -div_1 grad_1 a,
+/// and the adjoint traction is minus the weight, so the potential is
+/// -a, at degree l the coefficient of -g_v over l (l + 1).
+inline std::vector<Complex> TractionPotentialOfTangentialDual(
+    const SurfaceGrid& grid, std::span<const double> dual) {
+  auto out = grid.Expand(dual);
+  for (auto l = 0; l <= grid.LMax(); ++l) {
+    const auto factor = l > 0 ? -1.0 / (l * (l + 1.0)) : 0.0;
+    for (auto m = 0; m <= l; ++m) out[SurfaceGrid::Index(l, m)] *= factor;
+  }
+  return out;
 }
 
 /// Serves the forward internal states to a reverse sweep, strictly

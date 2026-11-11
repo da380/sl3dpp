@@ -795,7 +795,6 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
     const PointMaterialDirection& direction) const {
-  detail::RefuseTangential(measurements, "the continuous sweep");
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -912,7 +911,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // perturbation of its inverse.
   struct Jump {
     std::vector<double> xiA;
-    std::vector<Complex> lam, psiA, zu, zphi;
+    std::vector<Complex> lam, psiA, zu, zphi, zv;
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
     GRDSolver::GeneralisedForcing f;
@@ -933,6 +932,13 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
         zetaPhi[i] = -g * m.potentialDual[i];
       }
       f.potentialLoad = zetaPhi;
+    }
+    // a measurement of V: its adjoint tangential traction
+    std::vector<Complex> tractionV;
+    if (!m.tangentialPotentialDual.empty()) {
+      tractionV = detail::TractionPotentialOfTangentialDual(
+          grid, m.tangentialPotentialDual);
+      f.tangentialTraction = grid.Synthesise(tractionV);
     }
     if (rotation != RotationalFeedback::None) {
       auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
@@ -962,6 +968,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
                    : grid.ZeroCoefficients();
     if (!zetaU.empty()) out.zu = grid.Expand(zetaU);
     if (!zetaPhi.empty()) out.zphi = grid.Expand(zetaPhi);
+    out.zv = std::move(tractionV);
     return out;
   };
   // The jump's solutions per degree (the unrelaxed responses to its
@@ -971,6 +978,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     const auto psiCols = tidesOf(j.psiA);
     const auto zuCols = j.zu.empty() ? LoadCallable{} : loadsOf(j.zu);
     const auto zphiCols = j.zphi.empty() ? LoadCallable{} : loadsOf(j.zphi);
+    const auto zvCols = j.zv.empty() ? LoadCallable{} : loadsOf(j.zv);
     auto out = Fields{};
     for (const auto& [l, m] : vs.state.m) {
       const auto& deg = op.Deg(l);
@@ -987,10 +995,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       const auto& units = op.UnitResponses(nullptr, l);
       add(units.data(), *lamCols(l, 0.0));
       add(units.data() + deg.ndof, *psiCols(l, 0.0));
-      if (zuCols || zphiCols) {
+      if (zuCols || zphiCols || zvCols) {
         const auto& split = op.SplitUnitResponses(nullptr, l);
         if (zuCols) add(split.data(), *zuCols(l, 0.0));
         if (zphiCols) add(split.data() + deg.ndof, *zphiCols(l, 0.0));
+        if (zvCols) add(split.data() + 2 * deg.ndof, *zvCols(l, 0.0));
       }
       out.emplace(l, std::move(x));
     }

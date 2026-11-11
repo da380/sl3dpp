@@ -49,6 +49,10 @@ class Evolution {
     /// The potential V of the tangential displacement (the displacement
     /// its surface gradient), as GRDSolver::Response's.
     std::vector<double> tangentialPotential;
+    /// The toroidal potential W of the tangential displacement, as
+    /// GRDSolver::Response's; empty where there is none (a radial model
+    /// under a load and a tide).
+    std::vector<double> toroidalPotential;
     std::array<double, 3> angularVelocity{};
     /// The internal variables, without the strain cache unless
     /// Options::record_strain (one elastic solve under the recorded load

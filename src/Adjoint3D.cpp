@@ -129,7 +129,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau,
     const MaterialDirection3D* materialV) const {
-  detail::RefuseTangential(measurements, "the continuous sweep");
   const bool second = ditau != nullptr;
   const bool material = options_.material_kernels;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
@@ -285,7 +284,27 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // laterally uniform — identical to the 1D sweep's jump).
   struct Jump {
     std::vector<double> xiA;
-    std::vector<Complex> lam, psiA, zu, zphi;
+    std::vector<Complex> lam, psiA, zu, zphi, zv, zw;
+  };
+  // The forces of a toroidal traction on the toroidal systems, from its
+  // potential's coefficients in load units (a measurement of the toroidal
+  // potential W: its adjoint traction).
+  auto toroidalTractionForces = [&](const std::vector<Complex>& zw) {
+    auto forces = std::map<int, std::vector<Complex>>{};
+    for (auto l = 1; l <= lmax; ++l) {
+      const auto& system = op.Toroidal(l);
+      const auto ndof = static_cast<std::size_t>(system.DofCount());
+      const auto unit = system.Tangential();
+      auto b = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1), 0.0);
+      for (auto mm = 0; mm <= l; ++mm) {
+        const Complex amp = ev.toMatDensity_ * zw[SurfaceGrid::Index(l, mm)];
+        for (auto d = std::size_t{0}; d < ndof; ++d) {
+          b[static_cast<std::size_t>(mm) * ndof + d] = unit[d] * amp;
+        }
+      }
+      forces.emplace(l, std::move(b));
+    }
+    return forces;
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
     GRDSolver::GeneralisedForcing f;
@@ -306,6 +325,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         zetaPhi[i] = -g * m.potentialDual[i];
       }
       f.potentialLoad = zetaPhi;
+    }
+    // a measurement of V: its adjoint tangential traction
+    std::vector<Complex> tractionV;
+    if (!m.tangentialPotentialDual.empty()) {
+      tractionV = detail::TractionPotentialOfTangentialDual(
+          grid, m.tangentialPotentialDual);
+      f.tangentialTraction = grid.Synthesise(tractionV);
     }
     if (rotation != RotationalFeedback::None) {
       auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
@@ -336,6 +362,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                    : grid.ZeroCoefficients();
     if (!zetaU.empty()) out.zu = grid.Expand(zetaU);
     if (!zetaPhi.empty()) out.zphi = grid.Expand(zetaPhi);
+    out.zv = std::move(tractionV);
+    if (!m.toroidalPotentialDual.empty()) {
+      out.zw = detail::TractionPotentialOfTangentialDual(
+          grid, m.toroidalPotentialDual);
+    }
     agree(out.xiA);
     agree(out.lam);
     agree(out.psiA);
@@ -378,7 +409,19 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   };
   auto applyJump = [&](const Jump& j) {
     auto spectral = coupling.ZeroSpectral();
-    const auto split = !j.zu.empty() || !j.zphi.empty();
+    const auto split = !j.zu.empty() || !j.zphi.empty() || !j.zv.empty();
+    // the toroidal traction's unrelaxed response, where there is one
+    auto twist = std::map<int, std::vector<Complex>>{};
+    if (!j.zw.empty()) {
+      auto none = std::map<int, std::vector<Complex>>{};
+      for (auto l = 0; l <= lmax; ++l) {
+        none.emplace(l, std::vector<Complex>(
+                            static_cast<std::size_t>(op.Spheroidal(l).DofCount()) *
+                                (static_cast<std::size_t>(l) + 1),
+                            0.0));
+      }
+      twist = op.SolveUnrelaxed(none, toroidalTractionForces(j.zw)).toroidal;
+    }
     for (auto l = 0; l <= lmax; ++l) {
       const auto& units = locked([&]() -> const std::vector<double>& {
         return reference.UnitResponses(nullptr, l);
@@ -399,15 +442,23 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
             j.zu.empty() ? 0.0 : ev.toMatDensity_ * j.zu[i];
         const Complex zphiAmp =
             j.zphi.empty() ? 0.0 : ev.toMatDensity_ * j.zphi[i];
+        const Complex zvAmp = j.zv.empty() ? 0.0 : ev.toMatDensity_ * j.zv[i];
         for (auto d = std::size_t{0}; d < ndof; ++d) {
           Complex v = units[d] * lamAmp + units[ndof + d] * psiAmp;
           if (splitUnits != nullptr) {
-            v += splitUnits[d] * zuAmp + splitUnits[ndof + d] * zphiAmp;
+            v += splitUnits[d] * zuAmp + splitUnits[ndof + d] * zphiAmp +
+                 splitUnits[2 * ndof + d] * zvAmp;
           }
           x[static_cast<std::size_t>(m) * ndof + d] = v;
         }
       }
-      coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x);
+      if (const auto w = twist.find(l); w != twist.end()) {
+        coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x,
+                                     &op.Toroidal(l), w->second);
+        if (material || hasMaterialV) lumpSolutions.toroidal[l] = w->second;
+      } else {
+        coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x);
+      }
       if (material || hasMaterialV) lumpSolutions.spheroidal[l] = std::move(x);
     }
     const auto dTilde = coupling.Synthesise(spectral);
@@ -1090,8 +1141,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                            const GRDSolver::GeneralisedForcing& base,
                            const GridCoupling::SpectralTensor* analysed,
                            const std::map<int, std::vector<Complex>>* bulk,
-                           const std::map<int, std::vector<Complex>>* split) {
+                           const std::map<int, std::vector<Complex>>* split,
+                           const std::map<int, std::vector<Complex>>* twist =
+                               nullptr) {
     auto step = op.StartStep(op.ZeroState(), 0.0, scheme);
+    if (twist != nullptr) step.AddToroidalForce(*twist);
     if (analysed != nullptr) {
       step.AddForce(*analysed, bulk != nullptr
                                    ? *bulk
@@ -1165,8 +1219,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       base.angularMomentumChange = avc;
     }
     auto split = std::map<int, std::vector<Complex>>{};
-    if (!m.displacementDual.empty() || !m.potentialDual.empty()) {
+    if (!m.displacementDual.empty() || !m.potentialDual.empty() ||
+        !m.tangentialPotentialDual.empty()) {
       auto zu = grid.ZeroCoefficients(), zphi = grid.ZeroCoefficients();
+      auto zv = grid.ZeroCoefficients();
+      if (!m.tangentialPotentialDual.empty()) {
+        zv = detail::TractionPotentialOfTangentialDual(
+            grid, m.tangentialPotentialDual);
+      }
       if (!m.displacementDual.empty()) {
         auto zetaU = std::vector<double>(fieldSize);
         for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1186,21 +1246,30 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         const auto ndof = static_cast<std::size_t>(system.DofCount());
         const auto force = system.Load(LoadPart::Force);
         const auto potential = system.Load(LoadPart::Potential);
+        const auto tangential = system.Tangential();
         auto b = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1), 0.0);
         for (auto mm = 0; mm <= l; ++mm) {
           const auto i = SurfaceGrid::Index(l, mm);
           const Complex zuAmp = ev.toMatDensity_ * zu[i];
           const Complex zphiAmp = ev.toMatDensity_ * zphi[i];
+          const Complex zvAmp = ev.toMatDensity_ * zv[i];
           for (auto d = std::size_t{0}; d < ndof; ++d) {
             b[static_cast<std::size_t>(mm) * ndof + d] =
-                force[d] * zuAmp + potential[d] * zphiAmp;
+                force[d] * zuAmp + potential[d] * zphiAmp +
+                tangential[d] * zvAmp;
           }
         }
         split.emplace(l, std::move(b));
       }
     }
+    auto twist = std::map<int, std::vector<Complex>>{};
+    if (!m.toroidalPotentialDual.empty()) {
+      twist = toroidalTractionForces(detail::TractionPotentialOfTangentialDual(
+          grid, m.toroidalPotentialDual));
+    }
     auto inst = instantaneous(node, base, nullptr, nullptr,
-                              split.empty() ? nullptr : &split);
+                              split.empty() ? nullptr : &split,
+                              twist.empty() ? nullptr : &twist);
     lumps.emplace(node, inst.response.relativeSeaLevelChange);
     if (material || hasMaterialV) {
       lumpSolutions = inst.x;

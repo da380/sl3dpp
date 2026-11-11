@@ -228,12 +228,26 @@ class GRDSolver {
     std::vector<double> directLoad;
     std::vector<double> displacementLoad;
     std::vector<double> potentialLoad;
+    /// A tangential traction on the surface, given by its potential tau
+    /// in the units of a load: the traction is -g grad_1 tau, as
+    /// displacementLoad is the normal traction -g times its field. The
+    /// body answers through the tangential-traction numbers h_v, l_v,
+    /// k_v; a degree-0 part is nothing. With displacementLoad, the
+    /// continuous adjoint's channel for a displacement measurement of
+    /// vector weight w: the two take minus the weight's radial part and
+    /// minus its tangential part's potential.
+    std::vector<double> tangentialTraction;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
     /// The ready response of the tangential displacement's potential, as
     /// the two above: it is joined to the potential returned and feeds
     /// nothing back.
     std::vector<std::complex<double>> tangentialResponse;
+    /// The ready toroidal potential W of the tangential displacement
+    /// (a 3D step's lateral part, or a source's): the sea level does not
+    /// see it and no Love number makes it, so it is only carried to the
+    /// response. Empty: none, and none returned.
+    std::vector<std::complex<double>> toroidalResponse;
     double inertiaMomentChange = 0.0;
     std::array<double, 3> angularMomentumChange{0.0, 0.0, 0.0};
     /// A prescribed tidal potential, its coefficients on the surface: the
@@ -260,6 +274,11 @@ class GRDSolver {
     /// centrifugal potential, and the ready response joined. It has no
     /// degree-0 part.
     std::vector<double> tangentialPotential;
+    /// The toroidal potential W of the tangential displacement,
+    /// u_t = grad_1 V - r x grad_1 W: the ready response's field. Empty
+    /// when the forcing gave none (a radial model under a load and a
+    /// tide has no toroidal displacement).
+    std::vector<double> toroidalPotential;
     std::array<double, 3> angularVelocity{0.0, 0.0, 0.0};
     int iterations = 0;
     double error = 0.0;
@@ -300,6 +319,9 @@ class GRDSolver {
     /// as the others; the dual of a tangential displacement measurement
     /// is minus the surface divergence of its vector density.
     std::vector<double> tangentialPotentialDual;
+    /// The dual of the toroidal potential W; it is carried to the dual of
+    /// the ready channel and enters nothing else.
+    std::vector<double> toroidalPotentialDual;
     std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
     std::vector<double> oceanFunctionOverride;
     RotationalFeedback rotation = RotationalFeedback::Full;
@@ -313,6 +335,8 @@ class GRDSolver {
     std::vector<std::complex<double>> displacementResponseDual;
     std::vector<std::complex<double>> potentialResponseDual;
     std::vector<std::complex<double>> tangentialResponseDual;
+    /// Empty when no toroidal dual was given.
+    std::vector<std::complex<double>> toroidalResponseDual;
     /// The dual of the prescribed tidal potential's coefficients, paired
     /// as the response channels' are.
     std::vector<std::complex<double>> tideDual;
@@ -342,6 +366,7 @@ class GRDSolver {
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
     std::vector<std::complex<double>> tangentialResponse;
+    std::vector<std::complex<double>> toroidalResponse;
     double inertiaMomentChange = 0.0;
     RotationalFeedback rotation = RotationalFeedback::Full;
   };
@@ -376,6 +401,8 @@ class GRDSolver {
   // The tangential numbers: the load's (channel sum and splits) and the
   // tide's, zero at degree 0.
   std::vector<double> l_, lU_, lPhi_, lt_;
+  // The tangential traction's numbers, zero at degree 0.
+  std::vector<double> hV_, lV_, kV_;
   std::vector<double> slcFactor_;  // -(h + k / g), per degree
   // Degree-2 and axial numbers.
   double h2_ = 0, k2_ = 0, ht2_ = 0, kt2_ = 0;

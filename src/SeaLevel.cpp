@@ -158,6 +158,14 @@ GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
   for (auto l = 0; l <= lmax; ++l) l_[l] = lU_[l] + lPhi_[l];
   // a degree-0 field has no tangential part
   l_[0] = lU_[0] = lPhi_[0] = lt_[0] = 0.0;
+  hV_.assign(lmax + 1, 0.0);
+  lV_.assign(lmax + 1, 0.0);
+  kV_.assign(lmax + 1, 0.0);
+  for (auto l = 1; l <= lmax; ++l) {
+    hV_[l] = nd.h_v[l];
+    lV_[l] = nd.l_v[l];
+    kV_[l] = nd.k_v[l];
+  }
   ht2_ = nd.h_t[2];
   kt2_ = nd.k_t[2];
   hc_ = nd.h_c;
@@ -374,10 +382,12 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   checkField(forcing.directLoad, "direct load");
   checkField(forcing.displacementLoad, "displacement load");
   checkField(forcing.potentialLoad, "potential load");
+  checkField(forcing.tangentialTraction, "tangential traction");
   checkField(forcing.oceanFunctionOverride, "ocean function override");
   checkCoefficients(forcing.displacementResponse, "displacement response");
   checkCoefficients(forcing.potentialResponse, "potential response");
   checkCoefficients(forcing.tangentialResponse, "tangential response");
+  checkCoefficients(forcing.toroidalResponse, "toroidal response");
   checkCoefficients(forcing.tide, "tide");
   const bool tidal =
       !forcing.tide.empty() &&
@@ -433,6 +443,21 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       }
     }
   }
+  if (!forcing.tangentialTraction.empty() &&
+      MaxAbs(forcing.tangentialTraction) > 0.0) {
+    anyForcing = true;
+    ensureStatic();
+    ensureTangential();
+    const auto lm = grid_.Expand(forcing.tangentialTraction);
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        staticDisp[i] += hV_[l] * lm[i];
+        staticGrav[i] += kV_[l] * lm[i];
+        staticTan[i] += lV_[l] * lm[i];
+      }
+    }
+  }
   if (!forcing.displacementResponse.empty() &&
       MaxAbs(forcing.displacementResponse) > 0.0) {
     anyForcing = true;
@@ -484,6 +509,10 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
   response.tangentialPotential.assign(fieldSize, 0.0);
+  // the toroidal potential is carried, whatever else is solved
+  if (!forcing.toroidalResponse.empty()) {
+    response.toroidalPotential = grid_.Synthesise(forcing.toroidalResponse);
+  }
   if (!anyForcing) return response;
 
   const auto& oceanFunction = forcing.oceanFunctionOverride.empty()
@@ -699,6 +728,10 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   out.displacementResponseDual.assign(coefSize, 0.0);
   out.potentialResponseDual.assign(coefSize, 0.0);
   out.tangentialResponseDual = lamV;
+  if (!forcing.toroidalPotentialDual.empty()) {
+    out.toroidalResponseDual = grid_.Expand(forcing.toroidalPotentialDual);
+    for (auto& v : out.toroidalResponseDual) v *= r2;
+  }
   out.tideDual.assign(coefSize, 0.0);
   if (MaxAbs(gXi) == 0.0 && MaxAbs(lamU) == 0.0 && MaxAbs(lamPhi) == 0.0 &&
       MaxAbs(std::span<const std::complex<double>>(lamV)) == 0.0 &&
@@ -1087,6 +1120,13 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);
   out.response.tangentialPotential = grid_.Synthesise(tanLm);
+  if (!forcing.toroidalResponse.empty()) {
+    if (forcing.toroidalResponse.size() != coefSize) {
+      throw std::invalid_argument(
+          "toroidal response is not a coefficient vector of the grid");
+    }
+    out.response.toroidalPotential = grid_.Synthesise(forcing.toroidalResponse);
+  }
   out.response.angularVelocity = omega;
   out.response.iterations = count;
   out.response.error = err;

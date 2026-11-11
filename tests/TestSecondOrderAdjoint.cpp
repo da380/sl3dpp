@@ -340,6 +340,7 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
   const auto fieldU = setup.Smooth(rng, 20.0 * setup.Metre());
   const auto fieldV = setup.Smooth(rng, 20.0 * setup.Metre());
   const auto g = setup.Smooth(rng, 1.0);
+  const auto gTangential = setup.Smooth(rng, 1.0);
   const auto span = 10.0 * setup.Kyr();
   const auto& mesh = setup.material.Mesh();
   // named, not a structured binding: Clang 18 does not capture those
@@ -398,6 +399,9 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
         op.Points(), materialDirection([](double r) { return 1.0 - 0.5 * r; }));
     auto measurement = std::map<std::size_t, Measurement>{};
     measurement[times.size() - 1].seaLevelDual = g;
+    // and the tangential displacement's potential, a tangential traction
+    // in the continuous sweep
+    measurement[times.size() - 1].tangentialPotentialDual = gTangential;
     struct Blocks {
       double ice, viscosity, material, forward;
     };

@@ -118,6 +118,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     agree(adj.displacementResponseDual);
     agree(adj.potentialResponseDual);
     agree(adj.tangentialResponseDual);
+    agree(adj.toroidalResponseDual);
     agree(adj.tideDual);
     auto scalars = std::array{adj.inertiaMomentDual, adj.converged ? 0.0 : 1.0};
     collectives.max(std::span(&scalars[1], 1));
@@ -345,6 +346,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
       duals.tangentialPotentialDual = m.tangentialPotentialDual;
+      duals.toroidalPotentialDual = m.toroidalPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
@@ -390,6 +392,24 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             for (auto d = 0; d < ndof; ++d) {
               if (system.Holds(d)) bl[d] += momentRow[d] * jd;
             }
+          }
+        }
+      };
+  // The dual of the toroidal surface potential on the surface dof of the
+  // toroidal columns (the transpose of the toroidal response channel).
+  auto addToroidalDuals =
+      [&](Forces& rhs, const GRDSolver::AdjointResponse& adj,
+          const std::function<const ToroidalOperator&(int)>& toroidal) {
+        if (adj.toroidalResponseDual.empty()) return;
+        for (auto& [l, bl] : rhs) {
+          const auto& system = toroidal(l);
+          const auto ndof = system.DofCount();
+          const auto sw = system.SurfaceDof();
+          if (sw < 0 || !system.Holds(sw)) continue;
+          for (auto m = 0; m <= l; ++m) {
+            bl[static_cast<std::size_t>(m) * ndof + sw] +=
+                ev.toNdLength_ *
+                adj.toroidalResponseDual[SurfaceGrid::Index(l, m)];
           }
         }
       };
@@ -786,6 +806,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
               "the adjoint sea level solve at node {} did not converge", n));
         }
         addSurfaceDuals(sphForces, adj, sph);
+        addToroidalDuals(torForces, adj, tor);
         const auto xdag = op.SolveForces(sphForces, torForces, sph, tor);
         auto e = exit(xdag, sph, tor);
         auto y = e;
@@ -934,15 +955,21 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         }
         auto surface = zeroSph;
         addSurfaceDuals(surface, adj, sph);
-        const auto response = op.SolveForces(surface, zeroTor, sph, tor);
+        auto surfaceTor = zeroTor;
+        addToroidalDuals(surfaceTor, adj, tor);
+        const auto response = op.SolveForces(surface, surfaceTor, sph, tor);
         for (auto& [l, b] : surface) {
           const auto& fixed = b0s.at(l);
           for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += fixed[i];
         }
+        for (auto& [l, b] : surfaceTor) {
+          const auto& fixed = b0t.at(l);
+          for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += fixed[i];
+        }
         auto warm = iterate;
         combine(warm, response, 1.0);
-        auto [solved, solveInfo] =
-            step.Solve(surface, b0t, &warm, 0.0, op.options_.solve_outer_factor);
+        auto [solved, solveInfo] = step.Solve(surface, surfaceTor, &warm, 0.0,
+                                              op.options_.solve_outer_factor);
         const auto change = solveInfo.initial;
         if (!std::isfinite(change)) break;
         if (change <= control.rtol && solveInfo.converged) {
@@ -1267,6 +1294,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     auto e0 = Tensor{};
     if (material || hasMaterialV) {
       addSurfaceDuals(sphForces, adj, sph);
+      addToroidalDuals(torForces, adj, tor);
       y0 = op.SolveUnrelaxed(sphForces, torForces);
       e0 = exit(y0, sph, tor);
     }
@@ -1334,6 +1362,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
     duals.tangentialPotentialDual = m.tangentialPotentialDual;
+    duals.toroidalPotentialDual = m.toroidalPotentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
     auto adj =
         solverFor(op.ElasticLove()).SolveAdjoint(ev.state_, duals, sleOptions);

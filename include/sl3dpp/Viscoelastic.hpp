@@ -366,8 +366,9 @@ class ViscoelasticOperator {
   [[nodiscard]] const std::vector<double>& UnitResponses(Flavour* flavour,
                                                          int l) const;
   /// The flavour's responses to the SPLIT unit-load channels, columns
-  /// (traction-only, attraction-only): what the continuous adjoint's jump
-  /// needs for displacement and potential measurements.
+  /// (traction-only, attraction-only, the unit tangential traction):
+  /// what the continuous adjoint's jump needs for displacement and
+  /// potential measurements.
   [[nodiscard]] const std::vector<double>& SplitUnitResponses(Flavour* flavour,
                                                               int l) const;
   void AddChannels(std::vector<double>& x, int l, Flavour* flavour, double t,

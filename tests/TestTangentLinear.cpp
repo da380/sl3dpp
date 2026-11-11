@@ -457,10 +457,76 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     EXPECT_NE(alongModuli, 0.0);
     EXPECT_NEAR(alongModuli, moduliRhs, 1e-8 * std::abs(alongModuli)) << label;
 
-    // the sweeps that do not carry the tangential dual say so
-    AdjointSolver continuous(evolution, {.method = AdjointMethod::Continuous});
-    EXPECT_THROW((void)continuous.FirstOrderKernels(times, *measured),
-                 std::invalid_argument);
+  }
+}
+
+TEST(TangentLinear, TheContinuousSweepTakesATangentialMeasurement) {
+  // A measurement of the tangential displacement's potential enters the
+  // continuous sweep as an adjoint tangential traction:
+  // its delta amplitudes are the discrete sweep's (two realisations, the
+  // engine transpose and the forward channel mapping), and its load
+  // kernels predict the objective to the commute error, which falls at
+  // second order under refinement; with an ocean and without, with and without the
+  // rotational feedback.
+  auto setup = Scene::Make(1e22);
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry})
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full}) {
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
+                       ", rotation " + std::to_string(static_cast<int>(rotation));
+    auto errors = std::map<std::size_t, double>{};
+    for (const auto npts : {std::size_t{5}, std::size_t{9}, std::size_t{17}}) {
+      std::mt19937 rng(17);  // the same fields at every resolution
+      auto times = std::vector<double>{};
+      for (auto n = std::size_t{0}; n < npts; ++n) {
+        times.push_back(10.0 * setup.Kyr() * static_cast<double>(n) /
+                        static_cast<double>(npts - 1));
+      }
+      const auto field = setup.Smooth(rng, 100.0 * setup.Sigma());
+      auto loads = std::vector<std::vector<double>>{};
+      for (auto n = std::size_t{0}; n < npts; ++n) {
+        loads.push_back(field);
+        for (auto& v : loads.back()) v *= times[n] / times.back();
+      }
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[npts / 2].tangentialPotentialDual = setup.Smooth(rng, 1.0);
+      measurements[npts - 1].tangentialPotentialDual = setup.Smooth(rng, 0.5);
+
+      ViscoelasticOperator op(setup.rheology, kLmax);
+      Evolution evolution(op, setup.solver, *background,
+                          {.rotation = rotation, .rtol = 1e-12});
+      const auto exact = Objective(
+          setup, evolution.Run(times, History(times, loads)), measurements);
+      ASSERT_NE(exact, 0.0);
+      auto kernels = std::map<AdjointMethod, Kernels>{};
+      for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+        kernels.emplace(method,
+                        AdjointSolver(evolution, {.method = method, .rtol = 1e-12})
+                            .FirstOrderKernels(times, measurements));
+      }
+      auto predicted = 0.0, discrete = 0.0;
+      for (auto n = std::size_t{0}; n < npts; ++n) {
+        predicted += setup.Surface(
+            kernels[AdjointMethod::Continuous].directLoadKernels[n], loads[n]);
+        discrete += setup.Surface(
+            kernels[AdjointMethod::Discrete].directLoadKernels[n], loads[n]);
+      }
+      EXPECT_NEAR(discrete, exact, 1e-8 * std::abs(exact)) << label;
+      errors[npts] = std::abs(predicted - exact) / std::abs(exact);
+      for (const auto& [node, a] :
+           kernels[AdjointMethod::Discrete].instantaneous) {
+        const auto& b =
+            kernels[AdjointMethod::Continuous].instantaneous.at(node);
+        EXPECT_GT(MaxAbs(a), 0.0);
+        EXPECT_LT(MaxDiff(a, b), 1e-7 * MaxAbs(a))
+            << "node " << node << ", " << label;
+      }
+    }
+    EXPECT_LT(errors[17], 0.1) << label;
+    EXPECT_GT(errors[5] / errors[9], 2.0) << label;
+    EXPECT_GT(errors[9] / errors[17], 3.0) << label;  // second order
   }
 }
 

@@ -434,10 +434,12 @@ const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
     const auto force = deg.system.Load(LoadPart::Force);
     const auto potential = deg.system.Load(LoadPart::Potential);
-    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
+    const auto tangential = deg.system.Tangential();
+    auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 3, 0.0);
     std::ranges::copy(force, rhs.begin());
     std::ranges::copy(potential, rhs.begin() + deg.ndof);
-    found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    std::ranges::copy(tangential, rhs.begin() + 2 * deg.ndof);
+    found = cache.emplace(l, system.Solve(rhs, 3)).first;
   }
   return found->second;
 }

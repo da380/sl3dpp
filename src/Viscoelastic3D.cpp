@@ -1265,7 +1265,8 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
   const auto toroidal = [&](int l) -> const ToroidalOperator& {
     return op.FlavourToroidal(flavour, l);
   };
-  if (extraSpheroidal_.empty() && analysed_.scalars.empty()) {
+  if (extraSpheroidal_.empty() && extraToroidal_.empty() &&
+      analysed_.scalars.empty()) {
     return op.SolveAll(analysed_, spheroidal, toroidal);
   }
   auto sph = op.SpheroidalForces(analysed_, spheroidal);
@@ -1273,8 +1274,12 @@ Viscoelastic3D::Solutions Viscoelastic3D::OpenStep::Respond(
     auto& b = sph.at(l);
     for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
   }
-  return op.SolveForces(sph, coupling.ToroidalForce(analysed_, toroidal),
-                        spheroidal, toroidal);
+  auto tor = coupling.ToroidalForce(analysed_, toroidal);
+  for (const auto& [l, f] : extraToroidal_) {
+    auto& b = tor.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+  }
+  return op.SolveForces(sph, tor, spheroidal, toroidal);
 }
 
 std::pair<Viscoelastic3D::OpenStep::Fields, Viscoelastic3D::OpenStep::Fields>
@@ -1313,10 +1318,15 @@ Viscoelastic3D::OpenStep::Forces(const LoadCallable3D& load,
     for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
   }
   op.AddChannelForces(sph, t_, load, tide, spheroidal);
-  return {std::move(sph),
-          op.coupling_.ToroidalForce(fixed_, [&](int l) -> const ToroidalOperator& {
-            return op.FlavourToroidal(flavour, l);
-          })};
+  auto tor =
+      op.coupling_.ToroidalForce(fixed_, [&](int l) -> const ToroidalOperator& {
+        return op.FlavourToroidal(flavour, l);
+      });
+  for (const auto& [l, f] : extraToroidal_) {
+    auto& b = tor.at(l);
+    for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f[i];
+  }
+  return {std::move(sph), std::move(tor)};
 }
 
 std::pair<Viscoelastic3D::OpenStep::Fields, Viscoelastic3D::OpenStep::Fields>
@@ -1547,6 +1557,22 @@ void Viscoelastic3D::OpenStep::AddForce(
     if (extra.empty()) {
       extra = f;
     } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  startForce_ = false;
+}
+
+void Viscoelastic3D::OpenStep::AddToroidalForce(
+    const std::map<int, std::vector<Complex>>& toroidal) {
+  for (const auto& [l, f] : toroidal) {
+    auto& extra = extraToroidal_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      if (extra.size() != f.size()) {
+        throw std::invalid_argument("a toroidal force has the solutions' layout");
+      }
       for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
     }
   }
@@ -1849,6 +1875,37 @@ std::map<int, std::vector<Viscoelastic3D::Complex>> Viscoelastic3D::Surface(
   if (options_.collectives.Distributed()) {
     // The surface segment's process holds them: summed, every process has
     // them.
+    auto all = std::vector<Complex>{};
+    for (const auto& [l, values] : out) {
+      all.insert(all.end(), values.begin(), values.end());
+    }
+    options_.collectives.sum(Reals(all));
+    auto at = all.begin();
+    for (auto& [l, values] : out) {
+      std::copy(at, at + static_cast<std::ptrdiff_t>(values.size()),
+                values.begin());
+      at += static_cast<std::ptrdiff_t>(values.size());
+    }
+  }
+  return out;
+}
+
+std::map<int, std::vector<Viscoelastic3D::Complex>>
+Viscoelastic3D::SurfaceToroidal(const Solutions& solutions) const {
+  auto out = std::map<int, std::vector<Complex>>{};
+  for (const auto& [l, x] : solutions.toroidal) {
+    const auto& op = Toroidal(l);
+    const auto columns = l + 1;
+    const auto dof = op.SurfaceDof();
+    auto values = std::vector<Complex>(columns, 0.0);
+    if (dof >= 0 && op.Holds(dof)) {
+      for (auto c = 0; c < columns; ++c) {
+        values[c] = x[static_cast<std::size_t>(c) * op.DofCount() + dof];
+      }
+    }
+    out.emplace(l, std::move(values));
+  }
+  if (options_.collectives.Distributed()) {
     auto all = std::vector<Complex>{};
     for (const auto& [l, values] : out) {
       all.insert(all.end(), values.begin(), values.end());

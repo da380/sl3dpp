@@ -1659,8 +1659,68 @@ as they do U's and Phi's. A measurement of V is
 `Measurement::tangentialPotentialDual`; one of the tangential
 displacement itself, int w . grad_1 V dS, has the dual -div_1 w.
 
+**Displacement measurements.** A measurement of the surface
+displacement is a vector weight w on the surface, J = int w . u dS,
+with
+
+    u = U r + grad_1 V - r x grad_1 W,
+
+V and W the spheroidal and toroidal potentials of the tangential part.
+In the canonical basis (Phinney & Burridge 1973; Dahlen & Tromp 1998,
+appendix C; Crawford et al. 2017, eqs 2.51-2.60) the components expand
+in generalised spherical harmonics of upper index -1, 0, 1,
+
+    u^0_lm = U_lm,   u^(+-)_lm = sqrt(l (l + 1) / 2) (V_lm +- i W_lm),
+
+so a weight's components give its duals algebraically: the radial
+component is the dual of U, and with w = w_r r + grad_1 a - r x grad_1 b
+the pairing is sum_lm l (l + 1) (a V + b W), the duals of V and W having
+the coefficients sqrt(l (l + 1) / 2) (w^+ + w^-)_lm and
+-i sqrt(l (l + 1) / 2) (w^+ - w^-)_lm (`Measurement::displacementDual`,
+`tangentialPotentialDual`, `toroidalPotentialDual`).
+`DisplacementMeasurement` builds them from a weight given by its east,
+north and up components on a grid carrying upper index 1, and
+`DisplacementField` is the inverse map, the vector field of U, V and W.
+`PointDisplacementMeasurement` is the weight concentrated at a site
+along a direction, band-limited as the point dual is, and needs no
+transform: the upward part is the grid's reproducing kernel
+K(x . x0), the horizontal part its derivative along the direction,
+(x . d) K'(x . x0), on V, and along d x r on W.
+
+**The toroidal potential.** A radial model under a load and a tide has
+no toroidal displacement: W is absent from its responses, and its
+sweeps pass over the dual of W. Lateral structure makes one. The sea
+level does not see W and no Love number makes it, so the sea level
+solve carries it alone, from a ready channel to the response and its
+dual back (`toroidalResponse`, `Response::toroidalPotential`; empty
+when there is none). The 3D evolution and tangent-linear run read W at
+the surface of the toroidal systems' solutions; the discrete 3D sweep
+places its dual on their surface rows.
+
+**The adjoint traction.** The continuous sweeps pose the adjoint as a
+forward problem, each measurement's dual a forcing of it: the sea
+level's a direct load, the potential's the attraction piece of a load,
+and a displacement measurement's a traction on the surface, the weight
+itself (times g, in the energy form the sweeps carry). The channels
+are in the units of a load, a unit being the traction -g times it, as
+a load presses down: the radial part enters as the traction piece of
+the load -w_r, the tangential part as the spheroidal traction of
+potential -a and the toroidal traction of potential -b, whose
+coefficients at degree l are those of minus the duals of V and W over
+l (l + 1). The body answers a unit spheroidal traction through h_v,
+l_v and k_v, with h_v = l (l + 1) l_u and k_v = g l (l + 1) l_phi by the
+reciprocity of the symmetric form; the jump at an observation solves
+the unrelaxed sea level equation under it
+(`GeneralisedForcing::tangentialTraction`) and adds the channel's unit
+response (the third column of `SplitUnitResponses`) to the radial
+solution whose strain bumps the adjoint internal variables. A toroidal
+traction moves no load and no potential in the radial reference: its
+unrelaxed toroidal response joins the jump's solution through its
+strain alone. Under lateral moduli both tractions' forces join the
+instantaneous fixed point's (`OpenStep::AddToroidalForce` for the
+toroidal one). The rotational feedback needs no term of its own.
+
 **What takes them.** The tangent-linear runs, 1D and 3D, take the tide
-and return V. The discrete sweeps, 1D and 3D, first and second order,
-take the tangential dual, and the first-order ones form the tide
-kernels. The continuous sweeps refuse the tangential dual and form no
-tide kernels.
+and return V, and in 3D W. Every sweep, discrete and continuous, 1D and
+3D, takes a displacement measurement in full. The discrete first-order
+sweeps form the tide kernels; the continuous ones do not.

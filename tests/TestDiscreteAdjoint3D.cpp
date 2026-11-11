@@ -183,6 +183,9 @@ double Objective(const Scene& scene,
       total +=
           scene.Surface(m.tangentialPotentialDual, snap.tangentialPotential);
     }
+    if (!m.toroidalPotentialDual.empty() && !snap.toroidalPotential.empty()) {
+      total += scene.Surface(m.toroidalPotentialDual, snap.toroidalPotential);
+    }
     for (auto j = 0; j < 3; ++j) {
       total += m.angularVelocityDual[j] * snap.angularVelocity[j];
     }
@@ -297,7 +300,7 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
   // displacement's potential measured, under lateral viscosity: the
   // discrete sweep is the transpose of the discrete tangent-linear run
   // in the load, the tide and the viscosity, with an ocean and without
-  // one; the continuous sweep refuses the tangential dual.
+  // one.
   auto scene = Scene::Make(1e21);
   const auto& grid = scene.solver.Grid();
   std::mt19937 rng(29);
@@ -342,6 +345,12 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
   measurements[3].potentialDual = scene.Smooth(rng, 0.4);
   measurements[3].tangentialPotentialDual = scene.Smooth(rng, 0.6);
   measurements[3].angularVelocityDual = {0.2, -0.4, 0.8};
+  // and the toroidal potential, which the lateral structure makes
+  measurements[2].toroidalPotentialDual = scene.Smooth(rng, 0.8);
+  measurements[3].toroidalPotentialDual = scene.Smooth(rng, -0.5);
+  auto toroidalAlone = std::map<std::size_t, Measurement>{};
+  toroidalAlone[1].toroidalPotentialDual = scene.Smooth(rng, 1.0);
+  toroidalAlone[3].toroidalPotentialDual = scene.Smooth(rng, 1.0);
   auto direction = [](double theta, double phi) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
   };
@@ -356,10 +365,13 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
     Evolution3D evolution(
         op, scene.solver, *background,
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
-    const auto trajectory = ForwardTrajectory3D::FromSnapshots(evolution.Run(
+    const auto snapshots = evolution.Run(
         times, Evolution3D::Forcing{
                    .directLoad = [&](double t) { return loads[nodeOf(t)]; },
-                   .tide = [&](double t) { return tides[nodeOf(t)]; }}));
+                   .tide = [&](double t) { return tides[nodeOf(t)]; }});
+    ASSERT_FALSE(snapshots.back().toroidalPotential.empty());
+    EXPECT_GT(MaxAbs(snapshots.back().toroidalPotential), 0.0);
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
     AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                         .rtol = 1e-12,
                                         .coupled_rtol = 1e-12});
@@ -392,9 +404,24 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
     EXPECT_NEAR(alongViscosity, viscosityRhs, 1e-8 * std::abs(alongViscosity))
         << label;
 
-    AdjointSolver3D continuous(evolution, {.method = AdjointMethod::Continuous});
-    EXPECT_THROW((void)continuous.FirstOrderKernels(times, measurements),
-                 std::invalid_argument);
+    // the toroidal potential measured alone
+    const auto alone =
+        adjoint.FirstOrderKernels(times, toroidalAlone, &trajectory);
+    auto aloneLoad = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      aloneLoad += scene.Surface(alone.ice.directLoadKernels[n], deltas[n]);
+    }
+    const auto toroidalAlongLoad =
+        Objective(scene, tangent.Run(times, loadOnly), toroidalAlone);
+    EXPECT_NE(toroidalAlongLoad, 0.0);
+    EXPECT_NEAR(toroidalAlongLoad, aloneLoad, 1e-8 * std::abs(toroidalAlongLoad))
+        << label;
+    const auto toroidalAlongViscosity = Objective(
+        scene, tangent.Run(times, viscosityOnly, &trajectory), toroidalAlone);
+    EXPECT_NEAR(toroidalAlongViscosity,
+                GridPairing(op.Coupling(), alone.itauKernel3D, ditau),
+                1e-8 * std::abs(toroidalAlongViscosity))
+        << label;
   }
 }
 
@@ -1053,6 +1080,120 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderLateralModuli) {
 // adjoint nested over the same solve.
 TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangentUnderConjugateGradientSteps) {
   MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+}
+
+TEST(DiscreteAdjoint3D, TheContinuousSweepTakesATangentialMeasurement) {
+  // A measurement of the tangential displacement's potential in the 3D
+  // continuous sweep, an adjoint tangential traction:
+  // with no lateral structure the kernels are the 1D continuous sweep's,
+  // and under lateral viscosity and lateral moduli (where the jump is
+  // the instantaneous fixed point under the traction's forces) the gap
+  // to the discrete sweep's load kernels falls as the steps are halved.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(31);
+  const auto span = 10.0 * scene.Kyr();
+  const auto load = scene.MeltLoad(-0.1);
+  const auto gMiddle = scene.Smooth(rng, 1.0);
+  const auto gLast = scene.Smooth(rng, 0.5);
+  auto gridOf = [&](int nodes) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    return times;
+  };
+  auto measured = [&](std::size_t nodes) {
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[nodes / 2].tangentialPotentialDual = gMiddle;
+    measurements[nodes - 1].tangentialPotentialDual = gLast;
+    return measurements;
+  };
+
+  {
+    const auto times = gridOf(5);
+    const auto measurements = measured(times.size());
+    ViscoelasticOperator op1(scene.rheology, kLmax);
+    Evolution evolution1(op1, scene.solver, scene.state, {.rtol = 1e-12});
+    const auto kernels1 =
+        AdjointSolver(evolution1, {.method = AdjointMethod::Continuous, .rtol = 1e-12})
+            .FirstOrderKernels(times, measurements);
+    Viscoelastic3D op3(scene.rheology, kLmax,
+                       [](double, double, double) { return 0.0; });
+    Evolution3D evolution3(op3, scene.solver, scene.state,
+                           {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto kernels3 =
+        AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12})
+            .FirstOrderKernels(times, measurements);
+    auto scale = 0.0, worst = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      scale = std::max(scale, MaxAbs(kernels1.directLoadKernels[n]));
+      worst = std::max(worst, MaxDiff(kernels3.ice.directLoadKernels[n],
+                                      kernels1.directLoadKernels[n]));
+    }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(worst, 1e-8 * scale);
+  }
+
+  // The gap to the discrete sweep under lateral structure: the potential
+  // V under lateral viscosity and moduli, and the toroidal potential W,
+  // whose adjoint traction is toroidal, under lateral viscosity alone
+  // (the jump by the unrelaxed toroidal response) and with lateral
+  // moduli too (the jump by the instantaneous fixed point).
+  struct Case {
+    const char* name;
+    bool toroidal;
+    bool moduli;
+  };
+  for (const auto& which : {Case{"V, lateral moduli", false, true},
+                            Case{"W, lateral viscosity", true, false},
+                            Case{"W, lateral moduli", true, true}}) {
+    auto options = Viscoelastic3D::Options{};
+    if (which.moduli) options.moduli = TestModuli();
+    Viscoelastic3D op(
+        scene.rheology, kLmax,
+        [](double, double theta, double phi) {
+          return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        },
+        options);
+    auto gaps = std::vector<double>{};
+    for (const auto nodes : {5, 9, 17}) {
+      const auto times = gridOf(nodes);
+      auto measurements = measured(times.size());
+      if (which.toroidal) {
+        for (auto& [node, m] : measurements) {
+          m.toroidalPotentialDual = std::move(m.tangentialPotentialDual);
+          m.tangentialPotentialDual.clear();
+        }
+      }
+      Evolution3D evolution(op, scene.solver, scene.state,
+                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      auto paired = std::map<AdjointMethod, double>{};
+      for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+        const auto kernels =
+            AdjointSolver3D(evolution, {.method = method,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12})
+                .FirstOrderKernels(times, measurements);
+        auto total = 0.0;
+        for (auto n = std::size_t{0}; n < times.size(); ++n) {
+          auto at = load;
+          for (auto& v : at) v *= times[n] / span;
+          total += scene.Surface(kernels.ice.directLoadKernels[n], at);
+        }
+        paired[method] = total;
+      }
+      ASSERT_NE(paired[AdjointMethod::Discrete], 0.0) << which.name;
+      gaps.push_back(std::abs(paired[AdjointMethod::Continuous] -
+                              paired[AdjointMethod::Discrete]) /
+                     std::abs(paired[AdjointMethod::Discrete]));
+    }
+    EXPECT_LT(gaps[2], 0.1)
+        << which.name << ": " << gaps[0] << " " << gaps[1] << " " << gaps[2];
+    EXPECT_GT(gaps[0] / gaps[1], 2.0)
+        << which.name << ": " << gaps[0] << " " << gaps[1];
+    EXPECT_GT(gaps[1] / gaps[2], 3.0)
+        << which.name << ": " << gaps[1] << " " << gaps[2];
+  }
 }
 
 TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {

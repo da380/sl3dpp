@@ -378,6 +378,11 @@ class Viscoelastic3D {
   [[nodiscard]] std::map<int, std::vector<Complex>> Surface(
       const Solutions& solutions, Component component) const;
 
+  /// The surface value of the toroidal scalar W per degree (from 1), as
+  /// Surface: the tangential displacement is grad_1 V - r x grad_1 W.
+  [[nodiscard]] std::map<int, std::vector<Complex>> SurfaceToroidal(
+      const Solutions& solutions) const;
+
   /// The inertia moment of the degree-0, m = 0 column of solutions (zero
   /// without one); distributed, collective (each process's share summed).
   [[nodiscard]] double InertiaMoment(const Solutions& solutions) const;
@@ -551,6 +556,9 @@ class Viscoelastic3D {
     /// Respond.
     void AddForce(const GridCoupling::SpectralTensor& analysed,
                   const std::map<int, std::vector<Complex>>& spheroidal);
+    /// Adds per-degree toroidal forces (the solutions' layout), as
+    /// AddForce's spheroidal ones: a toroidal traction, say.
+    void AddToroidalForce(const std::map<int, std::vector<Complex>>& toroidal);
 
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients
@@ -593,6 +601,8 @@ class Viscoelastic3D {
     mutable bool startForce_ = false;
     /// Per-degree spheroidal forces added after the assembly (AddForce).
     std::map<int, std::vector<Complex>> extraSpheroidal_;
+    /// Per-degree toroidal forces added after the assembly.
+    std::map<int, std::vector<Complex>> extraToroidal_;
   };
 
   /// Opens a step: the start strain comes from the state's cache or a
