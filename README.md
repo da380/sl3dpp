@@ -26,7 +26,8 @@ of mantle viscosity using deglacial sea level observations;
   sea-level fingerprints, of a radial Earth or of one with laterally
   varying elastic moduli.
 - **The sea-level equation.** The generalised sea-level equation, with
-  displacement and potential response channels, frozen or migrating
+  displacement and potential response channels, the tangential
+  displacement beside the radial, frozen or migrating
   shorelines, exact mass conservation, rotational feedback (none, axial, or
   full: polar wander and length-of-day change), and its exact adjoint.
 - **1D viscoelastic evolution.** Generalised Maxwell (Prony) rheologies,

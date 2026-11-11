@@ -195,6 +195,10 @@ TEST(LateralGate, ZeroLateralForcedEvolutionMatchesThe1DLoop) {
           WorstDeparture(coupled[node].potential, reference[node].potential),
           1e-8)
           << "node " << node << ", " << label;
+      EXPECT_LT(WorstDeparture(coupled[node].tangentialPotential,
+                               reference[node].tangentialPotential),
+                1e-8)
+          << "node " << node << ", " << label;
       for (auto i = 0; i < 3; ++i) {
         EXPECT_NEAR(coupled[node].angularVelocity[i],
                     reference[node].angularVelocity[i],
@@ -313,6 +317,11 @@ TEST(Lateral, WithoutAnOceanIsTheDirectlySteppedBody) {
       EXPECT_LT(WorstDeparture(snapshot.potential,
                                field(op.Surface(solutions, Component::Phi),
                                      toPotential)),
+                1e-7)
+          << "node " << node << ", " << label;
+      EXPECT_LT(WorstDeparture(snapshot.tangentialPotential,
+                               field(op.Surface(solutions, Component::V),
+                                     toLength)),
                 1e-7)
           << "node " << node << ", " << label;
     }

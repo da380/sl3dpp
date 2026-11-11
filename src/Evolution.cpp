@@ -265,6 +265,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     response.relativeSeaLevelChange.assign(fieldSize, 0.0);
     response.displacement.assign(fieldSize, 0.0);
     response.potential.assign(fieldSize, 0.0);
+    response.tangentialPotential.assign(fieldSize, 0.0);
     sigma_ = grid.ZeroCoefficients();
     psi_ = grid.ZeroCoefficients();
     ocean = state_.oceanFunction;
@@ -281,22 +282,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     psi_ = potentialAt(times[0], response.angularVelocity);
   }
-  // The surface coefficients of a node's radial solutions, when kept.
-  auto surface = std::optional<Snapshot::Surface>{};
-  auto surfaceOf = [&](const std::map<int, std::vector<double>>& solutions) {
-    if (!options_.record_surface) return;
-    surface = Snapshot::Surface{
-        .U = Coefficients(op.Surface(solutions, Component::U), toNdLength_),
-        .V = Coefficients(op.Surface(solutions, Component::V), toNdLength_),
-        .Phi = Coefficients(op.Surface(solutions, Component::Phi),
-                            toNdPotential_)};
-  };
-  if (options_.record_surface && !resumed) {
-    const auto start = op.SolveElastic(vstate_, Columns(sigma_, toMatDensity_),
-                                       Columns(psi_, toMatPotential_));
-    vstate_.strain = op.Strain(start);
-    surfaceOf(start);
-  } else if (stride > 0) {
+  if (stride > 0) {
     op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
                    Columns(psi_, toMatPotential_));
   }
@@ -308,11 +294,10 @@ std::vector<Evolution::Snapshot> Evolution::March(
     snapshot.relativeSeaLevelChange = std::move(r.relativeSeaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
+    snapshot.tangentialPotential = std::move(r.tangentialPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
     snapshot.oceanFunction = std::move(ocean);
-    snapshot.surface = std::move(surface);
-    surface.reset();
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
     // loads.
@@ -358,6 +343,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       moving.potentialResponse =
           Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
+      moving.tangentialResponse =
+          Coefficients(step.MemorySurface(Component::V), toNdLength_);
       moving.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
       moving.rotation = options_.rotation;
       auto solved =
@@ -377,16 +364,17 @@ std::vector<Evolution::Snapshot> Evolution::March(
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       coupled.potentialResponse =
           Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
+      coupled.tangentialResponse =
+          Coefficients(step.MemorySurface(Component::V), toNdLength_);
       coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
       coupled.rotation = options_.rotation;
       response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
       sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     }
     psi_ = potentialAt(times[node], response.angularVelocity);
-    auto [next, solutions] = step.Finish(Columns(sigma_, toMatDensity_),
-                                         Columns(psi_, toMatPotential_));
-    vstate_ = std::move(next);
-    surfaceOf(solutions);
+    vstate_ = step.Finish(Columns(sigma_, toMatDensity_),
+                          Columns(psi_, toMatPotential_))
+                  .first;
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, keep);
     checkpoint(node);

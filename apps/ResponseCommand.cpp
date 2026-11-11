@@ -27,7 +27,9 @@
 #include <complex>
 #include <format>
 #include <fstream>
+#include <functional>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <optional>
 #include <planetmodel/json.hpp>
@@ -46,6 +48,7 @@
 #include "Ranks.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Evolution.hpp"
+#include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
@@ -611,6 +614,82 @@ struct NodeSurface {
   std::vector<Complex> U, V, Phi;
 };
 
+/// What drives a body's evolution through the nodes of `times`: the
+/// nodes' times and the forcing the library's evolutions take, in the
+/// units of `solver`, from the forcing `forcingAt` gives at each node
+/// (non-dimensional under the model's scales). The evolutions ask by
+/// time, at the nodes in order; each node's forcing is built once.
+struct NodeDriver {
+  std::vector<double> times;
+  std::function<std::vector<double>(double)> directLoad;
+  std::function<std::vector<Complex>(double)> tide;  ///< empty: no tide
+};
+
+NodeDriver DriverOf(const GRDSolver& solver, const Scales& scales,
+                    const TimesBlock& times,
+                    std::function<NodeForcing(std::size_t)> forcingAt,
+                    bool hasLoad, bool hasTide) {
+  const auto& units = solver.SolverScales();
+  const auto loadDims = Dimensions{.mass = 1, .length = -2};
+  const auto toSolverLoad = scales.Factor(loadDims) / units.Factor(loadDims);
+  const auto toSolverPotential =
+      scales.Factor(PotentialDimensions) / units.Factor(PotentialDimensions);
+  const auto toTime = KYR / units.Time();
+  auto driver = NodeDriver{};
+  driver.times.resize(times.nodes_kyr.size());
+  for (auto n = std::size_t{0}; n < driver.times.size(); ++n) {
+    driver.times[n] = times.nodes_kyr[n] * toTime;
+  }
+
+  struct Built {
+    std::vector<double> times;
+    std::function<NodeForcing(std::size_t)> forcingAt;
+    std::optional<std::pair<std::size_t, NodeForcing>> node;
+    const NodeForcing& At(double t) {
+      const auto found = std::ranges::lower_bound(times, t);
+      const auto n = static_cast<std::size_t>(found - times.begin());
+      if (found == times.end() || *found != t) {
+        throw std::logic_error("the forcing was asked for away from a node");
+      }
+      if (!node || node->first != n) node.emplace(n, forcingAt(n));
+      return node->second;
+    }
+  };
+  const auto built = std::make_shared<Built>(
+      Built{.times = driver.times, .forcingAt = std::move(forcingAt), .node = {}});
+  const auto* grid = &solver.Grid();
+  // every node's forcing is built, whichever channels it holds
+  driver.directLoad = [built, grid, hasLoad, toSolverLoad](double t) {
+    const auto& node = built->At(t);
+    if (!hasLoad) return std::vector<double>(grid->FieldSize(), 0.0);
+    auto coefficients = node.load;
+    for (auto& c : coefficients) c *= toSolverLoad;
+    return grid->Synthesise(coefficients);
+  };
+  if (hasTide) {
+    driver.tide = [built, toSolverPotential](double t) {
+      auto coefficients = built->At(t).tide;
+      for (auto& c : coefficients) c *= toSolverPotential;
+      return coefficients;
+    };
+  }
+  return driver;
+}
+
+/// The surface response of an evolution's snapshot, SI.
+template <typename Snapshot>
+NodeSurface SurfaceOf(const GRDSolver& solver, const Snapshot& snapshot) {
+  const auto& grid = solver.Grid();
+  const auto& units = solver.SolverScales();
+  auto node = NodeSurface{.U = grid.Expand(snapshot.displacement),
+                          .V = grid.Expand(snapshot.tangentialPotential),
+                          .Phi = grid.Expand(snapshot.potential)};
+  for (auto& c : node.U) c *= units.Length();
+  for (auto& c : node.V) c *= units.Length();
+  for (auto& c : node.Phi) c *= units.Factor(PotentialDimensions);
+  return node;
+}
+
 /// The radial model of a rheology stepped through the nodes of `times`
 /// under the forcing `forcingAt` gives at each node (non-dimensional
 /// under the model's scales): the library's evolution on a body without
@@ -625,78 +704,16 @@ std::vector<NodeSurface> StepRadial(
     bool hasTide) {
   const ViscoelasticOperator op(rheology, lmax);
   const GRDSolver solver(grid, op.ElasticLoveNumbers(), SeaLevelParameters{});
-  const auto& units = solver.SolverScales();
-  const auto loadDims = Dimensions{.mass = 1, .length = -2};
-  const auto toSolverLoad = scales.Factor(loadDims) / units.Factor(loadDims);
-  const auto toSolverPotential =
-      scales.Factor(PotentialDimensions) / units.Factor(PotentialDimensions);
-  const auto toTime = KYR / units.Time();
-  auto nodeTimes = std::vector<double>(times.nodes_kyr.size());
-  for (auto n = std::size_t{0}; n < nodeTimes.size(); ++n) {
-    nodeTimes[n] = times.nodes_kyr[n] * toTime;
-  }
-
-  // The evolution asks for the forcing by time, at the nodes in order;
-  // each node's is built once.
-  auto built = std::optional<std::pair<std::size_t, NodeForcing>>{};
-  auto at = [&](double t) -> const NodeForcing& {
-    const auto found = std::ranges::lower_bound(nodeTimes, t);
-    const auto n = static_cast<std::size_t>(found - nodeTimes.begin());
-    if (found == nodeTimes.end() || *found != t) {
-      throw std::logic_error("the forcing was asked for away from a node");
-    }
-    if (!built || built->first != n) built.emplace(n, forcingAt(n));
-    return built->second;
-  };
-  auto forcing = Evolution::Forcing{};
-  // every node's forcing is built, whichever channels it holds
-  forcing.directLoad = [&](double t) {
-    const auto& node = at(t);
-    if (!hasLoad) return std::vector<double>(grid.FieldSize(), 0.0);
-    auto coefficients = node.load;
-    for (auto& c : coefficients) c *= toSolverLoad;
-    return grid.Synthesise(coefficients);
-  };
-  if (hasTide) {
-    forcing.tide = [&](double t) {
-      auto coefficients = at(t).tide;
-      for (auto& c : coefficients) c *= toSolverPotential;
-      return coefficients;
-    };
-  }
-
+  const auto driver = DriverOf(solver, scales, times, forcingAt, hasLoad, hasTide);
   Evolution evolution(op, solver, solver.NoOceanState(),
-                      {.scheme = scheme,
-                       .rotation = RotationalFeedback::None,
-                       .record_surface = true});
-  const auto length = units.Length();
-  const auto potential = units.Factor(PotentialDimensions);
+                      {.scheme = scheme, .rotation = RotationalFeedback::None});
   auto out = std::vector<NodeSurface>{};
-  for (const auto& snapshot : evolution.Run(nodeTimes, forcing)) {
-    auto node = NodeSurface{.U = snapshot.surface->U,
-                            .V = snapshot.surface->V,
-                            .Phi = snapshot.surface->Phi};
-    for (auto& c : node.U) c *= length;
-    for (auto& c : node.V) c *= length;
-    for (auto& c : node.Phi) c *= potential;
-    out.push_back(std::move(node));
+  for (const auto& snapshot : evolution.Run(
+           driver.times, Evolution::Forcing{.directLoad = driver.directLoad,
+                                            .tide = driver.tide})) {
+    out.push_back(SurfaceOf(solver, snapshot));
   }
   return out;
-}
-
-/// A step's channels from the channels at its start and at its end: the
-/// start's before the step's middle, the end's from it on. A step reads
-/// its start-time channels only to solve for the start strain, which a
-/// state that carries its strain does not need.
-Viscoelastic3D::LoadCallable3D Across(Viscoelastic3D::LoadCallable3D before,
-                                      Viscoelastic3D::LoadCallable3D after,
-                                      double middle) {
-  if (!before && !after) return {};
-  return [before = std::move(before), after = std::move(after), middle](
-             int l, double t) -> std::optional<std::vector<Complex>> {
-    const auto& channel = t < middle ? before : after;
-    return channel ? channel(l, t) : std::nullopt;
-  };
 }
 
 /// The viscoelastic response: the run with a `times` block.
@@ -775,8 +792,6 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   const auto cacheBytes = solver.cache_mb << 20;
   const SurfaceGrid grid(input.lmax, {.cache_bytes = cacheBytes});
   const TimedForcing timed(forcing, grid, top.At("forcing"));
-  auto tideDegrees = std::set<int>{};
-  for (const auto& term : forcing.tide) tideDegrees.insert(term.degree);
   const auto density = scales.Factor(Dimensions{.mass = 1, .length = -2});
   const auto potential = scales.Factor(PotentialDimensions);
   auto forcingAt = [&](std::size_t n) {
@@ -794,14 +809,14 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     if (hasLoad && ranks.First()) loads.push_back(std::move(load));
   };
 
-  // Each node's surface response, and the 3D step's iterations and
-  // residual (the first node's: its unrelaxed solve's, under lateral
-  // moduli).
+  // Each node's surface response, and the 3D step's passes, its
+  // conjugate-gradient iterations and its residual (the first node's:
+  // its unrelaxed response's, under lateral moduli).
   auto history = std::vector<NodeSurface>{};
   auto radial = std::vector<NodeSurface>{};
   auto iterations = std::vector<long long>(nodes, 0);
+  auto solves = std::vector<long long>(nodes, 0);
   auto residuals = std::vector<double>(nodes, 0.0);
-  const auto toTime = KYR / scales.Time();
   if (!threeD) {
     history = StepRadial(
         *rheology, input.lmax, grid, scales, times, solver.scheme,
@@ -849,95 +864,48 @@ std::string RunViscoelastic(const std::filesystem::path& config,
                                  [](double, double, double) { return 0.0; }};
     const Viscoelastic3D op(*rheology, input.lmax, coupled, delta, options);
 
-    // Every rank reads the forcing alike, but their transforms may round
-    // differently: the first rank's coefficients serve them all.
-    auto agree = [&](NodeForcing& nd) {
-      if (!ranks.Distributed()) return;
-      for (auto* coefficients : {&nd.load, &nd.tide}) {
-        ranks.collectives.share(
-            std::span(reinterpret_cast<double*>(coefficients->data()),
-                      2 * coefficients->size()));
-      }
-    };
-    auto channels = [&](NodeForcing nd) {
-      agree(nd);
-      return std::pair{hasLoad ? ColumnsOf(std::move(nd.load), 1.0)
-                               : Viscoelastic3D::LoadCallable3D{},
-                       hasTide ? ColumnsAt(std::move(nd.tide), tideDegrees)
-                               : Viscoelastic3D::LoadCallable3D{}};
-    };
-    const auto length = scales.Length();
-    auto record = [&](const Viscoelastic3D::Solutions& x) {
-      // collective: every rank takes part, the first keeps them
-      auto U = op.Surface(x, Component::U);
-      auto V = op.Surface(x, Component::V);
-      auto Phi = op.Surface(x, Component::Phi);
-      if (!ranks.First()) return;
-      history.push_back({.U = CoefficientsOf(grid, U, length),
-                         .V = CoefficientsOf(grid, V, length),
-                         .Phi = CoefficientsOf(grid, Phi, potential)});
-    };
-
-    // The first node: the unrelaxed solve under its forcing with no
-    // memory (under lateral moduli the conjugate-gradient solve on the
-    // reference systems), its strain kept for the first step.
-    auto state = op.ZeroState();
-    state.t = times.nodes_kyr.front() * toTime;
-    auto [nd, load] = forcingAt(0);
-    keep(std::move(load));
-    auto now = channels(std::move(nd));
-    {
-      const auto x = op.SolveElastic(state, now.first, now.second);
-      if (op.HasLateralModuli()) {
-        const auto info = op.LastElasticSolve();
-        if (!info.converged) {
-          throw std::runtime_error(std::format(
-              "the unrelaxed solve at the first node did not converge: "
-              "residual {} after {} iterations; loosen solver.step_rtol or "
-              "raise solver.step_max_iterations",
-              info.residual, info.iterations));
-        }
-        iterations[0] = info.iterations;
-        residuals[0] = info.residual;
-      }
-      state.strainCoefficients = op.StrainCoefficients(
-          x,
-          [&](int l) -> const DegreeOperator& {
-            return op.UnrelaxedSpheroidal(l);
-          },
-          [&](int l) -> const ToroidalOperator& {
-            return op.UnrelaxedToroidal(l);
-          });
-      op.PrimeStrain(state);
-      record(x);
-    }
-    // Each step ends under the forcing at its end node.
-    for (auto n = std::size_t{1}; n < nodes; ++n) {
-      auto [ndNext, loadNext] = forcingAt(n);
-      keep(std::move(loadNext));
-      auto next = channels(std::move(ndNext));
-      const auto dt = times.steps_kyr[n - 1] * toTime;
-      const auto middle = state.t + 0.5 * dt;
-      auto result = op.Step(state, dt, solver.scheme,
-                            Across(now.first, next.first, middle),
-                            Across(now.second, next.second, middle));
-      const auto& info = result.info;
-      if (!info.converged) {
+    // The library's evolution on a body without an ocean and without
+    // rotational feedback: the unrelaxed response at the first node (under
+    // lateral moduli the combined fixed point of a zero-length step), then
+    // a step to each node ending under that node's forcing, each closed as
+    // the step solver says. Distributed, the evolution has every rank
+    // forced alike.
+    const GRDSolver body(grid, op.ElasticLove(), SeaLevelParameters{});
+    const auto driver = DriverOf(
+        body, scales, times,
+        [&](std::size_t n) {
+          auto [nd, load] = forcingAt(n);
+          keep(std::move(load));
+          return std::move(nd);
+        },
+        hasLoad, hasTide);
+    auto evolutionOptions = Evolution3D::Options{};
+    evolutionOptions.scheme = solver.scheme;
+    evolutionOptions.rotation = RotationalFeedback::None;
+    evolutionOptions.max_coupled_iterations = solver.step_max_iterations;
+    evolutionOptions.coupled_rtol = solver.step_rtol;
+    evolutionOptions.on_snapshot = [&](std::size_t n,
+                                       const Evolution3D::Snapshot& snapshot) {
+      if (!snapshot.converged) {
         throw std::runtime_error(std::format(
             "the step to node {} ({:g} kyr) did not converge: residual {} "
             "after {} iterations; loosen solver.step_rtol or raise "
             "solver.step_max_iterations",
-            n, times.nodes_kyr[n], info.residual, info.iterations));
+            n, times.nodes_kyr[n], snapshot.coupledResidual,
+            snapshot.coupledIterations));
       }
-      iterations[n] = info.iterations;
-      residuals[n] = info.residual;
-      // the replaced state's tensors go to the next step
-      op.Recycle(std::exchange(state, std::move(result.state)));
-      record(result.solutions);
-      now = std::move(next);
-    }
-    op.ReleaseScratch();
+      iterations[n] = snapshot.coupledIterations;
+      solves[n] = snapshot.solveIterations;
+      residuals[n] = snapshot.coupledResidual;
+    };
+    Evolution3D evolution(op, body, body.NoOceanState(), evolutionOptions);
+    const auto snapshots = evolution.Run(
+        driver.times, Evolution3D::Forcing{.directLoad = driver.directLoad,
+                                           .tide = driver.tide});
     if (!ranks.First()) return "";
+    for (const auto& snapshot : snapshots) {
+      history.push_back(SurfaceOf(body, snapshot));
+    }
     // The radial reference model under the same forcing: the deck's
     // radial moduli and the radial reference viscosity, by the radial
     // stepper.
@@ -1007,6 +975,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   file.meta.emplace("scheme", schemeName);
   file.meta.emplace("step_solver", stepName);
   file.meta.emplace("step_iterations", iterations);
+  file.meta.emplace("solve_iterations", solves);
   file.meta.emplace("step_residual", residuals);
   const auto lengthDims = pm::units::LENGTH;
   const auto potentialDims = pm::Dimensions{.length = 2, .time = -2};
@@ -1106,7 +1075,9 @@ std::string RunViscoelastic(const std::filesystem::path& config,
 
   if (!threeD) return std::format("{}; {}", meaning, wrote);
   auto total = 0LL;
-  for (auto n = std::size_t{1}; n < nodes; ++n) total += iterations[n];
+  for (auto n = std::size_t{1}; n < nodes; ++n) {
+    total += conjugate ? solves[n] : iterations[n];
+  }
   return std::format("{}; {} ({} {} iterations over {} steps)", meaning, wrote,
                      total, conjugate ? "conjugate-gradient" : "fixed-point",
                      nodes - 1);

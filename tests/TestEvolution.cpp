@@ -360,9 +360,7 @@ TEST(Evolution, APrescribedTideDrivesTheBodyWithAndWithoutAnOcean) {
       const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
                          ", rotation " + std::to_string(static_cast<int>(rotation));
       Evolution evolution(op, solver, *background,
-                          {.rotation = rotation,
-                           .rtol = 1e-13,
-                           .record_surface = true});
+                          {.rotation = rotation, .rtol = 1e-13});
       const auto snapshots = evolution.Run(times, forcing);
       ASSERT_EQ(snapshots.size(), times.size());
 
@@ -406,15 +404,12 @@ TEST(Evolution, APrescribedTideDrivesTheBodyWithAndWithoutAnOcean) {
         EXPECT_LT(worst(snapshot.potential, phi), 1e-9)
             << "node " << node << ", " << label;
 
-        // The surface coefficients kept on the snapshot: the fields
-        // above, and the tangential displacement's potential.
-        ASSERT_TRUE(snapshot.surface.has_value());
-        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->U), u), 1e-9) << label;
-        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->Phi), phi), 1e-9)
-            << label;
+        // The tangential displacement's potential, which the solver joins
+        // from its tangential numbers and the step's memory.
         const auto v = field(op.Surface(solutions, Component::V), toLength);
         EXPECT_GT(*std::ranges::max_element(v), 0.0);
-        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->V), v), 1e-9) << label;
+        EXPECT_LT(worst(snapshot.tangentialPotential, v), 1e-9)
+            << "node " << node << ", " << label;
 
         // The sea level change holds the potentials that are not the
         // body's own: the tide's, and the centrifugal one's.

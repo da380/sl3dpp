@@ -234,7 +234,7 @@ class Evolution3D::Coupled {
                     2 * coefficients->size()));
     }
     for (auto* field : {&response.relativeSeaLevelChange, &response.displacement,
-                        &response.potential}) {
+                        &response.potential, &response.tangentialPotential}) {
       collectives.share(*field);
     }
     collectives.share(response.angularVelocity);
@@ -255,10 +255,13 @@ class Evolution3D::Coupled {
                                            owner.toNdLength_);
     auto potential = owner.Coefficients(op.Surface(responses, Component::Phi),
                                         owner.toNdPotential_);
+    auto tangential = owner.Coefficients(op.Surface(responses, Component::V),
+                                         owner.toNdLength_);
     const auto moment = step->InertiaMoment(responses) * owner.toNdMoment_;
     if (migrating_) {
       moving.displacementResponse = std::move(displacement);
       moving.potentialResponse = std::move(potential);
+      moving.tangentialResponse = std::move(tangential);
       moving.inertiaMomentChange = moment;
       auto solved = effectiveSolver->SolveNonlinear(owner.state_, moving,
                                                     nonlinearOptions);
@@ -272,6 +275,7 @@ class Evolution3D::Coupled {
       coupled.tide = tide;
       coupled.displacementResponse = std::move(displacement);
       coupled.potentialResponse = std::move(potential);
+      coupled.tangentialResponse = std::move(tangential);
       coupled.inertiaMomentChange = moment;
       coupled.rotation = owner.options_.rotation;
       response =
@@ -386,6 +390,7 @@ Evolution3D::Snapshot Evolution3D::MakeSnapshot(
   snapshot.relativeSeaLevelChange = std::move(response.relativeSeaLevelChange);
   snapshot.displacement = std::move(response.displacement);
   snapshot.potential = std::move(response.potential);
+  snapshot.tangentialPotential = std::move(response.tangentialPotential);
   snapshot.angularVelocity = response.angularVelocity;
   snapshot.coupledIterations = info.iterations;
   snapshot.coupledResidual = info.residual;
@@ -491,6 +496,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     response.relativeSeaLevelChange.assign(fieldSize, 0.0);
     response.displacement.assign(fieldSize, 0.0);
     response.potential.assign(fieldSize, 0.0);
+    response.tangentialPotential.assign(fieldSize, 0.0);
     sigma_ = grid.ZeroCoefficients();
     psi_ = grid.ZeroCoefficients();
     ocean = state_.oceanFunction;

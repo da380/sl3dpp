@@ -151,6 +151,13 @@ GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
   k2_ = k_[2];
   ht_ = truncate(nd.h_t);
   kt_ = truncate(nd.k_t);
+  lU_ = truncate(nd.l_u);
+  lPhi_ = truncate(nd.l_phi);
+  lt_ = truncate(nd.l_t);
+  l_.resize(lmax + 1);
+  for (auto l = 0; l <= lmax; ++l) l_[l] = lU_[l] + lPhi_[l];
+  // a degree-0 field has no tangential part
+  l_[0] = lU_[0] = lPhi_[0] = lt_[0] = 0.0;
   ht2_ = nd.h_t[2];
   kt2_ = nd.k_t[2];
   hc_ = nd.h_c;
@@ -370,6 +377,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   checkField(forcing.oceanFunctionOverride, "ocean function override");
   checkCoefficients(forcing.displacementResponse, "displacement response");
   checkCoefficients(forcing.potentialResponse, "potential response");
+  checkCoefficients(forcing.tangentialResponse, "tangential response");
   checkCoefficients(forcing.tide, "tide");
   const bool tidal =
       !forcing.tide.empty() &&
@@ -380,9 +388,14 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   }
 
   // The static (load-independent) coefficient terms.
-  std::vector<std::complex<double>> staticDisp, staticGrav;
+  // The tangential potential answers the same forcings and feeds nothing
+  // back: its static terms are kept apart and joined at the end.
+  std::vector<std::complex<double>> staticDisp, staticGrav, staticTan;
   auto displacementLoad0 = 0.0, potentialLoad0 = 0.0;
   auto anyForcing = false;
+  auto ensureTangential = [&] {
+    if (staticTan.empty()) staticTan.assign(coefSize, 0.0);
+  };
   auto ensureStatic = [&] {
     if (staticDisp.empty()) {
       staticDisp.assign(coefSize, 0.0);
@@ -393,6 +406,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       MaxAbs(forcing.displacementLoad) > 0.0) {
     anyForcing = true;
     ensureStatic();
+    ensureTangential();
     const auto lm = grid_.Expand(forcing.displacementLoad);
     displacementLoad0 = lm[SurfaceGrid::Index(0, 0)].real();
     for (auto l = 0; l <= grid_.LMax(); ++l) {
@@ -400,12 +414,14 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
         const auto i = SurfaceGrid::Index(l, m);
         staticDisp[i] += hU_[l] * lm[i];
         staticGrav[i] += kU_[l] * lm[i];
+        staticTan[i] += lU_[l] * lm[i];
       }
     }
   }
   if (!forcing.potentialLoad.empty() && MaxAbs(forcing.potentialLoad) > 0.0) {
     anyForcing = true;
     ensureStatic();
+    ensureTangential();
     const auto lm = grid_.Expand(forcing.potentialLoad);
     potentialLoad0 = lm[SurfaceGrid::Index(0, 0)].real();
     for (auto l = 0; l <= grid_.LMax(); ++l) {
@@ -413,6 +429,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
         const auto i = SurfaceGrid::Index(l, m);
         staticDisp[i] += hPhi_[l] * lm[i];
         staticGrav[i] += kPhi_[l] * lm[i];
+        staticTan[i] += lPhi_[l] * lm[i];
       }
     }
   }
@@ -432,16 +449,27 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       staticGrav[i] += forcing.potentialResponse[i];
     }
   }
+  if (!forcing.tangentialResponse.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(
+          forcing.tangentialResponse)) > 0.0) {
+    anyForcing = true;
+    ensureTangential();
+    for (auto i = std::size_t{0}; i < coefSize; ++i) {
+      staticTan[i] += forcing.tangentialResponse[i];
+    }
+  }
   if (tidal) {
     // The body's answer to the prescribed potential; the potential's own
     // place in the sea level change is added where that is formed.
     anyForcing = true;
     ensureStatic();
+    ensureTangential();
     for (auto l = 1; l <= grid_.LMax(); ++l) {
       for (auto m = 0; m <= l; ++m) {
         const auto i = SurfaceGrid::Index(l, m);
         staticDisp[i] += ht_[l] * forcing.tide[i];
         staticGrav[i] += kt_[l] * forcing.tide[i];
+        staticTan[i] += lt_[l] * forcing.tide[i];
       }
     }
   }
@@ -455,6 +483,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
+  response.tangentialPotential.assign(fieldSize, 0.0);
   if (!anyForcing) return response;
 
   const auto& oceanFunction = forcing.oceanFunctionOverride.empty()
@@ -574,11 +603,13 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
 
   // The remaining fields, from the same load as the sea level.
   std::vector<std::complex<double>> dispLm(coefSize), potLm(coefSize);
+  std::vector<std::complex<double>> tanLm(coefSize);
   for (auto l = 0; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       dispLm[i] = h_[l] * loadLm[i];
       potLm[i] = k_[l] * loadLm[i];
+      tanLm[i] = l_[l] * loadLm[i];
     }
   }
   if (!staticDisp.empty()) {
@@ -586,6 +617,9 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       dispLm[i] += staticDisp[i];
       potLm[i] += staticGrav[i];
     }
+  }
+  if (!staticTan.empty()) {
+    for (auto i = std::size_t{0}; i < coefSize; ++i) tanLm[i] += staticTan[i];
   }
   if (rotational) {
     const Rotation rotation(
@@ -596,11 +630,13 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
     SetBlock(potLm, rotation.grav2);
     dispLm[SurfaceGrid::Index(0, 0)] += hc_ * rotation.centrifugal0;
     potLm[SurfaceGrid::Index(0, 0)] += kc_ * rotation.centrifugal0;
+    AddBlock(tanLm, lt_[2] * rotation.centrifugal);
   }
 
   response.relativeSeaLevelChange = std::move(slc);
   response.displacement = grid_.Synthesise(dispLm);
   response.potential = grid_.Synthesise(potLm);
+  response.tangentialPotential = grid_.Synthesise(tanLm);
   response.angularVelocity = omega;
   response.iterations = count;
   response.error = err;
@@ -648,13 +684,24 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     lamPhi = grid_.Expand(forcing.potentialDual);
     for (auto& v : lamPhi) v *= r2;
   }
+  // The tangential potential feeds nothing back: its dual enters the dual
+  // load by the load numbers, the centrifugal dual by the degree-2 tidal
+  // one, and is itself the dual of the ready channel.
+  std::vector<std::complex<double>> lamV(coefSize, 0.0);
+  if (!forcing.tangentialPotentialDual.empty()) {
+    lamV = grid_.Expand(forcing.tangentialPotentialDual);
+    for (auto& v : lamV) v *= r2;
+  }
   const auto& gOmega = forcing.angularVelocityDual;
 
   AdjointResponse out;
   out.directLoadDual.assign(fieldSize, 0.0);
   out.displacementResponseDual.assign(coefSize, 0.0);
   out.potentialResponseDual.assign(coefSize, 0.0);
+  out.tangentialResponseDual = lamV;
+  out.tideDual.assign(coefSize, 0.0);
   if (MaxAbs(gXi) == 0.0 && MaxAbs(lamU) == 0.0 && MaxAbs(lamPhi) == 0.0 &&
+      MaxAbs(std::span<const std::complex<double>>(lamV)) == 0.0 &&
       MaxAbs(std::span<const double>(gOmega.data(), 3)) == 0.0) {
     return out;
   }
@@ -662,6 +709,7 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   // Duals the synthesised outputs contribute outside the fixed point.
   std::vector<std::complex<double>> lamUBase = lamU, lamPhiBase = lamPhi;
   Block2 du2Out{}, dphi2Out{};
+  const Block2 dpsi2Out = rotational ? lt_[2] * BlockOf(lamV) : Block2{};
   auto dpsi0Out = 0.0;
   if (rotational) {
     du2Out = BlockOf(lamU);
@@ -675,7 +723,7 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   for (auto l = 0; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
-      rOut[i] = h_[l] * lamUBase[i] + k_[l] * lamPhiBase[i];
+      rOut[i] = h_[l] * lamUBase[i] + k_[l] * lamPhiBase[i] + l_[l] * lamV[i];
     }
   }
   const double hkc = hc_ + (kc_ + 1.0) / g_;
@@ -715,7 +763,8 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
       SetBlock(stash.zBase, Block2{});
       const auto dDisp2 = du2Out + (-1.0 * z2);
       const Block2 dGrav2 = dphi2Out + (-1.0 / g_) * z2;
-      const Block2 dPsi2 = (-1.0 / g_) * z2 + ht2_ * dDisp2 + kt2_ * dGrav2;
+      const Block2 dPsi2 =
+          (-1.0 / g_) * z2 + ht2_ * dDisp2 + kt2_ * dGrav2 + dpsi2Out;
       const double dPsi0 =
           dpsi0Out - hkc * zDual[SurfaceGrid::Index(0, 0)].real();
       Block2 dGravForcing = dGrav2;
@@ -793,13 +842,12 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   }
   // The prescribed tide entered the two response channels by the tidal
   // numbers, and the sea level change by its own potential.
-  out.tideDual.assign(coefSize, 0.0);
   for (auto l = 1; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       out.tideDual[i] = ht_[l] * out.displacementResponseDual[i] +
-                        kt_[l] * out.potentialResponseDual[i] -
-                        stash.zWhole[i] / g_;
+                        kt_[l] * out.potentialResponseDual[i] +
+                        lt_[l] * lamV[i] - stash.zWhole[i] / g_;
     }
   }
   out.inertiaMomentDual = stash.j;
@@ -847,6 +895,11 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
+  }
+  if (!forcing.tangentialResponse.empty() &&
+      forcing.tangentialResponse.size() != coefSize) {
+    throw std::invalid_argument(
+        "tangential response is not a coefficient vector of the grid");
   }
 
   const auto& initialBathy = state.seaLevel;
@@ -1004,11 +1057,24 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
       potLm[i] += staticGrav[i];
     }
   }
+  std::vector<std::complex<double>> tanLm(coefSize);
+  for (auto l = 0; l <= grid_.LMax(); ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      tanLm[i] = l_[l] * loadLm[i];
+    }
+  }
+  if (!forcing.tangentialResponse.empty()) {
+    for (auto i = std::size_t{0}; i < coefSize; ++i) {
+      tanLm[i] += forcing.tangentialResponse[i];
+    }
+  }
   if (rotational && lastRotation) {
     SetBlock(dispLm, lastRotation->disp2);
     SetBlock(potLm, lastRotation->grav2);
     dispLm[SurfaceGrid::Index(0, 0)] += hc_ * lastRotation->centrifugal0;
     potLm[SurfaceGrid::Index(0, 0)] += kc_ * lastRotation->centrifugal0;
+    AddBlock(tanLm, lt_[2] * lastRotation->centrifugal);
   }
 
   NonlinearResponse out;
@@ -1020,6 +1086,7 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
   out.response.relativeSeaLevelChange = std::move(slcData);
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);
+  out.response.tangentialPotential = grid_.Synthesise(tanLm);
   out.response.angularVelocity = omega;
   out.response.iterations = count;
   out.response.error = err;

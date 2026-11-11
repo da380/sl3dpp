@@ -315,7 +315,7 @@ shorelines.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `solver.rtol` | number > 0 | 1e-9 | `sea-level` and the kernel commands: the relative tolerance of the sea level solves (and, for the kernels and the gradient calibration, of the adjoint solves); a sea level solve that misses it is an error. `response` has no sea level equation and refuses it |
-| `solver.step_rtol` | number > 0 | 1e-10 in `response`, 1e-9 in the others | the relative tolerance of a 3D step's closure. `sea-level` and `kernel`: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the fingerprint's one zero-length step). `response`: each step's closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual) and the unrelaxed solve under lateral moduli (an elastic response's one solve, a viscoelastic run's first node) |
+| `solver.step_rtol` | number > 0 | 1e-10 in `response`, 1e-9 in the others | the relative tolerance of a 3D step's closure. `sea-level` and `kernel`: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the fingerprint's one zero-length step). `response`: each step's closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual), under lateral moduli the zero-length step of a viscoelastic run's first node too, and an elastic response's one solve under lateral moduli |
 | `solver.step_max_iterations` | integer >= 1 | 200 in `response`, 60 in the others | its iteration budget; a step or solve that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the lateral structure's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
 | `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are bitwise independent of it: it sets only how many fields a batched transform takes at a time |
@@ -586,10 +586,11 @@ written for the elastic response alone.
 
 ### The viscoelastic run
 
-The run starts at the first node with no memory: the response there is
-the instantaneous elastic one to the forcing at the first node (the
-unrelaxed solve; under lateral moduli the conjugate-gradient solve of
-the elastic run). Each step then advances from one node to the next
+The run is the library's evolution (`Evolution`, `Evolution3D`) of a
+body without an ocean and without rotational feedback. It starts at the
+first node with no memory: the response there is the instantaneous
+elastic one to the forcing at the first node (the unrelaxed solve; under
+lateral moduli a zero-length step, closed as the steps are). Each step then advances from one node to the next
 under the forcing AT the next node, the scheme's end-time loads being
 that node's: the forcing enters at the nodes alone, and a history's or a
 field file's variation between two nodes is not seen. This is
@@ -604,7 +605,7 @@ a load switched on there), while a load ramped up from zero has none.
   `solver.step_max_iterations`; a step that does not converge is an
   error. Over MPI ranks it is distributed over radial segments as a 3D
   `sea-level` run is, every rank reading the inputs and the first rank's
-  forcing coefficients serving all. The radial reference model (the deck's radial moduli and
+  loads and response serving all. The radial reference model (the deck's radial moduli and
   the radial reference viscosity: the viscosity file's reference, or the
   deck's column) is stepped beside it by the 1D stepper under the same
   forcing, on the first rank. A 1D run on several ranks is the first
@@ -612,7 +613,7 @@ a load switched on there), while a load ramped up from zero has none.
 
 The first node's response is the elastic run's for the same forcing to
 rounding (about 1e-11 relative on the test decks; under lateral moduli to
-the conjugate gradients' tolerance), the radial stepper's unrelaxed
+the solves' tolerances), the radial stepper's unrelaxed
 systems carrying the branch moduli at the memory points rather than at
 the nodes.
 
@@ -672,9 +673,11 @@ elastic file's do, with `viscosity` (the viscosity file's path, where
 given) and, in place of `solve_iterations` and `solve_residual`,
 `dates_kyr` (the nodes, kyr), `time` (the axis's meaning), `scheme`,
 `step_solver` (`"fixed_point"` or `"conjugate_gradients"` in 3D,
-`"direct"` in 1D), and `step_iterations` and `step_residual`, one per
-node (the first node's those of its conjugate-gradient solve under
-lateral moduli, zero otherwise; zero throughout in 1D).
+`"direct"` in 1D), and `step_iterations` (the passes of each step's
+closure), `solve_iterations` (its conjugate-gradient iterations, zero
+under the fixed point) and `step_residual`, one per node (the first
+node's those of its zero-length step under lateral moduli, zero
+otherwise; zero throughout in 1D).
 
 Each exchange table is the elastic one's format for one node, with two
 named scalars more, `node` (the node's index) and `time_kyr` (its time),

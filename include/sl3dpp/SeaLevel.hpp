@@ -21,7 +21,9 @@
  * rotational feedback is solved in closed form at degree 2 (transverse at
  * order 1, axial at order 0 with its degree-0 part through the axial Love
  * numbers), and mass is conserved by a uniform shift over the oceans. The
- * linear fixed point is accelerated by Anderson mixing on the load
+ * tangential displacement, which the sea level does not see, is formed
+ * from the converged load and angular velocity by the tangential Love
+ * numbers, as its potential V. The linear fixed point is accelerated by Anderson mixing on the load
  * coefficients; the nonlinear solver recomputes the flotation ocean
  * function each pass (Kendall-style migration). The adjoint solve is the
  * exact transpose of the generalised solve's input channels, run through
@@ -228,6 +230,10 @@ class GRDSolver {
     std::vector<double> potentialLoad;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
+    /// The ready response of the tangential displacement's potential, as
+    /// the two above: it is joined to the potential returned and feeds
+    /// nothing back.
+    std::vector<std::complex<double>> tangentialResponse;
     double inertiaMomentChange = 0.0;
     std::array<double, 3> angularMomentumChange{0.0, 0.0, 0.0};
     /// A prescribed tidal potential, its coefficients on the surface: the
@@ -248,6 +254,12 @@ class GRDSolver {
     std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
+    /// The potential V of the tangential displacement, the displacement
+    /// its surface gradient: the answer of the tangential Love numbers to
+    /// the load, the load channels, the prescribed tide and the
+    /// centrifugal potential, and the ready response joined. It has no
+    /// degree-0 part.
+    std::vector<double> tangentialPotential;
     std::array<double, 3> angularVelocity{0.0, 0.0, 0.0};
     int iterations = 0;
     double error = 0.0;
@@ -284,18 +296,23 @@ class GRDSolver {
     std::vector<double> seaLevelDual;
     std::vector<double> displacementDual;
     std::vector<double> potentialDual;
+    /// The dual of the tangential displacement's potential V, a density
+    /// as the others; the dual of a tangential displacement measurement
+    /// is minus the surface divergence of its vector density.
+    std::vector<double> tangentialPotentialDual;
     std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
     std::vector<double> oceanFunctionOverride;
     RotationalFeedback rotation = RotationalFeedback::Full;
   };
 
   /// The duals of the generalised solve's input channels: the direct load
-  /// (a grid density), the two response channels (coefficients, paired by
-  /// the L2 coefficient pairing) and the inertia moment.
+  /// (a grid density), the three response channels (coefficients, paired
+  /// by the L2 coefficient pairing) and the inertia moment.
   struct AdjointResponse {
     std::vector<double> directLoadDual;
     std::vector<std::complex<double>> displacementResponseDual;
     std::vector<std::complex<double>> potentialResponseDual;
+    std::vector<std::complex<double>> tangentialResponseDual;
     /// The dual of the prescribed tidal potential's coefficients, paired
     /// as the response channels' are.
     std::vector<std::complex<double>> tideDual;
@@ -324,6 +341,7 @@ class GRDSolver {
     double sedimentDensity = -1.0;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
+    std::vector<std::complex<double>> tangentialResponse;
     double inertiaMomentChange = 0.0;
     RotationalFeedback rotation = RotationalFeedback::Full;
   };
@@ -355,6 +373,9 @@ class GRDSolver {
   // Non-dimensional Love arrays, degree 0..lmax: channel sums and splits.
   std::vector<double> h_, k_, hU_, kU_, hPhi_, kPhi_;
   std::vector<double> ht_, kt_;  // the tidal numbers, per degree
+  // The tangential numbers: the load's (channel sum and splits) and the
+  // tide's, zero at degree 0.
+  std::vector<double> l_, lU_, lPhi_, lt_;
   std::vector<double> slcFactor_;  // -(h + k / g), per degree
   // Degree-2 and axial numbers.
   double h2_ = 0, k2_ = 0, ht2_ = 0, kt2_ = 0;

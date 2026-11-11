@@ -222,6 +222,9 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
       }));
   const auto withoutOcean = solver.NoOceanState();
 
+  // Every dual at once, and the tangential potential's alone (so that its
+  // terms are not lost beside the others).
+  for (const auto tangentialAlone : {false, true})
   for (const auto* chosen : {&withOcean, &withoutOcean})
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
                         RotationalFeedback::Full}) {
@@ -241,6 +244,10 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
         grid.Expand(grid.FromFunction([&](double theta, double phi) {
           return -3.0 * Cap(theta, phi, 1.0, 5.5, 0.8) /
                  solver.SolverScales().Factor(PotentialDimensions);
+        }));
+    forcing.tangentialResponse =
+        grid.Expand(grid.FromFunction([&](double theta, double phi) {
+          return 0.2 * Cap(theta, phi, 0.8, 2.5, 0.7) / length;
         }));
     forcing.inertiaMomentChange = 1e-7;
     forcing.tide = grid.Expand(grid.FromFunction([&](double theta, double phi) {
@@ -265,6 +272,16 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
       return 0.4 * Cap(theta, phi, 1.4, 3.3, 0.7);
     });
     duals.angularVelocityDual = {0.3, -0.2, 0.5};
+    duals.tangentialPotentialDual =
+        grid.FromFunction([&](double theta, double phi) {
+          return 0.6 * Cap(theta, phi, 1.9, 5.0, 0.6);
+        });
+    if (tangentialAlone) {
+      duals.seaLevelDual.clear();
+      duals.displacementDual.assign(grid.FieldSize(), 0.0);
+      duals.potentialDual.assign(grid.FieldSize(), 0.0);
+      duals.angularVelocityDual = {0.0, 0.0, 0.0};
+    }
     const auto adjoint = solver.SolveAdjoint(state, duals, options);
     ASSERT_TRUE(adjoint.converged);
 
@@ -273,8 +290,14 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
       for (auto i = std::size_t{0}; i < f.size(); ++i) fg[i] = f[i] * g[i];
       return a * a * grid.Integrate(fg);
     };
+    ASSERT_GT(std::abs(surface(duals.tangentialPotentialDual,
+                               response.tangentialPotential)),
+              0.0);
     const double lhs =
-        surface(duals.seaLevelDual, response.relativeSeaLevelChange) +
+        (tangentialAlone ? 0.0
+                         : surface(duals.seaLevelDual,
+                                   response.relativeSeaLevelChange)) +
+        surface(duals.tangentialPotentialDual, response.tangentialPotential) +
         surface(duals.displacementDual, response.displacement) +
         surface(duals.potentialDual, response.potential) +
         duals.angularVelocityDual[0] * response.angularVelocity[0] +
@@ -285,11 +308,14 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
         Pair(adjoint.displacementResponseDual, forcing.displacementResponse,
              lmax) +
         Pair(adjoint.potentialResponseDual, forcing.potentialResponse, lmax) +
+        Pair(adjoint.tangentialResponseDual, forcing.tangentialResponse,
+             lmax) +
         Pair(adjoint.tideDual, forcing.tide, lmax) +
         adjoint.inertiaMomentDual * forcing.inertiaMomentChange;
     EXPECT_NEAR(lhs, rhs, 1e-10 * std::abs(lhs))
         << "rotation mode " << static_cast<int>(rotation)
-        << (chosen == &withOcean ? ", ocean" : ", no ocean");
+        << (chosen == &withOcean ? ", ocean" : ", no ocean")
+        << (tangentialAlone ? ", the tangential dual alone" : "");
   }
 }
 

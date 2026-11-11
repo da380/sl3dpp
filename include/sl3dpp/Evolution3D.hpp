@@ -55,6 +55,9 @@ class Evolution3D {
     std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
+    /// The potential V of the tangential displacement (the displacement
+    /// its surface gradient), as GRDSolver::Response's.
+    std::vector<double> tangentialPotential;
     std::array<double, 3> angularVelocity{};
     int coupledIterations = 0;
     double coupledResidual = 0.0;

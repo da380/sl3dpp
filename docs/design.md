@@ -73,7 +73,11 @@ Deliberately out of scope:
   a uniform ocean shift, and rotational feedback by first-order
   quasi-static Liouville theory solved in closed form at degree 2 (axial
   and transverse, no Chandler wobble, the hydrostatic-moment guard of
-  pyslfp). The evolutions use the linear equation with frozen shorelines,
+  pyslfp). Beside the sea level change, the radial displacement and the
+  potential, a solve returns the potential V of the tangential
+  displacement, from the tangential Love numbers and a ready response
+  channel of its own; its dual is an input of the adjoint solve. The
+  evolutions use the linear equation with frozen shorelines,
   or the nonlinear (Kendall-style) solve at every step with migrating
   shorelines (`RunMigrating`, pyslfp's `_run_migrating`): the step's
   memory field enters through the response channels and the step finishes

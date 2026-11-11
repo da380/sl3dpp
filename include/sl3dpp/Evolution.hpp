@@ -46,6 +46,9 @@ class Evolution {
     std::vector<double> relativeSeaLevelChange;
     std::vector<double> displacement;
     std::vector<double> potential;
+    /// The potential V of the tangential displacement (the displacement
+    /// its surface gradient), as GRDSolver::Response's.
+    std::vector<double> tangentialPotential;
     std::array<double, 3> angularVelocity{};
     /// The internal variables, without the strain cache unless
     /// Options::record_strain (one elastic solve under the recorded load
@@ -58,15 +61,6 @@ class Evolution {
     std::vector<double> oceanFunction;
     /// Whether the node's sea level solve met its tolerance.
     bool converged = true;
-    /// With Options::record_surface: the coefficients of the node's
-    /// radial solutions at the surface, in the solver's units — the
-    /// radial displacement U, the potential V of the tangential
-    /// displacement and the potential perturbation Phi. U and Phi are
-    /// the fields above to the solves' tolerance; V is here alone.
-    struct Surface {
-      std::vector<std::complex<double>> U, V, Phi;
-    };
-    std::optional<Surface> surface;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -103,10 +97,6 @@ class Evolution {
     /// true saves those solves at about twice the trajectory memory with
     /// one branch.
     bool record_strain = false;
-    /// Keep each node's surface coefficients on its snapshot
-    /// (Snapshot::surface), the tangential displacement's among them; the
-    /// first node then takes one elastic solve of the radial operator.
-    bool record_surface = false;
     /// Hand every node's snapshot to on_snapshot as it is recorded, so a
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
