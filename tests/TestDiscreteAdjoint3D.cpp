@@ -615,82 +615,7 @@ TEST(DiscreteAdjoint3D, ViscosityAboutASourceDrivenRun) {
     const auto ditau = TangentLinearSolver3D::ItauOfLogViscosity(op, d.logViscosity);
     const auto paired = GridPairing(op.Coupling(), kernels.itauKernel3D, ditau);
     EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label;
-
-    // what is not formed about a source-driven trajectory says so
-    EXPECT_THROW((void)AdjointSolver3D(evolution,
-                                       {.method = AdjointMethod::Discrete,
-                                        .material_kernels = true})
-                     .FirstOrderKernels(times, *measured, &trajectory),
-                 std::invalid_argument);
   }
-}
-
-TEST(DiscreteAdjoint3D, TheContinuousSweepAboutASourceDrivenRun) {
-  // The continuous 3D sweep about a run under a point source with
-  // lateral viscosity: its viscosity kernel tends to the discrete
-  // sweep's as the steps are halved, the displacement and the toroidal
-  // potential measured.
-  auto scene = Scene::Make(1e22);
-  const auto& sle = scene.solver.SolverScales();
-  std::mt19937 rng(47);
-  const auto span = 10.0 * scene.Kyr();
-  const auto surface = scene.material.Radius() *
-                       scene.model.ModelScales().Length() / sle.Length();
-  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
-  const auto unit = 1e21 / sle.Factor(energy);
-  const auto source = PointSource{
-      .at = {.radius = surface - 400e3 / sle.Length(),
-             .colatitude = 1.1,
-             .longitude = 4.0},
-      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
-                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
-  const auto gU = scene.Smooth(rng, 0.5);
-  const auto gW = scene.Smooth(rng, 0.8);
-  auto direction = [](double theta, double phi) {
-    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
-  };
-  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
-    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
-  });
-  const auto p = OnCoupling(op.Coupling(), direction);
-  auto gaps = std::vector<double>{};
-  for (const auto nodes : {5, 9, 17}) {
-    auto times = std::vector<double>{};
-    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
-    const auto forcing = Evolution3D::Forcing{.sources = [&](double t) {
-      auto at = source;
-      const auto shape = 0.3 + t / span;
-      for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
-                      &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
-        *c *= shape;
-      }
-      return std::vector<PointSource>{at};
-    }};
-    Evolution3D evolution(
-        op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
-    const auto trajectory =
-        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
-    auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[times.size() - 1].displacementDual = gU;
-    measurements[times.size() - 1].toroidalPotentialDual = gW;
-    auto paired = std::map<AdjointMethod, double>{};
-    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
-      const auto kernels =
-          AdjointSolver3D(evolution, {.method = method,
-                                      .rtol = 1e-12,
-                                      .coupled_rtol = 1e-12})
-              .FirstOrderKernels(times, measurements, &trajectory);
-      paired[method] = GridPairing(op.Coupling(), kernels.logViscosityKernel3D, {p});
-    }
-    ASSERT_NE(paired[AdjointMethod::Discrete], 0.0);
-    gaps.push_back(std::abs(paired[AdjointMethod::Continuous] -
-                            paired[AdjointMethod::Discrete]) /
-                   std::abs(paired[AdjointMethod::Discrete]));
-  }
-  EXPECT_LT(gaps[2], 0.1) << gaps[0] << " " << gaps[1] << " " << gaps[2];
-  EXPECT_GT(gaps[0] / gaps[1], 2.0) << gaps[0] << " " << gaps[1];
-  EXPECT_GT(gaps[1] / gaps[2], 2.0) << gaps[1] << " " << gaps[2];
 }
 
 TEST(DiscreteAdjoint3D, ZeroLateralMatchesThe1DDiscreteSweep) {
@@ -1461,6 +1386,106 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepTakesATangentialMeasurement) {
         << which.name << ": " << gaps[0] << " " << gaps[1];
     EXPECT_GT(gaps[1] / gaps[2], 3.0)
         << which.name << ": " << gaps[1] << " " << gaps[2];
+  }
+}
+
+TEST(DiscreteAdjoint3D, TheContinuousSweepAboutASourceDrivenRun) {
+  // The continuous 3D sweep about a run under a point source with
+  // lateral viscosity: its viscosity kernel and its material kernels
+  // tend to the discrete sweep's as the steps are halved, the
+  // displacement and the toroidal potential measured.
+  auto scene = Scene::Make(1e22);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(47);
+  const auto span = 10.0 * scene.Kyr();
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto source = PointSource{
+      .at = {.radius = surface - 400e3 / sle.Length(),
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto gW = scene.Smooth(rng, 0.8);
+  auto direction = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto p = OnCoupling(op.Coupling(), direction);
+  const auto [k0, m0] = scene.material.Moduli().KappaMu();
+  const auto dKappa = LateralModulus(
+      op.Coupling(), scene.material, k0,
+      [](double r) { return 0.05 * (1.0 - 0.5 * r); },
+      [](double theta, double phi) {
+        return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+      });
+  const auto dMu = LateralModulus(
+      op.Coupling(), scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+      [](double theta, double phi) {
+        return 1.0 + 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto gaps = std::vector<double>{}, kappaGaps = std::vector<double>{};
+  auto muGaps = std::vector<double>{};
+  for (const auto nodes : {5, 9, 17}) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    const auto forcing = Evolution3D::Forcing{.sources = [&](double t) {
+      auto at = source;
+      const auto shape = 0.3 + t / span;
+      for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
+                      &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
+        *c *= shape;
+      }
+      return std::vector<PointSource>{at};
+    }};
+    Evolution3D evolution(
+        op, scene.solver, scene.state,
+        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].displacementDual = gU;
+    measurements[times.size() - 1].toroidalPotentialDual = gW;
+    auto paired = std::map<AdjointMethod, double>{};
+    auto bulk = std::map<AdjointMethod, double>{};
+    auto shear = std::map<AdjointMethod, double>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto kernels =
+          AdjointSolver3D(evolution, {.method = method,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .material_kernels = true})
+              .FirstOrderKernels(times, measurements, &trajectory);
+      paired[method] = GridPairing(op.Coupling(), kernels.logViscosityKernel3D, {p});
+      bulk[method] = VolumePairing(op.Coupling(), kernels.kappaKernel3D, dKappa);
+      shear[method] = VolumePairing(op.Coupling(), kernels.muKernel3D, dMu);
+    }
+    ASSERT_NE(paired[AdjointMethod::Discrete], 0.0);
+    ASSERT_NE(bulk[AdjointMethod::Discrete], 0.0);
+    ASSERT_NE(shear[AdjointMethod::Discrete], 0.0);
+    gaps.push_back(std::abs(paired[AdjointMethod::Continuous] -
+                            paired[AdjointMethod::Discrete]) /
+                   std::abs(paired[AdjointMethod::Discrete]));
+    // the bulk and shear kernels apart: the bulk one is small beside the
+    // shear, and an error in it would hide in their sum
+    kappaGaps.push_back(std::abs(bulk[AdjointMethod::Continuous] -
+                                 bulk[AdjointMethod::Discrete]) /
+                        std::abs(bulk[AdjointMethod::Discrete]));
+    muGaps.push_back(std::abs(shear[AdjointMethod::Continuous] -
+                              shear[AdjointMethod::Discrete]) /
+                     std::abs(shear[AdjointMethod::Discrete]));
+  }
+  for (const auto* g : {&gaps, &kappaGaps, &muGaps}) {
+    const auto what = g == &gaps ? "viscosity" : (g == &kappaGaps ? "kappa" : "mu");
+    EXPECT_LT((*g)[2], 0.1) << what << " " << (*g)[0] << " " << (*g)[1] << " "
+                            << (*g)[2];
+    EXPECT_GT((*g)[0] / (*g)[1], 2.0) << what << " " << (*g)[0] << " " << (*g)[1];
+    EXPECT_GT((*g)[1] / (*g)[2], 3.0) << what << " " << (*g)[1] << " " << (*g)[2];
   }
 }
 

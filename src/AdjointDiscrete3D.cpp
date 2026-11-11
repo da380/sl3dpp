@@ -64,12 +64,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const MaterialDirection3D* materialV) const {
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
-      (second || options_.material_kernels)) {
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second) {
     throw std::invalid_argument(
-        "about a source-driven trajectory the 3D sweeps form the kernels in "
-        "the relaxation times alone: not the material kernels, nor the "
-        "second order");
+        "the second-order sweeps do not take a source-driven trajectory yet");
   }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -736,6 +733,22 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     return x;
   };
 
+  // About a source-driven trajectory a node's full forward solution is
+  // under the sources' forces too (the unrelaxed solve is linear).
+  auto withSources = [&](Viscoelastic3D::Solutions x, std::size_t node) {
+    if (trajectory == nullptr || trajectory->sourceForces.empty()) return x;
+    const auto& forces = trajectory->sourceForces[node];
+    const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+    for (auto* pair : {&x.spheroidal, &x.toroidal}) {
+      const auto& from = pair == &x.spheroidal ? add.spheroidal : add.toroidal;
+      for (auto& [l, to] : *pair) {
+        const auto& a = from.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
+      }
+    }
+    return x;
+  };
+
   const std::size_t lowest = op.HasLateralModuli() ? 0 : 1;
   for (std::size_t n = N + 1; n-- > lowest;) {
     if (options_.on_node) options_.on_node(n);
@@ -1145,7 +1158,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       // step's effective factor 1 - sum_k f_k beta_k(x), and against the
       // base decayed memory the step holds.
       auto fwdN = forwardState(n);  // a copy: the cache may drop it below
-      const auto xn = op.SolveElastic(fwdN, loadsAt(n), tidesAt(n));
+      const auto xn =
+          withSources(op.SolveElastic(fwdN, loadsAt(n), tidesAt(n)), n);
       const auto Dy = dilatationOf(last.xdag, sph);
       const auto Dx = dilatationOf(xn, unrelaxedSph);
       addMaterialPairing(Dy, Dx, e, d1Copy, factor, &step.memory_, kappaKernel,
@@ -1387,7 +1401,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       // The start's dual solution under the start duals and the start's
       // response duals, against the base start solution: every weight
       // one, no memory.
-      const auto x0 = op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0));
+      const auto x0 = withSources(
+          op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)), 0);
       addMaterialPairing(dilatationOf(y0, sph), dilatationOf(x0, sph), e0,
                          exit(x0, sph, tor), {}, nullptr, kappaKernel, muKernel);
     }

@@ -1848,8 +1848,12 @@ and the sweeps in the relaxation times need nothing more: with the
 strain kept, the drive and the pairings read a source-driven
 trajectory as any other, by both methods.
 
+For the moduli the 3D tangent and both sweeps redo a node's full
+forward solution (its dilatation is what the bulk term reads; the
+deviatoric strain is the recorded one), and about a source-driven run
+that solution is under the sources' forces too: the unrelaxed solve of
+the recorded forces is added to the solve under the recorded loads.
+
 **What is not yet taken.** The second-order sweeps refuse a
-source-driven trajectory. In 3D the moduli about a source-driven run
-are refused, tangent and kernels (the base solutions would have to be
-redone under the sources' forces), the continuous sweep forms no
-moment kernels, and the moment kernels are not distributed.
+source-driven trajectory. In 3D the continuous sweep forms no moment
+kernels, and the moment kernels are not distributed.

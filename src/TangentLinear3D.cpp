@@ -548,6 +548,19 @@ struct TangentLinearSolver3D::MaterialDrive3D
     const auto tide = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
     if (!direction.kappa.empty() || !state.strain) {
       base.x = op.SolveElastic(state, load, tide);
+      if (!trajectory->sourceForces.empty()) {
+        // a source-driven base: under the sources' forces too
+        const auto& forces = trajectory->sourceForces[node];
+        const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+        for (auto* pair : {&base.x->spheroidal, &base.x->toroidal}) {
+          const auto& from =
+              pair == &base.x->spheroidal ? add.spheroidal : add.toroidal;
+          for (auto& [l, to] : *pair) {
+            const auto& a = from.at(l);
+            for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
+          }
+        }
+      }
     }
     if (state.strain) {
       base.strain = &*state.strain;
@@ -849,11 +862,7 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (!ditau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
-  if (hasMaterial && trajectory != nullptr && !trajectory->sourceForces.empty()) {
-    throw std::invalid_argument(
-        "a perturbation of the moduli about a source-driven trajectory is "
-        "not taken in 3D yet");
-  }
+
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();

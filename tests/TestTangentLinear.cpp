@@ -1029,7 +1029,8 @@ TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {
   const auto atPoints = AtMemoryPoints(op.Points(), d);
 
   for (const bool toroidalAlone : {false, true}) {
-    auto itauGaps = std::vector<double>{}, materialGaps = std::vector<double>{};
+    auto itauGaps = std::vector<double>{}, kappaGaps = std::vector<double>{};
+    auto muGaps = std::vector<double>{};
     for (const auto nodes : {9, 17, 33}) {
       auto times = std::vector<double>{};
       for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
@@ -1054,7 +1055,7 @@ TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {
       const auto trajectory =
           ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
       struct Paired {
-        double itau, moduli;
+        double itau, kappa, mu;
       };
       auto results = std::map<AdjointMethod, Paired>{};
       for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
@@ -1065,20 +1066,28 @@ TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {
                 .FirstOrderKernels(times, measurements, &trajectory);
         results[method] = {
             VolumePairing(mesh, kernels.itauKernel[0], ditau[0]),
-            VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa) +
-                VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu)};
+            VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa),
+            VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu)};
       }
       const auto& exact = results[AdjointMethod::Discrete];
       const auto& c = results[AdjointMethod::Continuous];
       ASSERT_NE(exact.itau, 0.0);
-      ASSERT_NE(exact.moduli, 0.0);
+      ASSERT_NE(exact.mu, 0.0);
       itauGaps.push_back(std::abs(c.itau - exact.itau) / std::abs(exact.itau));
-      materialGaps.push_back(std::abs(c.moduli - exact.moduli) /
-                             std::abs(exact.moduli));
+      muGaps.push_back(std::abs(c.mu - exact.mu) / std::abs(exact.mu));
+      // the bulk kernel apart (the toroidal systems know no bulk modulus)
+      if (!toroidalAlone) {
+        ASSERT_NE(exact.kappa, 0.0);
+        kappaGaps.push_back(std::abs(c.kappa - exact.kappa) /
+                            std::abs(exact.kappa));
+      }
     }
-    for (const auto* gaps : {&itauGaps, &materialGaps}) {
-      const auto what = std::string(gaps == &itauGaps ? "itau" : "moduli") +
-                        (toroidalAlone ? ", the toroidal dual alone" : "");
+    for (const auto* gaps : {&itauGaps, &kappaGaps, &muGaps}) {
+      if (gaps->empty()) continue;
+      const auto what =
+          std::string(gaps == &itauGaps ? "itau"
+                                        : (gaps == &kappaGaps ? "kappa" : "mu")) +
+          (toroidalAlone ? ", the toroidal dual alone" : "");
       EXPECT_LT((*gaps)[2], 0.05)
           << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
       EXPECT_GT((*gaps)[0] / (*gaps)[1], 2.0)

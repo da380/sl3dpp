@@ -137,12 +137,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const bool second = ditau != nullptr;
   const bool material = options_.material_kernels;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
-      (second || material)) {
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second) {
     throw std::invalid_argument(
-        "about a source-driven trajectory the 3D sweeps form the kernels in "
-        "the relaxation times alone: not the material kernels, nor the "
-        "second order");
+        "the second-order sweeps do not take a source-driven trajectory yet");
   }
   // v's delta mu over the grid values and delta mu / mu_U (the branch
   // weight of the itau pairing and the memory force's variation move
@@ -907,6 +904,21 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       }
     });
   };
+  // About a source-driven trajectory a node's full forward solution is
+  // under the sources' forces too (the unrelaxed solve is linear).
+  auto withSources = [&](Viscoelastic3D::Solutions x, std::size_t node) {
+    if (trajectory == nullptr || trajectory->sourceForces.empty()) return x;
+    const auto& forces = trajectory->sourceForces[node];
+    const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+    for (auto* pair : {&x.spheroidal, &x.toroidal}) {
+      const auto& from = pair == &x.spheroidal ? add.spheroidal : add.toroidal;
+      for (auto& [l, to] : *pair) {
+        const auto& a = from.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
+      }
+    }
+    return x;
+  };
   // Both pairings of an adjoint solution and its derivative along v at
   // a node: the kernels (lambda against the forward solution and memory),
   // and their derivative (the derivative against the forward, lambda
@@ -919,7 +931,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (weight == 0.0) return;
     auto fwd = forwardState(node);  // a copy: the cache may drop it below
     const auto dFwd = forwardStrain(node);
-    const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
+    const auto x =
+        withSources(op.SolveElastic(fwd, loadsAt(node), tidesAt(node)), node);
     pairMaterialWith(lambda, eLambda, x, dFwd, fwd.m, weight, kappaKernel, muKernel);
     if (!second) return;
     pairMaterialWith(*dlambda, *eDlambda, x, dFwd, fwd.m, weight, dKappaKernel,
@@ -934,7 +947,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (weight == 0.0) return;
     const auto& fwd = forwardState(node);
     const auto& dFwd = forwardStrain(node);
-    const auto x = op.SolveElastic(fwd, loadsAt(node), tidesAt(node));
+    const auto x =
+        withSources(op.SolveElastic(fwd, loadsAt(node), tidesAt(node)), node);
     const auto Dy = dilatationOf(lambda);
     const auto Dx = dilatationOf(x);
     detail::ForEach(op.options_.parallel, nodeCount, [&](std::size_t rn) {
