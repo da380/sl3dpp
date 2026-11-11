@@ -81,6 +81,11 @@ class Evolution3D {
     /// The node's ocean function under migrating shorelines; empty when
     /// the shorelines are frozen at the background state's.
     std::vector<double> oceanFunction;
+    /// Under interior sources, when recording: the sources' forces at
+    /// the node. Such a run is recorded at every node (record_stride 1),
+    /// each state with its strain: the strain of a source-driven
+    /// solution is not regenerated from the loads alone.
+    std::optional<DegreeFields> sourceForces;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -335,6 +340,9 @@ class Evolution3D {
   // (material units): the recurrence `Checkpoint` carries.
   std::vector<Complex> sigma_;
   std::vector<Complex> psi_;
+  /// Whether the run in hand is under interior sources (its kept states
+  /// then carry their strains).
+  bool sourced_ = false;
   double toNdLength_ = 1.0, toNdPotential_ = 1.0, toNdMoment_ = 1.0;
   double toMatDensity_ = 1.0, toMatPotential_ = 1.0, toMatTime_ = 1.0;
 };

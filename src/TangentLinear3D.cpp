@@ -849,6 +849,11 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (!ditau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
+  if (hasMaterial && trajectory != nullptr && !trajectory->sourceForces.empty()) {
+    throw std::invalid_argument(
+        "a perturbation of the moduli about a source-driven trajectory is "
+        "not taken in 3D yet");
+  }
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();

@@ -1839,7 +1839,17 @@ together (`AdjointSolver3D::Options::moment_points`, on one process);
 in the stepper's complex m >= 0 columns they are the coefficients of a
 real field as they stand.
 
+A source-driven 3D run is recorded as the radial one is, at every
+node with each state's strain and the sources' forces
+(`Evolution3D::Snapshot::sourceForces`,
+`ForwardTrajectory3D::sourceForces`). The 3D internal variables are
+tensors on the grid, the toroidal part within them, so the tangent
+and the sweeps in the relaxation times need nothing more: with the
+strain kept, the drive and the pairings read a source-driven
+trajectory as any other, by both methods.
+
 **What is not yet taken.** The second-order sweeps refuse a
-source-driven trajectory. In 3D a source-driven run is not recorded
-for the kernels in the Earth's parameters, the continuous sweep forms
-no moment kernels, and the moment kernels are not distributed.
+source-driven trajectory. In 3D the moduli about a source-driven run
+are refused, tangent and kernels (the base solutions would have to be
+redone under the sources' forces), the continuous sweep forms no
+moment kernels, and the moment kernels are not distributed.

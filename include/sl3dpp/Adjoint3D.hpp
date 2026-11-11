@@ -58,6 +58,10 @@ struct ForwardTrajectory3D {
   std::vector<std::optional<Viscoelastic3D::State>> states;
   std::vector<std::vector<std::complex<double>>> loads;
   std::vector<std::vector<std::complex<double>>> tides;
+  /// The sources' forces at each node of a run under interior sources
+  /// (which records every node, each state with its strain); empty for a
+  /// run without them.
+  std::vector<DegreeFields> sourceForces;
 
   /// A spilled recording (a run with Options::on_state): `fetch(node)`
   /// supplies a kept node's state from wherever the callback put it, for

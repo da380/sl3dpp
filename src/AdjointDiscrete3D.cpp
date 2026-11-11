@@ -64,6 +64,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const MaterialDirection3D* materialV) const {
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
+      (second || options_.material_kernels)) {
+    throw std::invalid_argument(
+        "about a source-driven trajectory the 3D sweeps form the kernels in "
+        "the relaxation times alone: not the material kernels, nor the "
+        "second order");
+  }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;

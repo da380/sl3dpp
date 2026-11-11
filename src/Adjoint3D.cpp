@@ -45,6 +45,11 @@ ForwardTrajectory3D ForwardTrajectory3D::FromSnapshots(
     out.states.push_back(snapshot.internalState);
     out.loads.push_back(snapshot.loadCoefficients);
     out.tides.push_back(snapshot.tideCoefficients);
+    if (snapshot.sourceForces) out.sourceForces.push_back(*snapshot.sourceForces);
+  }
+  if (!out.sourceForces.empty() && out.sourceForces.size() != snapshots.size()) {
+    throw std::invalid_argument(
+        "a run under interior sources is recorded at every node");
   }
   return out;
 }
@@ -132,6 +137,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const bool second = ditau != nullptr;
   const bool material = options_.material_kernels;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
+      (second || material)) {
+    throw std::invalid_argument(
+        "about a source-driven trajectory the 3D sweeps form the kernels in "
+        "the relaxation times alone: not the material kernels, nor the "
+        "second order");
+  }
   // v's delta mu over the grid values and delta mu / mu_U (the branch
   // weight of the itau pairing and the memory force's variation move
   // with it); empty without a mu direction.

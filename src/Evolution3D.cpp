@@ -431,7 +431,7 @@ Evolution3D::Snapshot Evolution3D::MakeSnapshot(
   // The internal variables, and the strain only on request: an adjoint
   // otherwise regenerates it by one elastic solve under the recorded
   // loads.
-  if (keepState && options_.record_strain) {
+  if (keepState && (options_.record_strain || sourced_)) {
     snapshot.internalState = vstate_;
   } else if (keepState) {
     auto trimmed = Viscoelastic3D::State{};
@@ -463,6 +463,8 @@ Evolution3D::Snapshot Evolution3D::Instantaneous(
 
 Evolution3D::Snapshot Evolution3D::Instantaneous(const Forcing& forcing,
                                                  double t) {
+  sourced_ = static_cast<bool>(forcing.sources) ||
+             static_cast<bool>(forcing.stressGluts);
   Coupled coupled(*this, false);
   if (forcing.tide) coupled.tide = forcing.tide(t);
   if (forcing.sources || forcing.stressGluts) {
@@ -513,6 +515,18 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     }
   }
 
+  sourced_ = interior != nullptr && (interior->sources || interior->stressGluts);
+  if (sourced_ && options_.record_stride > 1) {
+    throw std::invalid_argument(
+        "a run under interior sources is recorded at every node "
+        "(record_stride 1): the states between could not be rebuilt "
+        "without the sources' forces");
+  }
+  if (sourced_ && options_.record_stride > 0 && options_.on_state) {
+    throw std::invalid_argument(
+        "a recorded run under interior sources keeps its states on the "
+        "snapshots, with their strains");
+  }
   Coupled coupled(*this, migrating);
   auto& response = coupled.response;
   auto& ocean = coupled.ocean;
@@ -573,6 +587,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
                     bool keepState) {
     auto snapshot =
         MakeSnapshot(t, r, info, converged, std::move(ocean), keepState);
+    if (sourced_ && keepState) snapshot.sourceForces = coupled.sourceForces;
     // With on_state, the kept state is handed out instead.
     auto kept = std::optional<Viscoelastic3D::State>{};
     if (options_.on_state) std::swap(kept, snapshot.internalState);
