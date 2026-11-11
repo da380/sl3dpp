@@ -61,6 +61,12 @@ struct ForwardTrajectory {
   /// forward run recorded; may be empty when every state is stored.
   std::vector<std::vector<std::complex<double>>> loads;
   std::vector<std::vector<std::complex<double>>> tides;
+  /// The toroidal systems' states, one per node, of a run under interior
+  /// sources (which records every node, each state with its strain);
+  /// empty for a run without them.
+  std::vector<ToroidalViscoelastic::State> toroidal;
+  /// And the sources' forces at each node of such a run.
+  std::vector<RadialSourceForces> sourceForces;
 
   /// The trajectory a recording run's snapshots carry (a run with
   /// Options::record_stride set).

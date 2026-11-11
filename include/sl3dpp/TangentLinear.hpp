@@ -115,6 +115,20 @@ struct SecondOrderDirection {
   PointMaterialDirection materialV;
 };
 
+/// The toroidal systems' drive about a source-driven trajectory, for a
+/// perturbation of the relaxation times or the moduli.
+struct TangentToroidalDrive {
+  /// A step's memory increment and force.
+  std::function<std::pair<ToroidalViscoelastic::Fields,
+                          ToroidalViscoelastic::Fields>(
+      const ToroidalViscoelastic& toroidal, std::size_t node, double dt)>
+      step{};
+  /// The start's own response (the moduli's).
+  std::function<ToroidalViscoelastic::Fields(
+      const ToroidalViscoelastic& toroidal)>
+      start{};
+};
+
 /**
  * @brief The tangent-linear run over a coupled evolution's setup.
  *
@@ -195,6 +209,7 @@ class TangentLinearSolver {
   using Direct = std::function<std::vector<double>(std::size_t node)>;
   using Tide =
       std::function<std::vector<std::complex<double>>(std::size_t node)>;
+  using ToroidalDrive = TangentToroidalDrive;
   /// The interior sources perturbed at a node.
   using Sources = std::function<
       std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
@@ -213,7 +228,8 @@ class TangentLinearSolver {
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive, MaterialForcing* material,
-      const Tide& tideAt = {}, const Sources& sourcesAt = {}) const;
+      const Tide& tideAt = {}, const Sources& sourcesAt = {},
+      const ToroidalDrive& toroidalDrive = {}) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two

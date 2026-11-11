@@ -33,6 +33,7 @@
 
 #include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp {
@@ -66,6 +67,12 @@ class Evolution {
     std::vector<double> oceanFunction;
     /// Whether the node's sea level solve met its tolerance.
     bool converged = true;
+    /// Under interior sources, when recording: the toroidal systems'
+    /// internal variables and strain at the node (ToroidalViscoelastic).
+    std::optional<ToroidalViscoelastic::State> toroidalState;
+    /// And the sources' forces at the node, which the derivative runs
+    /// about this one apply again.
+    std::optional<RadialSourceForces> sourceForces;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -150,7 +157,11 @@ class Evolution {
     /// acts. They force the spheroidal systems of each step and the
     /// toroidal ones, which a radial model steps on their own
     /// (ToroidalViscoelastic); the snapshots then carry the toroidal
-    /// potential. A run under them is not resumed from a checkpoint.
+    /// potential. A run under them is not resumed from a checkpoint, and
+    /// is recorded at every node or not at all (record_stride 1), each
+    /// kept state with its strain and the toroidal state beside it: the
+    /// strain of a source-driven solution is not regenerated from the
+    /// loads alone.
     std::function<std::vector<PointSource>(double)> sources{};
     std::function<std::vector<StressGlut>(double)> stressGluts{};
   };

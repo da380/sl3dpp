@@ -26,18 +26,27 @@
  * (dof, column) column-major over a degree's toroidal dofs, the columns
  * the 2 (l + 1) real ones of a real field (the real block of orders
  * 0..l, then the imaginary); memory and strain are (branch, scalar,
- * element, point, column) over the degree's memory window. Everything is
- * in the material's units.
+ * element, point, column) over the elements of the degree's system.
+ * Everything is in the material's units.
  */
 
 #include <map>
 #include <memory>
+#include <span>
 #include <vector>
 
 #include "sl3dpp/ToroidalOperator.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp {
+
+/// The forces of interior sources on a radial model's degree systems:
+/// per degree, (dof, column) over the 2 (l + 1) real columns of a real
+/// field (the real block of orders 0..l, then the imaginary), material
+/// units.
+struct RadialSourceForces {
+  std::map<int, std::vector<double>> spheroidal, toroidal;
+};
 
 class ToroidalViscoelastic {
  public:
@@ -72,12 +81,51 @@ class ToroidalViscoelastic {
   /// One step of dt ending under `force`: the new state, with its
   /// strain, and the solutions at the end. The trapezoid needs the
   /// state's strain (SetStrain, or a previous step's).
+  /// `memory`, when given, is added to the step's decayed memory (the
+  /// drive of a tangent-linear step, FirstOrderDrive's).
   [[nodiscard]] std::pair<State, Fields> Step(const State& state, double dt,
-                                              Scheme scheme,
-                                              const Fields& force) const;
+                                              Scheme scheme, const Fields& force,
+                                              const Fields* memory = nullptr) const;
+
+  /// The memory increment of a step from `prev` to `next` (two states of
+  /// a trajectory, with their strains) for a perturbation of the inverse
+  /// relaxation times at the memory points: the toroidal twin of
+  /// TangentLinearSolver::FirstOrderDrive, discrete (the scheme weights'
+  /// derivatives) or continuous.
+  [[nodiscard]] Fields FirstOrderDrive(
+      bool discrete, Scheme scheme, double dt, const State& prev,
+      const State& next,
+      const std::vector<std::vector<double>>& ditauPoints) const;
 
   /// The surface value of W per degree and column.
   [[nodiscard]] Fields Surface(const Fields& solutions) const;
+
+  // -- the moduli ---------------------------------------------------------------
+  //
+  // A perturbation delta mu of the shear modulus at the memory points of
+  // the whole mesh (the layout of PointMaterialDirection::mu), the branch
+  // moduli following as their fixed fractions of it and the relaxation
+  // times held, as in the spheroidal material tangent (docs/adjoints.md
+  // §13). The toroidal systems know no bulk modulus.
+
+  /// A step of the base run again: its decayed memory and its solutions.
+  struct BaseStep {
+    Fields decayed;
+    Fields solutions;
+  };
+  [[nodiscard]] BaseStep Redo(const State& prev, double dt, Scheme scheme,
+                              const Fields& force) const;
+
+  /// The force of delta mu on the step: minus the effective system's
+  /// variation on the base step's solution, plus the force of its decayed
+  /// memory with the branch moduli's variation.
+  [[nodiscard]] Fields MaterialForce(double dt, Scheme scheme,
+                                     std::span<const double> dmu,
+                                     const BaseStep& base) const;
+  /// The start's response to delta mu: the unrelaxed systems under minus
+  /// their variation on the base start solution.
+  [[nodiscard]] Fields StartMaterialResponse(std::span<const double> dmu,
+                                             const Fields& baseStart) const;
 
   // -- the transpose, for the discrete adjoint ---------------------------------
 
@@ -93,12 +141,37 @@ class ToroidalViscoelastic {
   /// dual of the node's surface W per degree and column (a degree absent
   /// has none). The duals are carried back to the step's start, and the
   /// dual solutions returned are the duals of the step's forces.
-  [[nodiscard]] Fields StepTransposed(Dual& dual, double dt, Scheme scheme,
-                                      const Fields& surfaceDual) const;
+  /// With `pairing`, the step's part of the kernel in the inverse
+  /// relaxation times is added to it: the duals paired with the forward
+  /// step's states through the scheme weights' derivatives, per branch
+  /// at the memory points of the whole mesh (the discrete sweep's
+  /// accumulation, before its map to the nodes).
+  struct ItauPairing {
+    const State* prev = nullptr;
+    const State* next = nullptr;
+    std::vector<std::vector<double>>* kernel = nullptr;
+  };
+  /// With `material`, the step's part of the kernel in the shear modulus
+  /// is added to it, at the memory points of the whole mesh: the dual
+  /// solution paired with MaterialForce's derivative, the base step
+  /// redone from `prev` under `force`.
+  struct MaterialPairing {
+    const State* prev = nullptr;
+    const Fields* force = nullptr;
+    std::vector<double>* mu = nullptr;
+  };
+  [[nodiscard]] Fields StepTransposed(
+      Dual& dual, double dt, Scheme scheme, const Fields& surfaceDual,
+      const ItauPairing* pairing = nullptr,
+      const MaterialPairing* material = nullptr) const;
   /// The transpose of the unrelaxed start (SolveElastic on a zero state,
   /// then SetStrain): the duals of the start's forces.
+  /// With `baseStart` and `mu`, the start's part of the kernel in the
+  /// shear modulus is added.
   [[nodiscard]] Fields StartTransposed(const Dual& dual,
-                                       const Fields& surfaceDual) const;
+                                       const Fields& surfaceDual,
+                                       const Fields* baseStart = nullptr,
+                                       std::vector<double>* mu = nullptr) const;
 
  private:
   struct Degree;

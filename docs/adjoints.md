@@ -1756,9 +1756,50 @@ toroidal potential has no toroidal part in its moment kernel.
 `AdjointSolver::Options::moment_points` gives the points, and
 `Kernels::momentKernels[n][p]` the tensors, in the solver's units.
 
-**What is not yet taken.** The discrete sweep of the radial model
-alone forms the moment kernels. A run under sources is not recorded
-(`record_stride`), so the kernels in the Earth's parameters about a
-source-driven trajectory are not available: its trajectory would have
-to hold the sources' forces and the toroidal state, and the sweeps
-their toroidal pairings.
+**The relaxation times about a source-driven run.** Under sources the
+toroidal systems carry internal variables as the spheroidal ones do,
+so the run's dependence on the relaxation times has a toroidal part.
+Such a run is recorded at every node (`record_stride` 1), each kept
+state with its strain, the toroidal state beside it
+(`Snapshot::toroidalState`, `ForwardTrajectory::toroidal`): the strain
+of a source-driven solution is not the elastic solve under the recorded
+loads alone, so it is kept and not regenerated. The tangent-linear run
+steps the toroidal systems under the toroidal twin of the first-order
+drive (`ToroidalViscoelastic::FirstOrderDrive`: the scheme weights'
+derivatives on the toroidal scalars, or the continuous drive), with no
+force of their own unless the sources are perturbed too. The discrete
+sweep carries the toroidal duals back whenever the trajectory is
+source-driven, forced by the dual of the surface W, and adds each
+step's pairing of them with the forward toroidal states to the kernel
+in the inverse relaxation times, the spheroidal sweep's expression on
+the two toroidal scalars (`StepTransposed` with an `ItauPairing`).
+
+**The moduli about a source-driven run.** The sources' forces do not
+depend on the moduli (a stress glut is given), so the material tangent
+and kernels of §13 hold with two additions. The base solutions the
+material forces act on, and the kernels pair with, are those of the
+source-driven run: the recorded forces (`Snapshot::sourceForces`,
+`ForwardTrajectory::sourceForces`) join the base step where it is
+redone and the base start's unrelaxed solve. And the toroidal systems
+have their own share, in the shear modulus alone: with S the strain
+operator of the two toroidal scalars and W_c their force weights, the
+toroidal stiffness is S^T (W_c mu w) S at the points (w the
+quadrature), so a perturbation delta mu forces a step by
+
+    -S^T (W_c (1 - sum_k f_k b_k) delta mu w) S x
+        + sum_k S^T (W_c f_k delta mu w) m~_k,
+
+x the base step's toroidal solution, m~ its decayed memory, f_k the
+branch fractions and b_k the scheme's end weights, and the start by
+the unrelaxed systems under -S^T (W_c delta mu w) S x_0
+(`ToroidalViscoelastic::MaterialForce`, `StartMaterialResponse`). The
+sweep adds the transposes to the shear kernel, the dual toroidal
+solution's strain paired with the same two terms (`StepTransposed`
+with a `MaterialPairing`, `StartTransposed` with the base start). The
+toroidal workspace spans every element of its system for this, the
+elastic regions included.
+
+**What is not yet taken.** The radial model's discrete sweep alone
+forms the moment kernels and takes a source-driven trajectory; the
+continuous sweep and the second-order sweeps refuse one. The 3D
+classes do not take sources as parameters.

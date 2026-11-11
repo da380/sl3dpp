@@ -275,11 +275,12 @@ std::vector<Evolution::Snapshot> Evolution::March(
   auto toroidal = std::optional<ToroidalViscoelastic>{};
   auto tstate = ToroidalViscoelastic::State{};
   auto twist = ToroidalViscoelastic::Fields{};  // the node's toroidal solutions
-  if (sourced && stride > 0) {
+  auto nodeForces = RadialSourceForces{};  // the node's source forces
+  if (sourced && stride > 1) {
     throw std::invalid_argument(
-        "a run under interior sources is not recorded for the kernels in "
-        "the Earth's parameters: its trajectory would not hold the "
-        "sources' forces or the toroidal state");
+        "a run under interior sources is recorded at every node "
+        "(record_stride 1): the states between could not be rebuilt "
+        "without the sources' forces");
   }
   if (sourced) {
     toroidal.emplace(op);
@@ -323,7 +324,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // its strain joins the start's.
     auto startResponse = std::map<int, std::vector<double>>{};
     if (sourced) {
-      const auto forces = sourceForcesAt(times[0]);
+      nodeForces = sourceForcesAt(times[0]);
+      const auto& forces = nodeForces;
       for (const auto& [l, f] : forces.spheroidal) {
         startResponse.emplace(l, op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1)));
       }
@@ -374,8 +376,12 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
     // loads.
-    if (keepState && options_.record_strain) {
+    if (keepState && (options_.record_strain || sourced)) {
       snapshot.internalState = vstate_;
+      if (sourced) {
+        snapshot.toroidalState = tstate;
+        snapshot.sourceForces = nodeForces;
+      }
     } else if (keepState) {
       ViscoelasticState kept;
       kept.t = vstate_.t;
@@ -436,7 +442,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
       if (sourced) {
         // the node's sources force the step; the toroidal systems are
         // stepped under theirs
-        const auto forces = sourceForcesAt(times[node]);
+        nodeForces = sourceForcesAt(times[node]);
+        const auto& forces = nodeForces;
         step.AddForce(forces.spheroidal);
         auto stepped =
             toroidal->Step(tstate, dt, options_.scheme, forces.toroidal);

@@ -629,6 +629,250 @@ TEST(TangentLinear, InteriorSourcesInThePair) {
   }
 }
 
+TEST(TangentLinear, RelaxationTimesAboutASourceDrivenRun) {
+  // The relaxation times as parameters of a run under point sources,
+  // whose toroidal systems carry memory too: the discrete tangent-linear
+  // run along a perturbation of them is the derivative of the forward
+  // run (central differences converge on it at second order, and
+  // Richardson lands on it), and the discrete sweep's kernel pairs with
+  // the perturbation to the same number; measured in every field, and in
+  // the toroidal potential alone, for both schemes.
+  auto setup = Scene::Make(1e21);
+  const auto& sle = setup.solver.SolverScales();
+  std::mt19937 rng(61);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto sources = std::vector<PointSource>{
+      {.at = {.radius = surface - 400e3 / sle.Length(),
+              .colatitude = 1.1,
+              .longitude = 4.0},
+       .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                  .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}},
+      {.at = {.radius = surface - 800e3 / sle.Length(),
+              .colatitude = 2.2,
+              .longitude = 1.0},
+       .moment = {.rr = -0.4 * unit, .tt = 0.8 * unit, .pp = -0.4 * unit,
+                  .rt = 0.5 * unit, .rp = 0.1 * unit, .tp = -0.3 * unit}}};
+  const auto forcing = Evolution::Forcing{
+      .sources = [&](double) { return sources; }};
+  auto measurements = FullMeasurements(setup, rng, times.size() - 1);
+  for (auto& [node, m] : measurements) {
+    m.tangentialPotentialDual = setup.Smooth(rng, 0.6);
+    m.toroidalPotentialDual = setup.Smooth(rng, 0.8);
+  }
+  auto toroidalAlone = std::map<std::size_t, Measurement>{};
+  toroidalAlone[2].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  toroidalAlone[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto& branch = setup.rheology.BranchAt(0);
+  const auto& all = measurements;
+  const auto& alone = toroidalAlone;
+
+  for (const auto* measured : {&all, &alone})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label =
+        std::string(measured == &alone ? "the toroidal dual alone, " : "") +
+        "scheme " + std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    Evolution evolution(op, setup.solver, setup.state,
+                        {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+    ASSERT_EQ(trajectory.toroidal.size(), times.size());
+
+    TangentPerturbation direction;
+    direction.itau = ditau;
+    const auto along = Objective(
+        setup,
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .Run(times, direction, &trajectory),
+        *measured);
+    ASSERT_NE(along, 0.0) << label;
+
+    auto objectiveAt = [&](double eps) {
+      auto b = branch;
+      for (auto i = std::size_t{0}; i < b.itau.size(); ++i) {
+        b.itau[i] += eps * ditau[0][i];
+      }
+      auto rheology = Rheology::Create(setup.material, {std::move(b)}).value();
+      ViscoelasticOperator moved(rheology, kLmax);
+      Evolution movedEvolution(moved, setup.solver, setup.state,
+                               {.scheme = scheme, .rtol = 1e-12});
+      return Objective(setup, movedEvolution.Run(times, forcing), *measured);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.02, 0.01}) {
+      fd[eps] = (objectiveAt(eps) - objectiveAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.02] - along);
+    const auto r2 = std::abs(fd[0.01] - along);
+    EXPECT_GT(r1 / r2, 3.0) << label;
+    EXPECT_LT(r1 / r2, 5.0) << label;
+    EXPECT_NEAR((4.0 * fd[0.01] - fd[0.02]) / 3.0, along, 1e-6 * std::abs(along))
+        << label;
+
+    AdjointSolver adjoint(evolution,
+                          {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    const auto kernels = adjoint.FirstOrderKernels(times, *measured, &trajectory);
+    const auto paired =
+        VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
+    EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label;
+
+    // what does not take a source-driven trajectory says so
+    EXPECT_THROW((void)AdjointSolver(evolution, {.method = AdjointMethod::Continuous})
+                     .FirstOrderKernels(times, *measured, &trajectory),
+                 std::invalid_argument);
+  }
+}
+
+TEST(TangentLinear, ModuliAboutASourceDrivenRun) {
+  // The moduli as parameters of a run under point sources: the
+  // tangent-linear run along a direction in kappa and mu (the branch
+  // moduli as fixed fractions, the relaxation times held) is the
+  // derivative of the forward run on the shifted material (central
+  // differences at second order, Richardson to 1e-6), the toroidal
+  // systems' share with it, and the discrete sweep's material kernels
+  // pair with the direction to the same number; measured in every field
+  // and in the toroidal potential alone, for both schemes. The sources'
+  // forces do not depend on the moduli: a stress glut is given.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(71);
+  const auto baseTable =
+      ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const GRDSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  const auto& sle = solver.SolverScales();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto sources = std::vector<PointSource>{
+      {.at = {.radius = surface - 400e3 / sle.Length(),
+              .colatitude = 1.1,
+              .longitude = 4.0},
+       .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                  .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}},
+      {.at = {.radius = surface - 800e3 / sle.Length(),
+              .colatitude = 2.2,
+              .longitude = 1.0},
+       .moment = {.rr = -0.4 * unit, .tt = 0.8 * unit, .pp = -0.4 * unit,
+                  .rt = 0.5 * unit, .rp = 0.1 * unit, .tp = -0.3 * unit}}};
+  const auto forcing = Evolution::Forcing{
+      .sources = [&](double) { return sources; }};
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+  measurements[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 0.8);
+  measurements[2].potentialDual = setup.Smooth(rng, 0.7);
+  measurements[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
+  auto toroidalAlone = std::map<std::size_t, Measurement>{};
+  toroidalAlone[0].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  toroidalAlone[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      d.mu[i] = profile * m0[i];
+    }
+  }
+  const auto& base = setup.rheology;
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(d, eps);
+    const auto muU = base.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < base.BranchCount(); ++k) {
+      auto branch = base.BranchAt(k);
+      for (auto i = std::size_t{0}; i < branch.mu.size(); ++i) {
+        branch.mu[i] = muU[i] > 0.0 ? branch.mu[i] / muU[i] * mu[i] : 0.0;
+      }
+      branches.push_back(std::move(branch));
+    }
+    return std::pair(shifted, Rheology::Create(shifted, branches).value());
+  };
+  const auto& all = measurements;
+  const auto& alone = toroidalAlone;
+
+  for (const auto* measured : {&all, &alone})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label =
+        std::string(measured == &alone ? "the toroidal dual alone, " : "") +
+        "scheme " + std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax,
+                            {.memory_points = MemoryPointSet::Gll});
+    Evolution evolution(op, solver, setup.state,
+                        {.scheme = scheme,
+                         .rotation = RotationalFeedback::None,
+                         .rtol = 1e-12,
+                         .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+    TangentPerturbation direction;
+    direction.material = AtGll(d);
+    const auto predicted = Objective(
+        setup,
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .Run(times, direction, &trajectory),
+        *measured);
+    ASSERT_NE(predicted, 0.0) << label;
+
+    auto functional = [&](double eps) {
+      const auto [shifted, rheology] = rheologyAt(eps);
+      ViscoelasticOperator moved(rheology, kLmax,
+                                 {.memory_points = MemoryPointSet::Gll});
+      Evolution movedEvolution(moved, solver, setup.state,
+                               {.scheme = scheme,
+                                .rotation = RotationalFeedback::None,
+                                .rtol = 1e-12});
+      return Objective(setup, movedEvolution.Run(times, forcing), *measured);
+    };
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.1, 0.05}) {
+      fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.1] - predicted);
+    const auto r2 = std::abs(fd[0.05] - predicted);
+    EXPECT_GT(r1 / r2, 3.0) << label << " " << fd[0.1] << " " << fd[0.05] << " "
+                            << predicted;
+    EXPECT_LT(r1 / r2, 5.0) << label;
+    EXPECT_NEAR((4.0 * fd[0.05] - fd[0.1]) / 3.0, predicted,
+                1e-6 * std::abs(predicted))
+        << label;
+
+    const auto kernels =
+        AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                  .rtol = 1e-12,
+                                  .material_kernels = true})
+            .FirstOrderKernels(times, *measured, &trajectory);
+    const auto paired =
+        VolumePairing(op.Points(), mesh, kernels.kappaKernel,
+                      direction.material.kappa) +
+        VolumePairing(op.Points(), mesh, kernels.muKernel, direction.material.mu);
+    EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted)) << label;
+  }
+}
+
 TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   // In the loads the two methods coincide; in the relaxation times they
   // differ by the order of the scheme: on a slowly relaxing mantle under

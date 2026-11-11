@@ -132,6 +132,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
   } else {
     ditauPoints = op.ItauPerturbationAtPoints(itau);
   }
+  if (!trajectory.toroidal.empty()) {
+    throw std::invalid_argument(
+        "the second-order sweeps do not take a source-driven trajectory yet");
+  }
   return options_.method == AdjointMethod::Discrete
              ? DiscreteSecondOrder(times, measurements, tangent, ditauPoints,
                                    trajectory, oceanFunctions, material)

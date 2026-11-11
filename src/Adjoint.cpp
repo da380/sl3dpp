@@ -30,6 +30,13 @@ ForwardTrajectory ForwardTrajectory::FromSnapshots(
     out.states.push_back(snapshot.internalState);
     out.loads.push_back(snapshot.loadCoefficients);
     out.tides.push_back(snapshot.tideCoefficients);
+    if (snapshot.toroidalState) out.toroidal.push_back(*snapshot.toroidalState);
+    if (snapshot.sourceForces) out.sourceForces.push_back(*snapshot.sourceForces);
+  }
+  if (!out.toroidal.empty() && (out.toroidal.size() != snapshots.size() ||
+                                out.sourceForces.size() != snapshots.size())) {
+    throw std::invalid_argument(
+        "a run under interior sources is recorded at every node");
   }
   return out;
 }
@@ -335,11 +342,15 @@ Kernels AdjointSolver::DiscreteSweep(
   // conjugate-paired strain functional, so the kernel is the strain of
   // the dual solution with its m > 0 columns halved.
   const bool moments = !options_.moment_points.empty();
+  // About a source-driven trajectory the toroidal systems carry memory,
+  // and the kernel in the relaxation times has their part.
+  const bool sourcedBase = trajectory != nullptr && !trajectory->toroidal.empty();
+  const bool twisting = moments || sourcedBase;
   auto toroidal = std::optional<ToroidalViscoelastic>{};
   auto tdual = ToroidalViscoelastic::Dual{};
   auto momentKernels =
       std::vector<std::vector<SphericalTensor>>(moments ? times.size() : 0);
-  if (moments) {
+  if (twisting) {
     toroidal.emplace(op);
     tdual = toroidal->ZeroDual();
   }
@@ -529,12 +540,29 @@ Kernels AdjointSolver::DiscreteSweep(
     auto xn = std::map<int, std::vector<double>>{};
     auto factor = std::vector<double>{};
     if (material) {
-      xn = op.SolveElastic(*fwdN, ev.Columns(trajectory->loads[n], ev.toMatDensity_),
-                           ev.Columns(trajectory->tides[n], ev.toMatPotential_));
+      // (about a source-driven run, under the sources' forces too)
+      auto withSources = [&](std::map<int, std::vector<double>> x,
+                             std::size_t node) {
+        if (!sourcedBase) return x;
+        for (const auto& [l, f] :
+             trajectory->sourceForces[node].spheroidal) {
+          const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+          auto& to = x.at(l);
+          for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+        }
+        return x;
+      };
+      xn = withSources(
+          op.SolveElastic(*fwdN,
+                          ev.Columns(trajectory->loads[n], ev.toMatDensity_),
+                          ev.Columns(trajectory->tides[n], ev.toMatPotential_)),
+          n);
       if (n == 1) {
-        x0 = op.SolveElastic(*fwdPrev,
-                             ev.Columns(trajectory->loads[0], ev.toMatDensity_),
-                             ev.Columns(trajectory->tides[0], ev.toMatPotential_));
+        x0 = withSources(
+            op.SolveElastic(*fwdPrev,
+                            ev.Columns(trajectory->loads[0], ev.toMatDensity_),
+                            ev.Columns(trajectory->tides[0], ev.toMatPotential_)),
+            0);
       }
       factor.assign(fractions[0].size(), 1.0);
       for (auto k = std::size_t{0}; k < K; ++k) {
@@ -675,12 +703,30 @@ Kernels AdjointSolver::DiscreteSweep(
         muKernel[i] += mu[i];
       }
     }
-    if (moments) {
-      auto y = std::map<int, std::vector<double>>{};
-      for (auto l = 0; l <= lmax; ++l) y.emplace(l, std::move(dualSolutions[l]));
-      const auto yT = toroidal->StepTransposed(tdual, dt, scheme,
-                                               toroidalSurfaceDual(adj));
-      momentKernels[n] = momentKernelsOf(y, yT);
+    if (twisting) {
+      auto pairing = ToroidalViscoelastic::ItauPairing{};
+      if (sourcedBase) {
+        pairing = {.prev = &trajectory->toroidal[n - 1],
+                   .next = &trajectory->toroidal[n],
+                   .kernel = &itauKernel};
+      }
+      auto materialPairing = ToroidalViscoelastic::MaterialPairing{};
+      if (sourcedBase && material) {
+        materialPairing = {.prev = &trajectory->toroidal[n - 1],
+                           .force = &trajectory->sourceForces[n].toroidal,
+                           .mu = &muKernel};
+      }
+      const auto yT = toroidal->StepTransposed(
+          tdual, dt, scheme, toroidalSurfaceDual(adj),
+          sourcedBase ? &pairing : nullptr,
+          sourcedBase && material ? &materialPairing : nullptr);
+      if (moments) {
+        auto y = std::map<int, std::vector<double>>{};
+        for (auto l = 0; l <= lmax; ++l) {
+          y.emplace(l, std::move(dualSolutions[l]));
+        }
+        momentKernels[n] = momentKernelsOf(y, yT);
+      }
     }
   }
 
@@ -736,6 +782,13 @@ Kernels AdjointSolver::DiscreteSweep(
       }
       momentKernels[0] = momentKernelsOf(
           y, toroidal->StartTransposed(tdual, toroidalSurfaceDual(adj)));
+    }
+    if (sourcedBase && material) {
+      // the toroidal start's part of the shear kernel
+      const auto base = toroidal->SolveElastic(
+          toroidal->ZeroState(), trajectory->sourceForces[0].toroidal);
+      (void)toroidal->StartTransposed(tdual, toroidalSurfaceDual(adj), &base,
+                                      &muKernel);
     }
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
@@ -847,6 +900,11 @@ Kernels AdjointSolver::ContinuousSweep(
   const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
   const auto K = op.GetRheology().BranchCount();
+  if (trajectory != nullptr && !trajectory->toroidal.empty()) {
+    throw std::invalid_argument(
+        "the continuous sweep does not take a source-driven trajectory "
+        "yet: use the discrete one");
+  }
   const auto N = times.size() - 1;
 
   GRDSolver::Options sleOptions;

@@ -19,12 +19,6 @@
 
 namespace sl3dpp::detail {
 
-/// Per degree, (dof, column) forces over the 2 (l + 1) real columns of a
-/// real field (the real block of orders 0..l, then the imaginary).
-struct RadialSourceForces {
-  std::map<int, std::vector<double>> spheroidal, toroidal;
-};
-
 /// The moment's factor from the solver's units to the material's.
 [[nodiscard]] inline double MomentToMaterial(const ViscoelasticOperator& op,
                                              const Scales& sle) {
