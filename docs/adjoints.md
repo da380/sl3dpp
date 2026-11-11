@@ -1854,6 +1854,11 @@ deviatoric strain is the recorded one), and about a source-driven run
 that solution is under the sources' forces too: the unrelaxed solve of
 the recorded forces is added to the solve under the recorded loads.
 
+The continuous 3D sweep forms the moment kernels as the radial one
+does: the strain at the points of the adjoint displacement at each node
+side under the time weights, and of the jump's solution at each
+observation without one (under lateral moduli the instantaneous fixed
+point's).
+
 **What is not yet taken.** The second-order sweeps refuse a
-source-driven trajectory. In 3D the continuous sweep forms no moment
-kernels, and the moment kernels are not distributed.
+source-driven trajectory. The 3D moment kernels are not distributed.

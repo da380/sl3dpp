@@ -260,8 +260,7 @@ class AdjointSolver3D {
     bool material_kernels = false;
     /// The points (solver units) at which to form the moment kernels
     /// (Kernels::momentKernels, under Kernels3D::ice), as
-    /// AdjointSolver::Options::moment_points; the discrete sweep, on one
-    /// process.
+    /// AdjointSolver::Options::moment_points; on one process.
     std::vector<BodyPoint> moment_points{};
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for

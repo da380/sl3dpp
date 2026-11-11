@@ -395,6 +395,42 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto lock = op.LockCaches();
     return get();
   };
+  // The moment kernels: the strain of the adjoint displacement at the
+  // given points (docs/adjoints.md §19), the smooth part under the time
+  // weights and the jump's without.
+  const bool moments = !options_.moment_points.empty();
+  if (moments && op.GetOptions().collectives.Distributed()) {
+    throw std::invalid_argument("the moment kernels are formed on one process");
+  }
+  const bool keepLump = material || hasMaterialV || moments;
+  auto momentKernels = std::vector<std::vector<SphericalTensor>>(
+      moments ? times.size() : 0,
+      std::vector<SphericalTensor>(options_.moment_points.size()));
+  auto addMoments = [&](const Viscoelastic3D::Solutions& lambda,
+                        std::size_t node, double weight) {
+    const auto fields = DegreeFields{.spheroidal = lambda.spheroidal,
+                                     .toroidal = lambda.toroidal};
+    const auto& base = op.GetRheology().BaseMaterial();
+    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+    const auto scale = weight * solver.SolverScales().Factor(energy) /
+                       base.ModelScales().Factor(energy);
+    for (auto p = std::size_t{0}; p < options_.moment_points.size(); ++p) {
+      auto point = options_.moment_points[p];
+      point.radius /= ev.toNdLength_;
+      const auto e = PointStrain(
+          base, op.LMax(),
+          [&](int l) -> const DegreeOperator& { return op.UnrelaxedSpheroidal(l); },
+          [&](int l) -> const ToroidalOperator& { return op.UnrelaxedToroidal(l); },
+          fields, point);
+      auto& to = momentKernels[node][p];
+      to.rr += scale * e.rr;
+      to.tt += scale * e.tt;
+      to.pp += scale * e.pp;
+      to.rt += scale * e.rt;
+      to.rp += scale * e.rp;
+      to.tp += scale * e.tp;
+    }
+  };
   Viscoelastic3D::Solutions lumpSolutions;  // the jump's, when material
   GridCoupling::TensorField lumpStrain;
   // m += factor(x) d-tilde: the adjoint state over itau, its derivative
@@ -464,11 +500,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       if (const auto w = twist.find(l); w != twist.end()) {
         coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x,
                                      &op.Toroidal(l), w->second);
-        if (material || hasMaterialV) lumpSolutions.toroidal[l] = w->second;
+        if (keepLump) lumpSolutions.toroidal[l] = w->second;
       } else {
         coupling.AddStrainOfSolution(spectral, l, op.Spheroidal(l), x);
       }
-      if (material || hasMaterialV) lumpSolutions.spheroidal[l] = std::move(x);
+      if (keepLump) lumpSolutions.spheroidal[l] = std::move(x);
     }
     const auto dTilde = coupling.Synthesise(spectral);
     if (material || hasMaterialV) lumpStrain = dTilde;
@@ -984,8 +1020,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // plus v's unrelaxed force's response on the adjoint displacement and
   // memory.
   auto accumulateMaterial = [&](std::size_t node, double weight) {
-    if (!material || weight == 0.0) return;
+    if ((!material && !moments) || weight == 0.0) return;
     const auto lambda = fullOf(vs);
+    if (moments) addMoments(lambda, node, pairing * weight);
+    if (!material) return;
     const auto e = strainOf(lambda);
     if (!second) {
       pairMaterial(lambda, e, node, pairing * weight);
@@ -1297,7 +1335,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                               split.empty() ? nullptr : &split,
                               twist.empty() ? nullptr : &twist);
     lumps.emplace(node, inst.response.relativeSeaLevelChange);
-    if (material || hasMaterialV) {
+    if (keepLump) {
       lumpSolutions = inst.x;
       lumpStrain = inst.strain;
     }
@@ -1342,6 +1380,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (material) {
       pairBoth(lumpSolutions, lumpStrain, &dxJ, &deJ, node, pairing);
     }
+    if (moments) addMoments(lumpSolutions, node, pairing);
     // The equilibria under lateral moduli are zero-length reversed steps
     // (their fixed points close the instantaneous lateral response; the
     // derivative state's carries v's material source as a step's does).
@@ -1445,6 +1484,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
       std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
+  out.ice.momentKernels = std::move(momentKernels);
   auto spherical = [&](const std::vector<std::vector<double>>& kernel) {
     auto reduced = std::vector<std::vector<double>>(
         K, std::vector<double>(nodeCount, 0.0));

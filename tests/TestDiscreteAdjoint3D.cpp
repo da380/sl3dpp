@@ -1489,6 +1489,96 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepAboutASourceDrivenRun) {
   }
 }
 
+TEST(DiscreteAdjoint3D, TheContinuousSweepFormsMomentKernels) {
+  // The continuous 3D sweep's moment kernels, the strain of its adjoint
+  // displacement at the sources: against the exact derivative (the
+  // tangent-linear run along a perturbation of the moment tensors smooth
+  // in time) the gap falls as the steps are halved, under lateral
+  // viscosity alone and with lateral moduli too (the jump by the
+  // instantaneous fixed point), the displacement and the tangential and
+  // toroidal potentials measured.
+  auto scene = Scene::Make(1e22);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(59);
+  const auto span = 10.0 * scene.Kyr();
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 800e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  const auto patterns = std::vector<SphericalTensor>{
+      {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+       .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit},
+      {.rr = -0.4 * unit, .tt = 0.8 * unit, .pp = -0.4 * unit,
+       .rt = 0.5 * unit, .rp = 0.1 * unit, .tp = -0.3 * unit}};
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto gV = scene.Smooth(rng, 0.6);
+  const auto gW = scene.Smooth(rng, 0.8);
+  for (const bool lateralModuli : {false, true}) {
+    auto options = Viscoelastic3D::Options{};
+    if (lateralModuli) options.moduli = TestModuli();
+    Viscoelastic3D op(
+        scene.rheology, kLmax,
+        [](double, double theta, double phi) {
+          return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        },
+        options);
+    auto gaps = std::vector<double>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() / 2].toroidalPotentialDual = gW;
+      measurements[times.size() - 1].displacementDual = gU;
+      measurements[times.size() - 1].tangentialPotentialDual = gV;
+      measurements[times.size() - 1].toroidalPotentialDual = gW;
+      TangentPerturbation3D direction;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto shape = std::sin(0.5 * std::numbers::pi * times[n] / span) + 0.3;
+        auto at = std::vector<PointSource>{};
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          auto M = patterns[p];
+          for (auto* c : {&M.rr, &M.tt, &M.pp, &M.rt, &M.rp, &M.tp}) *c *= shape;
+          at.push_back({.at = points[p], .moment = M});
+        }
+        direction.sources.push_back(std::move(at));
+      }
+      Evolution3D evolution(op, scene.solver, scene.state,
+                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      const auto along = Objective(
+          scene,
+          TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                            .rtol = 1e-12,
+                                            .coupled_rtol = 1e-12})
+              .Run(times, direction),
+          measurements);
+      ASSERT_NE(along, 0.0);
+      const auto kernels =
+          AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .moment_points = points})
+              .FirstOrderKernels(times, measurements);
+      ASSERT_EQ(kernels.ice.momentKernels.size(), times.size());
+      auto paired = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          paired += kernels.ice.momentKernels[n][p].Contract(
+              direction.sources[n][p].moment);
+        }
+      }
+      gaps.push_back(std::abs(paired - along) / std::abs(along));
+    }
+    const auto label = lateralModuli ? "lateral moduli" : "lateral viscosity";
+    EXPECT_LT(gaps[2], 0.05) << label << " " << gaps[0] << " " << gaps[1] << " "
+                             << gaps[2];
+    EXPECT_GT(gaps[0] / gaps[1], 2.0) << label << " " << gaps[0] << " " << gaps[1];
+    EXPECT_GT(gaps[1] / gaps[2], 3.0) << label << " " << gaps[1] << " " << gaps[2];
+  }
+}
+
 TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
   // The continuous sweep under lateral moduli: its gap to the discrete
   // kernels falls as the steps are halved, loads and log-viscosity alike.
