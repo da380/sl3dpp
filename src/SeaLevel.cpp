@@ -70,6 +70,13 @@ std::vector<std::complex<double>> FromReal(std::span<const double> v) {
   return out;
 }
 
+/// One over the ocean's area, and zero for a state with no ocean: every
+/// term the solves divide by the area is one of water conservation, which
+/// a body without an ocean does not have.
+double InverseOceanArea(double oceanArea) {
+  return oceanArea > 0.0 ? 1.0 / oceanArea : 0.0;
+}
+
 }  // namespace
 
 std::vector<double> SeaLevelFromTopography(
@@ -238,6 +245,15 @@ SeaLevelSolver::State SeaLevelSolver::MakeState(
   return state;
 }
 
+SeaLevelSolver::State SeaLevelSolver::NoOceanState() const {
+  State state;
+  state.iceThickness.assign(grid_.FieldSize(), 0.0);
+  state.seaLevel.assign(grid_.FieldSize(), 0.0);
+  state.oceanFunction.assign(grid_.FieldSize(), 0.0);
+  state.oceanArea = 0.0;
+  return state;
+}
+
 // -- the rotation block
 // ----------------------------------------------------------
 
@@ -397,12 +413,15 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
   const double oceanArea = forcing.oceanFunctionOverride.empty()
                                ? state.oceanArea
                                : IntegrateSurface(oceanFunction);
+  // Without an ocean there is no water to conserve: no uniform shift, and
+  // the load is the direct one alone.
+  const double perOceanArea = InverseOceanArea(oceanArea);
 
   auto directData = std::vector<double>(fieldSize, 0.0);
   auto meanSlc = 0.0;
   if (!forcing.directLoad.empty()) {
     directData = forcing.directLoad;
-    meanSlc = -IntegrateSurface(directData) / (waterDensity_ * oceanArea);
+    meanSlc = -IntegrateSurface(directData) * perOceanArea / waterDensity_;
   }
 
   auto staticSlc = std::vector<std::complex<double>>{};
@@ -449,7 +468,7 @@ SeaLevelSolver::Response SeaLevelSolver::SolveGeneralised(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       cslc[i] = oceanFunction[i] * slc[i];
     }
-    const auto shift = meanSlc - IntegrateSurface(cslc) / oceanArea;
+    const auto shift = meanSlc - IntegrateSurface(cslc) * perOceanArea;
     for (auto& v : slc) v += shift;
     return slc;
   };
@@ -559,6 +578,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   const double oceanArea = forcing.oceanFunctionOverride.empty()
                                ? state.oceanArea
                                : IntegrateSurface(oceanFunction);
+  const double perOceanArea = InverseOceanArea(oceanArea);
 
   auto gXi = std::vector<double>(fieldSize, 0.0);
   if (!forcing.seaLevelDual.empty()) gXi = forcing.seaLevelDual;
@@ -621,7 +641,8 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
     stash.meanDual = IntegrateSurface(xiDual);
     auto xgDual = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      xgDual[i] = xiDual[i] - oceanFunction[i] * (stash.meanDual / oceanArea);
+      xgDual[i] =
+          xiDual[i] - oceanFunction[i] * (stash.meanDual * perOceanArea);
     }
     auto zDual = grid_.Expand(xgDual);
     for (auto& v : zDual) v *= r2;
@@ -701,7 +722,7 @@ SeaLevelSolver::AdjointResponse SeaLevelSolver::SolveAdjoint(
   const auto lamGrid = grid_.Synthesise(lam);
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.directLoadDual[i] =
-        lamGrid[i] / r2 - stash.meanDual / (waterDensity_ * oceanArea);
+        lamGrid[i] / r2 - stash.meanDual * perOceanArea / waterDensity_;
   }
   for (auto i = std::size_t{0}; i < coefSize; ++i) {
     out.displacementResponseDual[i] = -stash.zBase[i] + lamUBase[i];
@@ -728,6 +749,11 @@ SeaLevelSolver::NonlinearResponse SeaLevelSolver::SolveNonlinear(
   const auto coefSize = grid_.CoefficientSize();
   const bool transverse = forcing.rotation == RotationalFeedback::Full;
   const bool rotational = forcing.rotation != RotationalFeedback::None;
+  if (!(state.oceanArea > 0.0)) {
+    throw std::invalid_argument(
+        "the nonlinear sea level solve needs a state with an ocean: the "
+        "shorelines of a body without one do not migrate");
+  }
   const double sedimentDensity =
       forcing.sedimentDensity >= 0.0
           ? forcing.sedimentDensity

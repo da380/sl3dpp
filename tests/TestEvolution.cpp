@@ -156,6 +156,123 @@ TEST(Evolution, ViscousMantleKeepsRelaxing) {
   EXPECT_GT(peaks.back(), 1.2 * peaks.front());
 }
 
+TEST(Evolution, WithoutAnOceanIsTheDirectlySteppedBody) {
+  // On a state with no ocean the evolution is the solid body stepped
+  // under the prescribed load, and under the centrifugal potential of the
+  // rotation it finds. The oracle steps the radial operator directly, each
+  // degree under the load's coefficients and the centrifugal coefficients
+  // of the evolution's own angular velocity, with no sea level solver.
+  auto setup = Setup::Make(true);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  auto ratio = [&](Dimensions dims) {
+    return material.Factor(dims) / sle.Factor(dims);
+  };
+  const auto toLength = ratio(Dimensions{.length = 1});
+  const auto toPotential = ratio(PotentialDimensions);
+  const auto toMatDensity = 1.0 / ratio(Dimensions{.mass = 1, .length = -2});
+  const auto toMatTime = 1.0 / ratio(Dimensions{.time = 1});
+
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  auto times = std::vector<double>{};
+  for (auto i = 0; i <= 6; ++i) times.push_back((i + 0.5 * (i % 2)) * kyr);
+  // A load switched on at the start and growing after it.
+  const auto held = setup.MeltLoad(-0.1);
+  auto loadAt = [&](double t) {
+    auto load = held;
+    for (auto& v : load) v *= 1.0 + 0.3 * (t - times.front()) / kyr;
+    return load;
+  };
+  auto columns = [](const std::vector<std::complex<double>>& coefficients,
+                    double factor) -> LoadCallable {
+    return [coefficients, factor](int l, double)
+               -> std::optional<std::vector<double>> {
+      auto out = std::vector<double>(2 * (l + 1));
+      for (auto m = 0; m <= l; ++m) {
+        const auto c = coefficients[SurfaceGrid::Index(l, m)];
+        out[m] = factor * c.real();
+        out[l + 1 + m] = factor * c.imag();
+      }
+      return out;
+    };
+  };
+  auto field = [&](const std::map<int, std::vector<double>>& perDegree,
+                   double factor) {
+    auto lm = grid.ZeroCoefficients();
+    for (const auto& [l, c] : perDegree) {
+      for (auto m = 0; m <= l; ++m) {
+        lm[SurfaceGrid::Index(l, m)] =
+            factor * std::complex<double>(c[m], c[l + 1 + m]);
+      }
+    }
+    return grid.Synthesise(lm);
+  };
+  auto worst = [](std::span<const double> a, std::span<const double> b) {
+    auto diff = 0.0, scale = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
+      diff = std::max(diff, std::abs(a[i] - b[i]));
+      scale = std::max(scale, std::abs(b[i]));
+    }
+    return diff / scale;
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+      SeaLevelEvolution evolution(
+          op, solver, solver.NoOceanState(),
+          {.scheme = scheme, .rotation = rotation, .rtol = 1e-12});
+      const auto snapshots = evolution.Run(times, loadAt);
+      ASSERT_EQ(snapshots.size(), times.size());
+
+      auto channels = [&](std::size_t node) {
+        const auto psi =
+            solver.CentrifugalCoefficients(snapshots[node].angularVelocity);
+        return std::pair{
+            columns(grid.Expand(loadAt(times[node])), toMatDensity),
+            columns(psi, 1.0 / toPotential)};
+      };
+      auto state = op.ZeroState([](int l) { return 2 * (l + 1); });
+      state.t = times.front() * toMatTime;
+      auto now = channels(0);
+      auto solutions = op.SolveElastic(state, now.first, now.second);
+      state.strain = op.Strain(solutions);
+      for (auto node = std::size_t{0}; node < times.size(); ++node) {
+        if (node > 0) {
+          auto next = channels(node);
+          const auto step =
+              op.StartStep(state, (times[node] - times[node - 1]) * toMatTime,
+                           scheme, now.first, now.second);
+          auto finished = step.Finish(next.first, next.second);
+          state = std::move(finished.first);
+          solutions = std::move(finished.second);
+          now = std::move(next);
+        }
+        const auto& snapshot = snapshots[node];
+        EXPECT_TRUE(snapshot.converged);
+        EXPECT_LT(worst(snapshot.displacement,
+                        field(op.Surface(solutions, Component::U), toLength)),
+                  1e-9)
+            << "node " << node << ", rotation " << static_cast<int>(rotation);
+        EXPECT_LT(worst(snapshot.potential,
+                        field(op.Surface(solutions, Component::Phi),
+                              toPotential)),
+                  1e-9)
+            << "node " << node << ", rotation " << static_cast<int>(rotation);
+        const auto spin = std::hypot(snapshot.angularVelocity[0],
+                                     snapshot.angularVelocity[1]);
+        if (rotation == RotationalFeedback::None) {
+          EXPECT_EQ(spin, 0.0);
+        } else {
+          EXPECT_GT(spin, 0.0);
+        }
+      }
+    }
+  }
+}
+
 TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
   // The reference is pyslfp on its GLQ grid, which coincides with ours at
   // this lmax, so the comparison isolates the implementation; the sharp

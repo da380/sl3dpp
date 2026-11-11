@@ -167,6 +167,15 @@ class SeaLevelSolver {
    * InitialSeaLevel.hpp), with oceanArea its integral. The linear solves
    * read C and its area only, never the sea level; the nonlinear solve
    * starts from the state's C and re-derives it by flotation.
+   *
+   * A state whose ocean function vanishes everywhere (oceanArea zero) is
+   * a body WITHOUT an ocean: the linear solve and its adjoint then carry
+   * no water load and no conservation of water, and are the response of
+   * the solid body to the forcing with the rotational feedback asked
+   * for, closed in one pass; the "sea level change" returned is then
+   * -(u + phi / g) with the centrifugal potential in phi, the change of
+   * an equipotential's height above the surface with no uniform shift.
+   * The nonlinear solve refuses such a state.
    */
   struct State {
     std::vector<double> iceThickness;
@@ -179,6 +188,10 @@ class SeaLevelSolver {
   [[nodiscard]] State MakeState(std::vector<double> iceThickness,
                                 std::vector<double> seaLevel,
                                 std::span<const char> forcedLand = {}) const;
+
+  /// The state of a body without an ocean: no ice, no sea level, the
+  /// ocean function zero everywhere.
+  [[nodiscard]] State NoOceanState() const;
 
   // -- the generalised linear solve
   // ---------------------------------------------

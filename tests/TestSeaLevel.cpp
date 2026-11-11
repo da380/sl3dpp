@@ -210,18 +210,22 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
   const auto& grid = solver.Grid();
   const auto a = solver.Radius();
 
-  // A smooth state (non-dimensional metres via the solver's scales).
+  // A smooth state (non-dimensional metres via the solver's scales), and
+  // the body without an ocean.
   const auto length = solver.SolverScales().Length();
-  auto state = solver.MakeState(
+  const auto withOcean = solver.MakeState(
       grid.FromFunction([&](double theta, double phi) {
         return 2000.0 * Cap(theta, phi, 0.1, 0.0, 0.3) / length;
       }),
       grid.FromFunction([&](double theta, double phi) {
         return (4000.0 - 7000.0 * Cap(theta, phi, 1.6, 2.0, 0.7)) / length;
       }));
+  const auto withoutOcean = solver.NoOceanState();
 
+  for (const auto* chosen : {&withOcean, &withoutOcean})
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
                         RotationalFeedback::Full}) {
+    const auto& state = *chosen;
     SeaLevelSolver::GeneralisedForcing forcing;
     forcing.rotation = rotation;
     const double sigma =
@@ -278,8 +282,89 @@ TEST(SeaLevelSolver, AdjointDotProductIdentity) {
         Pair(adjoint.potentialResponseDual, forcing.potentialResponse, lmax) +
         adjoint.inertiaMomentDual * forcing.inertiaMomentChange;
     EXPECT_NEAR(lhs, rhs, 1e-10 * std::abs(lhs))
-        << "rotation mode " << static_cast<int>(rotation);
+        << "rotation mode " << static_cast<int>(rotation)
+        << (chosen == &withOcean ? ", ocean" : ", no ocean");
   }
+}
+
+TEST(SeaLevelSolver, WithoutAnOceanIsTheSolidBodysResponse) {
+  // A state with no ocean carries no water load: the solve is the solid
+  // body's response to the forcing, rotation included. Its oracle is the
+  // solve WITH an ocean, whose converged total load (direct plus the
+  // ocean's) given to the body without one as a direct load must return
+  // the same displacement, potential and rotation, and a sea level change
+  // differing by the uniform shift that conserves the water.
+  const auto lmax = 24;
+  SeaLevelSolver solver(SurfaceGrid(lmax), TestTable(), SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const auto length = solver.SolverScales().Length();
+  const auto sigma =
+      solver.SolverScales().Factor(Dimensions{.mass = 1, .length = -2});
+  const auto withOcean = solver.MakeState(
+      grid.FromFunction([&](double theta, double phi) {
+        return 2000.0 * Cap(theta, phi, 0.1, 0.0, 0.3) / length;
+      }),
+      grid.FromFunction([&](double theta, double phi) {
+        return (4000.0 - 7000.0 * Cap(theta, phi, 1.6, 2.0, 0.7)) / length;
+      }));
+  const auto dry = solver.NoOceanState();
+  EXPECT_EQ(dry.oceanArea, 0.0);
+
+  auto maxAbs = [](std::span<const double> v) {
+    auto worst = 0.0;
+    for (const auto x : v) worst = std::max(worst, std::abs(x));
+    return worst;
+  };
+  SeaLevelSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Axial,
+                        RotationalFeedback::Full}) {
+    SeaLevelSolver::GeneralisedForcing forcing;
+    forcing.rotation = rotation;
+    forcing.directLoad = grid.FromFunction([&](double theta, double phi) {
+      return 150.0 * Cap(theta, phi, 0.4, 0.7, 0.5) / sigma;
+    });
+    forcing.displacementResponse =
+        grid.Expand(grid.FromFunction([&](double theta, double phi) {
+          return 0.5 * Cap(theta, phi, 2.0, 4.0, 0.6) / length;
+        }));
+    forcing.inertiaMomentChange = 1e-7;
+    const auto wet = solver.SolveGeneralised(withOcean, forcing, options);
+    ASSERT_TRUE(wet.converged);
+
+    auto total = forcing;
+    for (auto i = std::size_t{0}; i < total.directLoad.size(); ++i) {
+      total.directLoad[i] += solver.WaterDensity() *
+                             withOcean.oceanFunction[i] * wet.seaLevelChange[i];
+    }
+    const auto solid = solver.SolveGeneralised(dry, total, options);
+    EXPECT_TRUE(solid.converged);
+    EXPECT_LE(solid.iterations, 1);
+
+    const auto mode = static_cast<int>(rotation);
+    auto worstU = 0.0, worstPhi = 0.0, lowest = 1e300, highest = -1e300;
+    for (auto i = std::size_t{0}; i < wet.displacement.size(); ++i) {
+      worstU = std::max(worstU,
+                        std::abs(solid.displacement[i] - wet.displacement[i]));
+      worstPhi =
+          std::max(worstPhi, std::abs(solid.potential[i] - wet.potential[i]));
+      const auto shift = wet.seaLevelChange[i] - solid.seaLevelChange[i];
+      lowest = std::min(lowest, shift);
+      highest = std::max(highest, shift);
+    }
+    EXPECT_LT(worstU, 1e-10 * maxAbs(wet.displacement)) << "rotation " << mode;
+    EXPECT_LT(worstPhi, 1e-10 * maxAbs(wet.potential)) << "rotation " << mode;
+    EXPECT_LT(highest - lowest, 1e-10 * maxAbs(wet.seaLevelChange))
+        << "rotation " << mode;
+    for (auto k = 0; k < 3; ++k) {
+      EXPECT_NEAR(solid.angularVelocity[k], wet.angularVelocity[k],
+                  1e-10 * maxAbs(wet.angularVelocity) + 1e-300)
+          << "rotation " << mode;
+    }
+  }
+
+  SeaLevelSolver::NonlinearForcing moving;
+  moving.iceThicknessChange.assign(grid.FieldSize(), 0.0);
+  EXPECT_THROW((void)solver.SolveNonlinear(dry, moving), std::invalid_argument);
 }
 
 TEST(SeaLevelSolver, NonlinearMassBudgetAndLinearLimit) {

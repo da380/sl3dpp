@@ -228,6 +228,74 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
   }
 }
 
+TEST(TangentLinear, WithoutAnOceanThePairAreTransposes) {
+  // On a state with no ocean the evolution is the solid body under a
+  // prescribed load, with the rotational feedback: its tangent-linear run
+  // is the difference of two runs in the loads (the problem is linear in
+  // them), and the discrete run and sweep are exact transposes in the
+  // loads and the relaxation times, as with an ocean.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(23);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * setup.Kyr());
+  auto loads = std::vector<std::vector<double>>{};
+  auto deltas = std::vector<std::vector<double>>{};
+  auto shifted = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
+    deltas.push_back(setup.Smooth(rng, 10.0 * setup.Sigma()));
+    shifted.push_back(loads.back());
+    for (auto i = std::size_t{0}; i < shifted.back().size(); ++i) {
+      shifted.back()[i] += deltas.back()[i];
+    }
+  }
+  const auto measurements = FullMeasurements(setup, rng, times.size() - 1);
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto dry = setup.solver.NoOceanState();
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    SeaLevelEvolution evolution(
+        op, setup.solver, dry,
+        {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
+    const auto snapshots = evolution.Run(times, History(times, loads));
+    const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+    const auto moved = evolution.Run(times, History(times, shifted));
+
+    TangentLinearSolver tangent(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    TangentPerturbation loadsOnly;
+    loadsOnly.directLoad = deltas;
+    const auto alongLoads =
+        Objective(setup, tangent.Run(times, loadsOnly), measurements);
+    const auto difference = Objective(setup, moved, measurements) -
+                            Objective(setup, snapshots, measurements);
+    EXPECT_NEAR(alongLoads, difference, 1e-8 * std::abs(difference))
+        << "scheme " << static_cast<int>(scheme);
+
+    AdjointSolver adjoint(evolution,
+                          {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+    const auto kernels =
+        adjoint.IceHistoryKernels(times, measurements, &trajectory);
+    auto loadsRhs = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      loadsRhs += setup.Surface(kernels.loadDuals[n], deltas[n]);
+    }
+    EXPECT_NEAR(alongLoads, loadsRhs, 1e-8 * std::abs(alongLoads))
+        << "scheme " << static_cast<int>(scheme);
+
+    TangentPerturbation itauOnly;
+    itauOnly.itau = ditau;
+    const auto alongItau = Objective(
+        setup, tangent.Run(times, itauOnly, &trajectory), measurements);
+    const auto itauRhs =
+        VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
+    EXPECT_NE(alongItau, 0.0);
+    EXPECT_NEAR(alongItau, itauRhs, 1e-8 * std::abs(alongItau))
+        << "scheme " << static_cast<int>(scheme);
+  }
+}
+
 TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   // In the loads the two methods coincide; in the relaxation times they
   // differ by the order of the scheme: on a slowly relaxing mantle under
