@@ -1,5 +1,8 @@
 #include "sl3dpp/Adjoint.hpp"
 
+#include "sl3dpp/ToroidalViscoelastic.hpp"
+#include "sl3dpp/detail/InteriorSources.hpp"
+
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -317,10 +320,72 @@ Kernels AdjointSolver::DiscreteSweep(
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
       duals.tangentialPotentialDual = m.tangentialPotentialDual;
+      duals.toroidalPotentialDual = m.toroidalPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
     return std::pair(std::move(duals), std::move(synth));
+  };
+
+  // The moment kernels: the strain at the given points of each step's
+  // dual solution, spheroidal (the transposed effective solve's) and
+  // toroidal (the toroidal systems' own transposed recurrence, forced by
+  // the dual of the surface W). The dual of a step's forces is its dual
+  // solution, column by real column; a source's forces are the
+  // conjugate-paired strain functional, so the kernel is the strain of
+  // the dual solution with its m > 0 columns halved.
+  const bool moments = !options_.moment_points.empty();
+  auto toroidal = std::optional<ToroidalViscoelastic>{};
+  auto tdual = ToroidalViscoelastic::Dual{};
+  auto momentKernels =
+      std::vector<std::vector<SphericalTensor>>(moments ? times.size() : 0);
+  if (moments) {
+    toroidal.emplace(op);
+    tdual = toroidal->ZeroDual();
+  }
+  auto toroidalSurfaceDual = [&](const GRDSolver::AdjointResponse& adj) {
+    auto out = ToroidalViscoelastic::Fields{};
+    if (adj.toroidalResponseDual.empty()) return out;
+    for (auto l = 1; l <= lmax; ++l) {
+      out.emplace(l, ColumnDualsOf(adj.toroidalResponseDual, l, ev.toNdLength_));
+    }
+    return out;
+  };
+  auto momentKernelsOf = [&](const std::map<int, std::vector<double>>& y,
+                             const ToroidalViscoelastic::Fields& yT) {
+    auto asComplex = [](const std::map<int, std::vector<double>>& from) {
+      auto out = std::map<int, std::vector<Complex>>{};
+      for (const auto& [l, x] : from) {
+        const auto ndof = x.size() / (2 * (static_cast<std::size_t>(l) + 1));
+        auto c = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1));
+        for (auto m = 0; m <= l; ++m) {
+          const auto weight = m == 0 ? 1.0 : 0.5;
+          for (auto d = std::size_t{0}; d < ndof; ++d) {
+            c[static_cast<std::size_t>(m) * ndof + d] =
+                weight *
+                Complex(x[static_cast<std::size_t>(m) * ndof + d],
+                        x[static_cast<std::size_t>(l + 1 + m) * ndof + d]);
+          }
+        }
+        out.emplace(l, std::move(c));
+      }
+      return out;
+    };
+    const auto fields = DegreeFields{.spheroidal = asComplex(y),
+                                     .toroidal = asComplex(yT)};
+    const auto toMatMoment = detail::MomentToMaterial(op, solver.SolverScales());
+    auto out = std::vector<SphericalTensor>{};
+    for (auto point : options_.moment_points) {
+      point.radius /= ev.toNdLength_;
+      auto e = PointStrain(
+          op.BaseMaterial(), lmax,
+          [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); },
+          [&](int l) -> const ToroidalOperator& { return toroidal->Unrelaxed(l); },
+          fields, point);
+      for (auto* c : {&e.rr, &e.tt, &e.pp, &e.rt, &e.rp, &e.tp}) *c *= toMatMoment;
+      out.push_back(e);
+    }
+    return out;
   };
 
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
@@ -491,6 +556,7 @@ Kernels AdjointSolver::DiscreteSweep(
     auto materialByDegree =
         std::vector<std::pair<std::vector<double>, std::vector<double>>>(
             material ? lmax + 1 : 0);
+    auto dualSolutions = std::vector<std::vector<double>>(moments ? lmax + 1 : 0);
     detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
@@ -503,6 +569,7 @@ Kernels AdjointSolver::DiscreteSweep(
         for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
       }
       const auto y = systems[l]->Solve(rhs, ncols);
+      if (moments) dualSolutions[l] = y;
       const auto sy = deg.Strain(y, ncols);
       const auto wsy = deg.ApplyWeights(sy, ncols);
       if (material) {
@@ -608,6 +675,13 @@ Kernels AdjointSolver::DiscreteSweep(
         muKernel[i] += mu[i];
       }
     }
+    if (moments) {
+      auto y = std::map<int, std::vector<double>>{};
+      for (auto l = 0; l <= lmax; ++l) y.emplace(l, std::move(dualSolutions[l]));
+      const auto yT = toroidal->StepTransposed(tdual, dt, scheme,
+                                               toroidalSurfaceDual(adj));
+      momentKernels[n] = momentKernelsOf(y, yT);
+    }
   }
 
   // The start: the transposed instantaneous elastic solve at times[0].
@@ -646,6 +720,23 @@ Kernels AdjointSolver::DiscreteSweep(
       directLoadKernels[0][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
     tideKernels[0] = tideKernelOf(adj, psiDual);
+    if (moments) {
+      // the start's dual solutions: the transposed unrelaxed solves
+      auto y = std::map<int, std::vector<double>>{};
+      for (auto l = 0; l <= lmax; ++l) {
+        const auto& deg = op.Deg(l);
+        const auto ncols = 2 * (l + 1);
+        auto rhs = deg.DualFromScalars(ddual[l], ncols);
+        addSurfaceDuals(deg, l, ncols, adj, rhs);
+        if (l == 0) {
+          const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
+          for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
+        }
+        y.emplace(l, deg.system.Solve(rhs, ncols));
+      }
+      momentKernels[0] = momentKernelsOf(
+          y, toroidal->StartTransposed(tdual, toroidalSurfaceDual(adj)));
+    }
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
       // the start duals and the start's response duals, paired with the
@@ -709,6 +800,7 @@ Kernels AdjointSolver::DiscreteSweep(
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   out.tideKernels = std::move(tideKernels);
+  out.momentKernels = std::move(momentKernels);
   // the kernels as densities per unit volume: the weights divided out
   {
     const auto& mesh = op.BaseMaterial().Mesh();

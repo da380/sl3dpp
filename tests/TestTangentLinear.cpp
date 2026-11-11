@@ -530,6 +530,105 @@ TEST(TangentLinear, TheContinuousSweepTakesATangentialMeasurement) {
   }
 }
 
+TEST(TangentLinear, InteriorSourcesInThePair) {
+  // Point sources as parameters of the radial evolution: the
+  // tangent-linear run along a perturbation of their moment tensors is
+  // the run under the perturbation (the problem is linear in them), and
+  // the discrete sweep's moment kernels, the strain of its dual
+  // displacement at the sources, pair with the perturbation to the same
+  // number; with every measurement, the tangential and toroidal
+  // potentials among them, with an ocean and the rotational feedback and
+  // without either, for both schemes.
+  auto setup = Scene::Make(1e21);
+  const auto& sle = setup.solver.SolverScales();
+  std::mt19937 rng(53);
+  std::normal_distribution<double> normal;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 150e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  auto perturbation = std::vector<std::vector<PointSource>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    auto at = std::vector<PointSource>{};
+    for (const auto& point : points) {
+      at.push_back({.at = point,
+                    .moment = {.rr = unit * normal(rng),
+                               .tt = unit * normal(rng),
+                               .pp = unit * normal(rng),
+                               .rt = unit * normal(rng),
+                               .rp = unit * normal(rng),
+                               .tp = unit * normal(rng)}});
+    }
+    perturbation.push_back(std::move(at));
+  }
+  auto measurements = FullMeasurements(setup, rng, times.size() - 1);
+  for (auto& [node, m] : measurements) {
+    m.tangentialPotentialDual = setup.Smooth(rng, 0.6);
+    m.toroidalPotentialDual = setup.Smooth(rng, 0.8);
+  }
+  auto toroidalAlone = std::map<std::size_t, Measurement>{};
+  toroidalAlone[0].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  toroidalAlone[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 1.0);
+  auto sourcesAt = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return perturbation[n];
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  const auto& all = measurements;
+  const auto& alone = toroidalAlone;
+  for (const auto* background : {&wet, &dry})
+  for (const auto* measured : {&all, &alone})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label =
+        std::string(background == &dry ? "no ocean" : "ocean") +
+        (measured == &alone ? ", the toroidal dual alone" : "") + ", scheme " +
+        std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    Evolution evolution(op, setup.solver, *background,
+                        {.scheme = scheme, .rotation = rotation, .rtol = 1e-12});
+    const auto forward = Objective(
+        setup, evolution.Run(times, Evolution::Forcing{.sources = sourcesAt}),
+        *measured);
+    ASSERT_NE(forward, 0.0) << label;
+
+    TangentPerturbation direction;
+    direction.sources = perturbation;
+    const auto along = Objective(
+        setup,
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .Run(times, direction),
+        *measured);
+    EXPECT_NEAR(along, forward, 1e-9 * std::abs(forward)) << label;
+
+    const auto kernels =
+        AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                  .rtol = 1e-12,
+                                  .moment_points = points})
+            .FirstOrderKernels(times, *measured);
+    ASSERT_EQ(kernels.momentKernels.size(), times.size());
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      ASSERT_EQ(kernels.momentKernels[n].size(), points.size());
+      for (auto p = std::size_t{0}; p < points.size(); ++p) {
+        paired += kernels.momentKernels[n][p].Contract(perturbation[n][p].moment);
+      }
+    }
+    EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label;
+  }
+}
+
 TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   // In the loads the two methods coincide; in the relaxation times they
   // differ by the order of the scheme: on a slowly relaxing mantle under

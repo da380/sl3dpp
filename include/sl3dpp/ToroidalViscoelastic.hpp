@@ -79,9 +79,34 @@ class ToroidalViscoelastic {
   /// The surface value of W per degree and column.
   [[nodiscard]] Fields Surface(const Fields& solutions) const;
 
+  // -- the transpose, for the discrete adjoint ---------------------------------
+
+  /// The duals of the internal variables and of the strain a step starts
+  /// from, in State's layouts.
+  struct Dual {
+    Fields m;
+    Fields strain;
+  };
+  [[nodiscard]] Dual ZeroDual() const;
+
+  /// The transpose of the step that ended at a node: `surfaceDual` is the
+  /// dual of the node's surface W per degree and column (a degree absent
+  /// has none). The duals are carried back to the step's start, and the
+  /// dual solutions returned are the duals of the step's forces.
+  [[nodiscard]] Fields StepTransposed(Dual& dual, double dt, Scheme scheme,
+                                      const Fields& surfaceDual) const;
+  /// The transpose of the unrelaxed start (SolveElastic on a zero state,
+  /// then SetStrain): the duals of the start's forces.
+  [[nodiscard]] Fields StartTransposed(const Dual& dual,
+                                       const Fields& surfaceDual) const;
+
  private:
   struct Degree;
   [[nodiscard]] const Degree& Deg(int l) const;
+  /// The effective system of a degree for a (scheme, dt), kept on the
+  /// operator's flavour.
+  [[nodiscard]] const ToroidalOperator& Effective(Scheme scheme, double dt,
+                                                  int l) const;
 
   const ViscoelasticOperator* op_;
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;

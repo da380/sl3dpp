@@ -162,6 +162,9 @@ inline double Objective(const Scene& setup,
       total +=
           setup.Surface(m.tangentialPotentialDual, snap.tangentialPotential);
     }
+    if (!m.toroidalPotentialDual.empty() && !snap.toroidalPotential.empty()) {
+      total += setup.Surface(m.toroidalPotentialDual, snap.toroidalPotential);
+    }
     for (auto j = 0; j < 3; ++j) {
       total += m.angularVelocityDual[j] * snap.angularVelocity[j];
     }

@@ -66,6 +66,13 @@ struct TangentPerturbation {
   /// frozen run was driven by, its coefficients on the surface (no
   /// degree-0 part); refused about a migrating trajectory.
   std::vector<std::vector<std::complex<double>>> tide;
+  /// Per time node, a perturbation of the interior sources acting there
+  /// (Evolution::Forcing::sources and stressGluts: each node's point
+  /// sources and stress gluts, solver units), about a frozen run. The
+  /// run is linear in them, so no trajectory is needed; the snapshots
+  /// carry the toroidal potential.
+  std::vector<std::vector<PointSource>> sources;
+  std::vector<std::vector<StressGlut>> stressGluts;
   /// Per time node, a perturbation of the ice thickness, grounded by the
   /// node's ocean function relative to the first node's.
   std::vector<std::vector<double>> iceThickness;
@@ -85,7 +92,8 @@ struct TangentPerturbation {
   PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && tide.empty() && iceThickness.empty() &&
+    return directLoad.empty() && tide.empty() && sources.empty() &&
+           stressGluts.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && material.Empty();
   }
 };
@@ -187,6 +195,10 @@ class TangentLinearSolver {
   using Direct = std::function<std::vector<double>(std::size_t node)>;
   using Tide =
       std::function<std::vector<std::complex<double>>(std::size_t node)>;
+  /// The interior sources perturbed at a node.
+  using Sources = std::function<
+      std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
+          std::size_t node)>;
   using Drive =
       std::function<std::map<int, std::vector<double>>(std::size_t node, double dt)>;
 
@@ -201,7 +213,7 @@ class TangentLinearSolver {
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive, MaterialForcing* material,
-      const Tide& tideAt = {}) const;
+      const Tide& tideAt = {}, const Sources& sourcesAt = {}) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two

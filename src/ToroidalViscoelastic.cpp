@@ -243,7 +243,6 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
   const auto& op = *op_;
   const bool implicit = scheme == Scheme::BackwardEuler;
   const auto& weights = op.SchemeWeightsOf(scheme, dt);
-  auto& flavour = op.FlavourOf(scheme, dt);
   const auto K = op.GetRheology().BranchCount();
   State next;
   next.t = state.t + dt;
@@ -281,20 +280,6 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
         }
       }
     }
-    // the effective system, kept with the operator's flavour
-    auto system = flavour.toroidal.find(l);
-    if (system == flavour.toroidal.end()) {
-      system = flavour.toroidal
-                   .emplace(l, ToroidalOperator(
-                                   *flavour.material, l,
-                                   {.eps = op.options_.eps,
-                                    .truncation = op.options_.truncation,
-                                    .point_shear =
-                                        flavour.pointShear.points != nullptr
-                                            ? &flavour.pointShear
-                                            : nullptr}))
-                   .first;
-    }
     auto b = deg.MemoryForce(mem, ncols);
     if (const auto f = force.find(l); f != force.end()) {
       if (f->second.size() != b.size()) {
@@ -304,7 +289,7 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
       }
       for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f->second[i];
     }
-    auto x = system->second.Solve(b, ncols);
+    auto x = Effective(scheme, dt, l).Solve(b, ncols);
     auto d1 = deg.Strain(x, ncols);
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
@@ -341,6 +326,125 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::Surface(
       values[c] = x[static_cast<std::size_t>(c) * deg.ndof + dof];
     }
     out.emplace(l, std::move(values));
+  }
+  return out;
+}
+
+const ToroidalOperator& ToroidalViscoelastic::Effective(Scheme scheme,
+                                                        double dt,
+                                                        int l) const {
+  const auto& op = *op_;
+  auto& flavour = op.FlavourOf(scheme, dt);
+  auto system = flavour.toroidal.find(l);
+  if (system == flavour.toroidal.end()) {
+    system =
+        flavour.toroidal
+            .emplace(l, ToroidalOperator(
+                            *flavour.material, l,
+                            {.eps = op.options_.eps,
+                             .truncation = op.options_.truncation,
+                             .point_shear = flavour.pointShear.points != nullptr
+                                                ? &flavour.pointShear
+                                                : nullptr}))
+            .first;
+  }
+  return system->second;
+}
+
+ToroidalViscoelastic::Dual ToroidalViscoelastic::ZeroDual() const {
+  Dual dual;
+  const auto K = op_->GetRheology().BranchCount();
+  for (auto l = 1; l <= LMax(); ++l) {
+    const auto block = Deg(l).Block(2 * (l + 1));
+    dual.m[l].assign(K * 2 * block, 0.0);
+    dual.strain[l].assign(2 * block, 0.0);
+  }
+  return dual;
+}
+
+ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
+    Dual& dual, double dt, Scheme scheme, const Fields& surfaceDual) const {
+  const auto& op = *op_;
+  const bool implicit = scheme == Scheme::BackwardEuler;
+  const auto& weights = op.SchemeWeightsOf(scheme, dt);
+  const auto K = op.GetRheology().BranchCount();
+  auto out = Fields{};
+  for (auto& [l, md] : dual.m) {
+    const auto& deg = Deg(l);
+    const auto ncols = 2 * (l + 1);
+    const auto block = deg.Block(ncols);
+    auto& dd = dual.strain.at(l);
+    // the duals of the end strain: its own, and the memory's through the
+    // end weights
+    auto summed = dd;
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& w = weights[k];
+      for (auto s = 0; s < 2; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto b = implicit ? 1.0 - w.e[full] : w.beta[full];
+            const auto node = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            for (auto c = 0; c < ncols; ++c) {
+              summed[s * block + node + c] +=
+                  b * md[(k * 2 + s) * block + node + c];
+            }
+          }
+        }
+      }
+    }
+    auto rhs = deg.DualFromScalars(summed, ncols);
+    if (const auto g = surfaceDual.find(l); g != surfaceDual.end()) {
+      const auto dof = deg.system.SurfaceDof();
+      for (auto c = 0; c < ncols; ++c) {
+        rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
+      }
+    }
+    auto y = Effective(scheme, dt, l).Solve(rhs, ncols);
+    const auto sy = deg.Strain(y, ncols);
+    const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
+    std::ranges::fill(dd, 0.0);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      const auto& w = weights[k];
+      for (auto s = 0; s < 2; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+            const auto point = static_cast<std::size_t>(e) * deg.np + q;
+            const auto factor = wc[s] * deg.mu[k][point] * deg.Wq[point];
+            const auto node = point * ncols;
+            const auto at = (k * 2 + s) * block + node;
+            for (auto c = 0; c < ncols; ++c) {
+              const auto mtilde =
+                  md[at + c] + factor * sy[s * block + node + c];
+              md[at + c] = w.e[full] * mtilde;
+              if (!implicit) {
+                dd[s * block + node + c] += w.alpha[full] * mtilde;
+              }
+            }
+          }
+        }
+      }
+    }
+    out.emplace(l, std::move(y));
+  }
+  return out;
+}
+
+ToroidalViscoelastic::Fields ToroidalViscoelastic::StartTransposed(
+    const Dual& dual, const Fields& surfaceDual) const {
+  auto out = Fields{};
+  for (const auto& [l, dd] : dual.strain) {
+    const auto& deg = Deg(l);
+    const auto ncols = 2 * (l + 1);
+    auto rhs = deg.DualFromScalars(dd, ncols);
+    if (const auto g = surfaceDual.find(l); g != surfaceDual.end()) {
+      const auto dof = deg.system.SurfaceDof();
+      for (auto c = 0; c < ncols; ++c) {
+        rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
+      }
+    }
+    out.emplace(l, deg.system.Solve(rhs, ncols));
   }
   return out;
 }

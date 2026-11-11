@@ -1724,3 +1724,41 @@ toroidal one). The rotational feedback needs no term of its own.
 and return V, and in 3D W. Every sweep, discrete and continuous, 1D and
 3D, takes a displacement measurement in full. The discrete first-order
 sweeps form the tide kernels; the continuous ones do not.
+
+## 19. Interior sources as parameters
+
+**The tangent.** A frozen run is linear in its interior sources (the
+point stress gluts and the stress gluts on shells of docs/design.md
+§6a), so the tangent-linear run along a perturbation of them is the run
+under the perturbation: `TangentPerturbation::sources` and
+`stressGluts`, per node. It treats them as the evolution does, their
+spheroidal forces on each step and the toroidal systems stepped beside
+the loop (`ToroidalViscoelastic`).
+
+**The moment kernels.** A source's forces on a step's systems are
+linear in its moment tensor, and the dual of a step's forces is the
+step's dual solution, so with y_n the dual solution of the step ending
+at node n (of the unrelaxed start, at n = 0)
+
+    delta J = sum_n y_n . delta f_n = sum_n sum_p K_np : delta M_p(t_n).
+
+A point source's force on the coefficient (l, m) of an unknown is the
+conjugate of M contracted with the strain of that unknown's unit mode,
+so K_np is the strain at the point of the dual displacement: a stress
+glut works on the strain, and its kernel is the adjoint strain. In the
+real columns the sweep carries, the dual solution's m > 0 columns are
+halved before `PointStrain` reads them, the conjugate pairing counting
+those orders twice. The spheroidal dual solutions are the sweep's own.
+The toroidal ones come from the transpose of the toroidal recurrence
+(`ToroidalViscoelastic::StepTransposed`, `StartTransposed`), forced by
+the dual of the surface W alone: a measurement that does not read the
+toroidal potential has no toroidal part in its moment kernel.
+`AdjointSolver::Options::moment_points` gives the points, and
+`Kernels::momentKernels[n][p]` the tensors, in the solver's units.
+
+**What is not yet taken.** The discrete sweep of the radial model
+alone forms the moment kernels. A run under sources is not recorded
+(`record_stride`), so the kernels in the Earth's parameters about a
+source-driven trajectory are not available: its trajectory would have
+to hold the sources' forces and the toroidal state, and the sweeps
+their toroidal pairings.

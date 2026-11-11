@@ -42,6 +42,7 @@
 #include <vector>
 
 #include "sl3dpp/Evolution.hpp"
+#include "sl3dpp/PointSource.hpp"
 
 namespace sl3dpp {
 
@@ -140,6 +141,15 @@ struct Kernels {
   /// the degree-0 entry is zero. Formed by the discrete sweeps; empty
   /// otherwise.
   std::vector<std::vector<std::complex<double>>> tideKernels;
+  /// The MOMENT kernels, the discrete view alone: `momentKernels[n][p]`
+  /// is the dual of a point stress glut's moment tensor at time node n
+  /// and the p-th of Options::moment_points,
+  ///   delta J = sum_n sum_p momentKernels[n][p] : delta M_p(t_n),
+  /// in the solver's units. It is the strain there of the sweep's dual
+  /// displacement, spheroidal and toroidal: a stress glut works on the
+  /// strain, so its kernel is the adjoint strain. Formed by the discrete
+  /// sweep of the radial model when points are given; empty otherwise.
+  std::vector<std::vector<SphericalTensor>> momentKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> baseline;
   std::vector<double> initialSeaLevel;
@@ -248,6 +258,9 @@ class AdjointSolver {
     /// refinement. Both need the trajectory and cost one unrelaxed
     /// solve per node (two for the continuous form).
     bool material_kernels = false;
+    /// The points (solver units) at which to form the moment kernels
+    /// (Kernels::momentKernels); empty, none. Discrete sweep.
+    std::vector<BodyPoint> moment_points{};
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.

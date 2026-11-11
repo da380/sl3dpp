@@ -7,6 +7,7 @@
 
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
+#include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
 
 namespace sl3dpp {
@@ -274,69 +275,23 @@ std::vector<Evolution::Snapshot> Evolution::March(
   auto toroidal = std::optional<ToroidalViscoelastic>{};
   auto tstate = ToroidalViscoelastic::State{};
   auto twist = ToroidalViscoelastic::Fields{};  // the node's toroidal solutions
+  if (sourced && stride > 0) {
+    throw std::invalid_argument(
+        "a run under interior sources is not recorded for the kernels in "
+        "the Earth's parameters: its trajectory would not hold the "
+        "sources' forces or the toroidal state");
+  }
   if (sourced) {
     toroidal.emplace(op);
     tstate = toroidal->ZeroState();
     tstate.t = times[0] * toMatTime_;
   }
-  struct SourceForces {
-    std::map<int, std::vector<double>> spheroidal, toroidal;
-  };
   auto sourceForcesAt = [&](double t) {
-    auto out = SourceForces{};
-    const auto& material = op.BaseMaterial();
-    const auto& scales = material.ModelScales();
-    const auto& sle = solver.SolverScales();
-    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
-    const auto toMatMoment = sle.Factor(energy) / scales.Factor(energy);
-    const std::function<const DegreeOperator&(int)> sph =
-        [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); };
-    const std::function<const ToroidalOperator&(int)> tor =
-        [&](int l) -> const ToroidalOperator& { return toroidal->Unrelaxed(l); };
-    // complex m >= 0 columns to the real block then the imaginary block
-    auto add = [](std::map<int, std::vector<double>>& to,
-                  const std::map<int, std::vector<std::complex<double>>>& from) {
-      for (const auto& [l, b] : from) {
-        const auto ndof = b.size() / (static_cast<std::size_t>(l) + 1);
-        auto& real = to[l];
-        if (real.empty()) real.assign(2 * b.size(), 0.0);
-        for (auto m = 0; m <= l; ++m) {
-          for (auto d = std::size_t{0}; d < ndof; ++d) {
-            const auto v = b[static_cast<std::size_t>(m) * ndof + d];
-            real[static_cast<std::size_t>(m) * ndof + d] += v.real();
-            real[static_cast<std::size_t>(l + 1 + m) * ndof + d] += v.imag();
-          }
-        }
-      }
-    };
-    if (interior->sources) {
-      for (auto source : interior->sources(t)) {
-        source.at.radius /= toNdLength_;
-        for (auto* c :
-             {&source.moment.rr, &source.moment.tt, &source.moment.pp,
-              &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
-          *c *= toMatMoment;
-        }
-        const auto forces =
-            PointSourceForces(material, op.LMax(), sph, tor, source);
-        add(out.spheroidal, forces.spheroidal);
-        add(out.toroidal, forces.toroidal);
-      }
-    }
-    if (interior->stressGluts) {
-      for (auto glut : interior->stressGluts(t)) {
-        glut.radius /= toNdLength_;
-        for (auto* c : {&glut.moment.rr, &glut.moment.tt, &glut.moment.pp,
-                        &glut.moment.rt, &glut.moment.rp, &glut.moment.tp}) {
-          for (auto& v : *c) v *= toMatMoment;
-        }
-        const auto forces =
-            StressGlutForces(material, op.LMax(), sph, tor, glut);
-        add(out.spheroidal, forces.spheroidal);
-        add(out.toroidal, forces.toroidal);
-      }
-    }
-    return out;
+    return detail::ForcesOfSources(
+        op, *toroidal, solver.SolverScales(), toNdLength_,
+        interior->sources ? interior->sources(t) : std::vector<PointSource>{},
+        interior->stressGluts ? interior->stressGluts(t)
+                              : std::vector<StressGlut>{});
   };
   // The toroidal potential's coefficients of the node's toroidal solutions.
   auto toroidalCoefficients = [&] {
