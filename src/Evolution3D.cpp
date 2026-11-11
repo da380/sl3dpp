@@ -94,14 +94,29 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Run(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   CheckTimes(times);
-  return March(times, &directLoad, nullptr, false);
+  return March(times, &directLoad, nullptr, nullptr, false);
+}
+
+std::vector<Evolution3D::Snapshot> Evolution3D::Run(
+    std::span<const double> times, const Forcing& forcing) {
+  CheckTimes(times);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               nullptr, forcing.tide ? &forcing.tide : nullptr, false);
+}
+
+std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
+    const Checkpoint& from, std::span<const double> times,
+    const Forcing& forcing) {
+  Restore(from, times);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               nullptr, forcing.tide ? &forcing.tide : nullptr, true);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   CheckTimes(times);
-  return March(times, nullptr, &iceThickness, false);
+  return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
 void Evolution3D::Restore(const Checkpoint& from,
@@ -124,14 +139,14 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   Restore(from, times);
-  return March(times, &directLoad, nullptr, true);
+  return March(times, &directLoad, nullptr, nullptr, true);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   Restore(from, times);
-  return March(times, nullptr, &iceThickness, true);
+  return March(times, nullptr, &iceThickness, nullptr, true);
 }
 
 /// The machinery of one call's combined fixed point, which the start
@@ -186,12 +201,21 @@ class Evolution3D::Coupled {
     return solver.Grid().Expand(total);
   }
 
-  /// The centrifugal coefficients of the response's angular velocity.
+  /// The potential the radial steps see: the centrifugal coefficients of
+  /// the response's angular velocity, and the node's prescribed tide.
   [[nodiscard]] std::vector<Complex> CentrifugalCoefficients() const {
     const auto& solver = *owner_.solver_;
-    return owner_.options_.rotation == RotationalFeedback::None
-               ? solver.Grid().ZeroCoefficients()
-               : solver.CentrifugalCoefficients(response.angularVelocity);
+    auto psi = owner_.options_.rotation == RotationalFeedback::None
+                   ? solver.Grid().ZeroCoefficients()
+                   : solver.CentrifugalCoefficients(response.angularVelocity);
+    if (!tide.empty()) {
+      if (tide.size() != psi.size()) {
+        throw std::invalid_argument(
+            "the tide is not a coefficient vector of the solver's grid");
+      }
+      for (auto i = std::size_t{0}; i < psi.size(); ++i) psi[i] += tide[i];
+    }
+    return psi;
   }
 
   /// Distributed (Viscoelastic3D::Options::collectives), every process
@@ -245,6 +269,7 @@ class Evolution3D::Coupled {
     } else {
       GRDSolver::GeneralisedForcing coupled;
       coupled.directLoad = loadGrid;
+      coupled.tide = tide;
       coupled.displacementResponse = std::move(displacement);
       coupled.potentialResponse = std::move(potential);
       coupled.inertiaMomentChange = moment;
@@ -285,8 +310,10 @@ class Evolution3D::Coupled {
 
   GRDSolver::Options sleOptions;
   GRDSolver::Options nonlinearOptions;
-  /// The non-ocean load of the node (frozen shorelines).
+  /// The non-ocean load of the node (frozen shorelines), and its
+  /// prescribed tidal potential (empty: none).
   std::vector<double> loadGrid;
+  std::vector<Complex> tide;
   /// The last pass's sea level response, and the node's ocean function
   /// (migrating shorelines alone).
   GRDSolver::Response response;
@@ -333,6 +360,7 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
   const auto& elastic = coupled.SolverFor(op.ElasticLove());
   GRDSolver::GeneralisedForcing forcing;
   forcing.directLoad = coupled.loadGrid;
+  forcing.tide = coupled.tide;
   forcing.rotation = options_.rotation;
   coupled.response = elastic.SolveGeneralised(state_, forcing, coupled.sleOptions);
   sigma_ = coupled.TotalLoadCoefficients(coupled.loadGrid,
@@ -401,6 +429,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
+    const std::function<std::vector<std::complex<double>>(double)>* tide,
     bool resumed) {
   const auto& op = *op_;
   const auto& solver = *solver_;
@@ -427,6 +456,15 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   Coupled coupled(*this, migrating);
   auto& response = coupled.response;
   auto& ocean = coupled.ocean;
+  // The forcing at a node: the direct load (none given: none) and the
+  // prescribed tide, which the coupling carries through the node's passes.
+  auto directLoadAt = [&](double t) {
+    return directLoad != nullptr ? (*directLoad)(t)
+                                 : std::vector<double>(fieldSize, 0.0);
+  };
+  auto setTide = [&](double t) {
+    if (tide != nullptr) coupled.tide = (*tide)(t);
+  };
 
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
@@ -458,7 +496,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     ocean = state_.oceanFunction;
   } else if (!resumed) {
     // The instantaneous elastic response at the start (Instantaneous).
-    startInfo = Start(coupled, times[0], (*directLoad)(times[0]));
+    setTide(times[0]);
+    startInfo = Start(coupled, times[0], directLoadAt(times[0]));
   }
   PrimeForRecording();
 
@@ -501,7 +540,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
       }
       moving.rotation = options_.rotation;
     } else {
-      coupled.loadGrid = (*directLoad)(times[node]);
+      coupled.loadGrid = directLoadAt(times[node]);
+      setTide(times[node]);
     }
 
     // The combined fixed point: strain, ocean load and rotation together.

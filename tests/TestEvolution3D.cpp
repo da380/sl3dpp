@@ -124,6 +124,201 @@ TEST(LateralGate, ZeroLateralCoupledEvolutionMatchesThe1DLoop) {
   }
 }
 
+namespace {
+
+/// A tide of degrees 2 and 3, growing and turning in time (solver units).
+std::function<std::vector<std::complex<double>>(double)> TestTide(
+    const GRDSolver& solver, double kyr) {
+  const auto& grid = solver.Grid();
+  const auto amplitude = 5.0 / solver.SolverScales().Factor(PotentialDimensions);
+  return [&grid, amplitude, kyr](double t) {
+    auto psi = grid.ZeroCoefficients();
+    const auto s = t / (4.0 * kyr);
+    psi[SurfaceGrid::Index(2, 0)] = amplitude * (1.0 + s);
+    psi[SurfaceGrid::Index(2, 1)] = amplitude * std::complex<double>(0.4, -0.3 * s);
+    psi[SurfaceGrid::Index(2, 2)] = amplitude * std::complex<double>(-0.2 * s, 0.5);
+    psi[SurfaceGrid::Index(3, 1)] = amplitude * std::complex<double>(0.3, 0.2);
+    return psi;
+  };
+}
+
+double WorstDeparture(std::span<const double> a, std::span<const double> b) {
+  auto diff = 0.0, scale = 0.0;
+  for (auto i = std::size_t{0}; i < a.size(); ++i) {
+    diff = std::max(diff, std::abs(a[i] - b[i]));
+    scale = std::max(scale, std::abs(b[i]));
+  }
+  return diff / scale;
+}
+
+}  // namespace
+
+TEST(LateralGate, ZeroLateralForcedEvolutionMatchesThe1DLoop) {
+  // Under a direct load and a prescribed tide, with an ocean and without
+  // one, the 3D loop with no lateral perturbation is the 1D loop.
+  auto setup = Setup::Make();
+  const auto kyr = 1000.0 * 3.15576e7 / setup.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, kyr, 2 * kyr, 4 * kyr};
+  const auto held = setup.MeltLoad(-0.1);
+  const auto tide = TestTide(setup.solver, kyr);
+  auto load = [&](double t) {
+    auto out = held;
+    for (auto& v : out) v *= 1.0 + 0.2 * t / kyr;
+    return out;
+  };
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  Viscoelastic3D op3(setup.rheology, kLmax,
+                     [](double, double, double) { return 0.0; });
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&dry, &wet}) {
+    const auto label = background == &dry ? "no ocean" : "ocean";
+    Evolution evolution1(op1, setup.solver, *background, {.rtol = 1e-11});
+    const auto reference =
+        evolution1.Run(times, Evolution::Forcing{.directLoad = load, .tide = tide});
+    Evolution3D evolution3(op3, setup.solver, *background,
+                           {.rtol = 1e-11, .coupled_rtol = 1e-10});
+    const auto coupled = evolution3.Run(
+        times, Evolution3D::Forcing{.directLoad = load, .tide = tide});
+    ASSERT_EQ(coupled.size(), reference.size());
+    for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
+      EXPECT_TRUE(coupled[node].converged) << label;
+      EXPECT_LT(WorstDeparture(coupled[node].relativeSeaLevelChange,
+                               reference[node].relativeSeaLevelChange),
+                1e-8)
+          << "node " << node << ", " << label;
+      EXPECT_LT(WorstDeparture(coupled[node].displacement,
+                               reference[node].displacement),
+                1e-8)
+          << "node " << node << ", " << label;
+      EXPECT_LT(
+          WorstDeparture(coupled[node].potential, reference[node].potential),
+          1e-8)
+          << "node " << node << ", " << label;
+      for (auto i = 0; i < 3; ++i) {
+        EXPECT_NEAR(coupled[node].angularVelocity[i],
+                    reference[node].angularVelocity[i],
+                    1e-8 * std::abs(reference[node].angularVelocity[1]) + 1e-30)
+            << "node " << node << ", " << label;
+      }
+    }
+  }
+}
+
+TEST(Lateral, WithoutAnOceanIsTheDirectlySteppedBody) {
+  // Under lateral viscosity, on a state with no ocean, the evolution is
+  // the 3D stepper under the prescribed load and tide (and the
+  // centrifugal potential of the rotation it finds): the oracle steps the
+  // operator directly, with no sea level solver.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  auto ratio = [&](Dimensions dims) {
+    return material.Factor(dims) / sle.Factor(dims);
+  };
+  const auto toLength = ratio(Dimensions{.length = 1});
+  const auto toPotential = ratio(PotentialDimensions);
+  const auto toMatDensity = 1.0 / ratio(Dimensions{.mass = 1, .length = -2});
+  const auto toMatTime = 1.0 / ratio(Dimensions{.time = 1});
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3.5 * kyr};
+  const auto held = setup.MeltLoad(-0.1);
+  const auto tide = TestTide(solver, kyr);
+  auto load = [&](double t) {
+    auto out = held;
+    for (auto& v : out) v *= 1.0 + 0.2 * t / kyr;
+    return out;
+  };
+  Viscoelastic3D op(
+      setup.rheology, kLmax, [](double, double theta, double phi) {
+        return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  using Complex = std::complex<double>;
+  // The stepper's columns of a real field: its m >= 0 coefficients.
+  auto columns = [](std::vector<Complex> coefficients,
+                    double factor) -> Viscoelastic3D::LoadCallable3D {
+    return [coefficients = std::move(coefficients), factor](
+               int l, double) -> std::optional<std::vector<Complex>> {
+      auto out = std::vector<Complex>(l + 1);
+      for (auto m = 0; m <= l; ++m) {
+        out[m] = factor * coefficients[SurfaceGrid::Index(l, m)];
+      }
+      return out;
+    };
+  };
+  auto field = [&](const std::map<int, std::vector<Complex>>& perDegree,
+                   double factor) {
+    auto lm = grid.ZeroCoefficients();
+    for (const auto& [l, c] : perDegree) {
+      for (auto m = 0; m <= l; ++m) {
+        lm[SurfaceGrid::Index(l, m)] = factor * c[m];
+      }
+    }
+    return grid.Synthesise(lm);
+  };
+
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    const auto label = "rotation " + std::to_string(static_cast<int>(rotation));
+    Evolution3D evolution(op, solver, solver.NoOceanState(),
+                          {.rotation = rotation,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-11});
+    const auto snapshots = evolution.Run(
+        times, Evolution3D::Forcing{.directLoad = load, .tide = tide});
+    ASSERT_EQ(snapshots.size(), times.size());
+
+    auto channels = [&](std::size_t node) {
+      auto psi = tide(times[node]);
+      if (rotation != RotationalFeedback::None) {
+        const auto spin =
+            solver.CentrifugalCoefficients(snapshots[node].angularVelocity);
+        for (auto i = std::size_t{0}; i < psi.size(); ++i) psi[i] += spin[i];
+      }
+      return std::pair{columns(grid.Expand(load(times[node])), toMatDensity),
+                       columns(std::move(psi), 1.0 / toPotential)};
+    };
+    auto state = op.ZeroState();
+    state.t = times.front() * toMatTime;
+    auto now = channels(0);
+    auto solutions = op.SolveElastic(state, now.first, now.second);
+    op.PrimeStrain(state, now.first, now.second);
+    for (auto node = std::size_t{0}; node < times.size(); ++node) {
+      if (node > 0) {
+        auto next = channels(node);
+        const auto dt = (times[node] - times[node - 1]) * toMatTime;
+        const auto middle = state.t + 0.5 * dt;
+        auto across = [middle](Viscoelastic3D::LoadCallable3D before,
+                               Viscoelastic3D::LoadCallable3D after)
+            -> Viscoelastic3D::LoadCallable3D {
+          return [before = std::move(before), after = std::move(after), middle](
+                     int l, double t) { return (t < middle ? before : after)(l, t); };
+        };
+        auto result = op.Step(state, dt, Scheme::ExponentialTrapezoid,
+                              across(now.first, next.first),
+                              across(now.second, next.second));
+        ASSERT_TRUE(result.info.converged);
+        state = std::move(result.state);
+        solutions = std::move(result.solutions);
+        now = std::move(next);
+      }
+      const auto& snapshot = snapshots[node];
+      EXPECT_TRUE(snapshot.converged) << label;
+      EXPECT_LT(WorstDeparture(snapshot.displacement,
+                               field(op.Surface(solutions, Component::U),
+                                     toLength)),
+                1e-7)
+          << "node " << node << ", " << label;
+      EXPECT_LT(WorstDeparture(snapshot.potential,
+                               field(op.Surface(solutions, Component::Phi),
+                                     toPotential)),
+                1e-7)
+          << "node " << node << ", " << label;
+    }
+  }
+}
+
 TEST(Lateral, CoupledLateralEvolutionRunsAndConservesMass) {
   auto setup = Setup::Make();
   const auto& scales = setup.solver.SolverScales();

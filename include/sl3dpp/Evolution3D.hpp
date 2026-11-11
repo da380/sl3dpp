@@ -150,6 +150,27 @@ class Evolution3D {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
 
+  /// What drives a run, as Evolution::Forcing: the direct load, a grid
+  /// field, and a prescribed tidal potential, its coefficients on the
+  /// surface (no degree-0 part), each a function of time in the solver's
+  /// units and either absent.
+  struct Forcing {
+    std::function<std::vector<double>(double)> directLoad{};
+    std::function<std::vector<std::complex<double>>(double)> tide{};
+  };
+
+  /// `Run` under a forcing, as Evolution's: on a background state without
+  /// an ocean (GRDSolver::NoOceanState) the solid body stepped under the
+  /// forcing, the combined fixed point then over the lateral terms and
+  /// the rotational feedback alone.
+  [[nodiscard]] std::vector<Snapshot> Run(std::span<const double> times,
+                                          const Forcing& forcing);
+
+  /// `Resume` under a forcing.
+  [[nodiscard]] std::vector<Snapshot> Resume(const Checkpoint& from,
+                                             std::span<const double> times,
+                                             const Forcing& forcing);
+
   /// Continues a run from a checkpoint: `times` is the remaining grid,
   /// its first entry the checkpoint's own node, and the snapshots come
   /// back for the nodes after it. The restarted history is the
@@ -253,12 +274,14 @@ class Evolution3D {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
+      const std::function<std::vector<std::complex<double>>(double)>* tide,
       bool resumed);
 
   /// The instantaneous response at time t (SLE units) to the non-ocean
   /// load, from rest, under frozen shorelines: Run's first node and
   /// Instantaneous. Sets the state, the recurrence's coefficients and the
-  /// coupling's response; returns the fixed point's diagnostics.
+  /// coupling's response; returns the fixed point's diagnostics. A
+  /// prescribed tide there is the coupling's (Coupled::tide).
   Viscoelastic3D::StepInfo Start(Coupled& coupled, double t,
                                  std::vector<double> load);
 
