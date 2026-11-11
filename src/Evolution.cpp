@@ -1,9 +1,12 @@
 #include "sl3dpp/Evolution.hpp"
 
+#include <complex>
 #include <format>
+#include <optional>
 #include <stdexcept>
 
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
 
 namespace sl3dpp {
@@ -100,13 +103,19 @@ std::vector<Evolution::Snapshot> Evolution::Run(std::span<const double> times,
                                                 const Forcing& forcing) {
   CheckTimes(times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               nullptr, forcing.tide ? &forcing.tide : nullptr, false);
+               nullptr, forcing.tide ? &forcing.tide : nullptr, false,
+               &forcing);
 }
 
 std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const Forcing& forcing) {
   Restore(from, times);
+  if (forcing.sources || forcing.stressGluts) {
+    throw std::invalid_argument(
+        "a run under interior sources is not resumed from a checkpoint, "
+        "which does not hold the toroidal state");
+  }
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, true);
 }
@@ -152,7 +161,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
     const std::function<std::vector<std::complex<double>>(double)>* tide,
-    bool resumed) {
+    bool resumed, const Forcing* interior) {
   const auto& op = *op_;
   const auto& solver = *solver_;
   const auto& grid = solver.Grid();
@@ -257,6 +266,83 @@ std::vector<Evolution::Snapshot> Evolution::March(
     return psi;
   };
 
+  // Interior sources: their forces on the spheroidal systems (the real
+  // columns of each degree) and on the toroidal ones, which are stepped
+  // on their own beside the loop.
+  const bool sourced =
+      interior != nullptr && (interior->sources || interior->stressGluts);
+  auto toroidal = std::optional<ToroidalViscoelastic>{};
+  auto tstate = ToroidalViscoelastic::State{};
+  auto twist = ToroidalViscoelastic::Fields{};  // the node's toroidal solutions
+  if (sourced) {
+    toroidal.emplace(op);
+    tstate = toroidal->ZeroState();
+    tstate.t = times[0] * toMatTime_;
+  }
+  struct SourceForces {
+    std::map<int, std::vector<double>> spheroidal, toroidal;
+  };
+  auto sourceForcesAt = [&](double t) {
+    auto out = SourceForces{};
+    const auto& material = op.BaseMaterial();
+    const auto& scales = material.ModelScales();
+    const auto& sle = solver.SolverScales();
+    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+    const auto toMatMoment = sle.Factor(energy) / scales.Factor(energy);
+    const std::function<const DegreeOperator&(int)> sph =
+        [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); };
+    const std::function<const ToroidalOperator&(int)> tor =
+        [&](int l) -> const ToroidalOperator& { return toroidal->Unrelaxed(l); };
+    // complex m >= 0 columns to the real block then the imaginary block
+    auto add = [](std::map<int, std::vector<double>>& to,
+                  const std::map<int, std::vector<std::complex<double>>>& from) {
+      for (const auto& [l, b] : from) {
+        const auto ndof = b.size() / (static_cast<std::size_t>(l) + 1);
+        auto& real = to[l];
+        if (real.empty()) real.assign(2 * b.size(), 0.0);
+        for (auto m = 0; m <= l; ++m) {
+          for (auto d = std::size_t{0}; d < ndof; ++d) {
+            const auto v = b[static_cast<std::size_t>(m) * ndof + d];
+            real[static_cast<std::size_t>(m) * ndof + d] += v.real();
+            real[static_cast<std::size_t>(l + 1 + m) * ndof + d] += v.imag();
+          }
+        }
+      }
+    };
+    if (interior->sources) {
+      for (auto source : interior->sources(t)) {
+        source.at.radius /= toNdLength_;
+        for (auto* c :
+             {&source.moment.rr, &source.moment.tt, &source.moment.pp,
+              &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
+          *c *= toMatMoment;
+        }
+        const auto forces =
+            PointSourceForces(material, op.LMax(), sph, tor, source);
+        add(out.spheroidal, forces.spheroidal);
+        add(out.toroidal, forces.toroidal);
+      }
+    }
+    if (interior->stressGluts) {
+      for (auto glut : interior->stressGluts(t)) {
+        glut.radius /= toNdLength_;
+        for (auto* c : {&glut.moment.rr, &glut.moment.tt, &glut.moment.pp,
+                        &glut.moment.rt, &glut.moment.rp, &glut.moment.tp}) {
+          for (auto& v : *c) v *= toMatMoment;
+        }
+        const auto forces =
+            StressGlutForces(material, op.LMax(), sph, tor, glut);
+        add(out.spheroidal, forces.spheroidal);
+        add(out.toroidal, forces.toroidal);
+      }
+    }
+    return out;
+  };
+  // The toroidal potential's coefficients of the node's toroidal solutions.
+  auto toroidalCoefficients = [&] {
+    return Coefficients(toroidal->Surface(twist), toNdLength_);
+  };
+
   auto loadGrid = std::vector<double>{};
   auto response = GRDSolver::Response{};
   auto ocean = std::vector<double>{};  // the node's C, migrating only
@@ -278,11 +364,42 @@ std::vector<Evolution::Snapshot> Evolution::March(
     forcing.directLoad = loadGrid;
     if (tide != nullptr) forcing.tide = (*tide)(times[0]);
     forcing.rotation = options_.rotation;
+    // The sources' own unrelaxed response enters as ready channels, and
+    // its strain joins the start's.
+    auto startResponse = std::map<int, std::vector<double>>{};
+    if (sourced) {
+      const auto forces = sourceForcesAt(times[0]);
+      for (const auto& [l, f] : forces.spheroidal) {
+        startResponse.emplace(l, op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1)));
+      }
+      forcing.displacementResponse =
+          Coefficients(op.Surface(startResponse, Component::U), toNdLength_);
+      forcing.potentialResponse =
+          Coefficients(op.Surface(startResponse, Component::Phi), toNdPotential_);
+      forcing.tangentialResponse =
+          Coefficients(op.Surface(startResponse, Component::V), toNdLength_);
+      if (const auto found = startResponse.find(0);
+          found != startResponse.end()) {
+        forcing.inertiaMomentChange =
+            op.InertiaMoment(found->second, 2)[0] * toNdMoment_;
+      }
+      twist = toroidal->SolveElastic(tstate, forces.toroidal);
+      toroidal->SetStrain(tstate, twist);
+      forcing.toroidalResponse = toroidalCoefficients();
+    }
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
     sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     psi_ = potentialAt(times[0], response.angularVelocity);
+    if (sourced) {
+      op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
+                     Columns(psi_, toMatPotential_));
+      for (auto& [l, d] : op.Strain(startResponse)) {
+        auto& to = vstate_.strain.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += d[i];
+      }
+    }
   }
-  if (stride > 0) {
+  if (stride > 0 && !sourced) {
     op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
                    Columns(psi_, toMatPotential_));
   }
@@ -295,6 +412,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
     snapshot.tangentialPotential = std::move(r.tangentialPotential);
+    snapshot.toroidalPotential = std::move(r.toroidalPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
     snapshot.oceanFunction = std::move(ocean);
@@ -360,6 +478,17 @@ std::vector<Evolution::Snapshot> Evolution::March(
       loadGrid = directLoadAt(times[node]);
       coupled.directLoad = loadGrid;
       if (tide != nullptr) coupled.tide = (*tide)(times[node]);
+      if (sourced) {
+        // the node's sources force the step; the toroidal systems are
+        // stepped under theirs
+        const auto forces = sourceForcesAt(times[node]);
+        step.AddForce(forces.spheroidal);
+        auto stepped =
+            toroidal->Step(tstate, dt, options_.scheme, forces.toroidal);
+        tstate = std::move(stepped.first);
+        twist = std::move(stepped.second);
+        coupled.toroidalResponse = toroidalCoefficients();
+      }
       coupled.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       coupled.potentialResponse =

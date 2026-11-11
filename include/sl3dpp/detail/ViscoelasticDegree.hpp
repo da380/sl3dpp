@@ -20,6 +20,7 @@
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/ToroidalOperator.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp {
@@ -345,6 +346,9 @@ struct ViscoelasticOperator::Flavour {
   std::vector<double> pointShearModulus;
   PointShear pointShear;
   std::map<int, DegreeOperator> systems;
+  /// The toroidal effective systems (ToroidalViscoelastic), kept here so
+  /// they live exactly as long as the material they borrow.
+  std::map<int, ToroidalOperator> toroidal;
   std::map<int, std::vector<double>> units;  // (ndof x 2): load, tide
   /// (ndof x 2): the traction-only and attraction-only pieces of the
   /// unit surface load — the continuous adjoint's jump channels.

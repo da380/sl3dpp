@@ -188,6 +188,7 @@ add_library(sl3dpp STATIC
   src/Measurements.cpp
   src/Fault.cpp
   src/PointSource.cpp
+  src/ToroidalViscoelastic.cpp
   src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp

@@ -159,6 +159,9 @@ class ViscoelasticOperator {
     return nodalMaterial_ ? *nodalMaterial_ : rheology_->BaseMaterial();
   }
   [[nodiscard]] int LMax() const { return lmax_; }
+  /// The unrelaxed spheroidal system of a degree: its dof map, and the
+  /// solve of a force on it (a point source's, PointSource.hpp).
+  [[nodiscard]] const DegreeOperator& UnrelaxedSystem(int l) const;
 
   /// The undisturbed state at t = 0 with ncols(l) columns per degree.
   [[nodiscard]] ViscoelasticState ZeroState(
@@ -348,6 +351,7 @@ class ViscoelasticOperator {
   friend class AdjointSolver;    // the sweeps transpose these internals
   friend class AdjointSolver3D;  // and the 3D continuous sweep's jump
   friend class TangentLinearSolver;  // the forward-mode drives
+  friend class ToroidalViscoelastic;  // the toroidal partner shares these
 
   /// Per-degree workspace: the unrelaxed system over the degree's element
   /// subset, and the strain operators and branch data over its memory

@@ -747,3 +747,201 @@ TEST(PointSourceEvolution, AStressGlutDrivesTheEvolution) {
   EXPECT_LT(WorstDeparture(snapshots[0].toroidalPotential, grid.Synthesise(W)),
             1e-8);
 }
+
+#include "sl3dpp/ToroidalViscoelastic.hpp"
+
+TEST(PointSourceEvolution, TheRadialToroidalStepperMatchesThe3DClass) {
+  // The radial model's toroidal systems stepped on their own under a
+  // point source's toroidal forces: the surface W at every node is the
+  // 3D class's with no lateral structure, for both schemes.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  const auto toLength = material.Length() / sle.Length();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, 0.3 * kyr, 0.8 * kyr, 2.0 * kyr};
+  const auto source = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6});
+  Viscoelastic3D op3(setup.rheology, kLmax,
+                     [](double, double, double) { return 0.0; });
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  const ToroidalViscoelastic toroidal(op1);
+
+  // the source's toroidal forces as real columns, material units
+  auto inMaterial = source;
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  inMaterial.at.radius /= toLength;
+  for (auto* c : {&inMaterial.moment.rr, &inMaterial.moment.tt,
+                  &inMaterial.moment.pp, &inMaterial.moment.rt,
+                  &inMaterial.moment.rp, &inMaterial.moment.tp}) {
+    *c *= sle.Factor(energy) / material.Factor(energy);
+  }
+  const auto complexForces = PointSourceForces(
+      setup.material, kLmax,
+      [&](int l) -> const DegreeOperator& { return op3.UnrelaxedSpheroidal(l); },
+      [&](int l) -> const ToroidalOperator& { return toroidal.Unrelaxed(l); },
+      inMaterial);
+  auto forces = ToroidalViscoelastic::Fields{};
+  for (const auto& [l, b] : complexForces.toroidal) {
+    const auto ndof = static_cast<std::size_t>(toroidal.Unrelaxed(l).DofCount());
+    auto real = std::vector<double>(ndof * 2 * (l + 1));
+    for (auto m = 0; m <= l; ++m) {
+      for (auto d = std::size_t{0}; d < ndof; ++d) {
+        real[m * ndof + d] = b[m * ndof + d].real();
+        real[(l + 1 + m) * ndof + d] = b[m * ndof + d].imag();
+      }
+    }
+    forces.emplace(l, std::move(real));
+  }
+  auto fieldOf = [&](const ToroidalViscoelastic::Fields& solutions) {
+    auto lm = grid.ZeroCoefficients();
+    for (const auto& [l, w] : toroidal.Surface(solutions)) {
+      for (auto m = 0; m <= l; ++m) {
+        lm[SurfaceGrid::Index(l, m)] =
+            toLength * std::complex<double>(w[m], w[l + 1 + m]);
+      }
+    }
+    return grid.Synthesise(lm);
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    Evolution3D evolution(op3, solver, solver.NoOceanState(),
+                          {.scheme = scheme,
+                           .rotation = RotationalFeedback::None,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12});
+    const auto snapshots = evolution.Run(
+        times, Evolution3D::Forcing{.sources = [&](double) {
+          return std::vector<PointSource>{source};
+        }});
+    auto state = toroidal.ZeroState();
+    state.t = times.front() * sle.Time() / material.Time();
+    auto solutions = toroidal.SolveElastic(state, forces);
+    toroidal.SetStrain(state, solutions);
+    for (auto node = std::size_t{0}; node < times.size(); ++node) {
+      if (node > 0) {
+        const auto dt =
+            (times[node] - times[node - 1]) * sle.Time() / material.Time();
+        auto stepped = toroidal.Step(state, dt, scheme, forces);
+        state = std::move(stepped.first);
+        solutions = std::move(stepped.second);
+      }
+      EXPECT_GT(MaxAbsOf(snapshots[node].toroidalPotential), 0.0);
+      EXPECT_LT(WorstDeparture(fieldOf(solutions),
+                               snapshots[node].toroidalPotential),
+                1e-8)
+          << "node " << node << ", scheme " << static_cast<int>(scheme);
+    }
+    // it relaxes
+    EXPECT_GT(WorstDeparture(snapshots.back().toroidalPotential,
+                             snapshots.front().toroidalPotential),
+              1e-3);
+  }
+}
+
+TEST(PointSourceEvolution, TheRadialEvolutionMatchesThe3DClass) {
+  // Point sources and a stress glut on a shell in the radial evolution,
+  // with an ocean and the rotational feedback and without either: every
+  // field at every node is the 3D class's with no lateral structure, for
+  // both schemes.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, 0.3 * kyr, 0.8 * kyr, 2.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  const auto second = SourceAt(
+      setup, 150.0, 2.2, 1.0,
+      {.rr = -0.4, .tt = 0.8, .pp = -0.4, .rt = 0.5, .rp = 0.1, .tp = -0.3},
+      5e21);
+  const SurfaceGrid shellGrid(kLmax, {.nmax = 2});
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  auto glut = StressGlut{
+      .radius = setup.material.Radius() * material.Length() / sle.Length() -
+                600e3 / sle.Length(),
+      .grid = &shellGrid,
+      .moment = {}};
+  for (auto theta : shellGrid.CoLatitudes()) {
+    for (auto phi : shellGrid.Longitudes()) {
+      const auto s = std::sin(theta);
+      glut.moment.rr.push_back(unit * s * s * std::cos(phi) * std::cos(phi));
+      glut.moment.tt.push_back(unit * 0.5 * s * s);
+      glut.moment.pp.push_back(unit * 0.3 * s * s);
+      glut.moment.rt.push_back(unit * s * std::cos(theta) * std::cos(phi));
+      glut.moment.rp.push_back(unit * 0.2 * s * std::sin(phi));
+      glut.moment.tp.push_back(unit * 0.1 * s * s * std::sin(2.0 * phi));
+    }
+  }
+  // the second source acts from the second node on
+  auto sourcesAt = [&](double t) {
+    auto out = std::vector<PointSource>{thrust};
+    if (t >= times[1]) out.push_back(second);
+    return out;
+  };
+  auto glutsAt = [&](double) { return std::vector<StressGlut>{glut}; };
+
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  Viscoelastic3D op3(setup.rheology, kLmax,
+                     [](double, double, double) { return 0.0; });
+  const auto dry = solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
+                       ", scheme " + std::to_string(static_cast<int>(scheme));
+    Evolution evolution1(op1, solver, *background,
+                         {.scheme = scheme, .rotation = rotation, .rtol = 1e-12});
+    const auto radial = evolution1.Run(
+        times,
+        Evolution::Forcing{.sources = sourcesAt, .stressGluts = glutsAt});
+    Evolution3D evolution3(op3, solver, *background,
+                           {.scheme = scheme,
+                            .rotation = rotation,
+                            .rtol = 1e-12,
+                            .coupled_rtol = 1e-12});
+    const auto reference = evolution3.Run(
+        times,
+        Evolution3D::Forcing{.sources = sourcesAt, .stressGluts = glutsAt});
+    ASSERT_EQ(radial.size(), reference.size());
+    for (auto node = std::size_t{0}; node < radial.size(); ++node) {
+      const auto where = "node " + std::to_string(node) + ", " + label;
+      EXPECT_TRUE(radial[node].converged) << where;
+      EXPECT_LT(WorstDeparture(radial[node].relativeSeaLevelChange,
+                               reference[node].relativeSeaLevelChange),
+                1e-8)
+          << where;
+      EXPECT_LT(WorstDeparture(radial[node].displacement,
+                               reference[node].displacement),
+                1e-8)
+          << where;
+      EXPECT_LT(WorstDeparture(radial[node].potential, reference[node].potential),
+                1e-8)
+          << where;
+      EXPECT_LT(WorstDeparture(radial[node].tangentialPotential,
+                               reference[node].tangentialPotential),
+                1e-8)
+          << where;
+      ASSERT_FALSE(radial[node].toroidalPotential.empty()) << where;
+      EXPECT_LT(WorstDeparture(radial[node].toroidalPotential,
+                               reference[node].toroidalPotential),
+                1e-8)
+          << where;
+      for (auto i = 0; i < 3; ++i) {
+        EXPECT_NEAR(radial[node].angularVelocity[i],
+                    reference[node].angularVelocity[i],
+                    1e-8 * std::abs(reference[node].angularVelocity[1]) + 1e-30)
+            << where;
+      }
+    }
+  }
+}

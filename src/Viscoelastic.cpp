@@ -189,6 +189,10 @@ ViscoelasticOperator::ViscoelasticOperator(ViscoelasticOperator&&) noexcept =
 ViscoelasticOperator& ViscoelasticOperator::operator=(
     ViscoelasticOperator&&) noexcept = default;
 
+const DegreeOperator& ViscoelasticOperator::UnrelaxedSystem(int l) const {
+  return Deg(l).system;
+}
+
 std::pair<int, int> ViscoelasticOperator::MemoryElements(int l) const {
   const auto& deg = Deg(l);
   return {deg.e0, deg.ne};

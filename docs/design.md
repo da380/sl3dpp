@@ -317,6 +317,37 @@ toroidal potential W among them, reach the sea level solve through its
 ready channels, so the ocean's load and the rotational feedback answer
 a source as they do a step's memory: no further coupling is needed.
 
+**The radial model.** A radial model's toroidal motion is decoupled
+from the spheroidal, from gravity and from the sea level, so
+`ToroidalViscoelastic` steps its toroidal systems on their own: per
+degree the scalar W(r), whose deviatoric strain has the two driving
+scalars M = W and S = r dW/dr - W, the toroidal twins of the spheroidal
+M and S with the same force weights l(l+1)(l(l+1) - 2) and l(l+1), and
+the same recurrence over the branches (the decayed memory's force, the
+effective system of the operator's own flavour, the end strain closing
+the update). `Evolution::Forcing::sources` and `stressGluts` drive the
+radial evolution: the spheroidal forces join each step of the coupled
+loop (its start through the unrelaxed response's surface values as
+ready channels), the toroidal ones the stepper beside it, whose surface
+W the sea level solve carries to the snapshots. The radial evolution
+under sources is the 3D class's with no lateral structure, field for
+field.
+
+**The benchmark.** In a homogeneous elastic sphere without gravity the
+response to a point moment tensor is known in closed form: the
+full-space solution, u_i = M_jk dG_ij / d xi_k with Kelvin's tensor G,
+corrected by the regular solutions of the sphere that cancel its
+traction on the surface, degree by degree. Those are, at degree l, the
+spheroidal pair grad(r^l Y_lm) and r^2 grad(r^l Y_lm) + alpha_l x r^l Y_lm
+with alpha_l = -2 (l lambda + (3l + 1) mu) / ((l + 3) lambda + (l + 5) mu),
+and the toroidal r^l; degree 0 has U = r alone, and degree 1 is left
+out, a rigid motion being free without gravity. The source enters the
+closed form in Cartesian components, with no spherical harmonic of its
+own, so the comparison tests the source's forces, their signs and
+factors, the canonical components and the degree systems together
+(`PointSource.AHomogeneousSphereWithoutGravityInClosedForm`: the
+surface U, V and W of a source at half the radius, to degree 16).
+
 ## 7. Adjoints and kernels
 
 - **Two adjoints, one interface.** `AdjointSolver` offers the continuous

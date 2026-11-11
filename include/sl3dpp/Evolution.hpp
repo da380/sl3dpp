@@ -31,6 +31,7 @@
 #include <optional>
 #include <vector>
 
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
@@ -143,6 +144,15 @@ class Evolution {
   struct Forcing {
     std::function<std::vector<double>(double)> directLoad{};
     std::function<std::vector<std::complex<double>>(double)> tide{};
+    /// The point stress gluts acting at time t (PointSource.hpp) and the
+    /// stress gluts on shells (StressGlut), in the solver's units, as
+    /// Evolution3D::Forcing's: the stress glut itself, held from when it
+    /// acts. They force the spheroidal systems of each step and the
+    /// toroidal ones, which a radial model steps on their own
+    /// (ToroidalViscoelastic); the snapshots then carry the toroidal
+    /// potential. A run under them is not resumed from a checkpoint.
+    std::function<std::vector<PointSource>(double)> sources{};
+    std::function<std::vector<StressGlut>(double)> stressGluts{};
   };
 
   /// `Run` under a forcing: the start is the instantaneous elastic
@@ -223,7 +233,7 @@ class Evolution {
       const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
       const std::function<std::vector<std::complex<double>>(double)>* tide,
-      bool resumed);
+      bool resumed, const Forcing* interior = nullptr);
 
   /// Restores a checkpoint's recurrence into the members below.
   void Restore(const Checkpoint& from, std::span<const double> times);
