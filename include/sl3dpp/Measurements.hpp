@@ -81,7 +81,13 @@ namespace sl3dpp {
 // -- measurements -----------------------------------------------------------
 
 /// The field a surface dual pairs with.
-enum class FieldChannel { SeaLevel, Displacement, Potential };
+enum class FieldChannel {
+  SeaLevel,
+  Displacement,
+  Potential,
+  /// The potential V of the tangential displacement.
+  TangentialPotential
+};
 
 /// The `Measurement` of one node whose named channel carries `dual`.
 [[nodiscard]] Measurement FieldMeasurement(FieldChannel channel,

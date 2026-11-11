@@ -802,6 +802,22 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
         "a migrating run is driven by its ice thickness, not a direct "
         "load: perturb iceThickness");
   }
+  if (!direction.tide.empty()) {
+    if (migrating) {
+      throw std::invalid_argument(
+          "a migrating run takes no prescribed tide: none to perturb");
+    }
+    const auto coefSize = solver.Grid().CoefficientSize();
+    if (direction.tide.size() != nodes) {
+      throw std::invalid_argument("tide must give one entry per time node");
+    }
+    for (const auto& c : direction.tide) {
+      if (c.size() != coefSize) {
+        throw std::invalid_argument(
+            "tide must be coefficient vectors of the solver's grid");
+      }
+    }
+  }
   CheckPerNode(direction.directLoad, nodes, fieldSize, "directLoad");
   CheckPerNode(direction.iceThickness, nodes, fieldSize, "iceThickness");
   if (!direction.initialSeaLevel.empty() &&
@@ -885,7 +901,11 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (hasMaterial) {
     material = MakeMaterialDrive3D(direction.material, trajectory, &*cursor);
   }
-  return March(times, oceanFunctions, directAt, drive, material.get());
+  Tide tideAt{};
+  if (!direction.tide.empty()) {
+    tideAt = [&](std::size_t node) { return direction.tide[node]; };
+  }
+  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -1014,7 +1034,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
     const Direct& directAt, const Drive& drive,
-    const MaterialForcing3D* material) const {
+    const MaterialForcing3D* material, const Tide& tideAt) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -1062,10 +1082,15 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     }
     return grid.Expand(total);
   };
+  // The potential the steps see: the centrifugal one of the response's
+  // rotation, and the node's tide perturbation.
+  auto tideNow = std::vector<std::complex<double>>{};
   auto centrifugal = [&](const GRDSolver::Response& r) {
-    return rotation == RotationalFeedback::None
-               ? grid.ZeroCoefficients()
-               : solver.CentrifugalCoefficients(r.angularVelocity);
+    auto out = rotation == RotationalFeedback::None
+                   ? grid.ZeroCoefficients()
+                   : solver.CentrifugalCoefficients(r.angularVelocity);
+    for (auto i = std::size_t{0}; i < tideNow.size(); ++i) out[i] += tideNow[i];
+    return out;
   };
 
   GRDSolver::Options sleOptions;
@@ -1097,7 +1122,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
                     2 * coefficients->size()));
     }
     for (auto* field : {&response.relativeSeaLevelChange, &response.displacement,
-                        &response.potential}) {
+                        &response.potential, &response.tangentialPotential}) {
       collectives.share(*field);
     }
     collectives.share(response.angularVelocity);
@@ -1111,6 +1136,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   response.relativeSeaLevelChange.assign(fieldSize, 0.0);
   response.displacement.assign(fieldSize, 0.0);
   response.potential.assign(fieldSize, 0.0);
+  response.tangentialPotential.assign(fieldSize, 0.0);
   // The coupled pass of a step, shared by the steps and, under lateral
   // moduli, the start as a zero-length step.
   auto step = std::optional<Viscoelastic3D::OpenStep>{};
@@ -1120,10 +1146,13 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto closure = [&](const Viscoelastic3D::Solutions& responses) {
     GRDSolver::GeneralisedForcing coupled;
     coupled.directLoad = f;
+    coupled.tide = tideNow;
     coupled.displacementResponse =
         ev.Coefficients(op.Surface(responses, Component::U), ev.toNdLength_);
     coupled.potentialResponse =
         ev.Coefficients(op.Surface(responses, Component::Phi), ev.toNdPotential_);
+    coupled.tangentialResponse =
+        ev.Coefficients(op.Surface(responses, Component::V), ev.toNdLength_);
     coupled.inertiaMomentChange = step->InertiaMoment(responses) * ev.toNdMoment_;
     coupled.rotation = rotation;
     coupled.oceanFunctionOverride = overrideAt(node);
@@ -1154,6 +1183,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto startInfo = Viscoelastic3D::StepInfo{};
   const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
+  if (tideAt) tideNow = tideAt(0);
   if (lateral) {
     // The start under lateral moduli: the instantaneous coupled fixed
     // point of a zero-length step, the material's start forces on it.
@@ -1171,9 +1201,11 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     startInfo = info;
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
     step.reset();
-  } else if (const auto f0 = directAt(0); !f0.empty() || material != nullptr) {
+  } else if (const auto f0 = directAt(0);
+             !f0.empty() || material != nullptr || tideAt) {
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
+    forcing.tide = tideNow;
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
     if (material != nullptr) {
@@ -1183,6 +1215,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
           op.Surface(*startResponse, Component::U), ev.toNdLength_);
       forcing.potentialResponse = ev.Coefficients(
           op.Surface(*startResponse, Component::Phi), ev.toNdPotential_);
+      forcing.tangentialResponse = ev.Coefficients(
+          op.Surface(*startResponse, Component::V), ev.toNdLength_);
       // and, for the axial rotational feedback, its inertia moment
       forcing.inertiaMomentChange =
           op.InertiaMoment(*startResponse) * ev.toNdMoment_;
@@ -1218,6 +1252,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     snapshot.relativeSeaLevelChange = std::move(r.relativeSeaLevelChange);
     snapshot.displacement = std::move(r.displacement);
     snapshot.potential = std::move(r.potential);
+    snapshot.tangentialPotential = std::move(r.tangentialPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.coupledIterations = info.iterations;
     snapshot.coupledResidual = info.residual;
@@ -1243,6 +1278,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     if (material != nullptr) material->Apply(node, dt, scheme, *step);
     effectiveSolver = &solverFor(step->EffectiveLove());
     f = directAt(node);
+    if (tideAt) tideNow = tideAt(node);
     auto [strain, info] = close();
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(

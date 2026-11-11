@@ -282,7 +282,10 @@ TEST(SecondOrderAdjoint, HessianIsSymmetricAndAdjointToTheSecondOrderRun) {
     Evolution* evolution = nullptr;
     const auto base = MakeBase(setup, op, rng, migrating,
                                Scheme::ExponentialTrapezoid, &evolution, nullptr);
-    const auto measurements = Measurements(setup, rng, base.times.size() - 1);
+    // the tangential displacement's potential among the measurements
+    auto measurements = Measurements(setup, rng, base.times.size() - 1);
+    measurements[base.times.size() - 1].tangentialPotentialDual =
+        setup.Smooth(rng, 0.6);
     const auto u = Direction(setup, rng, base.times.size(), migrating,
                              [](double r) { return 0.3 + 0.7 * r * r; });
     const auto w = Direction(setup, rng, base.times.size(), migrating,

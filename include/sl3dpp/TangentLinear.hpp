@@ -62,6 +62,10 @@ struct TangentPerturbation {
   /// was driven by; refused about a migrating trajectory, which is driven
   /// by its thickness.
   std::vector<std::vector<double>> directLoad;
+  /// Per time node, a perturbation of the prescribed tidal potential a
+  /// frozen run was driven by, its coefficients on the surface (no
+  /// degree-0 part); refused about a migrating trajectory.
+  std::vector<std::vector<std::complex<double>>> tide;
   /// Per time node, a perturbation of the ice thickness, grounded by the
   /// node's ocean function relative to the first node's.
   std::vector<std::vector<double>> iceThickness;
@@ -81,7 +85,7 @@ struct TangentPerturbation {
   PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && iceThickness.empty() &&
+    return directLoad.empty() && tide.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && material.Empty();
   }
 };
@@ -108,8 +112,8 @@ struct SecondOrderDirection {
  *
  * Borrows the evolution as AdjointSolver does and leaves its state
  * untouched. The returned snapshots carry the perturbed responses at
- * every node (sea level change, displacement, potential, angular
- * velocity) and, when recording, the tangent-linear internal state with
+ * every node (sea level change, displacement, potential, the tangential
+ * displacement's potential, angular velocity) and, when recording, the tangent-linear internal state with
  * its strain and the node's load and centrifugal coefficients — what a
  * second-order run about this one reads.
  */
@@ -181,6 +185,8 @@ class TangentLinearSolver {
       const std::vector<std::vector<double>>& ditauPoints);
  private:
   using Direct = std::function<std::vector<double>(std::size_t node)>;
+  using Tide =
+      std::function<std::vector<std::complex<double>>(std::size_t node)>;
   using Drive =
       std::function<std::map<int, std::vector<double>>(std::size_t node, double dt)>;
 
@@ -194,8 +200,8 @@ class TangentLinearSolver {
   [[nodiscard]] std::vector<Evolution::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
-      const Direct& directAt, const Drive& drive,
-      MaterialForcing* material) const;
+      const Direct& directAt, const Drive& drive, MaterialForcing* material,
+      const Tide& tideAt = {}) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two

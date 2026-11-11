@@ -277,6 +277,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
+      duals.tangentialPotentialDual = m.tangentialPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
@@ -337,6 +338,12 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
         ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
     const auto sphiCols =
         ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
+    const auto svCols =
+        ColumnDualsOf(adj.tangentialResponseDual, l, ev.toNdLength_);
+    const auto sv = deg.system.SurfaceDof(Component::V);
+    for (auto c = 0; c < ncols; ++c) {
+      if (sv >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + sv] += svCols[c];
+    }
     const auto su = deg.system.SurfaceDof(Component::U);
     const auto sphi = deg.system.SurfaceDof(Component::Phi);
     for (auto c = 0; c < ncols; ++c) {
@@ -730,6 +737,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     duals.seaLevelDual = m.seaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
+    duals.tangentialPotentialDual = m.tangentialPotentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
     const auto adj = solverFor(0.0).SolveAdjoint(ev.state_, duals, sleOptions);
     if (!adj.converged) {
@@ -787,6 +795,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
     const PointMaterialDirection& direction) const {
+  detail::RefuseTangential(measurements, "the continuous sweep");
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;

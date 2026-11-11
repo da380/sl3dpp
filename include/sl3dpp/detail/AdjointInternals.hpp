@@ -76,11 +76,26 @@ inline std::vector<double> NodeWeights(std::span<const double> times) {
 inline void CheckGrids(const Measurement& m, std::size_t fieldSize,
                 std::size_t node) {
   for (const auto* f :
-       {&m.seaLevelDual, &m.displacementDual, &m.potentialDual}) {
+       {&m.seaLevelDual, &m.displacementDual, &m.potentialDual,
+        &m.tangentialPotentialDual}) {
     if (!f->empty() && f->size() != fieldSize) {
       throw std::invalid_argument(std::format(
           "the measurement at node {} does not live on the solver grid",
           node));
+    }
+  }
+}
+
+/// Refuses a measurement of the tangential displacement's potential,
+/// where a sweep does not carry it.
+inline void RefuseTangential(
+    const std::map<std::size_t, Measurement>& measurements, const char* sweep) {
+  for (const auto& [node, m] : measurements) {
+    if (!m.tangentialPotentialDual.empty()) {
+      throw std::invalid_argument(std::format(
+          "a measurement of the tangential displacement (node {}) is not "
+          "taken by {}: use a discrete sweep",
+          node, sweep));
     }
   }
 }

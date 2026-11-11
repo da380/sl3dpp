@@ -316,6 +316,73 @@ TEST(TangentLinear3D, LinearInTheLoadsWithLateralStructure) {
   }
 }
 
+TEST(TangentLinear3D, ATideAndTheTangentialDisplacementAreCarried) {
+  // The coupled run is linear in its load and its prescribed tide, so
+  // the tangent-linear run along a perturbation of the two is the run
+  // under that perturbation as its forcing, in every field (the
+  // tangential displacement's potential among them), with an ocean and
+  // without one, under lateral viscosity.
+  auto scene = Scene::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  std::mt19937 rng(19);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto potential =
+      1.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
+  auto deltas = std::vector<std::vector<double>>{};
+  auto tides = std::vector<std::vector<std::complex<double>>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
+    tides.push_back(grid.Expand(scene.Smooth(rng, potential)));
+    tides.back()[SurfaceGrid::Index(0, 0)] = 0.0;
+  }
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto dry = scene.solver.NoOceanState();
+  const auto& wet = scene.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto label = background == &dry ? "no ocean" : "ocean";
+    Evolution3D evolution(op, scene.solver, *background,
+                          {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto forced = evolution.Run(
+        times, Evolution3D::Forcing{
+                   .directLoad = [&](double t) { return deltas[nodeOf(t)]; },
+                   .tide = [&](double t) { return tides[nodeOf(t)]; }});
+    TangentPerturbation3D d;
+    d.directLoad = deltas;
+    d.tide = tides;
+    const auto run =
+        TangentLinearSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12})
+            .Run(times, d);
+    ASSERT_EQ(run.size(), forced.size());
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_TRUE(run[n].converged);
+      EXPECT_LT(MaxDiff(run[n].relativeSeaLevelChange,
+                        forced[n].relativeSeaLevelChange),
+                1e-8 * MaxAbs(forced[n].relativeSeaLevelChange))
+          << "node " << n << ", " << label;
+      EXPECT_LT(MaxDiff(run[n].displacement, forced[n].displacement),
+                1e-8 * MaxAbs(forced[n].displacement))
+          << "node " << n << ", " << label;
+      EXPECT_LT(MaxDiff(run[n].potential, forced[n].potential),
+                1e-8 * MaxAbs(forced[n].potential))
+          << "node " << n << ", " << label;
+      EXPECT_GT(MaxAbs(forced[n].tangentialPotential), 0.0);
+      EXPECT_LT(
+          MaxDiff(run[n].tangentialPotential, forced[n].tangentialPotential),
+          1e-8 * MaxAbs(forced[n].tangentialPotential))
+          << "node " << n << ", " << label;
+    }
+  }
+}
+
 TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
   // Along a log-viscosity direction p with lateral structure on, the
   // discrete run is the exact derivative of the coupled forward: central

@@ -316,6 +316,7 @@ Kernels AdjointSolver::DiscreteSweep(
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
+      duals.tangentialPotentialDual = m.tangentialPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
@@ -323,6 +324,37 @@ Kernels AdjointSolver::DiscreteSweep(
   };
 
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
+  // The tide kernels: a node's prescribed tide enters its sea level solve
+  // and, beside the centrifugal potential, the radial steps' tide channel.
+  auto tideKernels = std::vector<std::vector<Complex>>(times.size());
+  auto tideKernelOf = [&](const GRDSolver::AdjointResponse& adj,
+                          const std::vector<Complex>& psiDual) {
+    auto kernel = adj.tideDual;
+    for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
+    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    return kernel;
+  };
+  // The dual of a step's memory surface values, on the surface rows of
+  // the transposed solve.
+  auto addSurfaceDuals = [&](const ViscoelasticOperator::Degree& deg, int l,
+                             int ncols, const GRDSolver::AdjointResponse& adj,
+                             std::vector<double>& rhs) {
+    const auto suCols =
+        ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
+    const auto sphiCols =
+        ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
+    const auto svCols =
+        ColumnDualsOf(adj.tangentialResponseDual, l, ev.toNdLength_);
+    const auto su = deg.system.SurfaceDof(Component::U);
+    const auto sphi = deg.system.SurfaceDof(Component::Phi);
+    const auto sv = deg.system.SurfaceDof(Component::V);
+    for (auto c = 0; c < ncols; ++c) {
+      const auto at = static_cast<std::size_t>(c) * deg.ndof;
+      if (su >= 0) rhs[at + su] += suCols[c];
+      if (sphi >= 0) rhs[at + sphi] += sphiCols[c];
+      if (sv >= 0) rhs[at + sv] += svCols[c];
+    }
+  };
 
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
@@ -414,6 +446,7 @@ Kernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       directLoadKernels[n][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
+    tideKernels[n] = tideKernelOf(adj, psiDual);
 
     // The forward states this step's itau sensitivity pairs with.
     const ViscoelasticState* fwdPrev = nullptr;
@@ -464,19 +497,7 @@ Kernels AdjointSolver::DiscreteSweep(
       const auto ncols = 2 * (l + 1);
       const auto block = deg.NodalSize(ncols);
       auto rhs = std::move(xd[l]);
-      const auto suCols =
-          ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
-      const auto sphiCols =
-          ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
-      const auto su = deg.system.SurfaceDof(Component::U);
-      const auto sphi = deg.system.SurfaceDof(Component::Phi);
-      for (auto c = 0; c < ncols; ++c) {
-        if (su >= 0)
-          rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
-        if (sphi >= 0) {
-          rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
-        }
-      }
+      addSurfaceDuals(deg, l, ncols, adj, rhs);
       if (l == 0) {
         const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
         for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
@@ -624,6 +645,7 @@ Kernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       directLoadKernels[0][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
+    tideKernels[0] = tideKernelOf(adj, psiDual);
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
       // the start duals and the start's response duals, paired with the
@@ -633,18 +655,7 @@ Kernels AdjointSolver::DiscreteSweep(
         const auto& deg = op.Deg(l);
         const auto ncols = 2 * (l + 1);
         auto rhs = deg.DualFromScalars(ddual[l], ncols);
-        const auto suCols =
-            ColumnDualsOf(adj.displacementResponseDual, l, ev.toNdLength_);
-        const auto sphiCols =
-            ColumnDualsOf(adj.potentialResponseDual, l, ev.toNdPotential_);
-        const auto su = deg.system.SurfaceDof(Component::U);
-        const auto sphi = deg.system.SurfaceDof(Component::Phi);
-        for (auto c = 0; c < ncols; ++c) {
-          if (su >= 0) rhs[static_cast<std::size_t>(c) * deg.ndof + su] += suCols[c];
-          if (sphi >= 0) {
-            rhs[static_cast<std::size_t>(c) * deg.ndof + sphi] += sphiCols[c];
-          }
-        }
+        addSurfaceDuals(deg, l, ncols, adj, rhs);
         if (l == 0) {
           const double jd = adj.inertiaMomentDual * ev.toNdMoment_;
           for (auto d = 0; d < deg.ndof; ++d) rhs[d] += deg.momentRow[d] * jd;
@@ -671,6 +682,7 @@ Kernels AdjointSolver::DiscreteSweep(
     duals.seaLevelDual = m.seaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
+    duals.tangentialPotentialDual = m.tangentialPotentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
     const auto adj = solverFor(0.0).SolveAdjoint(ev.state_, duals, sleOptions);
     if (!adj.converged) {
@@ -696,6 +708,7 @@ Kernels AdjointSolver::DiscreteSweep(
 
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
+  out.tideKernels = std::move(tideKernels);
   // the kernels as densities per unit volume: the weights divided out
   {
     const auto& mesh = op.BaseMaterial().Mesh();
@@ -743,6 +756,7 @@ Kernels AdjointSolver::ContinuousSweep(
   const auto fieldSize = grid.FieldSize();
   const auto K = op.GetRheology().BranchCount();
   const auto N = times.size() - 1;
+  detail::RefuseTangential(measurements, "the continuous sweep");
 
   GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;

@@ -1614,3 +1614,53 @@ the one process on the same cuts, all at 1e-11.
 (TestDistributed), on 2, 3 and 4 ranks.
 Not distributed: the static Born perturbation (`ElasticPerturbation3D`),
 a small static problem run at benchmark size on one process.
+
+## 18. The tide and the tangential displacement
+
+**The forcing.** A frozen run is driven by a direct load f_n and a
+prescribed tidal potential psi_n at each node (`Evolution::Forcing`),
+with an ocean or without one (a state whose ocean function vanishes).
+The run is linear in both, so the tangent-linear run along (delta f,
+delta psi) is the run under them as its forcing
+(`TangentPerturbation::tide`, `TangentPerturbation3D::tide`). The tide
+enters a node twice: the sea level solve, where the body answers it
+through the tidal Love numbers and the potential itself moves the
+equipotentials, and the radial steps, whose tide channel carries
+psi_n beside the centrifugal potential of the rotation.
+
+**The tide kernels.** The discrete sweeps transpose both entries:
+with tau_n the sea level adjoint's tide dual at node n and
+psi-dagger_n the dual of the node's step channel (the dual the
+centrifugal exit already reads),
+
+    tideKernels[n] = tau_n + psi-dagger_n,
+    delta J = sum_n <tideKernels[n], delta psi_n>,
+
+in the L2 coefficient pairing of real fields. Without rotational
+feedback psi-dagger_n still carries the steps' dependence on the tide;
+the feedback adds nothing of its own, the centrifugal potential being
+a function of the response. The kernels in the Earth's parameters need
+no change: the recorded trajectory holds the potential the steps saw,
+the tide included.
+
+**The tangential displacement.** The sea level solve returns the
+potential V of the tangential displacement, u_t = grad_1 V:
+
+    V = l (sigma) + l_u (z_u) + l_phi (z_phi) + l_t (psi + psi_c) + V_r,
+
+sigma the converged total load, z_u and z_phi the split load channels,
+psi_c the centrifugal potential and V_r a ready response (a step's
+memory, and in 3D its lateral part, read at the surface as U's and
+Phi's are). V feeds nothing back, so its dual lambda_V leaves the fixed
+point untouched: it joins the dual load by l, the centrifugal dual by
+l_t at degree 2, the tide dual by l_t, and is itself the dual of V_r,
+which the sweeps place on the surface row of V in the transposed solve
+as they do U's and Phi's. A measurement of V is
+`Measurement::tangentialPotentialDual`; one of the tangential
+displacement itself, int w . grad_1 V dS, has the dual -div_1 w.
+
+**What takes them.** The tangent-linear runs, 1D and 3D, take the tide
+and return V. The discrete sweeps, 1D and 3D, first and second order,
+take the tangential dual, and the first-order ones form the tide
+kernels. The continuous sweeps refuse the tangential dual and form no
+tide kernels.

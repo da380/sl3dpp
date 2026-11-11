@@ -13,6 +13,7 @@
 #include <string>
 
 #include <cmath>
+#include <complex>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -178,6 +179,10 @@ double Objective(const Scene& scene,
     if (!m.potentialDual.empty()) {
       total += scene.Surface(m.potentialDual, snap.potential);
     }
+    if (!m.tangentialPotentialDual.empty()) {
+      total +=
+          scene.Surface(m.tangentialPotentialDual, snap.tangentialPotential);
+    }
     for (auto j = 0; j < 3; ++j) {
       total += m.angularVelocityDual[j] * snap.angularVelocity[j];
     }
@@ -284,6 +289,112 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
         adjoint.FirstOrderKernels(times, measurements, &sparseTrajectory);
     EXPECT_NEAR(GridPairing(op.Coupling(), again.itauKernel3D, ditau), itauRhs,
                 1e-9 * std::abs(itauRhs));
+  }
+}
+
+TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
+  // Under a load and a prescribed tide, with the tangential
+  // displacement's potential measured, under lateral viscosity: the
+  // discrete sweep is the transpose of the discrete tangent-linear run
+  // in the load, the tide and the viscosity, with an ocean and without
+  // one; the continuous sweep refuses the tangential dual.
+  auto scene = Scene::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  std::mt19937 rng(29);
+  using Complex = std::complex<double>;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto potential =
+      1.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
+  auto smoothTide = [&](double amplitude) {
+    auto out = grid.Expand(scene.Smooth(rng, amplitude * potential));
+    out[SurfaceGrid::Index(0, 0)] = 0.0;
+    return out;
+  };
+  auto loads = std::vector<std::vector<double>>{};
+  auto deltas = std::vector<std::vector<double>>{};
+  auto tides = std::vector<std::vector<Complex>>{};
+  auto tideDeltas = std::vector<std::vector<Complex>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    loads.push_back(scene.Smooth(rng, 100.0 * scene.Sigma()));
+    deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
+    tides.push_back(smoothTide(1.0));
+    tideDeltas.push_back(smoothTide(0.1));
+  }
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].tangentialPotentialDual = scene.Smooth(rng, 0.3);
+  measurements[2].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
+  measurements[3].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[3].potentialDual = scene.Smooth(rng, 0.4);
+  measurements[3].tangentialPotentialDual = scene.Smooth(rng, 0.6);
+  measurements[3].angularVelocityDual = {0.2, -0.4, 0.8};
+  auto direction = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+
+  const auto dry = scene.solver.NoOceanState();
+  const auto& wet = scene.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto label = background == &dry ? "no ocean" : "ocean";
+    Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+      return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+    });
+    Evolution3D evolution(
+        op, scene.solver, *background,
+        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(evolution.Run(
+        times, Evolution3D::Forcing{
+                   .directLoad = [&](double t) { return loads[nodeOf(t)]; },
+                   .tide = [&](double t) { return tides[nodeOf(t)]; }}));
+    AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12});
+    const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
+    ASSERT_EQ(kernels.ice.tideKernels.size(), times.size());
+    TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = 1e-12});
+    auto loadRhs = 0.0, tideRhs = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      loadRhs += scene.Surface(kernels.ice.directLoadKernels[n], deltas[n]);
+      tideRhs += pair(kernels.ice.tideKernels[n], tideDeltas[n]);
+    }
+    TangentPerturbation3D loadOnly, tideOnly, viscosityOnly;
+    loadOnly.directLoad = deltas;
+    tideOnly.tide = tideDeltas;
+    viscosityOnly.logViscosity = OnCoupling(op.Coupling(), direction);
+    const auto alongLoad = Objective(scene, tangent.Run(times, loadOnly), measurements);
+    const auto alongTide = Objective(scene, tangent.Run(times, tideOnly), measurements);
+    EXPECT_NE(alongTide, 0.0);
+    EXPECT_NEAR(alongLoad, loadRhs, 1e-8 * std::abs(alongLoad)) << label;
+    EXPECT_NEAR(alongTide, tideRhs, 1e-8 * std::abs(alongTide)) << label;
+    const auto ditau =
+        TangentLinearSolver3D::ItauOfLogViscosity(op, viscosityOnly.logViscosity);
+    const auto alongViscosity = Objective(
+        scene, tangent.Run(times, viscosityOnly, &trajectory), measurements);
+    const auto viscosityRhs =
+        GridPairing(op.Coupling(), kernels.itauKernel3D, ditau);
+    EXPECT_NE(alongViscosity, 0.0);
+    EXPECT_NEAR(alongViscosity, viscosityRhs, 1e-8 * std::abs(alongViscosity))
+        << label;
+
+    AdjointSolver3D continuous(evolution, {.method = AdjointMethod::Continuous});
+    EXPECT_THROW((void)continuous.FirstOrderKernels(times, measurements),
+                 std::invalid_argument);
   }
 }
 

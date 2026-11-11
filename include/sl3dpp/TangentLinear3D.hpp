@@ -56,6 +56,9 @@ namespace sl3dpp {
 /// direction is MaterialDirection3D (Adjoint3D.hpp).
 struct TangentPerturbation3D {
   std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
+  /// Per node, a perturbation of the prescribed tidal potential of a
+  /// frozen run, its coefficients on the surface (no degree-0 part).
+  std::vector<std::vector<std::complex<double>>> tide;
   std::vector<std::vector<double>> iceThickness;  ///< per node
   std::vector<double> initialSeaLevel;            ///< migrating runs
   /// Per branch over the grid values, material units.
@@ -68,7 +71,7 @@ struct TangentPerturbation3D {
   MaterialDirection3D material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && iceThickness.empty() &&
+    return directLoad.empty() && tide.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && logViscosity.empty() &&
            material.Empty();
   }
@@ -163,6 +166,8 @@ class TangentLinearSolver3D {
 
  private:
   using Direct = std::function<std::vector<double>(std::size_t node)>;
+  using Tide =
+      std::function<std::vector<std::complex<double>>(std::size_t node)>;
   using Drive = std::function<std::vector<GridCoupling::TensorField>(
       std::size_t node, double dt)>;
 
@@ -178,7 +183,7 @@ class TangentLinearSolver3D {
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
-      const MaterialForcing3D* material) const;
+      const MaterialForcing3D* material, const Tide& tideAt = {}) const;
   /// A material drive after the checks (the fields on the grid values).
   [[nodiscard]] std::shared_ptr<MaterialDrive3D> MakeMaterialDrive3D(
       const MaterialDirection3D& direction,

@@ -33,6 +33,7 @@
  */
 
 #include <array>
+#include <complex>
 #include <functional>
 #include <map>
 #include <optional>
@@ -73,12 +74,17 @@ struct ForwardTrajectory {
     std::span<const Evolution::Snapshot> snapshots);
 
 /// The duals of one observation node's outputs: the gains of
-///   J += int g_xi xi dS + int g_u u dS + int g_phi phi dS + g_omega . omega
-/// at that node. Empty vectors are absent duals.
+///   J += int g_xi xi dS + int g_u u dS + int g_phi phi dS + int g_v V dS
+///      + g_omega . omega
+/// at that node, V the potential of the tangential displacement (a
+/// measurement of the tangential displacement itself, int w . grad_1 V dS,
+/// has g_v = -div_1 w). Empty vectors are absent duals. The tangential
+/// dual is taken by the discrete sweeps; the continuous ones refuse it.
 struct Measurement {
   std::vector<double> seaLevelDual;
   std::vector<double> displacementDual;
   std::vector<double> potentialDual;
+  std::vector<double> tangentialPotentialDual;
   std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
 };
 
@@ -117,6 +123,14 @@ struct Measurement {
 struct Kernels {
   std::vector<double> times;
   std::vector<std::vector<double>> directLoadKernels;
+  /// The TIDE kernels, the discrete view alone: `tideKernels[n]` is the
+  /// dual of a prescribed tidal potential's coefficients at time node n,
+  /// delta J = sum_n <tideKernels[n], delta psi_n> in the L2 coefficient
+  /// pairing of real fields (the surface integral of the two synthesised
+  /// fields over the solver's sphere, divided by its radius squared);
+  /// the degree-0 entry is zero. Formed by the discrete sweeps; empty
+  /// otherwise.
+  std::vector<std::vector<std::complex<double>>> tideKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> baseline;
   std::vector<double> initialSeaLevel;

@@ -117,6 +117,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     agree(adj.directLoadDual);
     agree(adj.displacementResponseDual);
     agree(adj.potentialResponseDual);
+    agree(adj.tangentialResponseDual);
+    agree(adj.tideDual);
     auto scalars = std::array{adj.inertiaMomentDual, adj.converged ? 0.0 : 1.0};
     collectives.max(std::span(&scalars[1], 1));
     collectives.share(std::span(&scalars[0], 1));
@@ -342,6 +344,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
+      duals.tangentialPotentialDual = m.tangentialPotentialDual;
       for (auto j = 0; j < 3; ++j) gOmega[j] += m.angularVelocityDual[j];
     }
     duals.angularVelocityDual = gOmega;
@@ -363,10 +366,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           const auto su = system.SurfaceDof(Component::U);
           const auto sphi = system.SurfaceDof(Component::Phi);
           // the rows join the shares on the rank holding them
+          const auto sv = system.SurfaceDof(Component::V);
           const bool holdU = su >= 0 && system.Holds(su);
           const bool holdPhi = sphi >= 0 && system.Holds(sphi);
+          const bool holdV = sv >= 0 && system.Holds(sv);
           for (auto m = 0; m <= l; ++m) {
             const auto i = SurfaceGrid::Index(l, m);
+            if (holdV) {
+              bl[static_cast<std::size_t>(m) * ndof + sv] +=
+                  ev.toNdLength_ * adj.tangentialResponseDual[i];
+            }
             if (holdU) {
               bl[static_cast<std::size_t>(m) * ndof + su] +=
                   ev.toNdLength_ * adj.displacementResponseDual[i];
@@ -426,6 +435,17 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     itauKernel.assign(K, std::vector<double>(values, 0.0));
   }
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
+  // The tide kernels, as the 1D discrete sweep forms them: a node's
+  // prescribed tide enters its sea level solve and, beside the
+  // centrifugal potential, the steps' tide channel.
+  auto tideKernels = std::vector<std::vector<Complex>>(times.size());
+  auto tideKernelOf = [&](const GRDSolver::AdjointResponse& adj,
+                          const std::vector<Complex>& psiDual) {
+    auto kernel = adj.tideDual;
+    for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
+    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    return kernel;
+  };
   const auto zeroState = op.ZeroState();
   // The derivative dual state along v (the second-order sweep): the
   // derivatives of m-dagger and d-dagger, of the itau pairing, and of the
@@ -740,6 +760,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       std::vector<double> synth;
       Tensor e;
       Viscoelastic3D::Solutions xdag;
+      std::vector<Complex> psiDual;  // the pass's centrifugal dual
     };
     auto passWith = [&](const Tensor& src, bool measured, Last& out,
                         const Forces* extraSph = nullptr,
@@ -777,7 +798,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         });
         out = {std::move(adj), std::move(synth), std::move(e),
                material || hasMaterialV ? std::move(xdag)
-                                        : Viscoelastic3D::Solutions{}};
+                                        : Viscoelastic3D::Solutions{},
+               psiDual};
         return coupling.Analyse(y);
       };
     };
@@ -926,7 +948,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         if (change <= control.rtol && solveInfo.converged) {
           out = {std::move(adj), std::move(synth), exit(solved, sph, tor),
                  material || hasMaterialV ? std::move(solved)
-                                          : Viscoelastic3D::Solutions{}};
+                                          : Viscoelastic3D::Solutions{},
+                 psiDual};
           return true;
         }
         auto image = std::move(solved);
@@ -965,6 +988,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
     }
     directLoadKernels[n] = loadDualOf(last.adj, last.synth);
+    tideKernels[n] = tideKernelOf(last.adj, last.psiDual);
     // The effective modulus's factor 1 - sum_k f_k beta_k(x) at the grid
     // values (the material pairings' and v's effective shear weight's).
     auto factor = std::vector<double>{};
@@ -1237,6 +1261,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           "the adjoint elastic sea level solve did not converge");
     }
     directLoadKernels[0] = loadDualOf(adj, synth);
+    tideKernels[0] = tideKernelOf(adj, psiDual);
     // The first start dual's solution, where the material needs it.
     auto y0 = Viscoelastic3D::Solutions{};
     auto e0 = Tensor{};
@@ -1308,6 +1333,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     duals.seaLevelDual = m.seaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
+    duals.tangentialPotentialDual = m.tangentialPotentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
     auto adj =
         solverFor(op.ElasticLove()).SolveAdjoint(ev.state_, duals, sleOptions);
@@ -1332,6 +1358,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
       std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
+  out.ice.tideKernels = std::move(tideKernels);
   if (trajectory != nullptr) {
     out.itauKernel3D = std::move(itauKernel);
     out.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));

@@ -12,6 +12,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
+#include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -128,6 +129,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau,
     const MaterialDirection3D* materialV) const {
+  detail::RefuseTangential(measurements, "the continuous sweep");
   const bool second = ditau != nullptr;
   const bool material = options_.material_kernels;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();

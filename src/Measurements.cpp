@@ -282,6 +282,9 @@ Measurement FieldMeasurement(FieldChannel channel, std::vector<double> dual) {
     case FieldChannel::Potential:
       out.potentialDual = std::move(dual);
       break;
+    case FieldChannel::TangentialPotential:
+      out.tangentialPotentialDual = std::move(dual);
+      break;
   }
   return out;
 }
