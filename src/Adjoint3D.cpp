@@ -180,7 +180,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           std::format("measurement node {} is off the time grid", node));
     }
     for (const auto* f :
-         {&m.seaLevelDual, &m.displacementDual, &m.potentialDual}) {
+         {&m.relativeSeaLevelDual, &m.displacementDual, &m.potentialDual}) {
       if (!f->empty() && f->size() != fieldSize) {
         throw std::invalid_argument(std::format(
             "the measurement at node {} does not live on the solver grid",
@@ -315,7 +315,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     GRDSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(node);
-    if (!m.seaLevelDual.empty()) f.directLoad = m.seaLevelDual;
+    if (!m.relativeSeaLevelDual.empty()) f.directLoad = m.relativeSeaLevelDual;
     std::vector<double> zetaU, zetaPhi;
     if (!m.displacementDual.empty()) {
       zetaU.resize(fieldSize);
@@ -358,7 +358,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
+      lamGrid[i] = (m.relativeSeaLevelDual.empty() ? 0.0 : m.relativeSeaLevelDual[i]) +
                    rhoW * Cn[i] * out.xiA[i];
     }
     out.lam = grid.Expand(lamGrid);
@@ -412,8 +412,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   auto momentKernels = std::vector<std::vector<SphericalTensor>>(
       moments ? times.size() : 0,
       std::vector<SphericalTensor>(options_.moment_points.size()));
+  // their derivatives along v, in the second-order sweep: the same
+  // strain of the derivative displacement
+  auto dMomentKernels = std::vector<std::vector<SphericalTensor>>(
+      moments && second ? times.size() : 0,
+      std::vector<SphericalTensor>(options_.moment_points.size()));
   auto addMoments = [&](const Viscoelastic3D::Solutions& lambda,
-                        std::size_t node, double weight) {
+                        std::size_t node, double weight,
+                        bool derivative = false) {
     const auto fields = DegreeFields{.spheroidal = lambda.spheroidal,
                                      .toroidal = lambda.toroidal};
     const auto& base = op.GetRheology().BaseMaterial();
@@ -428,7 +434,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           [&](int l) -> const DegreeOperator& { return op.UnrelaxedSpheroidal(l); },
           [&](int l) -> const ToroidalOperator& { return op.UnrelaxedToroidal(l); },
           fields, point);
-      auto& to = momentKernels[node][p];
+      auto& to = (derivative ? dMomentKernels : momentKernels)[node][p];
       to.rr += scale * e.rr;
       to.tt += scale * e.tt;
       to.pp += scale * e.pp;
@@ -1055,7 +1061,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto lambda = fullOf(vs);
     if (moments) addMoments(lambda, node, pairing * weight);
     if (tidal) addTide(lambda, vs.sigma, node, weight, pairing);
-    if (!material) return;
+    if (!material && !(moments && second)) return;
     const auto e = strainOf(lambda);
     if (!second) {
       pairMaterial(lambda, e, node, pairing * weight);
@@ -1065,6 +1071,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (hasMaterialV) {
       addSolutions(dlambda, unrelaxedResponseV(e, lambda, &vs.state.m));
     }
+    if (moments) addMoments(dlambda, node, pairing * weight, true);
+    if (!material) return;
     const auto de = strainOf(dlambda);
     pairBoth(lambda, e, &dlambda, &de, node, pairing * weight);
   };
@@ -1312,7 +1320,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     GRDSolver::GeneralisedForcing base;
     base.rotation = rotation;
     base.oceanFunctionOverride = overrideAt(node);
-    if (!m.seaLevelDual.empty()) base.directLoad = m.seaLevelDual;
+    if (!m.relativeSeaLevelDual.empty()) base.directLoad = m.relativeSeaLevelDual;
     if (rotation != RotationalFeedback::None) {
       auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
       for (auto j = 0; j < 3; ++j) avc[j] = -g * m.angularVelocityDual[j];
@@ -1385,7 +1393,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       const auto& Cn = oceanAt(node);
       auto lamGrid = std::vector<double>(fieldSize);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-        lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
+        lamGrid[i] = (m.relativeSeaLevelDual.empty() ? 0.0 : m.relativeSeaLevelDual[i]) +
                      rhoW * Cn[i] * inst.response.relativeSeaLevelChange[i];
       }
       lumpLoad = grid.Expand(lamGrid);
@@ -1433,6 +1441,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       pairBoth(lumpSolutions, lumpStrain, &dxJ, &deJ, node, pairing);
     }
     if (moments) addMoments(lumpSolutions, node, pairing);
+    // the jump solution moves with the moduli alone
+    if (moments && hasMaterialV) addMoments(dxJ, node, pairing, true);
     if (tidal) addTide(lumpSolutions, lumpLoad, node, 1.0, pairing);
     // The equilibria under lateral moduli are zero-length reversed steps
     // (their fixed points close the instantaneous lateral response; the
@@ -1526,7 +1536,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         const double earlyV = earlyP == nullptr ? 0.0 : (*earlyP)[i] * perTime;
         const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
         duals[n][i] = smooth + (lump == lumpsOf.end() ? 0.0 : lump->second[i]);
-        density[n][i] = smooth / totalW;
+        density[n][i] = totalW > 0.0 ? smooth / totalW : 0.0;
       }
     }
   };
@@ -1573,6 +1583,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
+    derivatives.ice.momentKernels = std::move(dMomentKernels);
     derivatives.itauKernel3D = std::move(dItauKernel);
     derivatives.itauKernelSpherical = spherical(derivatives.itauKernel3D);
     // d/dv of -itau K: -(delta itau K + itau dK).

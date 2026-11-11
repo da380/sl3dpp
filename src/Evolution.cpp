@@ -73,8 +73,8 @@ std::vector<std::complex<double>> Evolution::Coefficients(
 namespace {
 
 void CheckTimes(std::span<const double> times) {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
@@ -116,13 +116,15 @@ std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const Forcing& forcing) {
   Restore(from, times);
-  if (forcing.sources || forcing.stressGluts) {
+  if ((forcing.sources || forcing.stressGluts) &&
+      (!from.toroidal.has_value() || from.strain.empty())) {
     throw std::invalid_argument(
-        "a run under interior sources is not resumed from a checkpoint, "
-        "which does not hold the toroidal state");
+        "a run under interior sources is resumed from a checkpoint of "
+        "such a run, which holds the strain and the toroidal state");
   }
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               nullptr, forcing.tide ? &forcing.tide : nullptr, true);
+               nullptr, forcing.tide ? &forcing.tide : nullptr, true,
+               &forcing);
 }
 
 std::vector<Evolution::Snapshot> Evolution::RunMigrating(
@@ -145,6 +147,7 @@ void Evolution::Restore(const Checkpoint& from,
   vstate_.strain = from.strain;
   sigma_ = from.loadCoefficients;
   psi_ = from.tideCoefficients;
+  restoredToroidal_ = from.toroidal;
 }
 
 std::vector<Evolution::Snapshot> Evolution::Resume(
@@ -235,18 +238,22 @@ std::vector<Evolution::Snapshot> Evolution::March(
     return found->second;
   };
 
+  // the toroidal state a checkpoint carries, under interior sources
+  const ToroidalViscoelastic::State* twisted = nullptr;
   auto checkpoint = [&](std::size_t node) {
     const auto every = options_.checkpoint_stride;
     if (every <= 0 || !options_.on_checkpoint) return;
     if (node % static_cast<std::size_t>(every) != 0 && node != lastNode) {
       return;
     }
-    options_.on_checkpoint(
-        node, Checkpoint{.t = times[node],
-                         .m = vstate_.m,
-                         .strain = vstate_.strain,
-                         .loadCoefficients = sigma_,
-                         .tideCoefficients = psi_});
+    auto out = Checkpoint{.t = times[node],
+                          .m = vstate_.m,
+                          .strain = vstate_.strain,
+                          .loadCoefficients = sigma_,
+                          .tideCoefficients = psi_,
+                          .toroidal = std::nullopt};
+    if (twisted != nullptr) out.toroidal = *twisted;
+    options_.on_checkpoint(node, out);
   };
 
   // The direct load at a node (none given: none), and the potential the
@@ -288,8 +295,13 @@ std::vector<Evolution::Snapshot> Evolution::March(
   }
   if (sourced) {
     toroidal.emplace(op);
-    tstate = toroidal->ZeroState();
-    tstate.t = times[0] * toMatTime_;
+    if (resumed) {
+      tstate = restoredToroidal_.value();
+    } else {
+      tstate = toroidal->ZeroState();
+      tstate.t = times[0] * toMatTime_;
+    }
+    twisted = &tstate;
   }
   auto sourceForcesAt = [&](double t) {
     return detail::ForcesOfSources(

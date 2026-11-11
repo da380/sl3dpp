@@ -181,7 +181,7 @@ metadata. For example:
   "model": {"deck": "earth.deck"},
   "lmax": 256,
   "forcing": {
-    "state": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
+    "sea_level": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
     "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
             "width_deg": 16, "fraction": -0.1}
   },

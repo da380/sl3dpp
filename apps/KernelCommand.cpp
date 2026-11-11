@@ -47,8 +47,8 @@ MeasurementSpec ReadSpec(const Json& item, std::size_t index) {
   auto out = MeasurementSpec{};
   out.type = Choice<Type>(
       item.At("type"),
-      {{"sea_level_cap", Type::SeaLevelCap},
-       {"sea_level_point", Type::SeaLevelPoint},
+      {{"relative_sea_level_cap", Type::RelativeSeaLevelCap},
+       {"relative_sea_level_point", Type::RelativeSeaLevelPoint},
        {"displacement_cap", Type::DisplacementCap},
        {"displacement_point", Type::DisplacementPoint},
        {"potential_cap", Type::PotentialCap},
@@ -58,23 +58,23 @@ MeasurementSpec ReadSpec(const Json& item, std::size_t index) {
        {"decay_time", Type::DecayTime}});
   out.name = String(item, "name", std::format("measurement_{}", index));
   switch (out.type) {
-    case Type::SeaLevelCap:
+    case Type::RelativeSeaLevelCap:
     case Type::DisplacementCap:
     case Type::PotentialCap:
       Allow(item, {"type", "name", "latitude", "longitude", "width_deg",
                    "date_kyr_bp"});
-      out.site = {Number(item, "latitude"), Number(item, "longitude")};
+      out.site = ReadSite(item);
       out.width = Number(item, "width_deg") * std::numbers::pi / 180.0;
       if (!(out.width > 0.0)) {
         Fail(item.At("width_deg"), "is not a positive angle");
       }
       out.date_kyr_bp = Number(item, "date_kyr_bp", 0.0);
       break;
-    case Type::SeaLevelPoint:
+    case Type::RelativeSeaLevelPoint:
     case Type::DisplacementPoint:
     case Type::PotentialPoint:
       Allow(item, {"type", "name", "latitude", "longitude", "date_kyr_bp"});
-      out.site = {Number(item, "latitude"), Number(item, "longitude")};
+      out.site = ReadSite(item);
       out.date_kyr_bp = Number(item, "date_kyr_bp", 0.0);
       break;
     case Type::StokesCoefficient:
@@ -95,7 +95,7 @@ MeasurementSpec ReadSpec(const Json& item, std::size_t index) {
       Allow(item, {"type", "name", "latitude", "longitude", "width_deg",
                    "window_start_kyr_bp", "window_end_kyr_bp",
                    "time_uncertainty_kyr", "value_uncertainty_m"});
-      out.site = {Number(item, "latitude"), Number(item, "longitude")};
+      out.site = ReadSite(item);
       out.width = Number(item, "width_deg") * std::numbers::pi / 180.0;
       if (!(out.width > 0.0)) {
         Fail(item.At("width_deg"), "is not a positive angle");
@@ -166,12 +166,12 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
     return s.potential;
   };
   switch (spec.type) {
-    case Type::SeaLevelCap:
-    case Type::SeaLevelPoint:
+    case Type::RelativeSeaLevelCap:
+    case Type::RelativeSeaLevelPoint:
       out.factor = scales.Length();
       out.objective = Dimensions{.length = 1};
       single(FieldChannel::SeaLevel,
-             spec.type == Type::SeaLevelCap
+             spec.type == Type::RelativeSeaLevelCap
                  ? CapMeanDual(grid, a, spec.site, spec.width)
                  : PointDual(grid, a, spec.site),
              sea);
@@ -242,7 +242,7 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
       // the weights are per metre of series: scale the duals so the
       // pairing's J is in kyr
       for (auto& [node, measurement] : out.measurements) {
-        for (auto& v : measurement.seaLevelDual) v *= length;
+        for (auto& v : measurement.relativeSeaLevelDual) v *= length;
       }
       out.value_nd = fit.decay_time;
       out.factor = KYR;

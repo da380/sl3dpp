@@ -1946,6 +1946,24 @@ toroidal systems are swept wherever the base run or v's twists, so the
 block of the sources against the parameters is formed about a
 load-driven run too.
 
-**What is not yet taken.** The 3D continuous second-order sweep forms
-no moment rows. The 3D moment and tide kernels of the continuous
-sweep, and the discrete moment kernels, are formed on one process.
+The 3D continuous second-order sweep forms its moment rows the same
+way.
+
+**The elastic problem.** A time grid of one node is the elastic problem:
+the evolution's run is its instantaneous solve, and the tangent-linear
+runs, both sweeps and the second-order sweeps take the one node, in 1D
+and in 3D with or without lateral moduli. Each reduces to its start
+term: the transposed unrelaxed solve (discrete) or the jump (continuous)
+— the two then agree to rounding, there being no step to commute —
+with the start's pairings for the kernels in the moduli and the source
+moments and their derivatives. The thickness kernel is the
+instantaneous one; the rate and density views, which divide by a node's
+interval, are zero. A rheology with no relaxing layer is taken alike.
+The static problems therefore have no sweeps of their own: load, tide
+and source kernels, kernels in kappa and mu about a laterally
+heterogeneous background, and the Hessian's action, are those of the
+evolution asked for one solve.
+
+**What is not yet taken.** The 3D moment and tide kernels of the
+continuous sweep, and the discrete moment kernels, are formed on one
+process. A migrating run takes no tide and no interior source.

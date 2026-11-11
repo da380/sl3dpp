@@ -170,8 +170,8 @@ double Objective(const Scene& scene,
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
-    if (!m.seaLevelDual.empty()) {
-      total += scene.Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
+    if (!m.relativeSeaLevelDual.empty()) {
+      total += scene.Surface(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += scene.Surface(m.displacementDual, snap.displacement);
@@ -226,9 +226,9 @@ TEST(DiscreteAdjoint3D, PairsWithTheTangentLinearRun) {
     deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = scene.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   middle.displacementDual = scene.Smooth(rng, -0.5);
   measurements[2] = std::move(middle);
   Measurement last;
@@ -339,7 +339,7 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
   };
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].tangentialPotentialDual = scene.Smooth(rng, 0.3);
-  measurements[2].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
   measurements[3].displacementDual = scene.Smooth(rng, 0.7);
   measurements[3].potentialDual = scene.Smooth(rng, 0.4);
@@ -462,7 +462,7 @@ TEST(DiscreteAdjoint3D, InteriorSourcesInThePair) {
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].displacementDual = scene.Smooth(rng, 0.3);
   measurements[0].toroidalPotentialDual = scene.Smooth(rng, 0.4);
-  measurements[2].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
   measurements[3].displacementDual = scene.Smooth(rng, 0.7);
   measurements[3].potentialDual = scene.Smooth(rng, 0.4);
@@ -551,7 +551,7 @@ TEST(DiscreteAdjoint3D, ViscosityAboutASourceDrivenRun) {
   const auto forcing =
       Evolution3D::Forcing{.sources = [&](double) { return sources; }};
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[2].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
   measurements[3].displacementDual = scene.Smooth(rng, 0.7);
   measurements[3].toroidalPotentialDual = scene.Smooth(rng, 0.6);
@@ -628,7 +628,7 @@ TEST(DiscreteAdjoint3D, ZeroLateralMatchesThe1DDiscreteSweep) {
   for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * scene.Kyr());
   const auto directLoad = Ramp(scene.MeltLoad(-0.1), times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[5].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[5].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[3].displacementDual = scene.Smooth(rng, -0.6);
   measurements[5].angularVelocityDual = {0.1, 0.3, -0.2};
 
@@ -693,7 +693,7 @@ TEST(DiscreteAdjoint3D, MachineGradeTaylorTest) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[4].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[4].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   auto evaluate = [&](double h, Kernels3D* kernelsOut) {
     Viscoelastic3D op(scene.rheology, kLmax,
@@ -765,7 +765,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderRefinement) {
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, Ramp(load, span)));
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[times.size() - 1].seaLevelDual = g;
+    measurements[times.size() - 1].relativeSeaLevelDual = g;
     auto results = std::map<AdjointMethod, std::pair<double, double>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels =
@@ -833,9 +833,9 @@ TEST(DiscreteAdjoint3D, MaterialKernelsPairWithTheTangent) {
   const auto load = scene.MeltLoad(-0.1);
   const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = scene.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   middle.displacementDual = scene.Smooth(rng, -0.5);
   measurements[2] = std::move(middle);
   Measurement last;
@@ -961,7 +961,7 @@ TEST(DiscreteAdjoint3D, ContinuousMaterialKernelsAgreeAndConverge) {
     }
     const auto directLoad = Ramp(load, times.back());
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts / 2].seaLevelDual = gMid;
+    measurements[npts / 2].relativeSeaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                       {.memory_points = MemoryPointSet::Gauss});
@@ -1021,7 +1021,7 @@ TEST(DiscreteAdjoint3D, ZeroLateralMaterialKernelsMatchThe1D) {
   const auto load = scene.MeltLoad(-0.1);
   const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[2].displacementDual = scene.Smooth(rng, 0.5);
   const auto ngll = scene.material.Mesh().NGll();
 
@@ -1115,9 +1115,9 @@ void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver s
     deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = scene.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   middle.displacementDual = scene.Smooth(rng, -0.5);
   measurements[2] = std::move(middle);
   Measurement last;
@@ -1199,9 +1199,9 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
   const auto load = scene.MeltLoad(-0.1);
   const auto directLoad = Ramp(load, times.back());
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = scene.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   middle.displacementDual = scene.Smooth(rng, -0.5);
   measurements[2] = std::move(middle);
   Measurement last;
@@ -1617,7 +1617,7 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepFormsTideKernels) {
       auto times = std::vector<double>{};
       for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
       auto measurements = std::map<std::size_t, Measurement>{};
-      measurements[times.size() / 2].seaLevelDual = gSea;
+      measurements[times.size() / 2].relativeSeaLevelDual = gSea;
       measurements[times.size() - 1].displacementDual = gU;
       TangentPerturbation3D direction;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -1685,7 +1685,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, Ramp(load, span)));
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[times.size() - 1].seaLevelDual = g;
+    measurements[times.size() - 1].relativeSeaLevelDual = g;
     auto results = std::map<AdjointMethod, std::pair<double, double>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels =
@@ -1743,7 +1743,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
     }
     const auto directLoad = Ramp(load, times.back());
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts / 2].seaLevelDual = gMid;
+    measurements[npts / 2].relativeSeaLevelDual = gMid;
     measurements[npts - 1].displacementDual = gEnd;
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
                       {.solver = solver,
@@ -1845,7 +1845,7 @@ TEST(DiscreteAdjoint3D, DISABLED_ContinuousGapDiagnostic) {
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, Ramp(load, span)));
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[times.size() - 1].seaLevelDual = g;
+    measurements[times.size() - 1].relativeSeaLevelDual = g;
     auto results = std::map<AdjointMethod, std::pair<double, double>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels =
@@ -1988,5 +1988,100 @@ TEST(DiscreteAdjoint3D, RotatingStepsSolveTheLateralSystem) {
     // (degree 4 at about 1% of degree 2 under these 10% moduli)
     EXPECT_GT(size[4], 1e-3 * size[2]);
     EXPECT_GT(size[0], 1e-4 * size[2]);
+  }
+}
+
+TEST(DiscreteAdjoint3D, InteriorSourcesInThePairUnderLateralModuli) {
+  // The discrete sweep's moment kernels with lateral elastic moduli in
+  // the background beside the lateral viscosity: they pair with a
+  // perturbation of the moment tensors to the tangent-linear run's
+  // objective, which is the run's own under the perturbation; every
+  // field measured, both step solvers.
+  auto scene = Scene::Make(1e21);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(101);
+  std::normal_distribution<double> normal;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(0.5 * n * scene.Kyr());
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 800e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  auto perturbation = std::vector<std::vector<PointSource>>{};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    auto at = std::vector<PointSource>{};
+    for (const auto& point : points) {
+      at.push_back({.at = point,
+                    .moment = {.rr = unit * normal(rng),
+                               .tt = unit * normal(rng),
+                               .pp = unit * normal(rng),
+                               .rt = unit * normal(rng),
+                               .rp = unit * normal(rng),
+                               .tp = unit * normal(rng)}});
+    }
+    perturbation.push_back(std::move(at));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].displacementDual = scene.Smooth(rng, 0.3);
+  measurements[0].toroidalPotentialDual = scene.Smooth(rng, 0.4);
+  measurements[2].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[2].tangentialPotentialDual = scene.Smooth(rng, -0.5);
+  measurements[3].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[3].potentialDual = scene.Smooth(rng, 0.4);
+  measurements[3].toroidalPotentialDual = scene.Smooth(rng, 0.6);
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  using StepSolver = Viscoelastic3D::Options::StepSolver;
+  for (auto stepSolver : {StepSolver::FixedPoint, StepSolver::ConjugateGradients}) {
+    const auto label =
+        stepSolver == StepSolver::FixedPoint ? "fixed point" : "conjugate gradients";
+    Viscoelastic3D op(
+        scene.rheology, kLmax,
+        [](double, double theta, double phi) {
+          return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        },
+        {.solver = stepSolver, .solve_rtol = 1e-12, .moduli = TestModuli()});
+    ASSERT_TRUE(op.HasLateralModuli());
+    Evolution3D evolution(op, scene.solver, scene.state,
+                          {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto forward = Objective(
+        scene,
+        evolution.Run(times, Evolution3D::Forcing{.sources = [&](double t) {
+          return perturbation[nodeOf(t)];
+        }}),
+        measurements);
+    ASSERT_NE(forward, 0.0);
+    TangentPerturbation3D direction;
+    direction.sources = perturbation;
+    const auto along = Objective(
+        scene,
+        TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12})
+            .Run(times, direction),
+        measurements);
+    EXPECT_NEAR(along, forward, 1e-8 * std::abs(forward)) << label;
+    const auto kernels =
+        AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                    .rtol = 1e-12,
+                                    .coupled_rtol = 1e-12,
+                                    .moment_points = points})
+            .FirstOrderKernels(times, measurements);
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      for (auto p = std::size_t{0}; p < points.size(); ++p) {
+        paired +=
+            kernels.ice.momentKernels[n][p].Contract(perturbation[n][p].moment);
+      }
+    }
+    EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label << " " << paired
+                                                        << " " << along;
   }
 }

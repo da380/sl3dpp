@@ -111,9 +111,9 @@ struct OceanBlock {
   /// following flotation.
   Shorelines shorelines = Shorelines::Frozen;
   /// With `calibrate`, the initial sea level is calibrated so that the run
-  /// reaches the state file's sea level at the window's end, by the method
+  /// reaches the sea level file's sea level at the window's end, by the method
   /// and within the iterations and tolerance given (InitialSeaLevel.hpp),
-  /// instead of being read from the state file at the window's start.
+  /// instead of being read from the sea level file at the window's start.
   bool calibrate = false;
   CalibrationMethod calibration_method = CalibrationMethod::FixedPoint;
   int calibration_iterations = 10;

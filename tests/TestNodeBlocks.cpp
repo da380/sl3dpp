@@ -340,7 +340,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       solver.Grid().FromFunction([](double theta, double phi) {
         return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
       });

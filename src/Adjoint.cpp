@@ -85,8 +85,8 @@ Kernels AdjointSolver::FirstOrderKernels(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
@@ -311,9 +311,9 @@ Kernels AdjointSolver::DiscreteSweep(
     duals.oceanFunctionOverride = overrideAt(node);
     const auto& Cn = oceanAt(node);
     auto synth = grid.Synthesise(sigmaDual);
-    duals.seaLevelDual.assign(fieldSize, 0.0);
+    duals.relativeSeaLevelDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      duals.seaLevelDual[i] = rhoW * Cn[i] * synth[i] / r2;
+      duals.relativeSeaLevelDual[i] = rhoW * Cn[i] * synth[i] / r2;
     }
     auto gOmega = std::array<double, 3>{0.0, 0.0, 0.0};
     if (rotation != RotationalFeedback::None) {
@@ -321,8 +321,8 @@ Kernels AdjointSolver::DiscreteSweep(
     }
     if (auto found = measurements.find(node); found != measurements.end()) {
       const auto& m = found->second;
-      for (auto i = std::size_t{0}; i < m.seaLevelDual.size(); ++i) {
-        duals.seaLevelDual[i] += m.seaLevelDual[i];
+      for (auto i = std::size_t{0}; i < m.relativeSeaLevelDual.size(); ++i) {
+        duals.relativeSeaLevelDual[i] += m.relativeSeaLevelDual[i];
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
@@ -757,6 +757,19 @@ Kernels AdjointSolver::DiscreteSweep(
       (void)toroidal->StartTransposed(tdual, toroidalSurfaceDual(adj), &base,
                                       &muKernel);
     }
+    if (material && x0.empty()) {
+      // one node (the elastic problem): no step formed the base start
+      x0 = op.SolveElastic(cursor->State(0),
+                           ev.Columns(trajectory->loads[0], ev.toMatDensity_),
+                           ev.Columns(trajectory->tides[0], ev.toMatPotential_));
+      if (sourcedBase) {
+        for (const auto& [l, f] : trajectory->sourceForces[0].spheroidal) {
+          const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+          auto& to = x0.at(l);
+          for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+        }
+      }
+    }
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
       // the start duals and the start's response duals, paired with the
@@ -790,7 +803,7 @@ Kernels AdjointSolver::DiscreteSweep(
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
     duals.oceanFunctionOverride = overrideAt(node);
-    duals.seaLevelDual = m.seaLevelDual;
+    duals.relativeSeaLevelDual = m.relativeSeaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
     duals.tangentialPotentialDual = m.tangentialPotentialDual;
@@ -813,7 +826,8 @@ Kernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       const double lumped =
           lump == lumps.end() ? 0.0 : lump->second[i];
-      densityLoad[n][i] = (directLoadKernels[n][i] - lumped) / w[n];
+      densityLoad[n][i] =
+          w[n] > 0.0 ? (directLoadKernels[n][i] - lumped) / w[n] : 0.0;
     }
   }
 
@@ -944,7 +958,7 @@ Kernels AdjointSolver::ContinuousSweep(
     GRDSolver::GeneralisedForcing f;
     f.rotation = rotation;
     f.oceanFunctionOverride = overrideAt(node);
-    if (!m.seaLevelDual.empty()) f.directLoad = m.seaLevelDual;
+    if (!m.relativeSeaLevelDual.empty()) f.directLoad = m.relativeSeaLevelDual;
     std::vector<double> zetaU, zetaPhi;
     if (!m.displacementDual.empty()) {
       zetaU.resize(fieldSize);
@@ -986,7 +1000,7 @@ Kernels AdjointSolver::ContinuousSweep(
     const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      lamGrid[i] = (m.seaLevelDual.empty() ? 0.0 : m.seaLevelDual[i]) +
+      lamGrid[i] = (m.relativeSeaLevelDual.empty() ? 0.0 : m.relativeSeaLevelDual[i]) +
                    rhoW * Cn[i] * out.xiA[i];
     }
     out.lam = grid.Expand(lamGrid);
@@ -1564,7 +1578,7 @@ Kernels AdjointSolver::ContinuousSweep(
       const double smooth = wEarly[n] * earlyV + wLate[n] * lateV;
       directLoadKernels[n][i] =
           smooth + (lump == lumps.end() ? 0.0 : lump->second[i]);
-      densityLoad[n][i] = smooth / totalW;
+      densityLoad[n][i] = totalW > 0.0 ? smooth / totalW : 0.0;
     }
   }
 

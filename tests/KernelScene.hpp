@@ -149,8 +149,8 @@ inline double Objective(const Scene& setup,
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
-    if (!m.seaLevelDual.empty()) {
-      total += setup.Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
+    if (!m.relativeSeaLevelDual.empty()) {
+      total += setup.Surface(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += setup.Surface(m.displacementDual, snap.displacement);
@@ -206,9 +206,9 @@ inline std::map<std::size_t, Measurement> FullMeasurements(const Scene& setup,
                                                     std::mt19937& rng,
                                                     std::size_t last) {
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = setup.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = setup.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   middle.displacementDual = setup.Smooth(rng, -0.5);
   measurements[last / 2 + 1] = std::move(middle);
   Measurement end;

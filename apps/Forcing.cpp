@@ -58,13 +58,7 @@ AmplitudeHistory ReadHistory(const Json& item, bool timed) {
 }
 
 /// A centre's latitude and longitude, degrees.
-GeographicPoint SiteOf(const Json& object) {
-  const auto latitude = Number(object, "latitude");
-  if (!(latitude >= -90.0 && latitude <= 90.0)) {
-    Fail(object.At("latitude"), "is not a latitude in [-90, 90]");
-  }
-  return {latitude, Number(object, "longitude")};
-}
+GeographicPoint SiteOf(const Json& object) { return ReadSite(object); }
 
 LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                       bool timed) {
@@ -145,6 +139,82 @@ TideTerm ReadTideTerm(const Json& item, int lmax, bool timed) {
   term.imaginary = Number(item, "imaginary_m2_s2", 0.0);
   if (term.order == 0 && term.imaginary != 0.0) {
     Fail(item.At("imaginary_m2_s2"), "is not zero at order 0 (a real field)");
+  }
+  return term;
+}
+
+/// One seismic source: a point moment tensor or a planar fault.
+SeismicTerm ReadSeismicTerm(const Json& item) {
+  Allow(item, {"point", "fault", "onset_kyr", "history_kyr"});
+  if (Has(item, "point") == Has(item, "fault")) {
+    Fail(item, "is exactly one of \"point\" and \"fault\"");
+  }
+  auto term = SeismicTerm{};
+  term.history = ReadHistory(item, true);
+  if (Has(item, "onset_kyr")) term.onset_kyr = Number(item, "onset_kyr");
+  auto planeOf = [&term](const Json& object) {
+    term.strike = Number(object, "strike_deg");
+    term.dip = Number(object, "dip_deg");
+    term.rake = Number(object, "rake_deg");
+    if (!(term.dip >= 0.0 && term.dip <= 90.0)) {
+      Fail(object.At("dip_deg"), "is not a dip in [0, 90]");
+    }
+  };
+  auto placeOf = [&term](const Json& object) {
+    term.site = ReadSite(object);
+    term.depth = 1e3 * Number(object, "depth_km");
+    if (!(term.depth > 0.0)) {
+      Fail(object.At("depth_km"), "is not a depth below the surface");
+    }
+  };
+  if (Has(item, "point")) {
+    const auto& point = item.At("point");
+    Allow(point, {"latitude", "longitude", "depth_km", "moment_tensor_nm",
+                  "strike_deg", "dip_deg", "rake_deg", "moment_nm"});
+    term.kind = SeismicTerm::Kind::Point;
+    placeOf(point);
+    if (Has(point, "moment_tensor_nm")) {
+      for (const auto* name : {"strike_deg", "dip_deg", "rake_deg", "moment_nm"}) {
+        if (Has(point, name)) {
+          Fail(point.At(name),
+               "describes a double couple, beside a moment tensor: give one");
+        }
+      }
+      const auto& tensor = point.At("moment_tensor_nm");
+      Allow(tensor, {"rr", "tt", "pp", "rt", "rp", "tp"});
+      term.moment = {.rr = Number(tensor, "rr"), .tt = Number(tensor, "tt"),
+                     .pp = Number(tensor, "pp"), .rt = Number(tensor, "rt"),
+                     .rp = Number(tensor, "rp"), .tp = Number(tensor, "tp")};
+    } else {
+      planeOf(point);
+      term.moment = DoubleCouple(term.strike, term.dip, term.rake);
+      const auto moment = Number(point, "moment_nm");
+      for (auto* c : {&term.moment.rr, &term.moment.tt, &term.moment.pp,
+                      &term.moment.rt, &term.moment.rp, &term.moment.tp}) {
+        *c *= moment;
+      }
+    }
+  } else {
+    const auto& fault = item.At("fault");
+    Allow(fault, {"latitude", "longitude", "depth_km", "strike_deg", "dip_deg",
+                  "rake_deg", "length_km", "width_km", "moment_nm",
+                  "patches_along_strike", "patches_down_dip"});
+    term.kind = SeismicTerm::Kind::Fault;
+    placeOf(fault);
+    planeOf(fault);
+    term.length = 1e3 * Number(fault, "length_km");
+    term.width = 1e3 * Number(fault, "width_km");
+    if (!(term.length > 0.0)) Fail(fault.At("length_km"), "is not a positive length");
+    if (!(term.width > 0.0)) Fail(fault.At("width_km"), "is not a positive width");
+    term.scalarMoment = Number(fault, "moment_nm");
+    term.alongStrike = Integer(fault, "patches_along_strike", 1);
+    term.downDip = Integer(fault, "patches_down_dip", 1);
+    if (term.alongStrike < 1) {
+      Fail(fault.At("patches_along_strike"), "is not a positive count");
+    }
+    if (term.downDip < 1) {
+      Fail(fault.At("patches_down_dip"), "is not a positive count");
+    }
   }
   return term;
 }
@@ -282,7 +352,7 @@ double AmplitudeHistory::At(double t) const {
 
 Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
                     int lmax, bool timed) {
-  Allow(block, {"load", "tide"});
+  Allow(block, {"load", "tide", "seismic"});
   auto out = Forcing{};
   if (Has(block, "load")) {
     for (const auto& item : block.At("load").AsArray()) {
@@ -294,8 +364,60 @@ Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
       out.tide.push_back(ReadTideTerm(item, lmax, timed));
     }
   }
-  if (out.load.empty() && out.tide.empty()) {
-    Fail(block, "needs at least one load term or tide coefficient");
+  if (Has(block, "seismic")) {
+    if (!timed) {
+      Fail(block.At("seismic"),
+           "gives seismic sources, which need a `times` block: the first "
+           "node of a run through time is the co-seismic response");
+    }
+    for (const auto& item : block.At("seismic").AsArray()) {
+      out.seismic.push_back(ReadSeismicTerm(item));
+    }
+  }
+  if (out.load.empty() && out.tide.empty() && out.seismic.empty()) {
+    Fail(block,
+         "needs at least one load term, tide coefficient or seismic source");
+  }
+  return out;
+}
+
+double SeismicTerm::FactorAt(double t) const {
+  if (onset_kyr && t < *onset_kyr - 1e-12 * (1.0 + std::abs(*onset_kyr))) {
+    return 0.0;
+  }
+  return history.At(t);
+}
+
+std::vector<PointSource> SeismicSourcesAt(const Forcing& forcing, double t,
+                                          double surfaceRadius) {
+  auto out = std::vector<PointSource>{};
+  for (const auto& term : forcing.seismic) {
+    const auto factor = term.FactorAt(t);
+    auto sources = std::vector<PointSource>{};
+    if (term.kind == SeismicTerm::Kind::Point) {
+      sources.push_back({.at = {.radius = surfaceRadius - term.depth,
+                                .colatitude = term.site.CoLatitude(),
+                                .longitude = term.site.Longitude()},
+                         .moment = term.moment});
+    } else {
+      sources = PlanarFaultSources(
+          PlanarFault{.centroid = term.site,
+                      .depth = term.depth,
+                      .strike = term.strike,
+                      .dip = term.dip,
+                      .rake = term.rake,
+                      .length = term.length,
+                      .width = term.width,
+                      .moment = term.scalarMoment},
+          surfaceRadius, term.alongStrike, term.downDip);
+    }
+    for (auto& source : sources) {
+      for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
+                      &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
+        *c *= factor;
+      }
+      out.push_back(source);
+    }
   }
   return out;
 }
@@ -541,6 +663,29 @@ std::string Describe(const TideTerm& term) {
   return out;
 }
 
+std::string Describe(const SeismicTerm& term) {
+  auto out = std::string{};
+  if (term.kind == SeismicTerm::Kind::Point) {
+    out = std::format(
+        "point source at latitude {:g}, longitude {:g}, depth {:g} km, moment "
+        "tensor (rr tt pp rt rp tp) {:g} {:g} {:g} {:g} {:g} {:g} N m",
+        term.site.latitude, term.site.longitude, term.depth / 1e3,
+        term.moment.rr, term.moment.tt, term.moment.pp, term.moment.rt,
+        term.moment.rp, term.moment.tp);
+  } else {
+    out = std::format(
+        "fault centred at latitude {:g}, longitude {:g}, depth {:g} km, strike "
+        "{:g}, dip {:g}, rake {:g} deg, {:g} by {:g} km, moment {:g} N m, {} "
+        "by {} patches",
+        term.site.latitude, term.site.longitude, term.depth / 1e3, term.strike,
+        term.dip, term.rake, term.length / 1e3, term.width / 1e3,
+        term.scalarMoment, term.alongStrike, term.downDip);
+  }
+  if (term.onset_kyr) out += std::format(", from {:g} kyr", *term.onset_kyr);
+  if (!term.history.Empty()) out += ", history_kyr " + Pairs(term.history);
+  return out;
+}
+
 std::string Summary(const Forcing& forcing) {
   auto parts = std::vector<std::string>{};
   if (const auto n = forcing.load.size(); n > 0) {
@@ -549,6 +694,9 @@ std::string Summary(const Forcing& forcing) {
   if (const auto n = forcing.tide.size(); n > 0) {
     parts.push_back(
         std::format("tide ({} coefficient{})", n, n == 1 ? "" : "s"));
+  }
+  if (const auto n = forcing.seismic.size(); n > 0) {
+    parts.push_back(std::format("seismic ({} source{})", n, n == 1 ? "" : "s"));
   }
   auto out = std::string{};
   for (const auto& part : parts) out += (out.empty() ? "" : " + ") + part;
@@ -559,13 +707,13 @@ namespace {
 
 /// The fingerprint's ice change.
 IceChange ReadIceChange(const Json& change) {
-  Allow(change, {"type", "latitude", "longitude", "width_deg", "fraction",
-                 "thickness_m"});
+  Allow(change, {"file", "type", "latitude", "longitude", "width_deg",
+                 "fraction", "thickness_m"});
   auto out = IceChange{};
   out.kind = Choice<IceChange::Kind>(
       change.At("type"), {{"cap_fraction", IceChange::Kind::CapFraction},
                           {"cap_thickness", IceChange::Kind::CapThickness}});
-  out.site = {Number(change, "latitude"), Number(change, "longitude")};
+  out.site = ReadSite(change);
   const auto width = Number(change, "width_deg");
   if (!(width > 0.0)) Fail(change.At("width_deg"), "is not a positive angle");
   out.width = width * std::numbers::pi / 180.0;
@@ -579,40 +727,55 @@ IceChange ReadIceChange(const Json& change) {
 
 }  // namespace
 
+GeographicPoint ReadSite(const Json& object) {
+  const auto latitude = Number(object, "latitude");
+  if (!(latitude >= -90.0 && latitude <= 90.0)) {
+    Fail(object.At("latitude"), "is not a latitude in [-90, 90]");
+  }
+  return {latitude, Number(object, "longitude")};
+}
+
 SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                                     const std::filesystem::path& directory,
                                     bool timed) {
-  Allow(block, {"state", "ice"});
-  auto out = SeaLevelForcing{};
-  const auto& state = block.At("state");
-  if (timed && Has(state, "date_kyr_bp")) {
-    Fail(state.At("date_kyr_bp"),
-         "dates the state, as the elastic fingerprint (no `times` block) "
-         "reads it; a run through time reads the state at its window's "
-         "start, or calibrating at its end");
+  if (Has(block, "state")) {
+    Fail(block.At("state"),
+         "is not a member: give the initial sea level as `sea_level` (a "
+         "`file` holding `sea_level` or `topography`) beside the ice history "
+         "`ice`; the ice the run starts from is the history's own");
   }
-  Allow(state, {"file", "date_kyr_bp"});
-  out.state.file = PathOf(state, "file", directory);
-  out.state.date_kyr_bp = Number(state, "date_kyr_bp", 0.0);
+  Allow(block, {"sea_level", "ice"});
+  auto out = SeaLevelForcing{};
+  const auto& sea = block.At("sea_level");
+  if (timed && Has(sea, "date_kyr_bp")) {
+    Fail(sea.At("date_kyr_bp"),
+         "dates the sea level, as the elastic fingerprint (no `times` "
+         "block) reads it; a run through time reads the sea level at its "
+         "window's start, or calibrating at its end");
+  }
+  Allow(sea, {"file", "date_kyr_bp"});
+  out.seaLevel.file = PathOf(sea, "file", directory);
+  out.seaLevel.date_kyr_bp = Number(sea, "date_kyr_bp", 0.0);
   const auto& ice = block.At("ice");
+  out.ice.history = PathOf(ice, "file", directory);
   if (timed) {
     for (const auto* name : {"type", "latitude", "longitude", "width_deg",
                              "fraction", "thickness_m"}) {
       if (Has(ice, name)) {
         Fail(ice.At(name),
              "describes an ice change, which the elastic fingerprint (no "
-             "`times` block) takes; a run through time takes an ice "
-             "history, `file`");
+             "`times` block) takes; a run through time takes the ice "
+             "history alone, `file`");
       }
     }
     Allow(ice, {"file"});
-    out.ice.history = PathOf(ice, "file", directory);
   } else {
-    if (Has(ice, "file")) {
-      Fail(ice.At("file"),
-           "is an ice history, which needs a `times` block; the elastic "
-           "fingerprint takes an ice change: `type`, `latitude`, "
-           "`longitude`, `width_deg` and `fraction` or `thickness_m`");
+    if (!Has(ice, "type")) {
+      Fail(ice,
+           "gives the ice history alone, which needs a `times` block; the "
+           "elastic fingerprint takes an ice change on it too: `type`, "
+           "`latitude`, `longitude`, `width_deg` and `fraction` or "
+           "`thickness_m`");
     }
     out.ice.change = ReadIceChange(ice);
   }

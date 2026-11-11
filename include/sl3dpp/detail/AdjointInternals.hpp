@@ -112,6 +112,8 @@ inline std::vector<double> ColumnDualsOf(std::span<const Complex> dual, int l,
 /// The trapezoid weights of the time grid.
 inline std::vector<double> NodeWeights(std::span<const double> times) {
   auto w = std::vector<double>(times.size());
+  // one node: the elastic problem, with no interval to weigh
+  if (times.size() == 1) return std::vector<double>{0.0};
   w.front() = 0.5 * (times[1] - times[0]);
   w.back() = 0.5 * (times[times.size() - 1] - times[times.size() - 2]);
   for (auto n = std::size_t{1}; n + 1 < times.size(); ++n) {
@@ -123,7 +125,7 @@ inline std::vector<double> NodeWeights(std::span<const double> times) {
 inline void CheckGrids(const Measurement& m, std::size_t fieldSize,
                 std::size_t node) {
   for (const auto* f :
-       {&m.seaLevelDual, &m.displacementDual, &m.potentialDual,
+       {&m.relativeSeaLevelDual, &m.displacementDual, &m.potentialDual,
         &m.tangentialPotentialDual, &m.toroidalPotentialDual}) {
     if (!f->empty() && f->size() != fieldSize) {
       throw std::invalid_argument(std::format(

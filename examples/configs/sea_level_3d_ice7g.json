@@ -6,7 +6,7 @@
   "lmax": 32,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
   "forcing": {
-    "state": {"file": "../data/ice7g.nc"},
+    "sea_level": {"file": "../data/ice7g.nc"},
     "ice": {"file": "../data/ice7g.nc"}
   },
   "rotation": "full",

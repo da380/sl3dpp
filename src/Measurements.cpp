@@ -274,7 +274,7 @@ Measurement FieldMeasurement(FieldChannel channel, std::vector<double> dual) {
   auto out = Measurement{};
   switch (channel) {
     case FieldChannel::SeaLevel:
-      out.seaLevelDual = std::move(dual);
+      out.relativeSeaLevelDual = std::move(dual);
       break;
     case FieldChannel::Displacement:
       out.displacementDual = std::move(dual);

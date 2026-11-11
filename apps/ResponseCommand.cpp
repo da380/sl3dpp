@@ -369,6 +369,14 @@ std::string RunElastic(const std::filesystem::path& config,
     moduli.emplace(std::move(*read));
   }
   const auto lateral = moduli && !moduli->IsRadial();
+  if (lateral && ranks.Distributed() && !input.output.volume.empty()) {
+    // each rank holds the solution on its own segment alone, so the
+    // fields inside the body cannot be formed on the first rank
+    Fail(top.At("output").At("volume"),
+         "is not written by the elastic response on lateral moduli over "
+         "several MPI ranks; run on one rank for the volume file, or drop "
+         "the member");
+  }
 
   // The forcing on the grid (SI), its load made non-dimensional under the
   // model's scales, kg m^-2 to the mass and length scales, and its tide
@@ -609,10 +617,15 @@ struct NodeForcing {
 
 /// The surface response at one node: the coefficients of the radial
 /// displacement U (m), the tangential displacement's potential V (m) and
-/// the potential perturbation Phi (m^2 s^-2).
+/// the potential perturbation Phi (m^2 s^-2), and, under seismic sources,
+/// the toroidal potential W (m; empty otherwise).
 struct NodeSurface {
-  std::vector<Complex> U, V, Phi;
+  std::vector<Complex> U, V, Phi, W;
 };
+
+/// The seismic sources at a time of the run's clock, kyr, SI (empty
+/// function: none).
+using SourcesAt = std::function<std::vector<PointSource>(double)>;
 
 /// What drives a body's evolution through the nodes of `times`: the
 /// nodes' times and the forcing the library's evolutions take, in the
@@ -623,12 +636,13 @@ struct NodeDriver {
   std::vector<double> times;
   std::function<std::vector<double>(double)> directLoad;
   std::function<std::vector<Complex>(double)> tide;  ///< empty: no tide
+  std::function<std::vector<PointSource>(double)> sources;  ///< empty: none
 };
 
 NodeDriver DriverOf(const GRDSolver& solver, const Scales& scales,
                     const TimesBlock& times,
                     std::function<NodeForcing(std::size_t)> forcingAt,
-                    bool hasLoad, bool hasTide) {
+                    bool hasLoad, bool hasTide, SourcesAt sourcesAt = {}) {
   const auto& units = solver.SolverScales();
   const auto loadDims = Dimensions{.mass = 1, .length = -2};
   const auto toSolverLoad = scales.Factor(loadDims) / units.Factor(loadDims);
@@ -673,6 +687,24 @@ NodeDriver DriverOf(const GRDSolver& solver, const Scales& scales,
       return coefficients;
     };
   }
+  if (sourcesAt) {
+    // SI to the solver's units: lengths, and the moment as an energy
+    const auto length = units.Length();
+    const auto energy =
+        units.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+    driver.sources = [sourcesAt = std::move(sourcesAt), toTime, length,
+                      energy](double t) {
+      auto sources = sourcesAt(t / toTime);
+      for (auto& source : sources) {
+        source.at.radius /= length;
+        for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
+                        &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
+          *c /= energy;
+        }
+      }
+      return sources;
+    };
+  }
   return driver;
 }
 
@@ -683,10 +715,15 @@ NodeSurface SurfaceOf(const GRDSolver& solver, const Snapshot& snapshot) {
   const auto& units = solver.SolverScales();
   auto node = NodeSurface{.U = grid.Expand(snapshot.displacement),
                           .V = grid.Expand(snapshot.tangentialPotential),
-                          .Phi = grid.Expand(snapshot.potential)};
+                          .Phi = grid.Expand(snapshot.potential),
+                          .W = {}};
   for (auto& c : node.U) c *= units.Length();
   for (auto& c : node.V) c *= units.Length();
   for (auto& c : node.Phi) c *= units.Factor(PotentialDimensions);
+  if (!snapshot.toroidalPotential.empty()) {
+    node.W = grid.Expand(snapshot.toroidalPotential);
+    for (auto& c : node.W) c *= units.Length();
+  }
   return node;
 }
 
@@ -701,16 +738,19 @@ std::vector<NodeSurface> StepRadial(
     const Rheology& rheology, int lmax, const SurfaceGrid& grid,
     const Scales& scales, const TimesBlock& times, Scheme scheme,
     const std::function<NodeForcing(std::size_t)>& forcingAt, bool hasLoad,
-    bool hasTide) {
+    bool hasTide, const SourcesAt& sourcesAt = {}) {
   const ViscoelasticOperator op(rheology, lmax);
   const GRDSolver solver(grid, op.ElasticLoveNumbers(), SeaLevelParameters{});
-  const auto driver = DriverOf(solver, scales, times, forcingAt, hasLoad, hasTide);
+  const auto driver =
+      DriverOf(solver, scales, times, forcingAt, hasLoad, hasTide, sourcesAt);
   Evolution evolution(op, solver, solver.NoOceanState(),
                       {.scheme = scheme, .rotation = RotationalFeedback::None});
   auto out = std::vector<NodeSurface>{};
   for (const auto& snapshot : evolution.Run(
            driver.times, Evolution::Forcing{.directLoad = driver.directLoad,
-                                            .tide = driver.tide})) {
+                                            .tide = driver.tide,
+                                            .sources = driver.sources,
+                                            .stressGluts = {}})) {
     out.push_back(SurfaceOf(solver, snapshot));
   }
   return out;
@@ -729,6 +769,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   const auto& forcing = input.forcing;
   const auto hasLoad = !forcing.load.empty();
   const auto hasTide = !forcing.tide.empty();
+  const auto hasSeismic = !forcing.seismic.empty();
   const auto& solver = input.solver;
 
   const auto deck = Deck::Read(input.model.deck, FormatOf(input.model.format));
@@ -742,6 +783,21 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   const auto material = Material::Create(*model, *mesh);
   if (!material) Fail(deckMember, material.error().message);
   const auto& scales = model->ModelScales();
+  // the seismic sources at a time of the run's clock, SI, depths from
+  // the body's surface
+  auto sourcesAt = SourcesAt{};
+  if (hasSeismic) {
+    const auto surfaceRadius = material->Radius() * scales.Length();
+    for (const auto& term : forcing.seismic) {
+      if (!(term.depth < surfaceRadius)) {
+        Fail(top.At("forcing").At("seismic"),
+             "holds a source deeper than the body's radius");
+      }
+    }
+    sourcesAt = [&forcing, surfaceRadius](double t) {
+      return SeismicSourcesAt(forcing, t, surfaceRadius);
+    };
+  }
 
   // The viscosity: a model file's, its radial reference the Maxwell body
   // and its log-perturbation the lateral part, or the deck's own column.
@@ -825,7 +881,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
           keep(std::move(load));
           return std::move(nd);
         },
-        hasLoad, hasTide);
+        hasLoad, hasTide, sourcesAt);
   } else {
     // The 3D stepper, distributed over radial segments like the
     // evolutions: the rank cuts balance the transform work of the
@@ -878,7 +934,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
           keep(std::move(load));
           return std::move(nd);
         },
-        hasLoad, hasTide);
+        hasLoad, hasTide, sourcesAt);
     auto evolutionOptions = Evolution3D::Options{};
     evolutionOptions.scheme = solver.scheme;
     evolutionOptions.rotation = RotationalFeedback::None;
@@ -901,7 +957,9 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     Evolution3D evolution(op, body, body.NoOceanState(), evolutionOptions);
     const auto snapshots = evolution.Run(
         driver.times, Evolution3D::Forcing{.directLoad = driver.directLoad,
-                                           .tide = driver.tide});
+                                           .tide = driver.tide,
+                                           .sources = driver.sources,
+                                           .stressGluts = {}});
     if (!ranks.First()) return "";
     for (const auto& snapshot : snapshots) {
       history.push_back(SurfaceOf(body, snapshot));
@@ -911,7 +969,8 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     // stepper.
     radial = StepRadial(
         *rheology, input.lmax, grid, scales, times, solver.scheme,
-        [&](std::size_t n) { return forcingAt(n).first; }, hasLoad, hasTide);
+        [&](std::size_t n) { return forcingAt(n).first; }, hasLoad, hasTide,
+        sourcesAt);
   }
 
   // What the config was taken to mean, for the summary and the outputs.
@@ -937,6 +996,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   auto described = std::vector<std::string>{};
   for (const auto& term : forcing.load) described.push_back(Describe(term));
   for (const auto& term : forcing.tide) described.push_back(Describe(term));
+  for (const auto& term : forcing.seismic) described.push_back(Describe(term));
   const auto schemeName = solver.scheme == Scheme::BackwardEuler
                               ? std::string{"backward_euler"}
                               : std::string{"exponential_trapezoid"};
@@ -1015,6 +1075,11 @@ std::string RunViscoelastic(const std::filesystem::path& config,
       "surface gradient)");
   put("potential", gather(history, &NodeSurface::Phi), potentialDims,
       "gravitational potential perturbation at the surface");
+  if (hasSeismic) {
+    put("toroidal_potential", gather(history, &NodeSurface::W), lengthDims,
+        "the toroidal displacement's potential W (the displacement minus "
+        "the radial unit vector crossed with its surface gradient)");
+  }
   if (threeD) {
     put("displacement_radial_model", gather(radial, &NodeSurface::U),
         lengthDims,

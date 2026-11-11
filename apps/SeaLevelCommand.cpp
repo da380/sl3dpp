@@ -128,7 +128,7 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
   hash.AddValue(run.lmax);
   if (!run.model.viscosity.empty()) hash.AddFile(run.model.viscosity);
   hash.AddValue(run.model.viscosity_file_radial);
-  hash.AddFile(run.forcing.state.file);
+  hash.AddFile(run.forcing.seaLevel.file);
   hash.AddFile(run.forcing.ice.history);
   hash.AddValue(window.start_kyr_bp);
   hash.AddValue(window.end_kyr_bp);
@@ -619,10 +619,10 @@ std::string RunWith(
   options.rotation = run.rotation;
   options.rtol = run.solver.rtol;
 
-  // The initial sea level: the state file's at the start, or calibrated
+  // The initial sea level: the sea level file's at the start, or calibrated
   // against its sea level at the end, by an evolution that streams nothing
   // (a resumption reads back the calibrated state its run kept).
-  auto origin = std::string{"the state file at the window's start"};
+  auto origin = std::string{"the sea level file at the window's start"};
   if (run.ocean.calibrate) {
     auto restored = std::optional<GRDSolver::State>{};
     if (resumed) {
@@ -638,7 +638,7 @@ std::string RunWith(
           CalibrateWorld(run, top, solver, world, calibrating, times);
       if (checkpointing) WriteInitialState(directory, hash, world.background);
       origin = std::format(
-          "calibrated against the state file at the window's end, {} run(s), "
+          "calibrated against the sea level file at the window's end, {} run(s), "
           "rms misfit {:.3g} m before, {:.3g} m after",
           calibrated.runs, calibrated.before_m, calibrated.after_m);
     }
@@ -716,29 +716,43 @@ struct FingerprintForcing {
   std::vector<double> thicknessChange;
 };
 
-/// Reads the fingerprint's state from `forcing.state.file` onto the grid
-/// and builds the ice change there.
+/// Reads the fingerprint's ice and sea level at its date onto the grid
+/// (`forcing.ice.file`, `forcing.sea_level.file`) and builds the ice
+/// change there.
 FingerprintForcing ReadFingerprintForcing(const SeaLevelRun& run,
                                           const Json& top,
                                           const SurfaceGrid& grid,
                                           const SeaLevelParameters& parameters) {
-  const auto& state = run.forcing.state;
+  const auto& source = run.forcing.seaLevel;
   const auto& change = *run.forcing.ice.change;
-  const auto& stateMember = top.At("forcing").At("state").At("file");
-  const auto history = io::FieldHistory::Read(state.file, grid);
-  if (!history) Fail(stateMember, history.error().message);
-  for (const auto name : {"ice_thickness", "topography"}) {
-    if (!history->Has(name)) {
-      Fail(stateMember, std::format("holds no field {}", name));
-    }
+  const auto& seaMember = top.At("forcing").At("sea_level").At("file");
+  const auto& iceMember = top.At("forcing").At("ice").At("file");
+  const auto ice = io::FieldHistory::Read(run.forcing.ice.history, grid);
+  if (!ice) Fail(iceMember, ice.error().message);
+  if (!ice->Has("ice_thickness")) {
+    Fail(iceMember, "holds no field ice_thickness");
   }
-  // the state at its date, its sea level by the flotation construction
-  // with the solver's own densities
+  auto same = std::error_code{};
+  const bool oneFile = std::filesystem::equivalent(
+                           source.file, run.forcing.ice.history, same) &&
+                       !same;
+  auto other = std::optional<io::FieldHistory>{};
+  if (!oneFile) {
+    auto sea = io::FieldHistory::Read(source.file, grid);
+    if (!sea) Fail(seaMember, sea.error().message);
+    other = std::move(*sea);
+  }
+  // the ice history's ice at the date, and the sea level there: given,
+  // or by the flotation construction with the solver's own densities
   auto out = FingerprintForcing{};
-  const auto date = -state.date_kyr_bp * KYR;
-  out.ice = history->Values("ice_thickness", date);
-  out.seaLevel = SeaLevelFromTopography(history->Values("topography", date),
-                                        out.ice, parameters);
+  const auto date = -source.date_kyr_bp * KYR;
+  try {
+    out.ice = IceThicknessAt(*ice, date);
+  } catch (const std::runtime_error& error) {
+    Fail(iceMember, error.what());
+  }
+  out.seaLevel =
+      SeaLevelFrom(oneFile ? *ice : *other, out.ice, date, parameters, seaMember);
 
   // the change: the Gaussian cap's weight times the amount, of the local
   // ice thickness for a fraction
@@ -806,7 +820,7 @@ planetmodel::SurfaceFile FingerprintFile(
     const std::array<double, 3>& angularVelocity,
     std::span<const double> ocean) {
   namespace pm = planetmodel;
-  const auto& state = run.forcing.state;
+  const auto& source = run.forcing.seaLevel;
   auto file = pm::SurfaceFile{};
   file.grid = pm::AngularGrid(
       std::vector<double>(grid.CoLatitudes().begin(), grid.CoLatitudes().end()),
@@ -821,8 +835,9 @@ planetmodel::SurfaceFile FingerprintFile(
   if (!run.model.moduli.empty()) {
     file.meta.emplace("moduli", run.model.moduli.string());
   }
-  file.meta.emplace("state", state.file.string());
-  file.meta.emplace("date_kyr_bp", std::vector<double>{state.date_kyr_bp});
+  file.meta.emplace("sea_level", source.file.string());
+  file.meta.emplace("ice_history", run.forcing.ice.history.string());
+  file.meta.emplace("date_kyr_bp", std::vector<double>{source.date_kyr_bp});
   file.meta.emplace("rotation", std::string{NameOf(run.rotation)});
   file.meta.emplace("omega_x_rad_s", std::vector<double>{angularVelocity[0]});
   file.meta.emplace("omega_y_rad_s", std::vector<double>{angularVelocity[1]});

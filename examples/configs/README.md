@@ -106,6 +106,14 @@ draws each config's figures from `out/<config>/` into
   `out/response_viscoelastic/response_viscoelastic_{node}.txt` (the start,
   the peak load, the unloaded state and the end). A `times` block is what
   makes a `response` viscoelastic; it takes about 5 s on four threads.
+- **`response_seismic.json`** — the co-seismic and post-seismic response
+  of the radial GIA deck to a thrust fault off north-east Japan (a 400 by
+  150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point
+  sources): `forcing.seismic` in a run through time, the first node the
+  co-seismic response and the later ones the relaxation, to 2 kyr at lmax
+  64. `out/response_seismic/response_seismic.nc` holds the radial
+  displacement, the tangential potential V, the toroidal potential W and
+  the potential at every node. About 5 s on two threads.
 - **`response1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
   mass of about 2 km of ice, held for 10 kyr and removed over the next half,
   on the radial viscoelastic Earth of `../data/prem8.gia.deck` (no lateral

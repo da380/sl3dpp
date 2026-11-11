@@ -17,6 +17,7 @@
 #include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
@@ -418,6 +419,55 @@ TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
     EXPECT_EQ(a.potential, b.potential) << "node " << 2 + k;
     EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 2 + k;
     EXPECT_EQ(a.coupledIterations, b.coupledIterations) << "node " << 2 + k;
+  }
+}
+
+TEST(Lateral, AResumedRunUnderInteriorSourcesIsTheUninterruptedOne) {
+  // Under a point source with lateral viscosity the checkpoint's
+  // recurrence, with its strain coefficients, is all a resumed run
+  // needs: the toroidal systems are part of the state.
+  auto setup = Setup::Make();
+  const auto& scales = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto times = std::vector<double>{0.0, kyr, 2 * kyr, 3 * kyr};
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / scales.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / scales.Factor(energy);
+  Evolution3D::Forcing forcing;
+  forcing.sources = [&](double t) {
+    const auto s = unit * (0.3 + t / times.back());
+    return std::vector<PointSource>{
+        {.at = {.radius = surface - 400e3 / scales.Length(),
+                .colatitude = 1.1,
+                .longitude = 4.0},
+         .moment = {.rr = 0.9 * s, .tt = -0.2 * s, .pp = -0.7 * s,
+                    .rt = 0.3 * s, .rp = -0.7 * s, .tp = 0.6 * s}}};
+  };
+  Viscoelastic3D op(
+      setup.rheology, kLmax, [](double, double theta, double phi) {
+        return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto checkpoints = std::map<std::size_t, Evolution3D::Checkpoint>{};
+  auto options = Evolution3D::Options{};
+  options.checkpoint_stride = 1;
+  options.on_checkpoint = [&](std::size_t node, const Evolution3D::Checkpoint& cp) {
+    checkpoints.emplace(node, cp);
+  };
+  Evolution3D whole(op, setup.solver, setup.state, options);
+  const auto full = whole.Run(times, forcing);
+  Evolution3D resumed(op, setup.solver, setup.state, {});
+  const auto tail = resumed.Resume(
+      checkpoints.at(1), std::vector<double>(times.begin() + 1, times.end()),
+      forcing);
+  ASSERT_EQ(tail.size(), times.size() - 2);
+  for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+    const auto& a = full[2 + k];
+    const auto& b = tail[k];
+    EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange) << "node " << 2 + k;
+    EXPECT_EQ(a.displacement, b.displacement) << "node " << 2 + k;
+    EXPECT_EQ(a.toroidalPotential, b.toroidalPotential) << "node " << 2 + k;
+    EXPECT_FALSE(a.toroidalPotential.empty());
   }
 }
 

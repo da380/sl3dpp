@@ -703,7 +703,7 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   const double perOceanArea = InverseOceanArea(oceanArea);
 
   auto gXi = std::vector<double>(fieldSize, 0.0);
-  if (!forcing.seaLevelDual.empty()) gXi = forcing.seaLevelDual;
+  if (!forcing.relativeSeaLevelDual.empty()) gXi = forcing.relativeSeaLevelDual;
   std::vector<std::complex<double>> lamU(coefSize, 0.0), lamPhi(coefSize, 0.0);
   if (!forcing.displacementDual.empty()) {
     lamU = grid_.Expand(forcing.displacementDual);

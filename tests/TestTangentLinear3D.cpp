@@ -404,7 +404,7 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
   const auto g = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = g;
+  measurements[times.size() - 1].relativeSeaLevelDual = g;
 
   auto functional = [&](double eps) {
     Viscoelastic3D op(scene.rheology, kLmax,

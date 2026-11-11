@@ -90,7 +90,7 @@ struct ForwardTrajectory {
 /// minus its vector weight: normal for the radial dual, tangential for
 /// V's.
 struct Measurement {
-  std::vector<double> seaLevelDual;
+  std::vector<double> relativeSeaLevelDual;
   std::vector<double> displacementDual;
   std::vector<double> potentialDual;
   std::vector<double> tangentialPotentialDual;
@@ -290,8 +290,9 @@ class AdjointSolver {
       : AdjointSolver(evolution, Options{}) {}
 
   /// The ice-history kernels of the objective the measurements define,
-  /// over the forward time grid (increasing, SLE units; at least two
-  /// nodes). Measurement keys are node indices into `times`. With a
+  /// over the forward time grid (increasing, SLE units; one node is the
+  /// elastic problem, whose kernels are the instantaneous ones alone).
+  /// Measurement keys are node indices into `times`. With a
   /// recorded forward `trajectory` (one entry per node, from a run with
   /// record_stride under the same scheme and loads), the kernels also
   /// carry the inverse-relaxation-time sensitivity. With

@@ -25,7 +25,8 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed) {
   constexpr auto kInBlocks = std::array{
       std::pair{std::string_view{"model_format"}, "`model.format`"},
       std::pair{std::string_view{"viscosity"}, "`model.viscosity`"},
-      std::pair{std::string_view{"state"}, "`forcing.state`"},
+      std::pair{std::string_view{"state"}, "`forcing.sea_level`"},
+      std::pair{std::string_view{"sea_level"}, "`forcing.sea_level`"},
       std::pair{std::string_view{"ice_history"}, "`forcing.ice`"},
       std::pair{std::string_view{"change"}, "`forcing.ice`"},
       std::pair{std::string_view{"scheme"}, "`solver.scheme`"},
@@ -248,9 +249,9 @@ SeaLevelParameters ParametersOf(const SeaLevelRun& run,
 
 namespace {
 
-/// The members naming the state file and the ice history.
-const Json& StateFileMember(const Json& top) {
-  return top.At("forcing").At("state").At("file");
+/// The members naming the sea level's file and the ice history.
+const Json& SeaLevelFileMember(const Json& top) {
+  return top.At("forcing").At("sea_level").At("file");
 }
 const Json& IceFileMember(const Json& top) {
   return top.At("forcing").At("ice").At("file");
@@ -258,36 +259,86 @@ const Json& IceFileMember(const Json& top) {
 
 }  // namespace
 
+std::vector<double> IceThicknessAt(const io::FieldHistory& ice, double time) {
+  auto thickness = ice.Values("ice_thickness", time);
+  for (auto v : thickness) {
+    if (!std::isfinite(v)) {
+      throw std::runtime_error(std::format(
+          "the ice history's ice_thickness is not a number somewhere at "
+          "{:g} kyr BP (a surface file marks uncovered points so): fill it "
+          "before the run",
+          -time / KYR));
+    }
+  }
+  return thickness;
+}
+
+std::vector<double> SeaLevelFrom(const io::FieldHistory& file,
+                                 std::span<const double> ice, double time,
+                                 const SeaLevelParameters& parameters,
+                                 const Json& member) {
+  auto sea = std::vector<double>{};
+  if (file.Has("sea_level")) {
+    sea = file.Values("sea_level", time);
+  } else if (file.Has("topography")) {
+    sea = SeaLevelFromTopography(
+        file.Values("topography", time),
+        std::vector<double>(ice.begin(), ice.end()), parameters);
+  } else {
+    Fail(member, "holds neither a field sea_level nor a field topography");
+  }
+  for (auto v : sea) {
+    if (!std::isfinite(v)) {
+      Fail(member,
+           std::format("gives a sea level that is not a number somewhere at "
+                       "{:g} kyr BP (a surface file marks uncovered points "
+                       "so): fill it before the run",
+                       -time / KYR));
+    }
+  }
+  return sea;
+}
+
 Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                  const GRDSolver& solver) {
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   const auto length = solver.SolverScales().Length();
-  auto state_history = io::FieldHistory::Read(run.forcing.state.file, grid);
-  if (!state_history) {
-    Fail(StateFileMember(top), state_history.error().message);
-  }
   auto ice_history = io::FieldHistory::Read(run.forcing.ice.history, grid);
   if (!ice_history) Fail(IceFileMember(top), ice_history.error().message);
-  for (const auto name : {"ice_thickness", "topography"}) {
-    if (!state_history->Has(name)) {
-      Fail(StateFileMember(top), std::format("holds no field {}", name));
-    }
-  }
   if (!ice_history->Has("ice_thickness")) {
     Fail(IceFileMember(top), "holds no field ice_thickness");
   }
+  auto ice = std::make_shared<const io::FieldHistory>(std::move(*ice_history));
+  // one file for both is read, resampled and held once
+  auto sea = ice;
+  auto same = std::error_code{};
+  if (!std::filesystem::equivalent(run.forcing.seaLevel.file,
+                                   run.forcing.ice.history, same) ||
+      same) {
+    auto sea_history = io::FieldHistory::Read(run.forcing.seaLevel.file, grid);
+    if (!sea_history) {
+      Fail(SeaLevelFileMember(top), sea_history.error().message);
+    }
+    sea = std::make_shared<const io::FieldHistory>(std::move(*sea_history));
+  }
   const auto start_si = -run.times->start_kyr_bp * KYR;
-  auto ice0 = state_history->Values("ice_thickness", start_si);
-  const auto topo0 = state_history->Values("topography", start_si);
-  auto sl_nd = SeaLevelFromTopography(topo0, ice0, solver.Parameters());
+  // the ice the run starts from is the history's own
+  auto ice0 = std::vector<double>{};
+  try {
+    ice0 = IceThicknessAt(*ice, start_si);
+  } catch (const std::runtime_error& error) {
+    Fail(IceFileMember(top), error.what());
+  }
+  auto sl_nd = SeaLevelFrom(*sea, ice0, start_si, solver.Parameters(),
+                            SeaLevelFileMember(top));
   auto ice_nd = std::vector<double>(fieldSize);
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     ice_nd[i] = ice0[i] / length;
     sl_nd[i] /= length;
   }
   auto background = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
-  return {std::move(*state_history), std::move(*ice_history), std::move(ice0),
+  return {std::move(sea), std::move(ice), std::move(ice0),
           std::move(background)};
 }
 
@@ -298,27 +349,25 @@ std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
   const auto end_si = -end_kyr_bp * KYR;
   // The file's end values are held beyond its span, which would make a
   // file ending before the window's end a target silently: refused.
-  if (const auto span = world.state.Span(); span.has_value()) {
+  if (const auto span = world.seaLevel->Span(); span.has_value()) {
     const auto slack = 1e-9 * KYR;
     if (end_si < span->first - slack || end_si > span->second + slack) {
-      Fail(StateFileMember(top),
+      Fail(SeaLevelFileMember(top),
            std::format("spans {:g} to {:g} kyr BP, which leaves out the "
                        "window's end ({:g} kyr BP), the calibration's target",
                        -span->first / KYR, -span->second / KYR, end_kyr_bp));
     }
   }
-  auto ice = std::vector<double>{};
-  auto topography = std::vector<double>{};
+  auto sea = std::vector<double>{};
   try {
-    ice = world.state.Values("ice_thickness", end_si);
-    topography = world.state.Values("topography", end_si);
+    sea = SeaLevelFrom(*world.seaLevel, IceThicknessAt(*world.ice, end_si),
+                       end_si, solver.Parameters(), SeaLevelFileMember(top));
   } catch (const std::runtime_error& error) {
-    Fail(StateFileMember(top),
+    Fail(SeaLevelFileMember(top),
          std::format("gives no sea level at the window's end, which the "
                      "calibration needs: {}",
                      error.what()));
   }
-  auto sea = SeaLevelFromTopography(topography, ice, solver.Parameters());
   const auto length = solver.SolverScales().Length();
   for (auto& v : sea) v /= length;
   return sea;
@@ -349,7 +398,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
   const auto rho_ice = solver.IceDensity();
   return [&world, fieldSize, length, time, start_si, rho_ice](double t) {
     const auto thickness =
-        world.ice.Values("ice_thickness", start_si + t * time);
+        IceThicknessAt(*world.ice, start_si + t * time);
     const auto& C = world.background.oceanFunction;
     auto load = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -366,12 +415,10 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   const auto length = scales.Length();
   const auto time = scales.Time();
   const auto start_si = -run.times->start_kyr_bp * KYR;
-  // the background's ice plus the history's change from world.ice0, the
-  // start's ice the frozen load is measured from (IceLoadOf), so a history
-  // that disagrees with the state at the start is refused by the migrating
-  // run rather than measured from another baseline
+  // the background's ice plus the history's change from world.ice0, its
+  // own start, which the frozen load is measured from too (IceLoadOf)
   return [&world, length, time, start_si](double t) {
-    auto thickness = world.ice.Values("ice_thickness", start_si + t * time);
+    auto thickness = IceThicknessAt(*world.ice, start_si + t * time);
     const auto& background = world.background.iceThickness;
     for (auto i = std::size_t{0}; i < thickness.size(); ++i) {
       thickness[i] = background[i] + (thickness[i] - world.ice0[i]) / length;
@@ -434,7 +481,7 @@ void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess) {
   const auto length = solver.SolverScales().Length();
   world.ice0 =
-      world.ice.Values("ice_thickness", -run.times->start_kyr_bp * KYR);
+      IceThicknessAt(*world.ice, -run.times->start_kyr_bp * KYR);
   auto ice = world.ice0;
   for (auto& v : ice) v /= length;
   world.background = solver.MakeState(

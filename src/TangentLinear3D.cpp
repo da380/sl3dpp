@@ -24,8 +24,8 @@ using Snapshot = Evolution3D::Snapshot;
 using State = Viscoelastic3D::State;
 
 void CheckTimes(std::span<const double> times) {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
@@ -713,7 +713,6 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   }
 
   Solutions StartResponse() const override {
-    const auto& op = *ev->op_;
     const auto& base0 = cursor->At(0);
     const auto x0 = BaseSolution(base0, 0);
     auto own = std::optional<Tensor>{};
@@ -728,7 +727,6 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   }
 
   void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
-    const auto& op = *ev->op_;
     const auto& base0 = cursor->At(0);
     const auto x0 = BaseSolution(base0, 0);
     auto own = std::optional<Tensor>{};

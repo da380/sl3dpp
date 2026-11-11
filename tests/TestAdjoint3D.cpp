@@ -124,7 +124,7 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[5].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[5].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
@@ -205,7 +205,7 @@ TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[4].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[4].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
   Viscoelastic3D op(
@@ -258,7 +258,7 @@ TEST(Adjoint3D, CheckpointedRecordingsRebuildTheGaps) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[6].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[6].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
@@ -334,7 +334,7 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
       return out;
     };
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts - 1].seaLevelDual = scene.solver.Grid().FromFunction(
+    measurements[npts - 1].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
         [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
     Viscoelastic3D op(scene.rheology, kLmax,
@@ -355,7 +355,7 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
       *kernelsOut =
           adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
-    return scene.Surface(measurements[npts - 1].seaLevelDual,
+    return scene.Surface(measurements[npts - 1].relativeSeaLevelDual,
                          snapshots.back().relativeSeaLevelChange);
   };
 
@@ -421,7 +421,7 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[npts - 1].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[npts - 1].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
   auto evaluate = [&](double h, Kernels3D* kernelsOut) -> double {
@@ -443,7 +443,7 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
       *kernelsOut =
           adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
-    return scene.Surface(measurements[npts - 1].seaLevelDual,
+    return scene.Surface(measurements[npts - 1].relativeSeaLevelDual,
                          snapshots.back().relativeSeaLevelChange);
   };
 

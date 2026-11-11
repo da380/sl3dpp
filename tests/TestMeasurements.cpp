@@ -214,13 +214,13 @@ TEST(MeasurementDuals, CoefficientDualReadsTheRealPair) {
 TEST(Measurements, CarryTheirDuals) {
   auto dual = std::vector<double>{1.0, 2.0};
   const auto sea = FieldMeasurement(FieldChannel::SeaLevel, dual);
-  EXPECT_EQ(sea.seaLevelDual, dual);
+  EXPECT_EQ(sea.relativeSeaLevelDual, dual);
   EXPECT_TRUE(sea.displacementDual.empty() && sea.potentialDual.empty());
   const auto phi = FieldMeasurement(FieldChannel::Potential, dual);
   EXPECT_EQ(phi.potentialDual, dual);
   const auto spin = RotationMeasurement(AngularVelocityComponent::Z);
   EXPECT_EQ(spin.angularVelocityDual, (std::array{0.0, 0.0, 1.0}));
-  EXPECT_TRUE(spin.seaLevelDual.empty());
+  EXPECT_TRUE(spin.relativeSeaLevelDual.empty());
 }
 
 std::vector<double> Window(std::size_t n, double span) {
@@ -398,9 +398,9 @@ TEST(DecayTime, MeasurementsCarryTheWeightedDual) {
   EXPECT_NEAR(fit.decay_time, 2.0, 1e-7);
   for (auto j = std::size_t{0}; j < nodes.size(); ++j) {
     const auto& m = measurements.at(nodes[j]);
-    ASSERT_EQ(m.seaLevelDual.size(), dual.size());
-    EXPECT_DOUBLE_EQ(m.seaLevelDual[0], 2.0 * fit.weights[j]);
-    EXPECT_DOUBLE_EQ(m.seaLevelDual[1], -1.0 * fit.weights[j]);
+    ASSERT_EQ(m.relativeSeaLevelDual.size(), dual.size());
+    EXPECT_DOUBLE_EQ(m.relativeSeaLevelDual[0], 2.0 * fit.weights[j]);
+    EXPECT_DOUBLE_EQ(m.relativeSeaLevelDual[1], -1.0 * fit.weights[j]);
     EXPECT_TRUE(m.displacementDual.empty());
   }
   const auto twice = std::vector<std::size_t>{1, 1, 2, 3, 4, 5};

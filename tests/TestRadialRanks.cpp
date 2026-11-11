@@ -497,11 +497,11 @@ TEST(RadialRanks, AdjointKernelsMatchTheOneProcessSweep) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       solvers[0].Grid().FromFunction([](double theta, double phi) {
         return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
       });
-  measurements[2].seaLevelDual = measurements[times.size() - 1].seaLevelDual;
+  measurements[2].relativeSeaLevelDual = measurements[times.size() - 1].relativeSeaLevelDual;
   const auto cuts = body.material.Mesh().BalancedCuts(
       count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
   ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
@@ -665,11 +665,11 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       solvers[0].Grid().FromFunction([](double theta, double phi) {
         return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
       });
-  measurements[2].displacementDual = measurements[times.size() - 1].seaLevelDual;
+  measurements[2].displacementDual = measurements[times.size() - 1].relativeSeaLevelDual;
   // the direction: a thickness history, a lateral log viscosity, lateral
   // moduli — over the one process's grid values, sliced per rank
   auto deltaIce = std::vector<std::vector<double>>{};
@@ -1027,11 +1027,11 @@ TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       solvers[0].Grid().FromFunction([](double theta, double phi) {
         return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
       });
-  measurements[2].seaLevelDual = measurements[times.size() - 1].seaLevelDual;
+  measurements[2].relativeSeaLevelDual = measurements[times.size() - 1].relativeSeaLevelDual;
   const auto cuts = body.material.Mesh().BalancedCuts(
       count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
   ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));

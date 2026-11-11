@@ -7,7 +7,7 @@ model's stored slices (for ICE-7G every kiloyear from 26 to 21 ka, then
 every half kiloyear to the present), `ice_thickness` and `topography` in
 metres on the data set's grid, to data/ice7g.nc (data/ice6g.nc,
 data/ice5g.nc). The file holds the present day too, so it is both the ice
-history (`forcing.ice.file`) and the state (`forcing.state.file`) of a
+history (`forcing.ice.file`) and the state (`forcing.sea_level.file`) of a
 `sea-level` config: configs/*_ice7g.json read data/ice7g.nc. pyslfp keeps
 the data in ~/.pyslfp_data (or $PYSLFP_DATA); if they are not there the
 script says what it would download and stops, unless --download is given.
@@ -32,11 +32,11 @@ Run from build/examples:
         [--lon -85] [--radius-deg 15] [--peak-m 3000]
         [--out data/synthetic_disk.nc]
 
-then a `sea-level` config through time takes the history as both its state
-and its ice, {"state": {"file": "../data/synthetic_disk.nc"}, "ice":
+then a `sea-level` config through time takes the file for both its sea
+level and its ice history, {"sea_level": {"file": "../data/synthetic_disk.nc"}, "ice":
 {"file": "../data/synthetic_disk.nc"}} with "times": {"start_kyr_bp": 26,
-"nodes": 27}, and a fingerprint takes the present-day state,
-{"state": {"file": "../data/synthetic_disk_present.nc"}, ...}.
+"nodes": 27}, and a fingerprint takes the present-day file for both,
+{"sea_level": {"file": "../data/synthetic_disk_present.nc"}, ...}.
 """
 from __future__ import annotations
 

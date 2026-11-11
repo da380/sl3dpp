@@ -2,8 +2,8 @@
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
   "lmax": 256,
   "forcing": {
-    "state": {"file": "../data/ice7g.nc", "date_kyr_bp": 0.0},
-    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
+    "sea_level": {"file": "../data/ice7g.nc", "date_kyr_bp": 0.0},
+    "ice": {"file": "../data/ice7g.nc", "type": "cap_fraction", "latitude": 72, "longitude": 320,
             "width_deg": 8, "fraction": -0.1}
   },
   "rotation": "full",

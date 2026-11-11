@@ -89,8 +89,8 @@ struct SeaLevelInput {
 /// window of nodes. Every date must be a node of the config's times.
 struct MeasurementSpec {
   enum class Type {
-    SeaLevelCap,
-    SeaLevelPoint,
+    RelativeSeaLevelCap,
+    RelativeSeaLevelPoint,
     DisplacementCap,
     DisplacementPoint,
     PotentialCap,
@@ -99,7 +99,7 @@ struct MeasurementSpec {
     Rotation,
     DecayTime
   };
-  Type type = Type::SeaLevelCap;
+  Type type = Type::RelativeSeaLevelCap;
   std::string name;
   GeographicPoint site{};  ///< caps, points and the decay time's site
   double width = 0.0;      ///< a cap's Gaussian width, radians

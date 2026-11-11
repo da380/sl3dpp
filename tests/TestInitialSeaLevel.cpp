@@ -491,7 +491,7 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   auto measurement = Measurement{};
-  measurement.seaLevelDual = body.Smooth(1.0, 6);
+  measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
   const auto measurements =
       std::map<std::size_t, Measurement>{{cap.times.size() - 1, measurement}};
   const auto constant =
@@ -522,8 +522,8 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
   Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   auto measurement = Measurement{};
-  measurement.seaLevelDual = body.Smooth(1.0, 12);
-  const auto& g = measurement.seaLevelDual;
+  measurement.relativeSeaLevelDual = body.Smooth(1.0, 12);
+  const auto& g = measurement.relativeSeaLevelDual;
   const auto kernels =
       AdjointSolver(evolution,
                     {.method = AdjointMethod::Discrete, .rtol = 1e-12})
@@ -606,8 +606,8 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
     const auto run = evolution.RunMigrating(cap.times, thickness);
     const auto oceans = OceanFunctionsOf(run);
     auto measurement = Measurement{};
-    measurement.seaLevelDual = body.Smooth(1.0, 6);
-    const auto& g = measurement.seaLevelDual;
+    measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
+    const auto& g = measurement.relativeSeaLevelDual;
 
     // Perturbations at the quarter dates but the first (the state's own
     // ice), the same on any refinement of them.
@@ -1140,7 +1140,7 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
   const auto& body = setting.body;
   const auto& times = setting.cap.times;
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = body.Smooth(1.0, 6);
+  measurements[times.size() - 1].relativeSeaLevelDual = body.Smooth(1.0, 6);
   measurements[2].displacementDual = body.Smooth(0.5, 7);
 
   ViscoelasticOperator op1(body.rheology, kLmax3D,
@@ -1214,8 +1214,8 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
     const auto oceans = OceanFunctionsOf(run);
     EXPECT_NE(oceans.back(), oceans.front()) << "no cell flipped";
     auto measurement = Measurement{};
-    measurement.seaLevelDual = body.Smooth(1.0, 6);
-    const auto& g = measurement.seaLevelDual;
+    measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
+    const auto& g = measurement.relativeSeaLevelDual;
     auto deltaAt = std::map<int, std::vector<double>>{};
     for (auto q = 1; q <= 4; ++q) {
       deltaAt.emplace(q, body.Smooth(1.0 * body.Metre(), 100 + q));

@@ -88,6 +88,9 @@ class Evolution {
     std::map<int, std::vector<double>> strain;
     std::vector<std::complex<double>> loadCoefficients;
     std::vector<std::complex<double>> tideCoefficients;
+    /// Under interior sources: the toroidal systems' state at the node,
+    /// with its strain.
+    std::optional<ToroidalViscoelastic::State> toroidal;
   };
 
   struct Options {
@@ -169,8 +172,9 @@ class Evolution {
     /// acts. They force the spheroidal systems of each step and the
     /// toroidal ones, which a radial model steps on their own
     /// (ToroidalViscoelastic); the snapshots then carry the toroidal
-    /// potential. A run under them is not resumed from a checkpoint, and
-    /// is recorded at every node or not at all (record_stride 1), each
+    /// potential. A run under them is resumed from a checkpoint that
+    /// holds the strain and the toroidal state (its own checkpoints do),
+    /// and is recorded at every node or not at all (record_stride 1), each
     /// kept state with its strain and the toroidal state beside it: the
     /// strain of a source-driven solution is not regenerated from the
     /// loads alone.
@@ -275,6 +279,8 @@ class Evolution {
   // (material units): the recurrence `Checkpoint` carries.
   std::vector<std::complex<double>> sigma_;
   std::vector<std::complex<double>> psi_;
+  // A restored checkpoint's toroidal state, for a resumed run.
+  std::optional<ToroidalViscoelastic::State> restoredToroidal_;
   // Unit ratios, material <-> SLE schemes (pyslfp's names).
   double toNdLength_ = 1.0, toNdPotential_ = 1.0, toNdMoment_ = 1.0;
   double toMatDensity_ = 1.0, toMatPotential_ = 1.0, toMatTime_ = 1.0;

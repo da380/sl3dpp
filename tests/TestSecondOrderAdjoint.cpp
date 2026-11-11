@@ -104,9 +104,9 @@ std::map<std::size_t, Measurement> Measurements(const Scene& setup,
                                                 std::mt19937& rng,
                                                 std::size_t last) {
   auto out = std::map<std::size_t, Measurement>{};
-  out[last].seaLevelDual = setup.Smooth(rng, 1.0);
+  out[last].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   out[last].displacementDual = setup.Smooth(rng, 0.5);
-  out[last / 2].seaLevelDual = setup.Smooth(rng, 1.0);
+  out[last / 2].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   return out;
 }
 
@@ -209,8 +209,8 @@ TEST(SecondOrderAdjoint, DerivativesMatchDifferencesOfTheGradient) {
   const auto u = Direction(setup, rng, times.size(), false,
                            [](double r) { return 0.8 - 0.5 * r; });
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
-  measurements[3].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[3].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   const auto& branch = setup.rheology.BranchAt(0);
   auto moved = [&](double eps) {
     auto out = thickness;
@@ -399,7 +399,7 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     v.material = AtMemoryPoints(
         op.Points(), materialDirection([](double r) { return 1.0 - 0.5 * r; }));
     auto measurement = std::map<std::size_t, Measurement>{};
-    measurement[times.size() - 1].seaLevelDual = g;
+    measurement[times.size() - 1].relativeSeaLevelDual = g;
     // and the tangential displacement's potential, a tangential traction
     // in the continuous sweep
     measurement[times.size() - 1].tangentialPotentialDual = gTangential;
@@ -480,7 +480,7 @@ TEST(SecondOrderAdjoint, MaterialBlocksAreExactAndSymmetric) {
   for (auto n = 0; n < 6; ++n) times.push_back(2.0 * n * setup.Kyr());
   const auto thickness = RandomThickness(setup, rng, times.size());
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[3].potentialDual = setup.Smooth(rng, 0.7);
 
@@ -724,7 +724,7 @@ TEST(SecondOrderAdjoint, HessianAboutASourceDrivenRun) {
       [](double s) { return 0.2 + s * s; });
 
   auto everyField = std::map<std::size_t, Measurement>{};
-  everyField[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  everyField[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   everyField[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   everyField[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 0.8);
   everyField[2].potentialDual = setup.Smooth(rng, 0.7);

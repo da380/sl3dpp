@@ -127,8 +127,8 @@ int main(int argc, char** argv) {
   for (auto i = std::size_t{0}; i < site.size(); ++i) siteArea[i] = site[i];
   const auto norm = a * a * grid.Integrate(siteArea);
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[nodes - 1].seaLevelDual = site;
-  for (auto& v : measurements[nodes - 1].seaLevelDual) v /= norm;
+  measurements[nodes - 1].relativeSeaLevelDual = site;
+  for (auto& v : measurements[nodes - 1].relativeSeaLevelDual) v /= norm;
 
   const auto table =
       examples::OutputDirectory("ice_kernels") / "ice_kernels.txt";
@@ -143,7 +143,7 @@ int main(int argc, char** argv) {
   out.Grid(grid);
   out.Scalar("gauge_lat", gauge.latitude);
   out.Scalar("gauge_lon", gauge.longitude);
-  out.Field("site_dual", measurements[nodes - 1].seaLevelDual);
+  out.Field("site_dual", measurements[nodes - 1].relativeSeaLevelDual);
   out.Field("ice_change_final_m", unitLoad);  // the load shape, context
 
   const auto& mesh = earth.material.Mesh();

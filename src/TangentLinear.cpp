@@ -79,8 +79,8 @@ class ForwardCursor {
 };
 
 void CheckTimes(std::span<const double> times) {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
@@ -534,7 +534,6 @@ struct TangentLinearSolver::MaterialSecondDrive
   }
 
   std::map<int, std::vector<double>> StartResponse() override {
-    const auto& op = *ev->op_;
     const auto& base0 = cursor->State(0);
     const auto x0 = BaseSolution(base0, 0);
     auto total = std::map<int, std::vector<double>>{};

@@ -2,8 +2,8 @@
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
   "lmax": 128,
   "forcing": {
-    "state": {"file": "../data/synthetic_earth.nc", "date_kyr_bp": 0.0},
-    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 318,
+    "sea_level": {"file": "../data/synthetic_earth.nc", "date_kyr_bp": 0.0},
+    "ice": {"file": "../data/synthetic_earth.nc", "type": "cap_fraction", "latitude": 72, "longitude": 318,
             "width_deg": 8, "fraction": -0.1}
   },
   "rotation": "full",

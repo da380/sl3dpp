@@ -139,8 +139,8 @@ double Objective(const Scene& setup,
   auto total = 0.0;
   for (const auto& [node, m] : measurements) {
     const auto& snap = snapshots[node];
-    if (!m.seaLevelDual.empty()) {
-      total += setup.Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
+    if (!m.relativeSeaLevelDual.empty()) {
+      total += setup.Surface(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
     }
     if (!m.displacementDual.empty()) {
       total += setup.Surface(m.displacementDual, snap.displacement);
@@ -191,9 +191,9 @@ TEST(Adjoint, DiscreteGradientIdentity) {
   }
 
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = setup.Smooth(rng, 0.3);
+  measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 0.3);
   Measurement middle;
-  middle.seaLevelDual = setup.Smooth(rng, 1.0);
+  middle.relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   middle.displacementDual = setup.Smooth(rng, -0.5);
   measurements[3] = std::move(middle);
   Measurement last;
@@ -255,8 +255,8 @@ TEST(Adjoint, ThicknessViewCarriesTheBaseline) {
   const auto loads = groundedLoads(thicknesses);
 
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[2].seaLevelDual = setup.Smooth(rng, 1.0);
-  measurements[4].seaLevelDual = setup.Smooth(rng, -0.6);
+  measurements[2].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[4].relativeSeaLevelDual = setup.Smooth(rng, -0.6);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
   Evolution evolution(op, setup.solver, setup.state, {.rtol = 1e-12});
@@ -314,8 +314,8 @@ TEST(Adjoint, ContinuousAgreesWithDiscreteAndConverges) {
       loads.push_back(setup.Smooth(local, 100.0 / sigma));
     }
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts / 2].seaLevelDual = setup.Smooth(local, 1.0);
-    measurements[npts - 1].seaLevelDual = setup.Smooth(local, 0.5);
+    measurements[npts / 2].relativeSeaLevelDual = setup.Smooth(local, 1.0);
+    measurements[npts - 1].relativeSeaLevelDual = setup.Smooth(local, 0.5);
 
     ViscoelasticOperator op(setup.rheology, kLmax);
     Evolution evolution(op, setup.solver, setup.state,
@@ -392,7 +392,7 @@ TEST(Adjoint, ViscosityKernelsAgainstFiniteDifferences) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
 
   // A smooth nodal perturbation of the branch's inverse relaxation time,
   // in material units, supported where the branch lives.
@@ -492,7 +492,7 @@ TEST(Adjoint, ContinuousViscosityKernelsConverge) {
       loads.push_back(setup.Smooth(local, 100.0 / sigma));
     }
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts - 1].seaLevelDual = setup.Smooth(local, 1.0);
+    measurements[npts - 1].relativeSeaLevelDual = setup.Smooth(local, 1.0);
 
     ViscoelasticOperator op(setup.rheology, kLmax);
     Evolution evolution(op, setup.solver, setup.state,
@@ -541,7 +541,7 @@ TEST(Adjoint, SavedAndRegeneratedStrainsAgree) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[5].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[5].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
   Evolution saving(
@@ -590,7 +590,7 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[10].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[10].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
 
   ViscoelasticOperator op(setup.rheology, kLmax);
   Evolution full(op, setup.solver, setup.state,
@@ -668,7 +668,7 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
   const double omConv =
       scales.Factor(Dimensions{.time = -1}) / 1.0e-4;  // OMEGA_ANCHOR
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[3].seaLevelDual = grid.FromFunction([](double t, double p) {
+  measurements[3].relativeSeaLevelDual = grid.FromFunction([](double t, double p) {
     return Cap(t, p, 0.9, 1.2, 0.5);
   });
   Measurement last;
@@ -819,7 +819,7 @@ TEST(Adjoint, MaterialKernelsAreTheTangentTranspose) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);
 
@@ -941,7 +941,7 @@ TEST(Adjoint, MaterialKernelsAreFunctionsOfRadius) {
     loads.push_back(setup.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[2].displacementDual = setup.Smooth(rng, 0.5);
   const auto& mesh = setup.material.Mesh();
 
@@ -1068,8 +1068,8 @@ TEST(Adjoint, ContinuousMaterialKernelsAgreeAndConverge) {
       loads.push_back(std::move(load));
     }
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts / 2].seaLevelDual = gMid;
-    measurements[npts - 1].seaLevelDual = gEnd;
+    measurements[npts / 2].relativeSeaLevelDual = gMid;
+    measurements[npts - 1].relativeSeaLevelDual = gEnd;
     measurements[npts - 1].displacementDual = gDisp;
     ViscoelasticOperator op(setup.rheology, kLmax, {.memory_points = set});
     const auto atPoints = AtMemoryPoints(op.Points(), d);

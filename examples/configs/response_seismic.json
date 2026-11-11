@@ -1,0 +1,13 @@
+{
+  "model": {"deck": "../data/prem8.gia.deck"},
+  "lmax": 64,
+  "times": {"at_kyr": [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0]},
+  "forcing": {
+    "seismic": [{"fault": {"latitude": 38.3, "longitude": 142.4, "depth_km": 25.0,
+                           "strike_deg": 200.0, "dip_deg": 12.0, "rake_deg": 90.0,
+                           "length_km": 400.0, "width_km": 150.0,
+                           "moment_nm": 4.0e22,
+                           "patches_along_strike": 8, "patches_down_dip": 3}}]
+  },
+  "output": {"surface": "out/response_seismic/response_seismic.nc"}
+}

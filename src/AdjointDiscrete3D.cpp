@@ -88,8 +88,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const auto values = coupling.GridValueCount();
   const auto nodeCount = static_cast<std::size_t>(coupling.NodeCount());
 
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {
@@ -329,9 +329,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     duals.oceanFunctionOverride = overrideAt(node);
     const auto& Cn = oceanAt(node);
     auto synth = grid.Synthesise(sigmaDual);
-    duals.seaLevelDual.assign(fieldSize, 0.0);
+    duals.relativeSeaLevelDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      duals.seaLevelDual[i] = rhoW * Cn[i] * synth[i] / r2;
+      duals.relativeSeaLevelDual[i] = rhoW * Cn[i] * synth[i] / r2;
     }
     auto gOmega = std::array<double, 3>{0.0, 0.0, 0.0};
     if (rotation != RotationalFeedback::None) {
@@ -340,8 +340,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     if (auto found = measurements.find(node);
         measured && found != measurements.end()) {
       const auto& m = found->second;
-      for (auto i = std::size_t{0}; i < m.seaLevelDual.size(); ++i) {
-        duals.seaLevelDual[i] += m.seaLevelDual[i];
+      for (auto i = std::size_t{0}; i < m.relativeSeaLevelDual.size(); ++i) {
+        duals.relativeSeaLevelDual[i] += m.relativeSeaLevelDual[i];
       }
       duals.displacementDual = m.displacementDual;
       duals.potentialDual = m.potentialDual;
@@ -1428,7 +1428,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
     duals.oceanFunctionOverride = overrideAt(node);
-    duals.seaLevelDual = m.seaLevelDual;
+    duals.relativeSeaLevelDual = m.relativeSeaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
     duals.tangentialPotentialDual = m.tangentialPotentialDual;
@@ -1450,7 +1450,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const auto lump = lumps.find(n);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       const double lumped = lump == lumps.end() ? 0.0 : lump->second[i];
-      densityLoad[n][i] = (directLoadKernels[n][i] - lumped) / w[n];
+      densityLoad[n][i] =
+          w[n] > 0.0 ? (directLoadKernels[n][i] - lumped) / w[n] : 0.0;
     }
   }
   Kernels3D out;

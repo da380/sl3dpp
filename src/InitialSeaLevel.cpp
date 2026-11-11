@@ -116,7 +116,7 @@ Misfit MisfitOf(Evolution& evolution, std::span<const double> times,
     // The initial sea level kernel of a sea level measurement w r at the
     // last node, about the run's own shorelines.
     auto measurement = Measurement{};
-    measurement.seaLevelDual = out.gradient;
+    measurement.relativeSeaLevelDual = out.gradient;
     const auto kernel = initialSeaLevelKernel(out.snapshots, measurement);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       out.gradient[i] += kernel[i];

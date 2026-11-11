@@ -36,6 +36,7 @@ all_exist() {  # all_exist <file>...: whether every file is there
 run love-numbers love_numbers.json
 run response response.json
 run response response_viscoelastic.json
+run response response_seismic.json
 run response response1d_disk.json
 run response response1d_tide.json
 run response response_tide_3d.json

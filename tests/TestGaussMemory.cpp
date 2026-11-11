@@ -157,8 +157,8 @@ struct Scene {
     auto total = 0.0;
     for (const auto& [node, m] : measurements) {
       const auto& snap = snapshots[node];
-      if (!m.seaLevelDual.empty()) {
-        total += Surface(m.seaLevelDual, snap.relativeSeaLevelChange);
+      if (!m.relativeSeaLevelDual.empty()) {
+        total += Surface(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
       }
       if (!m.displacementDual.empty()) {
         total += Surface(m.displacementDual, snap.displacement);
@@ -349,8 +349,8 @@ TEST(GaussMemory, DiscreteGradientIdentity) {
     loads.push_back(scene.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[0].seaLevelDual = scene.Smooth(rng, 0.3);
-  measurements[3].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.3);
+  measurements[3].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[3].displacementDual = scene.Smooth(rng, -0.5);
   measurements[5].displacementDual = scene.Smooth(rng, 0.7);
   measurements[5].potentialDual = scene.Smooth(rng, 0.4);
@@ -393,7 +393,7 @@ TEST(GaussMemory, ItauKernelAgainstFiniteDifferences) {
     loads.push_back(scene.Smooth(rng, 100.0 / sigma));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
 
   const auto& material = scene.body.material;
   const auto& base = scene.body.rheology.BranchAt(0);
@@ -476,7 +476,7 @@ TEST(GaussMemory, KernelsAgreeWithGllAndContinuousConverges) {
       loads.push_back(scene.Smooth(local, 100.0 / sigma));
     }
     auto measurements = std::map<std::size_t, Measurement>{};
-    measurements[npts - 1].seaLevelDual = scene.Smooth(local, 1.0);
+    measurements[npts - 1].relativeSeaLevelDual = scene.Smooth(local, 1.0);
     const auto op = Operator(scene.body.rheology, set);
     auto evolution = Evolution(op, scene.solver, scene.state,
                                        {.rtol = 1e-12, .record_stride = 1});

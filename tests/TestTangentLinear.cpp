@@ -765,7 +765,7 @@ TEST(TangentLinear, ModuliAboutASourceDrivenRun) {
   const auto forcing = Evolution::Forcing{
       .sources = [&](double) { return sources; }};
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 0.8);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);
@@ -922,7 +922,7 @@ TEST(TangentLinear, TheContinuousSweepFormsTideAndMomentKernels) {
       auto times = std::vector<double>{};
       for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
       auto measurements = std::map<std::size_t, Measurement>{};
-      measurements[times.size() / 2].seaLevelDual = gSea;
+      measurements[times.size() / 2].relativeSeaLevelDual = gSea;
       measurements[times.size() / 2].toroidalPotentialDual = gW;
       measurements[times.size() - 1].displacementDual = gU;
       measurements[times.size() - 1].tangentialPotentialDual = gV;
@@ -1124,7 +1124,7 @@ TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
     auto measurement = std::map<std::size_t, Measurement>{};
-    measurement[times.size() - 1].seaLevelDual = g;
+    measurement[times.size() - 1].relativeSeaLevelDual = g;
     TangentPerturbation direction;
     direction.itau = ditau;
     auto values = std::map<AdjointMethod, double>{};
@@ -1192,7 +1192,7 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
 
   auto measurement = std::map<std::size_t, Measurement>{};
-  measurement[cap.times.size() - 1].seaLevelDual = g;
+  measurement[cap.times.size() - 1].relativeSeaLevelDual = g;
   TangentPerturbation direction;
   direction.iceThickness = deltaIce;
   direction.initialSeaLevel = deltaSea;
@@ -1251,7 +1251,7 @@ TEST(TangentLinear, SecondOrderRunIsTheDerivativeOfTheFirst) {
   }
   const auto g = setup.Smooth(rng, 1.0);
   auto measurement = std::map<std::size_t, Measurement>{};
-  measurement[times.size() - 1].seaLevelDual = g;
+  measurement[times.size() - 1].relativeSeaLevelDual = g;
   const auto ditauU = setup.DeltaItau(0.1);
   const auto ditauV =
       setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
@@ -1435,7 +1435,7 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
     auto measurement = std::map<std::size_t, Measurement>{};
-    measurement[times.size() - 1].seaLevelDual = g;
+    measurement[times.size() - 1].relativeSeaLevelDual = g;
     auto values = std::map<AdjointMethod, double>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       TangentLinearSolver tangent(
@@ -1487,7 +1487,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferences) {
     loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);
 
@@ -1598,7 +1598,7 @@ TEST(TangentLinear, MaterialDirectionMatchesDifferencesAtGaussPoints) {
     loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);
 
@@ -1733,7 +1733,7 @@ TEST(TangentLinear, SecondOrderRunInTheMaterial) {
     deltaV.push_back(setup.Smooth(rng, 20.0 * setup.Sigma()));
   }
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);
   const auto ditauU = setup.DeltaItau(0.1);
@@ -1936,7 +1936,7 @@ TEST(TangentLinear, SecondOrderRunAboutASourceDrivenRun) {
         times.size(), std::vector<PointSource>{{.at = at, .moment = moment}});
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
   measurements[times.size() - 1].toroidalPotentialDual = setup.Smooth(rng, 0.8);
   measurements[2].potentialDual = setup.Smooth(rng, 0.7);

@@ -262,7 +262,7 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
 
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
-    duals.seaLevelDual = grid.FromFunction([&](double theta, double phi) {
+    duals.relativeSeaLevelDual = grid.FromFunction([&](double theta, double phi) {
       return Cap(theta, phi, 0.9, 1.2, 0.5);
     });
     duals.displacementDual = grid.FromFunction([&](double theta, double phi) {
@@ -277,7 +277,7 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
           return 0.6 * Cap(theta, phi, 1.9, 5.0, 0.6);
         });
     if (tangentialAlone) {
-      duals.seaLevelDual.clear();
+      duals.relativeSeaLevelDual.clear();
       duals.displacementDual.assign(grid.FieldSize(), 0.0);
       duals.potentialDual.assign(grid.FieldSize(), 0.0);
       duals.angularVelocityDual = {0.0, 0.0, 0.0};
@@ -295,7 +295,7 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
               0.0);
     const double lhs =
         (tangentialAlone ? 0.0
-                         : surface(duals.seaLevelDual,
+                         : surface(duals.relativeSeaLevelDual,
                                    response.relativeSeaLevelChange)) +
         surface(duals.tangentialPotentialDual, response.tangentialPotential) +
         surface(duals.displacementDual, response.displacement) +

@@ -3,7 +3,7 @@
   "lmax": 24,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
-    "state": {"file": "../data/synthetic_earth.nc"},
+    "sea_level": {"file": "../data/synthetic_earth.nc"},
     "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
@@ -11,9 +11,9 @@
   "record_stride": 6,
   "adjoint": "continuous",
   "measurements": [
-    {"type": "sea_level_cap", "name": "hudson_bay_sea_level",
+    {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
      "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 0},
-    {"type": "sea_level_point", "name": "far_field_sea_level",
+    {"type": "relative_sea_level_point", "name": "far_field_sea_level",
      "latitude": -17.5, "longitude": 210.5, "date_kyr_bp": 10},
     {"type": "rotation", "name": "length_of_day", "component": "z"},
     {"type": "stokes_coefficient", "name": "j2", "degree": 2, "order": 0},

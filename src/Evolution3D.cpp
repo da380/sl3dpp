@@ -68,8 +68,8 @@ std::vector<Evolution3D::Complex> Evolution3D::Coefficients(
 namespace {
 
 void CheckTimes(std::span<const double> times) {
-  if (times.size() < 2) {
-    throw std::invalid_argument("times must hold at least two entries");
+  if (times.empty()) {
+    throw std::invalid_argument("times must hold at least one entry");
   }
   for (auto i = std::size_t{1}; i < times.size(); ++i) {
     if (times[i] <= times[i - 1]) {

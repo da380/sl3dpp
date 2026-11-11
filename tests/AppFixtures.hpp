@@ -18,8 +18,13 @@ namespace sl3dpp::test {
 /// alone, for finite differences of the kernels.
 /// With `marine`, the polar ice sits in a basin 500 m below sea level and
 /// thins to a fifth by the present, so it floats off as it melts.
+/// `fields` picks what is written: both, the ice history alone, or the
+/// topography alone; `hole` puts a value that is not a number in the ice.
+enum class ToyFields { Both, Ice, Topography };
 inline void WriteToyHistory(const std::filesystem::path& path,
-                            double bump_last = 0.0, bool marine = false) {
+                            double bump_last = 0.0, bool marine = false,
+                            ToyFields fields = ToyFields::Both,
+                            bool hole = false) {
   namespace pm = planetmodel;
   constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
   const auto grid = pm::Equiangular(19, 36);
@@ -57,10 +62,15 @@ inline void WriteToyHistory(const std::filesystem::path& path,
   options.support = "node";
   options.time_interpolation = "linear";
   options.dimensions = pm::units::LENGTH;
-  file.variables.emplace("ice_thickness",
-                         pm::SurfaceField("ice_thickness", ice, options));
-  file.variables.emplace("topography",
-                         pm::SurfaceField("topography", topo, options));
+  if (hole) ice[9 * 36 + 5] = std::nan("");
+  if (fields != ToyFields::Topography) {
+    file.variables.emplace("ice_thickness",
+                           pm::SurfaceField("ice_thickness", ice, options));
+  }
+  if (fields != ToyFields::Ice) {
+    file.variables.emplace("topography",
+                           pm::SurfaceField("topography", topo, options));
+  }
   pm::WriteSurfaceFile(path, file);
 }
 

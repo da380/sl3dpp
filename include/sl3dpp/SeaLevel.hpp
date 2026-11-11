@@ -312,7 +312,7 @@ class GRDSolver {
   /// product. Must use the ocean function and rotation setting of the
   /// forward solve being transposed.
   struct AdjointForcing {
-    std::vector<double> seaLevelDual;
+    std::vector<double> relativeSeaLevelDual;
     std::vector<double> displacementDual;
     std::vector<double> potentialDual;
     /// The dual of the tangential displacement's potential V, a density

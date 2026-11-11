@@ -10,6 +10,7 @@
  * level's calibration.
  */
 
+#include <memory>
 #include <filesystem>
 #include <functional>
 #include <optional>
@@ -127,21 +128,36 @@ struct BuiltEarth {
 [[nodiscard]] SeaLevelParameters ParametersOf(const SeaLevelRun& run,
                                               const Material& material);
 
-/// The world a run moves: the state and ice histories on the solver
-/// grid, the window-start ice (SI), and the background state built from
-/// the start's thickness and topography by the flotation construction.
+/// The world a run moves: the sea level's file and the ice history on
+/// the solver grid (one object when they are one file), the ice
+/// history's ice at the window's start (SI), and the background built
+/// from that ice and the initial sea level.
 struct Loaded {
-  io::FieldHistory state;
-  io::FieldHistory ice;
+  std::shared_ptr<const io::FieldHistory> seaLevel;
+  std::shared_ptr<const io::FieldHistory> ice;
   std::vector<double> ice0;  ///< the start's ice thickness, SI
   GRDSolver::State background;
 };
+
+/// The sea level a file gives at a time (SI seconds), SI: its
+/// `sea_level` field, or by flotation from its `topography` with the
+/// given ice thickness (SI). A file with neither, or values that are
+/// not numbers, are refused at `member`.
+[[nodiscard]] std::vector<double> SeaLevelFrom(
+    const io::FieldHistory& file, std::span<const double> ice, double time,
+    const SeaLevelParameters& parameters, const Json& member);
+
+/// The ice history's thickness at a time (SI seconds), SI; values that
+/// are not numbers are refused.
+[[nodiscard]] std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
+                                                 double time);
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const GRDSolver& solver);
 
-/// The sea level the state file gives at the window's end, by the
-/// flotation construction, solver units: the calibration's target. Refused
-/// when the window's end lies outside the file's time span.
+/// The sea level the sea level file gives at the window's end (with the
+/// ice history's ice there, where it holds topography), solver units:
+/// the calibration's target. Refused when the window's end lies outside
+/// the file's time span.
 [[nodiscard]] std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run,
                                                   const Json& top,
                                                   const GRDSolver& solver,
@@ -163,7 +179,7 @@ struct Loaded {
     const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
 
 /// The ice thickness the migrating runs take, solver units: the
-/// background's ice plus the history's change from the start's ice
+/// background's ice plus the history's change from its own start
 /// (world.ice0, as IceLoadOf measures it). The references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
     const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
@@ -180,12 +196,12 @@ struct Loaded {
 void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess);
 
-/// Calibrates the world's initial sea level against the state file's sea
+/// Calibrates the world's initial sea level against the sea level file's sea
 /// level at the window's end, as the config asks, by an evolution the
 /// caller built to stream nothing, and adopts it as the world's
 /// background. The start is pyslfp's: the ice history's ice at the window's
 /// start, the target sea level as the guess (StartFromIceHistory), so the
-/// state file is read at the end alone. Refused when the calibration runs
+/// sea level file is read at the end alone. Refused when the calibration runs
 /// out of iterations. Returns the misfits before and after (SI metres) and
 /// the runs taken.
 struct CalibrationSummary {

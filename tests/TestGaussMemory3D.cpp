@@ -310,7 +310,7 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
     return out;
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[5].seaLevelDual = scene.solver.Grid().FromFunction(
+  measurements[5].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
   measurements[3].displacementDual = scene.solver.Grid().FromFunction(
       [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
@@ -417,7 +417,7 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
   };
   auto measurements = std::map<std::size_t, Measurement>{};
-  measurements[times.size() - 1].seaLevelDual =
+  measurements[times.size() - 1].relativeSeaLevelDual =
       scene.solver.Grid().FromFunction(
           [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
 
@@ -440,7 +440,7 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
           AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
       *kernelsOut = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
-    return scene.Surface(measurements[times.size() - 1].seaLevelDual,
+    return scene.Surface(measurements[times.size() - 1].relativeSeaLevelDual,
                          snapshots.back().relativeSeaLevelChange);
   };
 

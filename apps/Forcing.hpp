@@ -5,9 +5,11 @@
  * @brief The `forcing` blocks of the configs. `response`'s: a surface
  * load, the sum of a list of terms of surface mass density, and an
  * external tidal potential, the sum of a list of coefficients; the block's
- * reader, and its builder onto a run's grid. `sea-level`'s (and the
- * kernel commands'): the state the ocean stands on and the surface load
- * that changes it, the ice (SeaLevelForcing, at the end of this file).
+ * reader, and its builder onto a run's grid; and, in a run through time,
+ * seismic sources, point moment tensors and planar faults inside the
+ * body (SeismicTerm). `sea-level`'s (and the kernel commands'): an ice
+ * history and the initial sea level (SeaLevelForcing, at the end of this
+ * file).
  *
  * A load term is one of
  *
@@ -42,7 +44,9 @@
 #include <vector>
 
 #include "Input.hpp"
+#include "sl3dpp/Fault.hpp"
 #include "sl3dpp/Geography.hpp"
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/io/FieldHistory.hpp"
 
@@ -90,12 +94,47 @@ struct TideTerm {
   AmplitudeHistory history;  ///< the coefficient's factor through time
 };
 
+/// One seismic source of a run through time: a point moment tensor, or a
+/// planar fault of uniform slip laid out as point sources (Fault.hpp).
+/// The moment is the stress glut itself: it acts from `onset_kyr` (the
+/// run's start when absent) and is held, times its amplitude history
+/// where one is given. SI throughout: metres and N m.
+struct SeismicTerm {
+  enum class Kind { Point, Fault };
+  Kind kind = Kind::Point;
+  GeographicPoint site{};  ///< the point, or the fault's centroid
+  double depth = 0.0;      ///< below the surface, m
+  /// A point's moment tensor in the spherical polar basis at the point
+  /// (r up, theta south, phi east), N m.
+  SphericalTensor moment{};
+  /// A fault's plane and slip (Aki & Richards), degrees, its size (m),
+  /// its scalar moment (N m) and its patches along strike and down dip.
+  double strike = 0.0, dip = 90.0, rake = 0.0;
+  double length = 0.0, width = 0.0;
+  double scalarMoment = 0.0;
+  int alongStrike = 1, downDip = 1;
+  std::optional<double> onset_kyr;  ///< absent: from the run's start
+  AmplitudeHistory history;
+
+  /// The factor of the moment at time t, kyr: zero before the onset.
+  [[nodiscard]] double FactorAt(double t) const;
+};
+
 /// The `forcing` block: the load terms and the tide coefficients, each
-/// list summed.
+/// list summed, and the seismic sources.
 struct Forcing {
   std::vector<LoadTerm> load;
   std::vector<TideTerm> tide;
+  std::vector<SeismicTerm> seismic;
 };
+
+/// The point sources of a forcing's seismic terms at time t, kyr, SI
+/// (radius in metres from the centre, moments in N m), for a surface of
+/// radius `surfaceRadius` metres. Every term gives its sources at every
+/// time, with zero moment before its onset.
+[[nodiscard]] std::vector<PointSource> SeismicSourcesAt(const Forcing& forcing,
+                                                        double t,
+                                                        double surfaceRadius);
 
 /// Reads a `forcing` block for a run at `lmax`, relative paths against
 /// `directory`. Each element of `load` is an object holding exactly one of
@@ -104,8 +143,16 @@ struct Forcing {
 /// coefficient, likewise with an optional `history_kyr`. A history is a
 /// list of `[time_kyr, factor]` pairs, its times strictly increasing; a
 /// `field` term of a timed run may set `time_origin_kyr`. At least one
-/// load term or tide coefficient is needed. Without `timed`, a history or
-/// a time origin is refused: it needs a `times` block.
+/// load term, tide coefficient or seismic source is needed. Each element
+/// of `seismic` is an object holding exactly one of `point` (`latitude`,
+/// `longitude`, `depth_km` and either `moment_tensor_nm` with members
+/// `rr`, `tt`, `pp`, `rt`, `rp`, `tp`, or `strike_deg`, `dip_deg`,
+/// `rake_deg` and `moment_nm`) and `fault` (`latitude`, `longitude`,
+/// `depth_km` of its centroid, `strike_deg`, `dip_deg`, `rake_deg`,
+/// `length_km`, `width_km`, `moment_nm`, and optionally
+/// `patches_along_strike` and `patches_down_dip`), with optionally
+/// `onset_kyr` and `history_kyr`. Without `timed`, a history, a time
+/// origin or a seismic source is refused: it needs a `times` block.
 [[nodiscard]] Forcing ReadForcing(const Json& block,
                                   const std::filesystem::path& directory,
                                   int lmax, bool timed = false);
@@ -175,6 +222,10 @@ class TimedForcing {
   bool varies_ = false;
 };
 
+/// A site's `latitude` and `longitude`, degrees; a latitude outside
+/// [-90, 90] is refused.
+[[nodiscard]] GeographicPoint ReadSite(const Json& object);
+
 /// A Gaussian cap at the grid's points: amplitude exp(-d^2 / (2 width^2))
 /// in great-circle distance d (radians) from `centre`.
 [[nodiscard]] std::vector<double> CapField(const SurfaceGrid& grid,
@@ -213,24 +264,26 @@ class TimedForcing {
 /// its pattern and, where set, its time origin and amplitude history.
 [[nodiscard]] std::string Describe(const LoadTerm& term);
 [[nodiscard]] std::string Describe(const TideTerm& term);
+[[nodiscard]] std::string Describe(const SeismicTerm& term);
 
 /// What a forcing holds, as `load (2 terms) + tide (1 coefficient)`.
 [[nodiscard]] std::string Summary(const Forcing& forcing);
 
 // -- the forcing of a run with an ocean ---------------------------------------
 
-/// The state the ocean stands on: a planetmodel surface file holding
-/// `ice_thickness` and `topography`.
-struct StateSource {
+/// The sea level the run starts from: a planetmodel surface file holding
+/// `sea_level` or `topography` (the sea level then follows by flotation
+/// with the ice history's own ice at the same date).
+struct SeaLevelSource {
   std::filesystem::path file;
-  /// The date the elastic fingerprint reads the state at, kyr before
-  /// present; a run through time reads it at its window's start (or,
-  /// calibrating, at its end) instead.
+  /// The date the elastic fingerprint reads the sea level and the ice
+  /// at, kyr before present; a run through time reads them at its
+  /// window's start (the sea level, calibrating, at its end) instead.
   double date_kyr_bp = 0.0;
 };
 
 /// The elastic fingerprint's ice change: a Gaussian cap, of a fraction of
-/// the state's ice thickness or of a thickness.
+/// the ice thickness at the date or of a thickness.
 struct IceChange {
   enum class Kind { CapFraction, CapThickness } kind = Kind::CapFraction;
   GeographicPoint site;
@@ -238,25 +291,27 @@ struct IceChange {
   double amount = 0.0;  ///< the fraction, or the thickness in metres
 };
 
-/// The ice: through time, a surface file's history of `ice_thickness`;
-/// for the elastic fingerprint, a change applied to the state.
+/// The ice: an ice history, a surface file's `ice_thickness` through
+/// time (a static field is a history that does not change), and, for
+/// the elastic fingerprint, a change applied to its ice at the date.
 struct IceForcing {
-  std::filesystem::path history;    ///< a run through time's
+  std::filesystem::path history;    ///< the ice history's file
   std::optional<IceChange> change;  ///< the fingerprint's
 };
 
-/// The `forcing` block of `sea-level` and the kernel commands: the state
-/// and the surface load that changes it. The load is the ice, a member of
-/// its own; another kind of surface load would be a member beside it.
+/// The `forcing` block of `sea-level` and the kernel commands: an ice
+/// history and the initial sea level. The ice the run starts from is the
+/// history's own, so the two inputs cannot disagree; the load is the
+/// history's change from its start.
 struct SeaLevelForcing {
-  StateSource state;
+  SeaLevelSource seaLevel;
   IceForcing ice;
 };
 
 /// Reads a `forcing` block of a run with an ocean, relative paths against
-/// `directory`: `state` (`file`, and `date_kyr_bp` for the fingerprint)
-/// and `ice`, both required. In a run through time (`timed`) `ice` is an
-/// ice history, `file`; for the fingerprint it is a change, `type`
+/// `directory`: `sea_level` (`file`, and `date_kyr_bp` for the
+/// fingerprint) and `ice`, both required. `ice` gives the ice history,
+/// `file`; for the fingerprint it gives a change too, `type`
 /// ("cap_fraction" or "cap_thickness"), `latitude`, `longitude`,
 /// `width_deg` and the amount, `fraction` or `thickness_m`. The members of
 /// the other kind of run are refused, naming what this run takes.

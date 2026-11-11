@@ -4,14 +4,14 @@
   "lmax": 12,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 22},
   "forcing": {
-    "state": {"file": "../data/synthetic_earth.nc"},
+    "sea_level": {"file": "../data/synthetic_earth.nc"},
     "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
   "moments": "hydrostatic",
   "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
   "measurements": [
-    {"type": "sea_level_cap", "name": "hudson_bay_sea_level",
+    {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
      "latitude": 60, "longitude": 275, "width_deg": 10, "date_kyr_bp": 0},
     {"type": "decay_time", "name": "hudson_bay_decay",
      "latitude": 60, "longitude": 275, "width_deg": 10,

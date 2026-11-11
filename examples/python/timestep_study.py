@@ -83,7 +83,7 @@ def config(kind: str, steps: int) -> dict:
         "lmax": 16,
         "times": {"start_kyr_bp": START, "end_kyr_bp": END,
                   "nodes": steps + 1},
-        "forcing": {"state": {"file": "../data/synthetic_earth.nc"},
+        "forcing": {"sea_level": {"file": "../data/synthetic_earth.nc"},
                     "ice": {"file": "../data/synthetic_earth.nc"}},
         "rotation": "none",
         "solver": {"scheme": SCHEMES.get(kind, "exponential_trapezoid")},
@@ -93,7 +93,7 @@ def config(kind: str, steps: int) -> dict:
     else:
         out["adjoint"] = kind
         out["measurements"] = [
-            {"type": "sea_level_cap", "name": measurement, **SITE,
+            {"type": "relative_sea_level_cap", "name": measurement, **SITE,
              "date_kyr_bp": date}
             for measurement, date in MEASUREMENTS.items()]
         out["output"] = f"out/{name}"

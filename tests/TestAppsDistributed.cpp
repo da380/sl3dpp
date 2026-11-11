@@ -99,7 +99,7 @@ class AppsOverRanks : public ::testing::Test {
            data + R"(/viscosity_log.nc"}},
       "lmax": 8,
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
-      "forcing": {"state": {"file": "history.nc"},
+      "forcing": {"sea_level": {"file": "history.nc"},
                   "ice": {"file": "history.nc"}},
       "rotation": "full")";
   }
@@ -201,7 +201,7 @@ TEST_F(AppsOverRanks, CalibratedMigratingSeaLevelMatchesOneProcess) {
 TEST_F(AppsOverRanks, KernelMatchesOneProcessAndSpillsPerRank) {
   const auto measurement = std::string{R"(
       "measurements": [
-        {"type": "sea_level_cap", "name": "site", "latitude": -30.0,
+        {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
          "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}])"};
   const auto one = Write("one.json", "{" + Body() + "," + measurement +
                                          R"(, "output": "out_one"})");
@@ -340,8 +340,8 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
                  std::format(R"({{
       "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic"{}}},
       "lmax": 8,
-      "forcing": {{"state": {{"file": "history.nc"}},
-                  "ice": {{"type": "cap_thickness", "latitude": 70,
+      "forcing": {{"sea_level": {{"file": "history.nc"}},
+                  "ice": {{"file": "history.nc", "type": "cap_thickness", "latitude": 70,
                           "longitude": 30, "width_deg": 10,
                           "thickness_m": -50}}}},
       "rotation": "full",{}
@@ -415,7 +415,7 @@ TEST_F(AppsOverRanks, RadialSeaLevelIsTheFirstRanksAlone) {
   const auto body = std::string{R"(
       "model": {"deck": "ball.deck"}, "lmax": 8,
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
-      "forcing": {"state": {"file": "history.nc"},
+      "forcing": {"sea_level": {"file": "history.nc"},
                   "ice": {"file": "history.nc"}},
       "rotation": "full", "moments": "hydrostatic")"};
   const auto one = Write("one.json", "{" + body + R"(,

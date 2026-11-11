@@ -3,16 +3,16 @@
   "lmax": 16,
   "times": {"start_kyr_bp": 16.0, "end_kyr_bp": 6.0, "nodes": 41},
   "forcing": {
-    "state": {"file": "../data/synthetic_earth.nc"},
+    "sea_level": {"file": "../data/synthetic_earth.nc"},
     "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "none",
   "solver": {"scheme": "exponential_trapezoid"},
   "adjoint": "continuous",
   "measurements": [
-    {"type": "sea_level_cap", "name": "hudson_bay_10ka",
+    {"type": "relative_sea_level_cap", "name": "hudson_bay_10ka",
      "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 10.0},
-    {"type": "sea_level_cap", "name": "hudson_bay_6ka",
+    {"type": "relative_sea_level_cap", "name": "hudson_bay_6ka",
      "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 6.0}
   ],
   "output": "out/timestep_continuous_n40"
