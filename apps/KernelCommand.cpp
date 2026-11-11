@@ -547,9 +547,10 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   for (const auto& snapshot : snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(
-          std::format("the sea level solve did not converge at t = {}; loosen "
-                      "solver.rtol",
-                      snapshot.t));
+          std::format("the sea level solve did not converge at {:.6g} kyr "
+                      "BP; loosen solver.rtol",
+                      DateKyrBp(input.run, solver.SolverScales(),
+                                snapshot.t)));
     }
   }
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
@@ -681,8 +682,9 @@ std::string RunKernel3D(const std::filesystem::path& config) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
           "the coupled fixed point or its sea level solve did not converge "
-          "at t = {}; loosen solver.step_rtol or solver.rtol",
-          snapshot.t));
+          "at {:.6g} kyr BP; raise solver.step_max_iterations, or loosen "
+          "solver.step_rtol or solver.rtol",
+          DateKyrBp(input.run, solver.SolverScales(), snapshot.t)));
     }
   }
   auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);

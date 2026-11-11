@@ -18,7 +18,7 @@ cd build/examples/configs
 ../../apps/sl3d sea-level sea_level_1d.json   # or one at a time
 ```
 
-The synthetic configs need no data and run in about 45 s together on four
+The synthetic configs need no data and run in about a minute together on four
 threads (`OMP_NUM_THREADS=4`); CI runs them with `run_all.sh`. They are
 sized for that, so their degrees are low; raise `lmax` and `nodes` for
 sharper results. `poetry run python plot_app.py`, from `build/examples`,
@@ -255,8 +255,8 @@ draws each config's figures from `out/<config>/` into
   to the Maxwell times, and converge more slowly above them. At the
   reference step the two adjoints' kernels agree to 4e-4. The lesson: at
   a given step the kernels are several times less accurate than the
-  fields they are kernels of (here six times by the discrete adjoint and
-  twenty-five by the continuous one). The discrete adjoint is the exact
+  fields they are kernels of (here five to eight times by the discrete
+  adjoint and twenty to thirty by the continuous one). The discrete adjoint is the exact
   gradient of the time-stepped model, not the exact gradient of the
   Earth's: it inherits the time step's error, and more of it than the
   fields carry. A step that serves the forward run may not serve the
@@ -288,8 +288,8 @@ above 670 km and 5e21 Pa s below (`../data/earth_custom.gia.deck` and
 `../data/earth_custom.elastic.deck`, written by `make_earth_deck.py`), with
 S40RTS's lateral structure built on that deck by `make_lateral_model.py`
 (the commands are in examples/README.md, ICE-7G). `run_all.sh` runs them
-once all these files exist, and skips them otherwise; they take minutes
-each, and want 8 threads.
+once all these files exist, and skips them otherwise; the 3D run through
+time takes minutes.
 
 - `../data/earth_custom_moduli_s40rts.nc` (`--field moduli --kind
   tomography --lmax 64`): the shear and bulk moduli from S40RTS's dlnVs,
@@ -307,7 +307,7 @@ each, and want 8 threads.
   at 150 km and up to 0.70 in the mid-mantle); renormalising lowers the
   geometric mean by up to 27%. No lid: with this deck's 100 km elastic
   lithosphere, the stiffest mantle beneath it is 5.7 times the deck's
-  5e20 Pa s, so `--lid` at 3e21 Pa s or more finds no lid anywhere.
+  5e20 Pa s (2.9e21 Pa s), and `--lid` at 5e21 Pa s finds no lid anywhere.
 
 - **`sea_level_fingerprint_3d_ice7g.json`** — the fingerprint of
   `sea_level_fingerprint_ice7g.json` (10% of ICE-7G's Greenland ice
@@ -331,7 +331,20 @@ each, and want 8 threads.
   viscosity (`"reference": "file_radial"`, the deck's own viscosity, which
   the renormalisation made the 3D model's mean) and its lateral moduli;
   and the deck's radial run of the same (`sea_level_1d_ice7g_custom`),
-  which is the 3D run's radial reference model. RESULTS_A2
+  which is the 3D run's radial reference model. The lateral structure
+  changes the sea level change from 26 ka to the present by -30 to +19 m
+  (an rms of 3.5 m over the sphere, of the change's own 153 m), most
+  under the former Cordilleran and Laurentide ice, and by up to 74 m at
+  some time in the run. In relative sea level it lowers Hudson Bay's by
+  13 m at 26 ka and raises it by 9 m at 8 ka, lowers the Gulf of
+  Bothnia's by 5 m at 11 ka and raises Barbados's by 3 m at 26 ka. Each
+  step is the combined fixed point to `step_rtol` 1e-8, which the first
+  step reaches in about 60 iterations (the default budget is 60, so the
+  config raises `step_max_iterations`); `"step": "conjugate_gradients"`
+  converges within 40 passes a step and gives the same sea level to
+  1.5e-5 m, in somewhat more time. The 3D run takes 4.4 minutes and
+  1.6 GB on four threads, the radial one 1.5 s; at lmax 48 it does not
+  finish in 15 minutes.
 
 
 These read the decks of a three-layer "toy Mars" (a fluid core, a 1e21

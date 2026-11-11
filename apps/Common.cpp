@@ -324,6 +324,10 @@ std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
   return sea;
 }
 
+double DateKyrBp(const SeaLevelRun& run, const Scales& scales, double t) {
+  return run.times->start_kyr_bp - t * scales.Time() / KYR;
+}
+
 std::vector<double> MakeTimes(const SeaLevelRun& run, const Scales& scales) {
   const auto& window = *run.times;
   auto times = std::vector<double>{};
@@ -404,10 +408,10 @@ CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
   for (const auto& snapshot : calibration.snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
-          "the calibration's last run did not converge at t = {} (its sea "
-          "level solve, or in 3-D its coupled fixed point); loosen "
+          "the calibration's last run did not converge at {:.6g} kyr BP (its "
+          "sea level solve, or in 3-D its coupled fixed point); loosen "
           "solver.rtol or solver.step_rtol",
-          snapshot.t));
+          DateKyrBp(run, solver.SolverScales(), snapshot.t)));
     }
   }
   if (!calibration.converged) {

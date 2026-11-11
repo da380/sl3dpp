@@ -148,6 +148,11 @@ struct Loaded {
                                                   const Loaded& world);
 
 /// The window's uniform time grid, SLE units, zero at its start.
+/// The date (kyr before present) of a solver time `t`, which counts
+/// forwards from the window's start in the solver's own unit.
+[[nodiscard]] double DateKyrBp(const SeaLevelRun& run, const Scales& scales,
+                               double t);
+
 [[nodiscard]] std::vector<double> MakeTimes(const SeaLevelRun& run,
                                             const Scales& scales);
 

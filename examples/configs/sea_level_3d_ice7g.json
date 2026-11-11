@@ -11,6 +11,6 @@
   },
   "rotation": "full",
   "moments": "hydrostatic",
-  "solver": {"step_rtol": 1e-8, "step_max_iterations": 80},
+  "solver": {"step_rtol": 1e-8, "step_max_iterations": 120},
   "output": {"surface": "out/sea_level_3d_ice7g/sea_level_3d_ice7g.nc"}
 }

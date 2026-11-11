@@ -76,7 +76,7 @@ fi
 custom=(../data/ice7g.nc ../data/earth_custom.gia.deck
         ../data/earth_custom.elastic.deck ../data/earth_custom_moduli_s40rts.nc
         ../data/earth_custom_viscosity_s40rts.nc)
-if all_exist "${custom[@]}"; then  # minutes each, on 8 threads
+if all_exist "${custom[@]}"; then  # the 3D run through time takes minutes
   run sea-level sea_level_fingerprint_3d_ice7g.json
   run sea-level sea_level_1d_ice7g_custom.json
   run sea-level sea_level_3d_ice7g.json

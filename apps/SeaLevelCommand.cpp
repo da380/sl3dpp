@@ -554,7 +554,8 @@ std::string RunWith(
     const Json& top, std::string_view meaning, const SeaLevelSolver& solver,
     Loaded& world,
     const std::function<Evolution(typename Evolution::Options)>& make,
-    const std::function<void(const typename Evolution::Snapshot&)>& check) {
+    const std::function<void(const typename Evolution::Snapshot&, double)>&
+        check) {
   const auto started = std::chrono::steady_clock::now();
   const auto& run = input.run;
   const auto& window = *run.times;
@@ -572,9 +573,9 @@ std::string RunWith(
   const auto toOmega = 1.0 / scales.Time();
   auto history = std::vector<Node>{};
   auto keep = [&](const typename Evolution::Snapshot& snapshot) {
-    check(snapshot);
     auto kept = Node{};
-    kept.date_kyr_bp = window.start_kyr_bp - snapshot.t * scales.Time() / KYR;
+    kept.date_kyr_bp = DateKyrBp(run, scales, snapshot.t);
+    check(snapshot, kept.date_kyr_bp);
     kept.seaLevelChange = snapshot.seaLevelChange;
     kept.displacement = snapshot.displacement;
     kept.potential = snapshot.potential;
@@ -1015,13 +1016,13 @@ std::string Run1D(const std::filesystem::path& config,
         return SeaLevelEvolution(op, solver, world.background,
                                  std::move(options));
       },
-      [](const SeaLevelEvolution::Snapshot& snapshot) {
+      [](const SeaLevelEvolution::Snapshot& snapshot, double date_kyr_bp) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
-              "the sea level solve did not converge at t = {} (shoreline "
-              "cells flipping back and forth defeat the migrating solve's "
-              "tolerance); loosen solver.rtol",
-              snapshot.t));
+              "the sea level solve did not converge at {:.6g} kyr BP "
+              "(shoreline cells flipping back and forth defeat the migrating "
+              "solve's tolerance); loosen solver.rtol",
+              date_kyr_bp));
         }
       });
 }
@@ -1047,15 +1048,16 @@ std::string Run3D(const std::filesystem::path& config,
         return SeaLevelEvolution3D(op, solver, world.background,
                                    std::move(options));
       },
-      [](const SeaLevelEvolution3D::Snapshot& snapshot) {
+      [](const SeaLevelEvolution3D::Snapshot& snapshot, double date_kyr_bp) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
               "the coupled fixed point or its sea level solve did not "
-              "converge at t = {} (residual {:.3g} after {} iterations; "
-              "under migrating shorelines, cells flipping back and forth can "
-              "defeat the tolerances); loosen solver.step_rtol or "
+              "converge at {:.6g} kyr BP (residual {:.3g} after {} "
+              "iterations; under migrating shorelines, cells flipping back "
+              "and forth can defeat the tolerances); raise "
+              "solver.step_max_iterations, or loosen solver.step_rtol or "
               "solver.rtol",
-              snapshot.t, snapshot.coupledResidual,
+              date_kyr_bp, snapshot.coupledResidual,
               snapshot.coupledIterations));
         }
       });
