@@ -43,6 +43,7 @@
 #include <span>
 #include <vector>
 
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
@@ -164,6 +165,12 @@ class Evolution3D {
   struct Forcing {
     std::function<std::vector<double>(double)> directLoad{};
     std::function<std::vector<std::complex<double>>(double)> tide{};
+    /// The point stress gluts acting at time t (PointSource.hpp), in the
+    /// solver's units: the radius a length, the moment a stress times a
+    /// volume. A source is the stress glut itself, not its rate: one that
+    /// acts from a time on is returned from that time on, and the
+    /// response at the first node is the elastic one to the sources there.
+    std::function<std::vector<PointSource>(double)> sources{};
   };
 
   /// `Run` under a forcing, as Evolution's: on a background state without
@@ -282,7 +289,8 @@ class Evolution3D {
       const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
       const std::function<std::vector<std::complex<double>>(double)>* tide,
-      bool resumed);
+      bool resumed,
+      const std::function<std::vector<PointSource>(double)>* sources = nullptr);
 
   /// The instantaneous response at time t (SLE units) to the non-ocean
   /// load, from rest, under frozen shorelines: Run's first node and

@@ -1563,6 +1563,27 @@ void Viscoelastic3D::OpenStep::AddForce(
   startForce_ = false;
 }
 
+void Viscoelastic3D::OpenStep::AddDegreeForces(
+    const std::map<int, std::vector<Complex>>& spheroidal,
+    const std::map<int, std::vector<Complex>>& toroidal) {
+  for (const auto& [l, f] : spheroidal) {
+    const auto expected =
+        static_cast<std::size_t>(Spheroidal(l).DofCount()) * (l + 1);
+    if (f.size() != expected) {
+      throw std::invalid_argument(std::format(
+          "a degree-{} force has {} entries, the solutions {}", l, f.size(),
+          expected));
+    }
+    auto& extra = extraSpheroidal_[l];
+    if (extra.empty()) {
+      extra = f;
+    } else {
+      for (auto i = std::size_t{0}; i < extra.size(); ++i) extra[i] += f[i];
+    }
+  }
+  AddToroidalForce(toroidal);
+}
+
 void Viscoelastic3D::OpenStep::AddToroidalForce(
     const std::map<int, std::vector<Complex>>& toroidal) {
   for (const auto& [l, f] : toroidal) {

@@ -559,6 +559,10 @@ class Viscoelastic3D {
     /// Adds per-degree toroidal forces (the solutions' layout), as
     /// AddForce's spheroidal ones: a toroidal traction, say.
     void AddToroidalForce(const std::map<int, std::vector<Complex>>& toroidal);
+    /// Adds per-degree spheroidal and toroidal forces with no tensor: a
+    /// point source's (PointSource.hpp).
+    void AddDegreeForces(const std::map<int, std::vector<Complex>>& spheroidal,
+                         const std::map<int, std::vector<Complex>>& toroidal);
 
     /// Completes the step for the final strain coefficients: the strain d
     /// on the grid, m+ = m~ + beta(x) d, with d and its coefficients

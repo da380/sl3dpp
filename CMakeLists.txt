@@ -186,6 +186,7 @@ add_library(sl3dpp STATIC
   src/LoveNumbers.cpp
   src/Material.cpp
   src/Measurements.cpp
+  src/PointSource.cpp
   src/MemoryPoints.cpp
   src/RadialMesh.cpp
   src/Rheology.cpp

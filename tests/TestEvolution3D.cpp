@@ -418,3 +418,202 @@ TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
     EXPECT_EQ(a.coupledIterations, b.coupledIterations) << "node " << 2 + k;
   }
 }
+
+namespace {
+
+/// A point source in the solver's units: a moment of `newtonMetres` times
+/// the pattern, at `depthKm` below the surface.
+PointSource SourceAt(const Setup& setup, double depthKm, double colatitude,
+                     double longitude, SphericalTensor pattern,
+                     double newtonMetres = 1e20) {
+  const auto& sle = setup.solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto surface =
+      setup.material.Radius() * material.Length() / sle.Length();
+  const auto moment = newtonMetres / sle.Factor(energy);
+  for (auto* c : {&pattern.rr, &pattern.tt, &pattern.pp, &pattern.rt,
+                  &pattern.rp, &pattern.tp}) {
+    *c *= moment;
+  }
+  return {.at = {.radius = surface - depthKm * 1e3 / sle.Length(),
+                 .colatitude = colatitude,
+                 .longitude = longitude},
+          .moment = pattern};
+}
+
+double MaxAbsOf(std::span<const double> f) {
+  auto out = 0.0;
+  for (auto v : f) out = std::max(out, std::abs(v));
+  return out;
+}
+
+}  // namespace
+
+TEST(PointSourceEvolution, TheElasticStartIsTheDirectDegreeSolves) {
+  // A point source on a body without an ocean and without rotational
+  // feedback: the response at the first node is the unrelaxed degree
+  // systems solved under the source's forces, in U, V, phi and the
+  // toroidal W. An isotropic source makes no toroidal motion.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  auto ratio = [&](Dimensions dims) {
+    return material.Factor(dims) / sle.Factor(dims);
+  };
+  const auto toLength = ratio(Dimensions{.length = 1});
+  const auto toPotential = ratio(PotentialDimensions);
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, kyr};
+  Viscoelastic3D op(setup.rheology, kLmax,
+                    [](double, double, double) { return 0.0; });
+  using Complex = std::complex<double>;
+
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6});
+  const auto explosion =
+      SourceAt(setup, 400.0, 1.1, 4.0, {.rr = 1.0, .tt = 1.0, .pp = 1.0});
+  for (const auto* source : {&thrust, &explosion}) {
+    Evolution3D evolution(op, solver, solver.NoOceanState(),
+                          {.rotation = RotationalFeedback::None,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12});
+    const auto snapshots = evolution.Run(
+        times, Evolution3D::Forcing{.sources = [&](double) {
+          return std::vector<PointSource>{*source};
+        }});
+    ASSERT_EQ(snapshots.size(), times.size());
+    EXPECT_TRUE(snapshots[0].converged);
+    EXPECT_TRUE(snapshots[1].converged);
+
+    // the same source in the material's units, and the direct solves
+    auto inMaterial = *source;
+    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+    inMaterial.at.radius /= toLength;
+    for (auto* c : {&inMaterial.moment.rr, &inMaterial.moment.tt,
+                    &inMaterial.moment.pp, &inMaterial.moment.rt,
+                    &inMaterial.moment.rp, &inMaterial.moment.tp}) {
+      *c /= ratio(energy);
+    }
+    const auto sph = [&](int l) -> const DegreeOperator& {
+      return op.UnrelaxedSpheroidal(l);
+    };
+    const auto tor = [&](int l) -> const ToroidalOperator& {
+      return op.UnrelaxedToroidal(l);
+    };
+    const auto forces =
+        PointSourceForces(setup.material, kLmax, sph, tor, inMaterial);
+    auto U = grid.ZeroCoefficients(), V = grid.ZeroCoefficients();
+    auto Phi = grid.ZeroCoefficients(), W = grid.ZeroCoefficients();
+    auto solve = [](const auto& system, const std::vector<Complex>& b, int l) {
+      const auto ndof = static_cast<std::size_t>(system.DofCount());
+      auto re = std::vector<double>(b.size()), im = re;
+      for (auto i = std::size_t{0}; i < b.size(); ++i) {
+        re[i] = b[i].real();
+        im[i] = b[i].imag();
+      }
+      const auto xr = system.Solve(re, l + 1);
+      const auto xi = system.Solve(im, l + 1);
+      auto x = std::vector<Complex>(b.size());
+      for (auto i = std::size_t{0}; i < b.size(); ++i) x[i] = {xr[i], xi[i]};
+      (void)ndof;
+      return x;
+    };
+    for (auto l = 0; l <= kLmax; ++l) {
+      const auto& system = sph(l);
+      const auto ndof = static_cast<std::size_t>(system.DofCount());
+      const auto x = solve(system, forces.spheroidal.at(l), l);
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        auto at = [&](Component c) -> Complex {
+          const auto dof = system.SurfaceDof(c);
+          return dof >= 0 ? x[static_cast<std::size_t>(m) * ndof + dof] : 0.0;
+        };
+        U[i] = toLength * at(Component::U);
+        V[i] = toLength * at(Component::V);
+        Phi[i] = toPotential * at(Component::Phi);
+      }
+      if (l >= 1) {
+        const auto& twist = tor(l);
+        const auto tdof = static_cast<std::size_t>(twist.DofCount());
+        const auto w = solve(twist, forces.toroidal.at(l), l);
+        for (auto m = 0; m <= l; ++m) {
+          W[SurfaceGrid::Index(l, m)] =
+              toLength * w[static_cast<std::size_t>(m) * tdof + twist.SurfaceDof()];
+        }
+      }
+    }
+    const auto& start = snapshots[0];
+    const auto label = source == &explosion ? "explosion" : "thrust";
+    EXPECT_GT(MaxAbsOf(start.displacement), 0.0) << label;
+    EXPECT_LT(WorstDeparture(start.displacement, grid.Synthesise(U)), 1e-8)
+        << label;
+    EXPECT_LT(WorstDeparture(start.tangentialPotential, grid.Synthesise(V)), 1e-8)
+        << label;
+    EXPECT_LT(WorstDeparture(start.potential, grid.Synthesise(Phi)), 1e-8)
+        << label;
+    ASSERT_FALSE(start.toroidalPotential.empty());
+    if (source == &explosion) {
+      EXPECT_LT(MaxAbsOf(start.toroidalPotential),
+                1e-10 * MaxAbsOf(start.tangentialPotential));
+    } else {
+      EXPECT_GT(MaxAbsOf(start.toroidalPotential), 0.0);
+      EXPECT_LT(WorstDeparture(start.toroidalPotential, grid.Synthesise(W)),
+                1e-8);
+    }
+  }
+}
+
+TEST(PointSourceEvolution, RelaxationIsLinearAndConvergesWithTheStep) {
+  // A source held from the start on a viscoelastic body with an ocean
+  // and the rotational feedback: the response is linear in the moment,
+  // it relaxes (the late field differs from the elastic one), and under
+  // halving of the steps the field at the end converges at the scheme's
+  // second order.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  Viscoelastic3D op(setup.rheology, kLmax,
+                    [](double, double, double) { return 0.0; });
+  const SphericalTensor pattern{
+      .rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6};
+  auto runTo = [&](int steps, double scale) {
+    auto times = std::vector<double>{};
+    // steps below the mantle's relaxation time at the finer spacings
+    for (auto n = 0; n <= steps; ++n) times.push_back(1.0 * kyr * n / steps);
+    Evolution3D evolution(op, solver, setup.state,
+                          {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto source =
+        SourceAt(setup, 400.0, 1.1, 4.0, pattern, scale * 1e22);
+    auto snapshots = evolution.Run(
+        times, Evolution3D::Forcing{.sources = [&](double) {
+          return std::vector<PointSource>{source};
+        }});
+    for (const auto& s : snapshots) EXPECT_TRUE(s.converged);
+    return snapshots;
+  };
+  const auto coarse = runTo(2, 1.0);
+  const auto doubled = runTo(2, 2.0);
+  auto twice = coarse.back().displacement;
+  for (auto& v : twice) v *= 2.0;
+  EXPECT_LT(WorstDeparture(doubled.back().displacement, twice), 1e-9);
+  EXPECT_GT(MaxAbsOf(coarse.back().relativeSeaLevelChange), 0.0);
+  // it relaxes
+  EXPECT_GT(WorstDeparture(coarse.back().displacement, coarse.front().displacement),
+            1e-2);
+
+  const auto medium = runTo(4, 1.0);
+  const auto fine = runTo(8, 1.0);
+  const auto finest = runTo(16, 1.0);
+  for (auto field : {&Evolution3D::Snapshot::displacement,
+                     &Evolution3D::Snapshot::tangentialPotential,
+                     &Evolution3D::Snapshot::toroidalPotential}) {
+    const auto d1 = WorstDeparture(medium.back().*field, fine.back().*field);
+    const auto d2 = WorstDeparture(fine.back().*field, finest.back().*field);
+    EXPECT_GT(d1 / d2, 3.0) << d1 << " " << d2;
+    EXPECT_LT(d1 / d2, 5.0) << d1 << " " << d2;
+  }
+}

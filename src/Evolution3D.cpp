@@ -101,7 +101,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Run(
     std::span<const double> times, const Forcing& forcing) {
   CheckTimes(times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               nullptr, forcing.tide ? &forcing.tide : nullptr, false);
+               nullptr, forcing.tide ? &forcing.tide : nullptr, false,
+               forcing.sources ? &forcing.sources : nullptr);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
@@ -109,7 +110,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
     const Forcing& forcing) {
   Restore(from, times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               nullptr, forcing.tide ? &forcing.tide : nullptr, true);
+               nullptr, forcing.tide ? &forcing.tide : nullptr, true,
+               forcing.sources ? &forcing.sources : nullptr);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
@@ -172,6 +174,56 @@ class Evolution3D::Coupled {
     sleOptions.anderson_memory = owner.options_.anderson_memory;
     nonlinearOptions = sleOptions;
     nonlinearOptions.max_iterations = owner.options_.max_nonlinear_iterations;
+  }
+
+  /// The node's point sources (solver units) as forces on the degree
+  /// systems, the sum of theirs, in the material's units.
+  void SetSources(const std::vector<PointSource>& sources) {
+    sourceForces = DegreeFields{};
+    if (sources.empty()) return;
+    const auto& op = *owner_.op_;
+    const auto& material = op.GetRheology().BaseMaterial();
+    const auto& scales = material.ModelScales();
+    const auto& sle = owner_.solver_->SolverScales();
+    const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+    const auto toMatMoment = sle.Factor(energy) / scales.Factor(energy);
+    for (auto source : sources) {
+      source.at.radius /= owner_.toNdLength_;
+      for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
+                      &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
+        *c *= toMatMoment;
+      }
+      auto forces = PointSourceForces(
+          material, op.LMax(),
+          [&](int l) -> const DegreeOperator& {
+            return op.UnrelaxedSpheroidal(l);
+          },
+          [&](int l) -> const ToroidalOperator& {
+            return op.UnrelaxedToroidal(l);
+          },
+          source);
+      auto add = [](auto& to, auto& from) {
+        for (auto& [l, f] : from) {
+          auto& t = to[l];
+          if (t.empty()) {
+            t = std::move(f);
+          } else {
+            for (auto i = std::size_t{0}; i < t.size(); ++i) t[i] += f[i];
+          }
+        }
+      };
+      add(sourceForces.spheroidal, forces.spheroidal);
+      add(sourceForces.toroidal, forces.toroidal);
+    }
+  }
+  [[nodiscard]] bool HasSources() const {
+    return !sourceForces.spheroidal.empty();
+  }
+  /// The node's sources on the open step.
+  void ApplySources() {
+    if (HasSources()) {
+      step->AddDegreeForces(sourceForces.spheroidal, sourceForces.toroidal);
+    }
   }
 
   /// The flavour SLE solver of a Love table, keyed by the (operator-cached,
@@ -323,6 +375,8 @@ class Evolution3D::Coupled {
   /// prescribed tidal potential (empty: none).
   std::vector<double> loadGrid;
   std::vector<Complex> tide;
+  /// The node's point sources as forces (empty: none).
+  DegreeFields sourceForces;
   /// The last pass's sea level response, and the node's ocean function
   /// (migrating shorelines alone).
   GRDSolver::Response response;
@@ -347,11 +401,13 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
   vstate_ = op.ZeroState();
   vstate_.t = t * toMatTime_;
   coupled.loadGrid = std::move(load);
-  if (op.HasLateralModuli()) {
+  if (op.HasLateralModuli() || coupled.HasSources()) {
     // Under lateral moduli the unrelaxed operator varies laterally: the
     // instantaneous response is the combined fixed point of a zero-length
-    // step.
+    // step. Point sources force the degree systems directly, and take
+    // the same route.
     coupled.step.emplace(op.StartStep(vstate_, 0.0, options_.scheme));
+    coupled.ApplySources();
     coupled.effectiveSolver = &coupled.SolverFor(coupled.step->EffectiveLove());
     auto [strain, info] = coupled.Close();
     if (!info.converged) {
@@ -441,7 +497,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
     const std::function<std::vector<std::complex<double>>(double)>* tide,
-    bool resumed) {
+    bool resumed,
+    const std::function<std::vector<PointSource>(double)>* sources) {
   const auto& op = *op_;
   const auto& solver = *solver_;
   const auto& grid = solver.Grid();
@@ -475,6 +532,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   };
   auto setTide = [&](double t) {
     if (tide != nullptr) coupled.tide = (*tide)(t);
+    if (sources != nullptr) coupled.SetSources((*sources)(t));
   };
 
   const auto stride = options_.record_stride;
@@ -555,6 +613,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
       coupled.loadGrid = directLoadAt(times[node]);
       setTide(times[node]);
     }
+    coupled.ApplySources();
 
     // The combined fixed point: strain, ocean load and rotation together.
     auto [strain, info] = coupled.Close();

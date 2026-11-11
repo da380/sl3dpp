@@ -254,6 +254,42 @@ Deliberately out of scope:
   is about 0.7 GB at lmax 64, 4 GB at 128, 21 GB at 256 and 98 GB at 512,
   and a step holds several; README, *Memory*, has the levers.
 
+## 6a. Interior sources
+
+A stress glut S (Backus & Mulcahy 1976; Dahlen & Tromp 1998) enters the
+weak form as the work int S : e(w) dV on a test displacement w, the
+equivalent body force being -div S. The steppers advance the
+displacement, so the forcing is the stress glut itself and not its rate
+(Crawford et al. 2017 step the rate): a source that acts from a time on
+is a force held from then, and the response at the node where it first
+acts includes the elastic jump, as a load switched on does.
+
+**Point sources** (`PointSource.hpp`). For S = M delta(x - x_s) the work
+is M : e(w)(x_s). The strain of the mode (l, m) of each radial unknown
+at the source is taken through the canonical components of the
+generalised spherical harmonics: with
+u = U r Y + V grad_1 Y - W r x grad_1 Y the deviatoric strain's
+components at upper indices -2..2 are those of the memory coupling
+(`DeviatoricComponents`) times Y^N_lm(x_s), and the dilatation is
+(r dU/dr + 2U - l(l+1) V) / r times Y_lm(x_s). The force on the
+coefficient (l, m) of an unknown is the conjugate of M contracted with
+its unit mode's strain: `PointSourceForces` is the exact transpose of
+`PointStrain`, the strain of degree solutions at a point. The radial
+delta is exact in the weak form, the unknowns and their radial
+derivatives read at the source radius through the Lagrange basis of the
+element holding it; the source may lie anywhere in a solid element. A
+symmetric moment tensor forces the spheroidal systems and the toroidal
+ones, at every order. A degree whose truncated system does not reach
+the source's element takes no force from it.
+
+**In the evolution.** `Evolution3D::Forcing::sources` gives the point
+sources acting at each time. Their forces join each step's fixed forces
+on the degree systems, and the first node's response is a zero-length
+step under them. The surface values of the forced solutions, the
+toroidal potential W among them, reach the sea level solve through its
+ready channels, so the ocean's load and the rotational feedback answer
+a source as they do a step's memory: no further coupling is needed.
+
 ## 7. Adjoints and kernels
 
 - **Two adjoints, one interface.** `AdjointSolver` offers the continuous
