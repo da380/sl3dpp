@@ -185,6 +185,13 @@ struct ToroidalViscoelastic::Degree {
 
 ToroidalViscoelastic::ToroidalViscoelastic(const ViscoelasticOperator& op)
     : op_(&op) {}
+ToroidalViscoelastic::ToroidalViscoelastic(const ViscoelasticOperator& op,
+                                           std::function<int(int)> columns)
+    : op_(&op), columns_(std::move(columns)) {}
+
+int ToroidalViscoelastic::Columns(int l) const {
+  return columns_ ? columns_(l) : 2 * (l + 1);
+}
 ToroidalViscoelastic::~ToroidalViscoelastic() = default;
 
 int ToroidalViscoelastic::LMax() const { return op_->LMax(); }
@@ -214,7 +221,7 @@ ToroidalViscoelastic::State ToroidalViscoelastic::ZeroState() const {
   State state;
   const auto K = op_->GetRheology().BranchCount();
   for (auto l = 1; l <= LMax(); ++l) {
-    state.m[l].assign(K * 2 * Deg(l).Block(2 * (l + 1)), 0.0);
+    state.m[l].assign(K * 2 * Deg(l).Block(Columns(l)), 0.0);
   }
   return state;
 }
@@ -224,7 +231,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::SolveElastic(
   auto out = Fields{};
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     auto b = deg.MemoryForce(m, ncols);
     if (const auto f = force.find(l); f != force.end()) {
       if (f->second.size() != b.size()) {
@@ -243,7 +250,7 @@ void ToroidalViscoelastic::SetStrain(State& state,
                                      const Fields& solutions) const {
   state.strain.clear();
   for (const auto& [l, x] : solutions) {
-    state.strain.emplace(l, Deg(l).Strain(x, 2 * (l + 1)));
+    state.strain.emplace(l, Deg(l).Strain(x, Columns(l)));
   }
 }
 
@@ -265,7 +272,7 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
   auto solutions = Fields{};
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const std::vector<double>* d0 = nullptr;
     if (!implicit) {
@@ -354,7 +361,7 @@ void ToroidalViscoelastic::AccumulateItau(
   const auto K = op.GetRheology().BranchCount();
   for (const auto& [l, md] : adjoint.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const auto& dFwd = forward.strain.at(l);
     const auto& mFwd = forward.m.at(l);
@@ -394,7 +401,7 @@ void ToroidalViscoelastic::AccumulateMaterial(
   }
   for (const auto& [l, y] : adjointSolution) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const auto sy = deg.Strain(y, ncols);
     const auto sx = deg.Strain(forwardSolution.at(l), ncols);
@@ -427,7 +434,7 @@ void ToroidalViscoelastic::Jump(State& state, const Fields& solutions) const {
   const auto K = op.GetRheology().BranchCount();
   for (const auto& [l, x] : solutions) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const auto d = deg.Strain(x, ncols);
     auto& m = state.m.at(l);
@@ -456,7 +463,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::Surface(
   auto out = Fields{};
   for (const auto& [l, x] : solutions) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto dof = deg.system.SurfaceDof();
     auto values = std::vector<double>(ncols, 0.0);
     for (auto c = 0; c < ncols; ++c) {
@@ -492,7 +499,7 @@ ToroidalViscoelastic::Dual ToroidalViscoelastic::ZeroDual() const {
   Dual dual;
   const auto K = op_->GetRheology().BranchCount();
   for (auto l = 1; l <= LMax(); ++l) {
-    const auto block = Deg(l).Block(2 * (l + 1));
+    const auto block = Deg(l).Block(Columns(l));
     dual.m[l].assign(K * 2 * block, 0.0);
     dual.strain[l].assign(2 * block, 0.0);
   }
@@ -508,7 +515,7 @@ ToroidalViscoelastic::BaseStep ToroidalViscoelastic::Redo(
   auto out = BaseStep{};
   for (const auto& [l, m] : prev.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const auto* d0 = implicit ? nullptr : &prev.strain.at(l);
     auto mem = std::vector<double>(m.size());
@@ -564,7 +571,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::MaterialForce(
   auto out = Fields{};
   for (const auto& [l, w] : base.solutions) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     auto force = deg.WeightedDual(deg.Strain(w, ncols), effective, ncols);
     // the decayed memory's force with the branch moduli's variation
@@ -590,7 +597,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StartMaterialResponse(
   auto out = Fields{};
   for (const auto& [l, w] : baseStart) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     out.emplace(l, deg.system.Solve(
                        deg.WeightedDual(deg.Strain(w, ncols), minus, ncols),
                        ncols));
@@ -611,7 +618,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::FirstOrderDrive(
   auto out = Fields{};
   for (const auto& [l, mPrev] : prev.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     const auto& d0 = prev.strain.at(l);
     const auto& d1 = next.strain.at(l);
@@ -678,7 +685,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
   auto out = Fields{};
   for (auto& [l, md] : dual.m) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     const auto block = deg.Block(ncols);
     auto& dd = dual.strain.at(l);
     // the duals of the end strain: its own, and the memory's through the
@@ -795,7 +802,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StartTransposed(
   auto out = Fields{};
   for (const auto& [l, dd] : dual.strain) {
     const auto& deg = Deg(l);
-    const auto ncols = 2 * (l + 1);
+    const auto ncols = Columns(l);
     auto rhs = deg.DualFromScalars(dd, ncols);
     if (const auto g = surfaceDual.find(l); g != surfaceDual.end()) {
       const auto dof = deg.system.SurfaceDof();

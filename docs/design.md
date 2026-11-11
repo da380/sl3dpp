@@ -333,6 +333,35 @@ W the sea level solve carries to the snapshots. The radial evolution
 under sources is the 3D class's with no lateral structure, field for
 field.
 
+**The factored form.** A source at one radius forces the coefficient
+(l, m) of each unknown through a few radial vectors that depend on the
+degree alone, under amplitudes that carry the order: the source's
+moments against the generalised spherical harmonics of upper index
+-2..2, mu_N(l, m) = sum over sources of C_N(M) Y^N_lm(x_s) (or the
+shell's integral), and its trace's against Y_lm. The spheroidal
+unknowns see upper indices +N and -N alike and the toroidal one with
+opposite signs, so there are four spheroidal vectors (the deviatoric
+N = 0 part, the trace, |N| = 1, |N| = 2), with amplitudes conj(mu_0),
+conj(mu_tr), conj(mu_1 + mu_-1), conj(mu_2 + mu_-2), and two toroidal
+(|N| = 1, |N| = 2), with -i conj(mu_N - mu_-N) (`UnitForces`,
+`MomentsOf`, `AmplitudesOf`). The radial systems do not depend on the
+order, so the solutions of the unit vectors serve every order, every
+position on the sphere and every moment tensor at that radius: the
+generalised spherical harmonics at the source are the rotation from
+its own frame, and no frame is turned.
+
+`Evolution::Options::factor_sources` uses this for the problem where it
+pays, interior sources alone on a body without an ocean and without
+rotational feedback: the sources are sorted into classes of one radius
+and one history (a point source's tensor component by component, so a
+tensor that changes its pattern makes several; a stress glut must be a
+factor of time times a pattern), each class's six unit columns per
+degree are stepped through the nodes, spheroidal and toroidal, and the
+fields are the unit surface values under the classes' amplitudes. The
+snapshots are the general route's to rounding. With an ocean, a load,
+a tide or the feedback the coupled loop carries every order whatever
+the sources, so there is nothing to gain and the option is refused.
+
 **The benchmark.** In a homogeneous elastic sphere without gravity the
 response to a point moment tensor is known in closed form: the
 full-space solution, u_i = M_jk dG_ij / d xi_k with Kelvin's tensor G,

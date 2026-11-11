@@ -1,9 +1,12 @@
 #include "sl3dpp/Evolution.hpp"
 
+#include <algorithm>
+#include <array>
 #include <complex>
 #include <format>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
 
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
@@ -103,6 +106,7 @@ std::vector<Evolution::Snapshot> Evolution::Run(
 std::vector<Evolution::Snapshot> Evolution::Run(std::span<const double> times,
                                                 const Forcing& forcing) {
   CheckTimes(times);
+  if (options_.factor_sources) return MarchFactored(times, forcing);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, false,
                &forcing);
@@ -469,6 +473,319 @@ std::vector<Evolution::Snapshot> Evolution::March(
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, keep);
     checkpoint(node);
+  }
+  return snapshots;
+}
+
+std::vector<Evolution::Snapshot> Evolution::MarchFactored(
+    std::span<const double> times, const Forcing& forcing) {
+  const auto& op = *op_;
+  const auto& solver = *solver_;
+  const auto& grid = solver.Grid();
+  const auto lmax = op.LMax();
+  const auto nodes = times.size();
+  if (state_.oceanArea > 0.0 || options_.rotation != RotationalFeedback::None ||
+      forcing.directLoad || forcing.tide || options_.record_stride > 0 ||
+      (!forcing.sources && !forcing.stressGluts)) {
+    throw std::invalid_argument(
+        "factor_sources is for interior sources alone on a body without an "
+        "ocean and without rotational feedback, unrecorded: with an ocean, a "
+        "load, a tide or the feedback the loop carries every order anyway");
+  }
+  const auto& material = op.BaseMaterial();
+  const auto toMatMoment = detail::MomentToMaterial(op, solver.SolverScales());
+  using Complex = std::complex<double>;
+
+  // A class of sources: one radius and one history, s(t_n) times a
+  // pattern, whose moments add.
+  struct Class {
+    double radius = 0.0;          // material units
+    std::vector<double> history;  // per node, its largest entry one
+    SourceMoments moments;
+  };
+  auto classes = std::vector<Class>{};
+  auto classOf = [&](double radius, const std::vector<double>& history)
+      -> Class& {
+    for (auto& c : classes) {
+      if (c.radius != radius) continue;
+      auto same = true;
+      for (auto n = std::size_t{0}; n < nodes && same; ++n) {
+        same = std::abs(c.history[n] - history[n]) <= 1e-12;
+      }
+      if (same) return c;
+    }
+    classes.push_back(
+        {.radius = radius,
+         .history = history,
+         .moments = {.lmax = lmax,
+                     .at = std::vector<std::array<Complex, 6>>(
+                         SurfaceGrid::Index(lmax, lmax) + 1)}});
+    return classes.back();
+  };
+  auto addMoments = [](SourceMoments& to, const SourceMoments& from,
+                       double factor) {
+    for (auto i = std::size_t{0}; i < to.at.size(); ++i) {
+      for (auto k = 0; k < 6; ++k) to.at[i][k] += factor * from.at[i][k];
+    }
+  };
+  // a history scaled to its largest entry: the scale and the shape
+  auto normalised = [&](const std::vector<double>& h) {
+    auto top = 0.0;
+    for (auto v : h) {
+      if (std::abs(v) > std::abs(top)) top = v;
+    }
+    auto shape = h;
+    if (top != 0.0) {
+      for (auto& v : shape) v /= top;
+    }
+    return std::pair{top, std::move(shape)};
+  };
+
+  // The point sources: each position's tensor history, its components
+  // grouped by their histories (one group when the tensor keeps its
+  // pattern through time).
+  if (forcing.sources) {
+    struct Position {
+      BodyPoint at;
+      std::vector<std::array<double, 6>> tensor;  // per node
+    };
+    auto positions = std::vector<Position>{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      for (const auto& source : forcing.sources(times[n])) {
+        auto found = std::ranges::find_if(positions, [&](const Position& p) {
+          return p.at.radius == source.at.radius &&
+                 p.at.colatitude == source.at.colatitude &&
+                 p.at.longitude == source.at.longitude;
+        });
+        if (found == positions.end()) {
+          positions.push_back({.at = source.at,
+                               .tensor = std::vector<std::array<double, 6>>(
+                                   nodes, std::array<double, 6>{})});
+          found = positions.end() - 1;
+        }
+        const auto& M = source.moment;
+        const std::array<double, 6> components{M.rr, M.tt, M.pp,
+                                               M.rt, M.rp, M.tp};
+        for (auto k = 0; k < 6; ++k) found->tensor[n][k] += components[k];
+      }
+    }
+    for (const auto& position : positions) {
+      auto at = position.at;
+      at.radius /= toNdLength_;
+      // the components' scales and shapes, then one pattern per shape
+      auto scales = std::array<double, 6>{};
+      auto shapes = std::array<std::vector<double>, 6>{};
+      for (auto k = 0; k < 6; ++k) {
+        auto h = std::vector<double>(nodes);
+        for (auto n = std::size_t{0}; n < nodes; ++n) h[n] = position.tensor[n][k];
+        std::tie(scales[k], shapes[k]) = normalised(h);
+      }
+      auto done = std::array<bool, 6>{};
+      for (auto k = 0; k < 6; ++k) {
+        if (done[k] || scales[k] == 0.0) continue;
+        auto pattern = std::array<double, 6>{};
+        for (auto j = k; j < 6; ++j) {
+          if (done[j] || scales[j] == 0.0) continue;
+          auto same = true;
+          for (auto n = std::size_t{0}; n < nodes && same; ++n) {
+            same = std::abs(shapes[j][n] - shapes[k][n]) <= 1e-12;
+          }
+          if (!same) continue;
+          pattern[j] = scales[j] * toMatMoment;
+          done[j] = true;
+        }
+        const auto source = PointSource{
+            .at = at,
+            .moment = {.rr = pattern[0], .tt = pattern[1], .pp = pattern[2],
+                       .rt = pattern[3], .rp = pattern[4], .tp = pattern[5]}};
+        addMoments(classOf(at.radius, shapes[k]).moments,
+                   MomentsOf(lmax, source), 1.0);
+      }
+    }
+  }
+  // The stress gluts: each one factor of time times a pattern.
+  if (forcing.stressGluts) {
+    auto histories = std::vector<std::vector<StressGlut>>{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      histories.push_back(forcing.stressGluts(times[n]));
+      if (histories.back().size() != histories.front().size()) {
+        throw std::invalid_argument(
+            "factor_sources takes the same stress gluts at every node, each "
+            "scaled by a factor of time");
+      }
+    }
+    for (auto i = std::size_t{0}; i < histories.front().size(); ++i) {
+      auto norm = [](const StressGlut& g) {
+        auto sum = 0.0;
+        for (const auto* c : {&g.moment.rr, &g.moment.tt, &g.moment.pp,
+                              &g.moment.rt, &g.moment.rp, &g.moment.tp}) {
+          for (auto v : *c) sum += v * v;
+        }
+        return sum;
+      };
+      auto dot = [](const StressGlut& a, const StressGlut& b) {
+        auto sum = 0.0;
+        const std::vector<double>* x[6] = {&a.moment.rr, &a.moment.tt,
+                                           &a.moment.pp, &a.moment.rt,
+                                           &a.moment.rp, &a.moment.tp};
+        const std::vector<double>* y[6] = {&b.moment.rr, &b.moment.tt,
+                                           &b.moment.pp, &b.moment.rt,
+                                           &b.moment.rp, &b.moment.tp};
+        for (auto k = 0; k < 6; ++k) {
+          for (auto j = std::size_t{0}; j < x[k]->size(); ++j) {
+            sum += (*x[k])[j] * (*y[k])[j];
+          }
+        }
+        return sum;
+      };
+      auto reference = std::size_t{0};
+      for (auto n = std::size_t{1}; n < nodes; ++n) {
+        if (norm(histories[n][i]) > norm(histories[reference][i])) reference = n;
+      }
+      const auto& pattern = histories[reference][i];
+      const auto size2 = norm(pattern);
+      if (size2 == 0.0) continue;
+      auto history = std::vector<double>(nodes);
+      for (auto n = std::size_t{0}; n < nodes; ++n) {
+        const auto& at = histories[n][i];
+        if (at.radius != pattern.radius || at.grid != pattern.grid) {
+          throw std::invalid_argument(
+              "factor_sources takes each stress glut on one shell and grid "
+              "through the run");
+        }
+        history[n] = dot(at, pattern) / size2;
+        // the residual of the factored form
+        auto residual = 0.0;
+        {
+          const std::vector<double>* x[6] = {&at.moment.rr, &at.moment.tt,
+                                             &at.moment.pp, &at.moment.rt,
+                                             &at.moment.rp, &at.moment.tp};
+          const std::vector<double>* y[6] = {
+              &pattern.moment.rr, &pattern.moment.tt, &pattern.moment.pp,
+              &pattern.moment.rt, &pattern.moment.rp, &pattern.moment.tp};
+          for (auto k = 0; k < 6; ++k) {
+            for (auto j = std::size_t{0}; j < x[k]->size(); ++j) {
+              const auto r = (*x[k])[j] - history[n] * (*y[k])[j];
+              residual += r * r;
+            }
+          }
+        }
+        if (residual > 1e-24 * size2) {
+          throw std::invalid_argument(
+              "factor_sources takes a stress glut whose history is one "
+              "factor of time times a pattern; use the general route");
+        }
+      }
+      auto glut = pattern;
+      glut.radius /= toNdLength_;
+      addMoments(classOf(glut.radius, history).moments, MomentsOf(lmax, glut),
+                 toMatMoment);
+    }
+  }
+
+  // The unit solutions of each class through the nodes: the surface
+  // values of the four spheroidal columns (U, V, phi) and the two
+  // toroidal ones (W), per degree.
+  struct UnitSurface {
+    std::map<int, std::vector<double>> U, V, Phi, W;
+  };
+  auto surfaces =
+      std::vector<std::vector<UnitSurface>>(classes.size());
+  const ToroidalViscoelastic toroidal(op, [](int) { return 2; });
+  const std::function<const DegreeOperator&(int)> sph =
+      [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); };
+  const std::function<const ToroidalOperator&(int)> tor =
+      [&](int l) -> const ToroidalOperator& { return toroidal.Unrelaxed(l); };
+  for (auto c = std::size_t{0}; c < classes.size(); ++c) {
+    const auto& which = classes[c];
+    const auto units = UnitForces(material, lmax, sph, tor, which.radius);
+    auto scaled = [](const std::map<int, std::vector<double>>& from,
+                     double factor) {
+      auto out = from;
+      for (auto& [l, f] : out) {
+        for (auto& v : f) v *= factor;
+      }
+      return out;
+    };
+    auto surfaceOf = [&](const std::map<int, std::vector<double>>& x,
+                         const ToroidalViscoelastic::Fields& w) {
+      return UnitSurface{.U = op.Surface(x, Component::U),
+                         .V = op.Surface(x, Component::V),
+                         .Phi = op.Surface(x, Component::Phi),
+                         .W = toroidal.Surface(w)};
+    };
+    auto state = op.ZeroState([](int) { return 4; });
+    state.t = times[0] * toMatTime_;
+    auto tstate = toroidal.ZeroState();
+    tstate.t = state.t;
+    // the start: the unrelaxed response to the sources there
+    auto x = std::map<int, std::vector<double>>{};
+    for (const auto& [l, f] : scaled(units.spheroidal, which.history[0])) {
+      x.emplace(l, op.UnrelaxedSystem(l).Solve(f, 4));
+    }
+    state.strain = op.Strain(x);
+    auto w = toroidal.SolveElastic(tstate,
+                                   scaled(units.toroidal, which.history[0]));
+    toroidal.SetStrain(tstate, w);
+    surfaces[c].push_back(surfaceOf(x, w));
+    for (auto n = std::size_t{1}; n < nodes; ++n) {
+      const auto dt = (times[n] - times[n - 1]) * toMatTime_;
+      auto step = op.StartStep(state, dt, options_.scheme);
+      step.AddForce(scaled(units.spheroidal, which.history[n]));
+      auto finished = step.Finish({}, {});
+      state = std::move(finished.first);
+      auto stepped = toroidal.Step(tstate, dt, options_.scheme,
+                                   scaled(units.toroidal, which.history[n]));
+      tstate = std::move(stepped.first);
+      surfaces[c].push_back(surfaceOf(finished.second, stepped.second));
+    }
+  }
+
+  // The fields: each coefficient the unit surface values under the
+  // class's amplitudes at its order.
+  const auto g = solver.SurfaceGravity();
+  auto snapshots = std::vector<Snapshot>{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    auto U = grid.ZeroCoefficients(), V = grid.ZeroCoefficients();
+    auto Phi = grid.ZeroCoefficients(), W = grid.ZeroCoefficients();
+    for (auto c = std::size_t{0}; c < classes.size(); ++c) {
+      const auto& at = surfaces[c][n];
+      for (auto l = 0; l <= lmax; ++l) {
+        for (auto m = 0; m <= l; ++m) {
+          const auto amplitudes = AmplitudesOf(classes[c].moments, l, m);
+          const auto i = SurfaceGrid::Index(l, m);
+          for (auto k = 0; k < 4; ++k) {
+            U[i] += amplitudes.spheroidal[k] * at.U.at(l)[k];
+            V[i] += amplitudes.spheroidal[k] * at.V.at(l)[k];
+            Phi[i] += amplitudes.spheroidal[k] * at.Phi.at(l)[k];
+          }
+          if (l >= 1) {
+            for (auto k = 0; k < 2; ++k) {
+              W[i] += amplitudes.toroidal[k] * at.W.at(l)[k];
+            }
+          }
+        }
+      }
+    }
+    auto slc = grid.ZeroCoefficients();
+    for (auto i = std::size_t{0}; i < U.size(); ++i) {
+      U[i] *= toNdLength_;
+      V[i] *= toNdLength_;
+      W[i] *= toNdLength_;
+      Phi[i] *= toNdPotential_;
+      // a body without an ocean: the equipotential's height above the
+      // surface
+      slc[i] = -(U[i] + Phi[i] / g);
+    }
+    Snapshot snapshot;
+    snapshot.t = times[n];
+    snapshot.relativeSeaLevelChange = grid.Synthesise(slc);
+    snapshot.displacement = grid.Synthesise(U);
+    snapshot.potential = grid.Synthesise(Phi);
+    snapshot.tangentialPotential = grid.Synthesise(V);
+    snapshot.toroidalPotential = grid.Synthesise(W);
+    snapshots.push_back(std::move(snapshot));
+    if (options_.on_snapshot) options_.on_snapshot(n, snapshots.back());
   }
   return snapshots;
 }

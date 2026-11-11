@@ -33,6 +33,7 @@
  * stress times volume.
  */
 
+#include <array>
 #include <complex>
 #include <functional>
 #include <map>
@@ -118,6 +119,54 @@ struct DegreeFields {
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal,
     const PointSource& source);
+
+// -- the factored form --------------------------------------------------------
+//
+// A source at one radius forces the coefficient (l, m) of each unknown by
+// a few radial vectors that depend on the degree alone, with amplitudes
+// that carry the order: the source's moments against the generalised
+// spherical harmonics of upper index -2..2 and its trace's against Y_lm.
+// The spheroidal unknowns see the upper indices +N and -N alike and the
+// toroidal ones with opposite signs, so there are four spheroidal vectors
+// (the deviatoric N = 0 part, the trace, |N| = 1, |N| = 2) and two
+// toroidal (|N| = 1, |N| = 2). The radial systems do not depend on the
+// order, so the unit vectors' solutions serve every order, every
+// position on the sphere and every moment tensor at that radius.
+
+/// The moments a source presents to the modes: per (l, m >= 0), at
+/// SurfaceGrid::Index(l, m), the integrals over directions of the
+/// tensor's five canonical parts against Y^N_lm, N = -2..2, and of its
+/// trace against Y_lm. Linear in the source: those of several sources at
+/// one radius add.
+struct SourceMoments {
+  int lmax = 0;
+  std::vector<std::array<std::complex<double>, 6>> at;
+};
+[[nodiscard]] SourceMoments MomentsOf(int lmax, const PointSource& source);
+[[nodiscard]] SourceMoments MomentsOf(int lmax, const StressGlut& source);
+
+/// The amplitudes of the unit force vectors at (l, m) for a set of
+/// moments: spheroidal (N = 0 deviatoric, trace, |N| = 1, |N| = 2) and
+/// toroidal (|N| = 1, |N| = 2).
+struct UnitAmplitudes {
+  std::array<std::complex<double>, 4> spheroidal{};
+  std::array<std::complex<double>, 2> toroidal{};
+};
+[[nodiscard]] UnitAmplitudes AmplitudesOf(const SourceMoments& moments, int l,
+                                          int m);
+
+/// The unit force vectors at a radius: per degree, real (dof, column)
+/// column-major arrays of four spheroidal columns and (from degree 1) two
+/// toroidal ones, in AmplitudesOf's order. The force on coefficient
+/// (l, m) is the columns' sum under the amplitudes.
+struct UnitSourceForces {
+  std::map<int, std::vector<double>> spheroidal;
+  std::map<int, std::vector<double>> toroidal;
+};
+[[nodiscard]] UnitSourceForces UnitForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal, double radius);
 
 /// The forces of a shell source, as PointSourceForces: for any solutions
 /// x, conj(force) . x summed is the integral over the shell's directions

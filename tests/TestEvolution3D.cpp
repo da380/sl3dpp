@@ -945,3 +945,98 @@ TEST(PointSourceEvolution, TheRadialEvolutionMatchesThe3DClass) {
     }
   }
 }
+
+TEST(PointSourceEvolution, TheFactoredRouteIsTheGeneralOne) {
+  // Options::factor_sources: on a body without an ocean and without
+  // rotational feedback, the run by the sources' unit radial solutions
+  // is the general run in every field at every node. Two point sources
+  // at different depths, one switched on mid-run and one whose tensor
+  // changes its pattern through time, and a stress glut on a shell
+  // growing in time; both schemes.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, 0.3 * kyr, 0.8 * kyr, 2.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  const auto second = SourceAt(
+      setup, 150.0, 2.2, 1.0,
+      {.rr = -0.4, .tt = 0.8, .pp = -0.4, .rt = 0.5, .rp = 0.1, .tp = -0.3},
+      5e21);
+  const SurfaceGrid shellGrid(kLmax, {.nmax = 2});
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  auto glut = StressGlut{
+      .radius = setup.material.Radius() * material.Length() / sle.Length() -
+                600e3 / sle.Length(),
+      .grid = &shellGrid,
+      .moment = {}};
+  for (auto theta : shellGrid.CoLatitudes()) {
+    for (auto phi : shellGrid.Longitudes()) {
+      const auto s = std::sin(theta);
+      glut.moment.rr.push_back(unit * s * s * std::cos(phi) * std::cos(phi));
+      glut.moment.tt.push_back(unit * 0.5 * s * s);
+      glut.moment.pp.push_back(unit * 0.3 * s * s);
+      glut.moment.rt.push_back(unit * s * std::cos(theta) * std::cos(phi));
+      glut.moment.rp.push_back(unit * 0.2 * s * std::sin(phi));
+      glut.moment.tp.push_back(unit * 0.1 * s * s * std::sin(2.0 * phi));
+    }
+  }
+  auto sourcesAt = [&](double t) {
+    // the first changes its pattern: its shear parts grow, the rest hold
+    auto first = thrust;
+    const auto growth = 1.0 + t / times.back();
+    first.moment.rt *= growth;
+    first.moment.tp *= growth;
+    auto out = std::vector<PointSource>{first};
+    if (t >= times[1]) out.push_back(second);
+    return out;
+  };
+  auto glutsAt = [&](double t) {
+    auto at = glut;
+    const auto factor = 0.5 + t / times.back();
+    for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp, &at.moment.rt,
+                    &at.moment.rp, &at.moment.tp}) {
+      for (auto& v : *c) v *= factor;
+    }
+    return std::vector<StressGlut>{at};
+  };
+  const auto forcing =
+      Evolution::Forcing{.sources = sourcesAt, .stressGluts = glutsAt};
+
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label = "scheme " + std::to_string(static_cast<int>(scheme));
+    Evolution general(op, solver, solver.NoOceanState(),
+                      {.scheme = scheme,
+                       .rotation = RotationalFeedback::None,
+                       .rtol = 1e-12});
+    const auto reference = general.Run(times, forcing);
+    Evolution factored(op, solver, solver.NoOceanState(),
+                       {.scheme = scheme,
+                        .rotation = RotationalFeedback::None,
+                        .factor_sources = true});
+    const auto quick = factored.Run(times, forcing);
+    ASSERT_EQ(quick.size(), reference.size());
+    for (auto node = std::size_t{0}; node < quick.size(); ++node) {
+      const auto where = "node " + std::to_string(node) + ", " + label;
+      for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
+                         &Evolution::Snapshot::displacement,
+                         &Evolution::Snapshot::potential,
+                         &Evolution::Snapshot::tangentialPotential,
+                         &Evolution::Snapshot::toroidalPotential}) {
+        ASSERT_FALSE((quick[node].*field).empty()) << where;
+        EXPECT_LT(WorstDeparture(quick[node].*field, reference[node].*field),
+                  1e-9)
+            << where;
+      }
+    }
+  }
+  // what the route is not for
+  Evolution wet(op, solver, setup.state, {.factor_sources = true});
+  EXPECT_THROW((void)wet.Run(times, forcing), std::invalid_argument);
+}

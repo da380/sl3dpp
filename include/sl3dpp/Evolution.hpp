@@ -109,6 +109,18 @@ class Evolution {
     /// true saves those solves at about twice the trajectory memory with
     /// one branch.
     bool record_strain = false;
+    /// Under interior sources alone, on a body without an ocean and
+    /// without rotational feedback, step the sources' unit radial
+    /// solutions and not every order (PointSource.hpp, the factored
+    /// form): per source radius and time history, four spheroidal and two
+    /// toroidal columns a degree, whatever the sources' number, positions
+    /// and moment tensors, combined into the fields by their amplitudes.
+    /// The snapshots are the general route's to rounding. An option for
+    /// that problem alone: with an ocean, a load, a tide or the
+    /// rotational feedback the loop carries every order anyway and the
+    /// run is refused, as is recording (record_stride) and a stress glut
+    /// whose history is not one factor of time times a pattern.
+    bool factor_sources = false;
     /// Hand every node's snapshot to on_snapshot as it is recorded, so a
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
@@ -245,6 +257,11 @@ class Evolution {
       const std::function<std::vector<double>(double)>* iceThickness,
       const std::function<std::vector<std::complex<double>>(double)>* tide,
       bool resumed, const Forcing* interior = nullptr);
+
+  /// Options::factor_sources: the run under interior sources alone by
+  /// their unit radial solutions.
+  [[nodiscard]] std::vector<Snapshot> MarchFactored(
+      std::span<const double> times, const Forcing& forcing);
 
   /// Restores a checkpoint's recurrence into the members below.
   void Restore(const Checkpoint& from, std::span<const double> times);

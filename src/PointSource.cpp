@@ -302,38 +302,33 @@ DegreeFields ForcesFromMoments(
 
 }  // namespace
 
-DegreeFields PointSourceForces(
-    const Material& material, int lmax,
-    const std::function<const DegreeOperator&(int)>& spheroidal,
-    const std::function<const ToroidalOperator&(int)>& toroidal,
-    const PointSource& source) {
+SourceMoments MomentsOf(int lmax, const PointSource& source) {
   const HarmonicsAtPoint Y(lmax, source.at.colatitude, source.at.longitude);
   const auto& M = source.moment;
   const auto parts = CanonicalParts(M.rr, M.tt, M.pp, M.rt, M.rp, M.tp);
   const auto trace = M.rr + M.tt + M.pp;
-  return ForcesFromMoments(
-      material, lmax, spheroidal, toroidal, source.at.radius, [&](int l, int m) {
-        auto moments = ModeMoments{};
-        for (auto N = -2; N <= 2; ++N) {
-          moments.canonical[N + 2] = parts[N + 2] * Y(N, l, m);
-        }
-        moments.trace = trace * Y(0, l, m);
-        return moments;
-      });
+  auto out = SourceMoments{
+      .lmax = lmax,
+      .at = std::vector<std::array<Complex, 6>>(
+          SurfaceGrid::Index(lmax, lmax) + 1)};
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      auto& to = out.at[SurfaceGrid::Index(l, m)];
+      for (auto N = -2; N <= 2; ++N) to[N + 2] = parts[N + 2] * Y(N, l, m);
+      to[5] = trace * Y(0, l, m);
+    }
+  }
+  return out;
 }
 
-DegreeFields StressGlutForces(
-    const Material& material, int lmax,
-    const std::function<const DegreeOperator&(int)>& spheroidal,
-    const std::function<const ToroidalOperator&(int)>& toroidal,
-    const StressGlut& source) {
+SourceMoments MomentsOf(int lmax, const StressGlut& source) {
   if (source.grid == nullptr) {
-    throw std::invalid_argument("a shell source needs the grid of its moment");
+    throw std::invalid_argument("a stress glut needs the grid of its moment");
   }
   const auto& grid = *source.grid;
   if (grid.NMax() < 2 || grid.LMax() < lmax) {
     throw std::invalid_argument(std::format(
-        "a shell source's grid must carry upper index 2 and degree {}: it "
+        "a stress glut's grid must carry upper index 2 and degree {}: it "
         "carries {} and {}",
         lmax, grid.NMax(), grid.LMax()));
   }
@@ -342,12 +337,15 @@ DegreeFields StressGlutForces(
   for (const auto* f : {&S.rr, &S.tt, &S.pp, &S.rt, &S.rp, &S.tp}) {
     if (f->size() != size) {
       throw std::invalid_argument(
-          "a shell source's moment components live on its grid");
+          "a stress glut's moment components live on its grid");
     }
   }
   // int C_N(S) Y^N_lm dOmega is the conjugate of the spin-N coefficient
   // of conj(C_N(S)); the trace likewise at N = 0.
-  auto coefficients = std::array<std::vector<Complex>, 5>{};
+  auto out = SourceMoments{
+      .lmax = lmax,
+      .at = std::vector<std::array<Complex, 6>>(
+          SurfaceGrid::Index(lmax, lmax) + 1)};
   auto field = std::vector<Complex>(size);
   for (auto N = -2; N <= 2; ++N) {
     for (auto k = std::size_t{0}; k < size; ++k) {
@@ -355,23 +353,136 @@ DegreeFields StressGlutForces(
           CanonicalParts(S.rr[k], S.tt[k], S.pp[k], S.rt[k], S.rp[k], S.tp[k])
               [N + 2]);
     }
-    coefficients[N + 2] = grid.ExpandSpin(N, field);
+    const auto coefficients = grid.ExpandSpin(N, field);
+    for (auto l = std::abs(N); l <= lmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        out.at[SurfaceGrid::Index(l, m)][N + 2] =
+            std::conj(coefficients[SurfaceGrid::SpinIndex(N, l, m)]);
+      }
+    }
   }
   for (auto k = std::size_t{0}; k < size; ++k) {
     field[k] = S.rr[k] + S.tt[k] + S.pp[k];
   }
   const auto trace = grid.ExpandSpin(0, field);
-  return ForcesFromMoments(
-      material, lmax, spheroidal, toroidal, source.radius, [&](int l, int m) {
-        auto moments = ModeMoments{};
-        for (auto N = -2; N <= 2; ++N) {
-          if (l < std::abs(N)) continue;
-          moments.canonical[N + 2] = std::conj(
-              coefficients[N + 2][SurfaceGrid::SpinIndex(N, l, m)]);
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      out.at[SurfaceGrid::Index(l, m)][5] =
+          std::conj(trace[SurfaceGrid::SpinIndex(0, l, m)]);
+    }
+  }
+  return out;
+}
+
+namespace {
+
+DegreeFields ForcesOfMoments(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal, double radius,
+    const SourceMoments& moments) {
+  return ForcesFromMoments(material, lmax, spheroidal, toroidal, radius,
+                           [&](int l, int m) {
+                             const auto& from =
+                                 moments.at[SurfaceGrid::Index(l, m)];
+                             auto out = ModeMoments{};
+                             for (auto k = 0; k < 5; ++k) {
+                               out.canonical[k] = from[k];
+                             }
+                             out.trace = from[5];
+                             return out;
+                           });
+}
+
+}  // namespace
+
+DegreeFields PointSourceForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    const PointSource& source) {
+  return ForcesOfMoments(material, lmax, spheroidal, toroidal, source.at.radius,
+                         MomentsOf(lmax, source));
+}
+
+DegreeFields StressGlutForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    const StressGlut& source) {
+  return ForcesOfMoments(material, lmax, spheroidal, toroidal, source.radius,
+                         MomentsOf(lmax, source));
+}
+
+UnitAmplitudes AmplitudesOf(const SourceMoments& moments, int l, int m) {
+  // The work on a mode is sum_N mu_N a_N + mu_tr theta / 3 and the force
+  // its conjugate. The spheroidal unknowns have a_{-N} = a_N, real; the
+  // toroidal one a_{-N} = -a_N, imaginary, so with g = Im a its force is
+  // -i conj(mu_N - mu_{-N}) g.
+  const auto& mu = moments.at[SurfaceGrid::Index(l, m)];
+  auto out = UnitAmplitudes{};
+  out.spheroidal = {std::conj(mu[2]), std::conj(mu[5]),
+                    std::conj(mu[3] + mu[1]), std::conj(mu[4] + mu[0])};
+  out.toroidal = {-kI * std::conj(mu[3] - mu[1]),
+                  -kI * std::conj(mu[4] - mu[0])};
+  return out;
+}
+
+UnitSourceForces UnitForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    double radius) {
+  const auto& mesh = material.Mesh();
+  const auto n = mesh.NGll();
+  const auto at = LocateRadius(material, radius);
+  auto out = UnitSourceForces{};
+  for (auto l = 0; l <= lmax; ++l) {
+    const auto& sph = spheroidal(l);
+    const auto sphDofs = static_cast<std::size_t>(sph.DofCount());
+    auto bs = std::vector<double>(sphDofs * 4, 0.0);
+    const ToroidalOperator* tor = l >= 1 ? &toroidal(l) : nullptr;
+    const auto torDofs =
+        tor != nullptr ? static_cast<std::size_t>(tor->DofCount()) : 0;
+    auto bt = std::vector<double>(torDofs * 2, 0.0);
+    const bool reachesS = at.element >= sph.FirstElement();
+    const bool reachesT = tor != nullptr && at.element >= tor->FirstElement();
+    for (auto j = 0; j < n; ++j) {
+      const auto global = mesh.GlobalIndex(at.element, j);
+      const auto value = at.value[j];
+      const auto rd = at.radius * at.derivative[j];
+      // the strain components of the unknown's unit mode at the point
+      auto partsOf = [&](int which) {
+        const auto mode = UnitMode(which, value, rd);
+        const auto A = DeviatoricComponents(l, mode, at.radius);
+        const auto theta =
+            (mode.rdU + 2.0 * mode.U - l * (l + 1.0) * mode.V) / at.radius;
+        return std::pair{A, theta};
+      };
+      if (reachesS) {
+        for (const auto [which, component] :
+             {std::pair{0, Component::U}, std::pair{1, Component::V}}) {
+          const auto dof = sph.Dof(global, component);
+          if (dof < 0) continue;
+          const auto [A, theta] = partsOf(which);
+          bs[0 * sphDofs + dof] += (2.0 * A[2]).real();
+          bs[1 * sphDofs + dof] += (theta / 3.0).real();
+          bs[2 * sphDofs + dof] += A[3].real();
+          bs[3 * sphDofs + dof] += A[4].real();
         }
-        moments.trace = std::conj(trace[SurfaceGrid::SpinIndex(0, l, m)]);
-        return moments;
-      });
+      }
+      if (reachesT) {
+        if (const auto dof = tor->Dof(global); dof >= 0) {
+          const auto [A, theta] = partsOf(2);
+          bt[0 * torDofs + dof] += A[3].imag();
+          bt[1 * torDofs + dof] += A[4].imag();
+        }
+      }
+    }
+    out.spheroidal.emplace(l, std::move(bs));
+    if (tor != nullptr) out.toroidal.emplace(l, std::move(bt));
+  }
+  return out;
 }
 
 }  // namespace sl3dpp

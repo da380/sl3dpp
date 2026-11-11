@@ -667,3 +667,68 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
   EXPECT_LT(worst, 1e-6 * scale);
   EXPECT_LT(worstW, 1e-6 * scaleW);
 }
+
+TEST(PointSource, TheForcesFactorIntoUnitVectorsAndAmplitudes) {
+  // A source's forces on every order are four spheroidal and two
+  // toroidal radial vectors per degree, which depend on the radius alone,
+  // under amplitudes that carry the order, the position and the moment
+  // tensor: for a point source and for a stress glut on a shell.
+  auto body = Body::Make();
+  body.Build();
+  const auto radius = body.MantleRadius();
+  const auto units =
+      UnitForces(body.material, kLmax, body.Sph(), body.Tor(), radius);
+  auto check = [&](const DegreeFields& forces, const SourceMoments& moments) {
+    auto scale = 0.0, worst = 0.0;
+    for (auto l = 0; l <= kLmax; ++l) {
+      const auto sdof = static_cast<std::size_t>(body.spheroidal.at(l)->DofCount());
+      const auto tdof = l >= 1
+                            ? static_cast<std::size_t>(body.toroidal.at(l)->DofCount())
+                            : std::size_t{0};
+      for (auto m = 0; m <= l; ++m) {
+        const auto amplitudes = AmplitudesOf(moments, l, m);
+        for (auto d = std::size_t{0}; d < sdof; ++d) {
+          auto sum = Complex{};
+          for (auto c = 0; c < 4; ++c) {
+            sum += amplitudes.spheroidal[c] * units.spheroidal.at(l)[c * sdof + d];
+          }
+          const auto exact = forces.spheroidal.at(l)[m * sdof + d];
+          scale = std::max(scale, std::abs(exact));
+          worst = std::max(worst, std::abs(sum - exact));
+        }
+        for (auto d = std::size_t{0}; d < tdof; ++d) {
+          auto sum = Complex{};
+          for (auto c = 0; c < 2; ++c) {
+            sum += amplitudes.toroidal[c] * units.toroidal.at(l)[c * tdof + d];
+          }
+          const auto exact = forces.toroidal.at(l)[m * tdof + d];
+          scale = std::max(scale, std::abs(exact));
+          worst = std::max(worst, std::abs(sum - exact));
+        }
+      }
+    }
+    EXPECT_GT(scale, 0.0);
+    EXPECT_LT(worst, 1e-13 * scale);
+  };
+  const PointSource source{
+      .at = {.radius = radius, .colatitude = 1.1, .longitude = 4.0},
+      .moment = {.rr = 0.9, .tt = -0.2, .pp = 0.5, .rt = 0.3, .rp = -0.7, .tp = 0.6}};
+  check(PointSourceForces(body.material, kLmax, body.Sph(), body.Tor(), source),
+        MomentsOf(kLmax, source));
+
+  const SurfaceGrid grid(kLmax, {.nmax = 2});
+  auto glut = StressGlut{.radius = radius, .grid = &grid, .moment = {}};
+  for (auto theta : grid.CoLatitudes()) {
+    for (auto phi : grid.Longitudes()) {
+      const auto s = std::sin(theta);
+      glut.moment.rr.push_back(s * s * std::cos(phi) * std::cos(phi));
+      glut.moment.tt.push_back(0.5 * s * s);
+      glut.moment.pp.push_back(0.3 * s * s);
+      glut.moment.rt.push_back(s * std::cos(theta) * std::cos(phi));
+      glut.moment.rp.push_back(0.2 * s * std::sin(phi));
+      glut.moment.tp.push_back(0.1 * s * s * std::sin(2.0 * phi));
+    }
+  }
+  check(StressGlutForces(body.material, kLmax, body.Sph(), body.Tor(), glut),
+        MomentsOf(kLmax, glut));
+}

@@ -30,6 +30,7 @@
  * Everything is in the material's units.
  */
 
+#include <functional>
 #include <map>
 #include <memory>
 #include <span>
@@ -62,7 +63,14 @@ class ToroidalViscoelastic {
 
   /// The operator is borrowed and must outlive this.
   explicit ToroidalViscoelastic(const ViscoelasticOperator& op);
+  /// With another count of columns per degree than a real field's
+  /// 2 (l + 1): the unit solutions of a source, say (the pairings of the
+  /// continuous adjoint, which sum over orders, are not for these).
+  ToroidalViscoelastic(const ViscoelasticOperator& op,
+                       std::function<int(int)> columns);
   ~ToroidalViscoelastic();
+  /// The columns of a degree's arrays.
+  [[nodiscard]] int Columns(int l) const;
 
   [[nodiscard]] int LMax() const;
   /// The unrelaxed system of a degree (for its dof map and size).
@@ -207,6 +215,7 @@ class ToroidalViscoelastic {
                                                   int l) const;
 
   const ViscoelasticOperator* op_;
+  std::function<int(int)> columns_{};
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;
 };
 
