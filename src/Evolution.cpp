@@ -93,14 +93,29 @@ std::vector<Evolution::Snapshot> Evolution::Run(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   CheckTimes(times);
-  return March(times, &directLoad, nullptr, false);
+  return March(times, &directLoad, nullptr, nullptr, false);
+}
+
+std::vector<Evolution::Snapshot> Evolution::Run(std::span<const double> times,
+                                                const Forcing& forcing) {
+  CheckTimes(times);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               nullptr, forcing.tide ? &forcing.tide : nullptr, false);
+}
+
+std::vector<Evolution::Snapshot> Evolution::Resume(
+    const Checkpoint& from, std::span<const double> times,
+    const Forcing& forcing) {
+  Restore(from, times);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               nullptr, forcing.tide ? &forcing.tide : nullptr, true);
 }
 
 std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   CheckTimes(times);
-  return March(times, nullptr, &iceThickness, false);
+  return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
 void Evolution::Restore(const Checkpoint& from,
@@ -122,20 +137,21 @@ std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   Restore(from, times);
-  return March(times, &directLoad, nullptr, true);
+  return March(times, &directLoad, nullptr, nullptr, true);
 }
 
 std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   Restore(from, times);
-  return March(times, nullptr, &iceThickness, true);
+  return March(times, nullptr, &iceThickness, nullptr, true);
 }
 
 std::vector<Evolution::Snapshot> Evolution::March(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
+    const std::function<std::vector<std::complex<double>>(double)>* tide,
     bool resumed) {
   const auto& op = *op_;
   const auto& solver = *solver_;
@@ -219,6 +235,28 @@ std::vector<Evolution::Snapshot> Evolution::March(
                          .tideCoefficients = psi_});
   };
 
+  // The direct load at a node (none given: none), and the potential the
+  // radial steps see there: the centrifugal potential of the rotation the
+  // node's closure found, and the prescribed tide.
+  auto directLoadAt = [&](double t) {
+    return directLoad != nullptr ? (*directLoad)(t)
+                                 : std::vector<double>(fieldSize, 0.0);
+  };
+  auto potentialAt = [&](double t, const std::array<double, 3>& omega) {
+    auto psi = options_.rotation == RotationalFeedback::None
+                   ? grid.ZeroCoefficients()
+                   : solver.CentrifugalCoefficients(omega);
+    if (tide != nullptr) {
+      const auto given = (*tide)(t);
+      if (given.size() != psi.size()) {
+        throw std::invalid_argument(
+            "the tide is not a coefficient vector of the solver's grid");
+      }
+      for (auto i = std::size_t{0}; i < psi.size(); ++i) psi[i] += given[i];
+    }
+    return psi;
+  };
+
   auto loadGrid = std::vector<double>{};
   auto response = GRDSolver::Response{};
   auto ocean = std::vector<double>{};  // the node's C, migrating only
@@ -233,18 +271,32 @@ std::vector<Evolution::Snapshot> Evolution::March(
   } else if (!resumed) {
     // The instantaneous elastic response at the start: the right limit,
     // so a load switched on at times[0] is stepped at full order.
-    loadGrid = (*directLoad)(times[0]);
+    loadGrid = directLoadAt(times[0]);
     const auto& elasticSolver = solverFor(0.0);
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = loadGrid;
+    if (tide != nullptr) forcing.tide = (*tide)(times[0]);
     forcing.rotation = options_.rotation;
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
     sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
-    psi_ = options_.rotation == RotationalFeedback::None
-               ? grid.ZeroCoefficients()
-               : solver.CentrifugalCoefficients(response.angularVelocity);
+    psi_ = potentialAt(times[0], response.angularVelocity);
   }
-  if (stride > 0) {
+  // The surface coefficients of a node's radial solutions, when kept.
+  auto surface = std::optional<Snapshot::Surface>{};
+  auto surfaceOf = [&](const std::map<int, std::vector<double>>& solutions) {
+    if (!options_.record_surface) return;
+    surface = Snapshot::Surface{
+        .U = Coefficients(op.Surface(solutions, Component::U), toNdLength_),
+        .V = Coefficients(op.Surface(solutions, Component::V), toNdLength_),
+        .Phi = Coefficients(op.Surface(solutions, Component::Phi),
+                            toNdPotential_)};
+  };
+  if (options_.record_surface && !resumed) {
+    const auto start = op.SolveElastic(vstate_, Columns(sigma_, toMatDensity_),
+                                       Columns(psi_, toMatPotential_));
+    vstate_.strain = op.Strain(start);
+    surfaceOf(start);
+  } else if (stride > 0) {
     op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
                    Columns(psi_, toMatPotential_));
   }
@@ -259,6 +311,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
     snapshot.oceanFunction = std::move(ocean);
+    snapshot.surface = std::move(surface);
+    surface.reset();
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
     // loads.
@@ -316,8 +370,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
       GRDSolver::GeneralisedForcing coupled;
-      loadGrid = (*directLoad)(times[node]);
+      loadGrid = directLoadAt(times[node]);
       coupled.directLoad = loadGrid;
+      if (tide != nullptr) coupled.tide = (*tide)(times[node]);
       coupled.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       coupled.potentialResponse =
@@ -327,12 +382,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
       response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
       sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
     }
-    psi_ = options_.rotation == RotationalFeedback::None
-               ? grid.ZeroCoefficients()
-               : solver.CentrifugalCoefficients(response.angularVelocity);
+    psi_ = potentialAt(times[node], response.angularVelocity);
     auto [next, solutions] = step.Finish(Columns(sigma_, toMatDensity_),
                                          Columns(psi_, toMatPotential_));
     vstate_ = std::move(next);
+    surfaceOf(solutions);
     const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
     record(times[node], response, keep);
     checkpoint(node);

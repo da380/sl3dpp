@@ -149,6 +149,8 @@ GRDSolver::GRDSolver(SurfaceGrid grid, const LoveNumbers& table,
   }
   h2_ = h_[2];
   k2_ = k_[2];
+  ht_ = truncate(nd.h_t);
+  kt_ = truncate(nd.k_t);
   ht2_ = nd.h_t[2];
   kt2_ = nd.k_t[2];
   hc_ = nd.h_c;
@@ -368,6 +370,14 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   checkField(forcing.oceanFunctionOverride, "ocean function override");
   checkCoefficients(forcing.displacementResponse, "displacement response");
   checkCoefficients(forcing.potentialResponse, "potential response");
+  checkCoefficients(forcing.tide, "tide");
+  const bool tidal =
+      !forcing.tide.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(forcing.tide)) > 0.0;
+  if (tidal && forcing.tide[SurfaceGrid::Index(0, 0)] != 0.0) {
+    throw std::invalid_argument(
+        "a prescribed tidal potential has no degree-0 part");
+  }
 
   // The static (load-independent) coefficient terms.
   std::vector<std::complex<double>> staticDisp, staticGrav;
@@ -422,6 +432,19 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       staticGrav[i] += forcing.potentialResponse[i];
     }
   }
+  if (tidal) {
+    // The body's answer to the prescribed potential; the potential's own
+    // place in the sea level change is added where that is formed.
+    anyForcing = true;
+    ensureStatic();
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        staticDisp[i] += ht_[l] * forcing.tide[i];
+        staticGrav[i] += kt_[l] * forcing.tide[i];
+      }
+    }
+  }
   anyForcing =
       anyForcing || forcing.inertiaMomentChange != 0.0 ||
       MaxAbs(std::span<const double>(forcing.angularMomentumChange.data(), 3)) >
@@ -458,9 +481,15 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
     for (auto i = std::size_t{0}; i < coefSize; ++i) {
       staticSlc[i] = -(staticDisp[i] + staticGrav[i] / g_);
     }
+    if (tidal) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) {
+        staticSlc[i] -= forcing.tide[i] / g_;
+      }
+    }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
   }
+  const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
 
   // One iteration: the mass-conserving sea level change of a load.
   auto seaLevelFromLoad = [&](std::span<const std::complex<double>> loadLm,
@@ -485,7 +514,8 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       omega = rotation.omega;
       SetBlock(slcLm,
                -1.0 * (rotation.disp2 +
-                       (1.0 / g_) * (rotation.grav2 + rotation.centrifugal)));
+                       (1.0 / g_) *
+                           (rotation.grav2 + rotation.centrifugal + tide2)));
       // uniform, and so absorbed by mass conservation below
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * rotation.centrifugal0;
@@ -654,6 +684,7 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     double meanDual = 0.0;
     double j = 0.0;
     std::vector<std::complex<double>> zBase;
+    std::vector<std::complex<double>> zWhole;  // its degree-2 entries kept
     Block2 dsU2{}, dsPhi2{};
   };
 
@@ -673,6 +704,7 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     }
     auto zDual = grid_.Expand(xgDual);
     for (auto& v : zDual) v *= r2;
+    stash.zWhole = zDual;
 
     auto next = rOut;
     if (rotational) {
@@ -758,6 +790,17 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   if (rotational) {
     AddBlock(out.displacementResponseDual, stash.dsU2);
     AddBlock(out.potentialResponseDual, stash.dsPhi2);
+  }
+  // The prescribed tide entered the two response channels by the tidal
+  // numbers, and the sea level change by its own potential.
+  out.tideDual.assign(coefSize, 0.0);
+  for (auto l = 1; l <= grid_.LMax(); ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      out.tideDual[i] = ht_[l] * out.displacementResponseDual[i] +
+                        kt_[l] * out.potentialResponseDual[i] -
+                        stash.zWhole[i] / g_;
+    }
   }
   out.inertiaMomentDual = stash.j;
   out.iterations = count;

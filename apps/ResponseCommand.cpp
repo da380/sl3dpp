@@ -21,6 +21,7 @@
  * end node. It writes a surface file with a slice per node and an
  * exchange table per node.
  */
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <complex>
@@ -44,10 +45,12 @@
 #include "Input.hpp"
 #include "Ranks.hpp"
 #include "sl3dpp/EarthModel.hpp"
+#include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/ElasticPerturbation3D.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/Version.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
@@ -594,39 +597,6 @@ std::string RunElastic(const std::filesystem::path& config,
                  : std::format("{}; {}", meaning, wrote);
 }
 
-/// The radial stepper's columns of a real field's coefficients: per degree
-/// 2 (l + 1), the real parts of the m >= 0 coefficients and then their
-/// imaginary parts; at every degree, or at the degrees given alone.
-LoadCallable RealColumnsOf(std::vector<Complex> coefficients,
-                           std::optional<std::set<int>> degrees = {}) {
-  return [coefficients = std::move(coefficients), degrees = std::move(degrees)](
-             int l, double) -> std::optional<std::vector<double>> {
-    if (degrees && !degrees->contains(l)) return std::nullopt;
-    auto columns = std::vector<double>(2 * (l + 1));
-    for (auto m = 0; m <= l; ++m) {
-      const auto c = coefficients[SurfaceGrid::Index(l, m)];
-      columns[m] = c.real();
-      columns[l + 1 + m] = c.imag();
-    }
-    return columns;
-  };
-}
-
-/// The radial stepper's per-degree columns back to a grid's coefficients,
-/// scaled.
-std::vector<Complex> CoefficientsOfColumns(
-    const SurfaceGrid& grid,
-    const std::map<int, std::vector<double>>& perDegree, double factor) {
-  auto out = grid.ZeroCoefficients();
-  for (const auto& [l, columns] : perDegree) {
-    for (auto m = 0; m <= l; ++m) {
-      out[SurfaceGrid::Index(l, m)] =
-          factor * Complex(columns[m], columns[l + 1 + m]);
-    }
-  }
-  return out;
-}
-
 /// The load and tide at one node, non-dimensional under the model's
 /// scales.
 struct NodeForcing {
@@ -642,46 +612,74 @@ struct NodeSurface {
 };
 
 /// The radial model of a rheology stepped through the nodes of `times`
-/// under the forcing `forcingAt` gives at each node, by its own stepper
-/// per degree with every order a column: the unrelaxed solve at the first
-/// node, with no memory before it, then a step to each node ending under
-/// that node's forcing. The surface response at every node.
+/// under the forcing `forcingAt` gives at each node (non-dimensional
+/// under the model's scales): the library's evolution on a body without
+/// an ocean and without rotational feedback, which is the solid body
+/// stepped under the forcing — the unrelaxed solve at the first node,
+/// with no memory before it, then a step to each node ending under that
+/// node's forcing. The surface response at every node, SI.
 std::vector<NodeSurface> StepRadial(
     const Rheology& rheology, int lmax, const SurfaceGrid& grid,
     const Scales& scales, const TimesBlock& times, Scheme scheme,
     const std::function<NodeForcing(std::size_t)>& forcingAt, bool hasLoad,
-    bool hasTide, const std::set<int>& tideDegrees) {
+    bool hasTide) {
   const ViscoelasticOperator op(rheology, lmax);
-  const auto toTime = KYR / scales.Time();
-  const auto length = scales.Length();
-  const auto potential = scales.Factor(PotentialDimensions);
-  auto channels = [&](const NodeForcing& forcing) {
-    return std::pair{
-        hasLoad ? RealColumnsOf(forcing.load) : LoadCallable{},
-        hasTide ? RealColumnsOf(forcing.tide, tideDegrees) : LoadCallable{}};
+  const GRDSolver solver(grid, op.ElasticLoveNumbers(), SeaLevelParameters{});
+  const auto& units = solver.SolverScales();
+  const auto loadDims = Dimensions{.mass = 1, .length = -2};
+  const auto toSolverLoad = scales.Factor(loadDims) / units.Factor(loadDims);
+  const auto toSolverPotential =
+      scales.Factor(PotentialDimensions) / units.Factor(PotentialDimensions);
+  const auto toTime = KYR / units.Time();
+  auto nodeTimes = std::vector<double>(times.nodes_kyr.size());
+  for (auto n = std::size_t{0}; n < nodeTimes.size(); ++n) {
+    nodeTimes[n] = times.nodes_kyr[n] * toTime;
+  }
+
+  // The evolution asks for the forcing by time, at the nodes in order;
+  // each node's is built once.
+  auto built = std::optional<std::pair<std::size_t, NodeForcing>>{};
+  auto at = [&](double t) -> const NodeForcing& {
+    const auto found = std::ranges::lower_bound(nodeTimes, t);
+    const auto n = static_cast<std::size_t>(found - nodeTimes.begin());
+    if (found == nodeTimes.end() || *found != t) {
+      throw std::logic_error("the forcing was asked for away from a node");
+    }
+    if (!built || built->first != n) built.emplace(n, forcingAt(n));
+    return built->second;
   };
-  auto surface = [&](const std::map<int, std::vector<double>>& x) {
-    return NodeSurface{
-        .U = CoefficientsOfColumns(grid, op.Surface(x, Component::U), length),
-        .V = CoefficientsOfColumns(grid, op.Surface(x, Component::V), length),
-        .Phi = CoefficientsOfColumns(grid, op.Surface(x, Component::Phi),
-                                     potential)};
+  auto forcing = Evolution::Forcing{};
+  // every node's forcing is built, whichever channels it holds
+  forcing.directLoad = [&](double t) {
+    const auto& node = at(t);
+    if (!hasLoad) return std::vector<double>(grid.FieldSize(), 0.0);
+    auto coefficients = node.load;
+    for (auto& c : coefficients) c *= toSolverLoad;
+    return grid.Synthesise(coefficients);
   };
+  if (hasTide) {
+    forcing.tide = [&](double t) {
+      auto coefficients = at(t).tide;
+      for (auto& c : coefficients) c *= toSolverPotential;
+      return coefficients;
+    };
+  }
+
+  Evolution evolution(op, solver, solver.NoOceanState(),
+                      {.scheme = scheme,
+                       .rotation = RotationalFeedback::None,
+                       .record_surface = true});
+  const auto length = units.Length();
+  const auto potential = units.Factor(PotentialDimensions);
   auto out = std::vector<NodeSurface>{};
-  auto state = op.ZeroState([](int l) { return 2 * (l + 1); });
-  state.t = times.nodes_kyr.front() * toTime;
-  auto now = channels(forcingAt(0));
-  const auto start = op.SolveElastic(state, now.first, now.second);
-  state.strain = op.Strain(start);
-  out.push_back(surface(start));
-  for (auto n = std::size_t{1}; n < times.nodes_kyr.size(); ++n) {
-    auto next = channels(forcingAt(n));
-    const auto step = op.StartStep(state, times.steps_kyr[n - 1] * toTime,
-                                   scheme, now.first, now.second);
-    auto [after, solutions] = step.Finish(next.first, next.second);
-    state = std::move(after);
-    out.push_back(surface(solutions));
-    now = std::move(next);
+  for (const auto& snapshot : evolution.Run(nodeTimes, forcing)) {
+    auto node = NodeSurface{.U = snapshot.surface->U,
+                            .V = snapshot.surface->V,
+                            .Phi = snapshot.surface->Phi};
+    for (auto& c : node.U) c *= length;
+    for (auto& c : node.V) c *= length;
+    for (auto& c : node.Phi) c *= potential;
+    out.push_back(std::move(node));
   }
   return out;
 }
@@ -812,7 +810,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
           keep(std::move(load));
           return std::move(nd);
         },
-        hasLoad, hasTide, tideDegrees);
+        hasLoad, hasTide);
   } else {
     // The 3D stepper, distributed over radial segments like the
     // evolutions: the rank cuts balance the transform work of the
@@ -945,8 +943,7 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     // stepper.
     radial = StepRadial(
         *rheology, input.lmax, grid, scales, times, solver.scheme,
-        [&](std::size_t n) { return forcingAt(n).first; }, hasLoad, hasTide,
-        tideDegrees);
+        [&](std::size_t n) { return forcingAt(n).first; }, hasLoad, hasTide);
   }
 
   // What the config was taken to mean, for the summary and the outputs.

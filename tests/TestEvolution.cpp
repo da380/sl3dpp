@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -268,6 +269,173 @@ TEST(Evolution, WithoutAnOceanIsTheDirectlySteppedBody) {
         } else {
           EXPECT_GT(spin, 0.0);
         }
+      }
+    }
+  }
+}
+
+TEST(Evolution, APrescribedTideDrivesTheBodyWithAndWithoutAnOcean) {
+  // A prescribed tidal potential beside the direct load. The oracle steps
+  // the radial operator directly under the load the evolution carried
+  // (the direct load and, with an ocean, the induced one of its own
+  // relative sea level change) and under the potential it should have
+  // seen, the prescribed tide and the centrifugal potential of its own
+  // rotation: the displacement and the potential perturbation must be
+  // the evolution's. With an ocean the relative sea level change then
+  // holds the tide's own potential, -(u + (phi + psi) / g) up to the
+  // uniform shift.
+  auto setup = Setup::Make(true);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  auto ratio = [&](Dimensions dims) {
+    return material.Factor(dims) / sle.Factor(dims);
+  };
+  const auto toLength = ratio(Dimensions{.length = 1});
+  const auto toPotential = ratio(PotentialDimensions);
+  const auto toMatDensity = 1.0 / ratio(Dimensions{.mass = 1, .length = -2});
+  const auto toMatTime = 1.0 / ratio(Dimensions{.time = 1});
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  auto times = std::vector<double>{};
+  for (auto i = 0; i <= 5; ++i) times.push_back(1.5 * i * kyr);
+
+  const auto held = setup.MeltLoad(-0.1);
+  Evolution::Forcing forcing;
+  forcing.directLoad = [&](double t) {
+    auto load = held;
+    for (auto& v : load) v *= 1.0 + 0.2 * t / kyr;
+    return load;
+  };
+  // Degrees 2, 3 and 5, growing and turning in time.
+  const auto amplitude = 5.0 / sle.Factor(PotentialDimensions);
+  forcing.tide = [&](double t) {
+    auto psi = grid.ZeroCoefficients();
+    const auto s = t / (7.5 * kyr);
+    psi[SurfaceGrid::Index(2, 0)] = amplitude * (1.0 + s);
+    psi[SurfaceGrid::Index(2, 1)] = amplitude * std::complex<double>(0.4, -0.3 * s);
+    psi[SurfaceGrid::Index(2, 2)] = amplitude * std::complex<double>(-0.2 * s, 0.5);
+    psi[SurfaceGrid::Index(3, 1)] = amplitude * std::complex<double>(0.3, 0.2);
+    psi[SurfaceGrid::Index(5, 4)] = amplitude * std::complex<double>(0.1 * s, -0.2);
+    return psi;
+  };
+  auto columns = [](const std::vector<std::complex<double>>& coefficients,
+                    double factor) -> LoadCallable {
+    return [coefficients, factor](int l, double)
+               -> std::optional<std::vector<double>> {
+      auto out = std::vector<double>(2 * (l + 1));
+      for (auto m = 0; m <= l; ++m) {
+        const auto c = coefficients[SurfaceGrid::Index(l, m)];
+        out[m] = factor * c.real();
+        out[l + 1 + m] = factor * c.imag();
+      }
+      return out;
+    };
+  };
+  auto field = [&](const std::map<int, std::vector<double>>& perDegree,
+                   double factor) {
+    auto lm = grid.ZeroCoefficients();
+    for (const auto& [l, c] : perDegree) {
+      for (auto m = 0; m <= l; ++m) {
+        lm[SurfaceGrid::Index(l, m)] =
+            factor * std::complex<double>(c[m], c[l + 1 + m]);
+      }
+    }
+    return grid.Synthesise(lm);
+  };
+  auto worst = [](std::span<const double> a, std::span<const double> b) {
+    auto diff = 0.0, scale = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
+      diff = std::max(diff, std::abs(a[i] - b[i]));
+      scale = std::max(scale, std::abs(b[i]));
+    }
+    return diff / scale;
+  };
+
+  const auto dry = solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&dry, &wet}) {
+    for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+      const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
+                         ", rotation " + std::to_string(static_cast<int>(rotation));
+      Evolution evolution(op, solver, *background,
+                          {.rotation = rotation,
+                           .rtol = 1e-13,
+                           .record_surface = true});
+      const auto snapshots = evolution.Run(times, forcing);
+      ASSERT_EQ(snapshots.size(), times.size());
+
+      auto channels = [&](std::size_t node) {
+        const auto& snapshot = snapshots[node];
+        auto load = forcing.directLoad(times[node]);
+        const auto induced = solver.LoadFromSeaLevelChange(
+            *background, snapshot.relativeSeaLevelChange);
+        for (auto i = std::size_t{0}; i < load.size(); ++i) load[i] += induced[i];
+        auto psi = forcing.tide(times[node]);
+        if (rotation != RotationalFeedback::None) {
+          const auto spin =
+              solver.CentrifugalCoefficients(snapshot.angularVelocity);
+          for (auto i = std::size_t{0}; i < psi.size(); ++i) psi[i] += spin[i];
+        }
+        return std::pair{columns(grid.Expand(load), toMatDensity),
+                         columns(psi, 1.0 / toPotential)};
+      };
+      auto state = op.ZeroState([](int l) { return 2 * (l + 1); });
+      state.t = times.front() * toMatTime;
+      auto now = channels(0);
+      auto solutions = op.SolveElastic(state, now.first, now.second);
+      state.strain = op.Strain(solutions);
+      for (auto node = std::size_t{0}; node < times.size(); ++node) {
+        if (node > 0) {
+          auto next = channels(node);
+          const auto step = op.StartStep(
+              state, (times[node] - times[node - 1]) * toMatTime,
+              Scheme::ExponentialTrapezoid, now.first, now.second);
+          auto finished = step.Finish(next.first, next.second);
+          state = std::move(finished.first);
+          solutions = std::move(finished.second);
+          now = std::move(next);
+        }
+        const auto& snapshot = snapshots[node];
+        EXPECT_TRUE(snapshot.converged) << label;
+        const auto u = field(op.Surface(solutions, Component::U), toLength);
+        const auto phi = field(op.Surface(solutions, Component::Phi), toPotential);
+        EXPECT_LT(worst(snapshot.displacement, u), 1e-9)
+            << "node " << node << ", " << label;
+        EXPECT_LT(worst(snapshot.potential, phi), 1e-9)
+            << "node " << node << ", " << label;
+
+        // The surface coefficients kept on the snapshot: the fields
+        // above, and the tangential displacement's potential.
+        ASSERT_TRUE(snapshot.surface.has_value());
+        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->U), u), 1e-9) << label;
+        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->Phi), phi), 1e-9)
+            << label;
+        const auto v = field(op.Surface(solutions, Component::V), toLength);
+        EXPECT_GT(*std::ranges::max_element(v), 0.0);
+        EXPECT_LT(worst(grid.Synthesise(snapshot.surface->V), v), 1e-9) << label;
+
+        // The sea level change holds the potentials that are not the
+        // body's own: the tide's, and the centrifugal one's.
+        auto psi = forcing.tide(times[node]);
+        if (rotation != RotationalFeedback::None) {
+          const auto spin =
+              solver.CentrifugalCoefficients(snapshot.angularVelocity);
+          for (auto i = std::size_t{0}; i < psi.size(); ++i) psi[i] += spin[i];
+        }
+        psi[SurfaceGrid::Index(0, 0)] = 0.0;
+        const auto outer = grid.Synthesise(psi);
+        auto low = 1e300, high = -1e300, scale = 0.0;
+        for (auto i = std::size_t{0}; i < u.size(); ++i) {
+          const auto expected =
+              -(u[i] + (phi[i] + outer[i]) / solver.SurfaceGravity());
+          const auto shift = snapshot.relativeSeaLevelChange[i] - expected;
+          low = std::min(low, shift);
+          high = std::max(high, shift);
+          scale = std::max(scale, std::abs(expected));
+        }
+        EXPECT_LT(high - low, 1e-8 * scale) << "node " << node << ", " << label;
       }
     }
   }

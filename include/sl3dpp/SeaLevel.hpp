@@ -230,6 +230,14 @@ class GRDSolver {
     std::vector<std::complex<double>> potentialResponse;
     double inertiaMomentChange = 0.0;
     std::array<double, 3> angularMomentumChange{0.0, 0.0, 0.0};
+    /// A prescribed tidal potential, its coefficients on the surface: the
+    /// body answers through the tidal Love numbers of every degree, as it
+    /// does to the centrifugal potential of the rotation, and the
+    /// potential itself moves the equipotentials (it is in the relative
+    /// sea level change, and not in the potential returned, which is the
+    /// body's own perturbation). Degrees from 1 up; a degree-0 part is
+    /// refused.
+    std::vector<std::complex<double>> tide;
     /// An override of the state's ocean function (linearising about a
     /// migrating-shoreline trajectory, or a smooth benchmark C).
     std::vector<double> oceanFunctionOverride;
@@ -288,6 +296,9 @@ class GRDSolver {
     std::vector<double> directLoadDual;
     std::vector<std::complex<double>> displacementResponseDual;
     std::vector<std::complex<double>> potentialResponseDual;
+    /// The dual of the prescribed tidal potential's coefficients, paired
+    /// as the response channels' are.
+    std::vector<std::complex<double>> tideDual;
     double inertiaMomentDual = 0.0;
     int iterations = 0;
     double error = 0.0;
@@ -343,6 +354,7 @@ class GRDSolver {
   SeaLevelParameters parameters_;  // as given (SI)
   // Non-dimensional Love arrays, degree 0..lmax: channel sums and splits.
   std::vector<double> h_, k_, hU_, kU_, hPhi_, kPhi_;
+  std::vector<double> ht_, kt_;  // the tidal numbers, per degree
   std::vector<double> slcFactor_;  // -(h + k / g), per degree
   // Degree-2 and axial numbers.
   double h2_ = 0, k2_ = 0, ht2_ = 0, kt2_ = 0;

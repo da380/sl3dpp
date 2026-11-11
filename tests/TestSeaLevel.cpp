@@ -243,6 +243,11 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
                  solver.SolverScales().Factor(PotentialDimensions);
         }));
     forcing.inertiaMomentChange = 1e-7;
+    forcing.tide = grid.Expand(grid.FromFunction([&](double theta, double phi) {
+      return 2.0 * Cap(theta, phi, 2.6, 1.0, 0.9) /
+             solver.SolverScales().Factor(PotentialDimensions);
+    }));
+    forcing.tide[SurfaceGrid::Index(0, 0)] = 0.0;
 
     GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
     const auto response = solver.SolveGeneralised(state, forcing, options);
@@ -280,6 +285,7 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
         Pair(adjoint.displacementResponseDual, forcing.displacementResponse,
              lmax) +
         Pair(adjoint.potentialResponseDual, forcing.potentialResponse, lmax) +
+        Pair(adjoint.tideDual, forcing.tide, lmax) +
         adjoint.inertiaMomentDual * forcing.inertiaMomentChange;
     EXPECT_NEAR(lhs, rhs, 1e-10 * std::abs(lhs))
         << "rotation mode " << static_cast<int>(rotation)

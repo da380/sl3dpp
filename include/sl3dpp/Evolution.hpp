@@ -58,6 +58,15 @@ class Evolution {
     std::vector<double> oceanFunction;
     /// Whether the node's sea level solve met its tolerance.
     bool converged = true;
+    /// With Options::record_surface: the coefficients of the node's
+    /// radial solutions at the surface, in the solver's units — the
+    /// radial displacement U, the potential V of the tangential
+    /// displacement and the potential perturbation Phi. U and Phi are
+    /// the fields above to the solves' tolerance; V is here alone.
+    struct Surface {
+      std::vector<std::complex<double>> U, V, Phi;
+    };
+    std::optional<Surface> surface;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -94,6 +103,10 @@ class Evolution {
     /// true saves those solves at about twice the trajectory memory with
     /// one branch.
     bool record_strain = false;
+    /// Keep each node's surface coefficients on its snapshot
+    /// (Snapshot::surface), the tangential displacement's among them; the
+    /// first node then takes one elastic solve of the radial operator.
+    bool record_surface = false;
     /// Hand every node's snapshot to on_snapshot as it is recorded, so a
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
@@ -125,6 +138,31 @@ class Evolution {
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
+
+  /// What drives a run, each term a function of time in the solver's
+  /// units and any of them absent: the direct load, a grid field (the
+  /// given part of the surface load, whatever its source), and a
+  /// prescribed tidal potential, its coefficients on the surface (no
+  /// degree-0 part). The body answers both; with an ocean the sea level
+  /// equation closes each node under them, and the rotational feedback
+  /// asked for acts with or without one.
+  struct Forcing {
+    std::function<std::vector<double>(double)> directLoad{};
+    std::function<std::vector<std::complex<double>>(double)> tide{};
+  };
+
+  /// `Run` under a forcing: the start is the instantaneous elastic
+  /// response to the forcing at times[0], and each node is closed under
+  /// the forcing there. On a background state without an ocean
+  /// (GRDSolver::NoOceanState) this is the solid body stepped under the
+  /// forcing.
+  [[nodiscard]] std::vector<Snapshot> Run(std::span<const double> times,
+                                          const Forcing& forcing);
+
+  /// `Resume` under a forcing.
+  [[nodiscard]] std::vector<Snapshot> Resume(const Checkpoint& from,
+                                             std::span<const double> times,
+                                             const Forcing& forcing);
 
   /// Continues a run from a checkpoint: `times` is the remaining grid,
   /// its first entry the checkpoint's own node, and the snapshots come
@@ -190,6 +228,7 @@ class Evolution {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
+      const std::function<std::vector<std::complex<double>>(double)>* tide,
       bool resumed);
 
   /// Restores a checkpoint's recurrence into the members below.
