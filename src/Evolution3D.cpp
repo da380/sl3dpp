@@ -102,7 +102,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Run(
   CheckTimes(times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, false,
-               forcing.sources ? &forcing.sources : nullptr);
+               &forcing);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
@@ -111,7 +111,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
   Restore(from, times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, true,
-               forcing.sources ? &forcing.sources : nullptr);
+               &forcing);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
@@ -178,31 +178,26 @@ class Evolution3D::Coupled {
 
   /// The node's point sources (solver units) as forces on the degree
   /// systems, the sum of theirs, in the material's units.
-  void SetSources(const std::vector<PointSource>& sources) {
+  void SetSources(const std::vector<PointSource>& sources,
+                  const std::vector<StressGlut>& stressGluts) {
     sourceForces = DegreeFields{};
-    if (sources.empty()) return;
+    if (sources.empty() && stressGluts.empty()) return;
     const auto& op = *owner_.op_;
     const auto& material = op.GetRheology().BaseMaterial();
     const auto& scales = material.ModelScales();
     const auto& sle = owner_.solver_->SolverScales();
     const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
     const auto toMatMoment = sle.Factor(energy) / scales.Factor(energy);
-    for (auto source : sources) {
-      source.at.radius /= owner_.toNdLength_;
-      for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
-                      &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
-        *c *= toMatMoment;
-      }
-      auto forces = PointSourceForces(
-          material, op.LMax(),
-          [&](int l) -> const DegreeOperator& {
-            return op.UnrelaxedSpheroidal(l);
-          },
-          [&](int l) -> const ToroidalOperator& {
-            return op.UnrelaxedToroidal(l);
-          },
-          source);
-      auto add = [](auto& to, auto& from) {
+    const std::function<const DegreeOperator&(int)> sph =
+        [&](int l) -> const DegreeOperator& {
+      return op.UnrelaxedSpheroidal(l);
+    };
+    const std::function<const ToroidalOperator&(int)> tor =
+        [&](int l) -> const ToroidalOperator& {
+      return op.UnrelaxedToroidal(l);
+    };
+    auto add = [&](DegreeFields forces) {
+      auto join = [](auto& to, auto& from) {
         for (auto& [l, f] : from) {
           auto& t = to[l];
           if (t.empty()) {
@@ -212,8 +207,24 @@ class Evolution3D::Coupled {
           }
         }
       };
-      add(sourceForces.spheroidal, forces.spheroidal);
-      add(sourceForces.toroidal, forces.toroidal);
+      join(sourceForces.spheroidal, forces.spheroidal);
+      join(sourceForces.toroidal, forces.toroidal);
+    };
+    for (auto source : sources) {
+      source.at.radius /= owner_.toNdLength_;
+      for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
+                      &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
+        *c *= toMatMoment;
+      }
+      add(PointSourceForces(material, op.LMax(), sph, tor, source));
+    }
+    for (auto shell : stressGluts) {
+      shell.radius /= owner_.toNdLength_;
+      for (auto* c : {&shell.moment.rr, &shell.moment.tt, &shell.moment.pp,
+                      &shell.moment.rt, &shell.moment.rp, &shell.moment.tp}) {
+        for (auto& v : *c) v *= toMatMoment;
+      }
+      add(StressGlutForces(material, op.LMax(), sph, tor, shell));
     }
   }
   [[nodiscard]] bool HasSources() const {
@@ -492,13 +503,36 @@ Evolution3D::Snapshot Evolution3D::Instantaneous(
   return snapshot;
 }
 
+Evolution3D::Snapshot Evolution3D::Instantaneous(const Forcing& forcing,
+                                                 double t) {
+  Coupled coupled(*this, false);
+  if (forcing.tide) coupled.tide = forcing.tide(t);
+  if (forcing.sources || forcing.stressGluts) {
+    coupled.SetSources(
+        forcing.sources ? forcing.sources(t) : std::vector<PointSource>{},
+        forcing.stressGluts ? forcing.stressGluts(t) : std::vector<StressGlut>{});
+  }
+  auto load = forcing.directLoad
+                  ? forcing.directLoad(t)
+                  : std::vector<double>(solver_->Grid().FieldSize(), 0.0);
+  if (load.size() != solver_->Grid().FieldSize()) {
+    throw std::invalid_argument("the load must live on the solver's grid");
+  }
+  const auto info = Start(coupled, t, std::move(load));
+  PrimeForRecording();
+  auto snapshot = MakeSnapshot(t, coupled.response, info, true,
+                               std::move(coupled.ocean),
+                               options_.record_stride > 0);
+  op_->ReleaseScratch();
+  return snapshot;
+}
+
 std::vector<Evolution3D::Snapshot> Evolution3D::March(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>* directLoad,
     const std::function<std::vector<double>(double)>* iceThickness,
     const std::function<std::vector<std::complex<double>>(double)>* tide,
-    bool resumed,
-    const std::function<std::vector<PointSource>(double)>* sources) {
+    bool resumed, const Forcing* interior) {
   const auto& op = *op_;
   const auto& solver = *solver_;
   const auto& grid = solver.Grid();
@@ -532,7 +566,11 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   };
   auto setTide = [&](double t) {
     if (tide != nullptr) coupled.tide = (*tide)(t);
-    if (sources != nullptr) coupled.SetSources((*sources)(t));
+    if (interior != nullptr && (interior->sources || interior->stressGluts)) {
+      coupled.SetSources(
+          interior->sources ? interior->sources(t) : std::vector<PointSource>{},
+          interior->stressGluts ? interior->stressGluts(t) : std::vector<StressGlut>{});
+    }
   };
 
   const auto stride = options_.record_stride;

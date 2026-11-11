@@ -282,8 +282,35 @@ symmetric moment tensor forces the spheroidal systems and the toroidal
 ones, at every order. A degree whose truncated system does not reach
 the source's element takes no force from it.
 
-**In the evolution.** `Evolution3D::Forcing::sources` gives the point
-sources acting at each time. Their forces join each step's fixed forces
+**The general stress glut.** It is given on spherical
+shells, S = S_k(Omega) delta(r - r_k) / r_k^2 with S_k the moment per unit
+solid angle, a tensor field on a grid (`StressGlut`). Its work on a
+mode is the integral over directions of the point source's, so the
+forces are the same radial rows with the moments
+int C_N(S_k) Y^N_lm dOmega in place of C_N(M) Y^N_lm(x_s), C_N the five
+canonical parts of the tensor and its trace; they are the conjugates of
+the spin-N coefficients of conj(C_N(S_k)), five transforms and one for
+the trace (`StressGlutForces`). A point source is the shell whose
+moment is concentrated at one direction; a fault is a patch of a shell
+or of several; a glut through a volume is a radial quadrature of
+shells. The shells need not sit at the memory nodes, which exist only
+where a branch relaxes: a source in an elastic lid is as any other.
+
+**Faults** (`Fault.hpp`). A planar fault is given by its centroid's
+position and depth, its strike, dip and rake there (Aki & Richards
+2002), its length along strike, its width down dip and its total
+moment M0. With unit normal n and unit slip u the moment tensor is
+M0 (n u + u n), one tensor in space over a flat fault of uniform slip
+direction. `PlanarFaultSources` divides the rectangle into equal
+patches and puts a point source at each patch's centre with an equal
+share of the moment, the tensor's components taken in the spherical
+polar basis at that point; a patch whose centre lies above the surface
+is left out, its share with it. `DoubleCouple` is the tensor of a unit
+moment in the basis at the point where the angles are given.
+
+**In the evolution.** `Evolution3D::Forcing::sources` and `shells` give
+the sources acting at each time, and `Instantaneous(forcing)` the
+elastic response alone. Their forces join each step's fixed forces
 on the degree systems, and the first node's response is a zero-length
 step under them. The surface values of the forced solutions, the
 toroidal potential W among them, reach the sea level solve through its

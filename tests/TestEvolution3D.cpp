@@ -4,6 +4,8 @@
 
 #include <gtest/gtest.h>
 
+#include <numeric>
+
 #include <cmath>
 #include <filesystem>
 #include <map>
@@ -488,6 +490,13 @@ TEST(PointSourceEvolution, TheElasticStartIsTheDirectDegreeSolves) {
     ASSERT_EQ(snapshots.size(), times.size());
     EXPECT_TRUE(snapshots[0].converged);
     EXPECT_TRUE(snapshots[1].converged);
+    // the elastic response on its own is the run's first node
+    const auto alone = evolution.Instantaneous(
+        Evolution3D::Forcing{.sources = [&](double) {
+          return std::vector<PointSource>{*source};
+        }});
+    EXPECT_LT(WorstDeparture(alone.displacement, snapshots[0].displacement),
+              1e-12);
 
     // the same source in the material's units, and the direct solves
     auto inMaterial = *source;
@@ -616,4 +625,125 @@ TEST(PointSourceEvolution, RelaxationIsLinearAndConvergesWithTheStep) {
     EXPECT_GT(d1 / d2, 3.0) << d1 << " " << d2;
     EXPECT_LT(d1 / d2, 5.0) << d1 << " " << d2;
   }
+}
+
+TEST(PointSourceEvolution, AStressGlutDrivesTheEvolution) {
+  // A stress glut on a shell, a smooth tensor field: the evolution's
+  // elastic start is the unrelaxed toroidal and spheroidal systems solved
+  // under the shell's forces, and a uniform isotropic shell (a spherical
+  // pressure source) moves the surface at degree 0 alone.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& grid = solver.Grid();
+  const auto& sle = solver.SolverScales();
+  const auto& material = setup.model.ModelScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, kyr};
+  Viscoelastic3D op(setup.rheology, kLmax,
+                    [](double, double, double) { return 0.0; });
+  const SurfaceGrid shellGrid(kLmax, {.nmax = 2});
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e20 / sle.Factor(energy);
+  const auto radius = setup.material.Radius() * material.Length() / sle.Length() -
+                      400e3 / sle.Length();
+  auto run = [&](const StressGlut& shell) {
+    Evolution3D evolution(op, solver, solver.NoOceanState(),
+                          {.rotation = RotationalFeedback::None,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12});
+    return evolution.Run(times, Evolution3D::Forcing{.stressGluts = [&](double) {
+      return std::vector<StressGlut>{shell};
+    }});
+  };
+
+  // the uniform isotropic shell
+  auto uniform = StressGlut{.radius = radius, .grid = &shellGrid, .moment = {}};
+  const auto size = shellGrid.FieldSize();
+  uniform.moment.rr.assign(size, unit);
+  uniform.moment.tt.assign(size, unit);
+  uniform.moment.pp.assign(size, unit);
+  uniform.moment.rt.assign(size, 0.0);
+  uniform.moment.rp.assign(size, 0.0);
+  uniform.moment.tp.assign(size, 0.0);
+  const auto radial = run(uniform);
+  const auto& u = radial[0].displacement;
+  const auto mean = std::accumulate(u.begin(), u.end(), 0.0) / u.size();
+  // an expansion source pushes the surface outwards
+  EXPECT_GT(mean, 0.0);
+  auto spread = 0.0;
+  for (auto v : u) spread = std::max(spread, std::abs(v - mean));
+  EXPECT_LT(spread, 1e-9 * std::abs(mean));
+  EXPECT_LT(MaxAbsOf(radial[0].tangentialPotential), 1e-9 * std::abs(mean));
+
+  // a smooth shear pattern: the start against the direct solves
+  auto smooth = uniform;
+  auto k = std::size_t{0};
+  for (auto theta : shellGrid.CoLatitudes()) {
+    for (auto phi : shellGrid.Longitudes()) {
+      const auto a = std::sin(theta) * std::cos(phi);
+      const auto b = std::cos(theta);
+      // (a r + b theta) (x) (a r + b theta), a band-limited-ish field
+      smooth.moment.rr[k] = unit * a * a;
+      smooth.moment.tt[k] = unit * b * b * std::sin(theta) * std::sin(theta);
+      smooth.moment.pp[k] = unit * 0.3 * std::sin(theta) * std::sin(theta);
+      smooth.moment.rt[k] = unit * a * b * std::sin(theta);
+      smooth.moment.rp[k] = unit * 0.2 * std::sin(theta) * std::sin(phi);
+      smooth.moment.tp[k] = unit * 0.1 * std::sin(theta) * std::sin(theta) *
+                            std::sin(2.0 * phi);
+      ++k;
+    }
+  }
+  const auto snapshots = run(smooth);
+  auto inMaterial = smooth;
+  inMaterial.radius *= sle.Length() / material.Length();
+  const auto toMat = sle.Factor(energy) / material.Factor(energy);
+  for (auto* c : {&inMaterial.moment.rr, &inMaterial.moment.tt,
+                  &inMaterial.moment.pp, &inMaterial.moment.rt,
+                  &inMaterial.moment.rp, &inMaterial.moment.tp}) {
+    for (auto& v : *c) v *= toMat;
+  }
+  const auto forces = StressGlutForces(
+      setup.material, kLmax,
+      [&](int l) -> const DegreeOperator& { return op.UnrelaxedSpheroidal(l); },
+      [&](int l) -> const ToroidalOperator& { return op.UnrelaxedToroidal(l); },
+      inMaterial);
+  using Complex = std::complex<double>;
+  const auto toLength = material.Length() / sle.Length();
+  auto U = grid.ZeroCoefficients(), W = grid.ZeroCoefficients();
+  auto solve = [](const auto& system, const std::vector<Complex>& b, int l) {
+    auto re = std::vector<double>(b.size()), im = re;
+    for (auto i = std::size_t{0}; i < b.size(); ++i) {
+      re[i] = b[i].real();
+      im[i] = b[i].imag();
+    }
+    const auto xr = system.Solve(re, l + 1);
+    const auto xi = system.Solve(im, l + 1);
+    auto x = std::vector<Complex>(b.size());
+    for (auto i = std::size_t{0}; i < b.size(); ++i) x[i] = {xr[i], xi[i]};
+    return x;
+  };
+  for (auto l = 0; l <= kLmax; ++l) {
+    const auto& system = op.UnrelaxedSpheroidal(l);
+    const auto ndof = static_cast<std::size_t>(system.DofCount());
+    const auto x = solve(system, forces.spheroidal.at(l), l);
+    for (auto m = 0; m <= l; ++m) {
+      U[SurfaceGrid::Index(l, m)] =
+          toLength * x[static_cast<std::size_t>(m) * ndof +
+                       system.SurfaceDof(Component::U)];
+    }
+    if (l >= 1) {
+      const auto& twist = op.UnrelaxedToroidal(l);
+      const auto tdof = static_cast<std::size_t>(twist.DofCount());
+      const auto w = solve(twist, forces.toroidal.at(l), l);
+      for (auto m = 0; m <= l; ++m) {
+        W[SurfaceGrid::Index(l, m)] =
+            toLength * w[static_cast<std::size_t>(m) * tdof + twist.SurfaceDof()];
+      }
+    }
+  }
+  EXPECT_TRUE(snapshots[0].converged);
+  EXPECT_GT(MaxAbsOf(snapshots[0].toroidalPotential), 0.0);
+  EXPECT_LT(WorstDeparture(snapshots[0].displacement, grid.Synthesise(U)), 1e-8);
+  EXPECT_LT(WorstDeparture(snapshots[0].toroidalPotential, grid.Synthesise(W)),
+            1e-8);
 }

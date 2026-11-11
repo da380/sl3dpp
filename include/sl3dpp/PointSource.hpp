@@ -40,6 +40,7 @@
 
 #include "sl3dpp/DegreeOperator.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/ToroidalOperator.hpp"
 
 namespace sl3dpp {
@@ -70,6 +71,26 @@ struct PointSource {
   SphericalTensor moment;
 };
 
+/// A symmetric tensor field on a sphere: its six components in the
+/// spherical polar basis, each a field on a grid.
+struct SphericalTensorField {
+  std::vector<double> rr, tt, pp, rt, rp, tp;
+};
+
+/// A stress glut on a spherical shell, S = moment(Omega) delta(r - radius)
+/// / radius^2: `moment` is the moment per unit solid angle, a tensor field
+/// on `grid`, which must carry upper index 2 (SurfaceGrid::Options::nmax)
+/// and outlive the source. A point source is the shell whose moment is
+/// concentrated at one direction; a fault is a shell's patch, or several
+/// shells'; a stress glut through a volume is a radial quadrature of
+/// shells, each one's moment the glut there times its radial weight and
+/// its radius squared.
+struct StressGlut {
+  double radius = 0.0;
+  const SurfaceGrid* grid = nullptr;
+  SphericalTensorField moment;
+};
+
 /// Per-degree forces or solutions in the 3D stepper's layout: complex
 /// m >= 0 columns (l + 1 of them, column-major) over each system's dofs,
 /// the coefficients of a real field.
@@ -97,5 +118,16 @@ struct DegreeFields {
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal,
     const PointSource& source);
+
+/// The forces of a shell source, as PointSourceForces: for any solutions
+/// x, conj(force) . x summed is the integral over the shell's directions
+/// of moment : PointStrain(x, there). The moment's components are
+/// expanded in generalised spherical harmonics of upper index -2..2, so
+/// it is taken to the grid's band limit.
+[[nodiscard]] DegreeFields StressGlutForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    const StressGlut& source);
 
 }  // namespace sl3dpp

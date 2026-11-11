@@ -171,6 +171,10 @@ class Evolution3D {
     /// acts from a time on is returned from that time on, and the
     /// response at the first node is the elastic one to the sources there.
     std::function<std::vector<PointSource>(double)> sources{};
+    /// The stress gluts on shells acting at time t (StressGlut), as
+    /// `sources`: the general stress glut, a tensor field on each shell,
+    /// its moment per unit solid angle in the solver's units.
+    std::function<std::vector<StressGlut>(double)> stressGluts{};
   };
 
   /// `Run` under a forcing, as Evolution's: on a background state without
@@ -245,6 +249,11 @@ class Evolution3D {
   [[nodiscard]] Snapshot Instantaneous(const std::vector<double>& load,
                                        double t = 0.0);
 
+  /// `Instantaneous` under a forcing at time t: its direct load, tide,
+  /// point sources and stress gluts there (any absent). The elastic response
+  /// to a source: the coseismic field.
+  [[nodiscard]] Snapshot Instantaneous(const Forcing& forcing, double t = 0.0);
+
   [[nodiscard]] const Viscoelastic3D::State& FinalState() const {
     return vstate_;
   }
@@ -289,8 +298,7 @@ class Evolution3D {
       const std::function<std::vector<double>(double)>* directLoad,
       const std::function<std::vector<double>(double)>* iceThickness,
       const std::function<std::vector<std::complex<double>>(double)>* tide,
-      bool resumed,
-      const std::function<std::vector<PointSource>(double)>* sources = nullptr);
+      bool resumed, const Forcing* interior = nullptr);
 
   /// The instantaneous response at time t (SLE units) to the non-ocean
   /// load, from rest, under frozen shorelines: Run's first node and
