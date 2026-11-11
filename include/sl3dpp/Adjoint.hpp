@@ -144,8 +144,9 @@ struct Kernels {
   /// delta J = sum_n <tideKernels[n], delta psi_n> in the L2 coefficient
   /// pairing of real fields (the surface integral of the two synthesised
   /// fields over the solver's sphere, divided by its radius squared);
-  /// the degree-0 entry is zero. Formed by the discrete sweeps; empty
-  /// otherwise.
+  /// the degree-0 entry is zero. Formed by the discrete sweeps, and by
+  /// the radial model's continuous sweep when Options::tide_kernels asks
+  /// (to the commute error); empty otherwise.
   std::vector<std::vector<std::complex<double>>> tideKernels;
   /// The MOMENT kernels, the discrete view alone: `momentKernels[n][p]`
   /// is the dual of a point stress glut's moment tensor at time node n
@@ -153,8 +154,9 @@ struct Kernels {
   ///   delta J = sum_n sum_p momentKernels[n][p] : delta M_p(t_n),
   /// in the solver's units. It is the strain there of the sweep's dual
   /// displacement, spheroidal and toroidal: a stress glut works on the
-  /// strain, so its kernel is the adjoint strain. Formed by the discrete
-  /// sweep of the radial model when points are given; empty otherwise.
+  /// strain, so its kernel is the adjoint strain. Formed by the radial
+  /// model's sweeps when points are given (the continuous one to the
+  /// commute error); empty otherwise.
   std::vector<std::vector<SphericalTensor>> momentKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> baseline;
@@ -265,8 +267,12 @@ class AdjointSolver {
     /// solve per node (two for the continuous form).
     bool material_kernels = false;
     /// The points (solver units) at which to form the moment kernels
-    /// (Kernels::momentKernels); empty, none. Discrete sweep.
+    /// (Kernels::momentKernels); empty, none.
     std::vector<BodyPoint> moment_points{};
+    /// Also form the tide kernels (Kernels::tideKernels) in the continuous
+    /// sweep, where they cost one unrelaxed solve per node side; the
+    /// discrete sweep forms them always.
+    bool tide_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.

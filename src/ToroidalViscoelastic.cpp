@@ -335,6 +335,122 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
   return {std::move(next), std::move(solutions)};
 }
 
+namespace {
+
+/// The weight of a natural column in the sum over orders of a real
+/// field's pairing: m = 0 real once, its imaginary part not at all,
+/// m > 0 twice.
+double ColumnWeight(int l, int c) {
+  const auto m = c <= l ? c : c - (l + 1);
+  return m == 0 ? (c == 0 ? 1.0 : 0.0) : 2.0;
+}
+
+}  // namespace
+
+void ToroidalViscoelastic::AccumulateItau(
+    const State& adjoint, const State& forward, double scale,
+    std::vector<std::vector<double>>& kernel) const {
+  const auto& op = *op_;
+  const auto K = op.GetRheology().BranchCount();
+  for (const auto& [l, md] : adjoint.m) {
+    const auto& deg = Deg(l);
+    const auto ncols = 2 * (l + 1);
+    const auto block = deg.Block(ncols);
+    const auto& dFwd = forward.strain.at(l);
+    const auto& mFwd = forward.m.at(l);
+    const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto e = 0; e < deg.ne; ++e) {
+        for (auto q = 0; q < deg.np; ++q) {
+          const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+          const auto itau = op.pointItau_[k][full];
+          if (itau <= 0.0) continue;
+          const auto point = static_cast<std::size_t>(e) * deg.np + q;
+          auto sum = 0.0;
+          for (auto s = 0; s < 2; ++s) {
+            const auto factor = wc[s] * deg.mu[k][point] * deg.Wq[point];
+            for (auto c = 0; c < ncols; ++c) {
+              const auto at = (k * 2 + s) * block + point * ncols + c;
+              const auto sn = s * block + point * ncols + c;
+              sum += ColumnWeight(l, c) * factor * md[at] * (dFwd[sn] - mFwd[at]);
+            }
+          }
+          kernel[k][full] += scale * sum / itau;
+        }
+      }
+    }
+  }
+}
+
+void ToroidalViscoelastic::AccumulateMaterial(
+    const Fields& adjointSolution, const State& forward,
+    const Fields& forwardSolution, double weight,
+    std::vector<double>& mu) const {
+  const auto& op = *op_;
+  const auto K = op.GetRheology().BranchCount();
+  auto fractions = std::vector<std::span<const double>>{};
+  for (auto k = std::size_t{0}; k < K; ++k) {
+    fractions.push_back(op.BranchFractionAtPoints(k));
+  }
+  for (const auto& [l, y] : adjointSolution) {
+    const auto& deg = Deg(l);
+    const auto ncols = 2 * (l + 1);
+    const auto block = deg.Block(ncols);
+    const auto sy = deg.Strain(y, ncols);
+    const auto sx = deg.Strain(forwardSolution.at(l), ncols);
+    const auto& mFwd = forward.m.at(l);
+    const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
+    for (auto e = 0; e < deg.ne; ++e) {
+      for (auto q = 0; q < deg.np; ++q) {
+        const auto full = static_cast<std::size_t>(deg.e0 + e) * deg.np + q;
+        const auto point = static_cast<std::size_t>(e) * deg.np + q;
+        auto sum = 0.0;
+        for (auto s = 0; s < 2; ++s) {
+          for (auto c = 0; c < ncols; ++c) {
+            const auto sn = s * block + point * ncols + c;
+            auto term = -sx[sn];
+            for (auto k = std::size_t{0}; k < K; ++k) {
+              term += fractions[k][full] *
+                      mFwd[(k * 2 + s) * block + point * ncols + c];
+            }
+            sum += ColumnWeight(l, c) * wc[s] * sy[sn] * term;
+          }
+        }
+        mu[full] += weight * deg.Wq[point] * sum;
+      }
+    }
+  }
+}
+
+void ToroidalViscoelastic::Jump(State& state, const Fields& solutions) const {
+  const auto& op = *op_;
+  const auto K = op.GetRheology().BranchCount();
+  for (const auto& [l, x] : solutions) {
+    const auto& deg = Deg(l);
+    const auto ncols = 2 * (l + 1);
+    const auto block = deg.Block(ncols);
+    const auto d = deg.Strain(x, ncols);
+    auto& m = state.m.at(l);
+    for (auto k = std::size_t{0}; k < K; ++k) {
+      for (auto s = 0; s < 2; ++s) {
+        for (auto e = 0; e < deg.ne; ++e) {
+          for (auto q = 0; q < deg.np; ++q) {
+            const auto itau =
+                op.pointItau_[k][static_cast<std::size_t>(deg.e0 + e) * deg.np + q];
+            if (itau == 0.0) continue;
+            const auto node = (static_cast<std::size_t>(e) * deg.np + q) * ncols;
+            for (auto c = 0; c < ncols; ++c) {
+              m[(k * 2 + s) * block + node + c] +=
+                  itau * d[s * block + node + c];
+            }
+          }
+        }
+      }
+    }
+  }
+  state.strain.clear();
+}
+
 ToroidalViscoelastic::Fields ToroidalViscoelastic::Surface(
     const Fields& solutions) const {
   auto out = Fields{};

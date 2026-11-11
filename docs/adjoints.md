@@ -1799,7 +1799,37 @@ with a `MaterialPairing`, `StartTransposed` with the base start). The
 toroidal workspace spans every element of its system for this, the
 elastic regions included.
 
-**What is not yet taken.** The radial model's discrete sweep alone
-forms the moment kernels and takes a source-driven trajectory; the
-continuous sweep and the second-order sweeps refuse one. The 3D
-classes do not take sources as parameters.
+**The continuous sweep.** The continuous adjoint is a forward problem
+in reversed time, and in the energy form it carries a forcing's kernel
+is the adjoint solution's own work against it, as the load kernel is
+the adjoint sea level. With lambda the adjoint displacement at a node
+(the unrelaxed solve under the adjoint memory and the closed adjoint
+load; at an observation the jump's instantaneous solution, with no time
+weight) and c the constant between the sweep's pairing and the
+material's:
+
+- the moment kernel is c times the strain of lambda at the source
+  point, toroidal part included;
+- the tide kernel at degree l, order m is c times lambda's pairing with
+  the degree's unit tide force, less r^2 / g times the adjoint load's
+  coefficient: the tide moves the solid through its force and the sea
+  level through its own potential, and the second acts on the adjoint
+  load (the measurement's sea level dual and the ocean's);
+- the toroidal adjoint is the toroidal systems in reversed time, with no
+  force between observations and a jump at each by the unrelaxed
+  toroidal response to the adjoint traction of a measurement of W
+  (`ToroidalViscoelastic::Jump`).
+
+About a source-driven trajectory the kernels in the Earth's parameters
+gain their toroidal parts: the multiplier integrand W m-dagger (d - m) /
+itau of the toroidal internal variables (`AccumulateItau`), and in the
+shear modulus the adjoint toroidal displacement paired with the forward
+toroidal solution and memory (`AccumulateMaterial`); the spheroidal
+pairings read the forward solution under its sources' forces. All of
+these carry the continuous method's commute error, falling at the
+scheme's order. The moment and tide kernels cost one unrelaxed solve
+per node side; `Options::tide_kernels` asks for the second.
+
+**What is not yet taken.** The second-order sweeps refuse a
+source-driven trajectory. The 3D classes do not take sources as
+parameters.

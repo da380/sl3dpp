@@ -100,6 +100,31 @@ class ToroidalViscoelastic {
   /// The surface value of W per degree and column.
   [[nodiscard]] Fields Surface(const Fields& solutions) const;
 
+  // -- the continuous adjoint's pairings --------------------------------------
+  //
+  // The adjoint toroidal state is a State of this class stepped in
+  // reversed time. Both factors of each pairing are coefficients of real
+  // fields in the natural columns, so the sum over orders counts m > 0
+  // twice and the imaginary column of m = 0 not at all.
+
+  /// Adds scale times the multiplier integrand of the kernel in the
+  /// inverse relaxation times, W m-dagger (d - m) / itau per branch at
+  /// the memory points of the whole mesh, for an adjoint state and the
+  /// forward state at a node.
+  void AccumulateItau(const State& adjoint, const State& forward, double scale,
+                      std::vector<std::vector<double>>& kernel) const;
+  /// Adds weight times the pairing of the kernel in the shear modulus:
+  /// an adjoint toroidal displacement with the forward solution and the
+  /// forward memory at a node.
+  void AccumulateMaterial(const Fields& adjointSolution, const State& forward,
+                          const Fields& forwardSolution, double weight,
+                          std::vector<double>& mu) const;
+
+  /// The jump of the internal variables by the strain of `solutions` over
+  /// each branch's relaxation time, m_k += itau_k d: the continuous
+  /// adjoint's jump at an observation. The strain cache is cleared.
+  void Jump(State& state, const Fields& solutions) const;
+
   // -- the moduli ---------------------------------------------------------------
   //
   // A perturbation delta mu of the shear modulus at the memory points of

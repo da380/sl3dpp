@@ -722,11 +722,6 @@ TEST(TangentLinear, RelaxationTimesAboutASourceDrivenRun) {
     const auto paired =
         VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
     EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label;
-
-    // what does not take a source-driven trajectory says so
-    EXPECT_THROW((void)AdjointSolver(evolution, {.method = AdjointMethod::Continuous})
-                     .FirstOrderKernels(times, *measured, &trajectory),
-                 std::invalid_argument);
   }
 }
 
@@ -870,6 +865,227 @@ TEST(TangentLinear, ModuliAboutASourceDrivenRun) {
                       direction.material.kappa) +
         VolumePairing(op.Points(), mesh, kernels.muKernel, direction.material.mu);
     EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted)) << label;
+  }
+}
+
+TEST(TangentLinear, TheContinuousSweepFormsTideAndMomentKernels) {
+  // The continuous sweep's kernels in a prescribed tide and in point
+  // sources' moment tensors: the adjoint displacement paired with the
+  // tide's force (and the adjoint load with the tide's own potential),
+  // and its strain at the sources, the toroidal adjoint with it. Against
+  // the exact derivative (the tangent-linear run along a perturbation
+  // smooth in time) the gap falls at second order as the steps are
+  // halved; with an ocean and the rotational feedback and without
+  // either, measured in the sea level, the displacement and the
+  // tangential and toroidal potentials.
+  auto setup = Scene::Make(1e22);
+  const auto& grid = setup.solver.Grid();
+  const auto& sle = setup.solver.SolverScales();
+  using Complex = std::complex<double>;
+  const auto span = 10.0 * setup.Kyr();
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 800e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  const auto patterns = std::vector<SphericalTensor>{
+      {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+       .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit},
+      {.rr = -0.4 * unit, .tt = 0.8 * unit, .pp = -0.4 * unit,
+       .rt = 0.5 * unit, .rp = 0.1 * unit, .tp = -0.3 * unit}};
+  std::mt19937 fields(17);
+  const auto potential = 1.0 / sle.Factor(PotentialDimensions);
+  auto tide0 = grid.Expand(setup.Smooth(fields, potential));
+  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  const auto gSea = setup.Smooth(fields, 1.0);
+  const auto gU = setup.Smooth(fields, 0.5);
+  const auto gV = setup.Smooth(fields, 0.6);
+  const auto gW = setup.Smooth(fields, 0.8);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean");
+    auto tideGaps = std::vector<double>{}, momentGaps = std::vector<double>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() / 2].seaLevelDual = gSea;
+      measurements[times.size() / 2].toroidalPotentialDual = gW;
+      measurements[times.size() - 1].displacementDual = gU;
+      measurements[times.size() - 1].tangentialPotentialDual = gV;
+      measurements[times.size() - 1].toroidalPotentialDual = gW;
+      // perturbations smooth in time
+      TangentPerturbation tideOnly, sourcesOnly;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto shape = std::sin(0.5 * std::numbers::pi * times[n] / span) + 0.3;
+        auto tide = tide0;
+        for (auto& c : tide) c *= shape;
+        tideOnly.tide.push_back(std::move(tide));
+        auto at = std::vector<PointSource>{};
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          auto M = patterns[p];
+          for (auto* c : {&M.rr, &M.tt, &M.pp, &M.rt, &M.rp, &M.tp}) *c *= shape;
+          at.push_back({.at = points[p], .moment = M});
+        }
+        sourcesOnly.sources.push_back(std::move(at));
+      }
+      ViscoelasticOperator op(setup.rheology, kLmax);
+      Evolution evolution(op, setup.solver, *background,
+                          {.rotation = rotation, .rtol = 1e-12});
+      TangentLinearSolver tangent(
+          evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+      const auto alongTide =
+          Objective(setup, tangent.Run(times, tideOnly), measurements);
+      const auto alongSources =
+          Objective(setup, tangent.Run(times, sourcesOnly), measurements);
+      ASSERT_NE(alongTide, 0.0);
+      ASSERT_NE(alongSources, 0.0);
+      const auto kernels =
+          AdjointSolver(evolution, {.method = AdjointMethod::Continuous,
+                                    .rtol = 1e-12,
+                                    .moment_points = points,
+                                    .tide_kernels = true})
+              .FirstOrderKernels(times, measurements);
+      ASSERT_EQ(kernels.tideKernels.size(), times.size());
+      ASSERT_EQ(kernels.momentKernels.size(), times.size());
+      auto tidePaired = 0.0, momentPaired = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        tidePaired += pair(kernels.tideKernels[n], tideOnly.tide[n]);
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          momentPaired += kernels.momentKernels[n][p].Contract(
+              sourcesOnly.sources[n][p].moment);
+        }
+      }
+      tideGaps.push_back(std::abs(tidePaired - alongTide) / std::abs(alongTide));
+      momentGaps.push_back(std::abs(momentPaired - alongSources) /
+                           std::abs(alongSources));
+    }
+    for (const auto* gaps : {&tideGaps, &momentGaps}) {
+      const auto what = gaps == &tideGaps ? "tide" : "moment";
+      EXPECT_LT((*gaps)[2], 0.05)
+          << what << ", " << label << ": " << (*gaps)[0] << " " << (*gaps)[1]
+          << " " << (*gaps)[2];
+      EXPECT_GT((*gaps)[0] / (*gaps)[1], 2.0)
+          << what << ", " << label << ": " << (*gaps)[0] << " " << (*gaps)[1];
+      EXPECT_GT((*gaps)[1] / (*gaps)[2], 3.0)
+          << what << ", " << label << ": " << (*gaps)[1] << " " << (*gaps)[2];
+    }
+  }
+}
+
+TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {
+  // The continuous sweep about a run under point sources, whose toroidal
+  // systems carry memory: its kernels in the relaxation times and in the
+  // moduli, the toroidal parts with them, tend to the discrete sweep's
+  // as the steps are halved; measured in the displacement and in the
+  // tangential and toroidal potentials.
+  auto setup = Scene::Make(1e22);
+  const auto& sle = setup.solver.SolverScales();
+  std::mt19937 fields(23);
+  const auto span = 10.0 * setup.Kyr();
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto source = PointSource{
+      .at = {.radius = surface - 400e3 / sle.Length(),
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  const auto gU = setup.Smooth(fields, 0.5);
+  const auto gV = setup.Smooth(fields, 0.6);
+  const auto gW = setup.Smooth(fields, 0.8);
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      d.kappa[i] = 0.05 * (1.0 - 0.5 * r) * k0[i];
+      d.mu[i] = 0.1 * (0.5 + r * r) * m0[i];
+    }
+  }
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto atPoints = AtMemoryPoints(op.Points(), d);
+
+  for (const bool toroidalAlone : {false, true}) {
+    auto itauGaps = std::vector<double>{}, materialGaps = std::vector<double>{};
+    for (const auto nodes : {9, 17, 33}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      // a source ramped up over the run
+      const auto forcing = Evolution::Forcing{.sources = [&](double t) {
+        auto at = source;
+        const auto shape = 0.3 + t / span;
+        for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
+                        &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
+          *c *= shape;
+        }
+        return std::vector<PointSource>{at};
+      }};
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() - 1].toroidalPotentialDual = gW;
+      if (!toroidalAlone) {
+        measurements[times.size() - 1].displacementDual = gU;
+        measurements[times.size() - 1].tangentialPotentialDual = gV;
+      }
+      Evolution evolution(op, setup.solver, setup.state,
+                          {.rtol = 1e-12, .record_stride = 1});
+      const auto trajectory =
+          ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+      struct Paired {
+        double itau, moduli;
+      };
+      auto results = std::map<AdjointMethod, Paired>{};
+      for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+        const auto kernels =
+            AdjointSolver(evolution, {.method = method,
+                                      .rtol = 1e-12,
+                                      .material_kernels = true})
+                .FirstOrderKernels(times, measurements, &trajectory);
+        results[method] = {
+            VolumePairing(mesh, kernels.itauKernel[0], ditau[0]),
+            VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa) +
+                VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu)};
+      }
+      const auto& exact = results[AdjointMethod::Discrete];
+      const auto& c = results[AdjointMethod::Continuous];
+      ASSERT_NE(exact.itau, 0.0);
+      ASSERT_NE(exact.moduli, 0.0);
+      itauGaps.push_back(std::abs(c.itau - exact.itau) / std::abs(exact.itau));
+      materialGaps.push_back(std::abs(c.moduli - exact.moduli) /
+                             std::abs(exact.moduli));
+    }
+    for (const auto* gaps : {&itauGaps, &materialGaps}) {
+      const auto what = std::string(gaps == &itauGaps ? "itau" : "moduli") +
+                        (toroidalAlone ? ", the toroidal dual alone" : "");
+      EXPECT_LT((*gaps)[2], 0.05)
+          << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
+      EXPECT_GT((*gaps)[0] / (*gaps)[1], 2.0)
+          << what << ": " << (*gaps)[0] << " " << (*gaps)[1];
+      EXPECT_GT((*gaps)[1] / (*gaps)[2], 2.0)
+          << what << ": " << (*gaps)[1] << " " << (*gaps)[2];
+    }
   }
 }
 

@@ -900,11 +900,6 @@ Kernels AdjointSolver::ContinuousSweep(
   const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
   const auto K = op.GetRheology().BranchCount();
-  if (trajectory != nullptr && !trajectory->toroidal.empty()) {
-    throw std::invalid_argument(
-        "the continuous sweep does not take a source-driven trajectory "
-        "yet: use the discrete one");
-  }
   const auto N = times.size() - 1;
 
   GRDSolver::Options sleOptions;
@@ -931,6 +926,16 @@ Kernels AdjointSolver::ContinuousSweep(
   // with no ice load; sigmaC/psiC are its SLE-closure load and
   // centrifugal coefficients.
   const bool material = options_.material_kernels;
+  // The adjoint displacement itself is wanted for the material kernels,
+  // the moment kernels (its strain at the sources) and the tide kernels
+  // (its pairing with the tide's force).
+  const bool moments = !options_.moment_points.empty();
+  const bool tidal = options_.tide_kernels;
+  const bool wantSolutions = material || moments || tidal;
+  // About a source-driven trajectory the toroidal systems carry memory:
+  // the toroidal adjoint is swept for the kernels' toroidal parts.
+  const bool sourcedBase = trajectory != nullptr && !trajectory->toroidal.empty();
+  const bool twisting = moments || sourcedBase;
   auto fractions = std::vector<std::vector<double>>{};
   std::vector<double> kappaKernel, muKernel;
   if (material) {
@@ -1069,7 +1074,7 @@ Kernels AdjointSolver::ContinuousSweep(
       tasks.push_back(std::move(task));
     }
     const auto count = static_cast<int>(tasks.size());
-    if (material) {
+    if (wantSolutions) {
       // the entries made before the parallel loop fills them
       for (const auto& task : tasks) lumpSolutions[task.l].clear();
     }
@@ -1095,7 +1100,7 @@ Kernels AdjointSolver::ContinuousSweep(
       if (task.zphi) add(task.split->data() + deg.ndof, *task.zphi);
       if (task.zv) add(task.split->data() + 2 * deg.ndof, *task.zv);
       const auto dTilde = deg.Strain(x, ncols);
-      if (material) lumpSolutions.at(l) = x;
+      if (wantSolutions) lumpSolutions.at(l) = x;
       for (auto k = std::size_t{0}; k < K; ++k) {
         for (auto s = 0; s < 3; ++s) {
           for (auto e = 0; e < deg.ne; ++e) {
@@ -1223,9 +1228,17 @@ Kernels AdjointSolver::ContinuousSweep(
                           std::size_t node, double weight) {
     if (weight == 0.0) return;
     const auto& fwd = cursor->State(node);
-    const auto x =
+    auto x =
         op.SolveElastic(fwd, ev.Columns(trajectory->loads[node], ev.toMatDensity_),
                         ev.Columns(trajectory->tides[node], ev.toMatPotential_));
+    if (sourcedBase) {
+      // the forward solution of a source-driven run, under its forces too
+      for (const auto& [l, f] : trajectory->sourceForces[node].spheroidal) {
+        const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+        auto& to = x.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+      }
+    }
     auto tasks = std::vector<int>{};
     for (const auto& [l, y] : lambda) tasks.push_back(l);
     auto terms =
@@ -1288,15 +1301,123 @@ Kernels AdjointSolver::ContinuousSweep(
   };
   // The regular adjoint displacement at a node, under the current
   // adjoint memory and closed load.
+  // The toroidal adjoint, where the moment kernels want it: the toroidal
+  // systems in reversed time, with no force between observations and a
+  // jump at each by the toroidal traction of a measurement of W.
+  auto toroidal = std::optional<ToroidalViscoelastic>{};
+  auto tadj = ToroidalViscoelastic::State{};
+  auto lumpTwist = ToroidalViscoelastic::Fields{};
+  if (twisting) {
+    toroidal.emplace(op);
+    tadj = toroidal->ZeroState();
+    toroidal->SetStrain(tadj, toroidal->SolveElastic(tadj, {}));
+  }
+  auto momentKernels = std::vector<std::vector<SphericalTensor>>(
+      moments ? times.size() : 0,
+      std::vector<SphericalTensor>(options_.moment_points.size()));
+  auto tideKernels = std::vector<std::vector<Complex>>(
+      tidal ? times.size() : 0, grid.ZeroCoefficients());
+  // The moment kernels' part of an adjoint displacement: its strain at
+  // the points, scaled; the natural columns are the coefficients of a
+  // real field.
+  auto addMoments = [&](const std::map<int, std::vector<double>>& lambda,
+                        const ToroidalViscoelastic::Fields& twist,
+                        std::size_t node, double weight) {
+    auto asComplex = [](const std::map<int, std::vector<double>>& from) {
+      auto out = std::map<int, std::vector<Complex>>{};
+      for (const auto& [l, x] : from) {
+        const auto ndof = x.size() / (2 * (static_cast<std::size_t>(l) + 1));
+        auto c = std::vector<Complex>(ndof * (static_cast<std::size_t>(l) + 1));
+        for (auto m = 0; m <= l; ++m) {
+          for (auto d = std::size_t{0}; d < ndof; ++d) {
+            c[static_cast<std::size_t>(m) * ndof + d] =
+                Complex(x[static_cast<std::size_t>(m) * ndof + d],
+                        x[static_cast<std::size_t>(l + 1 + m) * ndof + d]);
+          }
+        }
+        out.emplace(l, std::move(c));
+      }
+      return out;
+    };
+    const auto fields = DegreeFields{.spheroidal = asComplex(lambda),
+                                     .toroidal = asComplex(twist)};
+    const auto scale =
+        weight * detail::MomentToMaterial(op, solver.SolverScales());
+    for (auto p = std::size_t{0}; p < options_.moment_points.size(); ++p) {
+      auto point = options_.moment_points[p];
+      point.radius /= ev.toNdLength_;
+      const auto e = PointStrain(
+          op.BaseMaterial(), op.LMax(),
+          [&](int l) -> const DegreeOperator& { return op.UnrelaxedSystem(l); },
+          [&](int l) -> const ToroidalOperator& { return toroidal->Unrelaxed(l); },
+          fields, point);
+      auto& to = momentKernels[node][p];
+      to.rr += scale * e.rr;
+      to.tt += scale * e.tt;
+      to.pp += scale * e.pp;
+      to.rt += scale * e.rt;
+      to.rp += scale * e.rp;
+      to.tp += scale * e.tp;
+    }
+  };
+  // The tide kernels' part: the adjoint displacement paired with the
+  // tide's force on each degree, and the adjoint load, on which the
+  // tide's own potential acts through the sea level.
+  auto addTide = [&](const std::map<int, std::vector<double>>& lambda,
+                     const std::vector<Complex>& load, std::size_t node,
+                     double weight) {
+    auto& to = tideKernels[node];
+    for (const auto& [l, x] : lambda) {
+      if (l == 0) continue;
+      const auto& deg = op.Deg(l);
+      for (auto m = 0; m <= l; ++m) {
+        auto re = 0.0, im = 0.0;
+        for (auto d = 0; d < deg.ndof; ++d) {
+          re += deg.tideVec[d] * x[static_cast<std::size_t>(m) * deg.ndof + d];
+          im += deg.tideVec[d] *
+                x[static_cast<std::size_t>(l + 1 + m) * deg.ndof + d];
+        }
+        const auto i = SurfaceGrid::Index(l, m);
+        to[i] += weight * (pairing * ev.toMatPotential_ * Complex(re, im) -
+                           r2 / g * load[i]);
+      }
+    }
+  };
+  // The toroidal share of the shear kernel about a source-driven run: an
+  // adjoint toroidal displacement with the forward toroidal solution and
+  // memory at the node.
+  auto pairToroidalMaterial = [&](const ToroidalViscoelastic::Fields& twist,
+                                  std::size_t node, double weight) {
+    if (twist.empty()) return;
+    const auto& forward = trajectory->toroidal[node];
+    toroidal->AccumulateMaterial(
+        twist, forward,
+        toroidal->SolveElastic(forward, trajectory->sourceForces[node].toroidal),
+        weight, muKernel);
+  };
+  // The regular adjoint displacement at a node, under the current
+  // adjoint memory and closed load.
   auto accumulateMaterial = [&](std::size_t node, double weight) {
-    if (!material || weight == 0.0) return;
-    pairMaterial(op.SolveElastic(vstate, ev.Columns(sigmaC, ev.toMatDensity_),
-                                 ev.Columns(psiC, ev.toMatPotential_)),
-                 node, pairing * weight);
+    if (!wantSolutions || weight == 0.0) return;
+    const auto lambda =
+        op.SolveElastic(vstate, ev.Columns(sigmaC, ev.toMatDensity_),
+                        ev.Columns(psiC, ev.toMatPotential_));
+    if (material) pairMaterial(lambda, node, pairing * weight);
+    auto twist = ToroidalViscoelastic::Fields{};
+    if (twisting && (moments || material)) {
+      twist = toroidal->SolveElastic(tadj, {});
+    }
+    if (moments) addMoments(lambda, twist, node, pairing * weight);
+    if (material && sourcedBase) pairToroidalMaterial(twist, node, pairing * weight);
+    if (tidal) addTide(lambda, sigmaC, node, weight);
   };
 
   auto accumulateItau = [&](std::size_t node, double weight) {
     if (!cursor.has_value() || weight == 0.0) return;
+    if (sourcedBase) {
+      toroidal->AccumulateItau(tadj, trajectory->toroidal[node],
+                               pairing * weight, itauKernel);
+    }
     const auto& fwd = cursor->State(node);
     // One task per degree, largest first, each forming its own term per
     // point; the terms are added to the kernel in degree order after, so
@@ -1372,6 +1493,38 @@ Kernels AdjointSolver::ContinuousSweep(
     applyJump(j);
     // the lumped adjoint displacement of the observation, no time weight
     if (material) pairMaterial(lumpSolutions, node, pairing);
+    if (twisting) {
+      // the toroidal jump: the unrelaxed toroidal response to the
+      // adjoint traction of a measurement of W
+      lumpTwist.clear();
+      const auto& dual = found->second.toroidalPotentialDual;
+      if (!dual.empty()) {
+        const auto zw = detail::TractionPotentialOfTangentialDual(grid, dual);
+        const auto columns = ev.Columns(zw, ev.toMatDensity_);
+        auto forces = ToroidalViscoelastic::Fields{};
+        for (auto l = 1; l <= op.LMax(); ++l) {
+          const auto& system = toroidal->Unrelaxed(l);
+          const auto unit = system.Tangential();
+          const auto amps = *columns(l, 0.0);
+          const auto ndof = static_cast<std::size_t>(system.DofCount());
+          auto b = std::vector<double>(ndof * amps.size());
+          for (auto c = std::size_t{0}; c < amps.size(); ++c) {
+            for (auto d = std::size_t{0}; d < ndof; ++d) {
+              b[c * ndof + d] = unit[d] * amps[c];
+            }
+          }
+          forces.emplace(l, std::move(b));
+        }
+        lumpTwist = toroidal->SolveElastic(toroidal->ZeroState(), forces);
+        toroidal->Jump(tadj, lumpTwist);
+        toroidal->SetStrain(tadj, toroidal->SolveElastic(tadj, {}));
+      }
+      if (moments) addMoments(lumpSolutions, lumpTwist, node, pairing);
+      if (material && sourcedBase) {
+        pairToroidalMaterial(lumpTwist, node, pairing);
+      }
+    }
+    if (tidal) addTide(lumpSolutions, j.lam, node, 1.0);
     auto early = smoothEquilibrium(node);
     if (node > 0) densityEarly[node] = std::move(early);
   };
@@ -1414,6 +1567,7 @@ Kernels AdjointSolver::ContinuousSweep(
         step.Finish(ev.Columns(sigmaC, ev.toMatDensity_),
                     ev.Columns(psiC, ev.toMatPotential_));
     vstate = std::move(next);
+    if (twisting) tadj = toroidal->Step(tadj, dt, scheme, {}).first;
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     accumulateMaterial(n - 1, wLate[n - 1] * perTime);
     observe(n - 1);
@@ -1449,6 +1603,9 @@ Kernels AdjointSolver::ContinuousSweep(
 
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
+  out.momentKernels = std::move(momentKernels);
+  for (auto& kernel : tideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+  out.tideKernels = std::move(tideKernels);
   // the kernels as densities per unit volume: the weights divided out
   {
     const auto& mesh = op.BaseMaterial().Mesh();
