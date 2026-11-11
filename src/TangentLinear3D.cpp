@@ -674,8 +674,28 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
     const auto& snap = part.b[node];
     auto x = op.SolveElastic(*snap.internalState, Loads(snap.loadCoefficients),
                              Tides(snap.tideCoefficients));
+    if (snap.sourceForces) {
+      // b perturbs the sources: its solution is under their forces too
+      Add(x, op.SolveUnrelaxed(snap.sourceForces->spheroidal,
+                               snap.sourceForces->toroidal));
+    }
     if (part.bMaterial) {
       Add(x, part.bMaterial->UnrelaxedResponse(baseStrain, baseX, baseMemory));
+    }
+    return x;
+  }
+
+  /// The base run's full solution at a node: the unrelaxed solve under
+  /// the recorded loads and, about a source-driven run, the sources'
+  /// forces.
+  Solutions BaseSolution(const Viscoelastic3D::State& state,
+                         std::size_t node) const {
+    const auto& op = *ev->op_;
+    auto x = op.SolveElastic(state, Loads(trajectory->loads[node]),
+                             Tides(trajectory->tides[node]));
+    if (!trajectory->sourceForces.empty()) {
+      const auto& forces = trajectory->sourceForces[node];
+      Add(x, op.SolveUnrelaxed(forces.spheroidal, forces.toroidal));
     }
     return x;
   }
@@ -695,8 +715,7 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   Solutions StartResponse() const override {
     const auto& op = *ev->op_;
     const auto& base0 = cursor->At(0);
-    const auto x0 = op.SolveElastic(base0, Loads(trajectory->loads[0]),
-                                    Tides(trajectory->tides[0]));
+    const auto x0 = BaseSolution(base0, 0);
     auto own = std::optional<Tensor>{};
     const auto& strain0 = BaseStrain(base0, x0, own);
     auto total = Solutions{};
@@ -711,8 +730,7 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
     const auto& op = *ev->op_;
     const auto& base0 = cursor->At(0);
-    const auto x0 = op.SolveElastic(base0, Loads(trajectory->loads[0]),
-                                    Tides(trajectory->tides[0]));
+    const auto x0 = BaseSolution(base0, 0);
     auto own = std::optional<Tensor>{};
     const auto& strain0 = BaseStrain(base0, x0, own);
     for (const auto& part : parts) {
@@ -728,8 +746,7 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
     const auto& op = *ev->op_;
     const Viscoelastic3D::State basePrev = cursor->At(node - 1);
     const auto& baseN = cursor->At(node);
-    const auto xN = op.SolveElastic(baseN, Loads(trajectory->loads[node]),
-                                    Tides(trajectory->tides[node]));
+    const auto xN = BaseSolution(baseN, node);
     auto own = std::optional<Tensor>{};
     const auto& strainN = BaseStrain(baseN, xN, own);
     // The base step before the node, for its lateral weights.
@@ -965,12 +982,6 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const auto values = op.Coupling().GridValueCount();
 
   CheckTimes(times);
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
-      (!direction.materialU.Empty() || !direction.materialV.Empty())) {
-    throw std::invalid_argument(
-        "about a source-driven trajectory the second-order run takes the "
-        "relaxation times and the sources, not yet the moduli");
-  }
   struct Part {
     std::span<const Snapshot> along;  // empty: the forward trajectory
     const std::vector<std::vector<double>>* ditau;
@@ -1238,13 +1249,14 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   if (tideAt) tideNow = tideAt(0);
   // The perturbed sources' forces at a node, on the open step.
   const bool sourced = static_cast<bool>(sourcesAt);
+  auto nodeForces = DegreeFields{};  // the node's perturbed sources' forces
   auto applySources = [&](std::size_t at) {
     if (!sourced) return;
     auto [points, gluts] = sourcesAt(at);
-    const auto forces = detail::ForcesOfSources3D(
+    nodeForces = detail::ForcesOfSources3D(
         op, solver.SolverScales(), ev.toNdLength_, std::move(points),
         std::move(gluts));
-    step->AddDegreeForces(forces.spheroidal, forces.toroidal);
+    step->AddDegreeForces(nodeForces.spheroidal, nodeForces.toroidal);
   };
   // the start as a zero-length step: under lateral moduli, and under
   // perturbed sources, whose forces act on the degree systems directly
@@ -1332,6 +1344,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
       snapshot.internalState = tstate;
       snapshot.loadCoefficients = sigma;
       snapshot.tideCoefficients = psi;
+      // a second-order run rebuilds this run's solutions under them
+      if (sourced) snapshot.sourceForces = nodeForces;
     }
     snapshots.push_back(std::move(snapshot));
   };

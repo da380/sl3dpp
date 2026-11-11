@@ -341,6 +341,7 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
   const auto fieldV = setup.Smooth(rng, 20.0 * setup.Metre());
   const auto g = setup.Smooth(rng, 1.0);
   const auto gTangential = setup.Smooth(rng, 1.0);
+  const auto gDisplacement = setup.Smooth(rng, 0.7);
   const auto span = 10.0 * setup.Kyr();
   const auto& mesh = setup.material.Mesh();
   // named, not a structured binding: Clang 18 does not capture those
@@ -402,6 +403,9 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
     // and the tangential displacement's potential, a tangential traction
     // in the continuous sweep
     measurement[times.size() - 1].tangentialPotentialDual = gTangential;
+    // and the displacement, whose jump's derivative along the moduli
+    // carries the rotation's centrifugal channel
+    measurement[times.size() - 1].displacementDual = gDisplacement;
     struct Blocks {
       double ice, viscosity, material, forward;
     };

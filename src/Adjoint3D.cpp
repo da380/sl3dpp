@@ -137,10 +137,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const bool second = ditau != nullptr;
   const bool material = options_.material_kernels;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second) {
-    throw std::invalid_argument(
-        "the second-order sweeps do not take a source-driven trajectory yet");
-  }
   // v's delta mu over the grid values and delta mu / mu_U (the branch
   // weight of the itau pairing and the memory force's variation move
   // with it); empty without a mu direction.
@@ -931,6 +927,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     auto x = op.SolveElastic(*snap.internalState,
                              ev.Columns(snap.loadCoefficients, ev.toMatDensity_),
                              ev.Columns(snap.tideCoefficients, ev.toMatPotential_));
+    if (snap.sourceForces) {
+      // v perturbs the sources: its solution is under their forces too
+      addSolutions(x, op.SolveUnrelaxed(snap.sourceForces->spheroidal,
+                                        snap.sourceForces->toroidal));
+    }
     if (hasMaterialV) {
       addSolutions(x, unrelaxedResponseV(baseStrain, baseX, baseMemory));
     }
@@ -1102,6 +1103,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       dlam[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     const auto dlamC = grid.Expand(dlam);
+    // the closed channels of the derivative: the ocean's load and, under
+    // the rotational feedback, the centrifugal potential of its rotation
+    const auto dpsiC = rotation != RotationalFeedback::None
+                           ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                           : grid.ZeroCoefficients();
     for (auto l = 0; l <= lmax; ++l) {
       const auto& units = locked([&]() -> const std::vector<double>& {
         return reference.UnitResponses(nullptr, l);
@@ -1109,9 +1115,12 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       const auto ndof = units.size() / 2;
       auto& x = response.spheroidal[l];
       for (auto m = 0; m <= l; ++m) {
-        const Complex amp = ev.toMatDensity_ * dlamC[SurfaceGrid::Index(l, m)];
+        const auto i = SurfaceGrid::Index(l, m);
+        const Complex amp = ev.toMatDensity_ * dlamC[i];
+        const Complex psiAmp = ev.toMatPotential_ * dpsiC[i];
         for (auto d = std::size_t{0}; d < ndof; ++d) {
-          x[static_cast<std::size_t>(m) * ndof + d] += units[d] * amp;
+          x[static_cast<std::size_t>(m) * ndof + d] +=
+              units[d] * amp + units[ndof + d] * psiAmp;
         }
       }
     }

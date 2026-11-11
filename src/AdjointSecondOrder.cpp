@@ -1039,14 +1039,23 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       dlam[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     const auto lamCols = loadsOf(grid.Expand(dlam));
+    // the closed channels of the derivative: the ocean's load and, under
+    // the rotational feedback, the centrifugal potential of its rotation
+    const auto psiCols =
+        tidesOf(rotation != RotationalFeedback::None
+                    ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                    : grid.ZeroCoefficients());
     for (auto& [l, x] : response) {
       const auto& deg = op.Deg(l);
       const int ncols = 2 * (l + 1);
       const auto& units = op.UnitResponses(nullptr, l);
       const auto amps = *lamCols(l, 0.0);
+      const auto psiAmps = *psiCols(l, 0.0);
       for (auto c = 0; c < ncols; ++c) {
         for (auto d = 0; d < deg.ndof; ++d) {
-          x[static_cast<std::size_t>(c) * deg.ndof + d] += units[d] * amps[c];
+          x[static_cast<std::size_t>(c) * deg.ndof + d] +=
+              units[d] * amps[c] +
+              units[static_cast<std::size_t>(deg.ndof) + d] * psiAmps[c];
         }
       }
     }

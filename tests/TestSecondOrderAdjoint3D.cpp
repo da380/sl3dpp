@@ -1363,8 +1363,9 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
   // <H u, w> = <H w, u>, and both equal <g, F''[u, w]> from the discrete
   // second-order tangent-linear run; the mixed block (sources against
   // viscosity) is non-zero and each pure-source Hessian vanishes, the
-  // run being linear in the sources. The displacement and the toroidal
-  // potential measured.
+  // run being linear in the sources. The same with lateral directions in
+  // the moduli, against the sources and the viscosity and against each
+  // other. The displacement and the toroidal potential measured.
   auto scene = Scene::Make(1e22);
   const auto& sle = scene.solver.SolverScales();
   std::mt19937 rng(73);
@@ -1427,6 +1428,20 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
   struct Direction {
     std::vector<std::vector<PointSource>> sources;
     std::vector<std::vector<double>> itau;
+    MaterialDirection3D material{};
+  };
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
+  auto moduli = [&](const std::function<double(double, double)>& angular) {
+    MaterialDirection3D d;
+    d.kappa = LateralModulus(
+        coupling, scene.material, k0,
+        [](double r) { return 0.05 * (1.0 - 0.5 * r); }, angular);
+    d.mu = LateralModulus(
+        coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+        angular);
+    return d;
   };
   auto pU = [](double theta, double phi) {
     return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
@@ -1440,6 +1455,17 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
                                       op, OnCoupling(coupling, pW))};
   const Direction sourcesOnly{u.sources, {}};
   const Direction viscosityOnly{{}, w.itau};
+  // the moduli, with the viscosity: a source perturbation and a moduli
+  // perturbation go in separate directions
+  const Direction withModuli{
+      {}, w.itau, moduli([](double theta, double phi) {
+        return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+      })};
+  const Direction otherModuli{
+      {}, u.itau, moduli([](double theta, double phi) {
+        return Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6) +
+               0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      })};
   TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                             .rtol = 1e-12,
                                             .coupled_rtol = 1e-12,
@@ -1447,16 +1473,20 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
   AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                       .rtol = 1e-12,
                                       .coupled_rtol = 1e-12,
+                                      .material_kernels = true,
                                       .moment_points = points});
   auto runOf = [&](const Direction& d) {
     TangentPerturbation3D direction;
     direction.sources = d.sources;
     direction.itau = d.itau;
+    direction.material = d.material;
     return tangent.Run(times, direction, &trajectory);
   };
   auto hessianOn = [&](const Direction& d,
                        const std::vector<Evolution3D::Snapshot>& run) {
-    return adjoint.SecondOrderKernels(times, measurements, run, d.itau, trajectory)
+    return adjoint
+        .SecondOrderKernels(times, measurements, run, d.itau, trajectory, {},
+                            d.material)
         .second;
   };
   auto pairing = [&](const KernelDerivatives3D& along, const Direction& d) {
@@ -1469,6 +1499,10 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
         }
       }
     }
+    if (!d.material.Empty()) {
+      total += VolumePairing(coupling, along.kappaKernel3D, d.material.kappa) +
+               VolumePairing(coupling, along.muKernel3D, d.material.mu);
+    }
     return total;
   };
   struct Case {
@@ -1480,6 +1514,10 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
   for (const auto& c : {Case{"both parts", &u, &w, false},
                         Case{"sources against viscosity", &sourcesOnly,
                              &viscosityOnly, false},
+                        Case{"sources and viscosity against moduli", &u,
+                             &withModuli, false},
+                        Case{"moduli against moduli", &withModuli, &otherModuli,
+                             false},
                         Case{"sources against sources", &sourcesOnly, &sourcesOnly,
                              true}}) {
     const auto runA = runOf(*c.a);
@@ -1491,6 +1529,8 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
     SecondOrderDirection3D ab;
     ab.itauU = c.a->itau;
     ab.itauV = c.b->itau;
+    ab.materialU = c.a->material;
+    ab.materialV = c.b->material;
     const auto forward =
         objective(tangent.RunSecondOrder(times, runA, runB, ab, &trajectory));
     if (c.vanishes) {
@@ -1503,5 +1543,184 @@ TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenR
     EXPECT_NE(haB, 0.0) << c.name;
     EXPECT_NEAR(haB, hbA, 1e-8 * std::abs(haB)) << c.name;
     EXPECT_NEAR(forward, haB, 1e-8 * std::abs(forward)) << c.name;
+  }
+}
+
+TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation) {
+  // The continuous second-order sweep with lateral viscosity and the
+  // rotational feedback, the displacement and the toroidal potential
+  // measured: its rows in the viscosity, the bulk modulus and the shear
+  // modulus (each apart) tend to the discrete sweep's at second order as
+  // the steps are halved.
+  auto scene = Scene::Make(1e22);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(79);
+  const auto span = 10.0 * scene.Kyr();
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto source = PointSource{
+      .at = {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  const auto other = SphericalTensor{.rr = -0.4 * unit, .tt = 0.8 * unit,
+                                     .pp = -0.4 * unit, .rt = 0.5 * unit,
+                                     .rp = 0.1 * unit, .tp = -0.3 * unit};
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto gW = scene.Smooth(rng, 0.8);
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  const auto& k0 = kappaMu.first;
+  const auto& m0 = kappaMu.second;
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto& coupling = op.Coupling();
+  auto moduli = [&](const std::function<double(double, double)>& angular) {
+    MaterialDirection3D d;
+    d.kappa = LateralModulus(
+        coupling, scene.material, k0,
+        [](double r) { return 0.05 * (1.0 - 0.5 * r); }, angular);
+    d.mu = LateralModulus(
+        coupling, scene.material, m0, [](double r) { return 0.1 * (0.5 + r * r); },
+        angular);
+    return d;
+  };
+  const auto itauU =
+      TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, pU));
+  const auto itauW =
+      TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, pW));
+  const auto materialU = moduli([](double theta, double phi) {
+    return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+  });
+  const auto materialW = moduli([](double theta, double phi) {
+    return 1.0 + 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  struct Rows {
+    double viscosity, kappa, mu;
+  };
+  const auto meltLoad = scene.MeltLoad(-0.1);
+  auto loadDriven = false;
+  auto part = 0;  // 0 both, 1 itau alone, 2 moduli alone
+  const auto measured = 0;  // U and W
+  const auto rotationOn = true;
+  auto gapsOf = [&](bool sourceDirection) {
+    auto gaps = std::vector<Rows>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto forcing = Evolution3D::Forcing{};
+      if (loadDriven) {
+        forcing.directLoad = [&](double t) {
+          auto out = meltLoad;
+          for (auto& v : out) v *= 0.3 + t / span;
+          return out;
+        };
+      } else {
+        forcing.sources = [&](double t) {
+          auto at = source;
+          const auto shape = 0.3 + t / span;
+          for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
+                          &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
+            *c *= shape;
+          }
+          return std::vector<PointSource>{at};
+        };
+      }
+      Evolution3D evolution(
+          op, scene.solver, scene.state,
+          {.rotation = rotationOn ? RotationalFeedback::Full : RotationalFeedback::None, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+      const auto trajectory =
+          ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      if (measured == 0 || measured == 1) {
+        measurements[times.size() - 1].displacementDual = gU;
+      }
+      if (measured == 0 || measured == 2) {
+        measurements[times.size() - 1].toroidalPotentialDual = gW;
+      }
+      if (measured == 3) measurements[times.size() - 1].seaLevelDual = gU;
+      TangentPerturbation3D u;
+      if (sourceDirection) {
+        for (auto t : times) {
+          auto M = other;
+          const auto shape = 1.0 - 0.5 * t / span;
+          for (auto* c : {&M.rr, &M.tt, &M.pp, &M.rt, &M.rp, &M.tp}) *c *= shape;
+          u.sources.push_back({PointSource{.at = source.at, .moment = M}});
+        }
+      } else {
+        if (part != 2) u.itau = itauU;
+        if (part != 1) u.material = materialU;
+      }
+      auto rows = std::map<AdjointMethod, Rows>{};
+      for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+        const auto run =
+            TangentLinearSolver3D(evolution, {.method = method,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = 1e-12,
+                                              .record = true})
+                .Run(times, u, &trajectory);
+        const auto along =
+            AdjointSolver3D(evolution, {.method = method,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12,
+                                        .material_kernels = true})
+                .SecondOrderKernels(times, measurements, run, u.itau, trajectory,
+                                    {}, u.material)
+                .second;
+        rows[method] = {GridPairing(coupling, along.itauKernel3D, itauW),
+                        VolumePairing(coupling, along.kappaKernel3D, materialW.kappa),
+                        VolumePairing(coupling, along.muKernel3D, materialW.mu)};
+      }
+      const auto& d = rows[AdjointMethod::Discrete];
+      const auto& c = rows[AdjointMethod::Continuous];
+      EXPECT_NE(d.viscosity, 0.0);
+      EXPECT_NE(d.kappa, 0.0);
+      EXPECT_NE(d.mu, 0.0);
+      gaps.push_back({std::abs(c.viscosity - d.viscosity) / std::abs(d.viscosity),
+                      std::abs(c.kappa - d.kappa) / std::abs(d.kappa),
+                      std::abs(c.mu - d.mu) / std::abs(d.mu)});
+    }
+    return gaps;
+  };
+  loadDriven = true;
+  for (const auto& g : gapsOf(false)) {
+    std::printf("load-driven, along the parameters: viscosity %.3e kappa %.3e mu %.3e\n",
+                g.viscosity, g.kappa, g.mu);
+  }
+  // Three cases: about the source-driven run along a direction in the
+  // viscosity and the moduli, and along one that perturbs the sources;
+  // and about a load-driven run along the moduli alone with the
+  // displacement and the toroidal potential measured, which the
+  // derivative of the jump's rotation enters.
+  struct Case {
+    const char* label;
+    bool load, sources;
+    int part;
+  };
+  for (const auto& c :
+       {Case{"source-driven, along the viscosity and the moduli", false, false, 0},
+        Case{"source-driven, along the sources", false, true, 0},
+        Case{"load-driven, along the moduli", true, false, 2}}) {
+    loadDriven = c.load;
+    part = c.part;
+    const auto gaps = gapsOf(c.sources);
+    for (auto row : {&Rows::viscosity, &Rows::kappa, &Rows::mu}) {
+      const auto what = row == &Rows::viscosity
+                            ? "viscosity"
+                            : (row == &Rows::kappa ? "kappa" : "mu");
+      EXPECT_LT(gaps[2].*row, 0.05)
+          << what << ", " << c.label << ": " << gaps[0].*row << " "
+          << gaps[1].*row << " " << gaps[2].*row;
+      EXPECT_GT((gaps[1].*row) / (gaps[2].*row), 3.0)
+          << what << ", " << c.label << ": " << gaps[1].*row << " "
+          << gaps[2].*row;
+    }
   }
 }

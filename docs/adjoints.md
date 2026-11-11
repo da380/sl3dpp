@@ -1879,9 +1879,24 @@ source rows of the Hessian's action), by the same strain at the points,
 and the viscosity rows are formed as about any trajectory. The
 second-order tangent-linear run takes the same.
 
-**What is not yet taken.** About a source-driven trajectory the moduli
-are refused at second order in 3D, the continuous 3D second-order sweep
-is refused, and the radial model's second-order sweeps are refused
-altogether (a radial model runs through the 3D class with no lateral
-structure). The 3D moment and tide kernels of the continuous sweep, and
-the discrete moment kernels, are formed on one process.
+The moduli join them: where a second-order run or sweep rebuilds a
+solution, the base's is under the recorded sources' forces and a
+tangent run's that perturbs the sources is under its own, which its
+recorded snapshots carry. The continuous 3D second-order sweep takes
+the same trajectories and directions, at its commute level, without the
+moment rows.
+
+A note on the continuous sweeps' jump along a direction in the moduli
+(§15): the derivative of the instantaneous adjoint solution is the
+unrelaxed response to the direction's force on it, closed by the sea
+level equation, and the closure returns two channels to the solution,
+the ocean's load and, under the rotational feedback, the centrifugal
+potential of the derivative's rotation. Both are added, in 1D and in
+3D; a measurement of the displacement or of the tangential potentials
+depends on the second at the per-cent level.
+
+**What is not yet taken.** The radial model's second-order sweeps
+refuse a source-driven trajectory (a radial model runs through the 3D
+class with no lateral structure). The 3D moment and tide kernels of
+the continuous sweep, and the discrete moment kernels, are formed on
+one process.

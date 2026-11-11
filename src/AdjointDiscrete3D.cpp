@@ -64,12 +64,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const MaterialDirection3D* materialV) const {
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second &&
-      (options_.material_kernels || hasMaterialV)) {
-    throw std::invalid_argument(
-        "about a source-driven trajectory the second-order sweep takes the "
-        "relaxation times and the sources, not yet the moduli");
-  }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -724,6 +718,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     auto x = op.SolveElastic(*snap.internalState,
                              ev.Columns(snap.loadCoefficients, ev.toMatDensity_),
                              ev.Columns(snap.tideCoefficients, ev.toMatPotential_));
+    if (snap.sourceForces) {
+      // v perturbs the sources: its solution is under their forces too
+      addSolutions(x, op.SolveUnrelaxed(snap.sourceForces->spheroidal,
+                                        snap.sourceForces->toroidal));
+    }
     if (hasMaterialV) {
       auto memoryForce = std::optional<Tensor>{};
       if (baseMemory != nullptr && !dmuV.empty()) {
@@ -1398,7 +1397,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         addSurfaceDuals(dsph, dadj, sph);
         const auto dy0 = op.SolveUnrelaxed(dsph, dtor);
         if (moments) dMomentKernels[0] = momentKernelsOf(dy0);
-        const auto x0 = op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0));
+        const auto x0 = withSources(
+            op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)), 0);
         const auto ex0 = exit(x0, sph, tor);
         const auto xv0 = tangentSolution(0, ex0, x0, nullptr);
         addMaterialPairing(dilatationOf(dy0, sph), dilatationOf(x0, sph),
