@@ -1579,6 +1579,84 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepFormsMomentKernels) {
   }
 }
 
+TEST(DiscreteAdjoint3D, TheContinuousSweepFormsTideKernels) {
+  // The continuous 3D sweep's tide kernels against the exact derivative
+  // (the tangent-linear run along a tide perturbation smooth in time):
+  // the gap falls as the steps are halved, under lateral viscosity alone
+  // and with lateral moduli too, with an ocean and the rotational
+  // feedback, the sea level and the displacement measured.
+  auto scene = Scene::Make(1e22);
+  const auto& grid = scene.solver.Grid();
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(67);
+  using Complex = std::complex<double>;
+  const auto span = 10.0 * scene.Kyr();
+  const auto potential = 1.0 / sle.Factor(PotentialDimensions);
+  auto tide0 = grid.Expand(scene.Smooth(rng, potential));
+  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  const auto gSea = scene.Smooth(rng, 1.0);
+  const auto gU = scene.Smooth(rng, 0.5);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  for (const bool lateralModuli : {false, true}) {
+    auto options = Viscoelastic3D::Options{};
+    if (lateralModuli) options.moduli = TestModuli();
+    Viscoelastic3D op(
+        scene.rheology, kLmax,
+        [](double, double theta, double phi) {
+          return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        },
+        options);
+    auto gaps = std::vector<double>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() / 2].seaLevelDual = gSea;
+      measurements[times.size() - 1].displacementDual = gU;
+      TangentPerturbation3D direction;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto shape = std::sin(0.5 * std::numbers::pi * times[n] / span) + 0.3;
+        auto tide = tide0;
+        for (auto& c : tide) c *= shape;
+        direction.tide.push_back(std::move(tide));
+      }
+      Evolution3D evolution(op, scene.solver, scene.state,
+                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      const auto along = Objective(
+          scene,
+          TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                            .rtol = 1e-12,
+                                            .coupled_rtol = 1e-12})
+              .Run(times, direction),
+          measurements);
+      ASSERT_NE(along, 0.0);
+      const auto kernels =
+          AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .tide_kernels = true})
+              .FirstOrderKernels(times, measurements);
+      ASSERT_EQ(kernels.ice.tideKernels.size(), times.size());
+      auto paired = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        paired += pair(kernels.ice.tideKernels[n], direction.tide[n]);
+      }
+      gaps.push_back(std::abs(paired - along) / std::abs(along));
+    }
+    const auto label = lateralModuli ? "lateral moduli" : "lateral viscosity";
+    EXPECT_LT(gaps[2], 0.05) << label << " " << gaps[0] << " " << gaps[1] << " "
+                             << gaps[2];
+    EXPECT_GT(gaps[0] / gaps[1], 2.0) << label << " " << gaps[0] << " " << gaps[1];
+    EXPECT_GT(gaps[1] / gaps[2], 3.0) << label << " " << gaps[1] << " " << gaps[2];
+  }
+}
+
 TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
   // The continuous sweep under lateral moduli: its gap to the discrete
   // kernels falls as the steps are halved, loads and log-viscosity alike.

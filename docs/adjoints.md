@@ -1860,5 +1860,28 @@ side under the time weights, and of the jump's solution at each
 observation without one (under lateral moduli the instantaneous fixed
 point's).
 
-**What is not yet taken.** The second-order sweeps refuse a
-source-driven trajectory. The 3D moment kernels are not distributed.
+Its tide kernels are the radial sweep's construction too
+(`AdjointSolver3D::Options::tide_kernels`): the adjoint displacement's
+spheroidal columns paired with each degree's unit tide force, less
+r^2 / g times the adjoint load, whose coefficients at an observation
+are those of the measurement's sea level dual and the ocean's share of
+the jump's sea level.
+
+**Second order.** The run is linear in its sources, so the Hessian has
+no source-source block; the sources enter the second derivative through
+the mixed blocks, with the relaxation times and the moduli. A direction
+that perturbs the sources is carried, as a load's is, by its recorded
+tangent-linear run. The discrete 3D second-order sweep takes a
+source-driven trajectory and such directions in the relaxation times
+and the sources: the derivative duals' solutions give the derivatives
+of the moment kernels along v (`KernelDerivatives::momentKernels`, the
+source rows of the Hessian's action), by the same strain at the points,
+and the viscosity rows are formed as about any trajectory. The
+second-order tangent-linear run takes the same.
+
+**What is not yet taken.** About a source-driven trajectory the moduli
+are refused at second order in 3D, the continuous 3D second-order sweep
+is refused, and the radial model's second-order sweeps are refused
+altogether (a radial model runs through the 3D class with no lateral
+structure). The 3D moment and tide kernels of the continuous sweep, and
+the discrete moment kernels, are formed on one process.

@@ -262,6 +262,10 @@ class AdjointSolver3D {
     /// (Kernels::momentKernels, under Kernels3D::ice), as
     /// AdjointSolver::Options::moment_points; on one process.
     std::vector<BodyPoint> moment_points{};
+    /// Also form the tide kernels in the continuous sweep, as
+    /// AdjointSolver::Options::tide_kernels (the discrete sweep forms
+    /// them always); on one process.
+    bool tide_kernels = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.

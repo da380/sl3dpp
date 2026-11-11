@@ -64,9 +64,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const MaterialDirection3D* materialV) const {
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
-  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second) {
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() && second &&
+      (options_.material_kernels || hasMaterialV)) {
     throw std::invalid_argument(
-        "the second-order sweeps do not take a source-driven trajectory yet");
+        "about a source-driven trajectory the second-order sweep takes the "
+        "relaxation times and the sources, not yet the moduli");
   }
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -467,6 +469,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   }
   auto momentKernels =
       std::vector<std::vector<SphericalTensor>>(moments ? times.size() : 0);
+  // and their derivatives along v, from the derivative duals' solutions
+  auto dMomentKernels = std::vector<std::vector<SphericalTensor>>(
+      moments && second ? times.size() : 0);
   auto momentKernelsOf = [&](const Viscoelastic3D::Solutions& y) {
     // the dual solutions are the coefficients of a real field in the
     // stepper's complex m >= 0 columns, as PointStrain reads them
@@ -1132,6 +1137,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             nested ? "nested solve" : "fixed point", n));
       }
       dloadDuals[n] = loadDualOf(dlast.adj, dlast.synth);
+      if (moments) dMomentKernels[n] = momentKernelsOf(dlast.xdag);
     }
 
     // The dual of the decayed memory: its own plus the fixed memory
@@ -1383,9 +1389,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             "did not converge");
       }
       dloadDuals[0] = loadDualOf(dadj, dsynth);
+      if (moments && !material) {
+        auto forces = dsph;
+        addSurfaceDuals(forces, dadj, sph);
+        dMomentKernels[0] = momentKernelsOf(op.SolveUnrelaxed(forces, dtor));
+      }
       if (material) {
         addSurfaceDuals(dsph, dadj, sph);
         const auto dy0 = op.SolveUnrelaxed(dsph, dtor);
+        if (moments) dMomentKernels[0] = momentKernelsOf(dy0);
         const auto x0 = op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0));
         const auto ex0 = exit(x0, sph, tor);
         const auto xv0 = tangentSolution(0, ex0, x0, nullptr);
@@ -1490,6 +1502,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
     derivatives.itauKernel3D = std::move(dItauKernel);
+    derivatives.ice.momentKernels = std::move(dMomentKernels);
     derivatives.itauKernelSpherical.assign(K, std::vector<double>(nodeCount, 0.0));
     derivatives.logViscosityKernel3D.assign(K, std::vector<double>(values, 0.0));
     for (auto k = std::size_t{0}; k < K; ++k) {

@@ -965,6 +965,12 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const auto values = op.Coupling().GridValueCount();
 
   CheckTimes(times);
+  if (trajectory != nullptr && !trajectory->sourceForces.empty() &&
+      (!direction.materialU.Empty() || !direction.materialV.Empty())) {
+    throw std::invalid_argument(
+        "about a source-driven trajectory the second-order run takes the "
+        "relaxation times and the sources, not yet the moduli");
+  }
   struct Part {
     std::span<const Snapshot> along;  // empty: the forward trajectory
     const std::vector<std::vector<double>>* ditau;

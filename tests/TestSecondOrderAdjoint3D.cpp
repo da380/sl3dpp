@@ -1354,3 +1354,154 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
             << ", material " << materialGaps[0] << " -> " << materialGaps[1]
             << ", mismatch " << mismatches[0] << " -> " << mismatches[1] << '\n';
 }
+
+TEST(SecondOrderAdjoint3D, HessianInTheSourcesAndTheViscosityAboutASourceDrivenRun) {
+  // About a run under point sources with lateral viscosity, along
+  // directions that perturb the sources' moment tensors and the inverse
+  // relaxation times together: the discrete second-order sweep's
+  // derivatives, the viscosity rows and the moment rows, give
+  // <H u, w> = <H w, u>, and both equal <g, F''[u, w]> from the discrete
+  // second-order tangent-linear run; the mixed block (sources against
+  // viscosity) is non-zero and each pure-source Hessian vanishes, the
+  // run being linear in the sources. The displacement and the toroidal
+  // potential measured.
+  auto scene = Scene::Make(1e22);
+  const auto& sle = scene.solver.SolverScales();
+  std::mt19937 rng(73);
+  std::normal_distribution<double> normal;
+  const auto span = 10.0 * scene.Kyr();
+  constexpr auto nodes = 7;
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto points = std::vector<BodyPoint>{
+      {.radius = surface - 400e3 / sle.Length(), .colatitude = 1.1, .longitude = 4.0},
+      {.radius = surface - 800e3 / sle.Length(), .colatitude = 2.2, .longitude = 1.0}};
+  auto tensors = [&](double scale) {
+    auto out = std::vector<std::vector<PointSource>>{};
+    for (auto n = 0; n < nodes; ++n) {
+      auto at = std::vector<PointSource>{};
+      for (const auto& point : points) {
+        at.push_back({.at = point,
+                      .moment = {.rr = scale * unit * normal(rng),
+                                 .tt = scale * unit * normal(rng),
+                                 .pp = scale * unit * normal(rng),
+                                 .rt = scale * unit * normal(rng),
+                                 .rp = scale * unit * normal(rng),
+                                 .tp = scale * unit * normal(rng)}});
+      }
+      out.push_back(std::move(at));
+    }
+    return out;
+  };
+  const auto base = tensors(1.0);
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto gW = scene.Smooth(rng, 0.8);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].displacementDual = gU;
+  measurements[times.size() - 1].toroidalPotentialDual = gW;
+  auto objective = [&](const std::vector<Evolution3D::Snapshot>& run) {
+    return scene.Surface(gU, run.back().displacement) +
+           scene.Surface(gW, run.back().toroidalPotential);
+  };
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto& coupling = op.Coupling();
+  Evolution3D evolution(
+      op, scene.solver, scene.state,
+      {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(evolution.Run(
+      times, Evolution3D::Forcing{.sources = [&](double t) {
+        return base[nodeOf(t)];
+      }}));
+  struct Direction {
+    std::vector<std::vector<PointSource>> sources;
+    std::vector<std::vector<double>> itau;
+  };
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  const Direction u{tensors(0.3), TangentLinearSolver3D::ItauOfLogViscosity(
+                                      op, OnCoupling(coupling, pU))};
+  const Direction w{tensors(0.3), TangentLinearSolver3D::ItauOfLogViscosity(
+                                      op, OnCoupling(coupling, pW))};
+  const Direction sourcesOnly{u.sources, {}};
+  const Direction viscosityOnly{{}, w.itau};
+  TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                            .rtol = 1e-12,
+                                            .coupled_rtol = 1e-12,
+                                            .record = true});
+  AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .moment_points = points});
+  auto runOf = [&](const Direction& d) {
+    TangentPerturbation3D direction;
+    direction.sources = d.sources;
+    direction.itau = d.itau;
+    return tangent.Run(times, direction, &trajectory);
+  };
+  auto hessianOn = [&](const Direction& d,
+                       const std::vector<Evolution3D::Snapshot>& run) {
+    return adjoint.SecondOrderKernels(times, measurements, run, d.itau, trajectory)
+        .second;
+  };
+  auto pairing = [&](const KernelDerivatives3D& along, const Direction& d) {
+    auto total = d.itau.empty() ? 0.0
+                                : GridPairing(coupling, along.itauKernel3D, d.itau);
+    if (!d.sources.empty()) {
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          total += along.ice.momentKernels[n][p].Contract(d.sources[n][p].moment);
+        }
+      }
+    }
+    return total;
+  };
+  struct Case {
+    const char* name;
+    const Direction* a;
+    const Direction* b;
+    bool vanishes;
+  };
+  for (const auto& c : {Case{"both parts", &u, &w, false},
+                        Case{"sources against viscosity", &sourcesOnly,
+                             &viscosityOnly, false},
+                        Case{"sources against sources", &sourcesOnly, &sourcesOnly,
+                             true}}) {
+    const auto runA = runOf(*c.a);
+    const auto runB = runOf(*c.b);
+    const auto alongA = hessianOn(*c.a, runA);
+    const auto alongB = hessianOn(*c.b, runB);
+    const auto haB = pairing(alongA, *c.b);
+    const auto hbA = pairing(alongB, *c.a);
+    SecondOrderDirection3D ab;
+    ab.itauU = c.a->itau;
+    ab.itauV = c.b->itau;
+    const auto forward =
+        objective(tangent.RunSecondOrder(times, runA, runB, ab, &trajectory));
+    if (c.vanishes) {
+      // linear in the sources: against the mixed block's size
+      const auto scale = std::abs(pairing(hessianOn(u, runOf(u)), w));
+      EXPECT_LT(std::abs(haB), 1e-9 * scale) << c.name;
+      EXPECT_LT(std::abs(forward), 1e-9 * scale) << c.name;
+      continue;
+    }
+    EXPECT_NE(haB, 0.0) << c.name;
+    EXPECT_NEAR(haB, hbA, 1e-8 * std::abs(haB)) << c.name;
+    EXPECT_NEAR(forward, haB, 1e-8 * std::abs(forward)) << c.name;
+  }
+}

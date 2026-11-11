@@ -221,6 +221,11 @@ struct KernelDerivatives {
   /// Hessian's action on v. Empty unless Options::material_kernels.
   std::vector<double> kappaKernel;
   std::vector<double> muKernel;
+  /// The derivatives along v of the moment kernels (Kernels::
+  /// momentKernels), in their layout: the source rows of the Hessian's
+  /// action on v. Formed by the discrete 3D sweep when Options::
+  /// moment_points gives points; empty otherwise.
+  std::vector<std::vector<SphericalTensor>> momentKernels;
 };
 
 namespace detail {
