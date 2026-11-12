@@ -230,11 +230,27 @@ class Evolution {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
 
+  /// A migrating run under further forcing beside the ice: the direct
+  /// loads inside and outside the water budget, a layer on the solid
+  /// surface (which moves the shorelines as the sea level does) and
+  /// interior sources, all changes from the background state. The start
+  /// is then solved, by the nonlinear equation on the unrelaxed body,
+  /// so a forcing present at times[0] acts there. A prescribed tide is
+  /// refused.
+  [[nodiscard]] std::vector<Snapshot> RunMigrating(
+      std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
+
   /// `Resume` for a migrating run: the same recurrence, the steps closed
   /// by the nonlinear solve.
   [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
+  [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
+      const Checkpoint& from, std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
 
   [[nodiscard]] const ViscoelasticState& FinalState() const { return vstate_; }
 

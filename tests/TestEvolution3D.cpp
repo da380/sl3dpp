@@ -320,6 +320,166 @@ TEST(LateralGate, LoadsOutsideTheWaterBudgetAndLayersMatchThe1DLoop) {
   }
 }
 
+TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
+  // Migrating shorelines under the forcings beside the ice, present from
+  // the first node so that the start is solved: a load inside the water
+  // budget, one outside it, a layer on the solid surface and a point
+  // source. With no lateral perturbation the 3D loop is the 1D loop,
+  // through a melting that moves the shorelines. Under lateral viscosity,
+  // where the forcing is too small to move a shoreline, the run is the
+  // frozen run under the same forcing.
+  auto setup = Setup::Make();
+  const auto& sle = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto times = std::vector<double>{0.0, kyr, 2 * kyr, 4 * kyr};
+  const auto held = setup.MeltLoad(-0.1);
+  const auto& grid = setup.solver.Grid();
+  const auto length = sle.Length();
+  const auto pattern = grid.FromFunction([&](double theta, double phi) {
+    return std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi - 1.0);
+  });
+  const auto unit =
+      1e21 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto source = PointSource{
+      .at = {.radius = setup.solver.Radius() - 400e3 / length,
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  // the forcing, scaled: the loads, the layer's height and the source
+  auto forcingOf = [&](double loads, double height, double moment) {
+    return Evolution3D::Forcing{
+        .directLoad =
+            [&, loads](double t) {
+              auto out = held;
+              for (auto& v : out) v *= loads * (1.0 + 0.2 * t / kyr);
+              return out;
+            },
+        .directLoadOutsideWaterBudget =
+            [&, loads](double t) {
+              auto out = held;
+              for (auto i = std::size_t{0}; i < out.size(); ++i) {
+                out[i] = -0.6 * loads * held[out.size() - 1 - i] *
+                         (0.5 + 0.3 * t / kyr);
+              }
+              return out;
+            },
+        .solidSurfaceChange =
+            [&, height](double t) {
+              auto out = pattern;
+              for (auto& v : out) v *= height / length * (0.3 + t / (4.0 * kyr));
+              return out;
+            },
+        .sources = [&, moment](double t) {
+          auto at = source;
+          for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
+                          &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
+            *c *= moment * (0.3 + t / (4.0 * kyr));
+          }
+          return std::vector<PointSource>{at};
+        }};
+  };
+  auto as1D = [](const Evolution3D::Forcing& f) {
+    return Evolution::Forcing{
+        .directLoad = f.directLoad,
+        .directLoadOutsideWaterBudget = f.directLoadOutsideWaterBudget,
+        .solidSurfaceChange = f.solidSurfaceChange,
+        .sources = f.sources};
+  };
+  const auto state =
+      setup.solver.MakeState(setup.state.iceThickness, setup.state.seaLevel);
+  auto compare = [&](const auto& got, const auto& want, double tolerance,
+                     const char* label) {
+    ASSERT_EQ(got.size(), want.size());
+    for (auto node = std::size_t{0}; node < got.size(); ++node) {
+      ASSERT_TRUE(got[node].converged) << label << ", node " << node;
+      EXPECT_LT(WorstDeparture(got[node].relativeSeaLevelChange,
+                               want[node].relativeSeaLevelChange),
+                tolerance)
+          << label << ", node " << node;
+      EXPECT_LT(WorstDeparture(got[node].displacement, want[node].displacement),
+                tolerance)
+          << label << ", node " << node;
+      EXPECT_LT(WorstDeparture(got[node].potential, want[node].potential),
+                tolerance)
+          << label << ", node " << node;
+      EXPECT_LT(WorstDeparture(got[node].tangentialPotential,
+                               want[node].tangentialPotential),
+                tolerance)
+          << label << ", node " << node;
+      ASSERT_FALSE(want[node].toroidalPotential.empty());
+      EXPECT_LT(WorstDeparture(got[node].toroidalPotential,
+                               want[node].toroidalPotential),
+                tolerance)
+          << label << ", node " << node;
+    }
+  };
+
+  // -- no lateral perturbation: the 1D loop, the shorelines moving
+  {
+    const auto melting = [&](double t) {
+      auto out = state.iceThickness;
+      for (auto& v : out) v *= 1.0 - 0.1 * t / kyr;
+      return out;
+    };
+    const auto forcing = forcingOf(1.0, 3.0, 1.0);
+    ViscoelasticOperator op1(setup.rheology, kLmax);
+    Viscoelastic3D op3(setup.rheology, kLmax,
+                       [](double, double, double) { return 0.0; });
+    Evolution evolution1(op1, setup.solver, state,
+                         {.rtol = 1e-11,
+                          .max_nonlinear_iterations = 200,
+                          .record_stride = 1});
+    const auto reference =
+        evolution1.RunMigrating(times, melting, as1D(forcing));
+    Evolution3D evolution3(op3, setup.solver, state,
+                           {.rtol = 1e-11,
+                            .coupled_rtol = 1e-10,
+                            .max_nonlinear_iterations = 200});
+    const auto coupled = evolution3.RunMigrating(times, melting, forcing);
+    compare(coupled, reference, 1e-7, "no lateral perturbation");
+    auto moved = std::size_t{0};
+    for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
+      EXPECT_EQ(coupled[node].oceanFunction, reference[node].oceanFunction)
+          << "node " << node;
+      for (auto i = std::size_t{0}; i < state.oceanFunction.size(); ++i) {
+        if (coupled[node].oceanFunction[i] != state.oceanFunction[i]) ++moved;
+      }
+    }
+    EXPECT_GT(moved, std::size_t{0});
+    // the start is solved: the first node is not the undisturbed one
+    auto top = 0.0;
+    for (auto v : coupled.front().relativeSeaLevelChange) {
+      top = std::max(top, std::abs(v));
+    }
+    EXPECT_GT(top, 0.0);
+  }
+
+  // -- lateral viscosity, no shoreline moving: the frozen run
+  {
+    const auto still = [&](double) { return state.iceThickness; };
+    const auto forcing = forcingOf(1e-3, 1e-3, 1e-2);
+    Viscoelastic3D lateral(
+        setup.rheology, kLmax, [](double, double theta, double phi) {
+          return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+        });
+    Evolution3D evolution(lateral, setup.solver, state,
+                          {.rtol = 1e-12,
+                           .coupled_rtol = 1e-11,
+                           .max_nonlinear_iterations = 400});
+    const auto frozen = evolution.Run(times, forcing);
+    const auto moving = evolution.RunMigrating(times, still, forcing);
+    for (const auto& snapshot : moving) {
+      ASSERT_EQ(snapshot.oceanFunction, state.oceanFunction);
+    }
+    compare(moving, frozen, 1e-7, "lateral viscosity");
+    auto tidal = Evolution3D::Forcing{
+        .tide = [&](double) { return grid.ZeroCoefficients(); }};
+    EXPECT_THROW((void)evolution.RunMigrating(times, still, tidal),
+                 std::invalid_argument);
+  }
+}
+
 TEST(Lateral, WithoutAnOceanIsTheDirectlySteppedBody) {
   // Under lateral viscosity, on a state with no ocean, the evolution is
   // the 3D stepper under the prescribed load and tide (and the

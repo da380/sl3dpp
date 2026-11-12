@@ -34,21 +34,4 @@ void CheckMigratingStart(const GRDSolver& solver,
   }
 }
 
-std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const GRDSolver& solver, const GRDSolver::State& background,
-    const GRDSolver::State& final) {
-  const auto fieldSize = solver.Grid().FieldSize();
-  const auto& start = background;
-  auto total = std::vector<double>(fieldSize);
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    total[i] =
-        solver.IceDensity() *
-            ((1.0 - final.oceanFunction[i]) * final.iceThickness[i] -
-             (1.0 - start.oceanFunction[i]) * start.iceThickness[i]) +
-        solver.WaterDensity() * (final.oceanFunction[i] * final.seaLevel[i] -
-                                 start.oceanFunction[i] * start.seaLevel[i]);
-  }
-  return solver.Grid().Expand(total);
-}
-
 }  // namespace sl3dpp::detail

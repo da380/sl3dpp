@@ -221,11 +221,27 @@ class Evolution3D {
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
 
+  /// A migrating run under further forcing beside the ice, as
+  /// Evolution's: the direct loads inside and outside the water budget,
+  /// a layer on the solid surface and interior sources, changes from the
+  /// background state. The start is then solved (the nonlinear equation
+  /// on the unrelaxed body; under lateral moduli or sources, inside the
+  /// combined fixed point of a zero-length step). A prescribed tide is
+  /// refused.
+  [[nodiscard]] std::vector<Snapshot> RunMigrating(
+      std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
+
   /// `Resume` for a migrating run: the same recurrence, each pass closed
   /// by the nonlinear solve.
   [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
       const Checkpoint& from, std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness);
+  [[nodiscard]] std::vector<Snapshot> ResumeMigrating(
+      const Checkpoint& from, std::span<const double> times,
+      const std::function<std::vector<double>(double)>& iceThickness,
+      const Forcing& forcing);
 
   /// The instantaneous elastic response to a direct load, as one solve
   /// with no time step: `load` the non-ocean surface load on the SLE grid,

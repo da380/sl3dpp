@@ -238,7 +238,12 @@ Deliberately out of scope:
   pass's memory and lateral responses, so the ocean function follows
   flotation inside the fixed point, and the load channel carries the
   converged state's load relative to the background. With no lateral
-  perturbation this is the 1D migrating run, shorelines included.
+  perturbation this is the 1D migrating run, shorelines included. Beside
+  the ice a migrating run takes the direct loads inside and outside the
+  water budget, a layer on the solid surface (its height is off the sea
+  level, so it moves the shorelines) and interior sources, as changes
+  from the background; the start is then solved by the nonlinear
+  equation on the unrelaxed body, and a prescribed tide is refused.
 - **Envelope.** Measured on a smooth degree-1 pattern
   ([lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/lateral-coupling.md) §5a): peak-to-peak contrasts
   up to 1000x converge at Δt/τ up to 2 (in about 150 passes at the hard

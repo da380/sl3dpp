@@ -14,6 +14,7 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
+#include <format>
 #include <functional>
 #include <map>
 #include <numbers>
@@ -1485,6 +1486,111 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
           << " " << (*gaps)[2];
     }
   }
+}
+
+TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
+  // A migrating run under the forcings beside the ice: a load inside the
+  // water budget, one outside it, a layer on the solid surface and a
+  // point source, all present at the first node, so that the start is
+  // solved. Where the forcing is too small to move a shoreline the run
+  // is the frozen run under the same forcing, node for node, the
+  // toroidal potential with it; and a prescribed tide is refused.
+  auto setup = Scene::Make(1e21);
+  const auto& sle = setup.solver.SolverScales();
+  const auto& grid = setup.solver.Grid();
+  std::mt19937 rng(57);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto state =
+      setup.solver.MakeState(setup.state.iceThickness, setup.state.seaLevel);
+  const auto load0 = setup.Smooth(rng, 100.0 * setup.Sigma());
+  const auto other0 = setup.Smooth(rng, 80.0 * setup.Sigma());
+  const auto layer0 = setup.Smooth(rng, 0.05 * setup.Metre());
+  auto history = [&](const std::vector<double>& pattern, double start) {
+    return [&times, pattern, start](double t) {
+      auto out = pattern;
+      for (auto& v : out) v *= start + t / times.back();
+      return out;
+    };
+  };
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e20 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto source = PointSource{
+      .at = {.radius = surface - 400e3 / sle.Length(),
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  auto forcing = Evolution::Forcing{
+      .directLoad = history(load0, 0.4),
+      .directLoadOutsideWaterBudget = history(other0, 0.7),
+      .solidSurfaceChange = history(layer0, 0.2),
+      .sources = [&](double t) {
+        auto at = source;
+        const auto shape = 0.3 + t / times.back();
+        for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp,
+                        &at.moment.rt, &at.moment.rp, &at.moment.tp}) {
+          *c *= shape;
+        }
+        return std::vector<PointSource>{at};
+      }};
+  const auto ice = [&](double) { return state.iceThickness; };
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+    }
+    return out;
+  };
+  auto peak = [](std::span<const double> x) {
+    auto out = 0.0;
+    for (auto v : x) out = std::max(out, std::abs(v));
+    return out;
+  };
+
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    for (const bool sourced : {false, true}) {
+      auto given = forcing;
+      if (!sourced) given.sources = nullptr;
+      ViscoelasticOperator op(setup.rheology, kLmax);
+      Evolution evolution(op, setup.solver, state,
+                          {.rotation = rotation,
+                           .rtol = 1e-13,
+                           .max_nonlinear_iterations = 400,
+                           .record_stride = 1});
+      const auto frozen = evolution.Run(times, given);
+      const auto moving = evolution.RunMigrating(times, ice, given);
+      ASSERT_EQ(frozen.size(), moving.size());
+      const auto what = std::format("rotation {}, sources {}",
+                                    static_cast<int>(rotation), sourced);
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        ASSERT_TRUE(moving[n].converged) << what << ", node " << n;
+        ASSERT_EQ(moving[n].oceanFunction, state.oceanFunction)
+            << what << ", node " << n;
+        for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
+                           &Evolution::Snapshot::displacement,
+                           &Evolution::Snapshot::potential,
+                           &Evolution::Snapshot::tangentialPotential,
+                           &Evolution::Snapshot::toroidalPotential}) {
+          ASSERT_EQ((moving[n].*field).size(), (frozen[n].*field).size());
+          if ((frozen[n].*field).empty()) continue;
+          EXPECT_GT(peak(frozen[n].*field), 0.0) << what << ", node " << n;
+          EXPECT_LT(worst(moving[n].*field, frozen[n].*field),
+                    1e-8 * peak(frozen[n].*field))
+              << what << ", node " << n;
+        }
+      }
+    }
+  }
+
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  Evolution evolution(op, setup.solver, state, {.rtol = 1e-12});
+  auto tidal = Evolution::Forcing{
+      .tide = [&](double) { return grid.ZeroCoefficients(); }};
+  EXPECT_THROW((void)evolution.RunMigrating(times, ice, tidal),
+               std::invalid_argument);
 }
 
 TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {

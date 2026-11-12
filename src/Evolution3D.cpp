@@ -122,6 +122,35 @@ std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
   return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
+namespace {
+void CheckMigratingForcing(const Evolution3D::Forcing& forcing) {
+  if (forcing.tide) {
+    throw std::invalid_argument(
+        "a prescribed tide is not taken under migrating shorelines");
+  }
+}
+}  // namespace
+
+std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceThickness,
+    const Forcing& forcing) {
+  CheckTimes(times);
+  CheckMigratingForcing(forcing);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               &iceThickness, nullptr, false, &forcing);
+}
+
+std::vector<Evolution3D::Snapshot> Evolution3D::ResumeMigrating(
+    const Checkpoint& from, std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceThickness,
+    const Forcing& forcing) {
+  CheckMigratingForcing(forcing);
+  Restore(from, times);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               &iceThickness, nullptr, true, &forcing);
+}
+
 void Evolution3D::Restore(const Checkpoint& from,
                                   std::span<const double> times) {
   CheckTimes(times);
@@ -188,6 +217,7 @@ class Evolution3D::Coupled {
   [[nodiscard]] bool HasSources() const {
     return !sourceForces.spheroidal.empty();
   }
+  [[nodiscard]] bool Migrating() const { return migrating_; }
   /// The node's sources on the open step.
   void ApplySources() {
     if (HasSources()) {
@@ -292,8 +322,7 @@ class Evolution3D::Coupled {
       auto solved = effectiveSolver->SolveNonlinear(owner.state_, moving,
                                                     nonlinearOptions);
       response = std::move(solved.response);
-      owner.sigma_ = detail::MigratedLoadCoefficients(
-          *owner.solver_, owner.state_, solved.finalState);
+      owner.sigma_ = std::move(solved.loadCoefficients);
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
       GRDSolver::GeneralisedForcing coupled;
@@ -379,6 +408,8 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
   vstate_.t = t * toMatTime_;
   coupled.loadGrid = std::move(load);
   if (op.HasLateralModuli() || coupled.HasSources()) {
+    // (a migrating start comes here with its nonlinear forcing set, and
+    // the closure solves the nonlinear equation in each pass)
     // Under lateral moduli the unrelaxed operator varies laterally: the
     // instantaneous response is the combined fixed point of a zero-length
     // step. Point sources force the degree systems directly, and take
@@ -400,6 +431,17 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
   }
   // The sea level equation closed by the unrelaxed Love numbers.
   const auto& elastic = coupled.SolverFor(op.ElasticLove());
+  if (coupled.Migrating()) {
+    // the nonlinear one, under the node's forcing beside the ice
+    auto solved = elastic.SolveNonlinear(state_, coupled.moving,
+                                         coupled.nonlinearOptions);
+    coupled.response = std::move(solved.response);
+    sigma_ = std::move(solved.loadCoefficients);
+    coupled.ocean = std::move(solved.finalState.oceanFunction);
+    psi_ = coupled.CentrifugalCoefficients();
+    coupled.Agree();
+    return {};
+  }
   GRDSolver::GeneralisedForcing forcing;
   forcing.directLoad = coupled.loadGrid;
   forcing.directLoadOutsideWaterBudget = coupled.outsideGrid;
@@ -582,8 +624,26 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
                          .tideCoefficients = psi_});
   };
 
+  // The forcing beside the ice of a migrating node, changes from the
+  // background: the loads, the layer and the sources.
+  auto setMoving = [&](double t) {
+    auto& moving = coupled.moving;
+    moving = GRDSolver::NonlinearForcing{};
+    moving.rotation = options_.rotation;
+    if (interior == nullptr) return;
+    setTide(t);
+    if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
+    moving.directLoadOutsideWaterBudget = coupled.outsideGrid;
+    moving.solidSurfaceChange = coupled.layerGrid;
+  };
+
   auto startInfo = Viscoelastic3D::StepInfo{};
-  if (!resumed && migrating) {
+  if (!resumed && migrating && interior != nullptr) {
+    // The start under a forcing beside the ice: solved, from the
+    // background.
+    setMoving(times[0]);
+    startInfo = Start(coupled, times[0], std::vector<double>(fieldSize, 0.0));
+  } else if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
     vstate_ = op.ZeroState();
     vstate_.t = times[0] * toMatTime_;
@@ -633,13 +693,12 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     // through the response channels, so the ocean function follows the
     // flotation condition inside the fixed point.
     auto& moving = coupled.moving;
-    moving = GRDSolver::NonlinearForcing{};
     if (migrating) {
+      setMoving(times[node]);
       moving.iceThicknessChange = (*iceThickness)(times[node]);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         moving.iceThicknessChange[i] -= state_.iceThickness[i];
       }
-      moving.rotation = options_.rotation;
     } else {
       coupled.loadGrid = directLoadAt(times[node]);
       setTide(times[node]);

@@ -6,6 +6,7 @@
 #include <numbers>
 #include <optional>
 #include <stdexcept>
+#include <string>
 
 #include "sl3dpp/ShConventions.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
@@ -945,10 +946,18 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
         "the nonlinear sea level solve needs a state with an ocean: the "
         "shorelines of a body without one do not migrate");
   }
-  const double sedimentDensity =
-      forcing.sedimentDensity >= 0.0
-          ? forcing.sedimentDensity
-          : 2300.0 / scales_.Factor(DensityDimensions);
+  auto checkField = [&](const std::vector<double>& field, const char* name) {
+    if (!field.empty() && field.size() != fieldSize) {
+      throw std::invalid_argument(std::string(name) +
+                                  " is not a field on the solver's grid");
+    }
+  };
+  checkField(forcing.iceThicknessChange, "the ice thickness change");
+  checkField(forcing.directLoad, "the direct load");
+  checkField(forcing.directLoadOutsideWaterBudget,
+             "the direct load outside the water budget");
+  checkField(forcing.solidSurfaceChange, "the solid surface change");
+  checkField(forcing.dynamicSeaLevelChange, "the dynamic sea level change");
 
   std::vector<std::complex<double>> staticDisp, staticGrav, staticSlc;
   std::optional<Block2> staticDisp2, staticGrav2;
@@ -969,6 +978,16 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
   }
+  // A layer on the solid surface: its thickness is in the sea level
+  // change alone, with the static terms, and so in the flotation.
+  const bool layered = !forcing.solidSurfaceChange.empty();
+  auto layer2 = Block2{};
+  if (layered) {
+    const auto layerLm = grid_.Expand(forcing.solidSurfaceChange);
+    if (staticSlc.empty()) staticSlc.assign(coefSize, 0.0);
+    for (auto i = std::size_t{0}; i < coefSize; ++i) staticSlc[i] -= layerLm[i];
+    layer2 = BlockOf(layerLm);
+  }
   if (!forcing.tangentialResponse.empty() &&
       forcing.tangentialResponse.size() != coefSize) {
     throw std::invalid_argument(
@@ -985,45 +1004,56 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
       newIce[i] += forcing.iceThicknessChange[i];
     }
   }
-  auto sedimentLoad = std::vector<double>{};
-  auto sedimentMassChange = 0.0;
-  if (!forcing.sedimentThicknessChange.empty()) {
-    sedimentLoad.resize(fieldSize);
+  // The direct loads: the one inside the water budget takes its mass
+  // from the ocean, the one outside it moves no water.
+  auto directData = std::vector<double>{};
+  auto directMassChange = 0.0;
+  if (!forcing.directLoad.empty()) {
+    directData = forcing.directLoad;
+    directMassChange = IntegrateSurface(directData);
+  }
+  if (!forcing.directLoadOutsideWaterBudget.empty()) {
+    if (directData.empty()) directData.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sedimentLoad[i] = sedimentDensity * forcing.sedimentThicknessChange[i];
+      directData[i] += forcing.directLoadOutsideWaterBudget[i];
     }
-    sedimentMassChange = IntegrateSurface(sedimentLoad);
   }
 
-  auto initialWater = std::vector<double>(fieldSize);
-  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-    initialWater[i] = initialOcean[i] * initialBathy[i];
-  }
-  const double initialWaterMass =
-      waterDensity_ * IntegrateSurface(initialWater);
+  // The changes of grounded ice and of ocean water per unit area from
+  // the state given, formed from the changes of the fields: a small
+  // change is then not the difference of two large masses.
+  const auto iceChange = [&](std::size_t i) {
+    return forcing.iceThicknessChange.empty() ? 0.0
+                                              : forcing.iceThicknessChange[i];
+  };
+  auto groundedIceChangeAt = [&](std::size_t i, double ocean) {
+    return iceDensity_ * ((1.0 - ocean) * iceChange(i) -
+                          (ocean - initialOcean[i]) * initialIce[i]);
+  };
+  auto waterChangeAt = [&](std::size_t i, double ocean, double seaLevelChange) {
+    return waterDensity_ * (ocean * seaLevelChange +
+                            (ocean - initialOcean[i]) * initialBathy[i]);
+  };
 
   std::vector<double> currentOcean = initialOcean;
-  std::vector<double> currentBathy = initialBathy;
+  // the final state's sea level less the first's
+  auto currentChange = std::vector<double>(fieldSize, 0.0);
   auto slcData = std::vector<double>(fieldSize, 0.0);
   auto omega = std::array<double, 3>{0.0, 0.0, 0.0};
 
   auto loadLm = std::vector<std::complex<double>>(coefSize, 0.0);
   auto lastRotation = std::optional<Rotation>{};
 
+  auto lastShift = 0.0;
   auto err = std::numeric_limits<double>::infinity();
   auto converged = false;
   auto count = 0;
   while (count < options.max_iterations) {
     auto totalLoad = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      const double groundedIceChange =
-          iceDensity_ * ((1.0 - currentOcean[i]) * newIce[i] -
-                         (1.0 - initialOcean[i]) * initialIce[i]);
-      const double oceanMassChange =
-          waterDensity_ * (currentOcean[i] * currentBathy[i] -
-                           initialOcean[i] * initialBathy[i]);
-      totalLoad[i] = groundedIceChange + oceanMassChange;
-      if (!sedimentLoad.empty()) totalLoad[i] += sedimentLoad[i];
+      totalLoad[i] = groundedIceChangeAt(i, currentOcean[i]) +
+                     waterChangeAt(i, currentOcean[i], currentChange[i]);
+      if (!directData.empty()) totalLoad[i] += directData[i];
     }
     loadLm = grid_.Expand(totalLoad);
 
@@ -1045,57 +1075,51 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
       omega = lastRotation->omega;
       SetBlock(slcLm, -1.0 * (lastRotation->disp2 +
                               (1.0 / g_) * (lastRotation->grav2 +
-                                            lastRotation->centrifugal)));
+                                            lastRotation->centrifugal) +
+                              layer2));
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * lastRotation->centrifugal0;
     }
     const auto slcLocal = grid_.Synthesise(slcLm);
 
-    // The explicit mass budget: grounded ice and sediment taken from the
-    // ocean, the eustatic shift closing it exactly.
-    auto rawBathy = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      rawBathy[i] = initialBathy[i] + slcLocal[i];
-      if (!forcing.sedimentThicknessChange.empty()) {
-        rawBathy[i] -= forcing.sedimentThicknessChange[i];
-      }
-      if (!forcing.dynamicSeaLevelChange.empty()) {
-        rawBathy[i] += forcing.dynamicSeaLevelChange[i];
+    // The explicit water budget: the grounded ice and the direct load
+    // inside it taken from the ocean, the uniform shift closing it
+    // exactly. The layer's thickness is already in the local change.
+    auto rawChange = slcLocal;
+    if (!forcing.dynamicSeaLevelChange.empty()) {
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        rawChange[i] += forcing.dynamicSeaLevelChange[i];
       }
     }
-    auto groundedIceChange = std::vector<double>(fieldSize);
+    // what the water has gained before the shift, and what it must lose
+    auto unbalanced = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      groundedIceChange[i] =
-          iceDensity_ * ((1.0 - currentOcean[i]) * newIce[i] -
-                         (1.0 - initialOcean[i]) * initialIce[i]);
+      unbalanced[i] = groundedIceChangeAt(i, currentOcean[i]) +
+                      waterChangeAt(i, currentOcean[i], rawChange[i]);
     }
-    const auto iceMassChange = IntegrateSurface(groundedIceChange);
-    const double targetWaterMass =
-        initialWaterMass - iceMassChange - sedimentMassChange;
-    auto currentRaw = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      currentRaw[i] = currentOcean[i] * rawBathy[i];
-    }
-    const double currentRawWaterMass =
-        waterDensity_ * IntegrateSurface(currentRaw);
     const double oceanDensityArea =
         waterDensity_ * IntegrateSurface(currentOcean);
     const double eustaticShift =
-        (targetWaterMass - currentRawWaterMass) / oceanDensityArea;
+        -(IntegrateSurface(unbalanced) + directMassChange) / oceanDensityArea;
 
-    std::vector<double> newSlc(fieldSize), newBathy(fieldSize),
+    lastShift = eustaticShift;
+    std::vector<double> newSlc(fieldSize), newChange(fieldSize),
         newOcean(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       newSlc[i] = slcLocal[i] + eustaticShift;
-      newBathy[i] = rawBathy[i] + eustaticShift;
+      newChange[i] = rawChange[i] + eustaticShift;
+      const double newBathy = initialBathy[i] + newChange[i];
       const auto land = !state.forcedLand.empty() && state.forcedLand[i] != 0;
       newOcean[i] =
-          !land && waterDensity_ * newBathy[i] - iceDensity_ * newIce[i] > 0.0
+          !land && waterDensity_ * newBathy - iceDensity_ * newIce[i] > 0.0
               ? 1.0
               : 0.0;
     }
 
-    const auto maxSlc = MaxAbs(slcData);
+    // The change between iterates against the size of the change, taken
+    // before the uniform shift as well as after: a layer whose water the
+    // shift returns exactly leaves no change to measure against.
+    const auto maxSlc = std::max(MaxAbs(slcData), count > 0 ? MaxAbs(slcLocal) : 0.0);
     if (maxSlc > 0.0) {
       auto diff = 0.0;
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1107,7 +1131,7 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     }
 
     slcData = std::move(newSlc);
-    currentBathy = std::move(newBathy);
+    currentChange = std::move(newChange);
     currentOcean = std::move(newOcean);
     ++count;
     if (err <= options.rtol) {
@@ -1152,7 +1176,10 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
 
   NonlinearResponse out;
   out.finalState.iceThickness = std::move(newIce);
-  out.finalState.seaLevel = std::move(currentBathy);
+  out.finalState.seaLevel = initialBathy;
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    out.finalState.seaLevel[i] += currentChange[i];
+  }
   out.finalState.oceanFunction = std::move(currentOcean);
   out.finalState.oceanArea = IntegrateSurface(out.finalState.oceanFunction);
   out.finalState.forcedLand = state.forcedLand;
@@ -1168,6 +1195,16 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     out.response.toroidalPotential = grid_.Synthesise(forcing.toroidalResponse);
   }
   out.response.angularVelocity = omega;
+  out.response.uniformShift = lastShift;
+  // the load of the state returned, which the last pass's update made
+  auto carried = std::vector<double>(fieldSize);
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    carried[i] = groundedIceChangeAt(i, out.finalState.oceanFunction[i]) +
+                 waterChangeAt(i, out.finalState.oceanFunction[i],
+                               currentChange[i]);
+    if (!directData.empty()) carried[i] += directData[i];
+  }
+  out.loadCoefficients = grid_.Expand(carried);
   out.response.iterations = count;
   out.response.error = err;
   out.response.converged = converged;

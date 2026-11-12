@@ -589,6 +589,186 @@ TEST(GRDSolver, LandHeldStaysLandThroughTheMigratingSolve) {
   }
 }
 
+TEST(GRDSolver, NonlinearSolveTakesEveryLoad) {
+  // The nonlinear solve under the loads of the linear one. Where no
+  // shoreline moves the two are the same equation, and their answers
+  // agree to the tolerance of the solves: ice, a load in the water
+  // budget, one outside it and a layer on the solid surface, together.
+  // A uniform layer changes nothing. A thick layer on the ocean floor
+  // makes land of it: the shorelines are flotation's on the final state,
+  // whose sea level is the first plus the change,
+  // the water and grounded ice are conserved (less the mass of a load
+  // inside the budget, where there is one), and the load returned is
+  // the load the final state carries.
+  const auto lmax = 32;
+  auto table = TestTable();
+  GRDSolver solver(SurfaceGrid(lmax), table, SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const auto length = solver.SolverScales().Length();
+  const double sigma =
+      solver.SolverScales().Factor(Dimensions{.mass = 1, .length = -2});
+  const double density =
+      solver.SolverScales().Factor(Dimensions{.mass = 1, .length = -3});
+  // a continent with grounded ice at its centre, in a deep ocean
+  const auto state = solver.MakeState(
+      grid.FromFunction([&](double theta, double phi) {
+        return 1500.0 * Cap(theta, phi, 1.6, 2.0, 0.3) / length;
+      }),
+      grid.FromFunction([&](double theta, double phi) {
+        return (4000.0 - 7000.0 * Cap(theta, phi, 1.6, 2.0, 0.7)) / length;
+      }));
+  auto maxAbs = [](std::span<const double> x) {
+    auto out = 0.0;
+    for (auto v : x) out = std::max(out, std::abs(v));
+    return out;
+  };
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+    }
+    return out;
+  };
+  const auto a2 = solver.Radius() * solver.Radius();
+  auto budget = [&](const GRDSolver::State& s) {
+    auto total = std::vector<double>(s.seaLevel.size());
+    for (auto i = std::size_t{0}; i < total.size(); ++i) {
+      total[i] =
+          solver.WaterDensity() * s.oceanFunction[i] * s.seaLevel[i] +
+          solver.IceDensity() * (1.0 - s.oceanFunction[i]) * s.iceThickness[i];
+    }
+    return a2 * grid.Integrate(total);
+  };
+  const GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
+
+  // -- no shoreline moves: the linear solve's answer
+  auto iceChange = state.iceThickness;
+  for (auto& v : iceChange) v *= -1e-3;
+  const auto inside = grid.FromFunction([&](double theta, double phi) {
+    return 150.0 * Cap(theta, phi, 0.4, 0.7, 0.5) / sigma;
+  });
+  const auto outside = grid.FromFunction([&](double theta, double phi) {
+    return -90.0 * Cap(theta, phi, 2.3, 4.0, 0.4) / sigma;
+  });
+  const auto layer = grid.FromFunction([&](double theta, double phi) {
+    return 0.2 * Cap(theta, phi, 0.9, 5.0, 0.4) / length;
+  });
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    GRDSolver::NonlinearForcing moving;
+    moving.iceThicknessChange = iceChange;
+    moving.directLoad = inside;
+    moving.directLoadOutsideWaterBudget = outside;
+    moving.solidSurfaceChange = layer;
+    moving.rotation = rotation;
+    const auto got = solver.SolveNonlinear(state, moving, options);
+    ASSERT_TRUE(got.response.converged)
+        << got.response.error << " after " << got.response.iterations;
+    ASSERT_EQ(got.finalState.oceanFunction, state.oceanFunction);
+
+    GRDSolver::GeneralisedForcing fixed;
+    fixed.directLoad =
+        solver.DirectLoadFromIceThicknessChange(state, iceChange);
+    for (auto i = std::size_t{0}; i < inside.size(); ++i) {
+      fixed.directLoad[i] += inside[i];
+    }
+    fixed.directLoadOutsideWaterBudget = outside;
+    fixed.solidSurfaceChange = layer;
+    fixed.rotation = rotation;
+    const auto want = solver.SolveGeneralised(state, fixed, options);
+    ASSERT_TRUE(want.converged);
+    const auto mode = static_cast<int>(rotation);
+    EXPECT_LT(worst(got.response.relativeSeaLevelChange,
+                    want.relativeSeaLevelChange),
+              1e-9 * maxAbs(want.relativeSeaLevelChange))
+        << "rotation " << mode;
+    EXPECT_LT(worst(got.response.displacement, want.displacement),
+              1e-9 * maxAbs(want.displacement))
+        << "rotation " << mode;
+    EXPECT_LT(worst(got.response.potential, want.potential),
+              1e-9 * maxAbs(want.potential))
+        << "rotation " << mode;
+    EXPECT_LT(worst(got.response.tangentialPotential, want.tangentialPotential),
+              1e-9 * maxAbs(want.tangentialPotential))
+        << "rotation " << mode;
+    EXPECT_NEAR(got.response.uniformShift, want.uniformShift,
+                1e-9 * maxAbs(want.relativeSeaLevelChange))
+        << "rotation " << mode;
+    for (auto k = 0; k < 3; ++k) {
+      EXPECT_NEAR(got.response.angularVelocity[k], want.angularVelocity[k],
+                  1e-9 * maxAbs(want.angularVelocity) + 1e-300)
+          << "rotation " << mode;
+    }
+  }
+
+  // -- a uniform layer displaces its own water and changes nothing
+  {
+    GRDSolver::NonlinearForcing moving;
+    moving.solidSurfaceChange.assign(grid.FieldSize(), 3.0 / length);
+    const auto got = solver.SolveNonlinear(state, moving, options);
+    ASSERT_TRUE(got.response.converged);
+    EXPECT_EQ(got.finalState.oceanFunction, state.oceanFunction);
+    EXPECT_LT(maxAbs(got.response.relativeSeaLevelChange), 1e-12 * 3.0 / length);
+    EXPECT_NEAR(got.response.uniformShift, 3.0 / length, 1e-12 * 3.0 / length);
+  }
+
+  // -- a layer that fills the sea where it lies
+  const auto fill = grid.FromFunction([&](double theta, double phi) {
+    return 6000.0 * Cap(theta, phi, 0.4, 0.7, 0.2) / length;
+  });
+  auto fillMass = fill;
+  for (auto& v : fillMass) v *= 2300.0 / density;
+  for (auto inBudget : {false, true}) {
+    GRDSolver::NonlinearForcing moving;
+    moving.solidSurfaceChange = fill;
+    (inBudget ? moving.directLoad : moving.directLoadOutsideWaterBudget) =
+        fillMass;
+    const GRDSolver::Options loose{.rtol = 1e-11, .max_iterations = 400};
+    const auto got = solver.SolveNonlinear(state, moving, loose);
+    ASSERT_TRUE(got.response.converged) << got.response.error;
+    const auto& final = got.finalState;
+    EXPECT_LT(final.oceanArea, 0.999 * state.oceanArea);
+    auto made = std::size_t{0};
+    for (auto i = std::size_t{0}; i < fill.size(); ++i) {
+      EXPECT_NEAR(final.seaLevel[i],
+                  state.seaLevel[i] + got.response.relativeSeaLevelChange[i],
+                  1e-12 * maxAbs(state.seaLevel));
+      // land made by the layer rising above the sea floor (the floor
+      // sinks under it, so less than the layer alone would make)
+      if (state.oceanFunction[i] == 1.0 && final.oceanFunction[i] == 0.0 &&
+          fill[i] > state.seaLevel[i]) {
+        ++made;
+      }
+    }
+    EXPECT_GT(made, std::size_t{10});
+    // and the shorelines are flotation's on the final state
+    EXPECT_EQ(
+        solver.MakeState(final.iceThickness, final.seaLevel).oceanFunction,
+        final.oceanFunction);
+    const auto taken = inBudget ? a2 * grid.Integrate(fillMass) : 0.0;
+    EXPECT_NEAR(budget(final), budget(state) - taken,
+                1e-9 * std::abs(budget(state)))
+        << "in budget " << inBudget;
+    // the load returned is the final state's own
+    auto carried = std::vector<double>(fill.size());
+    for (auto i = std::size_t{0}; i < fill.size(); ++i) {
+      carried[i] =
+          fillMass[i] +
+          solver.IceDensity() *
+              ((1.0 - final.oceanFunction[i]) * final.iceThickness[i] -
+               (1.0 - state.oceanFunction[i]) * state.iceThickness[i]) +
+          solver.WaterDensity() * (final.oceanFunction[i] * final.seaLevel[i] -
+                                   state.oceanFunction[i] * state.seaLevel[i]);
+    }
+    const auto want = grid.Expand(carried);
+    auto off = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < want.size(); ++i) {
+      off = std::max(off, std::abs(want[i] - got.loadCoefficients[i]));
+      top = std::max(top, std::abs(want[i]));
+    }
+    EXPECT_LT(off, 1e-8 * top) << "in budget " << inBudget;
+  }
+}
+
 TEST(GRDSolver, NonlinearMassBudgetAndLinearLimit) {
   auto table = TestTable();
   Fingerprint fingerprint(32, table);

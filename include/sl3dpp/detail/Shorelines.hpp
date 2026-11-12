@@ -6,8 +6,7 @@
  * (pyslfp's `_run_migrating`). Internal.
  *
  * A migrating run starts from its background state, which must be the state
- * at the first node, and finishes each step under the load its converged
- * nonlinear state carries relative to that background.
+ * at the first node.
  */
 
 #include <complex>
@@ -26,13 +25,5 @@ namespace sl3dpp::detail {
 void CheckMigratingStart(const GRDSolver& solver,
                          const GRDSolver::State& background,
                          std::span<const double> startIce);
-
-/// The surface load of a converged nonlinear state relative to the
-/// background, grounded ice and ocean water (pyslfp's `_total_load_coeffs`),
-/// as m >= 0 coefficients in the solver's units: what the radial step
-/// finishes under, so that it sees the load its sea level solution saw.
-[[nodiscard]] std::vector<std::complex<double>> MigratedLoadCoefficients(
-    const GRDSolver& solver, const GRDSolver::State& background,
-    const GRDSolver::State& final);
 
 }  // namespace sl3dpp::detail

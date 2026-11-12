@@ -134,6 +134,41 @@ std::vector<Evolution::Snapshot> Evolution::RunMigrating(
   return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
+namespace {
+void CheckMigratingForcing(const Evolution::Forcing& forcing) {
+  if (forcing.tide) {
+    throw std::invalid_argument(
+        "a prescribed tide is not taken under migrating shorelines");
+  }
+}
+}  // namespace
+
+std::vector<Evolution::Snapshot> Evolution::RunMigrating(
+    std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceThickness,
+    const Forcing& forcing) {
+  CheckTimes(times);
+  CheckMigratingForcing(forcing);
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               &iceThickness, nullptr, false, &forcing);
+}
+
+std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
+    const Checkpoint& from, std::span<const double> times,
+    const std::function<std::vector<double>(double)>& iceThickness,
+    const Forcing& forcing) {
+  CheckMigratingForcing(forcing);
+  Restore(from, times);
+  if ((forcing.sources || forcing.stressGluts) &&
+      (!from.toroidal.has_value() || from.strain.empty())) {
+    throw std::invalid_argument(
+        "a run under interior sources is resumed from a checkpoint of "
+        "such a run, which holds the strain and the toroidal state");
+  }
+  return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
+               &iceThickness, nullptr, true, &forcing);
+}
+
 void Evolution::Restore(const Checkpoint& from,
                                 std::span<const double> times) {
   CheckTimes(times);
@@ -338,10 +373,64 @@ std::vector<Evolution::Snapshot> Evolution::March(
     return Coefficients(toroidal->Surface(twist), toNdLength_);
   };
 
+  // The sources' own unrelaxed response at the start, as ready channels
+  // of the start's sea level solve (linear or nonlinear); its strain
+  // joins the start's.
+  auto startResponse = std::map<int, std::vector<double>>{};
+  auto startSources = [&](auto& forcing) {
+    nodeForces = sourceForcesAt(times[0]);
+    const auto& forces = nodeForces;
+    for (const auto& [l, f] : forces.spheroidal) {
+      startResponse.emplace(l, op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1)));
+    }
+    forcing.displacementResponse =
+        Coefficients(op.Surface(startResponse, Component::U), toNdLength_);
+    forcing.potentialResponse =
+        Coefficients(op.Surface(startResponse, Component::Phi), toNdPotential_);
+    forcing.tangentialResponse =
+        Coefficients(op.Surface(startResponse, Component::V), toNdLength_);
+    if (const auto found = startResponse.find(0);
+        found != startResponse.end()) {
+      forcing.inertiaMomentChange =
+          op.InertiaMoment(found->second, 2)[0] * toNdMoment_;
+    }
+    twist = toroidal->SolveElastic(tstate, forces.toroidal);
+    toroidal->SetStrain(tstate, twist);
+    forcing.toroidalResponse = toroidalCoefficients();
+  };
+  auto primeUnderSources = [&] {
+    op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
+                   Columns(psi_, toMatPotential_));
+    for (auto& [l, d] : op.Strain(startResponse)) {
+      auto& to = vstate_.strain.at(l);
+      for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += d[i];
+    }
+  };
+  // The forcing beside the ice of a migrating node: the loads and the
+  // layer, changes from the background.
+  auto movingLoadsAt = [&](double t, GRDSolver::NonlinearForcing& moving) {
+    if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
+    moving.directLoadOutsideWaterBudget = outsideAt(t);
+    moving.solidSurfaceChange = layerAt(t);
+  };
+
   auto loadGrid = std::vector<double>{};
   auto response = GRDSolver::Response{};
   auto ocean = std::vector<double>{};  // the node's C, migrating only
-  if (!resumed && migrating) {
+  if (!resumed && migrating && interior != nullptr) {
+    // The start under a forcing beside the ice: the nonlinear equation
+    // on the unrelaxed body, from the background.
+    GRDSolver::NonlinearForcing moving;
+    movingLoadsAt(times[0], moving);
+    moving.rotation = options_.rotation;
+    if (sourced) startSources(moving);
+    auto solved = solverFor(0.0).SolveNonlinear(state_, moving, nonlinearOptions);
+    response = std::move(solved.response);
+    sigma_ = std::move(solved.loadCoefficients);
+    ocean = std::move(solved.finalState.oceanFunction);
+    psi_ = potentialAt(times[0], response.angularVelocity);
+    if (sourced) primeUnderSources();
+  } else if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
     response.relativeSeaLevelChange.assign(fieldSize, 0.0);
     response.displacement.assign(fieldSize, 0.0);
@@ -361,43 +450,13 @@ std::vector<Evolution::Snapshot> Evolution::March(
     forcing.solidSurfaceChange = layerAt(times[0]);
     if (tide != nullptr) forcing.tide = (*tide)(times[0]);
     forcing.rotation = options_.rotation;
-    // The sources' own unrelaxed response enters as ready channels, and
-    // its strain joins the start's.
-    auto startResponse = std::map<int, std::vector<double>>{};
-    if (sourced) {
-      nodeForces = sourceForcesAt(times[0]);
-      const auto& forces = nodeForces;
-      for (const auto& [l, f] : forces.spheroidal) {
-        startResponse.emplace(l, op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1)));
-      }
-      forcing.displacementResponse =
-          Coefficients(op.Surface(startResponse, Component::U), toNdLength_);
-      forcing.potentialResponse =
-          Coefficients(op.Surface(startResponse, Component::Phi), toNdPotential_);
-      forcing.tangentialResponse =
-          Coefficients(op.Surface(startResponse, Component::V), toNdLength_);
-      if (const auto found = startResponse.find(0);
-          found != startResponse.end()) {
-        forcing.inertiaMomentChange =
-            op.InertiaMoment(found->second, 2)[0] * toNdMoment_;
-      }
-      twist = toroidal->SolveElastic(tstate, forces.toroidal);
-      toroidal->SetStrain(tstate, twist);
-      forcing.toroidalResponse = toroidalCoefficients();
-    }
+    if (sourced) startSources(forcing);
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
     sigma_ = totalLoadCoefficients(
         withOutside(loadGrid, forcing.directLoadOutsideWaterBudget),
         response.relativeSeaLevelChange);
     psi_ = potentialAt(times[0], response.angularVelocity);
-    if (sourced) {
-      op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
-                     Columns(psi_, toMatPotential_));
-      for (auto& [l, d] : op.Strain(startResponse)) {
-        auto& to = vstate_.strain.at(l);
-        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += d[i];
-      }
-    }
+    if (sourced) primeUnderSources();
   }
   if (stride > 0 && !sourced) {
     op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
@@ -452,6 +511,18 @@ std::vector<Evolution::Snapshot> Evolution::March(
                              Columns(sigma_, toMatDensity_),
                              Columns(psi_, toMatPotential_));
     const auto& effectiveSolver = solverFor(dt);
+    // the node's sources force the step; the toroidal systems are
+    // stepped under theirs
+    auto stepSources = [&](auto& forcing) {
+      nodeForces = sourceForcesAt(times[node]);
+      const auto& forces = nodeForces;
+      step.AddForce(forces.spheroidal);
+      auto stepped =
+          toroidal->Step(tstate, dt, options_.scheme, forces.toroidal);
+      tstate = std::move(stepped.first);
+      twist = std::move(stepped.second);
+      forcing.toroidalResponse = toroidalCoefficients();
+    };
     if (migrating) {
       // The step's equilibrium is the nonlinear equation from the
       // background, the memory field entering through the response
@@ -461,6 +532,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         moving.iceThicknessChange[i] -= state_.iceThickness[i];
       }
+      movingLoadsAt(times[node], moving);
+      if (sourced) stepSources(moving);
       moving.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       moving.potentialResponse =
@@ -474,8 +547,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
       response = std::move(solved.response);
       // the load the converged state carries relative to the background,
       // so the radial step finishes under the load its solution saw
-      sigma_ =
-          detail::MigratedLoadCoefficients(solver, state_, solved.finalState);
+      sigma_ = std::move(solved.loadCoefficients);
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
       GRDSolver::GeneralisedForcing coupled;
@@ -484,18 +556,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
       coupled.directLoadOutsideWaterBudget = outsideAt(times[node]);
       coupled.solidSurfaceChange = layerAt(times[node]);
       if (tide != nullptr) coupled.tide = (*tide)(times[node]);
-      if (sourced) {
-        // the node's sources force the step; the toroidal systems are
-        // stepped under theirs
-        nodeForces = sourceForcesAt(times[node]);
-        const auto& forces = nodeForces;
-        step.AddForce(forces.spheroidal);
-        auto stepped =
-            toroidal->Step(tstate, dt, options_.scheme, forces.toroidal);
-        tstate = std::move(stepped.first);
-        twist = std::move(stepped.second);
-        coupled.toroidalResponse = toroidalCoefficients();
-      }
+      if (sourced) stepSources(coupled);
       coupled.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
       coupled.potentialResponse =

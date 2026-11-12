@@ -385,12 +385,28 @@ class GRDSolver {
   // -- the nonlinear (migrating shoreline) solve
   // ------------------------------------
 
+  /// The forcings of the nonlinear solve, all non-dimensional and all
+  /// changes from the state given; an empty vector is an absent channel.
+  /// The surface loads have the properties they have in the linear solve
+  /// (GeneralisedForcing), and the ice one more: it enters the flotation
+  /// condition that places the shorelines.
   struct NonlinearForcing {
+    /// The change of ice thickness. Its grounded part is a direct load
+    /// inside the water budget, on the ocean function the solve finds.
     std::vector<double> iceThicknessChange;
-    std::vector<double> sedimentThicknessChange;
+    /// A direct load that enters the water budget (a hydrological load).
+    std::vector<double> directLoad;
+    /// A direct load outside the water budget (sediment, any other mass).
+    std::vector<double> directLoadOutsideWaterBudget;
+    /// A change of the height of the solid surface that is not the
+    /// body's deformation (a sediment layer: its mass over its density):
+    /// the sea level changes by minus this, and so the shorelines move
+    /// with it. The layer's mass is a direct load beside it.
+    std::vector<double> solidSurfaceChange;
+    /// A given change of the sea surface over the oceans (an
+    /// ocean-dynamic one): it is in the final state's sea level and its
+    /// water in the load, and not in the change returned.
     std::vector<double> dynamicSeaLevelChange;
-    /// Non-dimensional; negative means the default 2300 kg m^-3.
-    double sedimentDensity = -1.0;
     std::vector<std::complex<double>> displacementResponse;
     std::vector<std::complex<double>> potentialResponse;
     std::vector<std::complex<double>> tangentialResponse;
@@ -402,6 +418,10 @@ class GRDSolver {
   struct NonlinearResponse {
     State finalState;
     Response response;
+    /// The surface load the final state carries relative to the state
+    /// given, direct and induced: the grounded ice, the ocean's water and
+    /// the direct loads, as m >= 0 coefficients.
+    std::vector<std::complex<double>> loadCoefficients;
   };
 
   [[nodiscard]] NonlinearResponse SolveNonlinear(
