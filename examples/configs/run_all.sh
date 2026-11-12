@@ -47,6 +47,7 @@ run sea-level sea_level_fingerprint.json
 run sea-level sea_level_fingerprint_3d.json
 run sea-level sea_level_static_migrating.json
 run sea-level sea_level_static_coseismic.json
+run sea-level sea_level_postseismic.json
 run sea-level sea_level_1d.json
 run sea-level sea_level_1d_calibrated.json
 run sea-level sea_level_3d.json

@@ -49,8 +49,9 @@ struct SeaLevelRun {
   Problem problem = Problem::Static;
   ModelBlock model;
   int lmax = 0;
-  /// The window, dates before present: the quasi-static problem's.
-  std::optional<TimesBlock> times;
+  /// The quasi-static problem's nodes: dates before present (a dated
+  /// run), or times on the run's own clock (a run counting forwards).
+  std::optional<Window> times;
   SeaLevelForcing forcing;
   /// The state, its instant, the shorelines and the calibration, the
   /// `ocean` block's; absent, the body has no ocean (GRDSolver::
@@ -86,8 +87,10 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// initial sea level's calibration, the time step, a term's history or
 /// onset) are refused in the static one, naming the member, and so are the
 /// 3-D step's unless a moduli file is given (the static problem on lateral
-/// moduli takes them; on a radial file the runner refuses them). In the
-/// static problem a `thickness` term of the ice change without the
+/// moduli takes them; on a radial file the runner refuses them). The
+/// `times` block's form (ReadWindow) sets the form of the terms' times
+/// (ReadSeaLevelForcing) and of the state's instant (ReadOceanBlock). In
+/// the static problem a `thickness` term of the ice change without the
 /// state's date is refused, and with the state at the window's end a
 /// `change` term or a cap. The `ocean` block is optional: without it the
 /// body has no ocean, and an ice change is refused. A tide is refused
@@ -182,18 +185,23 @@ class InputFiles {
 /// the state's ice for `cap_fraction`). In the static problem each term
 /// is read at its own date and the change is one field, the same whatever
 /// time is asked; in a run through time each file is read at the time
-/// asked, and a cap is held through the run or scaled by its history's
-/// factor at the time asked. Every use of the ice goes through it: the
-/// state a run starts from, the frozen load, the migrating thickness, the
-/// calibration's start and the static problem's change.
+/// asked (a held file, a run counting forwards' `change`, is one field),
+/// and a cap is held through the run or scaled by its history's factor at
+/// the time asked. Times asked are SI seconds on the run's axis
+/// (Window::Axis: the calendar's in a dated run and the static problem,
+/// the run's own clock in one counting forwards). Every use of the ice
+/// goes through it: the state a run starts from, the frozen load, the
+/// migrating thickness, the calibration's start and the static problem's
+/// change.
 class RunIce {
  public:
-  /// Reads the state's ice at `stateTime` (SI seconds of the files' axes)
-  /// and the terms' files through `files`, a term's file held to its kind
-  /// (a `thickness` file without a time axis is refused, and in the
-  /// static problem a `change` file is held to its date, CheckDate).
-  /// Values that are not numbers are refused at the member reading them.
-  /// `top`, the config, must outlive the ice.
+  /// Reads the state's ice at `stateTime` (SI seconds of the state's
+  /// files' axes) and the terms' files through `files`, a term's file held
+  /// to its kind (a `thickness` file without a time axis is refused, in
+  /// the static problem a `change` file is held to its date, CheckDate,
+  /// and in a run counting forwards a `change` file with a time axis is
+  /// refused). Values that are not numbers are refused at the member
+  /// reading them. `top`, the config, must outlive the ice.
   RunIce(const SeaLevelRun& run, const Json& top, InputFiles& files,
          double stateTime);
 
@@ -218,9 +226,10 @@ class RunIce {
   [[nodiscard]] double Tolerance() const;
   /// Refuses, at `forcing.ice_change`, a change that removes more ice than
   /// the state holds at any of the SI times given (beyond Tolerance), with
-  /// the worst deficit, its place and, `dated`, its date. Where the state's
-  /// own thickness is negative (a resampling's undershoot) it holds none.
-  void CheckHeld(std::span<const double> times, bool dated) const;
+  /// the worst deficit, its place and, in a run through time (`window`),
+  /// its time as the window labels it. Where the state's own thickness is
+  /// negative (a resampling's undershoot) it holds none.
+  void CheckHeld(std::span<const double> times, const Window* window) const;
 
  private:
   struct Term {
@@ -295,10 +304,10 @@ struct LandMask {
 [[nodiscard]] const Json& IceMember(const Json& top);
 [[nodiscard]] const Json& IceChangeMember(const Json& top);
 
-/// The static problem's rule of the state's date, once the state's files
-/// are read through `files`: `ocean.date_kyr_bp` is required when any of
-/// them (the sea level, the ice, the land) has a time axis, and refused
-/// when none has one.
+/// The rule of the state's date in the static problem and in a run
+/// counting forwards, once the state's files are read through `files`:
+/// `ocean.date_kyr_bp` is required when any of them (the sea level, the
+/// ice, the land) has a time axis, and refused when none has one.
 void CheckStateDate(const SeaLevelRun& run, const Json& top,
                     InputFiles& files);
 
@@ -319,12 +328,14 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
                                                  double time);
 
 /// Reads the run through time's world: the state at the end of the window
-/// `ocean.at` names (a state's file with a time axis that ends before the
-/// window's end is refused when the state is there), the run's ice, held
-/// at every node to what the state holds (RunIce::CheckHeld), with the
-/// change present at the window's start, and the background built from
-/// the ice at the window's start and the state's sea level. Without an
-/// ocean, the world of a body without one (Loaded), nothing read.
+/// `ocean.at` names in a dated run (a state's file with a time axis that
+/// ends before the window's end is refused when the state is there), or
+/// at its date, `ocean.date_kyr_bp`, in a run counting forwards
+/// (CheckStateDate), the state then at the window's start; the run's ice,
+/// held at every node to what the state holds (RunIce::CheckHeld), with
+/// the change present at the window's start, and the background built
+/// from the ice at the window's start and the state's sea level. Without
+/// an ocean, the world of a body without one (Loaded), nothing read.
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const GRDSolver& solver);
 
@@ -335,14 +346,29 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
                                                   const GRDSolver& solver,
                                                   const Loaded& world);
 
-/// The window's uniform time grid, SLE units, zero at its start.
-/// The date (kyr before present) of a solver time `t`, which counts
-/// forwards from the window's start in the solver's own unit.
-[[nodiscard]] double DateKyrBp(const SeaLevelRun& run, const Scales& scales,
-                               double t);
+/// A solver time `t` (SLE units, counting forwards from the window's
+/// start) as a summary or an error states it: its date, `<d> kyr BP`, in
+/// a dated run, its time on the run's clock, `<t> <unit>`, in one counting
+/// forwards (Window::Label).
+[[nodiscard]] std::string WhenOf(const SeaLevelRun& run, const Scales& scales,
+                                 double t);
 
+/// The window's time nodes, SLE units, zero at its start (Window::Times).
 [[nodiscard]] std::vector<double> MakeTimes(const SeaLevelRun& run,
                                             const Scales& scales);
+
+/// The terms' clock (TermClock) against the solver's time: the time on it
+/// at solver time t (SLE units, zero at the window's start) is
+/// `zero + t * rate`, kyr from the window's start in a dated run and in
+/// the static problem (whose one node is at zero), the run's own clock in
+/// its unit in one counting forwards.
+struct SolverClock {
+  double zero = 0.0;
+  double rate = 0.0;
+  [[nodiscard]] double At(double t) const { return zero + t * rate; }
+};
+[[nodiscard]] SolverClock SolverClockOf(const SeaLevelRun& run,
+                                        const Scales& scales);
 
 /// The grounded ice load of the change from the ice the run starts from
 /// (world.ice0), as the drivers take it: a callable of SLE time over the

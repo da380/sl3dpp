@@ -73,11 +73,12 @@ struct LoveNumbersInput {
 /// loads, a tide and seismic sources, with frozen or migrating shorelines.
 /// The static problem is the solve on the state (the sea level and the
 /// ice) at its date on the elastic Earth, radial or, under lateral moduli,
-/// 3-D; the quasi-static problem is GIA through time from a state at an
-/// end of the window, of the radial model, or, under a lateral viscosity
-/// or lateral moduli, the 3-D one, restartable from disk checkpoints.
-/// Without an `ocean` block the state is absent and the body has no
-/// ocean.
+/// 3-D; the quasi-static problem is the run through time from a state at
+/// an end of the window, its nodes dates before present or times on the
+/// run's own clock in a unit (Window), of the radial model, or, under a
+/// lateral viscosity or lateral moduli, the 3-D one, restartable from
+/// disk checkpoints. Without an `ocean` block the state is absent and the
+/// body has no ocean.
 struct SeaLevelInput {
   SeaLevelRun run;
   CheckpointBlock checkpoint;  ///< no directory: no checkpoints
@@ -125,8 +126,9 @@ struct MeasurementSpec {
 };
 
 /// The config of `sl3d kernel1d` and `sl3d kernel`: the members of
-/// `sea-level`'s run through time (the quasi-static problem alone), a
-/// recording stride, and the
+/// `sea-level`'s run through time (the quasi-static problem alone, its
+/// nodes evenly spaced dates, on which the measurements' dates are
+/// located), a recording stride, and the
 /// measurements — one adjoint sweep, and one set of kernel files, per
 /// measurement. `kernel1d` runs a radial model, `kernel` a lateral
 /// viscosity.

@@ -84,18 +84,27 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
   }
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
+  // the terms' times are given as the window's are: dates in a dated run,
+  // times on the run's own clock in its unit in one counting forwards
+  auto clock = std::optional<TermClock>{};
   if (timed) {
-    out.times = ReadTimesBlock(top.At("times"), TimesForm::BeforePresent);
+    out.times = ReadWindow(top.At("times"));
+    clock = out.times->Dated()
+                ? TermClock{.form = TermClock::Form::Dated,
+                            .start_kyr_bp = out.times->Start(),
+                            .unit = {}}
+                : TermClock{.form = TermClock::Form::Forwards,
+                            .start_kyr_bp = std::nullopt,
+                            .unit = out.times->unit};
   }
   // the state is optional: without an `ocean` block the body has none
   const auto ocean = Has(top, "ocean");
-  out.forcing = ReadSeaLevelForcing(
-      top.At("forcing"), directory, out.lmax,
-      timed ? std::optional<double>{out.times->start_kyr_bp}
-            : std::optional<double>{},
-      ocean);
+  out.forcing =
+      ReadSeaLevelForcing(top.At("forcing"), directory, out.lmax, clock, ocean);
   if (ocean) {
-    out.ocean = ReadOceanBlock(top.At("ocean"), directory, out.problem);
+    out.ocean = ReadOceanBlock(
+        top.At("ocean"), directory, out.problem,
+        timed ? out.times->calendar : Calendar::Dated);
   }
   if (out.Migrating() && !out.forcing.tide.empty()) {
     Fail(top.At("forcing").At("tide"),
@@ -357,12 +366,24 @@ RunIce::RunIce(const SeaLevelRun& run, const Json& top, InputFiles& files,
                                  "a file with a time axis",
                                  term.file.file.string()));
         }
-        if (!term.dated && !thickness) {
+        if (term.held && held.file->Span()) {
+          Fail(item,
+               std::format("names a file with a time axis ({}), a dated "
+                           "history of the change, which makes the problem "
+                           "a dated one: give the dated form of `times` "
+                           "(`start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
+                           "`at_kyr_bp`); a run counting forwards on its own "
+                           "clock holds a `change` file of one field, "
+                           "without a time axis, through the run",
+                           term.file.file.string()));
+        }
+        if (!term.dated && !term.held && !thickness) {
           CheckDate(term.file, *held.file, item, "date_kyr_bp");
         }
         if (thickness) held.reference = ValuesOf(held, stateTime);
         // the static problem's term is read once, at its own date (a file
-        // without a time axis at any date: the present's)
+        // without a time axis at any date: the present's), and so is a
+        // held one
         if (!term.dated) {
           held.fixed = TermAt(held, -term.file.date.value_or(0.0) * KYR);
         }
@@ -402,9 +423,13 @@ std::vector<double> RunIce::TermAt(const Term& term, double time) const {
   if (!term.fixed.empty()) {
     const auto& history = term.term.history;
     if (history.Empty()) return term.fixed;
-    // a cap's history scales its change, at the time's place on the run's
-    // clock (kyr from the window's start)
-    const auto factor = history.At(*history.start_kyr_bp + time / KYR);
+    // a cap's history scales its change, at the time's place on the terms'
+    // clock: kyr from the window's start, its dates turned so (a dated
+    // run's axis is the calendar's), or the run's own clock in its unit
+    const auto factor =
+        history.At(history.start_kyr_bp
+                       ? *history.start_kyr_bp + time / KYR
+                       : time / history.unit.value().seconds);
     auto out = term.fixed;
     for (auto& v : out) v *= factor;
     return out;
@@ -466,7 +491,8 @@ double RunIce::Tolerance() const {
   return largest > 0.0 ? 1e-9 * largest : 1e-9;
 }
 
-void RunIce::CheckHeld(std::span<const double> times, bool dated) const {
+void RunIce::CheckHeld(std::span<const double> times,
+                       const Window* window) const {
   if (terms_.empty()) return;
   auto worst = 0.0, when = 0.0;
   auto where = std::size_t{0};
@@ -490,8 +516,7 @@ void RunIce::CheckHeld(std::span<const double> times, bool dated) const {
        std::format("removes more ice than the state holds, by {:.4g} m at "
                    "worst (at latitude {:.4g}, longitude {:.4g}{})",
                    -worst, latitude, longitude,
-                   dated ? std::format(", {:.6g} kyr BP", 0.0 - when / KYR)
-                         : std::string{}));
+                   window ? ", " + window->Label(when) : std::string{}));
 }
 
 std::string DescribeIceChange(const SeaLevelRun& run,
@@ -579,31 +604,33 @@ std::vector<double> SeaLevelFrom(const SeaLevelRun& run, const Json& top,
 
 namespace {
 
-/// The slice a run through time reads an input at: its window, or one of
-/// its ends, from a file with a time axis; any date from a static file.
+/// The slice a run through time reads a state's input at: in a dated run
+/// the end of its window the state belongs to, from a file with a time
+/// axis; in one counting forwards the state's date; any date from a static
+/// file.
 std::string WindowSlice(const SeaLevelRun& run, const io::FieldHistory& file,
-                        std::optional<WindowEnd> end) {
+                        WindowEnd end) {
   const auto& window = *run.times;
   const auto timeAxis = file.Span().has_value();
-  if (!end) {
-    return timeAxis ? std::format("{:g} to {:g} kyr BP", window.start_kyr_bp,
-                                  window.end_kyr_bp)
+  if (!window.Dated()) {
+    return timeAxis ? std::format("{:g} kyr BP",
+                                  run.ocean->date_kyr_bp.value_or(0.0))
                     : std::string{"static"};
   }
-  const auto start = *end == WindowEnd::Start;
+  const auto start = end == WindowEnd::Start;
   const auto name = start ? "start" : "end";
   return timeAxis ? std::format("the window's {}, {:g} kyr BP", name,
-                                start ? window.start_kyr_bp : window.end_kyr_bp)
+                                start ? window.Start() : window.End())
                   : std::format("static, at the window's {}", name);
 }
 
 /// Refuses a state's file whose time axis leaves out the window's end,
 /// where the state is read: its end values are held beyond its span,
 /// which would make a file ending early the calibration's target
-/// silently. `member` is the input's.
+/// silently. `member` is the input's. A dated run's alone.
 void CheckReachesEnd(const SeaLevelRun& run, const io::FieldHistory& file,
                      const Json& member) {
-  const auto end_kyr_bp = run.times->end_kyr_bp;
+  const auto end_kyr_bp = run.times->End();
   const auto end_si = -end_kyr_bp * KYR;
   if (const auto span = file.Span(); span.has_value()) {
     const auto slack = 1e-9 * KYR;
@@ -617,15 +644,24 @@ void CheckReachesEnd(const SeaLevelRun& run, const io::FieldHistory& file,
   }
 }
 
+/// The state's instant on its files' axes, SI seconds, in a run through
+/// time: a dated run's end of the window `ocean.at` names (the calendar's
+/// axis is the window's), or the state's date in one counting forwards (a
+/// state of files without a time axis at any date: the present's).
+double StateTime(const SeaLevelRun& run) {
+  const auto& window = *run.times;
+  if (!window.Dated()) return -run.ocean->date_kyr_bp.value_or(0.0) * KYR;
+  return run.ocean->at == WindowEnd::Start ? window.Axis(0)
+                                           : window.Axis(window.Size() - 1);
+}
+
 /// The state's sea level at its instant, SI, a topography converted with
 /// the state's ice.
 std::vector<double> StateSeaLevel(const SeaLevelRun& run, const Json& top,
                                   const SeaLevelParameters& parameters,
                                   const io::FieldHistory& sea,
                                   const RunIce& ice) {
-  const auto time = run.ocean->at == WindowEnd::Start
-                        ? -run.times->start_kyr_bp * KYR
-                        : -run.times->end_kyr_bp * KYR;
+  const auto time = StateTime(run);
   try {
     return SeaLevelFrom(run, top, sea, ice.State(), time, parameters);
   } catch (const std::runtime_error& error) {
@@ -659,9 +695,14 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
   const auto length = scales.Length();
   const auto& window = *run.times;
   const auto atStart = run.ocean->at == WindowEnd::Start;
-  const auto start_si = -window.start_kyr_bp * KYR;
-  const auto state_si = atStart ? start_si : -window.end_kyr_bp * KYR;
+  // the window's start on the run's axis, and the state's instant on its
+  // files' (the same axis in a dated run)
+  const auto start_si = window.Axis(0);
+  const auto state_si = StateTime(run);
   auto files = InputFiles(grid);
+  // a run counting forwards reads its state at its own date, held to its
+  // files as the static problem's is
+  if (!window.Dated()) CheckStateDate(run, top, files);
   const auto& source = run.ocean->seaLevel;
   const auto sea = files.Open(source.input, SeaLevelMember(run, top));
   const auto iceFile = files.Open(run.ocean->ice, IceMember(top));
@@ -676,7 +717,7 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
   for (const auto t : MakeTimes(run, scales)) {
     nodes.push_back(start_si + t * scales.Time());
   }
-  ice->CheckHeld(nodes, true);
+  ice->CheckHeld(nodes, &window);
   // the change present at the start, where the state is there: a load at
   // the first node, or the ice the start's solve takes
   auto changeAtStart = 0.0;
@@ -696,7 +737,10 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
     ice_nd[i] = ice0[i] / length;
     sl_nd[i] /= length;
   }
-  const auto land = ReadLand(run, top, files, start_si);
+  // a land field with a time axis is read on the calendar: at the window's
+  // start in a dated run, at the state's date in one counting forwards
+  const auto land =
+      ReadLand(run, top, files, window.Dated() ? start_si : state_si);
   auto background =
       solver.MakeState(std::move(ice_nd), std::move(sl_nd), land.held);
   auto iceRead = DescribeInput(run.ocean->ice,
@@ -724,18 +768,21 @@ std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
   return sea;
 }
 
-double DateKyrBp(const SeaLevelRun& run, const Scales& scales, double t) {
-  return run.times->start_kyr_bp - t * scales.Time() / KYR;
+std::string WhenOf(const SeaLevelRun& run, const Scales& scales, double t) {
+  const auto& window = *run.times;
+  return window.Label(window.Axis(0) + t * scales.Time());
 }
 
 std::vector<double> MakeTimes(const SeaLevelRun& run, const Scales& scales) {
-  const auto& window = *run.times;
-  auto times = std::vector<double>{};
-  const auto span_s = (window.start_kyr_bp - window.end_kyr_bp) * KYR;
-  for (auto n = 0; n < window.nodes; ++n) {
-    times.push_back(span_s * n / (window.nodes - 1) / scales.Time());
+  return run.times->Times(scales.Time());
+}
+
+SolverClock SolverClockOf(const SeaLevelRun& run, const Scales& scales) {
+  if (!run.times || run.times->Dated()) {
+    return {.zero = 0.0, .rate = scales.Time() / KYR};
   }
-  return times;
+  return {.zero = run.times->Start(),
+          .rate = scales.Time() / run.times->unit.seconds};
 }
 
 std::function<std::vector<double>(double)> IceLoadOf(
@@ -745,7 +792,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto time = scales.Time();
-  const auto start_si = -run.times->start_kyr_bp * KYR;
+  const auto start_si = run.times->Axis(0);
   const auto atStart = run.ocean->at == WindowEnd::Start;
   const auto rho_ice = solver.IceDensity();
   return [&world, atStart, fieldSize, length, time, start_si,
@@ -766,7 +813,7 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto time = scales.Time();
-  const auto start_si = -run.times->start_kyr_bp * KYR;
+  const auto start_si = run.times->Axis(0);
   const auto atStart = run.ocean->at == WindowEnd::Start;
   // the background's ice plus the change from world.ice0, which the
   // frozen load is measured from too (IceLoadOf)
@@ -809,10 +856,10 @@ CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
   for (const auto& snapshot : calibration.snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
-          "the calibration's last run did not converge at {:.6g} kyr BP (its "
+          "the calibration's last run did not converge at {} (its "
           "sea level solve, or in 3-D its coupled fixed point); loosen "
           "solver.rtol or solver.step_rtol",
-          DateKyrBp(run, solver.SolverScales(), snapshot.t)));
+          WhenOf(run, solver.SolverScales(), snapshot.t)));
     }
   }
   if (!calibration.converged) {
@@ -838,7 +885,7 @@ void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
   const auto length = solver.SolverScales().Length();
   world.ice0 = run.ocean->at == WindowEnd::Start
                    ? world.ice->State()
-                   : world.ice->At(-run.times->start_kyr_bp * KYR);
+                   : world.ice->At(run.times->Axis(0));
   auto ice = world.ice0;
   for (auto& v : ice) v /= length;
   // the land held stays the run's own

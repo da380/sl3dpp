@@ -32,13 +32,14 @@
  * The load is the sum of its terms, and the tide the sum of its
  * coefficients. In the static problem a `field` term's file with a time
  * axis is read at the term's `date_kyr` (`sea-level`'s `date_kyr_bp`, kyr
- * before present). In the quasi-static problem (a
- * run stepped through time) a term may carry an amplitude history
- * (`history_kyr`), the piecewise-linear factor its pattern is scaled by at
- * each time, and a `field` term may come from a file with a time axis,
- * read at each time by the file's own time rule; BuildForcing builds the
- * fixed forcing of a static run and TimedForcing the forcing of a run
- * through time. Coefficients throughout are the
+ * before present, or `date` with its `unit` on the file's own axis). In
+ * the quasi-static problem (a run stepped through time) a term may carry
+ * an amplitude history (`history_kyr`; `sea-level`'s `history_kyr_bp` or
+ * `history`, TermClock), the piecewise-linear factor its pattern is
+ * scaled by at each time, and a `field` term may come from a file with a
+ * time axis, read at each time by the file's own time rule; BuildForcing
+ * builds the fixed forcing of a static run and TimedForcing the forcing of
+ * a run through time. Coefficients throughout are the
  * grid's (SurfaceGrid.hpp): complex, orthonormal, with the Condon-Shortley
  * phase, Y_lm = sqrt((2l+1)/4pi) d^l_0m(theta) e^{i m phi}, the m >= 0 ones
  * of a real field (f_(l,-m) = (-1)^m conj(f_lm)), in SI.
@@ -62,20 +63,50 @@
 
 namespace sl3dpp::app {
 
-/// A term's amplitude history: factors at strictly increasing times, kyr
-/// on the run's clock. The factor at a time is their piecewise-linear
-/// interpolant, held at the first factor before the first time and at the
-/// last after the last; without a history it is 1 throughout.
+/// How a block's terms give their times, and the clock a run through time
+/// reads them on (the terms' clock, which the times below are on):
+///
+/// - Response: `response`'s, kyr on the run's own clock (`history_kyr`,
+///   `onset_kyr`, `time_origin_kyr`; a static field's `date_kyr` on its
+///   file's own axis).
+/// - Dated: `sea-level`'s dated form, dates in kyr before present
+///   (`history_kyr_bp`, `onset_kyr_bp`, a static field's `date_kyr_bp`; a
+///   field file read by date through time), turned to kyr from the
+///   window's start, the date of the clock's zero, which a run through time
+///   has (`start_kyr_bp`). The static problem's terms are of this form,
+///   without a start; its `field` terms may instead give `date` with its
+///   `unit` on the file's own axis.
+/// - Forwards: `sea-level`'s forwards form, times on the run's own clock
+///   in its `unit` (`history`, `onset`, a field's `time_origin`), taken as
+///   they stand.
+struct TermClock {
+  enum class Form { Response, Dated, Forwards };
+  Form form = Form::Response;
+  /// Dated, in a run through time: the window's start, kyr BP.
+  std::optional<double> start_kyr_bp;
+  /// Forwards: the run's unit.
+  TimeUnit unit;
+};
+
+/// A term's amplitude history: factors at strictly increasing times on the
+/// terms' clock (TermClock), in its unit. The factor at a time is their
+/// piecewise-linear interpolant, held at the first factor before the first
+/// time and at the last after the last; without a history it is 1
+/// throughout.
 struct AmplitudeHistory {
-  std::vector<double> times_kyr;
+  std::vector<double> times;
   std::vector<double> factors;
   /// Where the history was given as dates before present
-  /// (`history_kyr_bp`, `sea-level`'s form), the date of the clock's zero,
-  /// kyr BP: the times above are then this less the dates.
+  /// (`history_kyr_bp`, `sea-level`'s dated form), the date of the clock's
+  /// zero, kyr BP: the times above are then this less the dates, in kyr.
   std::optional<double> start_kyr_bp;
+  /// Where it was given on a run's own clock in that run's unit
+  /// (`history`, `sea-level`'s forwards form), the unit; absent for kyr
+  /// (`history_kyr`, `response`'s form) and for dates.
+  std::optional<TimeUnit> unit;
 
-  [[nodiscard]] bool Empty() const { return times_kyr.empty(); }
-  /// The factor at time t, kyr.
+  [[nodiscard]] bool Empty() const { return times.empty(); }
+  /// The factor at time t of the terms' clock.
   [[nodiscard]] double At(double t) const;
 };
 
@@ -90,18 +121,24 @@ struct LoadTerm {
   double amplitude = 0.0;
   /// A field's file input (its variable by default `load`) and, in the
   /// static problem, the date its file is read at (`date_kyr`, kyr on the
-  /// file's own axis, or `date_kyr_bp`, kyr before present), required of
-  /// a file with a time axis.
+  /// file's own axis; `date_kyr_bp`, kyr before present; or `date`, in
+  /// `unit` on the file's own axis), required of a file with a time axis.
   FileInput field;
   std::filesystem::path file;  ///< a coefficient table
-  /// The quasi-static problem: the run's time, kyr, at which a field
-  /// file's time zero falls: the file is read at (t - time_origin_kyr)
-  /// kyr, in seconds, at the run's time t.
-  double time_origin_kyr = 0.0;
+  /// The quasi-static problem: the time of the terms' clock at which a
+  /// field file's time zero falls, in the clock's unit: the file is read at
+  /// (t - time_origin) units, in seconds, at the clock's time t.
+  double time_origin = 0.0;
+  /// The unit of the terms' clock (kyr but in `sea-level`'s forwards form,
+  /// the run's unit) and of a static `date` on the file's own axis.
+  TimeUnit unit;
   /// Whether the term's dates are before present (`sea-level`'s form): a
   /// static problem's date is then `date_kyr_bp`, the file read at minus
   /// it on its axis.
   bool before_present = false;
+  /// The member the static problem's date is given by (`date_kyr`,
+  /// `date_kyr_bp` or `date`), which a refusal names.
+  std::string_view date_member = "date_kyr";
   /// Whether the file is read by date through time (`sea-level`'s form in
   /// a run through time): its time axis is the calendar's, read at each
   /// node's date, and the origin above is the window's start.
@@ -121,7 +158,7 @@ struct TideTerm {
 
 /// One seismic source of a run through time: a point moment tensor, or a
 /// planar fault of uniform slip laid out as point sources (Fault.hpp).
-/// The moment is the stress glut itself: it acts from `onset_kyr` (the
+/// The moment is the stress glut itself: it acts from its onset (the
 /// run's start when absent) and is held, times its amplitude history
 /// where one is given. SI throughout: metres and N m.
 struct SeismicTerm {
@@ -138,13 +175,19 @@ struct SeismicTerm {
   double length = 0.0, width = 0.0;
   double scalarMoment = 0.0;
   int alongStrike = 1, downDip = 1;
-  std::optional<double> onset_kyr;  ///< absent: from the run's start
+  /// The onset on the terms' clock (TermClock), in its unit (`onset_kyr`,
+  /// `onset_kyr_bp` turned to it, or `onset`); absent: from the run's
+  /// start.
+  std::optional<double> onset;
   /// Where the onset was given as a date (`onset_kyr_bp`), the date of the
   /// clock's zero, kyr BP.
   std::optional<double> start_kyr_bp;
+  /// The unit of the terms' clock, which a description names.
+  TimeUnit unit;
   AmplitudeHistory history;
 
-  /// The factor of the moment at time t, kyr: zero before the onset.
+  /// The factor of the moment at time t of the terms' clock: zero before
+  /// the onset.
   [[nodiscard]] double FactorAt(double t) const;
 };
 
@@ -156,7 +199,8 @@ struct Forcing {
   std::vector<SeismicTerm> seismic;
 };
 
-/// The point sources of a forcing's seismic terms at time t, kyr, SI
+/// The point sources of a forcing's seismic terms at time t of the terms'
+/// clock (kyr in `response`), SI
 /// (radius in metres from the centre, moments in N m), for a surface of
 /// radius `surfaceRadius` metres. Every term gives its sources at every
 /// time, with zero moment before its onset.
@@ -217,14 +261,14 @@ struct BuiltForcing {
                                         const SurfaceGrid& grid,
                                         const Json& block);
 
-/// A forcing on a run's grid at any time of the run's clock: each load
-/// term's pattern times its amplitude history, summed in the order given,
-/// and each tide coefficient times its own. The patterns are built once,
-/// as BuildForcing builds them, but for a `field` term whose file has a
-/// time axis: that file is read at each time asked, at file time
-/// (t - time_origin_kyr) kyr in seconds, by the file's own time rule (a
-/// `node` field interpolated between its nodes, its end values held
-/// outside its span), and expanded there.
+/// A forcing on a run's grid at any time of the terms' clock (TermClock):
+/// each load term's pattern times its amplitude history, summed in the
+/// order given, and each tide coefficient times its own. The patterns are
+/// built once, as BuildForcing builds them, but for a `field` term whose
+/// file has a time axis: that file is read at each time asked, at file
+/// time (t - time_origin) in the term's unit, in seconds, by the file's
+/// own time rule (a `node` field interpolated between its nodes, its end
+/// values held outside its span), and expanded there.
 class TimedForcing {
  public:
   /// Reads the terms' files onto `grid`. `block` is the config's `forcing`
@@ -236,7 +280,8 @@ class TimedForcing {
   TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
                const Json& block, bool timed = true);
 
-  /// The forcing at time t, kyr, SI: each load term's coefficients (its
+  /// The forcing at time t of the terms' clock, SI: each load term's
+  /// coefficients (its
   /// factor applied), their sum, the load's field at the grid's points
   /// (the terms' fields, as BuiltForcing::load, each times its factor),
   /// and the tide.
@@ -268,8 +313,9 @@ class TimedForcing {
 
 /// A `field` term's input as read, for a summary line and the outputs'
 /// metadata: `field <file>:<variable> (<slice>)`, the slice `static` for a
-/// file without a time axis, `<t> kyr` for the static problem's date, and
-/// in a run through time `the run's clock` or `time origin <t> kyr`.
+/// file without a time axis, `<t> kyr`, `<d> kyr BP` or `<t> <unit>` for
+/// the static problem's date, and in a run through time `each node's
+/// date`, `the run's clock` or `time origin <t> <unit>`.
 [[nodiscard]] std::string DescribeField(const LoadTerm& term, bool timeAxis,
                                         bool timed);
 
@@ -329,29 +375,36 @@ class TimedForcing {
 /// - `thickness`: a file of ice THICKNESS (its variable by default
 ///   `ice_thickness`), whose change is its value less its own value at
 ///   the state's instant. The static problem reads it at its date
-///   (`date_kyr_bp`, required), a run through time at each node's date;
-///   its file has a time axis, a change of a file without one being
-///   identically zero.
+///   (`date_kyr_bp`, required), a dated run through time at each node's
+///   date; its file has a time axis, a change of a file without one being
+///   identically zero. It is a dated ice history, which a run counting
+///   forwards on its own clock refuses.
 /// - `change`: a file holding a thickness CHANGE (its variable by default
 ///   `ice_thickness_change`), taken as it stands. The static problem reads
 ///   a file with a time axis at its date (`date_kyr_bp`) and one without
-///   as it is; a run through time reads one with a time axis at each
-///   node's date and holds one without through the run.
+///   as it is; a dated run through time reads one with a time axis at each
+///   node's date and holds one without through the run; a run counting
+///   forwards holds one without a time axis through the run and refuses
+///   one with (a dated history).
 /// - `cap_thickness`, `cap_fraction`: a Gaussian cap, weighted
 ///   exp(-d^2 / (2 w^2)) in great-circle distance d from its centre with
 ///   no cut-off, of a thickness at its centre or of a fraction of the
 ///   state's ice. A cap of negative thickness takes at each point no more
 ///   than the ice the state holds there. In a run through time a cap is
 ///   held through the run, or scaled by its amplitude history
-///   (`history_kyr_bp`, as a surface load's) at each time.
+///   (`history_kyr_bp` or `history`, as a surface load's) at each time.
 struct IceChangeTerm {
   enum class Kind { Thickness, Change, CapThickness, CapFraction };
   Kind kind = Kind::Thickness;
   /// `thickness` and `change`: the file input and, in the static problem,
   /// the date it is read at, kyr before present.
   FileInput file;
-  /// Whether the file is read at each node's date (a run through time).
+  /// Whether the file is read at each node's date (a dated run through
+  /// time).
   bool dated = false;
+  /// Whether the file is one field held through the run (a `change` term
+  /// of a run counting forwards, whose file has no time axis).
+  bool held = false;
   GeographicPoint site{};  ///< a cap's centre
   double width = 0.0;      ///< a cap's Gaussian width, radians
   /// A cap's amount: its thickness at the centre in metres, or the
@@ -388,9 +441,10 @@ struct SurfaceLoadTerm {
 /// change there, a direct load where it is grounded. Surface loads, the
 /// tide (a sum of coefficients of an external potential, as `response`'s)
 /// and seismic sources act beside the ice, changes from the state: in the
-/// static problem at its one instant, in a run through time on the run's
-/// clock (kyr from the window's start), a term present at the first node
-/// acting there. A run without an ocean has no ice change.
+/// static problem at its one instant, in a run through time on the terms'
+/// clock (TermClock: kyr from the window's start in a dated run, the run's
+/// own clock in its unit in one counting forwards), a term present at the
+/// first node acting there. A run without an ocean has no ice change.
 struct SeaLevelForcing {
   std::vector<IceChangeTerm> ice_change;
   std::vector<SurfaceLoadTerm> load;
@@ -418,29 +472,36 @@ struct SeaLevelForcing {
 /// an ocean, false by default without one) and, where it moves the solid
 /// surface, `density_kg_m3` (positive; refused otherwise); `tide` a list
 /// of tide coefficients and `seismic` a list of sources, as `response`'s.
-/// At least one term of the lists is required. Their times are DATES, kyr
+/// At least one term of the lists is required. Their times are given as
+/// the run's `clock` says (TermClock; absent, the static problem's, which
+/// has none). In the static problem and a DATED run they are dates, kyr
 /// before present, as the window's are: a history is `history_kyr_bp`,
 /// pairs `[date_kyr_bp, factor]` from the oldest (the dates strictly
 /// decreasing), an onset `onset_kyr_bp`; a `field` file with a time axis
-/// is read at the term's `date_kyr_bp` in the static problem and at each
-/// node's date in a run through time, as the ice change's files are
-/// (`time_origin_kyr` is refused); `response`'s names (`history_kyr`,
-/// `onset_kyr`, `date_kyr`) are refused, naming these. The members of the
-/// other problem are refused, naming what this one takes: a history or an
-/// onset in the static problem, a term's date in a run through time. So
-/// are `ice`, naming `ocean.ice` and `ice_change`, and `sea_level` and
-/// `state`, naming the `ocean` block's members. `start_kyr_bp` is the
-/// window's start, which the dates are turned to the run's clock by;
-/// absent in the static problem.
+/// is read at the term's `date_kyr_bp` in the static problem (or at
+/// `date` in its `unit`, on the file's own axis) and at each node's date
+/// in a run through time, as the ice change's files are. In a run
+/// COUNTING FORWARDS they are times on the run's own clock in its unit: a
+/// history is `history`, pairs `[time, factor]` (the times strictly
+/// increasing), an onset `onset`, and a `field` file with a time axis is
+/// read at t - `time_origin` (default 0) at the clock's time t. The names
+/// of the other forms (`response`'s `history_kyr`, `onset_kyr`,
+/// `date_kyr`, `time_origin_kyr` among them) are refused, naming this
+/// form's, and so are the members of the other problem: a history or an
+/// onset in the static problem, a term's date in a run through time. A
+/// `thickness` term of the ice change, a dated ice history, is refused in
+/// a run counting forwards. So are `ice`, naming `ocean.ice` and
+/// `ice_change`, and `sea_level` and `state`, naming the `ocean` block's
+/// members.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
     const Json& block, const std::filesystem::path& directory, int lmax,
-    std::optional<double> start_kyr_bp, bool ocean);
+    const std::optional<TermClock>& clock, bool ocean);
 
-/// The tide's coefficients on `grid` at time `t_kyr` of the run's clock,
+/// The tide's coefficients on `grid` at time `t` of the terms' clock,
 /// m^2 s^-2: each coefficient times its amplitude history's factor there,
 /// summed.
 [[nodiscard]] std::vector<std::complex<double>> TideAt(
-    std::span<const TideTerm> tide, const SurfaceGrid& grid, double t_kyr);
+    std::span<const TideTerm> tide, const SurfaceGrid& grid, double t);
 
 /// One line describing a term of an ice change, for provenance: its kind,
 /// its file and variable and when they are read, or its cap.
@@ -451,7 +512,7 @@ struct SeaLevelForcing {
 [[nodiscard]] std::string Describe(const SurfaceLoadTerm& term);
 
 /// The surface loads of a `sea-level` run on its grid, at any time of the
-/// run's clock, by their properties.
+/// terms' clock (TermClock), by their properties.
 class SurfaceLoads {
  public:
   /// Reads the terms' files onto `grid`; `block` is the config's `forcing`
@@ -467,7 +528,7 @@ class SurfaceLoads {
     std::vector<double> outside;  ///< outside it, kg m^-2
     std::vector<double> layer;    ///< the layer's thickness, m
   };
-  [[nodiscard]] Node At(double t_kyr) const;
+  [[nodiscard]] Node At(double t) const;
 
   /// Each `field` term's input as read (DescribeField).
   [[nodiscard]] const std::vector<std::string>& Inputs() const {

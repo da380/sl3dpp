@@ -305,7 +305,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 50);
+  EXPECT_EQ(read, 51);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -6313,6 +6313,808 @@ TEST_F(AppsTest, Kernel1DRefusesASpilledTrajectory) {
         }
       },
       planetmodel::Error);
+}
+
+/// A point source and a tide coefficient as `seismic` and `tide` terms,
+/// their timing members appended by the caller.
+constexpr auto kPointOpen = R"({"point": {"latitude": 30, "longitude": 40,
+    "depth_km": 300, "moment_tensor_nm": {"rr": 9e20, "tt": -2e20,
+    "pp": -7e20, "rt": 3e20, "rp": -7e20, "tp": 6e20}}, )";
+constexpr auto kTideOpen = R"({"degree": 2, "order": 1,
+    "amplitude_m2_s2": 1.0, "imaginary_m2_s2": 0.5, )";
+
+/// Numbers as a JSON list, each to the full precision of a double.
+std::string ListOf(const std::vector<double>& values) {
+  auto out = std::string{"["};
+  for (auto k = std::size_t{0}; k < values.size(); ++k) {
+    out += std::format("{}{:.17g}", k == 0 ? "" : ", ", values[k]);
+  }
+  return out + "]";
+}
+
+TEST_F(AppsTest, SeaLevelOnItsOwnClockIsResponsesRunThroughTime) {
+  // A run counting forwards on its own clock (`times.unit` with `at`) on a
+  // body without an ocean is `response`'s viscoelastic run on the same
+  // uneven nodes under the same forcing, its times taken as given: a cap
+  // with an amplitude history (`history`), a tide coefficient with its own
+  // and a point source from an onset (`onset`), node by node to rounding
+  // (about 4e-15 here: in kyr the two step through the same times to the
+  // bit), the tangential and toroidal potentials included. The same run
+  // in years, every time a thousand times larger, agrees with it to the
+  // rounding of its node times, which a step's response amplifies (about
+  // 3e-12 here: on this ball a one-ulp change of a node moves `response`'s
+  // own fields by up to 7e-13), and so does a run of forty days in days
+  // with its run in kyr (equal to the bit here). The file's time axis is
+  // the run's clock in seconds, its
+  // metadata the nodes in the run's unit (`times`) and the unit's name
+  // (`time_unit`), the terms are described in the unit, and the summary
+  // states the window in it.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  static_cast<void>(Run(
+      "response",
+      std::format(R"({}, "times": {{"at_kyr": [0, 0.2, 0.5, 1.1, 2, 3]}},
+      "forcing": {{"load": [{}, "history_kyr": [[0, 0.5], [1.5, 1.5]]}}],
+                  "tide": [{}"history_kyr": [[0, 1], [2, -1]]}}],
+                  "seismic": [{}"onset_kyr": 0.5}}]}})",
+                  kBall, kCapTerm, kTideOpen, kPointOpen)));
+  // the run on sea-level's clock in `unit`, its times `scale` times kyr's
+  const auto forwards = [&](const std::string& name, const std::string& unit,
+                            const std::vector<double>& at, double scale) {
+    auto times = at;
+    for (auto& t : times) t *= scale;
+    const auto config = Write(
+        name + ".json",
+        std::format(R"({{{}, "problem": "quasi_static",
+      "times": {{"unit": "{}", "at": {}}},
+      "forcing": {{"load": [{}, "history": [[0, 0.5], [{:.17g}, 1.5]]}}],
+                  "tide": [{}"history": [[0, 1], [{:.17g}, -1]]}}],
+                  "seismic": [{}"onset": {:.17g}}}]}},
+      "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
+                    kBall, unit, ListOf(times), kCapTerm, 1.5 * scale,
+                    kTideOpen, 2.0 * scale, kPointOpen, 0.5 * scale, name));
+    return app::RunSeaLevel(config);
+  };
+  const auto nodes = std::vector<double>{0.0, 0.2, 0.5, 1.1, 2.0, 3.0};
+  static_cast<void>(forwards("kyr", "kyr", nodes, 1.0));
+  const auto summary = forwards("yr", "yr", nodes, 1000.0);
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 6 nodes 0 to 3000 yr on the run's clock, no "
+      "ocean, rotation none; load (1 term) + tide (1 coefficient) + seismic "
+      "(1 source); wrote "))
+      << summary;
+  const auto response = Output("response");
+  const auto kyr = Output("kyr");
+  const auto yr = Output("yr");
+  auto worst = 0.0, units = 0.0;
+  for (const auto* name : {"displacement", "tangential_potential",
+                           "toroidal_potential", "potential"}) {
+    const auto departure = Departure(kyr.variables.at(name).values,
+                                     response.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+    const auto scaled =
+        Departure(yr.variables.at(name).values, kyr.variables.at(name).values);
+    units = std::max(units, scaled);
+    EXPECT_LT(scaled, 1e-11) << name;
+  }
+  RecordProperty("response_departure", std::format("{:.3e}", worst));
+  RecordProperty("yr_departure", std::format("{:.3e}", units));
+
+  // the file: the run's clock in seconds, the nodes in the unit
+  ASSERT_TRUE(yr.time);
+  ASSERT_EQ(yr.time->size(), nodes.size());
+  for (auto n = std::size_t{0}; n < nodes.size(); ++n) {
+    EXPECT_EQ((*yr.time)[n], nodes[n] * 1000.0 * (app::KYR / 1000.0)) << n;
+  }
+  EXPECT_EQ(std::get<std::string>(yr.meta.at("time_unit")), "yr");
+  EXPECT_EQ(std::get<std::vector<double>>(yr.meta.at("times")),
+            (std::vector<double>{0.0, 200.0, 500.0, 1100.0, 2000.0, 3000.0}));
+  EXPECT_FALSE(yr.meta.contains("dates_kyr_bp"));
+  EXPECT_EQ(std::get<std::string>(yr.meta.at("tide")),
+            "tide degree 2 order 1, 1 + 0.5 i m^2 s^-2, history in yr [[0, "
+            "1], [2000, -1]]");
+  EXPECT_NE(std::get<std::string>(yr.meta.at("seismic")).find(", from 500 yr"),
+            std::string::npos);
+  EXPECT_NE(std::get<std::string>(yr.meta.at("load"))
+                .find(", history in yr [[0, 0.5], [1500, 1.5]]"),
+            std::string::npos);
+
+  // forty days in days against the same run in kyr, the histories' times
+  // and the onset the kyr run's scaled alike
+  const auto days = std::vector<double>{0.0, 1.0, 3.0, 10.0, 40.0};
+  static_cast<void>(forwards("days", "day", days, 1.0));
+  static_cast<void>(forwards("days_in_kyr", "kyr", days, 86400.0 / app::KYR));
+  const auto inDays = Output("days");
+  const auto inKyr = Output("days_in_kyr");
+  auto weeks = 0.0;
+  for (const auto* name : {"displacement", "tangential_potential",
+                           "toroidal_potential", "potential"}) {
+    const auto departure = Departure(inDays.variables.at(name).values,
+                                     inKyr.variables.at(name).values);
+    weeks = std::max(weeks, departure);
+    EXPECT_LT(departure, 1e-11) << name;
+  }
+  RecordProperty("day_departure", std::format("{:.3e}", weeks));
+  EXPECT_EQ(std::get<std::string>(inDays.meta.at("time_unit")), "day");
+}
+
+TEST_F(AppsTest, SeaLevelReadsAFieldOnItsOwnClockAndOnItsOwnAxis) {
+  // A `field` load whose file has a time axis is read, in a run counting
+  // forwards, on the run's clock at t - `time_origin` in the run's unit:
+  // the file's axis counted back from the present, read from a time origin
+  // of 2 kyr at uneven nodes, is `response`'s run reading it from
+  // `time_origin_kyr` 2, to rounding (about 6e-15), and the same in years
+  // from 2000 yr agrees with it to the rounding of its node times (about
+  // 4e-12; SeaLevelOnItsOwnClockIsResponsesRunThroughTime). In the static
+  // problem the file is
+  // read at `date` in its `unit` on the file's own axis, the same load as
+  // at `date_kyr_bp` of minus that date, to the bit in kyr, yr and days.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  constexpr auto kLmax = 8;
+  const SurfaceGrid grid(kLmax);
+  const auto field = app::CapField(grid, {60.0, -85.0},
+                                   20.0 * std::numbers::pi / 180.0, 1.0e6);
+  {
+    auto file = pm::SurfaceFile{};
+    file.grid = pm::AngularGrid(
+        std::vector<double>(grid.CoLatitudes().begin(),
+                            grid.CoLatitudes().end()),
+        std::vector<double>(grid.Longitudes().begin(), grid.Longitudes().end()),
+        "gauss_legendre", kLmax,
+        std::vector<double>(grid.CoLatitudeWeights().begin(),
+                            grid.CoLatitudeWeights().end()));
+    file.source = "sl3dpp tests";
+    file.time = std::vector<double>{-2.0 * app::KYR, 0.0};
+    auto values = std::vector<double>(field.size(), 0.0);
+    values.insert(values.end(), field.begin(), field.end());
+    file.variables.emplace(
+        "load", pm::SurfaceField("load", values,
+                                 {.support = "node",
+                                  .time_interpolation = "linear",
+                                  .dimensions = pm::Dimensions{.mass = 1,
+                                                               .length = -2}}));
+    pm::WriteSurfaceFile(dir_ / "ramp_bp.nc", file);
+  }
+  static_cast<void>(Run("response", std::format(R"({},
+      "times": {{"at_kyr": [0, 0.5, 1.2, 2, 2.5, 3.5]}},
+      "forcing": {{"load": [{{"field": {{"file": "ramp_bp.nc",
+                                         "time_origin_kyr": 2}}}}]}})",
+                                                kBall)));
+  const auto onClock = [&](const std::string& name, const std::string& unit,
+                           double scale) {
+    auto at = std::vector<double>{0.0, 0.5, 1.2, 2.0, 2.5, 3.5};
+    for (auto& t : at) t *= scale;
+    return app::RunSeaLevel(Write(
+        name + ".json",
+        std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"unit": "{}", "at": {}}},
+      "forcing": {{"load": [{{"field": {{"file": "ramp_bp.nc",
+                                         "time_origin": {:.17g}}}}}]}},
+      "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
+                    kBall, unit, ListOf(at), 2.0 * scale, name)));
+  };
+  const auto summary = onClock("clock", "kyr", 1.0);
+  EXPECT_NE(summary.find("; load (1 term); wrote "), std::string::npos)
+      << summary;
+  static_cast<void>(onClock("years", "yr", 1000.0));
+  const auto response = Output("response");
+  const auto clock = Output("clock");
+  const auto years = Output("years");
+  auto worst = 0.0, units = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure = Departure(clock.variables.at(name).values,
+                                     response.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+    // in years, to the rounding of the node times (the clock test above)
+    const auto scaled = Departure(years.variables.at(name).values,
+                                  clock.variables.at(name).values);
+    units = std::max(units, scaled);
+    EXPECT_LT(scaled, 1e-11) << name;
+  }
+  RecordProperty("response_departure", std::format("{:.3e}", worst));
+  RecordProperty("yr_departure", std::format("{:.3e}", units));
+  EXPECT_EQ(std::get<std::string>(years.meta.at("load")),
+            std::format("field {}:load, time origin 2000 yr, outside the "
+                        "water budget",
+                        (dir_ / "ramp_bp.nc").string()));
+
+  // the static problem at a date on the file's own axis
+  const auto still = [&](const std::string& name, const std::string& when) {
+    static_cast<void>(app::RunSeaLevel(Write(
+        name + ".json",
+        std::format(R"({{{},
+      "problem": "static",
+      "forcing": {{"load": [{{"field": {{"file": "ramp_bp.nc", {}}}}}]}},
+      "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
+                    kBall, when, name))));
+    return Output(name);
+  };
+  const auto dated = still("dated", R"("date_kyr_bp": 1.5)");
+  EXPECT_EQ(std::get<std::string>(dated.meta.at("load")),
+            std::format("field {}:load, at 1.5 kyr BP, outside the water "
+                        "budget",
+                        (dir_ / "ramp_bp.nc").string()));
+  for (const auto& [name, when, text] :
+       {std::tuple{"own_kyr", R"("date": -1.5, "unit": "kyr")", "-1.5 kyr"},
+        std::tuple{"own_yr", R"("date": -1500, "unit": "yr")", "-1500 yr"},
+        std::tuple{"own_day", R"("date": -547875, "unit": "day")",
+                   "-547875 day"}}) {
+    const auto own = still(name, when);
+    for (const auto* field_name :
+         {"load_outside_water_budget", "displacement", "tangential_potential",
+          "potential", "relative_sea_level_change"}) {
+      EXPECT_EQ(own.variables.at(field_name).values,
+                dated.variables.at(field_name).values)
+          << name << ", " << field_name;
+    }
+    EXPECT_EQ(std::get<std::string>(own.meta.at("load")),
+              std::format("field {}:load, at {}, outside the water budget",
+                          (dir_ / "ramp_bp.nc").string(), text));
+  }
+  // a quarter of the cap: the file's ramp at 1.5 kyr BP
+  auto quarter = grid.Synthesise(grid.Expand(field));
+  for (auto& v : quarter) v *= 0.25;
+  EXPECT_LT(Departure(dated.variables.at("load_outside_water_budget").values,
+                      quarter),
+            1e-14);
+}
+
+TEST_F(AppsTest, SeaLevelTakesListedNodesDatedOrOnItsOwnClock) {
+  // Dates listed in `at_kyr_bp` that are the evenly spaced ones give the
+  // run of `start_kyr_bp` and `nodes` to the bit, under the toy history
+  // with an ocean, and its metadata list the dates given. A genuinely
+  // uneven dated run is the run counting forwards on its own clock over
+  // the same nodes, the state read at the window's start date
+  // (`ocean.date_kyr_bp` there), a cap melting a fifth of the polar ice
+  // under its history and a change held through the run, under frozen and
+  // migrating shorelines alike, to the rounding of the node times, formed
+  // from dates in the one and from times in the other, which the steps
+  // amplify (about 2.4e-12 here; the ocean functions equal).
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  sl3dpp::test::WriteToyChange(dir_ / "held.nc", false);
+  const auto config = [&](const std::string& name, const std::string& times,
+                          const std::string& forcing,
+                          const std::string& ocean) {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static", "times": {},
+      "forcing": {}, "ocean": {},
+      "rotation": "full", "moments": "hydrostatic",
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, times, forcing, ocean,
+                                             name));
+  };
+  constexpr auto kHistory =
+      R"({"ice_change": [{"thickness": {"file": "history.nc"}}]})";
+  constexpr auto kAtStart = R"({"at": "start",
+      "topography": {"file": "history.nc"}, "ice": {"file": "history.nc"}})";
+  static_cast<void>(app::RunSeaLevel(config(
+      "even", R"({"start_kyr_bp": 2, "nodes": 5})", kHistory, kAtStart)));
+  const auto summary = app::RunSeaLevel(config(
+      "listed", R"({"at_kyr_bp": [2, 1.5, 1, 0.5, 0]})", kHistory, kAtStart));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 5 nodes 2 to 0 kyr BP, shorelines frozen"))
+      << summary;
+  const auto even = Output("even");
+  const auto listed = Output("listed");
+  EXPECT_EQ(*listed.time, *even.time);
+  for (const auto& [name, values] : even.variables) {
+    EXPECT_EQ(listed.variables.at(name).values, values.values) << name;
+  }
+  EXPECT_EQ(std::get<std::vector<double>>(listed.meta.at("dates_kyr_bp")),
+            (std::vector<double>{2.0, 1.5, 1.0, 0.5, 0.0}));
+
+  // uneven: dated against forwards
+  constexpr auto kCap = R"({"cap_fraction": {"latitude": 90, "longitude": 0,
+      "width_deg": 15, "fraction": -0.2}, )";
+  constexpr auto kHeld = R"({"change": {"file": "held.nc"}})";
+  auto worst = 0.0;
+  for (const auto* shorelines : {"frozen", "migrating"}) {
+    const auto dated = std::format("dated_{}", shorelines);
+    const auto clock = std::format("clock_{}", shorelines);
+    static_cast<void>(app::RunSeaLevel(config(
+        dated, R"({"at_kyr_bp": [2, 1.7, 1.2, 0.5, 0]})",
+        std::format(R"({{"ice_change": [{}"history_kyr_bp": [[2, 0], [1, 1]]}},
+                                       {}]}})",
+                    kCap, kHeld),
+        std::format(R"({{"at": "start", "shorelines": "{}",
+          "topography": {{"file": "history.nc"}},
+          "ice": {{"file": "history.nc"}}}})",
+                    shorelines))));
+    const auto said = app::RunSeaLevel(config(
+        clock, R"({"unit": "kyr", "at": [0, 0.3, 0.8, 1.5, 2]})",
+        std::format(R"({{"ice_change": [{}"history": [[0, 0], [1, 1]]}},
+                                       {}]}})",
+                    kCap, kHeld),
+        std::format(R"({{"at": "start", "date_kyr_bp": 2,
+          "shorelines": "{}", "topography": {{"file": "history.nc"}},
+          "ice": {{"file": "history.nc"}}}})",
+                    shorelines)));
+    EXPECT_NE(said.find(std::format(
+                  "ice {}:ice_thickness (2 kyr BP), topography {}:topography "
+                  "(2 kyr BP); ice change cap at latitude 90, longitude 0, "
+                  "width 15 deg, fraction -0.2 of the state's ice, history "
+                  "in kyr [[0, 0], [1, 1]] + change {}:ice_thickness_change, "
+                  "held through the run; wrote ",
+                  (dir_ / "history.nc").string(),
+                  (dir_ / "history.nc").string(), (dir_ / "held.nc").string())),
+              std::string::npos)
+        << said;
+    const auto a = Output(dated);
+    const auto b = Output(clock);
+    for (const auto* name : {"relative_sea_level_change", "displacement",
+                             "tangential_potential", "potential",
+                             "initial_sea_level"}) {
+      const auto departure =
+          Departure(b.variables.at(name).values, a.variables.at(name).values);
+      worst = std::max(worst, departure);
+      EXPECT_LT(departure, 1e-11) << name << ", " << shorelines;
+    }
+    if (std::string_view{shorelines} == "migrating") {
+      EXPECT_EQ(b.variables.at("ocean_function").values,
+                a.variables.at("ocean_function").values);
+    }
+    EXPECT_EQ(std::get<std::vector<double>>(a.meta.at("dates_kyr_bp")),
+              (std::vector<double>{2.0, 1.7, 1.2, 0.5, 0.0}));
+    EXPECT_EQ(std::get<std::vector<double>>(b.meta.at("times")),
+              (std::vector<double>{0.0, 0.3, 0.8, 1.5, 2.0}));
+  }
+  RecordProperty("dated_departure", std::format("{:.3e}", worst));
+}
+
+TEST_F(AppsTest, SeaLevelOnItsOwnClockReadsItsStateAtItsDate) {
+  // A run counting forwards has no calendar of its own: its state is a
+  // snapshot of its files at `ocean.date_kyr_bp`. The toy history's slice
+  // at 1 kyr BP, named through the file with a time axis and that date,
+  // gives the run of the same slice written as files without one, under a
+  // melting cap and a surface load, each with a history in years, to
+  // rounding (equal to the bit here); the summary and the metadata give
+  // the slice read.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  {
+    // the history's slice at 1 kyr BP, its second, as static fields
+    const auto history = pm::ReadSurfaceFile(dir_ / "history.nc");
+    auto file = pm::SurfaceFile{};
+    file.grid = history.grid;
+    file.source = "sl3dpp tests";
+    for (const auto* name : {"ice_thickness", "topography"}) {
+      const auto& values = history.variables.at(name).values;
+      const auto size = values.size() / history.time->size();
+      file.variables.emplace(
+          name, pm::SurfaceField(
+                    name,
+                    std::vector<double>(
+                        values.begin() + static_cast<std::ptrdiff_t>(size),
+                        values.begin() + static_cast<std::ptrdiff_t>(2 * size)),
+                    {.dimensions = pm::units::LENGTH}));
+    }
+    pm::WriteSurfaceFile(dir_ / "slice.nc", file);
+  }
+  const auto config = [&](const std::string& name, const std::string& ocean) {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"unit": "yr", "at": [0, 100, 300, 1000]}},
+      "forcing": {{
+        "ice_change": [{{"cap_fraction": {{"latitude": 90, "longitude": 0,
+                          "width_deg": 15, "fraction": -0.2}},
+                        "history": [[0, 0], [500, 1]]}}],
+        "load": [{{"cap": {{"latitude": -40, "longitude": 120,
+                            "width_deg": 10, "amplitude_kg_m2": 2e4}},
+                   "history": [[0, 0], [300, 1]],
+                   "water_budget": true, "moves_solid_surface": false}}]}},
+      "ocean": {}, "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, ocean, name));
+  };
+  const auto summary = app::RunSeaLevel(config(
+      "dated", R"({"at": "start", "date_kyr_bp": 1,
+                   "topography": {"file": "history.nc"},
+                   "ice": {"file": "history.nc"}})"));
+  EXPECT_TRUE(summary.starts_with(std::format(
+      "1-D, viscoelastic, 4 nodes 0 to 1000 yr on the run's clock, "
+      "shorelines frozen, rotation none; ice {}:ice_thickness (1 kyr BP), "
+      "topography {}:topography (1 kyr BP); ice change cap",
+      (dir_ / "history.nc").string(), (dir_ / "history.nc").string())))
+      << summary;
+  static_cast<void>(app::RunSeaLevel(
+      config("still", R"({"at": "start", "topography": {"file": "slice.nc"},
+                          "ice": {"file": "slice.nc"}})")));
+  const auto dated = Output("dated");
+  const auto still = Output("still");
+  EXPECT_EQ(std::get<std::string>(still.meta.at("ice")),
+            std::format("{}:ice_thickness (static)",
+                        (dir_ / "slice.nc").string()));
+  auto worst = 0.0;
+  for (const auto* name :
+       {"relative_sea_level_change", "displacement", "tangential_potential",
+        "potential", "initial_sea_level"}) {
+    const auto departure = Departure(dated.variables.at(name).values,
+                                     still.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-13) << name;
+  }
+  RecordProperty("slice_departure", std::format("{:.3e}", worst));
+  // the cap and the load act: the run is not the state at rest
+  auto moved = 0.0;
+  for (const auto v : Slice(dated, "relative_sea_level_change", 3)) {
+    moved = std::max(moved, std::abs(v));
+  }
+  EXPECT_GT(moved, 1.0);
+}
+
+TEST_F(AppsTest, SeaLevelOnItsOwnClockRestartsFromItsCheckpoints) {
+  // A run counting forwards, stopped at its checkpoints by the wall-time
+  // limit and resumed, reproduces the uninterrupted run to the bit, its
+  // time axis included. Its checkpoints belong to its unit: the same nodes
+  // and times stated in kyr are another run, refused them.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  const auto body = [&](const std::string& unit, double scale) {
+    return std::format(R"({},
+      "problem": "quasi_static",
+      "times": {{"unit": "{}", "at": [0, {:.17g}, {:.17g}, {:.17g}]}},
+      "forcing": {{
+        "ice_change": [{{"cap_fraction": {{"latitude": 90, "longitude": 0,
+                          "width_deg": 15, "fraction": -0.2}},
+                        "history": [[0, 0], [{:.17g}, 1]]}}]}},
+      "ocean": {{"at": "start", "date_kyr_bp": 2,
+                "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full", "moments": "hydrostatic")",
+                       kBall, unit, 100 * scale, 300 * scale, 1000 * scale,
+                       500 * scale);
+  };
+  static_cast<void>(app::RunSeaLevel(Write(
+      "whole.json",
+      "{" + body("yr", 1.0) + R"(, "output": {"surface": "out/whole.nc"}})")));
+  const auto pieces = Write(
+      "pieces.json", "{" + body("yr", 1.0) +
+                         R"(, "checkpoint": {"directory": "ckpt", "every": 1,
+                              "max_walltime_min": 1e-9},
+              "output": {"surface": "out/pieces.nc"}})");
+  auto attempts = 0;
+  auto summary = std::string{};
+  for (; attempts < 8; ++attempts) {
+    summary = app::RunSeaLevel(pieces);
+    if (summary.find("wrote") != std::string::npos) break;
+    EXPECT_NE(summary.find("checkpointed"), std::string::npos) << summary;
+  }
+  EXPECT_GE(attempts, 1);
+  EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
+  const auto whole = Output("whole");
+  const auto rebuilt = Output("pieces");
+  EXPECT_EQ(*rebuilt.time, *whole.time);
+  for (const auto* name : {"relative_sea_level_change", "displacement",
+                           "tangential_potential", "potential"}) {
+    EXPECT_EQ(rebuilt.variables.at(name).values,
+              whole.variables.at(name).values)
+        << name;
+  }
+  EXPECT_EQ(rebuilt.meta.at("times"), whole.meta.at("times"));
+  EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"), whole.meta.at("omega_z_rad_s"));
+  const auto inKyr = Write(
+      "in_kyr.json", "{" + body("kyr", 1e-3) +
+                         R"(, "checkpoint": {"directory": "ckpt", "every": 1},
+              "output": {"surface": "out/in_kyr.nc"}})");
+  EXPECT_THROW(
+      {
+        try {
+          static_cast<void>(app::RunSeaLevel(inKyr));
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(std::string{error.what()}.find("different run"),
+                    std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST_F(AppsTest, SeaLevelRefusesWhatEachFormOfItsTimesCannotSay) {
+  // Each fault of the two forms of the times is refused naming the
+  // member: a run counting forwards without its unit or with an unknown
+  // one, members of the two forms together, `response`'s names, either
+  // form's nodes given twice, out of order or too few; the terms' times in
+  // the other form's names (histories, onsets, a field's time origin and
+  // dates), and the static problem's own (a `date` without its `unit`,
+  // with `date_kyr_bp`, a `unit` alone, a time origin); in a run counting
+  // forwards a `thickness` term and a `change` file with a time axis (a
+  // dated ice history), the state at the window's end, and the state's
+  // date held to its files; the kernel commands' other forms. A change
+  // taking more ice than the state holds names its time in the run's
+  // unit.
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  sl3dpp::test::WriteToyChange(dir_ / "change.nc", true);
+  {
+    namespace pm = planetmodel;
+    auto file = pm::SurfaceFile{};
+    file.grid = pm::Equiangular(9, 18);
+    file.source = "sl3dpp tests";
+    for (const auto* name : {"ice_thickness", "topography", "load"}) {
+      file.variables.emplace(
+          name, pm::SurfaceField(name, std::vector<double>(9 * 18, 100.0),
+                                 {.dimensions = pm::units::LENGTH}));
+    }
+    pm::WriteSurfaceFile(dir_ / "static.nc", file);
+  }
+  const auto read = [](const fs::path& path) {
+    return app::ReadSeaLevelInput(path);
+  };
+  const auto refused = [&](auto&& run, const std::string& text,
+                           const std::string& member, const std::string& what) {
+    ExpectRefused(run, Write("bad.json", text), member, what);
+  };
+  constexpr auto kForwards = R"({"unit": "yr", "at": [0, 100, 300]})";
+  constexpr auto kDated = R"({"start_kyr_bp": 2, "nodes": 3})";
+  constexpr auto kCapLoad = R"({"cap": {"latitude": 60, "longitude": -85,
+      "width_deg": 20, "amplitude_kg_m2": 1.0e6}, )";
+  // a run without an ocean under the times and the forcing given
+  const auto dry = [&](const std::string& times, const std::string& forcing) {
+    return std::format(R"({{"problem": "quasi_static",
+        "model": {{"deck": "ball.deck"}}, "lmax": 4, "times": {},
+        "forcing": {}, "output": {{"surface": "o.nc"}}}})",
+                       times, forcing);
+  };
+  // a run with an ocean, its state in `ocean`
+  const auto wet = [&](const std::string& times, const std::string& forcing,
+                       const std::string& ocean) {
+    return std::format(R"({{"problem": "quasi_static",
+        "model": {{"deck": "ball.deck"}}, "lmax": 4, "times": {},
+        "forcing": {}, "ocean": {}, "output": {{"surface": "o.nc"}}}})",
+                       times, forcing, ocean);
+  };
+  const auto load = std::format(R"({{"load": [{}"history": [[0, 1]]}}]}})",
+                                kCapLoad);
+  const auto times = [&](const std::string& block) { return dry(block, load); };
+  // the load with the properties a run with an ocean is told
+  const auto wetLoad = std::format(R"({{"load": [{}"history": [[0, 1]],
+      "water_budget": false, "moves_solid_surface": false}}]}})",
+                                   kCapLoad);
+
+  // the times block's two forms
+  refused(read, times(R"({"at": [0, 100]})"), "times",
+          "gives no `unit` for its times: \"kyr\", \"yr\" or \"day\"");
+  refused(read, times(R"({"unit": "month", "at": [0, 1]})"), "times.unit",
+          "none of \"kyr\", \"yr\", \"day\"");
+  refused(read, times(R"({"start_kyr_bp": 2, "unit": "kyr", "end": 1,
+                          "nodes": 3})"),
+          "times.unit",
+          "beside `start_kyr_bp`, a date before present: the times are given "
+          "in one of two forms, dates before present (`start_kyr_bp`, "
+          "`end_kyr_bp` and `nodes`, or `at_kyr_bp`) or times counted "
+          "forwards on the run's own clock (`unit` with `start`, `end` and "
+          "`nodes`, or `at`)");
+  refused(read, times(R"({"start_kyr": 0, "end_kyr": 2, "nodes": 3})"),
+          "times.start_kyr", "this command counts forwards with a `unit`");
+  refused(read, times(R"({"nodes": 3})"), "times", "gives no window");
+  refused(read, times(R"({"at_kyr_bp": [2, 1, 1]})"), "times.at_kyr_bp[2]",
+          "strictly decreasing in kyr BP");
+  refused(read, times(R"({"at_kyr_bp": [2]})"), "times.at_kyr_bp",
+          "fewer than two nodes");
+  refused(read, times(R"({"start_kyr_bp": 2, "at_kyr_bp": [2, 1]})"),
+          "times.start_kyr_bp", "is given by `at_kyr_bp`");
+  refused(read, times(R"({"at_kyr_bp": [2, 1], "nodes": 2})"), "times",
+          "gives the nodes twice");
+  refused(read, times(R"({"unit": "yr", "at": [0, 100, 50]})"), "times.at[2]",
+          "strictly increasing");
+  refused(read, times(R"({"unit": "yr", "start": 0, "at": [0, 100]})"),
+          "times.start", "is given by `at`");
+  refused(read, times(R"({"unit": "yr", "end": 100, "at": [0, 100]})"),
+          "times", "gives the nodes twice");
+  refused(read, times(R"({"unit": "yr"})"), "times", "gives no nodes");
+  refused(read, times(R"({"unit": "yr", "nodes": 3})"), "times",
+          "gives `nodes` without `end`");
+  refused(read, times(R"({"unit": "yr", "start": 5, "end": 5, "nodes": 3})"),
+          "times.end", "is not later than `start`");
+  refused(read, times(R"({"unit": "yr", "end": 5, "nodes": 1})"),
+          "times.nodes", "fewer than two nodes");
+  refused(read, times(R"({"unit": "yr", "at": [0, 1], "step": 1})"),
+          "times.step", "not a recognised member");
+
+  // the terms' times, each form naming its own
+  refused(read,
+          dry(kForwards, std::format(R"({{"load": [{}"history_kyr_bp":
+                                       [[2, 1]]}}]}})",
+                                     kCapLoad)),
+          "forcing.load[0].history_kyr_bp",
+          "is a date before present, the dated form of `times`; this run "
+          "counts forwards on its own clock, in its `unit` (`times.unit`): "
+          "`history`");
+  refused(read,
+          dry(kForwards, std::format(R"({{"load": [{}"history_kyr":
+                                       [[0, 1]]}}]}})",
+                                     kCapLoad)),
+          "forcing.load[0].history_kyr", "`response`'s form");
+  refused(read,
+          dry(kForwards, std::format(R"({{"tide": [{}"history_kyr_bp":
+                                       [[2, 1]]}}]}})",
+                                     kTideOpen)),
+          "forcing.tide[0].history_kyr_bp", "`history`");
+  refused(read,
+          dry(kForwards,
+              std::format(R"({{"seismic": [{}"onset_kyr_bp": 1}}]}})",
+                          kPointOpen)),
+          "forcing.seismic[0].onset_kyr_bp", "`onset`");
+  refused(read,
+          dry(kForwards, std::format(R"({{"seismic": [{}"onset_kyr": 1}}]}})",
+                                     kPointOpen)),
+          "forcing.seismic[0].onset_kyr", "`onset`");
+  refused(read,
+          dry(kForwards, R"({"load": [{"field": {"file": "static.nc",
+                              "time_origin_kyr": 2}}]})"),
+          "forcing.load[0].field.time_origin_kyr", "`time_origin`");
+  refused(read,
+          dry(kForwards, R"({"load": [{"field": {"file": "static.nc",
+                              "date_kyr_bp": 2}}]})"),
+          "forcing.load[0].field.date_kyr_bp", "at t - `time_origin`");
+  refused(read,
+          dry(kForwards, R"({"load": [{"field": {"file": "static.nc",
+                              "date": 2, "unit": "yr"}}]})"),
+          "forcing.load[0].field.date", "at t - `time_origin`");
+  refused(read,
+          dry(kDated, std::format(R"({{"load": [{}"history": [[0, 1]]}}]}})",
+                                  kCapLoad)),
+          "forcing.load[0].history",
+          "the form of a `times` block counting forwards with a `unit`; this "
+          "run's times are dates, kyr before present: `history_kyr_bp`");
+  refused(read,
+          dry(kDated,
+              std::format(R"({{"seismic": [{}"onset": 1}}]}})", kPointOpen)),
+          "forcing.seismic[0].onset", "`onset_kyr_bp`");
+  refused(read,
+          dry(kDated, R"({"load": [{"field": {"file": "static.nc",
+                           "time_origin": 2}}]})"),
+          "forcing.load[0].field.time_origin", "is read by date");
+  refused(read,
+          dry(kDated, R"({"load": [{"field": {"file": "static.nc",
+                           "date": 2, "unit": "yr"}}]})"),
+          "forcing.load[0].field.date", "reads it at each node's date");
+  refused(read,
+          dry(kDated, R"({"load": [{"field": {"file": "static.nc",
+                           "unit": "yr"}}]})"),
+          "forcing.load[0].field.unit", "reads the file at each node's date");
+  // the static problem's: no history, onset or time origin; a date on the
+  // file's own axis with its unit
+  const auto fixed = [&](const std::string& forcing) {
+    return std::format(R"({{"problem": "static",
+        "model": {{"deck": "ball.deck"}}, "lmax": 4, "forcing": {},
+        "output": {{"surface": "o.nc"}}}})",
+                       forcing);
+  };
+  refused(read,
+          fixed(std::format(R"({{"load": [{}"history": [[0, 1]]}}]}})",
+                            kCapLoad)),
+          "forcing.load[0].history", "which needs the quasi-static problem");
+  refused(read,
+          fixed(std::format(R"({{"seismic": [{}"onset": 1}}]}})", kPointOpen)),
+          "forcing.seismic[0].onset", "which needs the quasi-static problem");
+  refused(read,
+          fixed(R"({"load": [{"field": {"file": "static.nc",
+                    "time_origin": 2}}]})"),
+          "forcing.load[0].field.time_origin",
+          "which needs the quasi-static problem");
+  refused(read,
+          fixed(R"({"load": [{"field": {"file": "static.nc", "date": 2}}]})"),
+          "forcing.load[0].field.date",
+          "needs its `unit` beside it: \"kyr\", \"yr\" or \"day\"");
+  refused(read,
+          fixed(R"({"load": [{"field": {"file": "static.nc", "date": 2,
+                    "unit": "yr", "date_kyr_bp": 1}}]})"),
+          "forcing.load[0].field.date",
+          "dates the file twice, beside `date_kyr_bp`");
+  refused(read,
+          fixed(R"({"load": [{"field": {"file": "static.nc",
+                    "unit": "yr"}}]})"),
+          "forcing.load[0].field.unit", "which the field does not give");
+  refused(read,
+          fixed(R"({"load": [{"field": {"file": "static.nc", "date": 2,
+                    "unit": "week"}}]})"),
+          "forcing.load[0].field.unit", "none of \"kyr\", \"yr\", \"day\"");
+  refused(app::RunSeaLevel,
+          fixed(R"({"load": [{"field": {"file": "static.nc", "date": 2,
+                    "unit": "yr"}}]})"),
+          "forcing.load[0].field.date", "dates a file without a time axis");
+
+  // the ice and the state of a run counting forwards
+  constexpr auto kState = R"({"at": "start", "date_kyr_bp": 2,
+      "topography": {"file": "history.nc"}, "ice": {"file": "history.nc"}})";
+  refused(read,
+          wet(kForwards,
+              R"({"ice_change": [{"thickness": {"file": "history.nc"}}]})",
+              kState),
+          "forcing.ice_change[0].thickness",
+          "a dated history, which makes the problem a dated one. Give the "
+          "dated form of `times`");
+  refused(read,
+          wet(kForwards,
+              R"({"ice_change": [{"cap_thickness": {"latitude": 70,
+                  "longitude": 0, "width_deg": 10, "thickness_m": 1},
+                  "history_kyr_bp": [[2, 0], [0, 1]]}]})",
+              kState),
+          "forcing.ice_change[0].history_kyr_bp", "`history`");
+  refused(read,
+          wet(kForwards,
+              R"({"ice_change": [{"change": {"file": "change.nc",
+                  "date_kyr_bp": 1}}]})",
+              kState),
+          "forcing.ice_change[0].change.date_kyr_bp",
+          "holds the file, one field without a time axis");
+  refused(app::RunSeaLevel,
+          wet(kForwards,
+              R"({"ice_change": [{"change": {"file": "change.nc"}}]})", kState),
+          "forcing.ice_change[0].change",
+          "a dated history of the change, which makes the problem a dated "
+          "one: give the dated form of `times`");
+  refused(read,
+          wet(kForwards, wetLoad,
+              R"({"at": "end", "topography": {"file": "history.nc"},
+                  "ice": {"file": "history.nc"}})"),
+          "ocean.at",
+          "Give the state at the start, \"start\", or the dated form of "
+          "`times`");
+  refused(read,
+          wet(kForwards, wetLoad,
+              R"({"at": "start", "topography": {"file": "history.nc"},
+                  "ice": {"file": "history.nc", "date_kyr_bp": 2}})"),
+          "ocean.ice.date_kyr_bp", "`ocean.date_kyr_bp`");
+  refused(app::RunSeaLevel,
+          wet(kForwards, wetLoad,
+              R"({"at": "start", "topography": {"file": "history.nc"},
+                  "ice": {"file": "history.nc"}})"),
+          "ocean", "give the state's date, `date_kyr_bp`");
+  refused(app::RunSeaLevel,
+          wet(kForwards, wetLoad,
+              R"({"at": "start", "date_kyr_bp": 2,
+                  "topography": {"file": "static.nc"},
+                  "ice": {"file": "static.nc"}})"),
+          "ocean.date_kyr_bp", "dates a state whose files have no time axis");
+  // a dated run's state stays at an end of its window
+  refused(read,
+          wet(kDated,
+              std::format(R"({{"load": [{}"water_budget": false,
+                  "moves_solid_surface": false}}]}})",
+                          kCapLoad),
+              R"({"at": "start", "date_kyr_bp": 2,
+                  "topography": {"file": "history.nc"},
+                  "ice": {"file": "history.nc"}})"),
+          "ocean.date_kyr_bp", "a dated run puts the state at an end");
+  // more ice taken than the state holds, at a time of the run's clock
+  for (const auto* what :
+       {"removes more ice than the state holds, by ", ", 300 yr)"}) {
+    refused(app::RunSeaLevel,
+            wet(kForwards,
+                R"({"ice_change": [{"cap_fraction": {"latitude": 90,
+                    "longitude": 0, "width_deg": 15, "fraction": -1},
+                    "history": [[0, 0], [300, 10]]}]})",
+                kState),
+            "forcing.ice_change", what);
+  }
+
+  // the kernel commands take evenly spaced dates alone
+  const auto kernel = [&](const std::string& block) {
+    return std::format(R"({{"problem": "quasi_static",
+        "model": {{"deck": "ball.deck"}}, "lmax": 4, "times": {},
+        "forcing": {{"ice_change": [{{"thickness":
+                                      {{"file": "history.nc"}}}}]}},
+        "ocean": {{"at": "start", "topography": {{"file": "history.nc"}},
+                  "ice": {{"file": "history.nc"}}}},
+        "measurements": [{{"type": "rotation", "component": "z"}}],
+        "output": "k"}})",
+                       block);
+  };
+  refused(app::ReadKernelInput, kernel(kForwards), "times.unit",
+          "which the kernel commands do not take");
+  refused(app::ReadKernelInput, kernel(R"({"at_kyr_bp": [2, 1, 0]})"),
+          "times.at_kyr_bp", "lists the nodes, which the kernel commands do "
+          "not take");
 }
 
 }  // namespace

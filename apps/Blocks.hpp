@@ -21,6 +21,7 @@
 
 #include <cstddef>
 #include <filesystem>
+#include <string>
 #include <string_view>
 #include <vector>
 
@@ -79,44 +80,91 @@ struct ModelBlock {
 [[nodiscard]] ModelBlock ReadModelBlock(const Json& block,
                                         const std::filesystem::path& directory);
 
-/// The two forms of a `times` block; each command takes one.
-enum class TimesForm {
-  /// kyr on the run's own clock, counted forwards: `start_kyr` (default
-  /// 0) with `end_kyr` and `nodes`, or `at_kyr` (`response`).
-  Forwards,
-  /// Dates in kyr before present: `start_kyr_bp`, `end_kyr_bp` (default
-  /// 0, later than the start, so smaller) and `nodes`, evenly spaced, both
-  /// ends included (`sea-level`, `kernel1d`, `kernel`).
-  BeforePresent
-};
-
-/// The `times` block: the time nodes of a run stepped through time.
+/// `response`'s `times` block: the time nodes of a run stepped through
+/// time, in kyr on the run's own clock, counted forwards.
 struct TimesBlock {
-  /// The forwards form: the nodes in kyr on the run's own clock, strictly
-  /// increasing, the first the start.
+  /// The nodes in kyr on the run's own clock, strictly increasing, the
+  /// first the start.
   std::vector<double> nodes_kyr;
-  /// The forwards form: the step from each node to the next, one fewer
-  /// than the nodes: for evenly spaced nodes the one spacing
-  /// (end - start) / (nodes - 1) every time, so that equal steps are equal
-  /// to the bit; the differences of the nodes given otherwise.
+  /// The step from each node to the next, one fewer than the nodes: for
+  /// evenly spaced nodes the one spacing (end - start) / (nodes - 1) every
+  /// time, so that equal steps are equal to the bit; the differences of
+  /// the nodes given otherwise.
   std::vector<double> steps_kyr;
-  /// The before-present form: the window's start and end, kyr before
-  /// present (the start the larger), and the number of nodes evenly
-  /// spaced over it, both ends included.
-  double start_kyr_bp = 0.0;
-  double end_kyr_bp = 0.0;
-  int nodes = 0;
 };
 
-/// Reads a `times` block of the given form. Forwards: `start_kyr`
-/// (default 0) with `end_kyr` (later than the start) and `nodes` (at least
-/// two, evenly spaced, both ends included); or instead an explicit list
-/// `at_kyr`, strictly increasing, of at least two entries, its first the
-/// start; exactly one of the two. Before present: `start_kyr_bp`
-/// (required), `end_kyr_bp` (default 0, below the start) and `nodes` (at
-/// least two). The members of the other form are refused, naming the form
-/// this command takes.
-[[nodiscard]] TimesBlock ReadTimesBlock(const Json& block, TimesForm form);
+/// Reads `response`'s `times` block: `start_kyr` (default 0) with
+/// `end_kyr` (later than the start) and `nodes` (at least two, evenly
+/// spaced, both ends included); or instead an explicit list `at_kyr`,
+/// strictly increasing, of at least two entries, its first the start;
+/// exactly one of the two. `sea-level`'s dates (`start_kyr_bp`,
+/// `end_kyr_bp`) are refused, naming this form.
+[[nodiscard]] TimesBlock ReadTimesBlock(const Json& block);
+
+/// The two forms of `sea-level`'s `times` block (and the kernel
+/// commands'), chosen by the members present.
+enum class Calendar {
+  /// Dates in kyr before present, on the calendar the files with a time
+  /// axis share: `start_kyr_bp`, `end_kyr_bp` and `nodes`, or `at_kyr_bp`.
+  Dated,
+  /// Times counted forwards on the run's own clock in the block's `unit`:
+  /// `start`, `end` and `nodes`, or `at`. A run with no calendar.
+  Forwards
+};
+
+/// `sea-level`'s `times` block: the nodes of a run through time, the
+/// window from the first to the last.
+struct Window {
+  Calendar calendar = Calendar::Dated;
+  /// The unit the nodes are given in, and the terms' times beside them:
+  /// kyr for dates; the block's `unit` on a forwards clock.
+  TimeUnit unit;
+  /// Whether the nodes were listed (`at_kyr_bp`, `at`) rather than evenly
+  /// spaced.
+  bool listed = false;
+  /// The nodes as the config gives them, in `unit`: dates before present,
+  /// strictly decreasing (dated), or times on the run's clock, strictly
+  /// increasing (forwards). Evenly spaced, the start less (dated) or plus
+  /// (forwards) n times the one spacing, the last the end itself.
+  std::vector<double> nodes;
+
+  [[nodiscard]] bool Dated() const { return calendar == Calendar::Dated; }
+  [[nodiscard]] std::size_t Size() const { return nodes.size(); }
+  /// The first node and the last, in `unit` (dated, kyr BP).
+  [[nodiscard]] double Start() const { return nodes.front(); }
+  [[nodiscard]] double End() const { return nodes.back(); }
+  /// Node `n`'s place on the run's axis, SI seconds: dated, minus its date
+  /// (the calendar's axis, the present at zero and the past negative, on
+  /// which files with a time axis are read); forwards, its time on the
+  /// run's clock.
+  [[nodiscard]] double Axis(std::size_t n) const;
+  /// Each node's time since the first, in units of `scale` seconds (the
+  /// solver's time unit). Dated: the window's span in seconds times n over
+  /// (nodes - 1) for evenly spaced nodes, the difference of their places
+  /// on the axis for listed ones, each over `scale`. Forwards: as
+  /// `response` counts its nodes, the node less the first, in the run's
+  /// unit, times the unit over `scale`, so that a run in kyr on
+  /// `response`'s nodes steps through `response`'s times to the bit. A
+  /// step's response moves with the last bit of its length (by up to about
+  /// 1e-12 relative under a one-ulp change of a node), so runs whose times
+  /// are formed otherwise (another unit, dates for times) agree to that.
+  [[nodiscard]] std::vector<double> Times(double scale) const;
+  /// A time of the run's axis (SI seconds) as a summary or an error states
+  /// it: `<d> kyr BP` (dated) or `<t> <unit>` (forwards), to six figures.
+  [[nodiscard]] std::string Label(double axis) const;
+};
+
+/// Reads `sea-level`'s `times` block. Dated: `start_kyr_bp` (required),
+/// `end_kyr_bp` (default 0, below the start) and `nodes` (at least two,
+/// evenly spaced, both ends included), or `at_kyr_bp`, the dates
+/// themselves, at least two, strictly decreasing. Forwards: `unit`
+/// (required: "kyr", "yr" or "day"), `start` (default 0) with `end`
+/// (later than the start) and `nodes`, or `at`, the times themselves, at
+/// least two, strictly increasing. Exactly one way of giving the nodes in
+/// either form; members of the two forms together are refused, naming
+/// both, and so are `response`'s names (`start_kyr`, `end_kyr`,
+/// `at_kyr`), naming the forwards form with its `unit`.
+[[nodiscard]] Window ReadWindow(const Json& block);
 
 /// The end of a run's window an input belongs to.
 enum class WindowEnd { Start, End };
@@ -151,13 +199,16 @@ struct OceanBlock {
   /// held as land whatever the flotation and zero elsewhere (landlocked
   /// depressions), the same at every date. Absent, flotation alone.
   std::optional<FileInput> land;
-  /// The static problem: the state's date, kyr before present
-  /// (`ocean.date_kyr_bp`), at which every member's file with a time axis
-  /// is read; absent when none has one.
+  /// The state's date, kyr before present (`ocean.date_kyr_bp`), at which
+  /// every member's file with a time axis is read, in the static problem
+  /// and in a run counting forwards (which has no calendar of its own);
+  /// absent when none has one. A dated run reads the state at the end of
+  /// its window `at` names instead.
   std::optional<double> date_kyr_bp;
   /// The quasi-static problem: the end of the window the state belongs to
   /// (`ocean.at`), the start's being the initial state and the end's the
-  /// state the run reaches, the target of the calibration.
+  /// state the run reaches, the target of the calibration (a dated run's
+  /// alone).
   WindowEnd at = WindowEnd::Start;
   /// The shorelines: frozen at the state's (the linear equation), or
   /// following flotation (the nonlinear one), in either problem.
@@ -173,21 +224,27 @@ struct OceanBlock {
   double calibration_rtol = 1e-4;
 };
 
-/// Reads an `ocean` block of a run of `problem`, relative paths against
-/// `directory`. It holds exactly one of `sea_level` and `topography` and,
-/// required, `ice`, each a file input (Files.hpp) of `file`, `format` and
-/// `variable` alone, and optionally `land`. The state's instant is the
-/// block's: in the static problem `date_kyr_bp` (whether it is required
-/// is the files' business, checked once they are read); in the
-/// quasi-static problem `at` ("start" or "end", required). Both take
-/// `shorelines` (a word, default "frozen"); the quasi-static problem also
-/// takes `calibration` (an object of `method`, `iterations` and `rtol`,
-/// each optional), which `"at": "end"` alone takes and turns on, and the
-/// static problem refuses. Each problem refuses the other's instant. A
-/// date or an `at` on a member is refused, naming the block's.
+/// Reads an `ocean` block of a run of `problem` (through time, on the
+/// `calendar` of its times), relative paths against `directory`. It holds
+/// exactly one of `sea_level` and `topography` and, required, `ice`, each
+/// a file input (Files.hpp) of `file`, `format` and `variable` alone, and
+/// optionally `land`. The state's instant is the block's: in the static
+/// problem `date_kyr_bp` (whether it is required is the files' business,
+/// checked once they are read, CheckStateDate); in the quasi-static
+/// problem `at` ("start" or "end", required), and in a run counting
+/// forwards `date_kyr_bp` too, the date of the state's files, as the
+/// static problem's. `"at": "end"` is refused in a run counting forwards:
+/// it reads the ice back along dated ice histories, which such a run does
+/// not have. Both problems take `shorelines` (a word, default "frozen");
+/// the quasi-static problem also takes `calibration` (an object of
+/// `method`, `iterations` and `rtol`, each optional), which `"at": "end"`
+/// alone takes and turns on, and the static problem refuses. The static
+/// problem refuses `at`, and a dated run `date_kyr_bp`. A date or an `at`
+/// on a member is refused, naming the block's.
 [[nodiscard]] OceanBlock ReadOceanBlock(const Json& block,
                                         const std::filesystem::path& directory,
-                                        Problem problem);
+                                        Problem problem,
+                                        Calendar calendar = Calendar::Dated);
 
 /// Whose `solver` block: the members and the defaults differ.
 enum class SolverOf {

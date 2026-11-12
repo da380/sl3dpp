@@ -11,13 +11,15 @@
  * radial model (Evolution, on a branchless rheology), or, under lateral
  * moduli, of the 3-D one (Evolution3D, distributed over radial segments
  * on several ranks) with the radial model's answer beside it, written as
- * a surface file of static fields. The quasi-static problem is GIA
- * through time from a state at an end of the window: the radial model's
- * evolution (Evolution), or, under a lateral viscosity or lateral moduli,
- * the 3-D one (Evolution3D, distributed over radial segments on several
- * ranks), written as a surface file with a slice per node (the response
- * and the potentials of the tangential displacement) and restartable from
- * disk checkpoints. The `model` block alone decides between 1-D and 3-D.
+ * a surface file of static fields. The quasi-static problem is the run
+ * through time from a state at an end of the window, its nodes dates
+ * before present or times on the run's own clock (Window): the radial
+ * model's evolution (Evolution), or, under a lateral viscosity or lateral
+ * moduli, the 3-D one (Evolution3D, distributed over radial segments on
+ * several ranks), written as a surface file with a slice per node (the
+ * response and the potentials of the tangential displacement) and
+ * restartable from disk checkpoints. The `model` block alone decides
+ * between 1-D and 3-D.
  */
 #include <algorithm>
 #include <chrono>
@@ -55,11 +57,14 @@ namespace sl3dpp::app {
 namespace {
 
 /// One node of the accumulated history, SI, kept across restarts: the
-/// response, the potentials of the tangential displacement (the toroidal
-/// one in the frame of no net rotation of the surface, empty where the
-/// node has none) and, under migrating shorelines, the ocean function.
+/// node as the config gives it (Window::nodes: its date, kyr BP, in a
+/// dated run, its time on the run's clock in its unit in one counting
+/// forwards), the response, the potentials of the tangential
+/// displacement (the toroidal one in the frame of no net rotation of the
+/// surface, empty where the node has none) and, under migrating
+/// shorelines, the ocean function.
 struct Node {
-  double date_kyr_bp = 0.0;
+  double node = 0.0;
   std::vector<double> relativeSeaLevelChange;
   std::vector<double> displacement;
   std::vector<double> potential;
@@ -166,9 +171,27 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
       hash.Add(std::as_bytes(std::span(described)));
     }
   }
-  hash.AddValue(window.start_kyr_bp);
-  hash.AddValue(window.end_kyr_bp);
-  hash.AddValue(window.nodes);
+  // the nodes: evenly spaced dates by their window and count; listed dates,
+  // or times on the run's own clock, by their form, their unit and the
+  // nodes as given, so that the same physical nodes in another form or
+  // another unit are another run (their solver times may differ in the
+  // last bit)
+  if (window.Dated() && !window.listed) {
+    hash.AddValue(window.Start());
+    hash.AddValue(window.End());
+    hash.AddValue(static_cast<int>(window.Size()));
+  } else {
+    const auto form =
+        std::string_view{window.Dated() ? "at_kyr_bp" : "forwards"};
+    hash.Add(std::as_bytes(std::span(form)));
+    hash.Add(std::as_bytes(std::span(window.unit.name)));
+    hash.AddValue(window.Size());
+    for (const auto node : window.nodes) hash.AddValue(node);
+    // a run counting forwards reads its state at its own date
+    if (!window.Dated() && run.ocean && run.ocean->date_kyr_bp) {
+      hash.AddValue(*run.ocean->date_kyr_bp);
+    }
+  }
   hash.AddValue(run.solver.scheme);
   hash.AddValue(run.rotation);
   hash.AddValue(run.solver.step_rtol);
@@ -218,12 +241,12 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
     // and its numbers whole, which the description rounds
     for (const auto value :
          {term.term.site.latitude, term.term.site.longitude, term.term.width,
-          term.term.radius, term.term.amplitude, term.term.time_origin_kyr,
+          term.term.radius, term.term.amplitude, term.term.time_origin,
           term.density}) {
       hash.AddValue(value);
     }
     for (const auto* values :
-         {&term.term.history.times_kyr, &term.term.history.factors}) {
+         {&term.term.history.times, &term.term.history.factors}) {
       for (const auto value : *values) hash.AddValue(value);
     }
     if (term.term.kind == LoadTerm::Kind::Field) {
@@ -240,9 +263,9 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
       hash.AddValue(term.order);
       hash.AddValue(term.amplitude);
       hash.AddValue(term.imaginary);
-      hash.AddValue(term.history.times_kyr.size());
-      for (auto k = std::size_t{0}; k < term.history.times_kyr.size(); ++k) {
-        hash.AddValue(term.history.times_kyr[k]);
+      hash.AddValue(term.history.times.size());
+      for (auto k = std::size_t{0}; k < term.history.times.size(); ++k) {
+        hash.AddValue(term.history.times[k]);
         hash.AddValue(term.history.factors[k]);
       }
     }
@@ -394,7 +417,7 @@ void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
     PutComplex(out, cp.tideCoefficients);
     PutOne(out, static_cast<std::uint64_t>(history.size()));
     for (const auto& kept : history) {
-      PutOne(out, kept.date_kyr_bp);
+      PutOne(out, kept.node);
       PutVector(out, kept.relativeSeaLevelChange);
       PutVector(out, kept.displacement);
       PutVector(out, kept.potential);
@@ -463,7 +486,7 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
     const auto nodes = GetOne<std::uint64_t>(in);
     for (auto k = std::uint64_t{0}; k < nodes; ++k) {
       auto kept = Node{};
-      kept.date_kyr_bp = GetOne<double>(in);
+      kept.node = GetOne<double>(in);
       kept.relativeSeaLevelChange = GetVector(in);
       kept.displacement = GetVector(in);
       kept.potential = GetVector(in);
@@ -541,9 +564,12 @@ std::optional<ReadBack<CheckpointT>> ReadCommonCheckpoint(
 }
 
 /// The histories as one surface file: SI node fields on a time axis in
-/// seconds relative to the present (negative past). Without an ocean the
-/// fields and metadata of the state (the initial sea level, the state's
-/// inputs, the shorelines) are left out, and `ocean` says there is none.
+/// seconds, relative to the present (negative past) in a dated run, the
+/// nodes' dates listed in `dates_kyr_bp`, and on the run's own clock in
+/// one counting forwards, its nodes listed in its unit in `times` beside
+/// the unit's name, `time_unit`. Without an ocean the fields and metadata
+/// of the state (the initial sea level, the state's inputs, the
+/// shorelines) are left out, and `ocean` says there is none.
 void WriteHistoryFile(const SeaLevelInput& input,
                       const std::filesystem::path& config,
                       const SurfaceGrid& grid, const std::vector<Node>& history,
@@ -561,12 +587,16 @@ void WriteHistoryFile(const SeaLevelInput& input,
                           grid.CoLatitudeWeights().end()));
   file.source = std::format("sl3d sea-level (sl3dpp {})", Version());
   file.title = "viscoelastic GIA histories";
+  const auto& window = *run.times;
   auto axis = std::vector<double>{};
-  auto dates = std::vector<double>{};
+  auto nodes = std::vector<double>{};
   auto omega = std::array<std::vector<double>, 3>{};
   for (const auto& kept : history) {
-    axis.push_back(-kept.date_kyr_bp * KYR);
-    dates.push_back(kept.date_kyr_bp);
+    // a dated run's axis is the calendar's, one counting forwards its own
+    // clock's
+    axis.push_back(window.Dated() ? -kept.node * KYR
+                                  : kept.node * window.unit.seconds);
+    nodes.push_back(kept.node);
     for (auto k = 0; k < 3; ++k) omega[k].push_back(kept.angularVelocity[k]);
   }
   file.time = axis;
@@ -581,10 +611,21 @@ void WriteHistoryFile(const SeaLevelInput& input,
   if (const auto change = DescribeIceChange(run, "; "); !change.empty()) {
     file.meta.emplace("ice_change", change);
   }
-  file.meta.emplace("time",
-                    std::string{"seconds relative to the present, negative "
-                                "in the past; dates_kyr_bp lists the nodes"});
-  file.meta.emplace("dates_kyr_bp", dates);
+  if (window.Dated()) {
+    file.meta.emplace("time",
+                      std::string{"seconds relative to the present, negative "
+                                  "in the past; dates_kyr_bp lists the "
+                                  "nodes"});
+    file.meta.emplace("dates_kyr_bp", nodes);
+  } else {
+    file.meta.emplace(
+        "time", std::format("seconds on the run's own clock, a time of t {} "
+                            "in the times block at t * {:.17g} s; times lists "
+                            "the nodes in time_unit",
+                            window.unit.name, window.unit.seconds));
+    file.meta.emplace("times", nodes);
+    file.meta.emplace("time_unit", std::string{window.unit.name});
+  }
   file.meta.emplace("omega_x_rad_s", omega[0]);
   file.meta.emplace("omega_y_rad_s", omega[1]);
   file.meta.emplace("omega_z_rad_s", omega[2]);
@@ -695,9 +736,9 @@ void WriteHistoryFile(const SeaLevelInput& input,
 
 /// What the config was taken to mean, for the summary: the model's
 /// dimension, elastic (with migrating shorelines where they are) or
-/// viscoelastic with the window, the shorelines and the calibration (or,
-/// in their place, that the body has no ocean), and the rotation and
-/// moments.
+/// viscoelastic with the window (its dates, or its times on the run's
+/// clock in its unit), the shorelines and the calibration (or, in their
+/// place, that the body has no ocean), and the rotation and moments.
 std::string Meaning(const SeaLevelRun& run, const BuiltEarth& earth) {
   auto out = earth.Dimension();
   if (!run.times) {
@@ -709,8 +750,13 @@ std::string Meaning(const SeaLevelRun& run, const BuiltEarth& earth) {
     }
   } else {
     const auto& window = *run.times;
-    out += std::format(", viscoelastic, {} nodes {} to {} kyr BP",
-                       window.nodes, window.start_kyr_bp, window.end_kyr_bp);
+    out += window.Dated()
+               ? std::format(", viscoelastic, {} nodes {} to {} kyr BP",
+                             window.Size(), window.Start(), window.End())
+               : std::format(", viscoelastic, {} nodes {} to {} {} on the "
+                             "run's clock",
+                             window.Size(), window.Start(), window.End(),
+                             window.unit.name);
     if (!run.ocean) {
       out += ", no ocean";
     } else {
@@ -725,15 +771,16 @@ std::string Meaning(const SeaLevelRun& run, const BuiltEarth& earth) {
 
 /// The forcing of a `sea-level` run in the form the library's evolutions
 /// take, in the solver's units, each channel a function of the solver's
-/// time read on the run's clock (kyr from the window's start through time;
-/// the static problem's one node is at zero, where its terms are what they
-/// are): the ice change's grounded load, `iceLoad` (given under frozen
-/// shorelines alone: under migrating ones the ice is given as its
-/// thickness, and a body without an ocean has none), joined by the surface
-/// loads in the water budget; the loads outside the water budget, the
-/// layer on the solid surface, the tide and the seismic sources. A channel
-/// no term gives is absent. `loads` are the run's surface loads (null
-/// without any), held by the forcing.
+/// time read on the terms' clock (SolverClockOf: kyr from the window's
+/// start in a dated run, the run's own clock in its unit in one counting
+/// forwards; the static problem's one node is at zero, where its terms
+/// are what they are): the ice change's grounded load, `iceLoad` (given
+/// under frozen shorelines alone: under migrating ones the ice is given as
+/// its thickness, and a body without an ocean has none), joined by the
+/// surface loads in the water budget; the loads outside the water budget,
+/// the layer on the solid surface, the tide and the seismic sources. A
+/// channel no term gives is absent. `loads` are the run's surface loads
+/// (null without any), held by the forcing.
 template <class EvolutionForcing>
 EvolutionForcing ForcingOf(
     const SeaLevelRun& run, const GRDSolver& solver,
@@ -741,7 +788,7 @@ EvolutionForcing ForcingOf(
     std::shared_ptr<const SurfaceLoads> loads) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
-  const auto toKyr = scales.Time() / KYR;
+  const auto clock = SolverClockOf(run, scales);
   const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
   const auto ice = static_cast<bool>(iceLoad);
   auto forcing = EvolutionForcing{};
@@ -752,9 +799,10 @@ EvolutionForcing ForcingOf(
       SurfaceLoads::Node node;
     };
     const auto built = std::make_shared<Built>();
-    const auto at = [built, loads, toKyr](double t) -> const SurfaceLoads::Node& {
+    const auto at = [built, loads,
+                     clock](double t) -> const SurfaceLoads::Node& {
       if (!built->t || *built->t != t) {
-        built->node = loads->At(t * toKyr);
+        built->node = loads->At(clock.At(t));
         built->t = t;
       }
       return built->node;
@@ -799,9 +847,9 @@ EvolutionForcing ForcingOf(
   }
   if (!run.forcing.tide.empty()) {
     const auto toPotential = scales.Factor(PotentialDimensions);
-    forcing.tide = [tide = run.forcing.tide, grid = &solver.Grid(), toKyr,
+    forcing.tide = [tide = run.forcing.tide, grid = &solver.Grid(), clock,
                     toPotential](double t) {
-      auto out = TideAt(tide, *grid, t * toKyr);
+      auto out = TideAt(tide, *grid, clock.At(t));
       for (auto& c : out) c /= toPotential;
       return out;
     };
@@ -812,9 +860,9 @@ EvolutionForcing ForcingOf(
     const auto surfaceRadius = solver.Radius() * length;
     const auto energy =
         scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
-    forcing.sources = [seismic = std::move(seismic), surfaceRadius, toKyr,
+    forcing.sources = [seismic = std::move(seismic), surfaceRadius, clock,
                        length, energy](double t) {
-      auto sources = SeismicSourcesAt(seismic, t * toKyr, surfaceRadius);
+      auto sources = SeismicSourcesAt(seismic, clock.At(t), surfaceRadius);
       for (auto& source : sources) {
         source.at.radius /= length;
         for (auto* c : {&source.moment.rr, &source.moment.tt,
@@ -831,15 +879,16 @@ EvolutionForcing ForcingOf(
 
 /// A run through time over either evolution. `make` builds the evolution
 /// from its options; `check` inspects each snapshot (refusing an
-/// unconverged node). `meaning` heads the summary.
+/// unconverged node), given the node as the window labels it
+/// (Window::Label). `meaning` heads the summary.
 template <class Evolution>
 std::string RunWith(
     const std::filesystem::path& config, const SeaLevelInput& input,
     const Json& top, std::string_view meaning, const GRDSolver& solver,
     Loaded& world,
     const std::function<Evolution(typename Evolution::Options)>& make,
-    const std::function<void(const typename Evolution::Snapshot&, double)>&
-        check) {
+    const std::function<void(const typename Evolution::Snapshot&,
+                             std::string_view)>& check) {
   const auto started = std::chrono::steady_clock::now();
   const auto& run = input.run;
   const auto& window = *run.times;
@@ -879,10 +928,10 @@ std::string RunWith(
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toOmega = 1.0 / scales.Time();
   auto history = std::vector<Node>{};
-  auto keep = [&](const typename Evolution::Snapshot& snapshot) {
+  auto keep = [&](std::size_t n, const typename Evolution::Snapshot& snapshot) {
     auto kept = Node{};
-    kept.date_kyr_bp = DateKyrBp(run, scales, snapshot.t);
-    check(snapshot, kept.date_kyr_bp);
+    kept.node = window.nodes[n];
+    check(snapshot, window.Label(window.Axis(n)));
     kept.relativeSeaLevelChange = snapshot.relativeSeaLevelChange;
     kept.displacement = snapshot.displacement;
     kept.potential = snapshot.potential;
@@ -960,17 +1009,19 @@ std::string RunWith(
     }
   }
 
-  options.on_snapshot = [&](std::size_t,
-                            const typename Evolution::Snapshot& s) { keep(s); };
   const auto base_node = resumed ? resumed->node : std::size_t{0};
+  // the evolution counts a resumed run's nodes from its checkpoint's
+  options.on_snapshot = [&](std::size_t node,
+                            const typename Evolution::Snapshot& s) {
+    keep(base_node + node, s);
+  };
   if (checkpointing) {
     options.checkpoint_stride = checkpoint.every;
     options.on_checkpoint = [&](std::size_t node,
                                 const typename Evolution::Checkpoint& cp) {
       WriteCheckpoint(directory, hash, base_node + node, cp,
                       ranks.First() ? history : std::vector<Node>{}, migrating);
-      const auto done =
-          base_node + node + 1 >= static_cast<std::size_t>(window.nodes);
+      const auto done = base_node + node + 1 >= window.Size();
       if (checkpoint.max_walltime_min > 0.0 && !done) {
         const auto minutes = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
@@ -1019,7 +1070,7 @@ std::string RunWith(
     // with restart false, the same config would start over again
     return std::format(
         "{}; checkpointed node {} of {} to {} at the wall-time limit{}; {}",
-        meaning, at.node, window.nodes - 1, checkpoint.directory.string(),
+        meaning, at.node, window.Size() - 1, checkpoint.directory.string(),
         replaced,
         input.restart ? "rerun the same config to resume"
                       : "set \"restart\": true (the default) to resume");
@@ -1065,7 +1116,7 @@ StaticWorld LoadStaticWorld(const SeaLevelRun& run, const Json& top,
   const auto date = run.ocean->date_kyr_bp;
   const auto time = -date.value_or(0.0) * KYR;
   const RunIce ice(run, top, files, time);
-  ice.CheckHeld(std::span(&time, 1), false);
+  ice.CheckHeld(std::span(&time, 1), nullptr);
   // the state's ice, and its sea level: given, or by the flotation
   // construction with the solver's own densities from the topography and
   // the state's ice
@@ -1546,13 +1597,13 @@ std::string Run1D(const std::filesystem::path& config,
         return Evolution(op, solver, world.background,
                                  std::move(options));
       },
-      [](const Evolution::Snapshot& snapshot, double date_kyr_bp) {
+      [](const Evolution::Snapshot& snapshot, std::string_view when) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
-              "the sea level solve did not converge at {:.6g} kyr BP "
-              "(shoreline cells flipping back and forth defeat the migrating "
-              "solve's tolerance); loosen solver.rtol",
-              date_kyr_bp));
+              "the sea level solve did not converge at {} (shoreline cells "
+              "flipping back and forth defeat the migrating solve's "
+              "tolerance); loosen solver.rtol",
+              when));
         }
       });
 }
@@ -1580,17 +1631,15 @@ std::string Run3D(const std::filesystem::path& config,
         return Evolution3D(op, solver, world.background,
                                    std::move(options));
       },
-      [](const Evolution3D::Snapshot& snapshot, double date_kyr_bp) {
+      [](const Evolution3D::Snapshot& snapshot, std::string_view when) {
         if (!snapshot.converged) {
           throw std::runtime_error(std::format(
               "the coupled fixed point or its sea level solve did not "
-              "converge at {:.6g} kyr BP (residual {:.3g} after {} "
-              "iterations; under migrating shorelines, cells flipping back "
-              "and forth can defeat the tolerances); raise "
-              "solver.step_max_iterations, or loosen solver.step_rtol or "
-              "solver.rtol",
-              date_kyr_bp, snapshot.coupledResidual,
-              snapshot.coupledIterations));
+              "converge at {} (residual {:.3g} after {} iterations; under "
+              "migrating shorelines, cells flipping back and forth can "
+              "defeat the tolerances); raise solver.step_max_iterations, or "
+              "loosen solver.step_rtol or solver.rtol",
+              when, snapshot.coupledResidual, snapshot.coupledIterations));
         }
       });
 }

@@ -11,7 +11,7 @@ sl3d <command> <config.json>
 | --- | --- | --- |
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
 | `response` | the response to a prescribed surface load and tide, no ocean: in the static problem the elastic response, in the quasi-static problem the viscoelastic response through time; 1D or 3D as the model's moduli (and viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
-| `sea-level` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem GIA through time from the state at an end of the window; without a state, the response of a body without an ocean to the loads, the tide and the sources, with rotational feedback as asked; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem) |
+| `sea-level` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, with rotational feedback as asked; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem) |
 | `kernel1d` | adjoint sensitivity kernels of configured measurements of a `sea-level` run through time, on a radial model | a directory of kernel files |
 | `kernel` | their 3D counterpart, on a laterally varying viscosity | a directory of kernel files |
 
@@ -92,15 +92,21 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 - Files are SI throughout: lengths in metres, viscosities in Pa s, times in
   seconds unless a file's own scales say otherwise.
 - Dates in configs are in kiloyears before present (`_kyr_bp` members:
-  the `times` of `sea-level` and the kernel commands, the state's date,
-  the dates of the forcing's terms, their histories and onsets, and the
-  measurements' dates), a kiloyear being 1000 Julian
+  the dated `times` of `sea-level` and the kernel commands, the state's
+  date, the dates of the forcing's terms, their histories and onsets, and
+  the measurements' dates), a kiloyear being 1000 Julian
   years, 3.15576e10 s. A date of D kyr BP is the time -D kyr: the time
-  axes of the files sl3d writes are in seconds relative to the present,
-  negative in the past. `response`'s `times` and the date of its `field`
-  load terms (`_kyr` members) count forwards instead, on the run's own
-  clock, and its file's time axis is that clock in seconds (response,
-  below).
+  axes of the files with dates that sl3d writes are in seconds relative
+  to the present, negative in the past.
+- Times counted forwards on a run's own clock are the other form.
+  `sea-level` takes them with a `unit` beside them (`times.unit`: `"kyr"`,
+  `"yr"`, a Julian year of 3.15576e7 s, or `"day"`, 86400 s), every time
+  of the run and its terms in that unit under unsuffixed names (`start`,
+  `end`, `at`, `history`, `onset`, `time_origin`, and the static
+  problem's `date` beside its own `unit`); `response`'s `times` and the
+  times of its terms count forwards in kyr (`_kyr` members). The time
+  axis of the file of such a run is its clock in seconds (sea-level, The
+  run through time; response, below).
 - Latitudes and longitudes are in degrees, latitude north positive and
   longitude east positive; cap widths and disk radii are in degrees.
 - `rotation` chooses the rotational feedback: `"none"`, `"axial"` (the
@@ -150,9 +156,9 @@ their kernels being those of a run through time. A member only the
 quasi-static problem takes (a viscosity file, an amplitude history, an
 onset, the time step, the initial sea level's calibration, checkpoints,
 the state's end of the window, ...) is refused in the static problem,
-and a member only the static problem takes (the state's date, a term's
-date) in the quasi-static one, the error naming the problem the member
-needs.
+and a member only the static problem takes (a term's date; the state's
+date, which a run counting forwards takes too) in the quasi-static one,
+the error naming the problem the member needs.
 
 ### File inputs
 
@@ -167,11 +173,14 @@ A member read from a file is a file input, an object of
 When the input is read is its member's business: the state's members
 (`ocean.sea_level` or `ocean.topography`, `ocean.ice`, `ocean.land`) at
 the `ocean` block's instant, `ocean.date_kyr_bp` in the static problem
-and an end of the window, `ocean.at`, in the quasi-static one; a term of
-the ice change, and `sea-level`'s `field` load term, at its own
-`date_kyr_bp` beside the file in the static problem and at each node's
-date in the quasi-static one; `response`'s `field` term at its
-`date_kyr` (The state and the ice change, below; response, The forcing
+and in a run counting forwards, and an end of the window, `ocean.at`, in
+a dated run; a term of the ice change, and `sea-level`'s `field` load
+term, at its own `date_kyr_bp` beside the file in the static problem
+(a `field` term at its `date` on the file's own axis instead, where it
+gives one) and at each node's date in a dated run; a `field` term on the
+run's clock, from its `time_origin`, in a run counting forwards;
+`response`'s `field` term at its `date_kyr` (The state and the ice
+change, below; sea-level, The forcing block; response, The forcing
 block). A
 variable the file does not hold is refused, the error listing the
 variables the file does hold. Conversion from other sources (ICE-NG,
@@ -211,7 +220,10 @@ one instant:
 the sea level of the sea level equation and the ice, the `ocean` block's
 (`ocean.sea_level` or `ocean.topography`, and `ocean.ice`), with the one
 instant of the whole block: its date, `ocean.date_kyr_bp`, in the static
-problem, and an end of the window, `ocean.at`, in the quasi-static one.
+problem, and an end of the window, `ocean.at`, in the quasi-static one;
+a run counting forwards on its own clock, which has no calendar, reads
+its state's files at their date `ocean.date_kyr_bp` too, a snapshot put
+at the window's start.
 The FORCING is what happens: an ice thickness CHANGE is one kind of it,
 the sum of the terms of the list `forcing.ice_change`, beside surface
 loads, a tide and seismic sources (sea-level, The forcing block, below).
@@ -248,7 +260,11 @@ an ocean, below).
   ice of that file at every date. A `change` term is a file holding a
   thickness change, taken as it stands; a cap (`cap_thickness`,
   `cap_fraction`) is a Gaussian cap of change, in a run through time held
-  or scaled by its amplitude history.
+  or scaled by its amplitude history. A `thickness` term, and a `change`
+  file with a time axis, are dated ice histories: they make the problem a
+  dated one, and a run counting forwards on its own clock refuses them
+  (its ice changes by `change` files without a time axis, held, and by
+  caps).
 - Under frozen shorelines (`ocean.shorelines`, the default) the sea level
   equation is the linear one on the state's shorelines (the start's
   through time), and an ice thickness change loads the Earth only where
@@ -334,9 +350,9 @@ Which command takes which:
 | `model.viscosity` | quasi-static | quasi-static | `kernel1d`: a radial one; `kernel`: required, varying laterally |
 | `model.moduli` | yes | yes | no |
 | `lmax` | yes | yes | yes |
-| `times` | quasi-static, required: the forwards form | quasi-static, required: the before-present form | the before-present form, required |
+| `times` | quasi-static, required: kyr counted forwards | quasi-static, required: dates before present, or times counted forwards in a `unit` | dates before present, evenly spaced, required |
 | `forcing` | `load`, `tide` and, quasi-static, `seismic` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | `ice_change`, its change zero at the window's start |
-| `ocean` | no | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration; absent, a body without an ocean | required, as `sea-level`'s quasi-static |
+| `ocean` | no | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | required, as `sea-level`'s dated quasi-static |
 | `rotation`, `moments` | no | yes | yes |
 | `solver.rtol` | no | yes | yes |
 | `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | yes | in a 3D run (the static problem's on lateral moduli too) | `kernel` |
@@ -391,8 +407,8 @@ time 3D. Each command's section says what that decides.
 ### The times block
 
 The time nodes of the quasi-static problem, required there and refused
-in the static one, in one of two forms. `response` takes the FORWARDS
-form, in kyr on the run's own clock:
+in the static one. `response` counts forwards in kyr on the run's own
+clock:
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -401,24 +417,53 @@ form, in kyr on the run's own clock:
 | `times.nodes` | integer >= 2 | required with `end_kyr` | the number of nodes, evenly spaced from `start_kyr` to `end_kyr`, both included |
 | `times.at_kyr` | array of numbers | instead of the three above | the nodes themselves, at least two, strictly increasing; the first is the start |
 
-Exactly one form is given: `end_kyr` and `nodes` (with `start_kyr` or
+Exactly one way is given: `end_kyr` and `nodes` (with `start_kyr` or
 its default), or `at_kyr` alone (`start_kyr` beside it is refused). Evenly
 spaced nodes take one step length, (end - start) / (nodes - 1), for every
 step; listed nodes step by their differences, so uneven steps are
 allowed. Listed nodes that coincide with evenly spaced ones give the same
-run to the bit.
+run to the bit. `sea-level`'s dates are refused, naming this form.
 
-`sea-level`, `kernel1d` and `kernel` take the BEFORE-PRESENT form, a
-window of dates:
+`sea-level` takes one of two forms, chosen by the members present. The
+DATED form gives dates before present, on the calendar the files with a
+time axis share:
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `times.start_kyr_bp` | number | required | the window's start, kyr BP |
+| `times.start_kyr_bp` | number | required with `nodes` | the window's start, kyr BP |
 | `times.end_kyr_bp` | number | 0 | the window's end, kyr BP; must be later than the start, so smaller |
-| `times.nodes` | integer >= 2 | required | the number of time nodes, both ends included, evenly spaced |
+| `times.nodes` | integer >= 2 | required with `start_kyr_bp` | the number of time nodes, both ends included, evenly spaced |
+| `times.at_kyr_bp` | array of numbers | instead of the three above | the dates themselves, at least two, from the oldest (strictly decreasing); the first is the start |
 
-Each command refuses the other form's members, naming the form it takes.
-In either form the step is not limited by the shortest Maxwell time.
+The FORWARDS form counts on the run's own clock, in a unit it names; the
+run then has no calendar of its own (the state is a snapshot of its files
+at a date, The ocean block, below, and the terms' times are on the
+clock, sea-level, The forcing block):
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `times.unit` | word | required | the unit of every time of the run: `"kyr"` (3.15576e10 s), `"yr"` (a Julian year, 3.15576e7 s) or `"day"` (86400 s) |
+| `times.start` | number | 0 | the first node, in `unit` |
+| `times.end` | number > `start` | required with `nodes` | the last node |
+| `times.nodes` | integer >= 2 | required with `end` | the number of nodes, evenly spaced from `start` to `end`, both included |
+| `times.at` | array of numbers | instead of `start`, `end` and `nodes` | the nodes themselves, at least two, strictly increasing; the first is the start |
+
+In either form exactly one way of giving the nodes is taken, as
+`response`'s: the window and `nodes`, or the list (`start_kyr_bp` or
+`start` beside it is refused). Members of the two forms together are
+refused, naming both, and so are `response`'s `start_kyr`, `end_kyr` and
+`at_kyr`, naming the forwards form with its `unit`. Listed dates that
+coincide with evenly spaced ones give the same run to the bit. A run
+counting forwards in kyr steps through `response`'s times for the same
+nodes to the bit; a step's response moves with the last bit of its
+length (a one-ulp change of a node moves `response`'s fields by up to
+about 1e-12 relative), so the same nodes stated in another unit, or as
+dates, give the same run to about that.
+
+`kernel1d` and `kernel` take the dated form with evenly spaced nodes
+alone, on which their measurements' dates are located: the forwards form
+and `at_kyr_bp` are refused. In every form the step is not limited by
+the shortest Maxwell time.
 
 ### The ocean block
 
@@ -431,11 +476,21 @@ sea level of the sea level equation, exactly one of `ocean.sea_level` and
 `ocean.topography`, the ice, `ocean.ice`, and the land held,
 `ocean.land`, each a file input of `file`, `format` and `variable`
 alone; the instant, one for the whole block, `ocean.date_kyr_bp` in the
-static problem and `ocean.at` in the quasi-static one; the shorelines,
+static problem and `ocean.at` in the quasi-static one (with
+`ocean.date_kyr_bp` too in a run counting forwards); the shorelines,
 in either problem; and, in the quasi-static problem, the initial sea
 level's calibration. `calibration` and `at` are refused in the static
 problem, which has no initial sea level to calibrate, and `date_kyr_bp`
-in the quasi-static one.
+in a dated run, whose state is at an end of its window.
+
+A run counting forwards on its own clock has no calendar: its state is
+a snapshot, the content of the state's files at `ocean.date_kyr_bp`, put
+at the window's start (`"at": "start"`). The date follows the static
+problem's rule, required when any of the state's files has a time axis
+and refused when none has one. `"at": "end"` is refused there: the state
+at the window's end reads the ice at the start back along dated ice
+histories (`thickness` terms) and calibrates the initial sea level
+against the state's, and a run counting forwards has no such history.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -443,8 +498,8 @@ in the quasi-static one.
 | `ocean.topography` | file input | one of the two | a topography, converted with the state's ice, `ocean.ice` (variable `topography` by default) |
 | `ocean.ice` | file input | required | the ice thickness on the body at the state's instant (variable `ice_thickness` by default) |
 | `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
-| `ocean.date_kyr_bp` | number | absent | the static problem: the state's date, kyr BP, at which every member's file with a time axis is read; required when any of the state's files (the sea level's, the ice's, the land's) has a time axis, refused when none has one; refused in the quasi-static problem |
-| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis) or `"end"` (the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its files reaching that date); refused in the static problem |
+| `ocean.date_kyr_bp` | number | absent | the static problem and a run counting forwards: the state's date, kyr BP, at which every member's file with a time axis is read; required when any of the state's files (the sea level's, the ice's, the land's) has a time axis, refused when none has one; refused in a dated run |
+| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its files reaching that date); refused in the static problem |
 | `ocean.shorelines` | word | `"frozen"` | `"frozen"`, the state's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (the nonlinear equation; sea-level, The static problem and The run through time) |
 | `ocean.calibration` | object | absent | the quasi-static problem with `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the state is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
 | `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
@@ -581,10 +636,11 @@ potential, with no ocean: no sea level equation is solved, and there is
 no rotational feedback. The config is made of blocks (The blocks, above):
 `model`, `times`, `forcing`, `solver` and `output`, with `problem` and
 `lmax` beside them. `sea-level` without an `ocean` block solves the same
-problems on a body without an ocean, its times dates before present and
-with the rotational feedback it is given (`"rotation": "none"` for
-`response`'s); what it writes and what it does not are listed there
-(sea-level, Without an ocean).
+problems on a body without an ocean, its times dates before present or
+counted forwards in a `unit` of its choice, and with the rotational
+feedback it is given (`"rotation": "none"` for `response`'s); what it
+writes and what it does not are listed there (sea-level, Without an
+ocean).
 
 The problem decides whether the response is elastic or viscoelastic:
 
@@ -1027,11 +1083,12 @@ The problem decides what is solved:
   static problem, below). Under an ice change alone it is the elastic
   sea-level fingerprint of the change; under a fault alone, the
   co-seismic sea level change;
-- `"problem": "quasi_static"` is GIA through time under the forcing
+- `"problem": "quasi_static"` is the run through time under the forcing
   from the state at an end of the window: the viscoelastic Earth through
-  the sea level equation over the window
-  of dates of its `times` block (The run through time, below),
-  restartable from checkpoints.
+  the sea level equation over the nodes of its `times` block, dates
+  before present (GIA over a deglaciation) or times on the run's own
+  clock in a `unit` (a post-seismic relaxation over years, say) (The run
+  through time, below), restartable from checkpoints.
 
 Both are runs of the library's evolutions (`Evolution`, `Evolution3D`):
 the static problem is a run of one node, the solve of its start alone,
@@ -1055,7 +1112,7 @@ and `model.viscosity` is refused in the static problem.
 | `problem` | word | required | `"static"` (the solve at the state's date) or `"quasi_static"` (the run through time) (The problem, above) |
 | `model` | object | required | the Earth model (The model block, above) |
 | `lmax` | integer >= 1 | required | the degree of the run and of its grid |
-| `times` | object | quasi-static: required | the window, dates before present (The times block, above); refused in the static problem |
+| `times` | object | quasi-static: required | the nodes, dates before present or times on the run's own clock in its `unit` (The times block, above); refused in the static problem |
 | `forcing` | object | required | the ice change, surface loads, the tide and seismic sources, any mix of them (below) |
 | `ocean` | object | absent | the state, its instant, the shorelines and, in the quasi-static problem, the initial sea level's calibration (The ocean block, above); absent, the body has no ocean (Without an ocean, below) |
 | `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above) |
@@ -1081,22 +1138,26 @@ conserved. Without an ocean there is no ice to change, and
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `forcing.ice_change` | list | absent | the ice thickness change, the sum of its terms, each an object holding exactly one of the four members below |
-| `forcing.ice_change[k].thickness` | file input | one of the four | a file of ice THICKNESS (variable `ice_thickness` by default) with a time axis: its change is its value less its own value at the state's instant (a file without a time axis, whose change would be zero, is refused) |
+| `forcing.ice_change[k].thickness` | file input | one of the four | a file of ice THICKNESS (variable `ice_thickness` by default) with a time axis: its change is its value less its own value at the state's instant (a file without a time axis, whose change would be zero, is refused). A dated ice history: refused in a run counting forwards |
 | `forcing.ice_change[k].thickness.date_kyr_bp` | number | required in the static problem | the date the file is read at, kyr BP: the change is the file at this date less the file at the state's date (which the state must have, `ocean.date_kyr_bp`); refused in the quasi-static problem, which reads the file at each node's date |
-| `forcing.ice_change[k].change` | file input | one of the four | a file holding a thickness CHANGE in metres (variable `ice_thickness_change` by default), taken as it stands. The static problem reads a file without a time axis as it is; the quasi-static problem reads a file with a time axis at each node's date and holds one without through the run. Refused with the state at the window's end (`"at": "end"`), where the ice changes are thickness histories, `thickness` terms |
+| `forcing.ice_change[k].change` | file input | one of the four | a file holding a thickness CHANGE in metres (variable `ice_thickness_change` by default), taken as it stands. The static problem reads a file without a time axis as it is; a dated run reads a file with a time axis at each node's date and holds one without through the run; a run counting forwards holds a file without a time axis through the run and refuses one with (a dated history). Refused with the state at the window's end (`"at": "end"`), where the ice changes are thickness histories, `thickness` terms |
 | `forcing.ice_change[k].change.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one |
 | `forcing.ice_change[k].cap_thickness` | object | one of the four | a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds). Refused with the state at the window's end |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt). Refused with the state at the window's end |
-| `forcing.ice_change[k].history_kyr_bp` | list of pairs | absent | the quasi-static problem, beside a cap: the cap's amplitude history, as a surface load's (below); without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
+| `forcing.ice_change[k].history_kyr_bp` | list of pairs | absent | a dated run, beside a cap: the cap's amplitude history, as a surface load's (below); without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
+| `forcing.ice_change[k].history` | list of pairs | absent | a run counting forwards, beside a cap: its amplitude history on the run's clock, as a surface load's `history` (below) |
 | `forcing.load` | list | absent | surface loads: each a load term as `response`'s (one of `cap`, `disk`, `field`, `coefficients`; response, The forcing block), with the properties below |
-| `forcing.load[k].field.date_kyr_bp` | number | absent | the static problem: the date a `field` term's file is read at, kyr BP; required of a file with a time axis, refused for a file without one; refused in the quasi-static problem, which reads the file at each node's date |
-| `forcing.load[k].history_kyr_bp` | list of pairs | absent | the quasi-static problem: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing), the factor interpolated linearly between them and held outside them; without one the factor is 1 throughout |
+| `forcing.load[k].field.date_kyr_bp` | number | absent | the static problem: the date a `field` term's file is read at, kyr BP; required of a file with a time axis (or `date`, below), refused for a file without one; refused in the quasi-static problem, which reads the file at each node's date or on the run's clock |
+| `forcing.load[k].field.date`, `forcing.load[k].field.unit` | number, word | absent | the static problem, instead of `date_kyr_bp`: the time on the file's OWN axis the file is read at, in `unit` (`"kyr"`, `"yr"` or `"day"`, required with `date`), the file read at +`date` x the unit; so `"date": -1500, "unit": "yr"` is `"date_kyr_bp": 1.5`. Both dates together are refused |
+| `forcing.load[k].field.time_origin` | number | 0 | a run counting forwards: the time on the run's clock, in its unit, at which the file's time zero falls: the file is read at (t - `time_origin`) x the unit, in seconds, at the run's time t (`response`'s `time_origin_kyr`) |
+| `forcing.load[k].history_kyr_bp` | list of pairs | absent | a dated run: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing), the factor interpolated linearly between them and held outside them; without one the factor is 1 throughout |
+| `forcing.load[k].history` | list of pairs | absent | a run counting forwards: the term's amplitude history, pairs `[time, factor]` on the run's clock in its unit, the times strictly increasing, interpolated and held as above |
 | `forcing.load[k].water_budget` | true or false | required with an ocean; `false` without one | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water. Without an ocean there is no water to exchange, and it has no effect |
 | `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
 | `forcing.tide` | list | absent | the tide: coefficients of an external potential, as `response`'s (`degree`, `order`, `amplitude_m2_s2`, `imaginary_m2_s2`; response, The forcing block), summed. Refused under migrating shorelines |
-| `forcing.tide[k].history_kyr_bp` | list of pairs | absent | the quasi-static problem: the coefficient's amplitude history, as a surface load's; refused in the static problem |
-| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`), with, in the quasi-static problem, optional `onset_kyr_bp` (the date the source acts from, kyr BP; absent: from the window's start) and `history_kyr_bp` |
+| `forcing.tide[k].history_kyr_bp`, `forcing.tide[k].history` | list of pairs | absent | the quasi-static problem: the coefficient's amplitude history, as a surface load's (dated, `history_kyr_bp`; counting forwards, `history`); refused in the static problem |
+| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`), with, in the quasi-static problem, an optional onset, the time the source acts from (absent: from the window's start), `onset_kyr_bp` (a date, kyr BP) in a dated run and `onset` (on the run's clock, in its unit) in one counting forwards, and the history of the run's form |
 
 The ice at a time is the state's ice plus the terms' changes summed
 there. A change that takes more ice than the state holds is refused (The
@@ -1121,14 +1182,23 @@ in either. `forcing.ice`, `forcing.sea_level` and `forcing.state` are
 refused, naming the members that hold the state's ice and sea level and
 the ice change.
 
-Times here are dates, kyr before present, as the window's are: a
+The terms' times take the form of the run's. In the static problem and
+a DATED run they are dates, kyr before present, as the window's are: a
 history is `history_kyr_bp` and an onset `onset_kyr_bp`, and a `field`
 term's file with a time axis is read at its `date_kyr_bp` in the static
-problem and at each node's date in the quasi-static one, as the ice
-change's files are, so a load file and an ice file on one calendar agree
-with nothing more said. `response`'s names for times on a run's own
-clock or on a file's own axis (`history_kyr`, `onset_kyr`,
-`time_origin_kyr`, `date_kyr`) are refused, naming these. The loads, the
+problem (or at `date` in its `unit` on the file's own axis) and at each
+node's date in the quasi-static one, as the ice change's files are, so a
+load file and an ice file on one calendar agree with nothing more said.
+In a run COUNTING FORWARDS they are times on the run's own clock in its
+unit, `times.unit`: a history is `history`, pairs `[time, factor]`, an
+onset `onset`, and a `field` term's file with a time axis is read at
+t - `time_origin` at the clock's time t (`time_origin` 0 by default:
+the file's axis is the clock's); its ice changes by caps and by `change`
+files without a time axis alone. The names of the other forms are
+refused, naming this form's: `response`'s names for times on a run's own
+clock in kyr or on a file's own axis (`history_kyr`, `onset_kyr`,
+`time_origin_kyr`, `date_kyr`) everywhere, the dated names in a run
+counting forwards and the forwards names in a dated run. The loads, the
 tide and the sources are changes from the state: in the static problem
 they act at its date, at their full amounts; in the quasi-static problem
 a term present at the first node acts there, the first node then the
@@ -1167,6 +1237,10 @@ factor of zero at the window's start:
                             "history_kyr_bp": [[21, 0], [15, 1]]}]}
 ```
 
+The same melt over the first fifty years of a run counting forwards in
+years, `"times": {"unit": "yr", "at": [0, 10, 25, 50, 100]}`, is
+`"history": [[0, 0], [50, 1]]` beside the cap.
+
 ### The static problem
 
 The solve at the state's date on the elastic Earth under the forcing.
@@ -1185,7 +1259,8 @@ than there is); a `cap_thickness` change is `thickness_m` times the
 weight, and a negative one, whose tail reaches past the ice, takes at
 each point no more than the ice the state holds there. The surface loads
 are read at their own dates (a `field` file with a time axis at its
-`date_kyr_bp`), and the tide and the seismic sources act whole.
+`date_kyr_bp`, or at its `date` in its `unit` on the file's own axis),
+and the tide and the seismic sources act whole.
 
 The solve is a run of one node of the library's evolution (`Evolution`;
 `Evolution3D` under lateral moduli, below) on the deck's elastic
@@ -1246,7 +1321,8 @@ state's date to <d> kyr BP`, `change <file>:<variable>[, at <d> kyr BP]`,
 `..., fraction <f> of the state's ice`) and joined by `; ` (absent
 without terms); the loads (`load`), the tide (`tide`) and the sources
 (`seismic`), each described as the quasi-static file's are (a `field`
-term's with `, at <d> kyr BP`) and joined by `; ` (absent without them);
+term's with `, at <d> kyr BP`, or `, at <t> <unit>` on its own axis) and
+joined by `; ` (absent without them);
 the `shorelines`, the `rotation`, and the angular velocity perturbation
 as `omega_x_rad_s`, `omega_y_rad_s` and `omega_z_rad_s` (rad s^-1).
 Without an ocean the state's inputs, the shorelines and the fields of
@@ -1319,9 +1395,19 @@ held, without a time axis), each cap held or scaled by its history,
 beside the surface loads, the tide and the sources there (The forcing
 block, above). The outputs are changes from the window's start. The time
 nodes are `times.nodes` evenly spaced dates from `start_kyr_bp` to
-`end_kyr_bp`, stepped by `solver.scheme`. Without an ocean the run is
-the body's under the loads, the tide and the sources alone (Without an
-ocean, below).
+`end_kyr_bp`, or the dates of `at_kyr_bp`, stepped by `solver.scheme`.
+Without an ocean the run is the body's under the loads, the tide and the
+sources alone (Without an ocean, below).
+
+A run counting forwards on its own clock (`times.unit`) is the same run
+with no calendar: its state is the snapshot of its files at
+`ocean.date_kyr_bp` (a state of files without a time axis needs none),
+put at the window's start; its nodes, histories, onsets and a field's
+time origin are times on its clock in its unit; its ice changes by caps,
+held or scaled by their `history`, and by `change` files without a time
+axis, held through the run. A post-seismic relaxation over decades, a
+surface load cycled over years, or a tide over days are runs of this
+kind; a deglaciation, whose ice history is dated, is not.
 
 The `ocean` block changes the start and the equation, as pyslfp's
 `run_ice_history` does:
@@ -1370,8 +1456,9 @@ zero-length step (`Evolution3D`).
 
 The output is a surface file on the run's Gauss–Legendre grid with one
 slice per time node, its time axis in seconds relative to the present
-(negative in the past). Its fields are SI node fields with linear time
-interpolation:
+(negative in the past) in a dated run, and the run's own clock in
+seconds (a node at t in the unit at t times the unit) in one counting
+forwards. Its fields are SI node fields with linear time interpolation:
 
 | Field | Unit | Meaning |
 | --- | --- | --- |
@@ -1391,15 +1478,23 @@ state's inputs as read, `ice` (`<file>:<variable> (<slice>)`) and
 `sea_level` (the same after its quantity), the slice the state's end of
 the window, `the window's start, <d> kyr BP` or `the window's end, <d>
 kyr BP`, or for a file without a time axis `static, at the window's
-start` or `... end`; the ice change's terms, `ice_change`, each described
+start` or `... end` (counting forwards, the state's date, `<d> kyr BP`,
+or `static`); the ice change's terms, `ice_change`, each described
 (`thickness <file>:<variable>, from the state's instant to each node's
-date` or `change <file>:<variable>, read by date`) and joined by `; `
+date`, `change <file>:<variable>, read by date` or, counting forwards,
+`..., held through the run`) and joined by `; `
 (absent without terms); the loads, the tide and the sources beside the
-ice, where given (`load`, `tide`, `seismic`); the `rotation`; the node
-dates as `dates_kyr_bp`, and the angular velocity perturbation at each
-node as `omega_x_rad_s`, `omega_y_rad_s` and `omega_z_rad_s` (rad s^-1).
-Without an ocean the shorelines, the initial sea level and the state's
-inputs are left out, and `ocean` is `none`.
+ice, where given (`load`, `tide`, `seismic`; a history given on the
+run's clock described as `history in <unit> [[t, f], ...]`, an onset as
+`from <t> <unit>`, a field's time origin as `time origin <t> <unit>`);
+the `rotation`; the nodes, in a dated run their dates as `dates_kyr_bp`
+(the dates given, listed or evenly spaced) and in one counting forwards
+their times in its unit as `times` with the unit's name as `time_unit`
+(`kyr`, `yr` or `day`; `time` says how the axis is formed); and the
+angular velocity perturbation at each node as `omega_x_rad_s`,
+`omega_y_rad_s` and `omega_z_rad_s` (rad s^-1). Without an ocean the
+shorelines, the initial sea level and the state's inputs are left out,
+and `ocean` is `none`.
 
 ### Without an ocean
 
@@ -1451,7 +1546,13 @@ a radial Earth the same unrelaxed solves by two routes, to rounding; on
 lateral moduli `sea-level`'s zero-length step against `response`'s
 conjugate gradients, to their tolerances). A run through time is
 `response`'s viscoelastic run under the same forcing at the same nodes,
-to rounding, its clock turned: in a window from S kyr BP, the node at D
+to rounding. Counting forwards in kyr it is `response`'s config in
+`sea-level`'s names: `times` `{"unit": "kyr", "at": [...]}` for
+`at_kyr` (`start`, `end` and `nodes` for `start_kyr`, `end_kyr` and
+`nodes`), and `history`, `onset` and a field's `time_origin` for
+`history_kyr`, `onset_kyr` and `time_origin_kyr`, the two stepping
+through the same times to the bit.
+Dated, its clock is turned: in a window from S kyr BP, the node at D
 kyr BP is `response`'s at S - D kyr, a history `[[D, f], ...]` given as
 `history_kyr_bp` is `response`'s `history_kyr` `[[S - D, f], ...]`, and
 an `onset_kyr_bp` of D is an `onset_kyr` of S - D. `response` alone writes
@@ -1459,9 +1560,7 @@ the exchange tables and the volume file, a run through time's `load`
 field at every node, the radial reference model's fields of a 3D run
 through time (`displacement_radial_model`, `potential_radial_model`) and
 its steps' iterations and residuals in the metadata, and the metadata
-of a single cap or tide coefficient; it alone takes unevenly spaced
-nodes (`times.at_kyr`) and a time origin for a load file
-(`time_origin_kyr`), `sea-level` reading its files by date.
+of a single cap or tide coefficient.
 
 `examples/configs/response_load_cap.json` (a Hudson Bay cap loaded from
 2 to 3 kyr on the run's clock, held to 7 kyr and removed by 7.5 kyr, on
@@ -1523,7 +1622,12 @@ A checkpoint is bound to its run: it records a hash of the members that
 decide the computation (everything but `checkpoint`, `restart`,
 `solver.cache_mb` and `output`, the inputs' variables, the sea level's
 quantity, the state's end of the window, the ice change's terms, the
-tide's coefficients and whether the body has an ocean among them) and of
+tide's coefficients and whether the body has an ocean among them; the
+nodes by their form: evenly spaced dates by their window and count,
+listed dates and times counted forwards by the list and, forwards, the
+unit and the state's date, so that the same nodes in another form or
+another unit are another run, their times possibly other in the last
+bit) and of
 the contents of the files the config names (the deck, the state's sea
 level and ice files, each ice change term's file, and the land, the
 surface loads' and the viscosity and moduli files where given). A run is
@@ -1574,7 +1678,8 @@ What the config was taken to mean, the inputs as read, then the file:
 - a run through time: `<model>, viscoelastic, <n> nodes <start> to <end>
   kyr BP, shorelines <frozen|migrating>[, initial sea level calibrated],
   rotation <rotation>[, moments hydrostatic]; ice <ice>, <sea level>[;
-  ice change <change>][; <forcing>]; wrote <surface>`, ending in
+  ice change <change>][; <forcing>]; wrote <surface>` (counting forwards,
+  `<n> nodes <start> to <end> <unit> on the run's clock`), ending in
   `, resumed` when the run resumed from a
   checkpoint, and in `, replacing <k> earlier checkpoint(s)` when a run
   starting over removed some;
@@ -1600,8 +1705,9 @@ moduli)`. The example configs
 `examples/configs/sea_level_fingerprint_3d.json`,
 `examples/configs/sea_level_static_migrating.json`,
 `examples/configs/sea_level_static_coseismic.json`,
-`examples/configs/sea_level_3d_calibrated.json` and
-`examples/configs/sea_level_no_ocean.json` print
+`examples/configs/sea_level_3d_calibrated.json`,
+`examples/configs/sea_level_no_ocean.json` and
+`examples/configs/sea_level_postseismic.json` print
 
 ```
 sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc in 0.36 s
@@ -1610,6 +1716,7 @@ sl3d sea-level: 1-D, elastic (fingerprint), shorelines migrating, rotation full;
 sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_static_coseismic/sea_level_static_coseismic.nc in 1.03 s
 sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 14.20 s
 sl3d sea-level: 1-D, viscoelastic, 49 nodes 12 to 0 kyr BP, no ocean, rotation none; load (1 term); wrote out/sea_level_no_ocean/sea_level_no_ocean.nc in 0.99 s
+sl3d sea-level: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 7.14 s
 ```
 
 ### Examples
@@ -1771,13 +1878,52 @@ The first three are static problems, radial, radial and 3D, and the
 next two radial runs through time; the last is 3D, under the lateral
 viscosity of `s40rts_viscosity.nc`.
 
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "lmax": 64,
+  "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]},
+  "forcing": {
+    "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+                           "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+                           "length_km": 600.0, "width_km": 150.0,
+                           "moment_nm": 2.0e22,
+                           "patches_along_strike": 12, "patches_down_dip": 3},
+                 "onset": 0.0}]
+  },
+  "ocean": {"at": "start", "date_kyr_bp": 0.0,
+            "topography": {"file": "../data/synthetic_earth.nc"},
+            "ice": {"file": "../data/synthetic_earth.nc"}},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "output": {"surface": "out/sea_level_postseismic/sea_level_postseismic.nc"}
+}
+```
+
+A run counting forwards in years, `examples/configs/sea_level_postseismic.json`:
+the thrust of `sea_level_static_coseismic.json` off the synthetic South
+America, acting from the run's start (`onset` 0), and the ocean's answer
+to the mantle's relaxation over five centuries at unevenly spaced nodes,
+on the Maxwell deck. The state is the synthetic Earth's present day, a
+snapshot of its files at `date_kyr_bp` 0; the time axis of the output is
+the run's clock in seconds, its nodes in years in the metadata (`times`,
+`time_unit` `yr`). The first node is the co-seismic answer, the static
+example's to 1.4e-6 m (the deck's unrelaxed moduli and the hydrostatic
+moments against the elastic deck and the standard moments): the sea floor
+over the fault rises by 0.360 m; the relaxation brings that down to
+0.34 m after a century and 0.27 m after five. About 7 s and 1.5 GB on
+four threads.
+
 ## kernel1d and kernel
 
 Adjoint sensitivity kernels of configured measurements of a run through
 time. The forward run is `sea-level`'s run through time of the same
 blocks (The blocks, above): `"problem": "quasi_static"` (required; the
 static problem is refused), `model`, `lmax`, `times` (required, dates
-before present), `forcing` (the ice change, of any of its terms; `load`,
+before present evenly spaced, `start_kyr_bp`, `end_kyr_bp` and `nodes`,
+on which the measurements' dates are located: the forwards form and
+`at_kyr_bp` are refused), `forcing` (the ice change, of any of its terms; `load`,
 `tide` and `seismic` are refused), `ocean` (required: the state, at
 `at`, the shorelines and the calibration; a config without it is
 refused), `rotation`, `moments` and `solver`, each meaning

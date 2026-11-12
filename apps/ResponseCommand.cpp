@@ -277,7 +277,7 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
   if (timed) {
-    out.times = ReadTimesBlock(top.At("times"), TimesForm::Forwards);
+    out.times = ReadTimesBlock(top.At("times"));
   }
   out.forcing = ReadForcing(top.At("forcing"), directory, out.lmax, timed);
   if (Has(top, "solver")) {

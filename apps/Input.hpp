@@ -25,6 +25,22 @@ using planetmodel::Json;
 /// configs' dates are kyr before present.
 inline constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
 
+/// A unit of time a config names in a `unit` member: its word and its
+/// length in seconds.
+struct TimeUnit {
+  std::string_view name = "kyr";
+  double seconds = KYR;
+};
+
+/// Reads a `unit` word: "kyr" (a kiloyear of Julian years, KYR), "yr" (a
+/// Julian year, KYR / 1000) or "day" (86400 s); any other is refused,
+/// listing these.
+[[nodiscard]] TimeUnit ReadTimeUnit(const Json& word);
+
+/// The words ReadTimeUnit takes, as a refusal lists them.
+inline constexpr auto kTimeUnits =
+    std::string_view{"\"kyr\", \"yr\" or \"day\""};
+
 /// How a refusal ends that names a member only a run through time takes.
 inline constexpr auto kNeedsQuasiStatic = std::string_view{
     "needs the quasi-static problem (\"problem\": \"quasi_static\", with a "

@@ -16,7 +16,8 @@
  * `land`, a `field` term's `load`). When an input is read is its
  * member's business: the state's members at the `ocean` block's instant,
  * a term's file at a date beside it in a static problem and at the
- * window's nodes in a quasi-static one.
+ * window's nodes in a quasi-static one (by date in a dated run, on the
+ * run's own clock in one counting forwards).
  */
 
 #include <filesystem>
@@ -35,8 +36,9 @@ enum class FileFormat { PlanetmodelSurface };
 
 /// A file input: the file, its type, the variable read from it and,
 /// where its member gives one, the date it is read at (kyr before present
-/// for `sea-level`'s ice change terms, `date_kyr_bp`; kyr on the run's
-/// clock for `response`'s `field` term, `date_kyr`).
+/// for `sea-level`'s terms, `date_kyr_bp`; kyr on the file's own axis for
+/// `response`'s `field` term, `date_kyr`; a time in the term's unit on
+/// the file's own axis for `sea-level`'s static `field` term, `date`).
 struct FileInput {
   std::filesystem::path file;
   FileFormat format = FileFormat::PlanetmodelSurface;

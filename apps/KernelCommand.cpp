@@ -127,13 +127,14 @@ struct Built {
 /// The node a date names, which must lie on the grid.
 std::size_t NodeOf(const Json& where, double date_kyr_bp,
                    const SeaLevelRun& run) {
+  // the kernel commands' nodes are evenly spaced dates (ReadKernelInput)
   const auto& window = *run.times;
-  const auto step =
-      (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
-  const auto exact = (window.start_kyr_bp - date_kyr_bp) / step;
+  const auto nodes = static_cast<int>(window.Size());
+  const auto step = (window.Start() - window.End()) / (nodes - 1);
+  const auto exact = (window.Start() - date_kyr_bp) / step;
   const auto node = std::llround(exact);
-  if (node < 0 || node >= window.nodes ||
-      std::abs(exact - static_cast<double>(node)) > 1e-9 * window.nodes) {
+  if (node < 0 || node >= nodes ||
+      std::abs(exact - static_cast<double>(node)) > 1e-9 * nodes) {
     Fail(where, std::format("{} kyr BP is not a node of the times grid",
                             date_kyr_bp));
   }
@@ -225,8 +226,8 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Json& where,
       auto elapsed = std::vector<double>{};
       auto series = std::vector<double>{};
       const auto& window = *run.times;
-      const auto step =
-          (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
+      const auto step = (window.Start() - window.End()) /
+                        (static_cast<int>(window.Size()) - 1);
       for (auto node = first; node <= last; ++node) {
         elapsed.push_back(step * static_cast<double>(node - first));
         series.push_back(
@@ -276,11 +277,11 @@ void WriteIceKernels(const std::filesystem::path& path, const SurfaceGrid& grid,
   file.source = std::format("sl3d {} (sl3dpp {})", command, Version());
   file.title = "ice-history sensitivity kernels";
   const auto& window = *run.times;
-  const auto step =
-      (window.start_kyr_bp - window.end_kyr_bp) / (window.nodes - 1);
+  const auto nodes = static_cast<int>(window.Size());
+  const auto step = (window.Start() - window.End()) / (nodes - 1);
   auto axis = std::vector<double>{};
-  for (auto n = 0; n < window.nodes; ++n) {
-    axis.push_back(-(window.start_kyr_bp - step * n) * KYR);
+  for (auto n = 0; n < nodes; ++n) {
+    axis.push_back(-(window.Start() - step * n) * KYR);
   }
   file.time = axis;
   auto instants = std::vector<double>{};
@@ -418,6 +419,27 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
          "`ocean.sea_level` (a sea level, used as it stands) or "
          "`ocean.topography` (converted with the state's ice), and the ice, "
          "`ocean.ice`, at one instant");
+  }
+  // the measurements' dates are located on evenly spaced dates: the other
+  // ways of giving `sea-level`'s nodes are refused before anything else
+  if (Has(top, "times") && top.At("times").IsObject()) {
+    const auto& times = top.At("times");
+    for (const auto* name : {"unit", "start", "end", "at"}) {
+      if (Has(times, name)) {
+        Fail(times.At(name),
+             "counts forwards on a run's own clock, which the kernel "
+             "commands do not take: their times are dates before present, "
+             "evenly spaced, `start_kyr_bp`, `end_kyr_bp` and `nodes`, on "
+             "which the measurements' dates are located");
+      }
+    }
+    if (Has(times, "at_kyr_bp")) {
+      Fail(times.At("at_kyr_bp"),
+           "lists the nodes, which the kernel commands do not take: their "
+           "times are dates before present, evenly spaced, `start_kyr_bp`, "
+           "`end_kyr_bp` and `nodes`, on which the measurements' dates are "
+           "located");
+    }
   }
   const auto directory = config.parent_path();
   auto out = KernelInput{};
@@ -584,10 +606,9 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   for (const auto& snapshot : snapshots) {
     if (!snapshot.converged) {
       throw std::runtime_error(
-          std::format("the sea level solve did not converge at {:.6g} kyr "
-                      "BP; loosen solver.rtol",
-                      DateKyrBp(input.run, solver.SolverScales(),
-                                snapshot.t)));
+          std::format("the sea level solve did not converge at {}; loosen "
+                      "solver.rtol",
+                      WhenOf(input.run, solver.SolverScales(), snapshot.t)));
     }
   }
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
@@ -696,8 +717,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   // with a trajectory directory, the recorded states spill to disk as
   // the run passes them, and the sweep fetches them back one at a time
   const auto spilling = !input.trajectory_directory.empty();
-  auto spilled = std::vector<bool>(
-      static_cast<std::size_t>(input.run.times->nodes), false);
+  auto spilled = std::vector<bool>(input.run.times->Size(), false);
   auto state_path = [&](std::size_t node) {
     return trajectoryDirectory / std::format("node_{:06}.traj", node);
   };
@@ -720,9 +740,9 @@ std::string RunKernel3D(const std::filesystem::path& config) {
     if (!snapshot.converged) {
       throw std::runtime_error(std::format(
           "the coupled fixed point or its sea level solve did not converge "
-          "at {:.6g} kyr BP; raise solver.step_max_iterations, or loosen "
+          "at {}; raise solver.step_max_iterations, or loosen "
           "solver.step_rtol or solver.rtol",
-          DateKyrBp(input.run, solver.SolverScales(), snapshot.t)));
+          WhenOf(input.run, solver.SolverScales(), snapshot.t)));
     }
   }
   auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);

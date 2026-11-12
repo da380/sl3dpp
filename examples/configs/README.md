@@ -25,6 +25,20 @@ sharper results. `poetry run python plot_app.py`, from `build/examples`,
 draws each config's figures from `out/<config>/` into
 `figures/sl3d/<config>/` (examples/README.md lists them).
 
+A `sea-level` run through time gives its nodes in one of two forms
+(docs/sl3d-configs.md, The times block). Dated, as the deglaciations
+here: `start_kyr_bp`, `end_kyr_bp` and `nodes`, or the dates listed in
+`at_kyr_bp`, its terms' times dates too (`history_kyr_bp`,
+`onset_kyr_bp`), its files read by date and its state at an end of the
+window (`ocean.at`). Counting forwards on the run's own clock, as
+`sea_level_postseismic.json`: a `unit` (`"kyr"`, `"yr"` or `"day"`) with
+`start`, `end` and `nodes` or the times listed in `at`, its terms' times
+on that clock (`history`, `onset`, a load file's `time_origin`), its
+state a snapshot of its files at `ocean.date_kyr_bp`, and its output's
+nodes in the unit (`times`, `time_unit`) rather than in dates
+(`dates_kyr_bp`). The static problem reads a load file with a time axis
+at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
+
 ## The synthetic Earth
 
 - **`love_numbers.json`** — the load and tidal Love numbers of the prem8
@@ -75,6 +89,21 @@ draws each config's figures from `out/<config>/` into
   magnitude over the ocean. The file holds the tangential and toroidal
   potentials (the horizontal motion) beside the rest. About 1 s and
   0.5 GB on four threads.
+- **`sea_level_postseismic.json`** — that thrust's post-seismic
+  relaxation, `sea-level` in the quasi-static problem counting forwards
+  on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
+  nine uneven nodes from 0 to 500 yr) rather than in dates: the fault
+  acts from the run's start (`"onset": 0`), the state is a snapshot of
+  the synthetic Earth's files at the present day (`ocean.date_kyr_bp` 0,
+  `"at": "start"`), on the Maxwell deck `../data/prem8.gia.deck` at
+  lmax 64 with full rotational feedback and the hydrostatic moments:
+  `out/sea_level_postseismic/sea_level_postseismic.nc`, its time axis the
+  run's clock in seconds and its nodes in years in the metadata (`times`,
+  `time_unit`). The first node is the co-seismic answer of
+  `sea_level_static_coseismic.json` to 1.4e-6 m (0.360 m of uplift over
+  the fault); the mantle's relaxation brings the uplift down to 0.34 m
+  after a century and 0.27 m after five. About 7 s and 1.5 GB on four
+  threads.
 - **`sea_level_1d.json`** — `sea-level` in the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a

@@ -2,6 +2,9 @@
 
 #include <cmath>
 #include <format>
+#include <initializer_list>
+#include <string_view>
+#include <utility>
 
 namespace sl3dpp::app {
 
@@ -89,35 +92,189 @@ double Finite(const Json& item) {
   return value;
 }
 
-/// The before-present form of a `times` block.
-TimesBlock ReadDates(const Json& block) {
-  for (const auto* name : {"start_kyr", "end_kyr", "at_kyr"}) {
-    if (Has(block, name)) {
-      Fail(block.At(name),
-           "counts forwards on a run's own clock, the form of `response`'s "
-           "times; this command's times are dates before present: "
-           "`start_kyr_bp`, `end_kyr_bp` and `nodes`");
+/// The two forms of `sea-level`'s times, as a refusal names them.
+constexpr auto kWindowForms = std::string_view{
+    "dates before present (`start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
+    "`at_kyr_bp`) or times counted forwards on the run's own clock (`unit` "
+    "with `start`, `end` and `nodes`, or `at`)"};
+
+/// The dated form of `sea-level`'s times.
+Window ReadDates(const Json& block) {
+  Allow(block, {"start_kyr_bp", "end_kyr_bp", "nodes", "at_kyr_bp"});
+  auto out = Window{};
+  out.calendar = Calendar::Dated;
+  if (Has(block, "at_kyr_bp")) {
+    if (Has(block, "start_kyr_bp")) {
+      Fail(block.At("start_kyr_bp"),
+           "is given by `at_kyr_bp`, whose first entry is the start");
     }
+    if (Has(block, "end_kyr_bp") || Has(block, "nodes")) {
+      Fail(block,
+           "gives the nodes twice: either `start_kyr_bp`, `end_kyr_bp` and "
+           "`nodes` (evenly spaced) or `at_kyr_bp` (the dates listed)");
+    }
+    out.listed = true;
+    const auto& at = block.At("at_kyr_bp");
+    for (const auto& item : at.AsArray()) {
+      const auto value = Finite(item);
+      if (!out.nodes.empty() && !(value < out.nodes.back())) {
+        Fail(item,
+             "is not later than the date before it: the dates run from the "
+             "oldest, strictly decreasing in kyr BP");
+      }
+      out.nodes.push_back(value);
+    }
+    if (out.nodes.size() < 2) Fail(at, "is fewer than two nodes");
+    return out;
   }
-  Allow(block, {"start_kyr_bp", "end_kyr_bp", "nodes"});
-  auto out = TimesBlock{};
-  out.start_kyr_bp = Finite(block.At("start_kyr_bp"));
-  out.end_kyr_bp =
+  const auto start = Finite(block.At("start_kyr_bp"));
+  const auto end =
       Has(block, "end_kyr_bp") ? Finite(block.At("end_kyr_bp")) : 0.0;
-  out.nodes = Integer(block, "nodes");
-  if (!(out.start_kyr_bp > out.end_kyr_bp)) {
+  const auto nodes = Integer(block, "nodes");
+  if (!(start > end)) {
     Fail(Has(block, "end_kyr_bp") ? block.At("end_kyr_bp") : block,
          "is not later than start_kyr_bp: dates count back from the "
          "present, so the window's end is the smaller");
   }
-  if (out.nodes < 2) Fail(block.At("nodes"), "is fewer than two nodes");
+  if (nodes < 2) Fail(block.At("nodes"), "is fewer than two nodes");
+  const auto spacing = (start - end) / (nodes - 1);
+  for (auto n = 0; n < nodes; ++n) {
+    out.nodes.push_back(n + 1 == nodes ? end : start - n * spacing);
+  }
+  return out;
+}
+
+/// The forwards form of `sea-level`'s times, on the run's own clock.
+Window ReadForwards(const Json& block) {
+  Allow(block, {"unit", "start", "end", "nodes", "at"});
+  if (!Has(block, "unit")) {
+    Fail(block, std::format("counts forwards on the run's own clock and "
+                            "gives no `unit` for its times: {}",
+                            kTimeUnits));
+  }
+  auto out = Window{};
+  out.calendar = Calendar::Forwards;
+  out.unit = ReadTimeUnit(block.At("unit"));
+  const auto even = Has(block, "end") || Has(block, "nodes");
+  const auto listed = Has(block, "at");
+  if (even && listed) {
+    Fail(block,
+         "gives the nodes twice: either `end` and `nodes` (evenly spaced "
+         "from `start`) or `at` (the nodes listed)");
+  }
+  if (!even && !listed) {
+    Fail(block,
+         "gives no nodes: either `end` and `nodes` (evenly spaced from "
+         "`start`) or `at` (the nodes listed)");
+  }
+  if (listed) {
+    if (Has(block, "start")) {
+      Fail(block.At("start"),
+           "is given by `at`, whose first entry is the start");
+    }
+    out.listed = true;
+    const auto& at = block.At("at");
+    for (const auto& item : at.AsArray()) {
+      const auto value = Finite(item);
+      if (!out.nodes.empty() && !(value > out.nodes.back())) {
+        Fail(item,
+             "is not later than the node before it: the nodes are strictly "
+             "increasing");
+      }
+      out.nodes.push_back(value);
+    }
+    if (out.nodes.size() < 2) Fail(at, "is fewer than two nodes");
+    return out;
+  }
+  for (const auto& [name, other] :
+       {std::pair{"end", "nodes"}, std::pair{"nodes", "end"}}) {
+    if (!Has(block, name)) {
+      Fail(block, std::format("gives `{}` without `{}`: evenly spaced nodes "
+                              "need both",
+                              other, name));
+    }
+  }
+  const auto start = Has(block, "start") ? Finite(block.At("start")) : 0.0;
+  const auto end = Finite(block.At("end"));
+  const auto nodes = Integer(block, "nodes");
+  if (!(end > start)) Fail(block.At("end"), "is not later than `start`");
+  if (nodes < 2) Fail(block.At("nodes"), "is fewer than two nodes");
+  const auto spacing = (end - start) / (nodes - 1);
+  for (auto n = 0; n < nodes; ++n) {
+    out.nodes.push_back(n + 1 == nodes ? end : start + n * spacing);
+  }
   return out;
 }
 
 }  // namespace
 
-TimesBlock ReadTimesBlock(const Json& block, TimesForm form) {
-  if (form == TimesForm::BeforePresent) return ReadDates(block);
+double Window::Axis(std::size_t n) const {
+  return Dated() ? -nodes[n] * KYR : nodes[n] * unit.seconds;
+}
+
+std::vector<double> Window::Times(double scale) const {
+  auto out = std::vector<double>{};
+  if (!Dated()) {
+    const auto toTime = unit.seconds / scale;
+    for (const auto node : nodes) out.push_back((node - Start()) * toTime);
+    return out;
+  }
+  if (listed) {
+    for (auto n = std::size_t{0}; n < nodes.size(); ++n) {
+      out.push_back((Axis(n) - Axis(0)) / scale);
+    }
+    return out;
+  }
+  const auto count = static_cast<int>(nodes.size());
+  const auto span = (Start() - End()) * KYR;
+  for (auto n = 0; n < count; ++n) {
+    out.push_back(span * n / (count - 1) / scale);
+  }
+  return out;
+}
+
+std::string Window::Label(double axis) const {
+  return Dated() ? std::format("{:.6g} kyr BP", 0.0 - axis / KYR)
+                 : std::format("{:.6g} {}", axis / unit.seconds, unit.name);
+}
+
+Window ReadWindow(const Json& block) {
+  if (!block.IsObject()) {
+    Fail(block, std::format("is not a block: `times` is an object, the nodes "
+                            "as {}",
+                            kWindowForms));
+  }
+  for (const auto* name : {"start_kyr", "end_kyr", "at_kyr"}) {
+    if (Has(block, name)) {
+      Fail(block.At(name),
+           "counts forwards on a run's own clock in kyr, the form of "
+           "`response`'s times; this command counts forwards with a `unit` "
+           "for its times (`start`, `end` and `nodes`, or `at`; `unit` "
+           "\"kyr\", \"yr\" or \"day\"), or gives dates before present "
+           "(`start_kyr_bp`, `end_kyr_bp` and `nodes`, or `at_kyr_bp`)");
+    }
+  }
+  const auto first = [&block](std::initializer_list<const char*> names) {
+    for (const auto* name : names) {
+      if (Has(block, name)) return std::string_view{name};
+    }
+    return std::string_view{};
+  };
+  const auto dated = first({"start_kyr_bp", "end_kyr_bp", "at_kyr_bp"});
+  const auto forwards = first({"unit", "start", "end", "at"});
+  if (!dated.empty() && !forwards.empty()) {
+    Fail(block.At(forwards),
+         std::format("counts forwards on the run's own clock, beside `{}`, a "
+                     "date before present: the times are given in one of two "
+                     "forms, {}",
+                     dated, kWindowForms));
+  }
+  if (!dated.empty()) return ReadDates(block);
+  if (!forwards.empty()) return ReadForwards(block);
+  Fail(block, std::format("gives no window: the nodes are {}", kWindowForms));
+}
+
+TimesBlock ReadTimesBlock(const Json& block) {
   for (const auto* name : {"start_kyr_bp", "end_kyr_bp"}) {
     if (Has(block, name)) {
       Fail(block.At(name),
@@ -195,7 +352,7 @@ std::string_view SeaLevelSource::Quantity() const {
 
 OceanBlock ReadOceanBlock(const Json& block,
                           const std::filesystem::path& directory,
-                          Problem problem) {
+                          Problem problem, Calendar calendar) {
   if (!block.IsObject()) {
     Fail(block,
          "is not a block: `ocean` is an object holding the state, the sea "
@@ -207,12 +364,19 @@ OceanBlock ReadOceanBlock(const Json& block,
          "`iterations`, `rtol`), which the state's \"at\": \"end\" turns on");
   }
   const auto timed = problem == Problem::QuasiStatic;
-  if (timed) {
+  // the state's files are read at its date in the static problem and in a
+  // run counting forwards, at an end of the window in a dated run
+  const auto forwards = timed && calendar == Calendar::Forwards;
+  const auto dated = timed && !forwards;
+  if (forwards) {
+    Allow(block, {"at", "date_kyr_bp", "shorelines", "sea_level", "topography",
+                  "ice", "land", "calibration"});
+  } else if (timed) {
     if (Has(block, "date_kyr_bp")) {
       Fail(block.At("date_kyr_bp"),
-           "dates the state, as the static problem reads it; the "
-           "quasi-static problem puts the state at an end of its window, "
-           "`at` (\"start\" or \"end\")");
+           "dates the state, as the static problem and a run counting "
+           "forwards on its own clock read it; a dated run puts the state "
+           "at an end of its window, `at` (\"start\" or \"end\")");
     }
     Allow(block, {"at", "shorelines", "sea_level", "topography", "ice", "land",
                   "calibration"});
@@ -259,8 +423,8 @@ OceanBlock ReadOceanBlock(const Json& block,
     if (!input.IsObject()) continue;  // ReadFileInput says what it is
     if (Has(input, "date_kyr_bp")) {
       Fail(input.At("date_kyr_bp"),
-           timed ? "is not a member: the state's date is the block's, in the "
-                   "quasi-static problem an end of the window, `ocean.at`"
+           dated ? "is not a member: the state's date is the block's, in a "
+                   "dated run an end of the window, `ocean.at`"
                  : "is not a member: the state's date is the block's, "
                    "`ocean.date_kyr_bp`");
     }
@@ -288,9 +452,19 @@ OceanBlock ReadOceanBlock(const Json& block,
     }
     out.at = Choice<WindowEnd>(
         block.At("at"), {{"start", WindowEnd::Start}, {"end", WindowEnd::End}});
-  } else {
-    out.date_kyr_bp = ReadDate(block, "date_kyr_bp");
+    if (forwards && out.at == WindowEnd::End) {
+      Fail(block.At("at"),
+           "puts the state at the window's end, whose ice at the start is "
+           "read back along dated ice histories (`thickness` terms) and "
+           "against whose sea level the initial sea level is calibrated: a "
+           "run counting forwards on its own clock has no such history, its "
+           "ice changing by `change` files without a time axis and caps "
+           "alone. Give the state at the start, \"start\", or the dated form "
+           "of `times` (`start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
+           "`at_kyr_bp`)");
+    }
   }
+  if (!dated) out.date_kyr_bp = ReadDate(block, "date_kyr_bp");
   if (Has(block, "land")) {
     const auto& land = block.At("land");
     out.land = ReadFileInput(land, directory, "land");

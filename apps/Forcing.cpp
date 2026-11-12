@@ -25,54 +25,98 @@ using Complex = std::complex<double>;
 constexpr auto kTermKinds =
     std::array<std::string_view, 4>{"cap", "disk", "field", "coefficients"};
 
-/// How a block's terms give their times: on the run's clock (`response`:
-/// `history_kyr`, `onset_kyr`, `time_origin_kyr`, a static field's
-/// `date_kyr` on its file's own axis), or as dates before present
-/// (`sea-level`: `history_kyr_bp`, `onset_kyr_bp`, a static field's
-/// `date_kyr_bp`, a field file read by date through time), turned to the
-/// run's clock by the date of its zero, the window's start, which a run
-/// through time has.
-struct Clock {
-  bool dated = false;
-  std::optional<double> start_kyr_bp;
+using Form = TermClock::Form;
+
+/// The names a form of the terms' clock (TermClock) gives a history and an
+/// onset.
+struct ClockNames {
+  std::string_view history;
+  std::string_view onset;
 };
 
-/// Refuses the other form's names in a term, naming this form's.
-void RefuseOtherClock(const Json& item, bool dated) {
-  constexpr auto kNames = std::array<std::pair<std::string_view, std::string_view>, 2>{
-      {{"history_kyr", "history_kyr_bp"}, {"onset_kyr", "onset_kyr_bp"}}};
-  for (const auto& [clock, date] : kNames) {
-    if (dated && Has(item, clock)) {
-      Fail(item.At(clock),
-           std::format("is a time on a run's own clock; here times are "
-                       "dates, kyr before present: `{}`",
-                       date));
+ClockNames NamesOf(Form form) {
+  switch (form) {
+    case Form::Response:
+      return {"history_kyr", "onset_kyr"};
+    case Form::Dated:
+      return {"history_kyr_bp", "onset_kyr_bp"};
+    case Form::Forwards:
+      break;
+  }
+  return {"history", "onset"};
+}
+
+/// Why a name of the form `given` is refused in a term of the form
+/// `mine` (in a run through time, `timed`), naming this form's `wanted`.
+std::string OtherClock(Form mine, Form given, std::string_view wanted,
+                       bool timed) {
+  if (mine == Form::Response) {
+    return std::format(
+        "is a date; here times are on the run's clock, kyr: `{}`", wanted);
+  }
+  if (mine == Form::Dated && given == Form::Response) {
+    return std::format(
+        "is a time on a run's own clock in kyr, `response`'s form; here "
+        "times are dates, kyr before present: `{}`",
+        wanted);
+  }
+  if (mine == Form::Dated) {
+    return timed ? std::format("is a time on a run's own clock, the form of a "
+                               "`times` block counting forwards with a "
+                               "`unit`; this run's times are dates, kyr "
+                               "before present: `{}`",
+                               wanted)
+                 : std::format("is a time on a run's own clock, which {}, "
+                               "its `times` counting forwards with a `unit`",
+                               kNeedsQuasiStatic);
+  }
+  return std::format(
+      "is {}; this run counts forwards on its own clock, in its `unit` "
+      "(`times.unit`): `{}`",
+      given == Form::Dated
+          ? "a date before present, the dated form of `times`"
+          : "a time in kyr, `response`'s form",
+      wanted);
+}
+
+/// Refuses the other forms' names of a history (and, with `onsets`, of an
+/// onset) in a term, naming this form's. `response`'s terms know their
+/// own names alone, the forwards form's being unknown members to them.
+void RefuseOtherClock(const Json& item, const TermClock& clock, bool timed,
+                      bool onsets = true) {
+  const auto mine = NamesOf(clock.form);
+  for (const auto form : {Form::Response, Form::Dated, Form::Forwards}) {
+    if (form == clock.form ||
+        (clock.form == Form::Response && form == Form::Forwards)) {
+      continue;
     }
-    if (!dated && Has(item, date)) {
-      Fail(item.At(date),
-           std::format("is a date; here times are on the run's clock, kyr: "
-                       "`{}`",
-                       clock));
+    const auto other = NamesOf(form);
+    if (Has(item, other.history)) {
+      Fail(item.At(other.history),
+           OtherClock(clock.form, form, mine.history, timed));
+    }
+    if (onsets && Has(item, other.onset)) {
+      Fail(item.At(other.onset),
+           OtherClock(clock.form, form, mine.onset, timed));
     }
   }
 }
 
-/// A term's amplitude history, `history_kyr` (or, dated, `history_kyr_bp`):
-/// refused without a `times` block (`timed`), which a forcing fixed in
-/// time cannot take.
+/// A term's amplitude history under its form's name (`history_kyr`,
+/// `history_kyr_bp` or `history`): refused without a `times` block
+/// (`timed`), which a forcing fixed in time cannot take.
 AmplitudeHistory ReadHistory(const Json& item, bool timed,
-                             const Clock& clock = {}) {
+                             const TermClock& clock = {}) {
   auto out = AmplitudeHistory{};
-  RefuseOtherClock(item, clock.dated);
-  const auto name =
-      std::string_view{clock.dated ? "history_kyr_bp" : "history_kyr"};
+  RefuseOtherClock(item, clock, timed);
+  const auto name = NamesOf(clock.form).history;
   if (!Has(item, name)) return out;
   const auto& history = item.At(name);
   if (!timed) {
     Fail(history,
          std::format("is an amplitude history, which {}", kNeedsQuasiStatic));
   }
-  if (clock.dated) {
+  if (clock.form == Form::Dated) {
     const auto start = clock.start_kyr_bp.value();
     out.start_kyr_bp = start;
     for (const auto& pair : history.AsArray()) {
@@ -85,38 +129,42 @@ AmplitudeHistory ReadHistory(const Json& item, bool timed,
         Fail(pair, "is not a pair of finite numbers [date_kyr_bp, factor]");
       }
       const auto time = start - date;
-      if (!out.times_kyr.empty() && !(time > out.times_kyr.back())) {
+      if (!out.times.empty() && !(time > out.times.back())) {
         Fail(pair.At(std::size_t{0}),
              "is not later than the date before it: a history's dates run "
              "from the oldest, strictly decreasing in kyr BP");
       }
-      out.times_kyr.push_back(time);
+      out.times.push_back(time);
       out.factors.push_back(factor);
     }
-    if (out.times_kyr.empty()) {
+    if (out.times.empty()) {
       Fail(history, "holds no [date_kyr_bp, factor] pair");
     }
     return out;
   }
+  // on the run's own clock: kyr (`response`), or the run's unit
+  const auto forwards = clock.form == Form::Forwards;
+  const auto pairName = forwards ? "[time, factor]" : "[time_kyr, factor]";
+  if (forwards) out.unit = clock.unit;
   for (const auto& pair : history.AsArray()) {
     if (!pair.IsArray() || pair.AsArray().size() != 2) {
-      Fail(pair, "is not a pair [time_kyr, factor]");
+      Fail(pair, std::format("is not a pair {}", pairName));
     }
     const auto time = pair.At(std::size_t{0}).AsNumber();
     const auto factor = pair.At(std::size_t{1}).AsNumber();
     if (!std::isfinite(time) || !std::isfinite(factor)) {
-      Fail(pair, "is not a pair of finite numbers [time_kyr, factor]");
+      Fail(pair, std::format("is not a pair of finite numbers {}", pairName));
     }
-    if (!out.times_kyr.empty() && !(time > out.times_kyr.back())) {
+    if (!out.times.empty() && !(time > out.times.back())) {
       Fail(pair.At(std::size_t{0}),
            "is not later than the time before it: a history's times are "
            "strictly increasing");
     }
-    out.times_kyr.push_back(time);
+    out.times.push_back(time);
     out.factors.push_back(factor);
   }
-  if (out.times_kyr.empty()) {
-    Fail(history, "holds no [time_kyr, factor] pair");
+  if (out.times.empty()) {
+    Fail(history, std::format("holds no {} pair", pairName));
   }
   return out;
 }
@@ -127,11 +175,11 @@ GeographicPoint SiteOf(const Json& object) { return ReadSite(object); }
 /// `extra`: further members the item may hold, which the caller reads.
 LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                       bool timed, std::span<const std::string_view> extra = {},
-                      const Clock& clock = {}) {
+                      const TermClock& clock = {}) {
   auto history = ReadHistory(item, timed, clock);
   auto members =
       std::vector<std::string_view>(kTermKinds.begin(), kTermKinds.end());
-  members.push_back(clock.dated ? "history_kyr_bp" : "history_kyr");
+  members.push_back(NamesOf(clock.form).history);
   members.insert(members.end(), extra.begin(), extra.end());
   Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
@@ -170,9 +218,11 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
            "is not a member: the field read from the file is its `variable`");
     }
     term.kind = LoadTerm::Kind::Field;
-    if (clock.dated) {
+    term.unit = clock.unit;
+    if (clock.form == Form::Dated) {
       // the dates are before present: the run's clock's names refused,
-      // and the static problem's date `date_kyr_bp`
+      // and the static problem's date `date_kyr_bp`, or `date` with its
+      // `unit` on the file's own axis
       if (Has(field, "time_origin_kyr")) {
         Fail(field.At("time_origin_kyr"),
              timed ? "is a time origin on a run's own clock; here a file with "
@@ -181,26 +231,108 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                    : "is a time origin on a run's own clock; here a file "
                      "with a time axis is read at its date, `date_kyr_bp`");
       }
+      if (Has(field, "time_origin")) {
+        Fail(field.At("time_origin"),
+             timed ? std::string{"is a time origin on a run's own clock, the "
+                                 "form of a `times` block counting forwards "
+                                 "with a `unit`; here a file with a time axis "
+                                 "is read by date, at each node's, as the ice "
+                                 "change's files are"}
+                   : std::format("is a time origin on a run's own clock, "
+                                 "which {}, its `times` counting forwards "
+                                 "with a `unit`; the static problem reads a "
+                                 "file with a time axis at its date, "
+                                 "`date_kyr_bp`, or at `date` in its `unit` "
+                                 "on the file's own axis",
+                                 kNeedsQuasiStatic));
+      }
       if (Has(field, "date_kyr")) {
         Fail(field.At("date_kyr"),
              "is a time on the file's own axis; here dates are kyr before "
              "present: `date_kyr_bp`");
       }
-      if (timed && Has(field, "date_kyr_bp")) {
-        Fail(field.At("date_kyr_bp"),
-             "dates the file, as the static problem reads it; a run through "
-             "time reads it at each node's date");
-      }
-      Allow(field, {"file", "format", "variable", "date_kyr_bp"});
-      term.field = ReadFileInput(field, directory, "load");
-      term.before_present = true;
       if (timed) {
+        for (const auto* name : {"date_kyr_bp", "date"}) {
+          if (Has(field, name)) {
+            Fail(field.At(name),
+                 "dates the file, as the static problem reads it; a run "
+                 "through time reads it at each node's date");
+          }
+        }
+        if (Has(field, "unit")) {
+          Fail(field.At("unit"),
+               "is the unit of the static problem's `date`; a run through "
+               "time reads the file at each node's date");
+        }
+        Allow(field, {"file", "format", "variable"});
+        term.field = ReadFileInput(field, directory, "load");
+        term.before_present = true;
         // the file's time zero is the present: the window's start on the
         // clock
         term.dated = true;
-        term.time_origin_kyr = clock.start_kyr_bp.value();
+        term.time_origin = clock.start_kyr_bp.value();
       } else {
-        term.field.date = ReadDate(field, "date_kyr_bp");
+        Allow(field,
+              {"file", "format", "variable", "date_kyr_bp", "date", "unit"});
+        term.field = ReadFileInput(field, directory, "load");
+        if (Has(field, "date")) {
+          // the instant on the file's own axis
+          if (Has(field, "date_kyr_bp")) {
+            Fail(field.At("date"),
+                 "dates the file twice, beside `date_kyr_bp`: give the date "
+                 "before present, `date_kyr_bp`, or the time on the file's "
+                 "own axis, `date` with its `unit`");
+          }
+          if (!Has(field, "unit")) {
+            Fail(field.At("date"),
+                 std::format("is a time on the file's own axis, which needs "
+                             "its `unit` beside it: {}",
+                             kTimeUnits));
+          }
+          term.unit = ReadTimeUnit(field.At("unit"));
+          term.date_member = "date";
+          term.field.date = ReadDate(field, "date");
+        } else {
+          if (Has(field, "unit")) {
+            Fail(field.At("unit"),
+                 "is the unit of a `date` on the file's own axis, which the "
+                 "field does not give");
+          }
+          term.before_present = true;
+          term.date_member = "date_kyr_bp";
+          term.field.date = ReadDate(field, "date_kyr_bp");
+        }
+      }
+    } else if (clock.form == Form::Forwards) {
+      // times on the run's own clock in its unit: the file read at
+      // t - `time_origin`
+      for (const auto* name : {"date_kyr_bp", "date_kyr", "date"}) {
+        if (Has(field, name)) {
+          Fail(field.At(name),
+               "dates the file, as the static problem reads it; a run "
+               "through time reads it at each time t of its clock, at t - "
+               "`time_origin`");
+        }
+      }
+      if (Has(field, "unit")) {
+        Fail(field.At("unit"),
+             "is the unit of the static problem's `date`; this run's times "
+             "are in its own unit, `times.unit`");
+      }
+      if (Has(field, "time_origin_kyr")) {
+        Fail(field.At("time_origin_kyr"),
+             "is a time origin in kyr, `response`'s form; this run counts "
+             "forwards on its own clock, in its `unit` (`times.unit`): "
+             "`time_origin`");
+      }
+      Allow(field, {"file", "format", "variable", "time_origin"});
+      term.field = ReadFileInput(field, directory, "load");
+      if (Has(field, "time_origin")) {
+        const auto& origin = field.At("time_origin");
+        term.time_origin = origin.AsNumber();
+        if (!std::isfinite(term.time_origin)) {
+          Fail(origin, "is not a finite number");
+        }
       }
     } else {
       Allow(field,
@@ -214,8 +346,8 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                                    "its `date_kyr`",
                                    kNeedsQuasiStatic));
         }
-        term.time_origin_kyr = origin.AsNumber();
-        if (!std::isfinite(term.time_origin_kyr)) {
+        term.time_origin = origin.AsNumber();
+        if (!std::isfinite(term.time_origin)) {
           Fail(origin, "is not a finite number");
         }
       }
@@ -240,10 +372,10 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
 }
 
 TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
-                      const Clock& clock = {}) {
+                      const TermClock& clock = {}) {
   auto history = ReadHistory(item, timed, clock);
   Allow(item, {"degree", "order", "amplitude_m2_s2", "imaginary_m2_s2",
-               clock.dated ? "history_kyr_bp" : "history_kyr"});
+               NamesOf(clock.form).history});
   auto term = TideTerm{};
   term.history = std::move(history);
   term.degree = Integer(item, "degree");
@@ -265,31 +397,31 @@ TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
 /// One seismic source: a point moment tensor or a planar fault; `timed`, a
 /// run through time's, which alone takes an onset and a history.
 SeismicTerm ReadSeismicTerm(const Json& item, bool timed = true,
-                            const Clock& clock = {}) {
-  RefuseOtherClock(item, clock.dated);
-  if (clock.dated) {
-    Allow(item, {"point", "fault", "onset_kyr_bp", "history_kyr_bp"});
-  } else {
-    Allow(item, {"point", "fault", "onset_kyr", "history_kyr"});
-  }
+                            const TermClock& clock = {}) {
+  RefuseOtherClock(item, clock, timed);
+  const auto names = NamesOf(clock.form);
+  Allow(item, {"point", "fault", names.onset, names.history});
   if (Has(item, "point") == Has(item, "fault")) {
     Fail(item, "is exactly one of \"point\" and \"fault\"");
   }
   auto term = SeismicTerm{};
-  const auto onset =
-      std::string_view{clock.dated ? "onset_kyr_bp" : "onset_kyr"};
-  if (!timed && Has(item, onset)) {
-    Fail(item.At(onset),
+  if (!timed && Has(item, names.onset)) {
+    Fail(item.At(names.onset),
          std::format("is an onset, which {}: the static problem is the "
                      "co-seismic response",
                      kNeedsQuasiStatic));
   }
   term.history = ReadHistory(item, timed, clock);
-  if (clock.dated && Has(item, "onset_kyr_bp")) {
-    term.start_kyr_bp = clock.start_kyr_bp;
-    term.onset_kyr = *clock.start_kyr_bp - Number(item, "onset_kyr_bp");
-  } else if (Has(item, "onset_kyr")) {
-    term.onset_kyr = Number(item, "onset_kyr");
+  term.unit = clock.unit;
+  if (Has(item, names.onset)) {
+    const auto onset = Number(item, names.onset);
+    if (clock.form == Form::Dated) {
+      // a date, turned to the clock's kyr from the window's start
+      term.start_kyr_bp = clock.start_kyr_bp;
+      term.onset = *clock.start_kyr_bp - onset;
+    } else {
+      term.onset = onset;
+    }
   }
   auto planeOf = [&term](const Json& object) {
     term.strike = Number(object, "strike_deg");
@@ -360,15 +492,12 @@ SeismicTerm ReadSeismicTerm(const Json& item, bool timed = true,
 
 /// A field term's file on the grid, holding its variable. Unless `timed`
 /// the file is read at one time: a time axis needs the term's date
-/// (`date_kyr`, or `date_kyr_bp` before present), and a file without one
-/// refuses it.
+/// (`date_kyr`, `date_kyr_bp` before present, or `date` on the file's own
+/// axis), and a file without one refuses it.
 io::FieldHistory OpenFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
                                const Json& field, bool timed) {
   auto history = OpenFileInput(term.field, grid, field);
-  if (!timed) {
-    CheckDate(term.field, history, field,
-              term.before_present ? "date_kyr_bp" : "date_kyr");
-  }
+  if (!timed) CheckDate(term.field, history, field, term.date_member);
   return history;
 }
 
@@ -424,12 +553,13 @@ TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
         out.history.emplace(std::move(history));
         break;
       }
-      // a static run reads a file with a time axis at its date, kyr on the
-      // file's own axis or kyr before present (minus that on the axis); a
-      // static file is the same at every time
+      // a static run reads a file with a time axis at its date, kyr before
+      // present (minus that on the axis) or a time in the term's unit on
+      // the file's own axis; a static file is the same at every time
       const auto date = term.field.date.value_or(0.0);
-      const auto time =
-          timed ? 0.0 : (term.before_present ? -date : date) * KYR;
+      const auto time = timed                 ? 0.0
+                        : term.before_present ? -date * KYR
+                                              : date * term.unit.seconds;
       out.field = FieldValues(history, term, field.At("file"), time);
       out.coefficients = grid.Expand(out.field);
       break;
@@ -446,19 +576,24 @@ TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
 /// "[[t, f], ...]", for provenance.
 std::string Pairs(const AmplitudeHistory& history) {
   auto out = std::string{"["};
-  for (auto i = std::size_t{0}; i < history.times_kyr.size(); ++i) {
-    out += std::format("{}[{:g}, {:g}]", i == 0 ? "" : ", ",
-                       history.times_kyr[i], history.factors[i]);
+  for (auto i = std::size_t{0}; i < history.times.size(); ++i) {
+    out += std::format("{}[{:g}, {:g}]", i == 0 ? "" : ", ", history.times[i],
+                       history.factors[i]);
   }
   return out + "]";
 }
 
 /// A history as a term's description ends with it: its pairs under the
-/// name it was given by, dates where it was given as dates.
+/// name it was given by, dates where it was given as dates, and the unit
+/// of a run's own clock where it was given on one.
 std::string History(const AmplitudeHistory& history) {
+  if (history.unit) {
+    return std::format(", history in {} {}", history.unit->name,
+                       Pairs(history));
+  }
   if (!history.start_kyr_bp) return ", history_kyr " + Pairs(history);
   auto dated = history;
-  for (auto& t : dated.times_kyr) t = *history.start_kyr_bp - t;
+  for (auto& t : dated.times) t = *history.start_kyr_bp - t;
   return ", history_kyr_bp " + Pairs(dated);
 }
 
@@ -494,13 +629,13 @@ std::optional<T> Parse(std::string_view word) {
 }  // namespace
 
 double AmplitudeHistory::At(double t) const {
-  if (times_kyr.empty()) return 1.0;
-  if (t <= times_kyr.front()) return factors.front();
-  if (t >= times_kyr.back()) return factors.back();
-  // times_kyr[i] <= t < times_kyr[i + 1]
+  if (times.empty()) return 1.0;
+  if (t <= times.front()) return factors.front();
+  if (t >= times.back()) return factors.back();
+  // times[i] <= t < times[i + 1]
   const auto i = static_cast<std::size_t>(
-      std::ranges::upper_bound(times_kyr, t) - times_kyr.begin() - 1);
-  const auto w = (t - times_kyr[i]) / (times_kyr[i + 1] - times_kyr[i]);
+      std::ranges::upper_bound(times, t) - times.begin() - 1);
+  const auto w = (t - times[i]) / (times[i + 1] - times[i]);
   return factors[i] + w * (factors[i + 1] - factors[i]);
 }
 
@@ -538,9 +673,7 @@ Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
 }
 
 double SeismicTerm::FactorAt(double t) const {
-  if (onset_kyr && t < *onset_kyr - 1e-12 * (1.0 + std::abs(*onset_kyr))) {
-    return 0.0;
-  }
+  if (onset && t < *onset - 1e-12 * (1.0 + std::abs(*onset))) return 0.0;
   return history.At(t);
 }
 
@@ -753,8 +886,8 @@ BuiltForcing TimedForcing::At(double t) const {
     if (pattern.history) {
       field = FieldValues(*pattern.history, term,
                           block_->At("load").At(k).At("field").At("file"),
-                          (t - term.time_origin_kyr) * KYR,
-                          std::format(" at {:g} kyr", t));
+                          (t - term.time_origin) * term.unit.seconds,
+                          std::format(" at {:g} {}", t, term.unit.name));
       coefficients = grid.Expand(field);
     } else {
       field = pattern.field;
@@ -806,13 +939,16 @@ std::string Describe(const LoadTerm& term) {
       out = std::format("field {}:{}", term.field.file.string(),
                         term.field.variable);
       if (term.field.date) {
-        out += std::format(", at {:g} kyr{}", *term.field.date,
-                           term.before_present ? " BP" : "");
+        out += term.before_present
+                   ? std::format(", at {:g} kyr BP", *term.field.date)
+                   : std::format(", at {:g} {}", *term.field.date,
+                                 term.unit.name);
       }
       if (term.dated) {
         out += ", read by date";
-      } else if (term.time_origin_kyr != 0.0) {
-        out += std::format(", time origin {:g} kyr", term.time_origin_kyr);
+      } else if (term.time_origin != 0.0) {
+        out += std::format(", time origin {:g} {}", term.time_origin,
+                           term.unit.name);
       }
       break;
     case LoadTerm::Kind::Coefficients:
@@ -826,13 +962,15 @@ std::string Describe(const LoadTerm& term) {
 std::string DescribeField(const LoadTerm& term, bool timeAxis, bool timed) {
   auto slice = std::string{"static"};
   if (timeAxis && !timed) {
-    slice = std::format("{:g} kyr{}", term.field.date.value_or(0.0),
-                        term.before_present ? " BP" : "");
+    const auto date = term.field.date.value_or(0.0);
+    slice = term.before_present ? std::format("{:g} kyr BP", date)
+                                : std::format("{:g} {}", date, term.unit.name);
   } else if (timeAxis) {
     slice = term.dated ? std::string{"each node's date"}
-            : term.time_origin_kyr == 0.0
+            : term.time_origin == 0.0
                 ? std::string{"the run's clock"}
-                : std::format("time origin {:g} kyr", term.time_origin_kyr);
+                : std::format("time origin {:g} {}", term.time_origin,
+                              term.unit.name);
   }
   return "field " + DescribeInput(term.field, slice);
 }
@@ -863,10 +1001,10 @@ std::string Describe(const SeismicTerm& term) {
         term.dip, term.rake, term.length / 1e3, term.width / 1e3,
         term.scalarMoment, term.alongStrike, term.downDip);
   }
-  if (term.onset_kyr && term.start_kyr_bp) {
-    out += std::format(", from {:g} kyr BP", *term.start_kyr_bp - *term.onset_kyr);
-  } else if (term.onset_kyr) {
-    out += std::format(", from {:g} kyr", *term.onset_kyr);
+  if (term.onset && term.start_kyr_bp) {
+    out += std::format(", from {:g} kyr BP", *term.start_kyr_bp - *term.onset);
+  } else if (term.onset) {
+    out += std::format(", from {:g} {}", *term.onset, term.unit.name);
   }
   if (!term.history.Empty()) out += History(term.history);
   return out;
@@ -894,25 +1032,22 @@ namespace {
 constexpr auto kIceChangeKinds = std::array<std::string_view, 4>{
     "thickness", "change", "cap_thickness", "cap_fraction"};
 
-/// One term of an ice change; `start_kyr_bp`, a run through time's window
-/// start.
+/// One term of an ice change of a run of the given `clock` (a run through
+/// time's, `timed`, or the static problem's).
 IceChangeTerm ReadIceChangeTerm(const Json& item,
                                 const std::filesystem::path& directory,
-                                std::optional<double> start_kyr_bp) {
-  const auto timed = start_kyr_bp.has_value();
+                                bool timed, const TermClock& clock) {
   if (!item.IsObject()) {
     Fail(item,
          "is not a term: a term of an ice change is an object holding one of "
          "\"thickness\", \"change\", \"cap_thickness\" and \"cap_fraction\"");
   }
-  if (Has(item, "history_kyr")) {
-    Fail(item.At("history_kyr"),
-         "is a time on a run's own clock; here times are dates, kyr before "
-         "present: `history_kyr_bp`");
-  }
+  RefuseOtherClock(item, clock, timed, false);
+  const auto history = NamesOf(clock.form).history;
+  const auto forwards = clock.form == Form::Forwards;
   auto members = std::vector<std::string_view>(kIceChangeKinds.begin(),
                                                kIceChangeKinds.end());
-  members.push_back("history_kyr_bp");
+  members.push_back(history);
   Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
       kIceChangeKinds,
@@ -929,22 +1064,38 @@ IceChangeTerm ReadIceChangeTerm(const Json& item,
     const auto thickness = Has(item, "thickness");
     term.kind = thickness ? IceChangeTerm::Kind::Thickness
                           : IceChangeTerm::Kind::Change;
-    if (Has(item, "history_kyr_bp")) {
-      Fail(item.At("history_kyr_bp"),
+    if (Has(item, history)) {
+      Fail(item.At(history),
            "is an amplitude history, which a cap of ice change alone takes: "
            "a `thickness` or `change` term's change is its file's");
     }
     const auto& file = item.At(term.Member());
+    if (thickness && forwards) {
+      Fail(file,
+           "is an ice history, a file of thickness whose change is measured "
+           "along its time axis from the state's instant: a dated history, "
+           "which makes the problem a dated one. Give the dated form of "
+           "`times` (`start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
+           "`at_kyr_bp`); on a run's own clock the ice changes by a `change` "
+           "file without a time axis, held through the run, or by a cap "
+           "with its `history`");
+    }
     term.file = ReadFileInput(
         file, directory, thickness ? "ice_thickness" : "ice_thickness_change");
     if (timed) {
       if (Has(file, "date_kyr_bp")) {
         Fail(file.At("date_kyr_bp"),
-             "dates the file, as the static problem reads it; a run through "
-             "time reads it at each node's date");
+             forwards ? "dates the file, as the static problem reads it; a "
+                        "run counting forwards on its own clock holds the "
+                        "file, one field without a time axis, through the run"
+                      : "dates the file, as the static problem reads it; a "
+                        "run through time reads it at each node's date");
       }
       Allow(file, {"file", "format", "variable"});
-      term.dated = true;
+      // a dated run reads the file at each node's date; one counting
+      // forwards holds its one field
+      term.dated = !forwards;
+      term.held = forwards;
     } else {
       Allow(file, {"file", "format", "variable", "date_kyr_bp"});
       term.file.date = ReadDate(file, "date_kyr_bp");
@@ -967,8 +1118,7 @@ IceChangeTerm ReadIceChangeTerm(const Json& item,
   if (!(width > 0.0)) Fail(cap.At("width_deg"), "is not a positive angle");
   term.width = width * std::numbers::pi / 180.0;
   term.amount = Number(cap, fraction ? "fraction" : "thickness_m");
-  term.history = ReadHistory(
-      item, timed, Clock{.dated = true, .start_kyr_bp = start_kyr_bp});
+  term.history = ReadHistory(item, timed, clock);
   return term;
 }
 
@@ -999,10 +1149,12 @@ GeographicPoint ReadSite(const Json& object) {
 SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                                     const std::filesystem::path& directory,
                                     int lmax,
-                                    std::optional<double> start_kyr_bp,
+                                    const std::optional<TermClock>& given,
                                     bool ocean) {
-  const auto timed = start_kyr_bp.has_value();
-  const auto clock = Clock{.dated = true, .start_kyr_bp = start_kyr_bp};
+  // the static problem's terms are dated, and have no window
+  const auto timed = given.has_value();
+  const auto clock = given.value_or(
+      TermClock{.form = Form::Dated, .start_kyr_bp = std::nullopt, .unit = {}});
   if (!block.IsObject()) {
     Fail(block,
          "is not a block: `forcing` is an object of the ice change, "
@@ -1090,7 +1242,7 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
   if (Has(block, "ice_change")) {
     for (const auto& item : block.At("ice_change").AsArray()) {
       out.ice_change.push_back(
-          ReadIceChangeTerm(item, directory, start_kyr_bp));
+          ReadIceChangeTerm(item, directory, timed, clock));
     }
   }
   if (out.ice_change.empty() && !out.BesideTheIce()) {
@@ -1128,6 +1280,8 @@ std::string Describe(const IceChangeTerm& term) {
                              term.file.variable);
       if (term.dated) {
         out += ", read by date";
+      } else if (term.held) {
+        out += ", held through the run";
       } else if (term.file.date) {
         out += std::format(", at {:g} kyr BP", *term.file.date);
       }
@@ -1159,12 +1313,11 @@ std::string Describe(const SurfaceLoadTerm& term) {
 }
 
 std::vector<std::complex<double>> TideAt(std::span<const TideTerm> tide,
-                                         const SurfaceGrid& grid,
-                                         double t_kyr) {
+                                         const SurfaceGrid& grid, double t) {
   auto out = grid.ZeroCoefficients();
   for (const auto& term : tide) {
     out[SurfaceGrid::Index(term.degree, term.order)] +=
-        term.history.At(t_kyr) * Complex{term.amplitude, term.imaginary};
+        term.history.At(t) * Complex{term.amplitude, term.imaginary};
   }
   return out;
 }
@@ -1184,9 +1337,9 @@ SurfaceLoads::SurfaceLoads(const SeaLevelForcing& forcing,
       grid_(&grid),
       timed_(LoadsAlone(forcing), grid, block, timed) {}
 
-SurfaceLoads::Node SurfaceLoads::At(double t_kyr) const {
+SurfaceLoads::Node SurfaceLoads::At(double t) const {
   const auto& grid = *grid_;
-  const auto built = timed_.At(t_kyr);
+  const auto built = timed_.At(t);
   auto inside = std::vector<Complex>{}, outside = std::vector<Complex>{};
   auto layer = std::vector<Complex>{};
   auto add = [&](std::vector<Complex>& to, const std::vector<Complex>& term,

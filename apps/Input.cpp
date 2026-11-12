@@ -62,6 +62,12 @@ std::filesystem::path PathOf(const Json& object, std::string_view key,
   return path.is_absolute() ? path : directory / path;
 }
 
+TimeUnit ReadTimeUnit(const Json& word) {
+  return Choice<TimeUnit>(word, {{"kyr", TimeUnit{"kyr", KYR}},
+                                 {"yr", TimeUnit{"yr", KYR / 1000.0}},
+                                 {"day", TimeUnit{"day", 86400.0}}});
+}
+
 std::string CreatedNow() {
   const auto now = std::chrono::floor<std::chrono::seconds>(
       std::chrono::system_clock::now());
