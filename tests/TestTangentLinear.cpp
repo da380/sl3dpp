@@ -457,6 +457,46 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     EXPECT_NE(alongModuli, 0.0);
     EXPECT_NEAR(alongModuli, moduliRhs, 1e-8 * std::abs(alongModuli)) << label;
 
+    // Second order: the forcing's rows of the Hessian. Along the
+    // relaxation times the derivatives of the load and tide kernels,
+    // paired with the forcing's direction, are the derivative of the
+    // itau kernel along the forcing paired with the relaxation times,
+    // and both are the second-order run's objective.
+    TangentLinearSolver recorded(
+        evolution,
+        {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    const auto runForcing = recorded.Run(times, forcing, &trajectory);
+    const auto runItau = recorded.Run(times, itauOnly, &trajectory);
+    const auto [kernelsF, alongF] = adjoint.SecondOrderKernels(
+        times, *measured, runForcing, {}, trajectory);
+    const auto [kernelsI, alongI] = adjoint.SecondOrderKernels(
+        times, *measured, runItau, ditau, trajectory);
+    ASSERT_EQ(alongI.directLoadKernels.size(), times.size());
+    ASSERT_EQ(alongI.tideKernels.size(), times.size());
+    auto loadRows = 0.0, tideRows = 0.0, firstTide = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      loadRows += setup.Surface(alongI.directLoadKernels[n], deltas[n]);
+      tideRows += pair(alongI.tideKernels[n], tideDeltas[n]);
+      // the sweep's own tide kernels are the first-order sweep's
+      firstTide += pair(kernelsI.tideKernels[n], tideDeltas[n]);
+    }
+    EXPECT_NEAR(firstTide, tideRhs, 1e-9 * std::abs(tideRhs)) << label;
+    const auto itauRow =
+        VolumePairing(setup.material.Mesh(), alongF.itauKernel[0], ditau[0]);
+    EXPECT_NE(tideRows, 0.0);
+    EXPECT_NE(loadRows, 0.0);
+    EXPECT_NEAR(loadRows + tideRows, itauRow, 1e-8 * std::abs(itauRow)) << label;
+    const auto second = recorded.RunSecondOrder(
+        times, runForcing, runItau, {.itauU = {}, .itauV = ditau}, &trajectory);
+    const auto mixed = Objective(setup, second, *measured);
+    EXPECT_NEAR(mixed, itauRow, 1e-8 * std::abs(itauRow)) << label;
+    // the forcing's own block vanishes: the run is linear in it
+    auto ownBlock = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      ownBlock += std::abs(setup.Surface(alongF.directLoadKernels[n], deltas[n])) +
+                  std::abs(pair(alongF.tideKernels[n], tideDeltas[n]));
+    }
+    EXPECT_LT(ownBlock, 1e-10 * std::abs(itauRow)) << label;
   }
 }
 

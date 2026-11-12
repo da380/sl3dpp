@@ -80,4 +80,25 @@ inline void WriteToyHistory(const std::filesystem::path& path,
   pm::WriteSurfaceFile(path, file);
 }
 
+/// A field held as land for the toy world, without a time axis: one over
+/// a band of the southern ocean (colatitudes 1.9 to 2.5), zero elsewhere,
+/// under the name given. `hole` puts a value that is not a number in it.
+inline void WriteToyLand(const std::filesystem::path& path,
+                         const std::string& name = "land", bool hole = false) {
+  namespace pm = planetmodel;
+  const auto grid = pm::Equiangular(19, 36);
+  auto held = std::vector<double>{};
+  for (const auto theta : grid.Colatitudes()) {
+    for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+      held.push_back(theta > 1.9 && theta < 2.5 ? 1.0 : 0.0);
+    }
+  }
+  if (hole) held[9 * 36 + 5] = std::nan("");
+  auto file = pm::SurfaceFile{};
+  file.grid = grid;
+  file.source = "sl3dpp tests";
+  file.variables.emplace(name, pm::SurfaceField(name, held, {}));
+  pm::WriteSurfaceFile(path, file);
+}
+
 }  // namespace sl3dpp::test

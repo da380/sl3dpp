@@ -54,6 +54,7 @@ void DerivativeViews(KernelDerivatives& out, std::span<const double> C,
                                        std::vector<double>(C.size(), 0.0)),
       {}, oceanFunctions, rhoW);
   out.times.assign(times.begin(), times.end());
+  out.directLoadKernels = std::move(views.directLoadKernels);
   out.thickness = std::move(views.thickness);
   out.initialSeaLevel = std::move(views.initialSeaLevel);
 }
@@ -303,6 +304,18 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     }
     return adj;
   };
+  // The tide kernel of a node, and its derivative from the derivative
+  // duals: the adjoint solve's tide dual with the dual of the step's
+  // tide coefficients, no degree 0 (as the first-order sweep forms it).
+  auto tideKernels = std::vector<std::vector<Complex>>(times.size());
+  auto dTideKernels = std::vector<std::vector<Complex>>(times.size());
+  auto tideKernelOf = [](const GRDSolver::AdjointResponse& adj,
+                         const std::vector<Complex>& psiDual) {
+    auto kernel = adj.tideDual;
+    for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
+    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    return kernel;
+  };
   // The contraction of a degree's dual vector with the unit responses:
   // the duals of the step's load and tide coefficients.
   auto contract = [&](const ViscoelasticOperator::Degree& deg,
@@ -509,6 +522,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     });
     const auto [sigmaDual, psiDual] = pack(sigBy, psiBy);
     const auto adj = adjointSolve(dt, sigmaDual, psiDual, n, true, directLoadKernels[n]);
+    tideKernels[n] = tideKernelOf(adj, psiDual);
 
     // 2. The first sweep's radial solve, and from it the second sweep's
     // dual of the step's solution: the derivative of the effective system
@@ -571,6 +585,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto [dsigmaDual, dpsiDual] = pack(sigBy, psiBy);
     const auto dadj =
         adjointSolve(dt, dsigmaDual, dpsiDual, n, false, dloadDuals[n]);
+    dTideKernels[n] = tideKernelOf(dadj, dpsiDual);
 
     // 3. The second sweep's radial solve, the itau pairings of both
     // sweeps, and the weight recursion closing both dual states.
@@ -762,6 +777,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     }
     const auto [sigmaDual, psiDual] = pack(sigBy, psiBy);
     const auto adj0 = adjointSolve(0.0, sigmaDual, psiDual, 0, true, directLoadKernels[0]);
+    tideKernels[0] = tideKernelOf(adj0, psiDual);
     // The first start duals' solutions, where the material needs them.
     auto y0 = std::vector<std::vector<double>>(lmax + 1);
     if (material || materialV || moments) {
@@ -788,6 +804,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto [dsigmaDual, dpsiDual] = pack(dsigBy, dpsiBy);
     const auto dadj0 =
         adjointSolve(0.0, dsigmaDual, dpsiDual, 0, false, dloadDuals[0]);
+    dTideKernels[0] = tideKernelOf(dadj0, dpsiDual);
     // The derivative start duals' solutions.
     auto dy0s = std::vector<std::vector<double>>(lmax + 1);
     if (material || moments) {
@@ -895,6 +912,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   derivatives.muKernel = pointSamples(std::move(dMuKernel));
   kernels.momentKernels = std::move(momentKernels);
   derivatives.momentKernels = std::move(dMomentKernels);
+  kernels.tideKernels = std::move(tideKernels);
+  derivatives.tideKernels = std::move(dTideKernels);
   return {std::move(kernels), std::move(derivatives)};
 }
 

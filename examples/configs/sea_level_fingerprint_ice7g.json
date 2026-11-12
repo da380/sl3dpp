@@ -7,7 +7,8 @@
             "type": "cap_fraction", "latitude": 72, "longitude": 320,
             "width_deg": 8, "fraction": -0.1}
   },
-  "ocean": {"topography": {"file": "../data/ice7g.nc", "date_kyr_bp": 0.0}},
+  "ocean": {"topography": {"file": "../data/ice7g.nc", "date_kyr_bp": 0.0},
+            "land": {"file": "../data/ice7g.nc"}},
   "rotation": "full",
   "output": {"surface": "out/sea_level_fingerprint_ice7g/sea_level_fingerprint_ice7g.nc"}
 }

@@ -158,6 +158,11 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
   if (ice.variable != "ice_thickness") {
     hash.Add(std::as_bytes(std::span(ice.variable)));
   }
+  // the land held, where the run is told one
+  if (run.ocean.land) {
+    hash.AddFile(run.ocean.land->file);
+    hash.Add(std::as_bytes(std::span(run.ocean.land->variable)));
+  }
   if (sea.kind != SeaLevelSource::Kind::Topography ||
       sea.input.variable != "topography") {
     hash.AddValue(sea.kind);

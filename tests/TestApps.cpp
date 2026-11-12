@@ -1893,6 +1893,142 @@ void ExpectRefused(Run&& run, const fs::path& config, const std::string& member,
       << config;
 }
 
+TEST_F(AppsTest, SeaLevelHoldsTheLandItIsTold) {
+  // `ocean.land` names a field that is one where the surface is held as
+  // land whatever the flotation: a band of the toy world's southern ocean
+  // is then land at every node of a run under migrating shorelines, of a
+  // calibrated one, and in the fingerprint, where without the member it
+  // is ocean; the summary names the input; a variable under another name
+  // gives the same run to the bit. A file without the variable, a date
+  // on the member and a value that is not a number are refused.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  sl3dpp::test::WriteToyLand(dir_ / "land.nc");
+  sl3dpp::test::WriteToyLand(dir_ / "held.nc", "held");
+  sl3dpp::test::WriteToyLand(dir_ / "hole.nc", "land", true);
+
+  // the ocean function's least and greatest values inside the band, and
+  // its least south of it, over every node of a file
+  struct Seen {
+    double leastInBand = 1.0, greatestInBand = 0.0, leastSouth = 1.0;
+  };
+  auto seen = [](const pm::SurfaceFile& file) {
+    const auto& values = file.variables.at("ocean_function").values;
+    const auto ntheta = file.grid->Colatitudes().size();
+    const auto nphi = file.grid->NPhi();
+    const auto nodes = values.size() / (ntheta * nphi);
+    auto out = Seen{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      for (auto i = std::size_t{0}; i < ntheta; ++i) {
+        const auto theta = file.grid->Colatitudes()[i];
+        for (auto j = std::size_t{0}; j < nphi; ++j) {
+          const auto c = values[(n * ntheta + i) * nphi + j];
+          if (theta > 2.05 && theta < 2.35) {
+            out.leastInBand = std::min(out.leastInBand, c);
+            out.greatestInBand = std::max(out.greatestInBand, c);
+          } else if (theta > 2.7) {
+            out.leastSouth = std::min(out.leastSouth, c);
+          }
+        }
+      }
+    }
+    return out;
+  };
+  const auto run = [&](const std::string& name, const std::string& ocean,
+                       const std::string& at = "start") {
+    return Write(name + ".json",
+                 "{" + std::string{kBall} + ", " +
+                     Window(5, "history.nc", "", ocean, at) +
+                     R"(, "rotation": "none", "output": {"surface": "out/)" +
+                     name + R"(.nc"}})");
+  };
+  const auto migrating = std::string{R"("shorelines": "migrating")"};
+
+  static_cast<void>(app::RunSeaLevel(run("flotation", migrating)));
+  const auto free = seen(pm::ReadSurfaceFile(dir_ / "out" / "flotation.nc"));
+  EXPECT_EQ(free.leastInBand, 1.0);  // ocean by flotation
+  EXPECT_EQ(free.leastSouth, 1.0);
+
+  const auto summary = app::RunSeaLevel(
+      run("held", migrating + R"(, "land": {"file": "land.nc"})"));
+  EXPECT_NE(summary.find(std::format(", land {}:land (held at every date)",
+                                     (dir_ / "land.nc").string())),
+            std::string::npos)
+      << summary;
+  const auto heldFile = pm::ReadSurfaceFile(dir_ / "out" / "held.nc");
+  const auto held = seen(heldFile);
+  EXPECT_EQ(held.greatestInBand, 0.0);  // land at every node
+  EXPECT_EQ(held.leastSouth, 1.0);      // and the ocean beyond it untouched
+  // the water goes elsewhere: the run is another run
+  {
+    const auto& got = heldFile.variables.at("relative_sea_level_change").values;
+    const auto other = pm::ReadSurfaceFile(dir_ / "out" / "flotation.nc");
+    const auto& want = other.variables.at("relative_sea_level_change").values;
+    auto scale = 0.0, diff = 0.0;
+    for (auto i = std::size_t{0}; i < want.size(); ++i) {
+      scale = std::max(scale, std::abs(want[i]));
+      diff = std::max(diff, std::abs(got[i] - want[i]));
+    }
+    EXPECT_GT(diff, 1e-3 * scale);
+  }
+
+  // the variable under another name: the same run
+  static_cast<void>(app::RunSeaLevel(run(
+      "named",
+      migrating + R"(, "land": {"file": "held.nc", "variable": "held"})")));
+  EXPECT_EQ(pm::ReadSurfaceFile(dir_ / "out" / "named.nc")
+                .variables.at("relative_sea_level_change")
+                .values,
+            heldFile.variables.at("relative_sea_level_change").values);
+
+  // through a calibration, whose runs start again from the ice history
+  static_cast<void>(app::RunSeaLevel(
+      run("calibrated",
+          Calibrated("migrating") + R"(, "land": {"file": "land.nc"})", "end")));
+  const auto calibrated =
+      seen(pm::ReadSurfaceFile(dir_ / "out" / "calibrated.nc"));
+  EXPECT_EQ(calibrated.greatestInBand, 0.0);
+  EXPECT_EQ(calibrated.leastSouth, 1.0);
+
+  // the fingerprint
+  const auto fingerprint = [&](const std::string& name,
+                               const std::string& land) {
+    return Write(name + ".json", std::format(R"({{
+    "problem": "static", {},
+    "forcing": {{"ice": {{"file": "history.nc", "date_kyr_bp": 2.0,
+                "type": "cap_fraction", "latitude": 90, "longitude": 0,
+                "width_deg": 15, "fraction": -0.1}}}},
+    "ocean": {{"topography": {{"file": "history.nc", "date_kyr_bp": 2.0}}{}}},
+    "rotation": "none",
+    "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, land, name));
+  };
+  static_cast<void>(app::RunSeaLevel(fingerprint("print", "")));
+  EXPECT_EQ(seen(pm::ReadSurfaceFile(dir_ / "out" / "print.nc")).leastInBand,
+            1.0);
+  const auto printed = app::RunSeaLevel(
+      fingerprint("print_held", R"(, "land": {"file": "land.nc"})"));
+  EXPECT_NE(printed.find(":land (held at every date)"), std::string::npos)
+      << printed;
+  EXPECT_EQ(
+      seen(pm::ReadSurfaceFile(dir_ / "out" / "print_held.nc")).greatestInBand,
+      0.0);
+
+  // refusals
+  ExpectRefused(
+      app::RunSeaLevel,
+      run("absent", migrating + R"(, "land": {"file": "history.nc"})"),
+      "ocean.land", "ice_thickness");
+  ExpectRefused(app::RunSeaLevel,
+                run("dated", migrating + R"(, "land": {"file": "land.nc",
+                                              "date_kyr_bp": 0.0})"),
+                "date_kyr_bp", "");
+  ExpectRefused(app::RunSeaLevel,
+                run("hole", migrating + R"(, "land": {"file": "hole.nc"})"),
+                "ocean.land", "not a number");
+}
+
 TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
   // In the static problem, sea-level is the elastic fingerprint of an ice
   // change on the state: written as a surface file of static fields, the

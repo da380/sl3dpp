@@ -422,6 +422,44 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
                 GridPairing(op.Coupling(), alone.itauKernel3D, ditau),
                 1e-8 * std::abs(toroidalAlongViscosity))
         << label;
+
+    // Second order: the forcing's rows of the Hessian. Along the
+    // viscosity the derivatives of the load and tide kernels, paired
+    // with the forcing's direction, are the derivative of the itau
+    // kernel along the forcing paired with the viscosity's itau, and
+    // both are the second-order run's objective.
+    TangentLinearSolver3D recorded(evolution, {.method = AdjointMethod::Discrete,
+                                               .rtol = 1e-12,
+                                               .coupled_rtol = 1e-12,
+                                               .record = true});
+    TangentPerturbation3D forcing;
+    forcing.directLoad = deltas;
+    forcing.tide = tideDeltas;
+    const auto runForcing = recorded.Run(times, forcing, &trajectory);
+    const auto runViscosity = recorded.Run(times, viscosityOnly, &trajectory);
+    const auto [kernelsF, alongF] = adjoint.SecondOrderKernels(
+        times, measurements, runForcing, {}, trajectory);
+    const auto [kernelsV, alongV] = adjoint.SecondOrderKernels(
+        times, measurements, runViscosity, ditau, trajectory);
+    ASSERT_EQ(alongV.ice.directLoadKernels.size(), times.size());
+    ASSERT_EQ(alongV.ice.tideKernels.size(), times.size());
+    auto loadRows = 0.0, tideRows = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      loadRows += scene.Surface(alongV.ice.directLoadKernels[n], deltas[n]);
+      tideRows += pair(alongV.ice.tideKernels[n], tideDeltas[n]);
+    }
+    const auto itauRow = GridPairing(op.Coupling(), alongF.itauKernel3D, ditau);
+    EXPECT_NE(loadRows, 0.0);
+    EXPECT_NE(tideRows, 0.0);
+    EXPECT_NEAR(loadRows + tideRows, itauRow, 1e-8 * std::abs(itauRow)) << label;
+    SecondOrderDirection3D mixedDirection;
+    mixedDirection.itauV = ditau;
+    const auto mixed = Objective(
+        scene,
+        recorded.RunSecondOrder(times, runForcing, runViscosity, mixedDirection,
+                                &trajectory),
+        measurements);
+    EXPECT_NEAR(mixed, itauRow, 1e-8 * std::abs(itauRow)) << label;
   }
 }
 

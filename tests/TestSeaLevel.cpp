@@ -399,6 +399,64 @@ TEST(GRDSolver, WithoutAnOceanIsTheSolidBodysResponse) {
   EXPECT_THROW((void)solver.SolveNonlinear(dry, moving), std::invalid_argument);
 }
 
+TEST(GRDSolver, LandHeldStaysLandThroughTheMigratingSolve) {
+  // A state told to hold points as land has no ocean there whatever the
+  // flotation says, its ocean area the less for it, and the solve with
+  // migrating shorelines, which finds the ocean function again by
+  // flotation, leaves them land and keeps the mark.
+  auto table = TestTable();
+  Fingerprint fingerprint(32, table);
+  fingerprint.SetAnalyticTestState(5.0);
+  const auto& grid = fingerprint.Grid();
+  const auto& solver = fingerprint.Solver();
+  const auto length = solver.SolverScales().Length();
+  auto scaled = [&](std::vector<double> v) {
+    for (auto& x : v) x /= length;
+    return v;
+  };
+  const auto free = solver.MakeState(scaled(fingerprint.IceThickness()),
+                                     scaled(fingerprint.SeaLevel()));
+  // hold a patch of the open ocean
+  auto land = std::vector<char>(grid.FieldSize(), 0);
+  const auto nphi = grid.Longitudes().size();
+  auto held = std::size_t{0};
+  for (auto it = std::size_t{0}; it < grid.CoLatitudes().size(); ++it) {
+    for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+      const auto i = it * nphi + ip;
+      const auto theta = grid.CoLatitudes()[it];
+      if (free.oceanFunction[i] == 1.0 && theta > 1.2 && theta < 1.9 &&
+          grid.Longitudes()[ip] < 1.0) {
+        land[i] = 1;
+        ++held;
+      }
+    }
+  }
+  ASSERT_GT(held, std::size_t{10});
+  const auto state = solver.MakeState(scaled(fingerprint.IceThickness()),
+                                      scaled(fingerprint.SeaLevel()), land);
+  EXPECT_LT(state.oceanArea, free.oceanArea);
+  for (auto i = std::size_t{0}; i < land.size(); ++i) {
+    EXPECT_EQ(state.oceanFunction[i], land[i] ? 0.0 : free.oceanFunction[i]);
+  }
+
+  GRDSolver::NonlinearForcing forcing;
+  forcing.iceThicknessChange = state.iceThickness;
+  for (auto& v : forcing.iceThicknessChange) v *= -0.05;
+  GRDSolver::Options options;
+  options.rtol = 1e-10;
+  options.max_iterations = 100;
+  auto moved = state;
+  const auto result = solver.SolveNonlinear(moved, forcing, options);
+  ASSERT_TRUE(result.response.converged);
+  ASSERT_EQ(moved.forcedLand.size(), land.size());
+  for (auto i = std::size_t{0}; i < land.size(); ++i) {
+    EXPECT_EQ(moved.forcedLand[i], land[i]);
+    if (land[i]) {
+      EXPECT_EQ(moved.oceanFunction[i], 0.0);
+    }
+  }
+}
+
 TEST(GRDSolver, NonlinearMassBudgetAndLinearLimit) {
   auto table = TestTable();
   Fingerprint fingerprint(32, table);

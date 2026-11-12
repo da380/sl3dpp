@@ -509,6 +509,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   auto dddual = Tensor{};
   auto dItauKernel = std::vector<std::vector<double>>{};
   auto dloadDuals = std::vector<std::vector<double>>{};
+  auto dTideKernels = std::vector<std::vector<Complex>>{};
   if (second) {
     for (auto k = std::size_t{0}; k < K; ++k) {
       dmdual.push_back(coupling.ZeroTensor());
@@ -516,6 +517,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     dddual = coupling.ZeroTensor();
     dItauKernel.assign(K, std::vector<double>(values, 0.0));
     dloadDuals.resize(times.size());
+    dTideKernels.resize(times.size());
   }
   auto tangentState = [&](std::size_t node) -> const Viscoelastic3D::State& {
     return *tangent[node].internalState;
@@ -1136,6 +1138,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             nested ? "nested solve" : "fixed point", n));
       }
       dloadDuals[n] = loadDualOf(dlast.adj, dlast.synth);
+      dTideKernels[n] = tideKernelOf(dlast.adj, dlast.psiDual);
       if (moments) dMomentKernels[n] = momentKernelsOf(dlast.xdag);
     }
 
@@ -1388,6 +1391,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             "did not converge");
       }
       dloadDuals[0] = loadDualOf(dadj, dsynth);
+      dTideKernels[0] = tideKernelOf(dadj, dpsiDual);
       if (moments && !material) {
         auto forces = dsph;
         addSurfaceDuals(forces, dadj, sph);
@@ -1500,6 +1504,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
                                          std::vector<double>(fieldSize, 0.0)),
         {}, oceanFunctions, rhoW);
     derivatives.ice.times.assign(times.begin(), times.end());
+    derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
+    derivatives.ice.tideKernels = std::move(dTideKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
     derivatives.itauKernel3D = std::move(dItauKernel);

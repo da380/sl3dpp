@@ -214,6 +214,14 @@ its start.
   sits on the ocean floor (pyslfp's construction). The member names the
   quantity the file holds; no other is tried. The ocean function follows
   from the sea level.
+- The ocean function is decided by flotation, so every depression below
+  sea level is ocean, joined to the sea or not. `ocean.land`, optional,
+  is a file input of a field that is one where the surface is held as
+  land whatever the flotation and zero elsewhere, the same at every date
+  (the landlocked depressions: the Caspian and the like); under migrating
+  shorelines those points stay land. pyslfp's `export_ice_history`
+  (4.2 or later) writes such a field, `land`, beside the ice thickness
+  and the topography, so one file may be named for all three.
 - An ice thickness change loads the Earth only where the ice is grounded:
   the load is 917 kg m^-3 times the thickness change times (1 - C), with C
   the ocean function of the start. The sea level equation is the linear
@@ -366,6 +374,7 @@ refused there.
 | `ocean.topography` | file input | one of the two | a topography, converted with the run's own ice at the same instant (variable `topography` by default) |
 | `ocean.<sea level>.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one; for `ocean.topography`, refused when it is not the ice's date (`forcing.ice.date_kyr_bp`) |
 | `ocean.<sea level>.at` | word | required | the quasi-static problem: the end of the window the sea level belongs to, `"start"` (the initial sea level, read at `times.start_kyr_bp` where the file has a time axis) or `"end"` (the sea level the run reaches at `times.end_kyr_bp`, against which the initial sea level is calibrated); refused in the static problem, which takes `date_kyr_bp` instead |
+| `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default; `file`, `format` and `variable` alone, the field being the same at every date). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
 | `ocean.shorelines` | word | `"frozen"` | the quasi-static problem: `"frozen"`, the start's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (sea-level, The run through time) |
 | `ocean.calibration` | object | absent | the quasi-static problem with the sea level `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the sea level is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
 | `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |

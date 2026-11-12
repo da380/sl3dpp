@@ -1581,6 +1581,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         C, solver.IceDensity(), times, std::move(dloadDuals),
         std::move(dDensityLoad), {}, oceanFunctions, rhoW);
     derivatives.ice.times.assign(times.begin(), times.end());
+    derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
     derivatives.ice.momentKernels = std::move(dMomentKernels);

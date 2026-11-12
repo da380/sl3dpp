@@ -4,7 +4,8 @@
   "lmax": 32,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
   "forcing": {"ice": {"file": "../data/ice7g.nc"}},
-  "ocean": {"topography": {"file": "../data/ice7g.nc", "at": "start"}},
+  "ocean": {"topography": {"file": "../data/ice7g.nc", "at": "start"},
+            "land": {"file": "../data/ice7g.nc"}},
   "rotation": "full",
   "moments": "hydrostatic",
   "output": {"surface": "out/sea_level_1d_ice7g_custom/sea_level_1d_ice7g_custom.nc"}

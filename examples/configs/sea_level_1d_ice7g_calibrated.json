@@ -7,6 +7,7 @@
   "ocean": {
     "shorelines": "migrating",
     "topography": {"file": "../data/ice7g.nc", "at": "end"},
+    "land": {"file": "../data/ice7g.nc"},
     "calibration": {"method": "fixed_point", "iterations": 12}
   },
   "rotation": "full",

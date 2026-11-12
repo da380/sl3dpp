@@ -213,6 +213,14 @@ enum class AdjointMethod { Continuous, Discrete };
  */
 struct KernelDerivatives {
   std::vector<double> times;
+  /// The derivatives along v of the load kernels (Kernels::
+  /// directLoadKernels), per time node: the rows of the Hessian's action
+  /// on v for a prescribed direct load.
+  std::vector<std::vector<double>> directLoadKernels;
+  /// The derivatives along v of the tide kernels (Kernels::tideKernels),
+  /// per time node, in their pairing: the rows for a prescribed tidal
+  /// potential. Formed where the sweep forms the tide kernels.
+  std::vector<std::vector<std::complex<double>>> tideKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;

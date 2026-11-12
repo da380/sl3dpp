@@ -17,7 +17,7 @@ python = ">=3.12"
 numpy = ">=2.0"
 matplotlib = ">=3.9"
 cartopy = ">=0.24"
-pyslfp = ">=4.1.0,<5"
+pyslfp = ">=4.2.0,<5"
 planetmodel = {version = ">=1.5.0,<2", extras = ["netcdf", "plot"]}
 
 [build-system]
