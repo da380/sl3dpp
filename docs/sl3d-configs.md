@@ -1008,15 +1008,20 @@ them.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `forcing.load` | list | absent | surface loads: each a load term as `response`'s (one of `cap`, `disk`, `field`, `coefficients`, with an optional `history_kyr`; response, The forcing block), with the properties below |
+| `forcing.load` | list | absent | surface loads: each a load term as `response`'s (one of `cap`, `disk`, `field`, `coefficients`; response, The forcing block), with an optional `history_kyr_bp` and the properties below |
+| `forcing.load[k].history_kyr_bp` | list of pairs | absent | the term's amplitude history: pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing), the factor interpolated linearly between them and held outside them |
 | `forcing.load[k].water_budget` | true or false | required | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water |
 | `forcing.load[k].moves_solid_surface` | true or false | required | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
-| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`, with optional `onset_kyr` and `history_kyr`) |
+| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`), with optional `onset_kyr_bp` (the date the source acts from, kyr BP; absent: from the window's start) and `history_kyr_bp` |
 
-The loads and the sources are changes from the run's start, on the run's
-clock: a `history_kyr`, an `onset_kyr` and a field file's
-`time_origin_kyr` are in kyr from the window's start (not kyr BP). A term
+Times here are dates, kyr before present, as the window's are: a
+history is `history_kyr_bp` and an onset `onset_kyr_bp`, and a `field`
+term's file with a time axis is read at each node's date, as the ice
+history is, so a load file and an ice file on one calendar agree with
+nothing more said. `response`'s names for times on a run's own clock
+(`history_kyr`, `onset_kyr`, `time_origin_kyr`) are refused, naming
+these. The loads and the sources are changes from the run's start. A term
 present at the first node acts there: the first node is then the
 response of the unrelaxed body to it, and under migrating shorelines its
 shorelines may already differ from the start's. Each load is band-limited

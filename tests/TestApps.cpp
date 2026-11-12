@@ -2437,7 +2437,7 @@ TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
   constexpr auto kLmax = 8;
   const auto cap = std::string{R"({"cap": {"latitude": 60, "longitude": -85,
       "width_deg": 20, "amplitude_kg_m2": 2000},
-      "history_kyr": [[0, 0.5], [2, 1.5]],
+      "history_kyr_bp": [[2, 0.5], [0, 1.5]],
       "water_budget": true, "moves_solid_surface": false})"};
   const auto disk = std::string{R"({"disk": {"latitude": -20, "longitude": 100,
       "radius_deg": 25, "amplitude_kg_m2": 4600},
@@ -2516,7 +2516,7 @@ TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
     const auto file = pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
     EXPECT_EQ(std::get<std::string>(file.meta.at("load")),
               "cap at latitude 60, longitude -85, width 20 deg, 2000 kg m^-2, "
-              "history_kyr [[0, 0.5], [2, 1.5]], in the water budget; disk at "
+              "history_kyr_bp [[2, 0.5], [0, 1.5]], in the water budget; disk at "
               "latitude -20, longitude 100, radius 25 deg, 4600 kg m^-2, "
               "outside the water budget, a layer on the solid surface of "
               "2300 kg m^-3")
@@ -2617,6 +2617,52 @@ TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
                     "water_budget": false, "moves_solid_surface": false,
                     "density_kg_m3": 2300})"),
                 "forcing.load[0].density_kg_m3", "this load is none");
+  // times are dates here: the run's clock's names are refused, and so is
+  // a history that does not run from the oldest date
+  ExpectRefused(app::RunSeaLevel,
+                loaded("clocked", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "history_kyr": [[0, 0.5], [2, 1.5]],
+                    "water_budget": true, "moves_solid_surface": false})"),
+                "forcing.load[0].history_kyr", "`history_kyr_bp`");
+  ExpectRefused(app::RunSeaLevel,
+                loaded("backwards", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "history_kyr_bp": [[0, 0.5], [2, 1.5]],
+                    "water_budget": true, "moves_solid_surface": false})"),
+                "forcing.load[0].history_kyr_bp[1][0]", "from the oldest");
+  ExpectRefused(
+      app::RunSeaLevel,
+      config("onset", "frozen",
+             R"(, "seismic": [{"point": {"latitude": 30, "longitude": 40,
+                 "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
+                 "rake_deg": 90, "moment_nm": 1e21}, "onset_kyr": 1}])"),
+      "forcing.seismic[0].onset_kyr", "`onset_kyr_bp`");
+  // a source from 1 kyr BP: nothing before it but the ice's run
+  {
+    static_cast<void>(app::RunSeaLevel(config(
+        "late", "frozen",
+        R"(, "seismic": [{"point": {"latitude": 30, "longitude": 40,
+            "depth_km": 300, "strike_deg": 20, "dip_deg": 60, "rake_deg": 90,
+            "moment_nm": 1e21}, "onset_kyr_bp": 1}])")));
+    const auto late = pm::ReadSurfaceFile(dir_ / "out" / "late.nc");
+    const auto bare = pm::ReadSurfaceFile(dir_ / "out" / "frozen_ice.nc");
+    EXPECT_NE(std::get<std::string>(late.meta.at("seismic")).find("from 1 kyr BP"),
+              std::string::npos);
+    const auto& got = late.variables.at("displacement").values;
+    const auto& ice = bare.variables.at("displacement").values;
+    const auto fieldSize = grid.FieldSize();
+    // nodes at 2, 4/3, 2/3 and 0 kyr BP: the source acts at the last two
+    auto before = 0.0, after = 0.0;
+    for (auto i = std::size_t{0}; i < 2 * fieldSize; ++i) {
+      before = std::max(before, std::abs(got[i] - ice[i]));
+    }
+    for (auto i = 2 * fieldSize; i < 4 * fieldSize; ++i) {
+      after = std::max(after, std::abs(got[i] - ice[i]));
+    }
+    EXPECT_LT(before, 1e-12);
+    EXPECT_GT(after, 1e-6);
+  }
   ExpectRefused(app::RunSeaLevel,
                 config("calibrated", "frozen", all, "", "end"), "forcing.load",
                 "a calibrated initial sea level does not take");

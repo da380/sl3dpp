@@ -78,7 +78,10 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
   if (timed) {
     out.times = ReadTimesBlock(top.At("times"), TimesForm::BeforePresent);
   }
-  out.forcing = ReadSeaLevelForcing(top.At("forcing"), directory, timed);
+  out.forcing = ReadSeaLevelForcing(
+      top.At("forcing"), directory,
+      timed ? std::optional<double>{out.times->start_kyr_bp}
+            : std::optional<double>{});
   if (!Has(top, "ocean")) {
     Fail(top,
          "has no `ocean` block: the sea level equation needs its sea level, "

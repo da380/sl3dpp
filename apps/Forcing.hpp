@@ -64,6 +64,10 @@ namespace sl3dpp::app {
 struct AmplitudeHistory {
   std::vector<double> times_kyr;
   std::vector<double> factors;
+  /// Where the history was given as dates before present
+  /// (`history_kyr_bp`, `sea-level`'s form), the date of the clock's zero,
+  /// kyr BP: the times above are then this less the dates.
+  std::optional<double> start_kyr_bp;
 
   [[nodiscard]] bool Empty() const { return times_kyr.empty(); }
   /// The factor at time t, kyr.
@@ -88,6 +92,10 @@ struct LoadTerm {
   /// file's time zero falls: the file is read at (t - time_origin_kyr)
   /// kyr, in seconds, at the run's time t.
   double time_origin_kyr = 0.0;
+  /// Whether the file is read by date (`sea-level`'s form): its time axis
+  /// is the calendar's, read at each node's date, and the origin above is
+  /// the window's start.
+  bool dated = false;
   AmplitudeHistory history;  ///< the term's factor through time
 };
 
@@ -121,6 +129,9 @@ struct SeismicTerm {
   double scalarMoment = 0.0;
   int alongStrike = 1, downDip = 1;
   std::optional<double> onset_kyr;  ///< absent: from the run's start
+  /// Where the onset was given as a date (`onset_kyr_bp`), the date of the
+  /// clock's zero, kyr BP.
+  std::optional<double> start_kyr_bp;
   AmplitudeHistory history;
 
   /// The factor of the moment at time t, kyr: zero before the onset.
@@ -363,9 +374,17 @@ struct SeaLevelForcing {
 /// each with `water_budget` and `moves_solid_surface` (both required,
 /// true or false) and, where it moves the solid surface, `density_kg_m3`
 /// (positive; refused otherwise), and `seismic`, a list of sources as
-/// `response`'s; the static problem refuses both.
+/// `response`'s; the static problem refuses both. Their times are DATES,
+/// kyr before present, as the window's are: a history is
+/// `history_kyr_bp`, pairs `[date_kyr_bp, factor]` from the oldest (the
+/// dates strictly decreasing), an onset `onset_kyr_bp`, and a `field`
+/// file with a time axis is read at each node's date, as the ice history
+/// is (`time_origin_kyr` is refused); `response`'s names are refused,
+/// naming these. `start_kyr_bp` is the window's start, which the dates
+/// are turned to the run's clock by; absent in the static problem.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
-    const Json& block, const std::filesystem::path& directory, bool timed);
+    const Json& block, const std::filesystem::path& directory,
+    std::optional<double> start_kyr_bp);
 
 /// One line describing a surface load, for provenance: its term, its
 /// place in the water budget and, of a layer, its density.
