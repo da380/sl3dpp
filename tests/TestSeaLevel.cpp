@@ -250,6 +250,15 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
           return 0.2 * Cap(theta, phi, 0.8, 2.5, 0.7) / length;
         }));
     forcing.inertiaMomentChange = 1e-7;
+    // a load outside the water budget, and a layer on the solid surface
+    forcing.directLoadOutsideWaterBudget =
+        grid.FromFunction([&](double theta, double phi) {
+          return 90.0 * (Cap(theta, phi, 1.7, 3.0, 0.6) -
+                         0.5 * Cap(theta, phi, 0.6, 5.0, 0.4)) / sigma;
+        });
+    forcing.solidSurfaceChange = grid.FromFunction([&](double theta, double phi) {
+      return (0.3 * Cap(theta, phi, 1.8, 2.2, 0.8) + 0.05) / length;
+    });
     forcing.tide = grid.Expand(grid.FromFunction([&](double theta, double phi) {
       return 2.0 * Cap(theta, phi, 2.6, 1.0, 0.9) /
              solver.SolverScales().Factor(PotentialDimensions);
@@ -305,6 +314,9 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
         duals.angularVelocityDual[2] * response.angularVelocity[2];
     const double rhs =
         surface(adjoint.directLoadDual, forcing.directLoad) +
+        surface(adjoint.directLoadOutsideWaterBudgetDual,
+                forcing.directLoadOutsideWaterBudget) +
+        surface(adjoint.solidSurfaceChangeDual, forcing.solidSurfaceChange) +
         Pair(adjoint.displacementResponseDual, forcing.displacementResponse,
              lmax) +
         Pair(adjoint.potentialResponseDual, forcing.potentialResponse, lmax) +
@@ -397,6 +409,126 @@ TEST(GRDSolver, WithoutAnOceanIsTheSolidBodysResponse) {
   GRDSolver::NonlinearForcing moving;
   moving.iceThicknessChange.assign(grid.FieldSize(), 0.0);
   EXPECT_THROW((void)solver.SolveNonlinear(dry, moving), std::invalid_argument);
+}
+
+TEST(GRDSolver, LoadsOutsideTheWaterBudgetAndLayersOnTheSolidSurface) {
+  // The three properties of a surface load. A load in the water budget
+  // takes its mass from the ocean; one outside it moves no water, the
+  // ocean's volume unchanged, and is otherwise the same load: the two
+  // answers differ by the answer to the water moved alone. A layer on
+  // the solid surface lowers the sea level by its thickness and
+  // displaces its volume of water: a uniform layer changes nothing, a
+  // layer on the ocean floor raises the sea elsewhere, and its sea
+  // level is that of the same height given as a ready displacement,
+  // which the displacement returned then holds and the layer's does not.
+  const auto lmax = 24;
+  auto table = TestTable();
+  GRDSolver solver(SurfaceGrid(lmax), table, SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const auto length = solver.SolverScales().Length();
+  const double sigma =
+      solver.SolverScales().Factor(Dimensions{.mass = 1, .length = -2});
+  const auto state = solver.MakeState(
+      grid.FromFunction([&](double theta, double phi) {
+        return 2000.0 * Cap(theta, phi, 0.1, 0.0, 0.3) / length;
+      }),
+      grid.FromFunction([&](double theta, double phi) {
+        return (4000.0 - 7000.0 * Cap(theta, phi, 1.6, 2.0, 0.7)) / length;
+      }));
+  const auto& C = state.oceanFunction;
+  auto oceanMean = [&](std::span<const double> f) {
+    auto cf = std::vector<double>(f.size());
+    for (auto i = std::size_t{0}; i < f.size(); ++i) cf[i] = C[i] * f[i];
+    return grid.Integrate(cf);
+  };
+  auto maxAbs = [](std::span<const double> x) {
+    auto out = 0.0;
+    for (auto v : x) out = std::max(out, std::abs(v));
+    return out;
+  };
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+    }
+    return out;
+  };
+  const GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
+  const auto load = grid.FromFunction([&](double theta, double phi) {
+    return 150.0 * Cap(theta, phi, 0.4, 0.7, 0.5) / sigma;
+  });
+  const auto a2 = solver.Radius() * solver.Radius();
+
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    GRDSolver::GeneralisedForcing inside, outside;
+    inside.rotation = outside.rotation = rotation;
+    inside.directLoad = load;
+    outside.directLoadOutsideWaterBudget = load;
+    const auto in = solver.SolveGeneralised(state, inside, options);
+    const auto out = solver.SolveGeneralised(state, outside, options);
+    ASSERT_TRUE(in.converged && out.converged);
+    const auto scale = maxAbs(in.relativeSeaLevelChange);
+    // the water moved: the load's mass out of the ocean, or none
+    const auto water = solver.WaterDensity() * a2;
+    EXPECT_NEAR(water * oceanMean(in.relativeSeaLevelChange),
+                -a2 * grid.Integrate(load), 1e-10 * a2 * grid.Integrate(load));
+    EXPECT_LT(std::abs(oceanMean(out.relativeSeaLevelChange)),
+              1e-11 * scale * grid.Integrate(C));
+    EXPECT_GT(worst(in.relativeSeaLevelChange, out.relativeSeaLevelChange),
+              1e-3 * scale);
+    // and the two together are the load counted twice, once each way
+    GRDSolver::GeneralisedForcing both;
+    both.rotation = rotation;
+    both.directLoad = load;
+    both.directLoadOutsideWaterBudget = load;
+    const auto sum = solver.SolveGeneralised(state, both, options);
+    auto added = in.relativeSeaLevelChange;
+    for (auto i = std::size_t{0}; i < added.size(); ++i) {
+      added[i] += out.relativeSeaLevelChange[i];
+    }
+    EXPECT_LT(worst(sum.relativeSeaLevelChange, added), 1e-9 * scale);
+
+    // a uniform layer: nothing
+    GRDSolver::GeneralisedForcing uniform;
+    uniform.rotation = rotation;
+    uniform.solidSurfaceChange.assign(grid.FieldSize(), 3.0 / length);
+    const auto flat = solver.SolveGeneralised(state, uniform, options);
+    EXPECT_LT(maxAbs(flat.relativeSeaLevelChange), 1e-10 * 3.0 / length);
+    EXPECT_LT(maxAbs(flat.displacement), 1e-10 * 3.0 / length);
+
+    // a layer on part of the ocean floor: the sea falls there by nearly
+    // its thickness and rises elsewhere, no water lost
+    const auto layer = grid.FromFunction([&](double theta, double phi) {
+      return 2.0 * Cap(theta, phi, 2.6, 4.0, 0.4) / length;
+    });
+    GRDSolver::GeneralisedForcing layered, ready;
+    layered.rotation = ready.rotation = rotation;
+    layered.solidSurfaceChange = layer;
+    ready.displacementResponse = grid.Expand(layer);
+    const auto onFloor = solver.SolveGeneralised(state, layered, options);
+    const auto asReady = solver.SolveGeneralised(state, ready, options);
+    ASSERT_TRUE(onFloor.converged && asReady.converged);
+    EXPECT_LT(std::abs(oceanMean(onFloor.relativeSeaLevelChange)),
+              1e-11 * maxAbs(layer) * grid.Integrate(C));
+    auto least = 0.0, greatest = 0.0;
+    for (auto v : onFloor.relativeSeaLevelChange) {
+      least = std::min(least, v);
+      greatest = std::max(greatest, v);
+    }
+    EXPECT_LT(least, -0.9 * maxAbs(layer));
+    EXPECT_GT(greatest, 0.0);
+    if (rotation == RotationalFeedback::None) {
+      // the same sea level as the height given as a ready displacement,
+      // which is then in the displacement returned
+      EXPECT_LT(worst(onFloor.relativeSeaLevelChange,
+                      asReady.relativeSeaLevelChange),
+                1e-10 * maxAbs(layer));
+      auto moved = onFloor.displacement;
+      const auto band = grid.Synthesise(grid.Expand(layer));
+      for (auto i = std::size_t{0}; i < moved.size(); ++i) moved[i] += band[i];
+      EXPECT_LT(worst(moved, asReady.displacement), 1e-10 * maxAbs(layer));
+    }
+  }
 }
 
 TEST(GRDSolver, LandHeldStaysLandThroughTheMigratingSolve) {

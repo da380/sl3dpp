@@ -384,6 +384,9 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   checkField(forcing.potentialLoad, "potential load");
   checkField(forcing.tangentialTraction, "tangential traction");
   checkField(forcing.oceanFunctionOverride, "ocean function override");
+  checkField(forcing.directLoadOutsideWaterBudget,
+             "direct load outside the water budget");
+  checkField(forcing.solidSurfaceChange, "solid surface change");
   checkCoefficients(forcing.displacementResponse, "displacement response");
   checkCoefficients(forcing.potentialResponse, "potential response");
   checkCoefficients(forcing.tangentialResponse, "tangential response");
@@ -483,6 +486,16 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       staticTan[i] += forcing.tangentialResponse[i];
     }
   }
+  // A layer on the solid surface: its thickness is in the sea level
+  // change alone, with the static terms.
+  const bool layered = !forcing.solidSurfaceChange.empty() &&
+                       MaxAbs(forcing.solidSurfaceChange) > 0.0;
+  auto layerLm = std::vector<std::complex<double>>{};
+  if (layered) {
+    anyForcing = true;
+    ensureStatic();
+    layerLm = grid_.Expand(forcing.solidSurfaceChange);
+  }
   if (tidal) {
     // The body's answer to the prescribed potential; the potential's own
     // place in the sea level change is added where that is formed.
@@ -502,7 +515,9 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       anyForcing || forcing.inertiaMomentChange != 0.0 ||
       MaxAbs(std::span<const double>(forcing.angularMomentumChange.data(), 3)) >
           0.0 ||
-      (!forcing.directLoad.empty() && MaxAbs(forcing.directLoad) > 0.0);
+      (!forcing.directLoad.empty() && MaxAbs(forcing.directLoad) > 0.0) ||
+      (!forcing.directLoadOutsideWaterBudget.empty() &&
+       MaxAbs(forcing.directLoadOutsideWaterBudget) > 0.0);
 
   Response response;
   response.relativeSeaLevelChange.assign(fieldSize, 0.0);
@@ -531,6 +546,12 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
     directData = forcing.directLoad;
     meanSlc = -IntegrateSurface(directData) * perOceanArea / waterDensity_;
   }
+  // a load outside the water budget loads the body and moves no water
+  if (!forcing.directLoadOutsideWaterBudget.empty()) {
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      directData[i] += forcing.directLoadOutsideWaterBudget[i];
+    }
+  }
 
   auto staticSlc = std::vector<std::complex<double>>{};
   std::optional<Block2> staticDisp2, staticGrav2;
@@ -544,10 +565,14 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
         staticSlc[i] -= forcing.tide[i] / g_;
       }
     }
+    if (layered) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) staticSlc[i] -= layerLm[i];
+    }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
   }
   const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
+  const Block2 layer2 = layered ? BlockOf(layerLm) : Block2{};
 
   // One iteration: the mass-conserving sea level change of a load.
   auto seaLevelFromLoad = [&](std::span<const std::complex<double>> loadLm,
@@ -573,7 +598,8 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
       SetBlock(slcLm,
                -1.0 * (rotation.disp2 +
                        (1.0 / g_) *
-                           (rotation.grav2 + rotation.centrifugal + tide2)));
+                           (rotation.grav2 + rotation.centrifugal + tide2) +
+                       layer2));
       // uniform, and so absorbed by mass conservation below
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * rotation.centrifugal0;
@@ -725,6 +751,8 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
 
   AdjointResponse out;
   out.directLoadDual.assign(fieldSize, 0.0);
+  out.directLoadOutsideWaterBudgetDual.assign(fieldSize, 0.0);
+  out.solidSurfaceChangeDual.assign(fieldSize, 0.0);
   out.displacementResponseDual.assign(coefSize, 0.0);
   out.potentialResponseDual.assign(coefSize, 0.0);
   out.tangentialResponseDual = lamV;
@@ -861,9 +889,18 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
   // The input duals, read at the converged dual load.
   auto [unused, stash] = reverseOnce(lam);
   const auto lamGrid = grid_.Synthesise(lam);
+  out.directLoadOutsideWaterBudgetDual.resize(fieldSize);
+  out.solidSurfaceChangeDual.resize(fieldSize);
+  // the dual of the sea level before the uniform shift, band-limited as
+  // the layer's thickness is where it enters
+  const auto seaLevelDual = grid_.Synthesise(stash.zWhole);
   for (auto i = std::size_t{0}; i < fieldSize; ++i) {
     out.directLoadDual[i] =
         lamGrid[i] / r2 - stash.meanDual * perOceanArea / waterDensity_;
+    // outside the water budget: no part in the conservation's constant
+    out.directLoadOutsideWaterBudgetDual[i] = lamGrid[i] / r2;
+    // a layer on the solid surface lowers the sea level by its thickness
+    out.solidSurfaceChangeDual[i] = -seaLevelDual[i] / r2;
   }
   for (auto i = std::size_t{0}; i < coefSize; ++i) {
     out.displacementResponseDual[i] = -stash.zBase[i] + lamUBase[i];

@@ -62,6 +62,11 @@ struct TangentPerturbation {
   /// was driven by; refused about a migrating trajectory, which is driven
   /// by its thickness.
   std::vector<std::vector<double>> directLoad;
+  /// Per time node, perturbations of a frozen run's direct load outside
+  /// the water budget and of the height of a layer on the solid surface
+  /// (Evolution::Forcing); refused about a migrating trajectory.
+  std::vector<std::vector<double>> directLoadOutsideWaterBudget;
+  std::vector<std::vector<double>> solidSurfaceChange;
   /// Per time node, a perturbation of the prescribed tidal potential a
   /// frozen run was driven by, its coefficients on the surface (no
   /// degree-0 part); refused about a migrating trajectory.
@@ -92,7 +97,8 @@ struct TangentPerturbation {
   PointMaterialDirection material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && tide.empty() && sources.empty() &&
+    return directLoad.empty() && directLoadOutsideWaterBudget.empty() &&
+           solidSurfaceChange.empty() && tide.empty() && sources.empty() &&
            stressGluts.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && material.Empty();
   }
@@ -229,7 +235,8 @@ class TangentLinearSolver {
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive, MaterialForcing* material,
       const Tide& tideAt = {}, const Sources& sourcesAt = {},
-      const ToroidalDrive& toroidalDrive = {}) const;
+      const ToroidalDrive& toroidalDrive = {}, const Direct& outsideAt = {},
+      const Direct& layerAt = {}) const;
 
   /// The discrete method's term from the second derivatives of the
   /// scheme's weights, paired with the forward trajectory and the two

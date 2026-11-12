@@ -164,7 +164,19 @@ class Evolution {
   /// equation closes each node under them, and the rotational feedback
   /// asked for acts with or without one.
   struct Forcing {
+    /// The direct load at time t that enters the water budget, a mass
+    /// per unit area on the grid, solver units (GRDSolver::
+    /// GeneralisedForcing::directLoad).
     std::function<std::vector<double>(double)> directLoad{};
+    /// A direct load outside the water budget, likewise: it loads the
+    /// body and exchanges no water with the ocean (sediment, any other
+    /// mass).
+    std::function<std::vector<double>(double)> directLoadOutsideWaterBudget{};
+    /// The height at time t of a layer laid on the solid surface, solver
+    /// units (GRDSolver::GeneralisedForcing::solidSurfaceChange): the sea
+    /// level falls by it and the water it displaces goes elsewhere. The
+    /// layer's mass is a direct load beside it.
+    std::function<std::vector<double>(double)> solidSurfaceChange{};
     std::function<std::vector<std::complex<double>>(double)> tide{};
     /// The point stress gluts acting at time t (PointSource.hpp) and the
     /// stress gluts on shells (StressGlut), in the solver's units, as

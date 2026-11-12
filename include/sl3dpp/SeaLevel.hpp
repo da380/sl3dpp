@@ -225,7 +225,24 @@ class GRDSolver {
   /// coefficient-space responses joined with no Love number applied (a
   /// viscoelastic step's memory field).
   struct GeneralisedForcing {
+    /// The direct load that ENTERS THE WATER BUDGET, a mass per unit area
+    /// (grounded ice, a hydrological load): its mass leaves or joins the
+    /// ocean, so the uniform part of the sea level change conserves it.
     std::vector<double> directLoad;
+    /// A direct load OUTSIDE THE WATER BUDGET (sediment, any other mass):
+    /// it loads the body as directLoad does and exchanges no water with
+    /// the ocean. Such loads should conserve mass among themselves; one
+    /// with a net mass is taken as it is, the body's mass changing.
+    std::vector<double> directLoadOutsideWaterBudget;
+    /// A change of the height of the solid surface that is not the
+    /// body's deformation: a layer laid on it (sediment: its mass over
+    /// its density), positive upwards. The sea level, measured from the
+    /// solid surface, changes by minus this, the water it displaces
+    /// going elsewhere; it enters nothing else, and is not in the
+    /// displacement returned. The layer's mass is a direct load beside
+    /// it. By convention ice is no such layer: the solid surface is the
+    /// surface with the whole water layer, ice included, stripped.
+    std::vector<double> solidSurfaceChange;
     std::vector<double> displacementLoad;
     std::vector<double> potentialLoad;
     /// A tangential traction on the surface, given by its potential tau
@@ -332,6 +349,12 @@ class GRDSolver {
   /// by the L2 coefficient pairing) and the inertia moment.
   struct AdjointResponse {
     std::vector<double> directLoadDual;
+    /// The dual of a direct load outside the water budget: the direct
+    /// load's less the uniform term of the water's conservation.
+    std::vector<double> directLoadOutsideWaterBudgetDual;
+    /// The dual of a change of the solid surface's height, a grid
+    /// density as the direct load's.
+    std::vector<double> solidSurfaceChangeDual;
     std::vector<std::complex<double>> displacementResponseDual;
     std::vector<std::complex<double>> potentialResponseDual;
     std::vector<std::complex<double>> tangentialResponseDual;

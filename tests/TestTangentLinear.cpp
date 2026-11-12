@@ -1026,6 +1026,139 @@ TEST(TangentLinear, TheContinuousSweepFormsTideAndMomentKernels) {
   }
 }
 
+TEST(TangentLinear, LoadsOutsideTheWaterBudgetAndLayersInTheRun) {
+  // The properties of a surface load through a run. A load inside the
+  // water budget takes its mass from the ocean at every node; one
+  // outside it moves no water; a layer on the solid surface moves none
+  // either, and the three together are their sum. On a body without an
+  // ocean the two loads are one, and a layer is its thickness off the
+  // sea level and nothing more. The tangent-linear run along the three,
+  // the run being linear in them, is the run under them.
+  auto setup = Scene::Make(1e21);
+  const auto& grid = setup.solver.Grid();
+  const auto fieldSize = grid.FieldSize();
+  std::mt19937 rng(41);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(0.5 * n * setup.Kyr());
+  const auto load0 = setup.Smooth(rng, 100.0 * setup.Sigma());
+  const auto other0 = setup.Smooth(rng, 80.0 * setup.Sigma());
+  const auto layer0 = setup.Smooth(rng, 5.0 * setup.Metre());
+  auto history = [&](const std::vector<double>& pattern, double start) {
+    return [&times, pattern, start](double t) {
+      auto out = pattern;
+      for (auto& v : out) v *= start + t / times.back();
+      return out;
+    };
+  };
+  const auto inside = history(load0, 0.4);
+  const auto outside = history(other0, 0.7);
+  const auto layer = history(layer0, 0.2);
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+    }
+    return out;
+  };
+  auto peak = [](std::span<const double> x) {
+    auto out = 0.0;
+    for (auto v : x) out = std::max(out, std::abs(v));
+    return out;
+  };
+
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    Evolution evolution(op, setup.solver, setup.state,
+                        {.scheme = scheme, .rtol = 1e-13});
+    const auto runIn =
+        evolution.Run(times, Evolution::Forcing{.directLoad = inside});
+    const auto runOut = evolution.Run(
+        times, Evolution::Forcing{.directLoadOutsideWaterBudget = outside});
+    const auto runLayer =
+        evolution.Run(times, Evolution::Forcing{.solidSurfaceChange = layer});
+    const auto runAll = evolution.Run(
+        times, Evolution::Forcing{.directLoad = inside,
+                                  .directLoadOutsideWaterBudget = outside,
+                                  .solidSurfaceChange = layer});
+    const auto& C = setup.state.oceanFunction;
+    auto overOcean = [&](const std::vector<double>& f) {
+      auto cf = std::vector<double>(fieldSize);
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) cf[i] = C[i] * f[i];
+      return grid.Integrate(cf);
+    };
+    const auto area = grid.Integrate(C);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      const auto taken = grid.Integrate(inside(times[n]));
+      EXPECT_NEAR(setup.solver.WaterDensity() *
+                      overOcean(runIn[n].relativeSeaLevelChange),
+                  -taken, 1e-9 * std::abs(taken))
+          << "node " << n;
+      EXPECT_LT(std::abs(overOcean(runOut[n].relativeSeaLevelChange)),
+                1e-10 * peak(runOut[n].relativeSeaLevelChange) * area)
+          << "node " << n;
+      EXPECT_LT(std::abs(overOcean(runLayer[n].relativeSeaLevelChange)),
+                1e-10 * peak(layer(times[n])) * area)
+          << "node " << n;
+      for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
+                         &Evolution::Snapshot::displacement,
+                         &Evolution::Snapshot::potential}) {
+        auto sum = runIn[n].*field;
+        for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+          sum[i] += (runOut[n].*field)[i] + (runLayer[n].*field)[i];
+        }
+        EXPECT_LT(worst(runAll[n].*field, sum), 1e-9 * peak(sum)) << "node " << n;
+      }
+    }
+    EXPECT_GT(worst(runIn.back().relativeSeaLevelChange,
+                    evolution
+                        .Run(times, Evolution::Forcing{
+                                        .directLoadOutsideWaterBudget = inside})
+                        .back()
+                        .relativeSeaLevelChange),
+              1e-3 * peak(runIn.back().relativeSeaLevelChange));
+
+    // the tangent along the three is the run under them
+    TangentPerturbation direction;
+    for (auto t : times) {
+      direction.directLoad.push_back(inside(t));
+      direction.directLoadOutsideWaterBudget.push_back(outside(t));
+      direction.solidSurfaceChange.push_back(layer(t));
+    }
+    const auto along =
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-13})
+            .Run(times, direction);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LT(worst(along[n].relativeSeaLevelChange,
+                      runAll[n].relativeSeaLevelChange),
+                1e-9 * peak(runAll[n].relativeSeaLevelChange))
+          << "node " << n;
+      EXPECT_LT(worst(along[n].displacement, runAll[n].displacement),
+                1e-9 * peak(runAll[n].displacement))
+          << "node " << n;
+    }
+
+    // without an ocean: the two loads are one, and a layer is its
+    // thickness off the sea level
+    Evolution body(op, setup.solver, setup.solver.NoOceanState(),
+                   {.scheme = scheme, .rtol = 1e-13});
+    const auto dryIn = body.Run(times, Evolution::Forcing{.directLoad = inside});
+    const auto dryOut = body.Run(
+        times, Evolution::Forcing{.directLoadOutsideWaterBudget = inside});
+    const auto dryLayer =
+        body.Run(times, Evolution::Forcing{.solidSurfaceChange = layer});
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LT(worst(dryIn[n].displacement, dryOut[n].displacement),
+                1e-12 * peak(dryIn[n].displacement));
+      EXPECT_LT(peak(dryLayer[n].displacement), 1e-12 * peak(layer0));
+      const auto thickness = grid.Synthesise(grid.Expand(layer(times[n])));
+      auto fallen = dryLayer[n].relativeSeaLevelChange;
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) fallen[i] += thickness[i];
+      EXPECT_LT(peak(fallen), 1e-11 * peak(thickness)) << "node " << n;
+    }
+  }
+}
+
 TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
   // The tide's rows of the Hessian from the continuous second-order
   // sweep: about a tide-driven run, the derivative of the tide kernels

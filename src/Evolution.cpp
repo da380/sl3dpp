@@ -263,6 +263,29 @@ std::vector<Evolution::Snapshot> Evolution::March(
     return directLoad != nullptr ? (*directLoad)(t)
                                  : std::vector<double>(fieldSize, 0.0);
   };
+  // The load outside the water budget and the layer on the solid surface
+  // at a node, where the forcing gives them (empty: none).
+  auto outsideAt = [&](double t) {
+    return interior != nullptr && interior->directLoadOutsideWaterBudget
+               ? interior->directLoadOutsideWaterBudget(t)
+               : std::vector<double>{};
+  };
+  auto layerAt = [&](double t) {
+    return interior != nullptr && interior->solidSurfaceChange
+               ? interior->solidSurfaceChange(t)
+               : std::vector<double>{};
+  };
+  // every direct load of a node, for the radial step's own load
+  auto withOutside = [&](std::vector<double> load,
+                         const std::vector<double>& outside) {
+    if (outside.empty()) return load;
+    if (outside.size() != load.size()) {
+      throw std::invalid_argument(
+          "a direct load outside the water budget lives on the solver's grid");
+    }
+    for (auto i = std::size_t{0}; i < load.size(); ++i) load[i] += outside[i];
+    return load;
+  };
   auto potentialAt = [&](double t, const std::array<double, 3>& omega) {
     auto psi = options_.rotation == RotationalFeedback::None
                    ? grid.ZeroCoefficients()
@@ -334,6 +357,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
     const auto& elasticSolver = solverFor(0.0);
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = loadGrid;
+    forcing.directLoadOutsideWaterBudget = outsideAt(times[0]);
+    forcing.solidSurfaceChange = layerAt(times[0]);
     if (tide != nullptr) forcing.tide = (*tide)(times[0]);
     forcing.rotation = options_.rotation;
     // The sources' own unrelaxed response enters as ready channels, and
@@ -361,7 +386,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
       forcing.toroidalResponse = toroidalCoefficients();
     }
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
-    sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
+    sigma_ = totalLoadCoefficients(
+        withOutside(loadGrid, forcing.directLoadOutsideWaterBudget),
+        response.relativeSeaLevelChange);
     psi_ = potentialAt(times[0], response.angularVelocity);
     if (sourced) {
       op.PrimeStrain(vstate_, Columns(sigma_, toMatDensity_),
@@ -454,6 +481,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
       GRDSolver::GeneralisedForcing coupled;
       loadGrid = directLoadAt(times[node]);
       coupled.directLoad = loadGrid;
+      coupled.directLoadOutsideWaterBudget = outsideAt(times[node]);
+      coupled.solidSurfaceChange = layerAt(times[node]);
       if (tide != nullptr) coupled.tide = (*tide)(times[node]);
       if (sourced) {
         // the node's sources force the step; the toroidal systems are
@@ -476,7 +505,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
       coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
       coupled.rotation = options_.rotation;
       response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-      sigma_ = totalLoadCoefficients(loadGrid, response.relativeSeaLevelChange);
+      sigma_ = totalLoadCoefficients(
+          withOutside(loadGrid, coupled.directLoadOutsideWaterBudget),
+          response.relativeSeaLevelChange);
     }
     psi_ = potentialAt(times[node], response.angularVelocity);
     vstate_ = step.Finish(Columns(sigma_, toMatDensity_),
@@ -497,7 +528,8 @@ std::vector<Evolution::Snapshot> Evolution::MarchFactored(
   const auto lmax = op.LMax();
   const auto nodes = times.size();
   if (state_.oceanArea > 0.0 || options_.rotation != RotationalFeedback::None ||
-      forcing.directLoad || forcing.tide || options_.record_stride > 0 ||
+      forcing.directLoad || forcing.directLoadOutsideWaterBudget ||
+      forcing.solidSurfaceChange || forcing.tide || options_.record_stride > 0 ||
       (!forcing.sources && !forcing.stressGluts)) {
     throw std::invalid_argument(
         "factor_sources is for interior sources alone on a body without an "

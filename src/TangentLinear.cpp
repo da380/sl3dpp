@@ -648,6 +648,16 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
     }
   }
   CheckPerNode(direction.directLoad, nodes, fieldSize, "directLoad");
+  CheckPerNode(direction.directLoadOutsideWaterBudget, nodes, fieldSize,
+               "directLoadOutsideWaterBudget");
+  CheckPerNode(direction.solidSurfaceChange, nodes, fieldSize,
+               "solidSurfaceChange");
+  if (migrating && (!direction.directLoadOutsideWaterBudget.empty() ||
+                    !direction.solidSurfaceChange.empty())) {
+    throw std::invalid_argument(
+        "a migrating run is driven by its ice thickness: no load outside "
+        "the water budget and no layer on the solid surface to perturb");
+  }
   CheckPerNode(direction.iceThickness, nodes, fieldSize, "iceThickness");
   if (!direction.initialSeaLevel.empty() &&
       direction.initialSeaLevel.size() != fieldSize) {
@@ -778,8 +788,17 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
       };
     }
   }
+  Direct outsideAt{}, layerAt{};
+  if (!direction.directLoadOutsideWaterBudget.empty()) {
+    outsideAt = [&](std::size_t node) {
+      return direction.directLoadOutsideWaterBudget[node];
+    };
+  }
+  if (!direction.solidSurfaceChange.empty()) {
+    layerAt = [&](std::size_t node) { return direction.solidSurfaceChange[node]; };
+  }
   return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
-               sourcesAt, toroidalDrive);
+               sourcesAt, toroidalDrive, outsideAt, layerAt);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
@@ -1013,7 +1032,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     std::span<const std::vector<double>> oceanFunctions,
     const Direct& directAt, const Drive& drive, MaterialForcing* material,
     const Tide& tideAt, const Sources& sourcesAt,
-    const ToroidalDrive& toroidalDrive) const {
+    const ToroidalDrive& toroidalDrive, const Direct& outsideAt,
+    const Direct& layerAt) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -1060,6 +1080,14 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
       total[i] = (f.empty() ? 0.0 : f[i]) + rhoW * Cn[i] * slc[i];
     }
     return grid.Expand(total);
+  };
+  // every direct load of a node, for the radial step's own load
+  auto withOutside = [&](std::vector<double> f,
+                         const std::vector<double>& outside) {
+    if (outside.empty()) return f;
+    if (f.empty()) return outside;
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) f[i] += outside[i];
+    return f;
   };
   // The potential the radial steps see at a node: the centrifugal one of
   // the response's rotation, and the tide's perturbation.
@@ -1141,9 +1169,12 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   // perturbation gives none there).
   auto startResponse = std::map<int, std::vector<double>>{};
   if (const auto f0 = directAt(0);
-      !f0.empty() || material != nullptr || tideAt || sourced) {
+      !f0.empty() || material != nullptr || tideAt || sourced || outsideAt ||
+      layerAt) {
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
+    if (outsideAt) forcing.directLoadOutsideWaterBudget = outsideAt(0);
+    if (layerAt) forcing.solidSurfaceChange = layerAt(0);
     if (tideAt) forcing.tide = tideAt(0);
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
@@ -1193,7 +1224,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     }
     response = solverFor(0.0).SolveGeneralised(ev.state_, forcing, sleOptions);
     checkConverged(response, 0);
-    sigma = totalLoadCoefficients(f0, response.relativeSeaLevelChange, 0);
+    sigma = totalLoadCoefficients(
+        withOutside(f0, forcing.directLoadOutsideWaterBudget),
+        response.relativeSeaLevelChange, 0);
     psi = centrifugal(response, 0);
   }
   if (options_.record || material != nullptr || sourced) {
@@ -1274,6 +1307,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
       coupled.toroidalResponse = toroidalCoefficients();
     }
     coupled.directLoad = directAt(node);
+    if (outsideAt) coupled.directLoadOutsideWaterBudget = outsideAt(node);
+    if (layerAt) coupled.solidSurfaceChange = layerAt(node);
     if (tideAt) coupled.tide = tideAt(node);
     coupled.displacementResponse =
         ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
@@ -1287,8 +1322,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     coupled.oceanFunctionOverride = overrideAt(node);
     response = solverFor(dt).SolveGeneralised(ev.state_, coupled, sleOptions);
     checkConverged(response, node);
-    sigma = totalLoadCoefficients(coupled.directLoad, response.relativeSeaLevelChange,
-                                  node);
+    sigma = totalLoadCoefficients(
+        withOutside(coupled.directLoad, coupled.directLoadOutsideWaterBudget),
+        response.relativeSeaLevelChange, node);
     psi = centrifugal(response, node);
     auto [next, solutions] = step.Finish(ev.Columns(sigma, ev.toMatDensity_),
                                          ev.Columns(psi, ev.toMatPotential_));
