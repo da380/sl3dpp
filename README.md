@@ -24,7 +24,9 @@ of mantle viscosity using deglacial sea level observations;
 - **Elastic response.** Load and tidal Love numbers of transversely isotropic
   radial models, from per-degree spheroidal and toroidal systems; elastic
   sea-level fingerprints, of a radial Earth or of one with laterally
-  varying elastic moduli.
+  varying elastic moduli, and the elastic sea level problem under any mix
+  of ice change, surface loads and seismic sources, with frozen or
+  migrating shorelines.
 - **The sea-level equation.** The generalised sea-level equation, with
   displacement and potential response channels, the tangential
   displacement beside the radial, frozen or migrating
@@ -146,13 +148,16 @@ sl3d response run.json         # the response to a prescribed load and
                                #   time; 1D, or 3D under lateral moduli
                                #   (or viscosity) with the radial model's
                                #   beside it
-sl3d sea-level run.json        # the sea level equation under an ice load:
-                               #   the static problem's elastic fingerprint
-                               #   of an ice change, or the quasi-static
-                               #   problem's GIA through time under an ice
-                               #   history, restartable; 1D, or 3D under
-                               #   lateral moduli (the fingerprint too) or
-                               #   a lateral viscosity
+sl3d sea-level run.json        # the sea level equation under an ice
+                               #   change, surface loads and seismic
+                               #   sources, shorelines frozen or migrating:
+                               #   the static problem's elastic solve at
+                               #   one date (an ice change's fingerprint, a
+                               #   fault's co-seismic sea level), or the
+                               #   quasi-static problem's GIA through time,
+                               #   restartable; 1D, or 3D under lateral
+                               #   moduli (the static problem too) or a
+                               #   lateral viscosity
 sl3d kernel1d run.json         # adjoint kernels of configured measurements
                                #   of a radial sea-level run through time
 sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
@@ -175,13 +180,15 @@ it, under a required `problem`: `"static"` solves at one instant,
 `model` block's files make a run 1D or 3D. Files are read as file
 inputs, `{"file", "format", "variable"}`. A run with an ocean takes a
 state, the sea level and the ice on the body at one instant (the `ocean`
-block), and an ice change, a sum of terms (`forcing.ice_change`): the
-history of a thickness file, a file of thickness change, or, in the
-static problem, a Gaussian cap. Both come from planetmodel surface files,
-such as one holding `ice_thickness` and `topography` (pyslfp's
-`export_ice_history` writes one from ICE-5G/6G/7G), and a fingerprint
-comes back as a surface file of SI fields with the angular-velocity
-perturbation in its metadata. For example:
+block), and a forcing: an ice change, a sum of terms
+(`forcing.ice_change`: the history of a thickness file, a file of
+thickness change, or a Gaussian cap), surface loads (`forcing.load`) and
+seismic sources (`forcing.seismic`), in any mix. The state and the ice
+change come from planetmodel surface files, such as one holding
+`ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
+one from ICE-5G/6G/7G), and a static solve comes back as a surface file
+of SI fields with the angular-velocity perturbation in its metadata. For
+example:
 
 ```json
 {
@@ -199,10 +206,11 @@ perturbation in its metadata. For example:
 }
 ```
 
-run by `sl3d sea-level`; with `"problem": "quasi_static"`, a `times`
-block, the state at an end of the window (`"at": "start"` or `"end"`)
-and an ice history as a `thickness` term of the ice change, the same
-command runs GIA through time.
+run by `sl3d sea-level`; with `"shorelines": "migrating"` in the `ocean`
+block its shorelines follow flotation, and with `"problem":
+"quasi_static"`, a `times` block, the state at an end of the window
+(`"at": "start"` or `"end"`) and an ice history as a `thickness` term of
+the ice change, the same command runs GIA through time.
 
 ### Inputs
 
@@ -229,7 +237,7 @@ command runs GIA through time.
 ### Outputs
 
 `love-numbers` writes a plain-text table; `sea-level` writes a
-planetmodel surface file of SI fields (static for the fingerprint, a
+planetmodel surface file of SI fields (static for the static problem, a
 slice per time node through time), with the angular velocity in its
 metadata; `kernel1d` and `kernel` write a directory per run: the ice-history kernels of each measurement as surface files, its
 viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
@@ -423,8 +431,9 @@ a glacial cycle from 21 ka) for them, and each also runs on ICE-7G
 (`--state data/ice7g.nc`, or the `*_ice7g.json` configs).
 
 - **The `sl3d` configs** in `examples/configs`, at least one per command
-  (for `sea-level`, the fingerprint and runs through time, each in 1D and
-  3D),
+  (for `sea-level`, the static problem, a fingerprint in 1D and 3D, one
+  under migrating shorelines and a co-seismic one, and runs through time
+  in 1D and 3D),
   as in *Run a first model*, above.
 - **Seven C++ drivers** of the library, each with a plotting script:
 
@@ -514,6 +523,9 @@ The other entry points follow the same pattern:
   all in SI. On laterally varying elastic moduli,
   `Evolution3D(op, solver, state).Instantaneous(load)`, `op` a
   `Viscoelastic3D` with `Options::moduli` set, in the solver's units.
+  Under any forcing, frozen or migrating, the static problem is a run of
+  one node, `Run({t0}, forcing)` or `RunMigrating({t0}, ice, forcing)` of
+  either evolution, as `sl3d sea-level` solves it.
 - **3D.** `Viscoelastic3D(rheology, lmax, delta)`, with `delta(r, theta, phi)`
   the log-viscosity perturbation, driven by `Evolution3D` as above.
 - **Kernels.** Run the evolution with `{.record_stride = n}`, build a

@@ -198,7 +198,13 @@ class Evolution {
   /// response to the forcing at times[0], and each node is closed under
   /// the forcing there. On a background state without an ocean
   /// (GRDSolver::NoOceanState) this is the solid body stepped under the
-  /// forcing.
+  /// forcing. With one time the run is the start alone: the static
+  /// problem, the linear sea level equation on the unrelaxed body.
+  ///
+  /// Under RotationalFeedback::Full a run that steps refuses moments of
+  /// inertia that sustain less oblateness than the model's hydrostatic
+  /// fluid limit, which long steps approach; a run of one node takes no
+  /// step, and that check does not apply to it (every entry alike).
   [[nodiscard]] std::vector<Snapshot> Run(std::span<const double> times,
                                           const Forcing& forcing);
 

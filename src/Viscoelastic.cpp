@@ -464,12 +464,31 @@ void ViscoelasticOperator::AddChannels(std::vector<double>& x, int l,
   }
 }
 
+namespace {
+/// A degree's column count in a state: the count it carries, or, of a
+/// state without one, the size of its memory over `perColumn`, the
+/// memory's size per column.
+int ColumnsOf(const ViscoelasticState& state, int l, std::size_t memory,
+              std::size_t perColumn) {
+  if (const auto found = state.columns.find(l); found != state.columns.end()) {
+    return found->second;
+  }
+  if (perColumn == 0) {
+    throw std::logic_error(
+        "a state of a rheology without relaxation branches carries its "
+        "column counts (ViscoelasticOperator::ZeroState)");
+  }
+  return static_cast<int>(memory / perColumn);
+}
+}  // namespace
+
 ViscoelasticState ViscoelasticOperator::ZeroState(
     const std::function<int(int)>& ncols) const {
   ViscoelasticState state;
   const auto K = rheology_->BranchCount();
   for (auto l = 0; l <= lmax_; ++l) {
     const auto& deg = Deg(l);
+    state.columns[l] = ncols(l);
     state.m[l].assign(K * 3 * deg.NodalSize(ncols(l)), 0.0);
   }
   return state;
@@ -498,7 +517,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     task.m = &m;
     task.deg = &Deg(l);
     task.ncols =
-        static_cast<int>(m.size() / (K * 3 * task.deg->ne * task.deg->np));
+        ColumnsOf(state, l, m.size(), K * 3 * task.deg->ne * task.deg->np);
     if (load || tide) {
       task.units = &UnitResponses(nullptr, l);
       task.load = FetchColumns(load, l, state.t, task.ncols);
@@ -627,7 +646,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
   auto degs = std::vector<const ViscoelasticOperator::Degree*>{};
   for (const auto& [l, m] : state.m) {
     const auto& deg = op.Deg(l);
-    ncols_[l] = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+    ncols_[l] = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
     inputs.emplace_back(l, &m);
     degs.push_back(&deg);
   }
@@ -832,6 +851,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
 
   ViscoelasticState out;
   out.t = t_;
+  out.columns = ncols_;
   auto solutions = std::map<int, std::vector<double>>{};
   for (auto& task : tasks) {
     out.m.emplace(task.l, std::move(task.mNew));
@@ -864,9 +884,10 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
     const auto K = rheology_->BranchCount();
     ViscoelasticState out;
     out.t = state.t + dt;
+    out.columns = state.columns;
     for (const auto& [l, m] : state.m) {
       const auto& deg = Deg(l);
-      const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+      const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
       const std::size_t block = deg.NodalSize(ncols);
       auto mNew = std::vector<double>(m.size());
       for (auto k = std::size_t{0}; k < K; ++k) {
@@ -920,9 +941,10 @@ ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
   const auto K = rheology_->BranchCount();
   ViscoelasticState prev;
   prev.t = state.t - dt;
+  prev.columns = state.columns;
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+    const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
     const std::size_t block = deg.NodalSize(ncols);
     const auto& d1 = state.strain.at(l);
     auto mPrev = std::vector<double>(m.size());
@@ -970,7 +992,7 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
   auto count = std::size_t{0};
   for (const auto& [l, m] : state.m) {
     const auto& deg = Deg(l);
-    const int ncols = static_cast<int>(m.size() / (K * 3 * deg.ne * deg.np));
+    const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
     const std::size_t block = deg.NodalSize(ncols);
     const auto& mNew = newState.m.at(l);
     for (auto k = std::size_t{0}; k < K; ++k) {

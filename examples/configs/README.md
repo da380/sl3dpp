@@ -48,6 +48,33 @@ draws each config's figures from `out/<config>/` into
   (`*_radial_model`). The stiff craton under North America and the soft
   ridge change the sea level by a few centimetres at most, against a
   near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
+- **`sea_level_static_migrating.json`** — `sea-level` in the static
+  problem under migrating shorelines (`ocean.shorelines`): the elastic
+  response to the whole synthetic deglaciation, its state the synthetic
+  Earth at 21 ka (`ocean.date_kyr_bp` 21) and the change a `thickness`
+  term read at the present, so that the ice at the solve is the present
+  day's and the shorelines follow its flotation, at lmax 128 with full
+  rotational feedback:
+  `out/sea_level_static_migrating/sea_level_static_migrating.nc`, which
+  holds the ocean function the solve reaches (`ocean_function_final`)
+  beside the state's. The ocean rises by 80 m on average over the 21 ka
+  ocean, and the marine margins of the ice sheets flood: the ocean covers
+  83.75% of the surface at the solve against 83.33% at 21 ka. A fraction
+  of a second.
+- **`sea_level_static_coseismic.json`** — `sea-level` in the static
+  problem forced by a fault alone, no ice change (`forcing.seismic`): the
+  co-seismic sea level change of a thrust off the synthetic South
+  America's west coast (centred at 22° S, 74.5° W, 25 km deep), a 600 by
+  150 km plane of scalar moment 2e22 N m dipping 18° east under the
+  continent, laid out as 12 by 3 point sources, on the present day's
+  state at lmax 64 with full rotational feedback:
+  `out/sea_level_static_coseismic/sea_level_static_coseismic.nc`. The sea
+  floor rises by up to 0.36 m over the fault, the sea level falling by as
+  much there, and elsewhere the surface sinks by up to 5 cm; the ocean's
+  water is conserved, the sea level change integrating to 2e-17 of its
+  magnitude over the ocean. The file holds the tangential and toroidal
+  potentials (the horizontal motion) beside the rest. About 1 s and
+  0.5 GB on four threads.
 - **`sea_level_1d.json`** — `sea-level` in the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a

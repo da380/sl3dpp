@@ -41,8 +41,8 @@ namespace sl3dpp::app {
 
 /// The members `sea-level`, `kernel1d` and `kernel` share: the problem,
 /// the Earth, the degree, the window, the forcing, the ocean, the rotation
-/// and the solves. The static problem is the elastic fingerprint
-/// (`sea-level` alone).
+/// and the solves. The static problem, the solve at the state's one
+/// instant on the elastic Earth, is `sea-level`'s alone.
 struct SeaLevelRun {
   Problem problem = Problem::Static;
   ModelBlock model;
@@ -71,12 +71,13 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 
 /// Reads the shared members, relative paths against `directory`. The
 /// members only the quasi-static problem takes (a viscosity file, the
-/// ocean's shorelines and calibration, the time step) are refused in the
-/// static one, naming the member, and so are the 3-D step's unless a
-/// moduli file is given (the fingerprint on lateral moduli takes them; on
-/// a radial file the runner refuses them). In the static problem a
-/// `thickness` term of the ice change without the state's date is
-/// refused, and with the state at the window's end a `change` term.
+/// initial sea level's calibration, the time step, a term's history or
+/// onset) are refused in the static one, naming the member, and so are the
+/// 3-D step's unless a moduli file is given (the static problem on lateral
+/// moduli takes them; on a radial file the runner refuses them). In the
+/// static problem a `thickness` term of the ice change without the
+/// state's date is refused, and with the state at the window's end a
+/// `change` term or a cap.
 [[nodiscard]] SeaLevelRun ReadSeaLevelRun(
     const Json& top, const std::filesystem::path& directory);
 
@@ -167,9 +168,10 @@ class InputFiles {
 /// the state's ice for `cap_fraction`). In the static problem each term
 /// is read at its own date and the change is one field, the same whatever
 /// time is asked; in a run through time each file is read at the time
-/// asked. Every use of the ice goes through it: the state a run starts
-/// from, the frozen load, the migrating thickness, the calibration's
-/// start and the fingerprint's change.
+/// asked, and a cap is held through the run or scaled by its history's
+/// factor at the time asked. Every use of the ice goes through it: the
+/// state a run starts from, the frozen load, the migrating thickness, the
+/// calibration's start and the static problem's change.
 class RunIce {
  public:
   /// Reads the state's ice at `stateTime` (SI seconds of the files' axes)
@@ -189,9 +191,10 @@ class RunIce {
   /// it stands (zero without terms).
   [[nodiscard]] std::vector<double> ChangeAt(double time) const;
   /// The change from SI time `since` to `time`: each file term's value at
-  /// `time` less its value at `since` (a cap, the same at every time,
-  /// adds nothing). It is ChangeAt(time) - ChangeAt(since), formed term by
-  /// term, without passing through the state's instant.
+  /// `time` less its value at `since`, and a cap's change at the one less
+  /// at the other (nothing without a history). It is ChangeAt(time) -
+  /// ChangeAt(since), formed term by term, without passing through the
+  /// state's instant.
   [[nodiscard]] std::vector<double> ChangeSince(double time,
                                                 double since) const;
   /// The ice at SI time `time`: the state's plus ChangeAt(time).
@@ -246,6 +249,16 @@ struct Loaded {
   GRDSolver::State background;
   std::string iceRead;       ///< the state's ice as read, for summaries and files
   std::string seaLevelRead;  ///< the state's sea level as read, likewise
+  /// With the state at the window's start, the largest change of the ice
+  /// there from the state's own, m (zero without one, and with the state
+  /// at the window's end, whose run starts from the ice at the start).
+  double changeAtStart = 0.0;
+
+  /// Whether a change is present at the window's start: one larger than
+  /// the ice's tolerance (RunIce::Tolerance).
+  [[nodiscard]] bool ChangedAtStart() const {
+    return changeAtStart > ice->Tolerance();
+  }
 };
 
 /// The surface held as land whatever the flotation, `ocean.land`: its
@@ -293,10 +306,9 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
 /// Reads the run through time's world: the state at the end of the window
 /// `ocean.at` names (a state's file with a time axis that ends before the
 /// window's end is refused when the state is there), the run's ice, held
-/// at every node to what the state holds (RunIce::CheckHeld) and, under
-/// migrating shorelines with the state at the start, refused where a
-/// change is present at the start, and the background built from the
-/// ice at the window's start and the state's sea level.
+/// at every node to what the state holds (RunIce::CheckHeld), with the
+/// change present at the window's start, and the background built from
+/// the ice at the window's start and the state's sea level.
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const GRDSolver& solver);
 
@@ -326,8 +338,9 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
     const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
 
 /// The ice thickness the migrating runs take, solver units: the
-/// background's ice plus the same change as IceLoadOf's. The references
-/// must outlive it.
+/// background's ice plus the same change as IceLoadOf's, so that a change
+/// present at the window's start is ice the start's solve takes. The
+/// references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
     const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
 

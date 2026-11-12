@@ -363,13 +363,16 @@ TEST(Lateral, ThreadedStepMatchesSerial) {
   EXPECT_EQ(diff, 0.0);
 }
 
-TEST(Lateral, CacheSizeLeavesTheStepBitwiseUnchanged) {
+TEST(Lateral, CacheSizeLeavesTheStepUnchanged) {
   // Options::cache_bytes reaches the coupling's grid, and a cache small
   // enough that the batched transforms over the memory nodes take smaller
   // chunks than under the default (16 KiB: 7 spin -2 fields at a time
   // against 63, so the chunks fall differently through the batch) leaves
-  // two steps, their iteration counts and the memory they leave bit for
-  // bit as they are under the default.
+  // two steps as they are under the default: their iteration counts the
+  // same, and their solutions and the memory they leave equal to
+  // rounding. Each operator's grid plans its own transforms, and two
+  // plans may sum in different orders, so the last bits may differ; a
+  // fault in the chunking would differ in the leading digits.
   constexpr auto kSmall = std::size_t{16} << 10;
   auto body = Body::Make();
   const auto tau = body.rheology.MinRelaxationTime();
@@ -413,13 +416,31 @@ TEST(Lateral, CacheSizeLeavesTheStepBitwiseUnchanged) {
   EXPECT_EQ(iterations[0], iterations[2]);
   EXPECT_EQ(iterations[1], iterations[3]);
 
+  // the largest difference of two arrays over the largest value of the
+  // first
+  constexpr auto kRounding = 1e-13;
+  auto departure = [](const auto& x, const auto& y) {
+    EXPECT_EQ(x.size(), y.size());
+    auto worst = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < std::min(x.size(), y.size()); ++i) {
+      worst = std::max(worst, std::abs(x[i] - y[i]));
+      top = std::max(top, std::abs(x[i]));
+    }
+    return std::pair{worst, top};
+  };
   auto scale = 0.0;
   auto compare = [&](const std::map<int, std::vector<Complex>>& a,
                      const std::map<int, std::vector<Complex>>& b) {
     ASSERT_EQ(a.size(), b.size());
+    // against the largest value of any degree: a degree the load does not
+    // reach holds rounding alone
+    auto top = 0.0;
     for (const auto& [l, x] : a) {
-      for (auto c : x) scale = std::max(scale, std::abs(c));
-      ASSERT_EQ(x, b.at(l)) << "degree " << l;
+      for (auto c : x) top = std::max(top, std::abs(c));
+    }
+    scale = std::max(scale, top);
+    for (const auto& [l, x] : a) {
+      EXPECT_LE(departure(x, b.at(l)).first, kRounding * top) << "degree " << l;
     }
   };
   compare(standard.spheroidal, small.spheroidal);
@@ -428,13 +449,23 @@ TEST(Lateral, CacheSizeLeavesTheStepBitwiseUnchanged) {
   // and the memory the steps leave, branch by branch
   ASSERT_EQ(standardState.m.size(), smallState.m.size());
   for (auto k = std::size_t{0}; k < standardState.m.size(); ++k) {
+    auto top = departure(standardState.m[k].r, smallState.m[k].r).second;
     for (auto c = 0; c < 2; ++c) {
-      ASSERT_EQ(standardState.m[k].c[c], smallState.m[k].c[c])
+      top = std::max(
+          top, departure(standardState.m[k].c[c], smallState.m[k].c[c]).second);
+    }
+    EXPECT_GT(top, 0.0) << "branch " << k;
+    for (auto c = 0; c < 2; ++c) {
+      EXPECT_LE(departure(standardState.m[k].c[c], smallState.m[k].c[c]).first,
+                kRounding * top)
           << "branch " << k << " component " << c;
     }
-    ASSERT_EQ(standardState.m[k].r, smallState.m[k].r) << "branch " << k;
+    EXPECT_LE(departure(standardState.m[k].r, smallState.m[k].r).first,
+              kRounding * top)
+        << "branch " << k;
   }
 }
+
 
 TEST(Lateral, FinishingAMovedStepTakesItsBuffers) {
   // A step that is done with finishes into its own buffers (the grid

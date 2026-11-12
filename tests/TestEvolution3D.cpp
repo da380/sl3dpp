@@ -497,6 +497,50 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
   }
 }
 
+TEST(Lateral, ARunOfOneNodeIsHeldToNoFluidLimit) {
+  // As Evolution's: a run of one node takes no step, so moments of
+  // inertia that sustain less oblateness than the model's hydrostatic
+  // fluid limit, but more than the elastic response, are taken there.
+  // Under the full feedback the run is Instantaneous under the same
+  // forcing, by the same code, and the elastic sea level solve; a run
+  // that steps is refused.
+  auto setup = Setup::Make();
+  const Viscoelastic3D op(setup.rheology, kLmax,
+                          [](double, double, double) { return 0.0; });
+  const auto kHyd = FluidTidalNumber(setup.material, 2);
+  const GRDSolver solver(
+      SurfaceGrid(kLmax), op.ElasticLove(),
+      WithHydrostaticMoments(SeaLevelParameters{}, kHyd, -0.05));
+  ASSERT_LE(solver.TransverseMarginFor(kHyd), 0.0);
+  ASSERT_GT(solver.TransverseRotationDenominator(), 0.0);
+  const auto state =
+      solver.MakeState(setup.state.iceThickness, setup.state.seaLevel);
+  const auto load = setup.MeltLoad(-0.1);
+  Evolution3D evolution(op, solver, state,
+                        {.rtol = 1e-12, .coupled_rtol = 1e-11});
+  const auto forcing =
+      Evolution3D::Forcing{.directLoad = [&](double) { return load; }};
+  const auto one = std::vector<double>{0.0};
+  const auto alone = evolution.Run(one, forcing);
+  ASSERT_EQ(alone.size(), 1u);
+  ASSERT_TRUE(alone[0].converged);
+  const auto instant = evolution.Instantaneous(forcing);
+  EXPECT_EQ(alone[0].relativeSeaLevelChange, instant.relativeSeaLevelChange);
+  EXPECT_EQ(alone[0].displacement, instant.displacement);
+  EXPECT_EQ(alone[0].angularVelocity, instant.angularVelocity);
+  const auto reference =
+      solver.Solve(state, load, RotationalFeedback::Full, {.rtol = 1e-12});
+  ASSERT_NE(reference.angularVelocity[0], 0.0);
+  EXPECT_LT(WorstDeparture(alone[0].relativeSeaLevelChange,
+                           reference.relativeSeaLevelChange),
+            1e-10);
+  EXPECT_LT(WorstDeparture(alone[0].angularVelocity, reference.angularVelocity),
+            1e-10);
+  const auto two =
+      std::vector<double>{0.0, 1e10 / solver.SolverScales().Time()};
+  EXPECT_THROW((void)evolution.Run(two, forcing), std::invalid_argument);
+}
+
 TEST(Lateral, WithoutAnOceanIsTheDirectlySteppedBody) {
   // Under lateral viscosity, on a state with no ocean, the evolution is
   // the 3D stepper under the prescribed load and tide (and the

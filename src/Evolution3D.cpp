@@ -562,7 +562,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
                                 interior != nullptr);
   }
 
-  if (options_.rotation == RotationalFeedback::Full) {
+  // A run of one node takes no step: its elastic problem is closed on the
+  // elastic numbers alone, as Instantaneous's is.
+  if (options_.rotation == RotationalFeedback::Full && times.size() > 1) {
     const auto kHyd = FluidTidalNumber(op.GetRheology().BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(

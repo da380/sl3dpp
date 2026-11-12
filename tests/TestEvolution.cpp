@@ -9,7 +9,9 @@
 #include <filesystem>
 #include <fstream>
 #include <map>
+#include <span>
 #include <sstream>
+#include <stdexcept>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -128,6 +130,139 @@ TEST(Evolution, ElasticRheologyReducesToTheFingerprint) {
                   1e-9 * std::abs(reference.angularVelocity[1]) + 1e-30);
     }
   }
+}
+
+TEST(Evolution, ABodyWithoutRelaxationBranchesIsElastic) {
+  // A rheology with no relaxation branch is an elastic body, whose
+  // internal variables are empty. Its run of one node under a load and a
+  // point source, recorded, is the start of the viscoelastic body's (the
+  // same unrelaxed moduli); and stepped under a forcing held, it does not
+  // relax: every node is the first.
+  auto setup = Setup::Make(true);
+  const auto elastic = Rheology::Create(setup.material, {});
+  ASSERT_TRUE(elastic);
+  ViscoelasticOperator relaxing(setup.rheology, kLmax);
+  ViscoelasticOperator op(*elastic, kLmax);
+  const auto& scales = setup.solver.SolverScales();
+  const auto unit =
+      1e21 / scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto load = setup.MeltLoad(-0.1);
+  const auto forcing = Evolution::Forcing{
+      .directLoad = [&](double) { return load; },
+      .sources = [&](double) {
+        return std::vector<PointSource>{
+            {.at = {.radius = setup.solver.Radius() - 400e3 / scales.Length(),
+                    .colatitude = 1.1,
+                    .longitude = 4.0},
+             .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                        .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}}};
+      }};
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+      top = std::max(top, std::abs(y[i]));
+    }
+    return out / top;
+  };
+  const Evolution::Options options{.rtol = 1e-12, .record_stride = 1};
+  Evolution evolution(op, setup.solver, setup.state, options);
+  Evolution reference(relaxing, setup.solver, setup.state, options);
+  const auto one = std::vector<double>{0.0};
+  const auto alone = evolution.Run(one, forcing);
+  const auto start = reference.Run(one, forcing);
+  ASSERT_EQ(alone.size(), 1u);
+  ASSERT_FALSE(alone[0].toroidalPotential.empty());
+  for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
+                     &Evolution::Snapshot::displacement,
+                     &Evolution::Snapshot::potential,
+                     &Evolution::Snapshot::tangentialPotential,
+                     &Evolution::Snapshot::toroidalPotential}) {
+    EXPECT_LT(worst(alone[0].*field, start[0].*field), 1e-10);
+  }
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  const auto held = evolution.Run(std::vector<double>{0.0, kyr, 5.0 * kyr}, forcing);
+  ASSERT_EQ(held.size(), 3u);
+  for (auto n = std::size_t{1}; n < held.size(); ++n) {
+    EXPECT_LT(worst(held[n].displacement, held[0].displacement), 1e-9)
+        << "node " << n;
+    EXPECT_LT(worst(held[n].toroidalPotential, held[0].toroidalPotential), 1e-9)
+        << "node " << n;
+  }
+}
+
+TEST(Evolution, ARunOfOneNodeIsHeldToNoFluidLimit) {
+  // The check of the transverse rotational feedback against the model's
+  // hydrostatic fluid limit guards the steps, whose effective tidal
+  // number long steps drive towards that limit. A run of one node takes
+  // no step: moments of inertia that sustain less oblateness than the
+  // fluid limit, but more than the elastic response, are taken there, and
+  // the run is the elastic sea level solve under the full feedback, by
+  // either entry and frozen or migrating; a run that steps is refused.
+  auto setup = Setup::Make(true);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto kHyd = FluidTidalNumber(setup.material, 2);
+  const GRDSolver solver(
+      SurfaceGrid(kLmax), op.ElasticLoveNumbers(),
+      WithHydrostaticMoments(SeaLevelParameters{}, kHyd, -0.05));
+  ASSERT_LE(solver.TransverseMarginFor(kHyd), 0.0);
+  ASSERT_GT(solver.TransverseRotationDenominator(), 0.0);
+  const auto state =
+      solver.MakeState(setup.state.iceThickness, setup.state.seaLevel);
+  ASSERT_EQ(state.oceanFunction, setup.state.oceanFunction);
+  const auto load = setup.MeltLoad(-0.1);
+  Evolution evolution(op, solver, state,
+                      {.rtol = 1e-12, .max_nonlinear_iterations = 400});
+  const auto reference =
+      solver.Solve(state, load, RotationalFeedback::Full, {.rtol = 1e-12});
+  ASSERT_TRUE(reference.converged);
+  ASSERT_NE(reference.angularVelocity[0], 0.0);
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+      top = std::max(top, std::abs(y[i]));
+    }
+    return out / top;
+  };
+  const auto one = std::vector<double>{0.0};
+  const auto byLoad = evolution.Run(one, [&](double) { return load; });
+  const auto byForcing = evolution.Run(
+      one, Evolution::Forcing{.directLoad = [&](double) { return load; }});
+  for (const auto* run : {&byLoad, &byForcing}) {
+    ASSERT_EQ(run->size(), 1u);
+    const auto& node = run->front();
+    EXPECT_LT(worst(node.relativeSeaLevelChange,
+                    reference.relativeSeaLevelChange),
+              1e-10);
+    EXPECT_LT(worst(node.displacement, reference.displacement), 1e-10);
+    EXPECT_LT(worst(node.angularVelocity, reference.angularVelocity), 1e-10);
+  }
+  // migrating, the ice thinned at the node: the nonlinear solve's own
+  auto thinned = state.iceThickness;
+  for (auto& v : thinned) v *= 0.9;
+  const auto moving = evolution.RunMigrating(
+      one, [&](double) { return thinned; }, Evolution::Forcing{});
+  ASSERT_EQ(moving.size(), 1u);
+  GRDSolver::NonlinearForcing melt;
+  melt.iceThicknessChange = thinned;
+  for (auto i = std::size_t{0}; i < thinned.size(); ++i) {
+    melt.iceThicknessChange[i] -= state.iceThickness[i];
+  }
+  melt.rotation = RotationalFeedback::Full;
+  const auto nonlinear = solver.SolveNonlinear(
+      state, melt, {.rtol = 1e-12, .max_iterations = 400});
+  ASSERT_TRUE(moving[0].converged);
+  ASSERT_TRUE(nonlinear.response.converged);
+  EXPECT_EQ(moving[0].oceanFunction, nonlinear.finalState.oceanFunction);
+  EXPECT_LT(worst(moving[0].relativeSeaLevelChange,
+                  nonlinear.response.relativeSeaLevelChange),
+            1e-9);
+  // a run that steps approaches the fluid limit: refused
+  const auto two =
+      std::vector<double>{0.0, 1e10 / solver.SolverScales().Time()};
+  EXPECT_THROW((void)evolution.Run(two, [&](double) { return load; }),
+               std::invalid_argument);
 }
 
 TEST(Evolution, ViscousMantleKeepsRelaxing) {

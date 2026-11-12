@@ -71,6 +71,11 @@ using LoadCallable =
 /// a load jump at exactly t must be followed by Invalidate().
 struct ViscoelasticState {
   std::map<int, std::vector<double>> m;  ///< (K, 3, ne, ngll, ncols)
+  /// Each degree's column count. The operator's states carry it
+  /// (ZeroState sets it, the steps hand it on); a state without it has
+  /// its counts read off the sizes of `m`, which a rheology with no
+  /// relaxation branch (an elastic body, whose `m` is empty) cannot give.
+  std::map<int, int> columns;
   double t = 0.0;
   std::map<int, std::vector<double>> strain;  ///< cache; empty = none
 

@@ -471,6 +471,19 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
 
 namespace {
 
+/// Refuses an ice change present at the window's start: the kernels'
+/// sweeps take the ice at the first node to be the state's.
+void RefuseChangeAtStart(const Json& top, const Loaded& world) {
+  if (!world.ChangedAtStart()) return;
+  Fail(IceChangeMember(top),
+       std::format("changes the ice by up to {:.4g} m at the window's start, "
+                   "where the state is: the kernel commands take the ice at "
+                   "the first node to be the state's, their sweeps starting "
+                   "there, so a change present at the start is not taken (a "
+                   "cap may take a history from a factor of zero)",
+                   world.changeAtStart));
+}
+
 /// The run and sweeps both kernel commands share. `sweep` maps one
 /// measurement's node-keyed duals to its Kernels, writing any extra
 /// (viscosity) outputs of its own under the measurement's stem.
@@ -544,6 +557,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   GRDSolver solver(SurfaceGrid(input.run.lmax), op.ElasticLoveNumbers(),
                         ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
+  RefuseChangeAtStart(top, world);
   const auto times = MakeTimes(input.run, solver.SolverScales());
   auto options = Evolution::Options{};
   options.scheme = input.run.solver.scheme;
@@ -657,6 +671,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
       SurfaceGrid(input.run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
       op.ElasticLove(), ParametersOf(input.run, earth.material));
   auto world = LoadWorld(input.run, top, solver);
+  RefuseChangeAtStart(top, world);
   const auto times = MakeTimes(input.run, solver.SolverScales());
   auto options = Evolution3D::Options{};
   options.scheme = input.run.solver.scheme;

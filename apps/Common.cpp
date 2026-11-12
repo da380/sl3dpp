@@ -70,8 +70,8 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
   const auto& model = top.At("model");
   if (!timed && model.IsObject() && Has(model, "viscosity")) {
     Fail(model.At("viscosity"),
-         std::format("is a viscosity, which {}; the elastic fingerprint has "
-                     "no use for it",
+         std::format("is a viscosity, which {}; the static problem's Earth "
+                     "is elastic and has no use for it",
                      kNeedsQuasiStatic));
   }
   out.model = ReadModelBlock(model, directory);
@@ -110,13 +110,16 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
            "which the `ocean` block does not give (a state of files without "
            "a time axis has none): give the change itself, a `change` term");
     }
-    if (timed && term.kind == IceChangeTerm::Kind::Change &&
+    if (timed && term.kind != IceChangeTerm::Kind::Thickness &&
         out.ocean.at == WindowEnd::End) {
       Fail(member,
-           "is a change taken as it stands, which the state at the window's "
-           "end (`ocean.at`: \"end\") does not take: the ice changes are then "
-           "thickness histories, `thickness` terms, each read back from the "
-           "end");
+           std::format("is {}, which the state at the window's end "
+                       "(`ocean.at`: \"end\") does not take: the ice changes "
+                       "are then thickness histories, `thickness` terms, each "
+                       "read back from the end",
+                       term.kind == IceChangeTerm::Kind::Change
+                           ? "a change taken as it stands"
+                           : "a cap of ice change"));
     }
   }
   if (Has(top, "rotation")) out.rotation = RotationOf(top.At("rotation"));
@@ -130,15 +133,15 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
         Fail(solver.At("scheme"),
              std::format("sets the time step, which {}", kNeedsQuasiStatic));
       }
-      // the fingerprint takes the 3-D step on a laterally varying moduli
-      // file, which BuildEarth reads; without one it is refused here
+      // the static problem takes the 3-D step on a laterally varying
+      // moduli file, which BuildEarth reads; without one it is refused here
       if (out.model.moduli.empty()) {
         for (const auto* name : {"step", "step_rtol", "step_max_iterations",
                                  "transform_degrees", "cache_mb"}) {
           if (Has(solver, name)) {
             Fail(solver.At(name),
                  std::format("sets the 3-D step, which {} or lateral moduli "
-                             "(`model.moduli`): the elastic fingerprint on a "
+                             "(`model.moduli`): the static problem on a "
                              "radial Earth is one solve of the sea level "
                              "equation",
                              kNeedsQuasiStatic));
@@ -391,7 +394,16 @@ std::vector<double> RunIce::ValuesOf(const Term& term, double time) const {
 }
 
 std::vector<double> RunIce::TermAt(const Term& term, double time) const {
-  if (!term.fixed.empty()) return term.fixed;
+  if (!term.fixed.empty()) {
+    const auto& history = term.term.history;
+    if (history.Empty()) return term.fixed;
+    // a cap's history scales its change, at the time's place on the run's
+    // clock (kyr from the window's start)
+    const auto factor = history.At(*history.start_kyr_bp + time / KYR);
+    auto out = term.fixed;
+    for (auto& v : out) v *= factor;
+    return out;
+  }
   auto values = ValuesOf(term, time);
   if (term.term.kind == IceChangeTerm::Kind::Thickness) {
     for (auto i = std::size_t{0}; i < values.size(); ++i) {
@@ -419,9 +431,11 @@ std::vector<double> RunIce::ChangeAt(double time) const {
 std::vector<double> RunIce::ChangeSince(double time, double since) const {
   auto out = std::vector<double>{};
   for (const auto& term : terms_) {
-    if (!term.file) continue;  // a cap: the same at every time
-    auto change = ValuesOf(term, time);
-    const auto before = ValuesOf(term, since);
+    // a cap: the same at every time, but for its history
+    if (!term.file && term.term.history.Empty()) continue;
+    auto change = term.file ? ValuesOf(term, time) : TermAt(term, time);
+    const auto before =
+        term.file ? ValuesOf(term, since) : TermAt(term, since);
     for (auto i = std::size_t{0}; i < change.size(); ++i) {
       change[i] -= before[i];
     }
@@ -647,27 +661,18 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
   }
   auto ice = std::make_shared<const RunIce>(run, top, files, state_si);
   // the ice at every node the run steps: no change takes more than the
-  // state holds, and under migrating shorelines, whose first node is the
-  // start's own state, none is present at the start where the state is
+  // state holds
   auto nodes = std::vector<double>{};
   for (const auto t : MakeTimes(run, scales)) {
     nodes.push_back(start_si + t * scales.Time());
   }
   ice->CheckHeld(nodes, true);
-  if (atStart && run.ocean.shorelines == Shorelines::Migrating &&
-      ice->Changes()) {
-    auto worst = 0.0;
+  // the change present at the start, where the state is there: a load at
+  // the first node, or the ice the start's solve takes
+  auto changeAtStart = 0.0;
+  if (atStart) {
     for (const auto v : ice->ChangeAt(start_si)) {
-      worst = std::max(worst, std::abs(v));
-    }
-    if (worst > ice->Tolerance()) {
-      Fail(IceChangeMember(top),
-           std::format("changes the ice by up to {:.4g} m at the window's "
-                       "start, where the state is: an ice change present at "
-                       "the window's start is not taken under migrating "
-                       "shorelines, whose first node is the state itself "
-                       "(under frozen shorelines it is a load there)",
-                       worst));
+      changeAtStart = std::max(changeAtStart, std::abs(v));
     }
   }
   // the ice the run starts from: the state's, or, with the state at the
@@ -695,7 +700,8 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
           std::move(ice0),
           std::move(background),
           std::move(iceRead),
-          std::move(seaRead)};
+          std::move(seaRead),
+          changeAtStart};
 }
 
 std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,

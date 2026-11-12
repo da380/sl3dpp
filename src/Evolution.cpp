@@ -220,11 +220,13 @@ std::vector<Evolution::Snapshot> Evolution::March(
                                 interior != nullptr);
   }
 
-  if (options_.rotation == RotationalFeedback::Full) {
+  if (options_.rotation == RotationalFeedback::Full && times.size() > 1) {
     // Long steps drive the effective tidal number towards the fluid
     // limit, so the specified moments must sustain more oblateness than
     // the model's hydrostatic one (Mitrovica et al. 2005; Yu et al.
-    // 2025); the margin with the elastic number alone is not enough.
+    // 2025); the margin with the elastic number alone is not enough. A
+    // run of one node takes no step: its elastic problem is closed on the
+    // elastic numbers alone.
     const auto kHyd = FluidTidalNumber(op.BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
       throw std::invalid_argument(
@@ -494,6 +496,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
       ViscoelasticState kept;
       kept.t = vstate_.t;
       kept.m = vstate_.m;
+      kept.columns = vstate_.columns;
       snapshot.internalState = std::move(kept);
     }
     if (stride > 0) {

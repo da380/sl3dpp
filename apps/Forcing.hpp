@@ -8,11 +8,11 @@
  * reader, and its builder onto a run's grid; and, in a run through time,
  * seismic sources, point moment tensors and planar faults inside the
  * body (SeismicTerm). `sea-level`'s (and the kernel commands'): the ice
- * change, a sum of terms, and, in a run through time, surface loads that
- * each state their place in the water budget and whether they move the
- * solid surface, and seismic sources (SeaLevelForcing, at the end of this
- * file); the state they change, the sea level and the ice on the body at
- * one instant, is the `ocean` block's (Blocks.hpp).
+ * change, a sum of terms, surface loads that each state their place in
+ * the water budget and whether they move the solid surface, and seismic
+ * sources (SeaLevelForcing, at the end of this file); the state they
+ * change, the sea level and the ice on the body at one instant, is the
+ * `ocean` block's (Blocks.hpp).
  *
  * A load term is one of
  *
@@ -30,7 +30,8 @@
  *
  * The load is the sum of its terms, and the tide the sum of its
  * coefficients. In the static problem a `field` term's file with a time
- * axis is read at the term's `date_kyr`. In the quasi-static problem (a
+ * axis is read at the term's `date_kyr` (`sea-level`'s `date_kyr_bp`, kyr
+ * before present). In the quasi-static problem (a
  * run stepped through time) a term may carry an amplitude history
  * (`history_kyr`), the piecewise-linear factor its pattern is scaled by at
  * each time, and a `field` term may come from a file with a time axis,
@@ -86,17 +87,22 @@ struct LoadTerm {
   /// kg m^-2: a cap's at its centre, a disk's within it.
   double amplitude = 0.0;
   /// A field's file input (its variable by default `load`) and, in the
-  /// static problem, the time its file is read at, kyr (`date_kyr`),
-  /// required of a file with a time axis.
+  /// static problem, the date its file is read at (`date_kyr`, kyr on the
+  /// file's own axis, or `date_kyr_bp`, kyr before present), required of
+  /// a file with a time axis.
   FileInput field;
   std::filesystem::path file;  ///< a coefficient table
   /// The quasi-static problem: the run's time, kyr, at which a field
   /// file's time zero falls: the file is read at (t - time_origin_kyr)
   /// kyr, in seconds, at the run's time t.
   double time_origin_kyr = 0.0;
-  /// Whether the file is read by date (`sea-level`'s form): its time axis
-  /// is the calendar's, read at each node's date, and the origin above is
-  /// the window's start.
+  /// Whether the term's dates are before present (`sea-level`'s form): a
+  /// static problem's date is then `date_kyr_bp`, the file read at minus
+  /// it on its axis.
+  bool before_present = false;
+  /// Whether the file is read by date through time (`sea-level`'s form in
+  /// a run through time): its time axis is the calendar's, read at each
+  /// node's date, and the origin above is the window's start.
   bool dated = false;
   AmplitudeHistory history;  ///< the term's factor through time
 };
@@ -221,9 +227,12 @@ class TimedForcing {
  public:
   /// Reads the terms' files onto `grid`. `block` is the config's `forcing`
   /// block, where a fault in a term's file is reported, then and at any
-  /// time asked; it and `grid` must outlive the forcing.
+  /// time asked; it and `grid` must outlive the forcing. Without `timed`
+  /// (a static problem's terms) each term is read once, as BuildForcing
+  /// reads it, a field file at its date, and the forcing is the same at
+  /// every time.
   TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
-               const Json& block);
+               const Json& block, bool timed = true);
 
   /// The forcing at time t, kyr, SI: each load term's coefficients (its
   /// factor applied), their sum, the load's field at the grid's points
@@ -326,11 +335,13 @@ class TimedForcing {
 ///   a file with a time axis at its date (`date_kyr_bp`) and one without
 ///   as it is; a run through time reads one with a time axis at each
 ///   node's date and holds one without through the run.
-/// - `cap_thickness`, `cap_fraction` (the static problem alone): a
-///   Gaussian cap, weighted exp(-d^2 / (2 w^2)) in great-circle distance d
-///   from its centre with no cut-off, of a thickness at its centre or of a
-///   fraction of the state's ice. A cap of negative thickness takes at
-///   each point no more than the ice the state holds there.
+/// - `cap_thickness`, `cap_fraction`: a Gaussian cap, weighted
+///   exp(-d^2 / (2 w^2)) in great-circle distance d from its centre with
+///   no cut-off, of a thickness at its centre or of a fraction of the
+///   state's ice. A cap of negative thickness takes at each point no more
+///   than the ice the state holds there. In a run through time a cap is
+///   held through the run, or scaled by its amplitude history
+///   (`history_kyr_bp`, as a surface load's) at each time.
 struct IceChangeTerm {
   enum class Kind { Thickness, Change, CapThickness, CapFraction };
   Kind kind = Kind::Thickness;
@@ -344,6 +355,8 @@ struct IceChangeTerm {
   /// A cap's amount: its thickness at the centre in metres, or the
   /// fraction of the state's ice.
   double amount = 0.0;
+  /// A cap's factor through time, in a run through time; empty, 1.
+  AmplitudeHistory history;
 
   /// The term's member: `thickness`, `change`, `cap_thickness` or
   /// `cap_fraction`.
@@ -368,10 +381,11 @@ struct SurfaceLoadTerm {
 /// The `forcing` block of `sea-level` and the kernel commands: what
 /// happens to the state (the `ocean` block's, Blocks.hpp). The ice change
 /// is the sum of its terms; the ice at a time is the state's plus the
-/// change there, a direct load where it is grounded. A run through time
-/// takes surface loads and seismic sources beside the ice, changes from
-/// the run's start on the run's clock (kyr from the window's start): a
-/// term present at the first node acts there.
+/// change there, a direct load where it is grounded. Surface loads and
+/// seismic sources act beside the ice, changes from the state: in the
+/// static problem at its one instant, in a run through time on the run's
+/// clock (kyr from the window's start), a term present at the first node
+/// acting there.
 struct SeaLevelForcing {
   std::vector<IceChangeTerm> ice_change;
   std::vector<SurfaceLoadTerm> load;
@@ -386,28 +400,28 @@ struct SeaLevelForcing {
 /// Reads a `forcing` block of a run with an ocean, relative paths against
 /// `directory`. `ice_change` is a list of terms (IceChangeTerm), each an
 /// object holding exactly one of `thickness` and `change` (file inputs,
-/// in the static problem with `date_kyr_bp`, required of `thickness`) and,
-/// in the static problem alone, `cap_thickness` (`latitude`, `longitude`,
-/// `width_deg`, `thickness_m`) and `cap_fraction` (`latitude`,
-/// `longitude`, `width_deg`, `fraction`). The static problem requires at
-/// least one term; a run through time requires one unless it takes a
-/// surface load or a seismic source, without which nothing would force
-/// it. The members of the other problem are refused, naming what this one
-/// takes, and so are `ice`, naming `ocean.ice` and `ice_change`, and
-/// `sea_level` and `state`, naming the `ocean` block's members. The
-/// quasi-static problem also takes `load`, a list of load terms as
-/// `response`'s (ReadForcing),
-/// each with `water_budget` and `moves_solid_surface` (both required,
-/// true or false) and, where it moves the solid surface, `density_kg_m3`
-/// (positive; refused otherwise), and `seismic`, a list of sources as
-/// `response`'s; the static problem refuses both. Their times are DATES,
-/// kyr before present, as the window's are: a history is
+/// in the static problem with `date_kyr_bp`, required of `thickness`),
+/// `cap_thickness` (`latitude`, `longitude`, `width_deg`, `thickness_m`)
+/// and `cap_fraction` (`latitude`, `longitude`, `width_deg`, `fraction`),
+/// a cap in a run through time with an optional `history_kyr_bp` beside
+/// it. `load` is a list of load terms as `response`'s (ReadForcing), each
+/// with `water_budget` and `moves_solid_surface` (both required, true or
+/// false) and, where it moves the solid surface, `density_kg_m3`
+/// (positive; refused otherwise), and `seismic` a list of sources as
+/// `response`'s. At least one term of the three is required. Their times
+/// are DATES, kyr before present, as the window's are: a history is
 /// `history_kyr_bp`, pairs `[date_kyr_bp, factor]` from the oldest (the
-/// dates strictly decreasing), an onset `onset_kyr_bp`, and a `field`
-/// file with a time axis is read at each node's date, as the ice change's
-/// files are (`time_origin_kyr` is refused); `response`'s names are
-/// refused, naming these. `start_kyr_bp` is the window's start, which the
-/// dates are turned to the run's clock by; absent in the static problem.
+/// dates strictly decreasing), an onset `onset_kyr_bp`; a `field` file
+/// with a time axis is read at the term's `date_kyr_bp` in the static
+/// problem and at each node's date in a run through time, as the ice
+/// change's files are (`time_origin_kyr` is refused); `response`'s names
+/// (`history_kyr`, `onset_kyr`, `date_kyr`) are refused, naming these.
+/// The members of the other problem are refused, naming what this one
+/// takes: a history or an onset in the static problem, a term's date in a
+/// run through time. So are `ice`, naming `ocean.ice` and `ice_change`,
+/// and `sea_level` and `state`, naming the `ocean` block's members.
+/// `start_kyr_bp` is the window's start, which the dates are turned to the
+/// run's clock by; absent in the static problem.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
     const Json& block, const std::filesystem::path& directory,
     std::optional<double> start_kyr_bp);
@@ -425,9 +439,10 @@ struct SeaLevelForcing {
 class SurfaceLoads {
  public:
   /// Reads the terms' files onto `grid`; `block` is the config's `forcing`
-  /// block (TimedForcing). It and `grid` must outlive the loads.
+  /// block (TimedForcing). It and `grid` must outlive the loads. Without
+  /// `timed` the loads are the static problem's, the same at every time.
   SurfaceLoads(const SeaLevelForcing& forcing, const SurfaceGrid& grid,
-               const Json& block);
+               const Json& block, bool timed = true);
 
   /// The loads at one time, SI, at the grid's points and band-limited to
   /// its degree; a kind no term has is empty.

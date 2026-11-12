@@ -190,7 +190,11 @@ class Evolution3D {
   /// `Run` under a forcing, as Evolution's: on a background state without
   /// an ocean (GRDSolver::NoOceanState) the solid body stepped under the
   /// forcing, the combined fixed point then over the lateral terms and
-  /// the rotational feedback alone.
+  /// the rotational feedback alone. With one time the run is the start
+  /// alone, the static problem (Instantaneous under the forcing); a run of
+  /// one node takes no step, and the check of the transverse rotational
+  /// feedback against the model's fluid limit, which a run that steps
+  /// makes, does not apply to it (every entry alike).
   [[nodiscard]] std::vector<Snapshot> Run(std::span<const double> times,
                                           const Forcing& forcing);
 

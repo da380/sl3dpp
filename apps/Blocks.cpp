@@ -222,17 +222,15 @@ OceanBlock ReadOceanBlock(const Json& block,
            "is an end of a run's window, which the static problem does not "
            "have: it reads the state at its date, `date_kyr_bp`");
     }
-    for (const auto* name : {"shorelines", "calibration"}) {
-      if (Has(block, name)) {
-        Fail(block.At(name),
-             std::format("belongs to a run through time, which {}: the "
-                         "static problem solves the linear equation on its "
-                         "state's own shorelines, with no initial sea "
-                         "level to calibrate",
-                         kNeedsQuasiStatic));
-      }
+    if (Has(block, "calibration")) {
+      Fail(block.At("calibration"),
+           std::format("calibrates an initial sea level, which {}: the "
+                       "static problem has none, its state being the sea "
+                       "level at its own instant",
+                       kNeedsQuasiStatic));
     }
-    Allow(block, {"date_kyr_bp", "sea_level", "topography", "ice", "land"});
+    Allow(block, {"date_kyr_bp", "shorelines", "sea_level", "topography",
+                  "ice", "land"});
   }
   const auto given = Has(block, "sea_level");
   if (given && Has(block, "topography")) {

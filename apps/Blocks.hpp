@@ -139,8 +139,8 @@ struct SeaLevelSource {
 
 /// The `ocean` block of a run with an ocean: the state, what is on the
 /// body at one instant (the sea level and the ice, each a file input, and
-/// the land held), the instant itself and, in the quasi-static problem,
-/// the shorelines and the initial sea level's calibration. What happens
+/// the land held), the instant itself, the shorelines and, in the
+/// quasi-static problem, the initial sea level's calibration. What happens
 /// to the ice is the forcing's (`forcing.ice_change`, Forcing.hpp).
 struct OceanBlock {
   SeaLevelSource seaLevel;
@@ -159,8 +159,8 @@ struct OceanBlock {
   /// (`ocean.at`), the start's being the initial state and the end's the
   /// state the run reaches, the target of the calibration.
   WindowEnd at = WindowEnd::Start;
-  /// The shorelines: frozen at the start's (the linear equation), or
-  /// following flotation.
+  /// The shorelines: frozen at the state's (the linear equation), or
+  /// following flotation (the nonlinear one), in either problem.
   Shorelines shorelines = Shorelines::Frozen;
   /// With the state at the window's end, the initial sea level is
   /// calibrated so that the run reaches the state's sea level there, by
@@ -179,12 +179,12 @@ struct OceanBlock {
 /// `variable` alone, and optionally `land`. The state's instant is the
 /// block's: in the static problem `date_kyr_bp` (whether it is required
 /// is the files' business, checked once they are read); in the
-/// quasi-static problem `at` ("start" or "end", required). The
-/// quasi-static problem also takes `shorelines` (a word, default
-/// "frozen") and `calibration` (an object of `method`, `iterations` and
-/// `rtol`, each optional), which `"at": "end"` alone takes and turns on;
-/// the static problem refuses both, and each problem refuses the other's
-/// instant. A date or an `at` on a member is refused, naming the block's.
+/// quasi-static problem `at` ("start" or "end", required). Both take
+/// `shorelines` (a word, default "frozen"); the quasi-static problem also
+/// takes `calibration` (an object of `method`, `iterations` and `rtol`,
+/// each optional), which `"at": "end"` alone takes and turns on, and the
+/// static problem refuses. Each problem refuses the other's instant. A
+/// date or an `at` on a member is refused, naming the block's.
 [[nodiscard]] OceanBlock ReadOceanBlock(const Json& block,
                                         const std::filesystem::path& directory,
                                         Problem problem);
@@ -210,7 +210,7 @@ struct SolverBlock {
   /// point over the strain, the ocean load and the rotation
   /// (Evolution3D::Options::coupled_rtol, max_coupled_iterations;
   /// under lateral moduli the start's zero-length step too, and the
-  /// fingerprint's one zero-length step). `response`:
+  /// static problem's one zero-length step). `response`:
   /// each step's closure (the fixed point or the conjugate gradients) and
   /// the unrelaxed solve under lateral moduli (an elastic response's one
   /// solve, a viscoelastic run's first node).

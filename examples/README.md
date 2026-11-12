@@ -79,7 +79,7 @@ uses it; `inputs.py` holds what they share.
 | `make_planet_deck.py` | `planet.gia.deck`, `planet.elastic.deck`: a three-layer toy Mars (fluid core, Maxwell mantle, elastic lid); prints its mass and surface gravity | `model.deck`; `response_tide_planet*.json` |
 | `make_lateral_model.py` | `<deck>_<field>_<kind>.nc`: a 3D viscosity or lateral moduli on a deck's own body, an analytic pattern, S40RTS or a Gaussian random field; from S40RTS the viscosity by sl3d's conversion chain (optionally renormalised to the deck's mean, with a lid), the moduli from the shear speed and a scaled P speed (`--vp-scaling`) | `model.viscosity.file`, `model.moduli.file` |
 | `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice` and `ocean.topography` (the state), a `thickness` term of `forcing.ice_change` (the history) |
-| `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term of `response` |
+| `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term of `response` (a static one, of `sea-level` too) |
 | `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term of `response` |
 | `make_tide_history.py` | `configs/response_tide_oscillating.json`: a `response` config of a sinusoidal degree-2 tide at a chosen period | `sl3d response` |
 
@@ -135,7 +135,11 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 
 `sea_level_3d`'s run is drawn against the 1D one in
 `figures/sl3d/sea_level_1d/sea_level.png` (in `sea_level_3d/` when it
-alone has run), so it has no folder of its own.
+alone has run), so it has no folder of its own. The static problem's
+`sea_level_static_migrating` (the synthetic deglaciation under migrating
+shorelines) and `sea_level_static_coseismic` (a fault alone) have no
+figures; their surface files hold the fields
+`examples/configs/README.md` names.
 
 The tide figures show three things. On the synthetic 3D Earth the lunar
 body tide is the radial model's to 2e-4: a bulge of 0.21 m, which the

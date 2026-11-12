@@ -1,0 +1,19 @@
+{
+  "problem": "static",
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
+  "lmax": 64,
+  "forcing": {
+    "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+                           "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+                           "length_km": 600.0, "width_km": 150.0,
+                           "moment_nm": 2.0e22,
+                           "patches_along_strike": 12, "patches_down_dip": 3}}]
+  },
+  "ocean": {
+    "date_kyr_bp": 0.0,
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "full",
+  "output": {"surface": "out/sea_level_static_coseismic/sea_level_static_coseismic.nc"}
+}
