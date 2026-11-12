@@ -1026,6 +1026,156 @@ TEST(TangentLinear, TheContinuousSweepFormsTideAndMomentKernels) {
   }
 }
 
+TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
+  // The tide's rows of the Hessian from the continuous second-order
+  // sweep: about a tide-driven run, the derivative of the tide kernels
+  // along the relaxation times and along the moduli, paired with a
+  // perturbation of the tide smooth in time, against the exact mixed
+  // derivative (the discrete second-order tangent-linear run). The gap
+  // falls as the steps are halved, with an ocean and the rotational
+  // feedback and without either.
+  auto setup = Scene::Make(1e22);
+  const auto& grid = setup.solver.Grid();
+  const auto& sle = setup.solver.SolverScales();
+  using Complex = std::complex<double>;
+  const auto span = 10.0 * setup.Kyr();
+  std::mt19937 fields(23);
+  const auto potential = 1.0 / sle.Factor(PotentialDimensions);
+  auto tide0 = grid.Expand(setup.Smooth(fields, potential));
+  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  auto tide1 = grid.Expand(setup.Smooth(fields, potential));
+  tide1[SurfaceGrid::Index(0, 0)] = 0.0;
+  const auto gSea = setup.Smooth(fields, 1.0);
+  const auto gU = setup.Smooth(fields, 0.5);
+  const auto gV = setup.Smooth(fields, 0.6);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      d.mu[i] = profile * m0[i];
+    }
+  }
+
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean");
+    auto itauGaps = std::vector<double>{}, moduliGaps = std::vector<double>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() / 2].relativeSeaLevelDual = gSea;
+      measurements[times.size() - 1].displacementDual = gU;
+      measurements[times.size() - 1].tangentialPotentialDual = gV;
+      // the base tide and its perturbation, smooth in time
+      auto base = std::vector<std::vector<Complex>>{};
+      TangentPerturbation tideOnly;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto x = times[n] / span;
+        auto b = tide0, t = tide1;
+        for (auto& c : b) c *= 0.4 + std::cos(0.5 * std::numbers::pi * x);
+        for (auto& c : t) c *= 0.3 + std::sin(0.5 * std::numbers::pi * x);
+        base.push_back(std::move(b));
+        tideOnly.tide.push_back(std::move(t));
+      }
+      ViscoelasticOperator op(setup.rheology, kLmax);
+      Evolution evolution(
+          op, setup.solver, *background,
+          {.rotation = rotation, .rtol = 1e-12, .record_stride = 1});
+      const auto snapshots = evolution.Run(
+          times, Evolution::Forcing{.tide = [&](double t) {
+            for (auto n = std::size_t{0}; n < times.size(); ++n) {
+              if (std::abs(t - times[n]) <= 1e-12 * span) return base[n];
+            }
+            throw std::runtime_error("the test history is read off its nodes");
+          }});
+      const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+      TangentPerturbation itauOnly, moduliOnly;
+      itauOnly.itau = ditau;
+      moduliOnly.material = AtMemoryPoints(op.Points(), d);
+
+      // the exact mixed derivatives
+      TangentLinearSolver exact(
+          evolution,
+          {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+      const auto exactTide = exact.Run(times, tideOnly, &trajectory);
+      SecondOrderDirection alongItau, alongModuli;
+      alongItau.itauV = ditau;
+      alongModuli.materialV = moduliOnly.material;
+      const auto mixedItau = Objective(
+          setup,
+          exact.RunSecondOrder(times, exactTide,
+                               exact.Run(times, itauOnly, &trajectory),
+                               alongItau, &trajectory),
+          measurements);
+      const auto mixedModuli = Objective(
+          setup,
+          exact.RunSecondOrder(times, exactTide,
+                               exact.Run(times, moduliOnly, &trajectory),
+                               alongModuli, &trajectory),
+          measurements);
+      ASSERT_NE(mixedItau, 0.0);
+      ASSERT_NE(mixedModuli, 0.0);
+
+      // the continuous sweep's tide rows along each
+      TangentLinearSolver continuous(
+          evolution,
+          {.method = AdjointMethod::Continuous, .rtol = 1e-12, .record = true});
+      AdjointSolver adjoint(evolution, {.method = AdjointMethod::Continuous,
+                                        .rtol = 1e-12,
+                                        .material_kernels = true,
+                                        .tide_kernels = true});
+      auto row = [&](const KernelDerivatives& derivatives) {
+        EXPECT_EQ(derivatives.tideKernels.size(), times.size());
+        auto out = 0.0;
+        for (auto n = std::size_t{0}; n < times.size(); ++n) {
+          out += pair(derivatives.tideKernels[n], tideOnly.tide[n]);
+        }
+        return out;
+      };
+      const auto [kernelsI, derivativesI] = adjoint.SecondOrderKernels(
+          times, measurements, continuous.Run(times, itauOnly, &trajectory),
+          ditau, trajectory);
+      const auto [kernelsM, derivativesM] = adjoint.SecondOrderKernels(
+          times, measurements, continuous.Run(times, moduliOnly, &trajectory),
+          {}, trajectory, {}, moduliOnly.material);
+      itauGaps.push_back(std::abs(row(derivativesI) - mixedItau) /
+                         std::abs(mixedItau));
+      moduliGaps.push_back(std::abs(row(derivativesM) - mixedModuli) /
+                           std::abs(mixedModuli));
+    }
+    for (const auto* gaps : {&itauGaps, &moduliGaps}) {
+      const auto what = gaps == &itauGaps ? "relaxation times" : "moduli";
+      EXPECT_LT((*gaps)[2], 0.05)
+          << what << ", " << label << ": " << (*gaps)[0] << " " << (*gaps)[1]
+          << " " << (*gaps)[2];
+      EXPECT_GT((*gaps)[1] / (*gaps)[2], 3.0)
+          << what << ", " << label << ": " << (*gaps)[0] << " " << (*gaps)[1]
+          << " " << (*gaps)[2];
+    }
+  }
+}
+
 TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {
   // The continuous sweep about a run under point sources, whose toroidal
   // systems carry memory: its kernels in the relaxation times and in the

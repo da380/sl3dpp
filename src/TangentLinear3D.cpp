@@ -938,11 +938,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   }
   Sources sourcesAt{};
   if (!direction.sources.empty() || !direction.stressGluts.empty()) {
-    if (!direction.material.Empty()) {
-      throw std::invalid_argument(
-          "perturb the sources and the moduli in separate runs: the "
-          "tangent is linear in the two");
-    }
     if (migrating) {
       throw std::invalid_argument(
           "a migrating run takes no interior sources: none to perturb");

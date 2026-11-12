@@ -407,6 +407,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   }
   auto tideKernels = std::vector<std::vector<Complex>>(
       tidal ? times.size() : 0, grid.ZeroCoefficients());
+  // their derivatives along v, in the second-order sweep: the same
+  // pairing of the derivative displacement and load, the tide's force
+  // depending on neither the moduli nor the relaxation times
+  auto dTideKernels = std::vector<std::vector<Complex>>(
+      tidal && second ? times.size() : 0, grid.ZeroCoefficients());
   auto lumpLoad = std::vector<Complex>{};  // the jump's adjoint load
   const bool keepLump = material || hasMaterialV || moments || tidal;
   auto momentKernels = std::vector<std::vector<SphericalTensor>>(
@@ -446,8 +451,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   Viscoelastic3D::Solutions lumpSolutions;  // the jump's, when material
   auto addTide = [&](const Viscoelastic3D::Solutions& lambda,
                      const std::vector<Complex>& load, std::size_t node,
-                     double weight, double scale) {
-    auto& to = tideKernels[node];
+                     double weight, double scale, bool derivative = false) {
+    auto& to = (derivative ? dTideKernels : tideKernels)[node];
     for (const auto& [l, x] : lambda.spheroidal) {
       if (l == 0) continue;
       const auto& tideVec = locked([&]() -> const std::vector<double>& {
@@ -1061,7 +1066,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     const auto lambda = fullOf(vs);
     if (moments) addMoments(lambda, node, pairing * weight);
     if (tidal) addTide(lambda, vs.sigma, node, weight, pairing);
-    if (!material && !(moments && second)) return;
+    if (!material && !((moments || tidal) && second)) return;
     const auto e = strainOf(lambda);
     if (!second) {
       pairMaterial(lambda, e, node, pairing * weight);
@@ -1072,6 +1077,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       addSolutions(dlambda, unrelaxedResponseV(e, lambda, &vs.state.m));
     }
     if (moments) addMoments(dlambda, node, pairing * weight, true);
+    if (tidal) addTide(dlambda, ds.sigma, node, weight, pairing, true);
     if (!material) return;
     const auto de = strainOf(dlambda);
     pairBoth(lambda, e, &dlambda, &de, node, pairing * weight);
@@ -1430,6 +1436,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       auto [dx, dxi] = lateral ? lateralJumpDerivative(node) : jumpDerivative(node);
       deJ = strainOf(dx);
       bump(ds.state, op.itau_, deJ);
+      if (tidal) {
+        // the derivative of the jump's adjoint load: the ocean's alone,
+        // the measurement's dual not moving with the moduli
+        const auto& Cn = oceanAt(node);
+        auto lamGrid = std::vector<double>(fieldSize);
+        for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+          lamGrid[i] = rhoW * Cn[i] * dxi[i];
+        }
+        addTide(dx, grid.Expand(lamGrid), node, 1.0, pairing, true);
+      }
       dlumps.emplace(node, std::move(dxi));
       dxJ = std::move(dx);
     } else if (material && second) {
@@ -1582,6 +1598,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         std::move(dDensityLoad), {}, oceanFunctions, rhoW);
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
+    for (auto& kernel : dTideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    derivatives.ice.tideKernels = std::move(dTideKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
     derivatives.ice.momentKernels = std::move(dMomentKernels);

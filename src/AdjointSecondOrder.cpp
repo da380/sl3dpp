@@ -1149,7 +1149,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // with the unrelaxed table, carried as the response channel of v's
   // unrelaxed variation on the jump solution (the forward start's
   // pattern); returns the derivative solution and the fingerprint's
-  // derivative (the derivative lump).
+  // derivative (the derivative lump), with the derivative of the
+  // jump's ocean load, as coefficients.
   auto jumpDerivative = [&](const Fields& xJ, std::size_t node) {
     auto response = tools->UnrelaxedResponse(tools->UnrelaxedForce(xJ, nullptr));
     GRDSolver::GeneralisedForcing f;
@@ -1167,7 +1168,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       dlam[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
-    const auto lamCols = loadsOf(grid.Expand(dlam));
+    auto dlamCoefficients = grid.Expand(dlam);
+    const auto lamCols = loadsOf(dlamCoefficients);
     // the closed channels of the derivative: the ocean's load and, under
     // the rotational feedback, the centrifugal potential of its rotation
     const auto psiCols =
@@ -1188,7 +1190,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
         }
       }
     }
-    return std::pair(std::move(response), resp.relativeSeaLevelChange);
+    return std::tuple(std::move(response), resp.relativeSeaLevelChange,
+                      std::move(dlamCoefficients));
   };
   // m += factor(x) d-tilde, with the factor itau (the adjoint state) or
   // v's delta itau (its derivative), at the memory points.
@@ -1368,6 +1371,37 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       moments ? times.size() : 0,
       std::vector<SphericalTensor>(options_.moment_points.size()));
   auto dMomentKernels = momentKernels;
+  // The tide kernels and their derivatives (Options::tide_kernels), as
+  // the first-order sweep forms them: an adjoint displacement paired
+  // with the tide's force on each degree, and its closed load, on which
+  // the tide's own potential acts through the sea level. The tide's
+  // force does not depend on the moduli or the relaxation times, so the
+  // derivative is the same pairing of the derivative displacement and
+  // load.
+  const bool tidal = options_.tide_kernels;
+  auto tideKernels = std::vector<std::vector<Complex>>(
+      tidal ? times.size() : 0, grid.ZeroCoefficients());
+  auto dTideKernels = tideKernels;
+  auto addTide = [&](const Fields& lambda, const std::vector<Complex>& load,
+                     std::size_t node, double weight,
+                     std::vector<std::vector<Complex>>& kernels) {
+    auto& to = kernels[node];
+    for (const auto& [l, x] : lambda) {
+      if (l == 0) continue;
+      const auto& deg = op.Deg(l);
+      for (auto m = 0; m <= l; ++m) {
+        auto re = 0.0, im = 0.0;
+        for (auto d = 0; d < deg.ndof; ++d) {
+          re += deg.tideVec[d] * x[static_cast<std::size_t>(m) * deg.ndof + d];
+          im += deg.tideVec[d] *
+                x[static_cast<std::size_t>(l + 1 + m) * deg.ndof + d];
+        }
+        const auto i = SurfaceGrid::Index(l, m);
+        to[i] += weight * (pairing * ev.toMatPotential_ * Complex(re, im) -
+                           r2 / g * load[i]);
+      }
+    }
+  };
   // The moment kernels' part of an adjoint displacement: its strain at
   // the points, scaled.
   auto addMoments = [&](const Fields& lambda, const TwistFields& twisted,
@@ -1562,11 +1596,15 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // memory and closed load, and its derivative: the derivative state's
   // plus v's unrelaxed force's response on the adjoint displacement.
   auto accumulateMaterial = [&](std::size_t node, double weight) {
-    if ((!material && !moments) || weight == 0.0) return;
+    if ((!material && !moments && !tidal) || weight == 0.0) return;
     const auto lambda = fullOf(vs);
     auto dlambda = fullOf(ds);
     if (tools.has_value()) {
       tools->AddUnrelaxedResponse(dlambda, lambda, &vs.state.m);
+    }
+    if (tidal) {
+      addTide(lambda, vs.sigma, node, weight, tideKernels);
+      addTide(dlambda, ds.sigma, node, weight, dTideKernels);
     }
     if (material) pairBoth(lambda, dlambda, node, pairing * weight);
     if (twisting) {
@@ -1589,10 +1627,12 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     applyJump(vs.state, strains, false);
     applyJump(ds.state, strains, true);
     auto dxJ = Fields{};
+    if (tidal) addTide(xJ, j.lam, node, 1.0, tideKernels);
     if (materialV) {
-      auto [dx, dxi] = jumpDerivative(xJ, node);
+      auto [dx, dxi, dlam] = jumpDerivative(xJ, node);
       applyJump(ds.state, strainsOf(dx), false);
       dlumps.emplace(node, std::move(dxi));
+      if (tidal) addTide(dx, dlam, node, 1.0, dTideKernels);
       dxJ = std::move(dx);
     } else if (material) {
       dxJ = xJ;
@@ -1769,6 +1809,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   derivatives.muKernel = pointSamples(std::move(dMuKernel));
   kernels.momentKernels = std::move(momentKernels);
   derivatives.momentKernels = std::move(dMomentKernels);
+  for (auto* set : {&tideKernels, &dTideKernels}) {
+    for (auto& kernel : *set) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+  }
+  kernels.tideKernels = std::move(tideKernels);
+  derivatives.tideKernels = std::move(dTideKernels);
   return {std::move(kernels), std::move(derivatives)};
 }
 

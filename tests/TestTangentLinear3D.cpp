@@ -1293,5 +1293,46 @@ TEST(TangentLinear3D, ModuliAboutASourceDrivenRun) {
                       direction.material.kappa) +
         VolumePairing(op.Coupling(), kernels.muKernel3D, direction.material.mu);
     EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted)) << label;
+
+    // The sources and the moduli perturbed in one run: the sum of the
+    // run along each, in every field at every node.
+    TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = 1e-12});
+    TangentPerturbation3D sourcesOnly;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      auto at = sources;
+      for (auto& source : at) {
+        auto& M = source.moment;
+        for (auto* c : {&M.rr, &M.tt, &M.pp, &M.rt, &M.rp, &M.tp}) {
+          *c *= 0.2 + 0.1 * static_cast<double>(n);
+        }
+      }
+      sourcesOnly.sources.push_back(std::move(at));
+    }
+    auto together = direction;
+    together.sources = sourcesOnly.sources;
+    const auto alongModuli = tangent.Run(times, direction, &trajectory);
+    const auto alongSources = tangent.Run(times, sourcesOnly, &trajectory);
+    const auto alongBoth = tangent.Run(times, together, &trajectory);
+    for (auto field : {&Evolution3D::Snapshot::displacement,
+                       &Evolution3D::Snapshot::tangentialPotential,
+                       &Evolution3D::Snapshot::toroidalPotential,
+                       &Evolution3D::Snapshot::relativeSeaLevelChange}) {
+      auto worst = 0.0, scale = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto& both = alongBoth[n].*field;
+        const auto& m = alongModuli[n].*field;
+        const auto& q = alongSources[n].*field;
+        ASSERT_EQ(both.size(), m.size());
+        ASSERT_EQ(both.size(), q.size());
+        for (auto i = std::size_t{0}; i < both.size(); ++i) {
+          worst = std::max(worst, std::abs(both[i] - m[i] - q[i]));
+          scale = std::max({scale, std::abs(m[i]), std::abs(q[i])});
+        }
+      }
+      EXPECT_GT(scale, 0.0) << label;
+      EXPECT_LT(worst, 1e-9 * scale) << label;
+    }
   }
 }

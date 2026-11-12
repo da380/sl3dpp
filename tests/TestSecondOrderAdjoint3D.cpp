@@ -1744,6 +1744,117 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
   }
 }
 
+TEST(SecondOrderAdjoint3D, ContinuousTideRowsConverge) {
+  // The tide's rows of the Hessian about a tide-driven run with lateral
+  // viscosity and the rotational feedback: the continuous sweep's, along
+  // a direction in the viscosity and the moduli and paired with a tide
+  // smooth in time, tend to the discrete sweep's as the steps are
+  // halved; so do its load rows.
+  auto scene = Scene::Make(1e22);
+  const auto& grid = scene.solver.Grid();
+  const auto& sle = scene.solver.SolverScales();
+  using Complex = std::complex<double>;
+  std::mt19937 rng(83);
+  const auto span = 10.0 * scene.Kyr();
+  const auto potential = 1.0 / sle.Factor(PotentialDimensions);
+  auto tide0 = grid.Expand(scene.Smooth(rng, potential));
+  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  auto tide1 = grid.Expand(scene.Smooth(rng, potential));
+  tide1[SurfaceGrid::Index(0, 0)] = 0.0;
+  const auto gSea = scene.Smooth(rng, 1.0);
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto loadPattern = scene.MeltLoad(-0.1);
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto& coupling = op.Coupling();
+  TangentPerturbation3D u;
+  u.itau = TangentLinearSolver3D::ItauOfLogViscosity(
+      op, OnCoupling(coupling, [](double theta, double phi) {
+        return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+      }));
+  auto angular = [](double theta, double phi) {
+    return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+  };
+  u.material.kappa = LateralModulus(
+      coupling, scene.material, kappaMu.first,
+      [](double r) { return 0.05 * (1.0 - 0.5 * r); }, angular);
+  u.material.mu = LateralModulus(
+      coupling, scene.material, kappaMu.second,
+      [](double r) { return 0.1 * (0.5 + r * r); }, angular);
+
+  auto tideGaps = std::vector<double>{}, loadGaps = std::vector<double>{};
+  for (const auto nodes : {5, 9, 17}) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() / 2].relativeSeaLevelDual = gSea;
+    measurements[times.size() - 1].displacementDual = gU;
+    Evolution3D evolution(op, scene.solver, scene.state,
+                          {.rotation = RotationalFeedback::Full,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12,
+                           .record_stride = 1});
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(evolution.Run(
+        times, Evolution3D::Forcing{.tide = [&](double t) {
+          auto out = tide0;
+          for (auto& c : out) c *= 0.4 + std::cos(0.5 * std::numbers::pi * t / span);
+          return out;
+        }}));
+    auto rows = std::map<AdjointMethod, std::pair<double, double>>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto run = TangentLinearSolver3D(evolution, {.method = method,
+                                                         .rtol = 1e-12,
+                                                         .coupled_rtol = 1e-12,
+                                                         .record = true})
+                           .Run(times, u, &trajectory);
+      const auto along =
+          AdjointSolver3D(evolution, {.method = method,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12,
+                                      .material_kernels = true,
+                                      .tide_kernels = true})
+              .SecondOrderKernels(times, measurements, run, u.itau, trajectory,
+                                  {}, u.material)
+              .second;
+      ASSERT_EQ(along.ice.tideKernels.size(), times.size());
+      ASSERT_EQ(along.ice.directLoadKernels.size(), times.size());
+      auto tide = 0.0, load = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto shape = 0.3 + std::sin(0.5 * std::numbers::pi * times[n] / span);
+        auto t = tide1;
+        for (auto& c : t) c *= shape;
+        tide += pair(along.ice.tideKernels[n], t);
+        auto f = loadPattern;
+        for (auto& v : f) v *= shape;
+        load += scene.Surface(along.ice.directLoadKernels[n], f);
+      }
+      rows[method] = {tide, load};
+    }
+    const auto& d = rows[AdjointMethod::Discrete];
+    const auto& c = rows[AdjointMethod::Continuous];
+    ASSERT_NE(d.first, 0.0);
+    ASSERT_NE(d.second, 0.0);
+    tideGaps.push_back(std::abs(c.first - d.first) / std::abs(d.first));
+    loadGaps.push_back(std::abs(c.second - d.second) / std::abs(d.second));
+  }
+  for (const auto* gaps : {&tideGaps, &loadGaps}) {
+    const auto what = gaps == &tideGaps ? "tide" : "load";
+    EXPECT_LT((*gaps)[2], 0.05)
+        << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
+    EXPECT_GT((*gaps)[1] / (*gaps)[2], 3.0)
+        << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
+  }
+}
+
 TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
   // One time node, the elastic problem, with and without lateral moduli
   // in the background, an ocean and the rotational feedback: the
