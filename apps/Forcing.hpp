@@ -8,8 +8,10 @@
  * reader, and its builder onto a run's grid; and, in a run through time,
  * seismic sources, point moment tensors and planar faults inside the
  * body (SeismicTerm). `sea-level`'s (and the kernel commands'): the ice
- * (SeaLevelForcing, at the end of this file); their sea level is the
- * `ocean` block's (Blocks.hpp).
+ * and, in a run through time, surface loads that each state their place
+ * in the water budget and whether they move the solid surface, and
+ * seismic sources (SeaLevelForcing, at the end of this file); their sea
+ * level is the `ocean` block's (Blocks.hpp).
  *
  * A load term is one of
  *
@@ -316,12 +318,37 @@ struct IceForcing {
   std::optional<IceChange> change;  ///< the static problem's
 };
 
+/// A surface load of a run with an ocean: a load term (a surface mass
+/// density, as `response`'s) with the two properties the sea level
+/// equation needs of it. A load in the WATER BUDGET takes its mass from
+/// the ocean (a hydrological load); one outside it moves no water
+/// (sediment, any other mass). A load that MOVES THE SOLID SURFACE is a
+/// layer laid on it, of thickness its mass over its density: the sea
+/// level, measured from the solid surface, falls by the thickness, and
+/// under migrating shorelines the shorelines move with it.
+struct SurfaceLoadTerm {
+  LoadTerm term;
+  bool water_budget = false;
+  bool moves_solid_surface = false;
+  double density = 0.0;  ///< kg m^-3, of a load that moves the surface
+};
+
 /// The `forcing` block of `sea-level` and the kernel commands: the ice, a
 /// direct load. The ice the run starts from is the history's own, so the
 /// ice and the sea level cannot disagree; the load is the history's change
-/// from its start. The sea level is the `ocean` block's (Blocks.hpp).
+/// from its start. The sea level is the `ocean` block's (Blocks.hpp). A
+/// run through time takes surface loads and seismic sources beside the
+/// ice, changes from the run's start on the run's clock (kyr from the
+/// window's start): a term present at the first node acts there.
 struct SeaLevelForcing {
   IceForcing ice;
+  std::vector<SurfaceLoadTerm> load;
+  std::vector<SeismicTerm> seismic;
+
+  /// Whether the run is forced by more than its ice.
+  [[nodiscard]] bool BesideTheIce() const {
+    return !load.empty() || !seismic.empty();
+  }
 };
 
 /// Reads a `forcing` block of a run with an ocean, relative paths against
@@ -331,8 +358,46 @@ struct SeaLevelForcing {
 /// or "cap_thickness"), `latitude`, `longitude`, `width_deg` and the
 /// amount, `fraction` or `thickness_m`. The members of the other problem
 /// are refused, naming what this one takes, and so are `sea_level` and
-/// `state`, naming the `ocean` block's members.
+/// `state`, naming the `ocean` block's members. The quasi-static problem
+/// also takes `load`, a list of load terms as `response`'s (ReadForcing),
+/// each with `water_budget` and `moves_solid_surface` (both required,
+/// true or false) and, where it moves the solid surface, `density_kg_m3`
+/// (positive; refused otherwise), and `seismic`, a list of sources as
+/// `response`'s; the static problem refuses both.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
     const Json& block, const std::filesystem::path& directory, bool timed);
+
+/// One line describing a surface load, for provenance: its term, its
+/// place in the water budget and, of a layer, its density.
+[[nodiscard]] std::string Describe(const SurfaceLoadTerm& term);
+
+/// The surface loads of a run with an ocean on its grid, at any time of
+/// the run's clock, by their properties.
+class SurfaceLoads {
+ public:
+  /// Reads the terms' files onto `grid`; `block` is the config's `forcing`
+  /// block (TimedForcing). It and `grid` must outlive the loads.
+  SurfaceLoads(const SeaLevelForcing& forcing, const SurfaceGrid& grid,
+               const Json& block);
+
+  /// The loads at one time, SI, at the grid's points and band-limited to
+  /// its degree; a kind no term has is empty.
+  struct Node {
+    std::vector<double> inside;   ///< in the water budget, kg m^-2
+    std::vector<double> outside;  ///< outside it, kg m^-2
+    std::vector<double> layer;    ///< the layer's thickness, m
+  };
+  [[nodiscard]] Node At(double t_kyr) const;
+
+  /// Each `field` term's input as read (DescribeField).
+  [[nodiscard]] const std::vector<std::string>& Inputs() const {
+    return timed_.Inputs();
+  }
+
+ private:
+  std::vector<SurfaceLoadTerm> terms_;
+  const SurfaceGrid* grid_;
+  TimedForcing timed_;
+};
 
 }  // namespace sl3dpp::app

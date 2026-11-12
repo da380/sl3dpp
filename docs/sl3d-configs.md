@@ -975,8 +975,9 @@ deck's moduli as they are; it has no use for a viscosity, and
 
 ### The forcing block
 
-The forcing is the ice, a direct load; the sea level belongs to the sea
-level equation, in the `ocean` block.
+The forcing is the ice, a direct load, and in a run through time any
+further surface loads and seismic sources; the sea level belongs to the
+sea level equation, in the `ocean` block.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1000,6 +1001,34 @@ The members of the other problem are refused, naming what this one
 takes: a date or an ice change in the quasi-static problem, an ice with
 no change in the static one. `forcing.sea_level` and `forcing.state` are
 refused, naming the `ocean` block's members.
+
+In the quasi-static problem `sea-level` takes two more members beside
+the ice, both lists; the static problem and the kernel commands refuse
+them.
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `forcing.load` | list | absent | surface loads: each a load term as `response`'s (one of `cap`, `disk`, `field`, `coefficients`, with an optional `history_kyr`; response, The forcing block), with the properties below |
+| `forcing.load[k].water_budget` | true or false | required | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water |
+| `forcing.load[k].moves_solid_surface` | true or false | required | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it |
+| `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
+| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`, with optional `onset_kyr` and `history_kyr`) |
+
+The loads and the sources are changes from the run's start, on the run's
+clock: a `history_kyr`, an `onset_kyr` and a field file's
+`time_origin_kyr` are in kyr from the window's start (not kyr BP). A term
+present at the first node acts there: the first node is then the
+response of the unrelaxed body to it, and under migrating shorelines its
+shorelines may already differ from the start's. Each load is band-limited
+to the run's degree. The ice is not such a load: it is in the water
+budget, it does not move the solid surface (the solid surface is the one
+under the ice) and it alone enters the flotation that places the
+shorelines.
+
+A run forced beside its ice is not calibrated (`"at": "end"` is
+refused), and a run under seismic sources is not checkpointed. The
+output file's metadata lists the loads (`load`) and the sources
+(`seismic`); its fields are those of the run under the ice alone.
 
 ### The fingerprint
 

@@ -168,6 +168,16 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
     hash.AddValue(sea.kind);
     hash.Add(std::as_bytes(std::span(sea.input.variable)));
   }
+  // the forcing beside the ice, where there is one
+  for (const auto& term : run.forcing.load) {
+    const auto described = Describe(term);
+    hash.Add(std::as_bytes(std::span(described)));
+    if (term.term.kind == LoadTerm::Kind::Field) {
+      hash.AddFile(term.term.field.file);
+    } else if (term.term.kind == LoadTerm::Kind::Coefficients) {
+      hash.AddFile(term.term.file);
+    }
+  }
   if (run.ocean.calibrate) {
     hash.AddValue(run.ocean.calibration_method);
     hash.AddValue(run.ocean.calibration_iterations);
@@ -495,6 +505,20 @@ void WriteHistoryFile(const SeaLevelInput& input,
   }
   file.meta.emplace("shorelines", std::string{NameOf(run.ocean.shorelines)});
   file.meta.emplace("initial_sea_level", std::string{initialSeaLevelOrigin});
+  auto listed = [](const auto& terms) {
+    auto out = std::string{};
+    for (const auto& term : terms) {
+      if (!out.empty()) out += "; ";
+      out += Describe(term);
+    }
+    return out;
+  };
+  if (!run.forcing.load.empty()) {
+    file.meta.emplace("load", listed(run.forcing.load));
+  }
+  if (!run.forcing.seismic.empty()) {
+    file.meta.emplace("seismic", listed(run.forcing.seismic));
+  }
   const auto fieldSize = grid.FieldSize();
   const auto potential = pm::Dimensions{.length = 2, .time = -2};
   auto gather = [&](auto member) {
@@ -588,6 +612,93 @@ std::string RunWith(
   const auto thickness = migrating
                              ? IceThicknessOf(run, solver, world)
                              : std::function<std::vector<double>(double)>{};
+
+  // The forcing beside the ice: the surface loads by their properties and
+  // the seismic sources, on the run's clock (kyr from the window's start),
+  // in the solver's units. Under frozen shorelines the ice's load joins
+  // the loads in the water budget; under migrating ones the ice is given
+  // as its thickness.
+  const auto forced = run.forcing.BesideTheIce();
+  auto forcing = typename Evolution::Forcing{};
+  auto loads = std::optional<SurfaceLoads>{};
+  if (forced) {
+    const auto toKyr = scales.Time() / KYR;
+    const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
+    if (!run.forcing.load.empty()) {
+      loads.emplace(run.forcing, grid, top.At("forcing"));
+      // a node's loads are built once, whichever is asked first
+      struct Built {
+        std::optional<double> t;
+        SurfaceLoads::Node node;
+      };
+      const auto built = std::make_shared<Built>();
+      const auto at = [built, &loads, toKyr](double t) -> const SurfaceLoads::Node& {
+        if (!built->t || *built->t != t) {
+          built->node = loads->At(t * toKyr);
+          built->t = t;
+        }
+        return built->node;
+      };
+      auto any = [&](auto member) {
+        return std::ranges::any_of(run.forcing.load, member);
+      };
+      const auto inside =
+          any([](const SurfaceLoadTerm& term) { return term.water_budget; });
+      const auto outside =
+          any([](const SurfaceLoadTerm& term) { return !term.water_budget; });
+      const auto layered = any(
+          [](const SurfaceLoadTerm& term) { return term.moves_solid_surface; });
+      if (inside || !migrating) {
+        forcing.directLoad = [at, directLoad, migrating, inside,
+                              toLoad](double t) {
+          auto out = migrating ? std::vector<double>{} : directLoad(t);
+          if (!inside) return out;
+          const auto& given = at(t).inside;
+          if (out.empty()) out.assign(given.size(), 0.0);
+          for (auto i = std::size_t{0}; i < out.size(); ++i) {
+            out[i] += given[i] / toLoad;
+          }
+          return out;
+        };
+      }
+      if (outside) {
+        forcing.directLoadOutsideWaterBudget = [at, toLoad](double t) {
+          auto out = at(t).outside;
+          for (auto& v : out) v /= toLoad;
+          return out;
+        };
+      }
+      if (layered) {
+        forcing.solidSurfaceChange = [at, length](double t) {
+          auto out = at(t).layer;
+          for (auto& v : out) v /= length;
+          return out;
+        };
+      }
+    } else if (!migrating) {
+      forcing.directLoad = directLoad;
+    }
+    if (!run.forcing.seismic.empty()) {
+      auto seismic = Forcing{};
+      seismic.seismic = run.forcing.seismic;
+      const auto surfaceRadius = solver.Radius() * length;
+      const auto energy =
+          scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+      forcing.sources = [seismic = std::move(seismic), surfaceRadius, toKyr,
+                         length, energy](double t) {
+        auto sources = SeismicSourcesAt(seismic, t * toKyr, surfaceRadius);
+        for (auto& source : sources) {
+          source.at.radius /= length;
+          for (auto* c : {&source.moment.rr, &source.moment.tt,
+                          &source.moment.pp, &source.moment.rt,
+                          &source.moment.rp, &source.moment.tp}) {
+            *c /= energy;
+          }
+        }
+        return sources;
+      };
+    }
+  }
 
   const auto toPotential = scales.Factor(PotentialDimensions);
   const auto toOmega = 1.0 / scales.Time();
@@ -697,7 +808,13 @@ std::string RunWith(
           times.begin() + static_cast<std::ptrdiff_t>(resumed->node),
           times.end());
       if (remaining.size() >= 2) {  // a checkpoint at the last node is done
-        if (migrating) {
+        if (migrating && forced) {
+          static_cast<void>(evolution.ResumeMigrating(
+              resumed->checkpoint, remaining, thickness, forcing));
+        } else if (forced) {
+          static_cast<void>(
+              evolution.Resume(resumed->checkpoint, remaining, forcing));
+        } else if (migrating) {
           static_cast<void>(evolution.ResumeMigrating(resumed->checkpoint,
                                                       remaining, thickness));
         } else {
@@ -705,6 +822,10 @@ std::string RunWith(
               evolution.Resume(resumed->checkpoint, remaining, directLoad));
         }
       }
+    } else if (migrating && forced) {
+      static_cast<void>(evolution.RunMigrating(times, thickness, forcing));
+    } else if (forced) {
+      static_cast<void>(evolution.Run(times, forcing));
     } else if (migrating) {
       static_cast<void>(evolution.RunMigrating(times, thickness));
     } else {
@@ -1140,6 +1261,25 @@ SeaLevelInput ReadSeaLevelInput(const std::filesystem::path& config) {
   }
   if (Has(top, "checkpoint")) {
     out.checkpoint = ReadCheckpointBlock(top.At("checkpoint"), directory);
+  }
+  // what a run forced beside its ice does not yet do
+  if (out.run.forcing.BesideTheIce()) {
+    const auto& forcing = top.At("forcing");
+    const auto& member =
+        forcing.At(out.run.forcing.load.empty() ? "seismic" : "load");
+    if (out.run.ocean.calibrate) {
+      Fail(member,
+           "is a forcing beside the ice, which a calibrated initial sea "
+           "level does not take: the calibration's runs are under the ice "
+           "alone. Give the sea level at the window's start (\"at\": "
+           "\"start\")");
+    }
+    if (!out.run.forcing.seismic.empty() && Has(top, "checkpoint")) {
+      Fail(forcing.At("seismic"),
+           "gives seismic sources, whose run is not checkpointed: the "
+           "checkpoint files do not hold the state the sources' toroidal "
+           "response is stepped from");
+    }
   }
   if (Has(top, "restart")) out.restart = top.At("restart").AsBool();
   const auto& output = top.At("output");

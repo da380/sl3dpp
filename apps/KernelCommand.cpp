@@ -414,6 +414,13 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
   const auto directory = config.parent_path();
   auto out = KernelInput{};
   out.run = ReadSeaLevelRun(top, directory);
+  for (const auto* name : {"load", "seismic"}) {
+    if (const auto& forcing = top.At("forcing"); Has(forcing, name)) {
+      Fail(forcing.At(name),
+           "is a forcing beside the ice, which the kernel commands do not "
+           "take: their runs are under the ice history alone");
+    }
+  }
   out.record_stride = Integer(top, "record_stride", 1);
   if (out.record_stride < 1) {
     Fail(top.At("record_stride"), "is not a positive stride");

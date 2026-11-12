@@ -61,12 +61,14 @@ AmplitudeHistory ReadHistory(const Json& item, bool timed) {
 /// A centre's latitude and longitude, degrees.
 GeographicPoint SiteOf(const Json& object) { return ReadSite(object); }
 
+/// `extra`: further members the item may hold, which the caller reads.
 LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
-                      bool timed) {
+                      bool timed, std::span<const std::string_view> extra = {}) {
   auto history = ReadHistory(item, timed);
   auto members =
       std::vector<std::string_view>(kTermKinds.begin(), kTermKinds.end());
   members.push_back("history_kyr");
+  members.insert(members.end(), extra.begin(), extra.end());
   Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
       kTermKinds, [&item](std::string_view kind) { return Has(item, kind); });
@@ -790,8 +792,58 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
            "(converted with the run's own ice at the same instant)");
     }
   }
-  Allow(block, {"ice"});
+  Allow(block, {"ice", "load", "seismic"});
   auto out = SeaLevelForcing{};
+  for (const auto* name : {"load", "seismic"}) {
+    if (!timed && Has(block, name)) {
+      Fail(block.At(name),
+           std::format("is a forcing beside the ice, which {}: the static "
+                       "problem is the fingerprint of an ice change",
+                       kNeedsQuasiStatic));
+    }
+  }
+  if (Has(block, "load")) {
+    constexpr auto kProperties = std::array<std::string_view, 3>{
+        "water_budget", "moves_solid_surface", "density_kg_m3"};
+    for (const auto& item : block.At("load").AsArray()) {
+      auto term = SurfaceLoadTerm{};
+      term.term = ReadLoadTerm(item, directory, true, kProperties);
+      for (const auto* name : {"water_budget", "moves_solid_surface"}) {
+        if (!Has(item, name)) {
+          Fail(item,
+               std::format("does not say `{}` (true or false): a surface "
+                           "load of a run with an ocean states whether its "
+                           "mass is exchanged with the ocean "
+                           "(`water_budget`) and whether it is a layer on "
+                           "the solid surface (`moves_solid_surface`)",
+                           name));
+        }
+      }
+      term.water_budget = item.At("water_budget").AsBool();
+      term.moves_solid_surface = item.At("moves_solid_surface").AsBool();
+      if (term.moves_solid_surface) {
+        if (!Has(item, "density_kg_m3")) {
+          Fail(item,
+               "moves the solid surface and gives no `density_kg_m3`: the "
+               "layer's thickness is its mass over its density");
+        }
+        term.density = Number(item, "density_kg_m3");
+        if (!(term.density > 0.0) || !std::isfinite(term.density)) {
+          Fail(item.At("density_kg_m3"), "is not a positive density");
+        }
+      } else if (Has(item, "density_kg_m3")) {
+        Fail(item.At("density_kg_m3"),
+             "is the density of a layer on the solid surface, and this load "
+             "is none (`moves_solid_surface` is false)");
+      }
+      out.load.push_back(std::move(term));
+    }
+  }
+  if (Has(block, "seismic")) {
+    for (const auto& item : block.At("seismic").AsArray()) {
+      out.seismic.push_back(ReadSeismicTerm(item));
+    }
+  }
   const auto& ice = block.At("ice");
   out.ice.file = ReadFileInput(ice, directory, "ice_thickness");
   if (timed) {
@@ -820,6 +872,52 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
     out.ice.change = ReadIceChange(ice);
     out.ice.file.date = ReadDate(ice, "date_kyr_bp");
   }
+  return out;
+}
+
+std::string Describe(const SurfaceLoadTerm& term) {
+  auto out = Describe(term.term);
+  out += term.water_budget ? ", in the water budget"
+                           : ", outside the water budget";
+  if (term.moves_solid_surface) {
+    out += std::format(", a layer on the solid surface of {:g} kg m^-3",
+                       term.density);
+  }
+  return out;
+}
+
+namespace {
+Forcing LoadsAlone(const SeaLevelForcing& forcing) {
+  auto out = Forcing{};
+  for (const auto& term : forcing.load) out.load.push_back(term.term);
+  return out;
+}
+}  // namespace
+
+SurfaceLoads::SurfaceLoads(const SeaLevelForcing& forcing,
+                           const SurfaceGrid& grid, const Json& block)
+    : terms_(forcing.load), grid_(&grid), timed_(LoadsAlone(forcing), grid, block) {}
+
+SurfaceLoads::Node SurfaceLoads::At(double t_kyr) const {
+  const auto& grid = *grid_;
+  const auto built = timed_.At(t_kyr);
+  auto inside = std::vector<Complex>{}, outside = std::vector<Complex>{};
+  auto layer = std::vector<Complex>{};
+  auto add = [&](std::vector<Complex>& to, const std::vector<Complex>& term,
+                 double factor) {
+    if (to.empty()) to = grid.ZeroCoefficients();
+    for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += factor * term[i];
+  };
+  for (auto k = std::size_t{0}; k < terms_.size(); ++k) {
+    add(terms_[k].water_budget ? inside : outside, built.terms[k], 1.0);
+    if (terms_[k].moves_solid_surface) {
+      add(layer, built.terms[k], 1.0 / terms_[k].density);
+    }
+  }
+  auto out = Node{};
+  if (!inside.empty()) out.inside = grid.Synthesise(inside);
+  if (!outside.empty()) out.outside = grid.Synthesise(outside);
+  if (!layer.empty()) out.layer = grid.Synthesise(layer);
   return out;
 }
 

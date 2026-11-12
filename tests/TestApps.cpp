@@ -2422,6 +2422,220 @@ TEST_F(AppsTest, SeaLevelTakesAnIceHistoryAndAnInitialSeaLevel) {
                 "forcing.ice.file", "not a number");
 }
 
+TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
+  // A run through time under surface loads and a seismic source beside
+  // its ice: a cap in the water budget with an amplitude history, a disk
+  // outside it that is a layer on the solid surface, and a point source,
+  // all present from the first node. Under frozen and under migrating
+  // shorelines the command is the library's evolution run here under the
+  // same forcing; the output says what forced it; and the terms that do
+  // not state their properties, the static problem, a calibrated start,
+  // checkpoints under sources and the kernel commands are refused.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc", 0.0, true);
+  constexpr auto kLmax = 8;
+  const auto cap = std::string{R"({"cap": {"latitude": 60, "longitude": -85,
+      "width_deg": 20, "amplitude_kg_m2": 2000},
+      "history_kyr": [[0, 0.5], [2, 1.5]],
+      "water_budget": true, "moves_solid_surface": false})"};
+  const auto disk = std::string{R"({"disk": {"latitude": -20, "longitude": 100,
+      "radius_deg": 25, "amplitude_kg_m2": 4600},
+      "water_budget": false, "moves_solid_surface": true,
+      "density_kg_m3": 2300})"};
+  const auto point = std::string{R"({"point": {"latitude": 30, "longitude": 40,
+      "depth_km": 300, "moment_tensor_nm": {"rr": 9e20, "tt": -2e20,
+      "pp": -7e20, "rt": 3e20, "rp": -7e20, "tp": 6e20}}})"};
+  const auto config = [&](const std::string& name, const std::string& shorelines,
+                          const std::string& forcing,
+                          const std::string& extra = "",
+                          const std::string& at = "start") {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4}},
+      "forcing": {{"ice": {{"file": "history.nc"}}{}}},
+      "ocean": {{"shorelines": "{}",
+                 "topography": {{"file": "history.nc", "at": "{}"}}}},
+      "rotation": "none",{} "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, forcing, shorelines, at,
+                                             extra, name));
+  };
+  const auto all = std::format(R"(, "load": [{}, {}], "seismic": [{}])", cap,
+                               disk, point);
+
+  // the library's pieces
+  const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+  const auto mesh = RadialMesh::Create(model, {.lmax = kLmax});
+  ASSERT_TRUE(mesh);
+  const auto material = Material::Create(model, *mesh);
+  ASSERT_TRUE(material);
+  const auto rheology = Rheology::FromModel(*material, model);
+  ASSERT_TRUE(rheology);
+  const ViscoelasticOperator op(*rheology, kLmax);
+  const SurfaceGrid grid(kLmax);
+  const GRDSolver solver(grid, op.ElasticLoveNumbers(), SeaLevelParameters{});
+  const auto& scales = solver.SolverScales();
+  const auto length = scales.Length();
+  const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  const auto energy =
+      scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
+  ASSERT_TRUE(history);
+  const auto start = -2.0 * app::KYR;
+  const auto ice0 = history->Values("ice_thickness", start);
+  auto sea = SeaLevelFromTopography(history->Values("topography", start), ice0,
+                                    solver.Parameters());
+  auto ice = ice0;
+  for (auto& v : ice) v /= length;
+  for (auto& v : sea) v /= length;
+  const auto state = solver.MakeState(std::move(ice), std::move(sea));
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < 4; ++n) {
+    times.push_back(2.0 * app::KYR * n / 3 / scales.Time());
+  }
+  const auto rad = std::numbers::pi / 180.0;
+  const auto capField = grid.Synthesise(grid.Expand(
+      app::CapField(grid, GeographicPoint{60.0, -85.0}, 20.0 * rad, 2000.0)));
+  const auto diskField = grid.Synthesise(app::DiskCoefficients(
+      grid, GeographicPoint{-20.0, 100.0}, 25.0 * rad, 4600.0));
+  const auto kyrOf = [&](double t) { return t * scales.Time() / app::KYR; };
+  const auto thicknessAt = [&](double t) {
+    return history->Values("ice_thickness", start + t * scales.Time());
+  };
+  const auto site = GeographicPoint{30.0, 40.0};
+  const auto source = PointSource{
+      .at = {.radius = (solver.Radius() * length - 300e3) / length,
+             .colatitude = site.CoLatitude(),
+             .longitude = site.Longitude()},
+      .moment = {.rr = 9e20 / energy, .tt = -2e20 / energy, .pp = -7e20 / energy,
+                 .rt = 3e20 / energy, .rp = -7e20 / energy, .tp = 6e20 / energy}};
+
+  for (const bool migrating : {false, true}) {
+    const auto name = std::string{migrating ? "moving" : "frozen"};
+    const auto summary = app::RunSeaLevel(config(name, migrating ? "migrating" : "frozen", all));
+    const auto file = pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+    EXPECT_EQ(std::get<std::string>(file.meta.at("load")),
+              "cap at latitude 60, longitude -85, width 20 deg, 2000 kg m^-2, "
+              "history_kyr [[0, 0.5], [2, 1.5]], in the water budget; disk at "
+              "latitude -20, longitude 100, radius 25 deg, 4600 kg m^-2, "
+              "outside the water budget, a layer on the solid surface of "
+              "2300 kg m^-3")
+        << summary;
+    EXPECT_TRUE(file.meta.contains("seismic"));
+
+    auto forcing = Evolution::Forcing{};
+    forcing.directLoad = [&, migrating](double t) {
+      auto out = std::vector<double>(capField.size(), 0.0);
+      const auto factor = 0.5 + 0.5 * kyrOf(t);
+      const auto thickness = thicknessAt(t);
+      for (auto i = std::size_t{0}; i < out.size(); ++i) {
+        if (!migrating) {
+          out[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
+                   (thickness[i] - ice0[i]) / length;
+        }
+        out[i] += factor * capField[i] / toLoad;
+      }
+      return out;
+    };
+    forcing.directLoadOutsideWaterBudget = [&](double) {
+      auto out = diskField;
+      for (auto& v : out) v /= toLoad;
+      return out;
+    };
+    forcing.solidSurfaceChange = [&](double) {
+      auto out = diskField;
+      for (auto& v : out) v /= 2300.0 * length;
+      return out;
+    };
+    forcing.sources = [&](double) { return std::vector<PointSource>{source}; };
+    Evolution evolution(op, solver, state, {.rotation = RotationalFeedback::None});
+    const auto snapshots =
+        migrating ? evolution.RunMigrating(
+                        times,
+                        [&](double t) {
+                          auto out = thicknessAt(t);
+                          for (auto i = std::size_t{0}; i < out.size(); ++i) {
+                            out[i] = state.iceThickness[i] +
+                                     (out[i] - ice0[i]) / length;
+                          }
+                          return out;
+                        },
+                        forcing)
+                  : evolution.Run(times, forcing);
+    ASSERT_EQ(snapshots.size(), 4u);
+    for (const auto* variable :
+         {"relative_sea_level_change", "displacement", "potential"}) {
+      const auto which = std::string_view{variable};
+      const auto factor = which == "potential"
+                              ? scales.Factor(PotentialDimensions)
+                              : length;
+      auto want = std::vector<double>{};
+      for (const auto& snapshot : snapshots) {
+        EXPECT_TRUE(snapshot.converged);
+        const auto& field = which == "relative_sea_level_change"
+                                ? snapshot.relativeSeaLevelChange
+                                : (which == "displacement" ? snapshot.displacement
+                                                           : snapshot.potential);
+        for (const auto v : field) want.push_back(v * factor);
+      }
+      EXPECT_LT(Departure(file.variables.at(variable).values, want), 1e-9)
+          << variable << ", " << name;
+    }
+    // the forcing beside the ice matters to the run
+    static_cast<void>(app::RunSeaLevel(
+        config(name + "_ice", migrating ? "migrating" : "frozen", "")));
+    const auto bare = pm::ReadSurfaceFile(dir_ / "out" / (name + "_ice.nc"));
+    EXPECT_GT(Departure(bare.variables.at("displacement").values,
+                        file.variables.at("displacement").values),
+              1e-3)
+        << name;
+    EXPECT_FALSE(bare.meta.contains("load"));
+  }
+
+  // -- refusals
+  const auto loaded = [&](const std::string& name, const std::string& term) {
+    return config(name, "frozen", std::format(R"(, "load": [{}])", term));
+  };
+  ExpectRefused(app::RunSeaLevel,
+                loaded("unsaid", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "moves_solid_surface": false})"),
+                "forcing.load[0]", "does not say `water_budget`");
+  ExpectRefused(app::RunSeaLevel,
+                loaded("unmoved", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "water_budget": true})"),
+                "forcing.load[0]", "does not say `moves_solid_surface`");
+  ExpectRefused(app::RunSeaLevel,
+                loaded("thin", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "water_budget": false, "moves_solid_surface": true})"),
+                "forcing.load[0]", "gives no `density_kg_m3`");
+  ExpectRefused(app::RunSeaLevel,
+                loaded("dense", R"({"cap": {"latitude": 60, "longitude": -85,
+                    "width_deg": 20, "amplitude_kg_m2": 2000},
+                    "water_budget": false, "moves_solid_surface": false,
+                    "density_kg_m3": 2300})"),
+                "forcing.load[0].density_kg_m3", "this load is none");
+  ExpectRefused(app::RunSeaLevel,
+                config("calibrated", "frozen", all, "", "end"), "forcing.load",
+                "a calibrated initial sea level does not take");
+  ExpectRefused(app::RunSeaLevel,
+                config("kept", "frozen", all,
+                       R"( "checkpoint": {"directory": "ckpt", "every": 1},)"),
+                "forcing.seismic", "is not checkpointed");
+  ExpectRefused(
+      app::RunSeaLevel,
+      Write("static.json", "{" + std::string{kBall} + R"(,
+        "problem": "static",
+        "forcing": {"ice": {"file": "history.nc", "date_kyr_bp": 0,
+            "type": "cap_thickness", "latitude": 70, "longitude": 0,
+            "width_deg": 10, "thickness_m": -1}, "load": []},
+        "ocean": {"topography": {"file": "history.nc", "date_kyr_bp": 0}},
+        "output": {"surface": "out/static.nc"}})"),
+      "forcing.load", "is a forcing beside the ice");
+}
+
 TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   namespace pm = planetmodel;
   static_cast<void>(Deck());
