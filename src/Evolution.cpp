@@ -216,7 +216,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
   if (migrating && !resumed) {
     // The shorelines follow flotation from the first node, so the
     // background must be the state there, flotation's own C included.
-    detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]));
+    detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]),
+                                interior != nullptr);
   }
 
   if (options_.rotation == RotationalFeedback::Full) {
@@ -421,6 +422,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // The start under a forcing beside the ice: the nonlinear equation
     // on the unrelaxed body, from the background.
     GRDSolver::NonlinearForcing moving;
+    // the ice at the first node may differ from the background's
+    moving.iceThicknessChange = (*iceThickness)(times[0]);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      moving.iceThicknessChange[i] -= state_.iceThickness[i];
+    }
     movingLoadsAt(times[0], moving);
     moving.rotation = options_.rotation;
     if (sourced) startSources(moving);

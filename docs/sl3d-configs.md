@@ -1047,7 +1047,7 @@ block's.
 | `forcing.ice_change[k].thickness.date_kyr_bp` | number | required in the static problem | the date the file is read at, kyr BP: the change is the file at this date less the file at the state's date (which the state must have, `ocean.date_kyr_bp`); refused in the quasi-static problem, which reads the file at each node's date |
 | `forcing.ice_change[k].change` | file input | one of the four | a file holding a thickness CHANGE in metres (variable `ice_thickness_change` by default), taken as it stands. The static problem reads a file without a time axis as it is; the quasi-static problem reads a file with a time axis at each node's date and holds one without through the run. Refused with the state at the window's end (`"at": "end"`), where the ice changes are thickness histories, `thickness` terms |
 | `forcing.ice_change[k].change.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one |
-| `forcing.ice_change[k].cap_thickness` | object | one of the four | the static problem alone: a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt) |
+| `forcing.ice_change[k].cap_thickness` | object | one of the four | the static problem alone: a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds) |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | the static problem alone: a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt) |
 
 The ice at a time is the state's ice plus the terms' changes summed
@@ -1114,8 +1114,9 @@ distance d from its centre, weighted exp(-d^2 / (2 w^2)) with no cut-off:
 a `cap_fraction` change is `fraction` times the weight times the state's
 ice thickness, so it acts only where there is ice (and, `fraction` no
 less than -1, takes no more than there is); a `cap_thickness` change is
-`thickness_m` times the weight, and a negative one, its tail reaching
-past the ice, takes ice where the state holds none, which is refused.
+`thickness_m` times the weight, and a negative one, whose tail reaches
+past the ice, takes at each point no more than the ice the state holds
+there.
 The change loads the Earth only where the ice is grounded. The solve's
 tolerance is `solver.rtol`; a solve that does not converge is an error.
 

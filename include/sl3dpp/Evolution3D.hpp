@@ -226,8 +226,9 @@ class Evolution3D {
   /// a layer on the solid surface and interior sources, changes from the
   /// background state. The start is then solved (the nonlinear equation
   /// on the unrelaxed body; under lateral moduli or sources, inside the
-  /// combined fixed point of a zero-length step). A prescribed tide is
-  /// refused.
+  /// combined fixed point of a zero-length step), and the ice at times[0]
+  /// may differ from the background's. With one time the run is that
+  /// solve alone. A prescribed tide is refused.
   [[nodiscard]] std::vector<Snapshot> RunMigrating(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness,

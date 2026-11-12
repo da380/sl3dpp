@@ -369,6 +369,11 @@ RunIce::RunIce(const SeaLevelRun& run, const Json& top, InputFiles& files,
         held.fixed.resize(mask.size());
         for (auto i = std::size_t{0}; i < mask.size(); ++i) {
           held.fixed[i] = term.amount * mask[i] * (fraction ? state_[i] : 1.0);
+          // a cap of thickness has no edge: where it melts, it takes no
+          // more than the ice the state holds there
+          if (!fraction) {
+            held.fixed[i] = std::max(held.fixed[i], -std::max(state_[i], 0.0));
+          }
         }
         break;
       }

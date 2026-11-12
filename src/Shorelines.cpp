@@ -8,7 +8,7 @@ namespace sl3dpp::detail {
 
 void CheckMigratingStart(const GRDSolver& solver,
                          const GRDSolver::State& background,
-                         std::span<const double> startIce) {
+                         std::span<const double> startIce, bool startSolved) {
   const auto fieldSize = solver.Grid().FieldSize();
   if (startIce.size() != fieldSize) {
     throw std::invalid_argument(
@@ -19,7 +19,7 @@ void CheckMigratingStart(const GRDSolver& solver,
     scale = std::max(scale, std::abs(startIce[i]));
     worst = std::max(worst, std::abs(background.iceThickness[i] - startIce[i]));
   }
-  if (worst > 1e-6 * scale) {
+  if (!startSolved && worst > 1e-6 * scale) {
     throw std::invalid_argument(
         "the background state's ice thickness is not the history's at the "
         "first node; build the state at times[0]");

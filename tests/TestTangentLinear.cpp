@@ -1839,6 +1839,124 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   }
 }
 
+TEST(TangentLinear, TheOneNodeRunIsTheStaticProblem) {
+  // A run of one node is the solve of its start alone: the static
+  // problem. Under frozen shorelines it is the linear sea level equation
+  // on the unrelaxed body under the node's loads, and under migrating
+  // ones the nonlinear equation, where the ice at the node may differ
+  // from the background's (an ice change is then one of the forcings)
+  // and the shorelines move; each is the sea level solver's own answer.
+  // With a source it is the first node of a longer run.
+  auto setup = Scene::Make(1e21);
+  const auto& sle = setup.solver.SolverScales();
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto cap = MarineCap::Make(setup, 3);
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  std::mt19937 rng(61);
+  const auto inside = setup.Smooth(rng, 2e4 * setup.Sigma());
+  const auto outside = setup.Smooth(rng, 1e4 * setup.Sigma());
+  const auto layer = setup.Smooth(rng, 400.0 * setup.Metre());
+  auto thinned = cap.ice0;
+  for (auto& v : thinned) v *= 0.8;
+  const auto ice = [&](double) { return thinned; };
+  auto forcing = Evolution::Forcing{
+      .directLoad = [&](double) { return inside; },
+      .directLoadOutsideWaterBudget = [&](double) { return outside; },
+      .solidSurfaceChange = [&](double) { return layer; }};
+  const auto one = std::vector<double>{cap.times[0]};
+  const GRDSolver elastic(setup.solver.Grid(), op.ElasticLoveNumbers(),
+                          setup.solver.Parameters());
+  const GRDSolver::Options options{.rtol = 1e-12, .max_iterations = 400};
+  auto worst = [](std::span<const double> x, std::span<const double> y) {
+    auto out = 0.0, top = 0.0;
+    for (auto i = std::size_t{0}; i < x.size(); ++i) {
+      out = std::max(out, std::abs(x[i] - y[i]));
+      top = std::max(top, std::abs(y[i]));
+    }
+    return out / top;
+  };
+
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    Evolution evolution(op, setup.solver, state,
+                        {.rotation = rotation,
+                         .rtol = 1e-12,
+                         .max_nonlinear_iterations = 400});
+    const auto mode = static_cast<int>(rotation);
+
+    // frozen: the linear equation
+    const auto frozen = evolution.Run(one, forcing);
+    ASSERT_EQ(frozen.size(), 1u);
+    GRDSolver::GeneralisedForcing fixed;
+    fixed.directLoad = inside;
+    fixed.directLoadOutsideWaterBudget = outside;
+    fixed.solidSurfaceChange = layer;
+    fixed.rotation = rotation;
+    const auto linear = elastic.SolveGeneralised(state, fixed, options);
+    EXPECT_LT(worst(frozen[0].relativeSeaLevelChange, linear.relativeSeaLevelChange),
+              1e-9)
+        << "rotation " << mode;
+    EXPECT_LT(worst(frozen[0].displacement, linear.displacement), 1e-9)
+        << "rotation " << mode;
+
+    // migrating: the nonlinear one, the ice changed with the rest
+    const auto moving = evolution.RunMigrating(one, ice, forcing);
+    ASSERT_EQ(moving.size(), 1u);
+    ASSERT_TRUE(moving[0].converged);
+    GRDSolver::NonlinearForcing moved;
+    moved.iceThicknessChange = thinned;
+    for (auto i = std::size_t{0}; i < thinned.size(); ++i) {
+      moved.iceThicknessChange[i] -= state.iceThickness[i];
+    }
+    moved.directLoad = inside;
+    moved.directLoadOutsideWaterBudget = outside;
+    moved.solidSurfaceChange = layer;
+    moved.rotation = rotation;
+    const auto nonlinear = elastic.SolveNonlinear(state, moved, options);
+    ASSERT_TRUE(nonlinear.response.converged);
+    EXPECT_EQ(moving[0].oceanFunction, nonlinear.finalState.oceanFunction);
+    EXPECT_NE(moving[0].oceanFunction, state.oceanFunction);
+    EXPECT_LT(worst(moving[0].relativeSeaLevelChange,
+                    nonlinear.response.relativeSeaLevelChange),
+              1e-9)
+        << "rotation " << mode;
+    EXPECT_LT(worst(moving[0].displacement, nonlinear.response.displacement), 1e-9)
+        << "rotation " << mode;
+    EXPECT_LT(worst(moving[0].potential, nonlinear.response.potential), 1e-9)
+        << "rotation " << mode;
+    // the ice's change matters to it
+    const auto held = evolution.RunMigrating(
+        one, [&](double) { return state.iceThickness; }, forcing);
+    EXPECT_GT(worst(held[0].relativeSeaLevelChange, moving[0].relativeSeaLevelChange),
+              1e-3);
+    // without a forcing the first node must be the background
+    EXPECT_THROW((void)evolution.RunMigrating(one, ice), std::invalid_argument);
+  }
+
+  // with a source: the first node of a longer run
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e22 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  forcing.sources = [&](double) {
+    return std::vector<PointSource>{
+        {.at = {.radius = surface - 400e3 / sle.Length(),
+                .colatitude = 0.6,
+                .longitude = 4.6},
+         .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                    .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}}};
+  };
+  Evolution evolution(op, setup.solver, state,
+                      {.rtol = 1e-12, .max_nonlinear_iterations = 400});
+  const auto alone = evolution.RunMigrating(one, ice, forcing);
+  const auto longer = evolution.RunMigrating(cap.times, ice, forcing);
+  ASSERT_EQ(alone.size(), 1u);
+  EXPECT_EQ(alone[0].relativeSeaLevelChange, longer[0].relativeSeaLevelChange);
+  EXPECT_EQ(alone[0].displacement, longer[0].displacement);
+  ASSERT_FALSE(alone[0].toroidalPotential.empty());
+  EXPECT_EQ(alone[0].toroidalPotential, longer[0].toroidalPotential);
+  EXPECT_EQ(alone[0].oceanFunction, longer[0].oceanFunction);
+}
+
 TEST(TangentLinear, AboutAForcedMigratingTrajectory) {
   // About a migrating run under forcings beside the ice — a load inside
   // the water budget, one outside it, a layer on the solid surface and a

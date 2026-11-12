@@ -453,6 +453,23 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
       top = std::max(top, std::abs(v));
     }
     EXPECT_GT(top, 0.0);
+    // The run of one node is the start's solve alone, the static
+    // problem, and the ice there may differ from the background's: the
+    // 1D run's, shorelines included.
+    const auto one = std::vector<double>{0.0};
+    const auto thinned = [&](double) {
+      auto out = state.iceThickness;
+      for (auto& v : out) v *= 0.8;
+      return out;
+    };
+    const auto alone1 = evolution1.RunMigrating(one, thinned, as1D(forcing));
+    const auto alone3 = evolution3.RunMigrating(one, thinned, forcing);
+    ASSERT_EQ(alone3.size(), 1u);
+    compare(alone3, alone1, 1e-7, "one node");
+    EXPECT_EQ(alone3[0].oceanFunction, alone1[0].oceanFunction);
+    EXPECT_GT(WorstDeparture(alone3[0].relativeSeaLevelChange,
+                             coupled[0].relativeSeaLevelChange),
+              1e-3);
   }
 
   // -- lateral viscosity, no shoreline moving: the frozen run

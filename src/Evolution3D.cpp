@@ -558,7 +558,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   if (migrating && !resumed) {
     // The shorelines follow flotation from the first node, so the
     // background must be the state there, flotation's own C included.
-    detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]));
+    detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]),
+                                interior != nullptr);
   }
 
   if (options_.rotation == RotationalFeedback::Full) {
@@ -642,6 +643,11 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     // The start under a forcing beside the ice: solved, from the
     // background.
     setMoving(times[0]);
+    // the ice at the first node may differ from the background's
+    coupled.moving.iceThicknessChange = (*iceThickness)(times[0]);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      coupled.moving.iceThicknessChange[i] -= state_.iceThickness[i];
+    }
     startInfo = Start(coupled, times[0], std::vector<double>(fieldSize, 0.0));
   } else if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.

@@ -235,8 +235,11 @@ class Evolution {
   /// surface (which moves the shorelines as the sea level does) and
   /// interior sources, all changes from the background state. The start
   /// is then solved, by the nonlinear equation on the unrelaxed body,
-  /// so a forcing present at times[0] acts there. A prescribed tide is
-  /// refused.
+  /// so a forcing present at times[0] acts there, and so does an ice
+  /// thickness there other than the background's (the background's ocean
+  /// function must still be flotation's). With one time the run is that
+  /// solve alone: the static problem with its shorelines migrating. A
+  /// prescribed tide is refused.
   [[nodiscard]] std::vector<Snapshot> RunMigrating(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness,

@@ -2498,6 +2498,26 @@ TEST_F(AppsTest, SeaLevelFingerprintTakesItsChangeAsTermsThatAdd) {
   const auto read = [&](const std::string& name) {
     return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
   };
+  // A melting cap has no edge, and takes at each point no more than the
+  // ice the state holds: caps deep and wide enough to take it all are
+  // one change, the loss of the state's ice, whatever their depth.
+  {
+    for (const auto* depth : {"1e7", "2e7"}) {
+      static_cast<void>(app::RunSeaLevel(config(
+          std::string{"gone"} + depth,
+          std::format(R"({{"cap_thickness": {{"latitude": 30, "longitude": 60,
+              "width_deg": 80, "thickness_m": -{}}}}})",
+                      depth))));
+    }
+    const auto once = read("gone1e7");
+    const auto twice = read("gone2e7");
+    const auto& taken = once.variables.at("ice_change").values;
+    EXPECT_EQ(taken, twice.variables.at("ice_change").values);
+    EXPECT_EQ(once.variables.at("relative_sea_level_change").values,
+              twice.variables.at("relative_sea_level_change").values);
+    EXPECT_LT(*std::ranges::min_element(taken), -1.0);
+    EXPECT_LE(*std::ranges::max_element(taken), 0.0);
+  }
   const auto thickness = read("thickness");
   const auto change = read("change");
   const auto cap = read("cap");
@@ -4434,14 +4454,12 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                                                   "variable": "thk"}}]})"),
           "forcing.ice_change[0].thickness.variable",
           "it holds \"ice_thickness\", \"topography\"");
-  // more ice taken than the state holds: a cap thinning the state where
-  // it holds none, and a melt of four times the history's, at a node of
-  // the run
+  // more ice taken than the state holds: a file's melt of four times the
+  // history's, in the static problem and at a node of the run
+  sl3dpp::test::WriteToyChange(dir_ / "melted.nc", false, 4.0);
   refused(app::RunSeaLevel,
           fingerprint("", R"({"deck": "ball.deck"})",
-                      R"({"ice_change": [{"cap_thickness": {"latitude": 70,
-                          "longitude": 0, "width_deg": 10,
-                          "thickness_m": -1}}]})"),
+                      R"({"ice_change": [{"change": {"file": "melted.nc"}}]})"),
           "forcing.ice_change", "removes more ice than the state holds, by ");
   sl3dpp::test::WriteToyChange(dir_ / "melt.nc", true, 4.0);
   for (const auto* what :

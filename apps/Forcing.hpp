@@ -329,7 +329,8 @@ class TimedForcing {
 /// - `cap_thickness`, `cap_fraction` (the static problem alone): a
 ///   Gaussian cap, weighted exp(-d^2 / (2 w^2)) in great-circle distance d
 ///   from its centre with no cut-off, of a thickness at its centre or of a
-///   fraction of the state's ice.
+///   fraction of the state's ice. A cap of negative thickness takes at
+///   each point no more than the ice the state holds there.
 struct IceChangeTerm {
   enum class Kind { Thickness, Change, CapThickness, CapFraction };
   Kind kind = Kind::Thickness;
