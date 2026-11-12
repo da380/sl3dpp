@@ -21,6 +21,7 @@
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
@@ -209,6 +210,113 @@ TEST(LateralGate, ZeroLateralForcedEvolutionMatchesThe1DLoop) {
             << "node " << node << ", " << label;
       }
     }
+  }
+}
+
+TEST(LateralGate, LoadsOutsideTheWaterBudgetAndLayersMatchThe1DLoop) {
+  // A direct load outside the water budget and a layer on the solid
+  // surface, beside one inside the budget: the 3D loop with no lateral
+  // perturbation is the 1D loop, with an ocean and without; and under
+  // lateral viscosity the tangent-linear run along the three, the run
+  // being linear in them, is the run under them.
+  auto setup = Setup::Make();
+  const auto kyr = 1000.0 * 3.15576e7 / setup.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, kyr, 2 * kyr, 4 * kyr};
+  const auto held = setup.MeltLoad(-0.1);
+  const auto& grid = setup.solver.Grid();
+  const auto length = setup.solver.SolverScales().Length();
+  const auto pattern = grid.FromFunction([&](double theta, double phi) {
+    return 3.0 / length * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi - 1.0);
+  });
+  auto load = [&](double t) {
+    auto out = held;
+    for (auto& v : out) v *= 1.0 + 0.2 * t / kyr;
+    return out;
+  };
+  // the same pattern as the ice's, turned about the axis by its sign
+  auto outside = [&](double t) {
+    auto out = held;
+    for (auto i = std::size_t{0}; i < out.size(); ++i) {
+      out[i] = -0.6 * held[out.size() - 1 - i] * (0.5 + 0.3 * t / kyr);
+    }
+    return out;
+  };
+  auto layer = [&](double t) {
+    auto out = pattern;
+    for (auto& v : out) v *= 0.3 + t / (4.0 * kyr);
+    return out;
+  };
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  Viscoelastic3D op3(setup.rheology, kLmax,
+                     [](double, double, double) { return 0.0; });
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&dry, &wet}) {
+    const auto label = background == &dry ? "no ocean" : "ocean";
+    Evolution evolution1(op1, setup.solver, *background, {.rtol = 1e-11});
+    const auto reference = evolution1.Run(
+        times, Evolution::Forcing{.directLoad = load,
+                                  .directLoadOutsideWaterBudget = outside,
+                                  .solidSurfaceChange = layer});
+    Evolution3D evolution3(op3, setup.solver, *background,
+                           {.rtol = 1e-11, .coupled_rtol = 1e-10});
+    const auto coupled = evolution3.Run(
+        times, Evolution3D::Forcing{.directLoad = load,
+                                    .directLoadOutsideWaterBudget = outside,
+                                    .solidSurfaceChange = layer});
+    ASSERT_EQ(coupled.size(), reference.size());
+    for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
+      EXPECT_LT(WorstDeparture(coupled[node].relativeSeaLevelChange,
+                               reference[node].relativeSeaLevelChange),
+                1e-8)
+          << "node " << node << ", " << label;
+      EXPECT_LT(WorstDeparture(coupled[node].displacement,
+                               reference[node].displacement),
+                1e-8)
+          << "node " << node << ", " << label;
+      EXPECT_LT(
+          WorstDeparture(coupled[node].potential, reference[node].potential),
+          1e-8)
+          << "node " << node << ", " << label;
+    }
+    // and the two new forcings matter: without them, another run
+    const auto bare =
+        evolution3.Run(times, Evolution3D::Forcing{.directLoad = load});
+    EXPECT_GT(WorstDeparture(bare.back().relativeSeaLevelChange,
+                             coupled.back().relativeSeaLevelChange),
+              1e-3)
+        << label;
+  }
+
+  Viscoelastic3D lateral(
+      setup.rheology, kLmax, [](double, double theta, double phi) {
+        return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  Evolution3D evolution(lateral, setup.solver, setup.state,
+                        {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  const auto run = evolution.Run(
+      times, Evolution3D::Forcing{.directLoad = load,
+                                  .directLoadOutsideWaterBudget = outside,
+                                  .solidSurfaceChange = layer});
+  TangentPerturbation3D direction;
+  for (auto t : times) {
+    direction.directLoad.push_back(load(t));
+    direction.directLoadOutsideWaterBudget.push_back(outside(t));
+    direction.solidSurfaceChange.push_back(layer(t));
+  }
+  const auto along =
+      TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12})
+          .Run(times, direction);
+  for (auto node = std::size_t{0}; node < run.size(); ++node) {
+    EXPECT_LT(WorstDeparture(along[node].relativeSeaLevelChange,
+                             run[node].relativeSeaLevelChange),
+              1e-8)
+        << "node " << node;
+    EXPECT_LT(WorstDeparture(along[node].displacement, run[node].displacement),
+              1e-8)
+        << "node " << node;
   }
 }
 

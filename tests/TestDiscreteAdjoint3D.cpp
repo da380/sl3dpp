@@ -435,6 +435,39 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
     TangentPerturbation3D forcing;
     forcing.directLoad = deltas;
     forcing.tide = tideDeltas;
+    // and a load outside the water budget and a layer on the solid
+    // surface, from the load's pattern
+    forcing.directLoadOutsideWaterBudget = deltas;
+    for (auto& f : forcing.directLoadOutsideWaterBudget) std::ranges::reverse(f);
+    forcing.solidSurfaceChange = deltas;
+    for (auto& f : forcing.solidSurfaceChange) {
+      for (auto& v : f) {
+        v *= 1.0 / (scene.solver.SolverScales().Length() * 100.0 * scene.Sigma());
+      }
+    }
+    // first order: each kernel is the tangent's transpose
+    {
+      TangentPerturbation3D outsideOnly, layerOnly;
+      outsideOnly.directLoadOutsideWaterBudget =
+          forcing.directLoadOutsideWaterBudget;
+      layerOnly.solidSurfaceChange = forcing.solidSurfaceChange;
+      auto outsideRhs = 0.0, layerRhs = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        outsideRhs +=
+            scene.Surface(kernels.ice.directLoadOutsideWaterBudgetKernels[n],
+                          outsideOnly.directLoadOutsideWaterBudget[n]);
+        layerRhs += scene.Surface(kernels.ice.solidSurfaceChangeKernels[n],
+                                  layerOnly.solidSurfaceChange[n]);
+      }
+      const auto alongOutside =
+          Objective(scene, tangent.Run(times, outsideOnly), measurements);
+      const auto alongLayer =
+          Objective(scene, tangent.Run(times, layerOnly), measurements);
+      EXPECT_NE(alongLayer, 0.0);
+      EXPECT_NEAR(alongOutside, outsideRhs, 1e-8 * std::abs(alongOutside))
+          << label;
+      EXPECT_NEAR(alongLayer, layerRhs, 1e-8 * std::abs(alongLayer)) << label;
+    }
     const auto runForcing = recorded.Run(times, forcing, &trajectory);
     const auto runViscosity = recorded.Run(times, viscosityOnly, &trajectory);
     const auto [kernelsF, alongF] = adjoint.SecondOrderKernels(
@@ -446,6 +479,11 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
     auto loadRows = 0.0, tideRows = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       loadRows += scene.Surface(alongV.ice.directLoadKernels[n], deltas[n]);
+      loadRows +=
+          scene.Surface(alongV.ice.directLoadOutsideWaterBudgetKernels[n],
+                        forcing.directLoadOutsideWaterBudget[n]) +
+          scene.Surface(alongV.ice.solidSurfaceChangeKernels[n],
+                        forcing.solidSurfaceChange[n]);
       tideRows += pair(alongV.ice.tideKernels[n], tideDeltas[n]);
     }
     const auto itauRow = GridPairing(op.Coupling(), alongF.itauKernel3D, ditau);

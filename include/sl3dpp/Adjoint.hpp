@@ -139,6 +139,15 @@ struct Measurement {
 struct Kernels {
   std::vector<double> times;
   std::vector<std::vector<double>> directLoadKernels;
+  /// The kernels of the two other properties of a surface load, per
+  /// time node, formed by the discrete sweeps (empty otherwise): with
+  /// respect to a direct load OUTSIDE THE WATER BUDGET (the load kernel
+  /// less the uniform term of the water's conservation), and to the
+  /// height of a LAYER ON THE SOLID SURFACE (Evolution::Forcing), each
+  /// paired as the load kernel is. The kernel in a sediment layer's
+  /// thickness is its density times the first plus the second.
+  std::vector<std::vector<double>> directLoadOutsideWaterBudgetKernels;
+  std::vector<std::vector<double>> solidSurfaceChangeKernels;
   /// The TIDE kernels, the discrete view alone: `tideKernels[n]` is the
   /// dual of a prescribed tidal potential's coefficients at time node n,
   /// delta J = sum_n <tideKernels[n], delta psi_n> in the L2 coefficient
@@ -221,6 +230,11 @@ struct KernelDerivatives {
   /// per time node, in their pairing: the rows for a prescribed tidal
   /// potential. Formed where the sweep forms the tide kernels.
   std::vector<std::vector<std::complex<double>>> tideKernels;
+  /// The derivatives along v of the kernels of a load outside the water
+  /// budget and of a layer on the solid surface, formed by the discrete
+  /// sweeps.
+  std::vector<std::vector<double>> directLoadOutsideWaterBudgetKernels;
+  std::vector<std::vector<double>> solidSurfaceChangeKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> initialSeaLevel;
   std::vector<std::vector<double>> itauKernel;

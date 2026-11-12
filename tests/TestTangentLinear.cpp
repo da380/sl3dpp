@@ -465,7 +465,19 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     TangentLinearSolver recorded(
         evolution,
         {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
-    const auto runForcing = recorded.Run(times, forcing, &trajectory);
+    // every surface forcing at once: the load inside the water budget,
+    // the tide, a load outside the budget and a layer on the solid
+    // surface (the last two from the load's and a scaled pattern)
+    auto every = forcing;
+    every.directLoadOutsideWaterBudget = deltas;
+    for (auto& f : every.directLoadOutsideWaterBudget) {
+      std::ranges::reverse(f);
+    }
+    every.solidSurfaceChange = deltas;
+    for (auto& f : every.solidSurfaceChange) {
+      for (auto& v : f) v *= setup.Metre() / (100.0 * setup.Sigma());
+    }
+    const auto runForcing = recorded.Run(times, every, &trajectory);
     const auto runItau = recorded.Run(times, itauOnly, &trajectory);
     const auto [kernelsF, alongF] = adjoint.SecondOrderKernels(
         times, *measured, runForcing, {}, trajectory);
@@ -473,9 +485,16 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
         times, *measured, runItau, ditau, trajectory);
     ASSERT_EQ(alongI.directLoadKernels.size(), times.size());
     ASSERT_EQ(alongI.tideKernels.size(), times.size());
+    ASSERT_EQ(alongI.directLoadOutsideWaterBudgetKernels.size(), times.size());
+    ASSERT_EQ(alongI.solidSurfaceChangeKernels.size(), times.size());
     auto loadRows = 0.0, tideRows = 0.0, firstTide = 0.0;
+    auto outsideRows = 0.0, layerRows = 0.0;
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       loadRows += setup.Surface(alongI.directLoadKernels[n], deltas[n]);
+      outsideRows += setup.Surface(alongI.directLoadOutsideWaterBudgetKernels[n],
+                                   every.directLoadOutsideWaterBudget[n]);
+      layerRows += setup.Surface(alongI.solidSurfaceChangeKernels[n],
+                                 every.solidSurfaceChange[n]);
       tideRows += pair(alongI.tideKernels[n], tideDeltas[n]);
       // the sweep's own tide kernels are the first-order sweep's
       firstTide += pair(kernelsI.tideKernels[n], tideDeltas[n]);
@@ -485,7 +504,16 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
         VolumePairing(setup.material.Mesh(), alongF.itauKernel[0], ditau[0]);
     EXPECT_NE(tideRows, 0.0);
     EXPECT_NE(loadRows, 0.0);
-    EXPECT_NEAR(loadRows + tideRows, itauRow, 1e-8 * std::abs(itauRow)) << label;
+    // without an ocean a layer is its thickness off the sea level and
+    // nothing that the relaxation times reach: its row is nil
+    if (background == &dry) {
+      EXPECT_EQ(layerRows, 0.0) << label;
+    } else {
+      EXPECT_NE(layerRows, 0.0) << label;
+    }
+    EXPECT_NEAR(loadRows + tideRows + outsideRows + layerRows, itauRow,
+                1e-8 * std::abs(itauRow))
+        << label;
     const auto second = recorded.RunSecondOrder(
         times, runForcing, runItau, {.itauU = {}, .itauV = ditau}, &trajectory);
     const auto mixed = Objective(setup, second, *measured);
@@ -1136,6 +1164,53 @@ TEST(TangentLinear, LoadsOutsideTheWaterBudgetAndLayersInTheRun) {
       EXPECT_LT(worst(along[n].displacement, runAll[n].displacement),
                 1e-9 * peak(runAll[n].displacement))
           << "node " << n;
+    }
+
+    // The discrete sweep's kernels in each of the three are the
+    // tangent's transposes: the load kernel, the kernel of a load
+    // outside the budget, and the kernel of the solid surface's height.
+    {
+      std::mt19937 duals(43);
+      const auto measurements = FullMeasurements(setup, duals, times.size() - 1);
+      TangentLinearSolver tangent(
+          evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-13});
+      const auto kernels =
+          AdjointSolver(evolution,
+                        {.method = AdjointMethod::Discrete, .rtol = 1e-13})
+              .FirstOrderKernels(times, measurements);
+      ASSERT_EQ(kernels.directLoadOutsideWaterBudgetKernels.size(), times.size());
+      ASSERT_EQ(kernels.solidSurfaceChangeKernels.size(), times.size());
+      TangentPerturbation in, out, laid;
+      in.directLoad = direction.directLoad;
+      out.directLoadOutsideWaterBudget = direction.directLoadOutsideWaterBudget;
+      laid.solidSurfaceChange = direction.solidSurfaceChange;
+      auto paired = [&](const std::vector<std::vector<double>>& kernel,
+                        const std::vector<std::vector<double>>& delta) {
+        auto sum = 0.0;
+        for (auto n = std::size_t{0}; n < times.size(); ++n) {
+          sum += setup.Surface(kernel[n], delta[n]);
+        }
+        return sum;
+      };
+      const auto alongIn = Objective(setup, tangent.Run(times, in), measurements);
+      const auto alongOut = Objective(setup, tangent.Run(times, out), measurements);
+      const auto alongLaid =
+          Objective(setup, tangent.Run(times, laid), measurements);
+      EXPECT_NE(alongOut, 0.0);
+      EXPECT_NE(alongLaid, 0.0);
+      EXPECT_NEAR(paired(kernels.directLoadKernels, in.directLoad), alongIn,
+                  1e-8 * std::abs(alongIn));
+      EXPECT_NEAR(paired(kernels.directLoadOutsideWaterBudgetKernels,
+                         out.directLoadOutsideWaterBudget),
+                  alongOut, 1e-8 * std::abs(alongOut));
+      EXPECT_NEAR(paired(kernels.solidSurfaceChangeKernels,
+                         laid.solidSurfaceChange),
+                  alongLaid, 1e-8 * std::abs(alongLaid));
+      // a load outside the budget is not one inside it
+      EXPECT_GT(std::abs(paired(kernels.directLoadKernels,
+                                out.directLoadOutsideWaterBudget) -
+                         alongOut),
+                1e-4 * std::abs(alongOut));
     }
 
     // without an ocean: the two loads are one, and a layer is its

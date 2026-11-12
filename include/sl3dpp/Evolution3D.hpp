@@ -168,7 +168,12 @@ class Evolution3D {
   /// surface (no degree-0 part), each a function of time in the solver's
   /// units and either absent.
   struct Forcing {
+    /// The direct load at time t that enters the water budget; one
+    /// outside it; and the height of a layer laid on the solid surface:
+    /// as Evolution::Forcing's.
     std::function<std::vector<double>(double)> directLoad{};
+    std::function<std::vector<double>(double)> directLoadOutsideWaterBudget{};
+    std::function<std::vector<double>(double)> solidSurfaceChange{};
     std::function<std::vector<std::complex<double>>(double)> tide{};
     /// The point stress gluts acting at time t (PointSource.hpp), in the
     /// solver's units: the radius a length, the moment a stress times a

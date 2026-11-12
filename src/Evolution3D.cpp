@@ -217,7 +217,8 @@ class Evolution3D::Coupled {
     const auto& ocean = owner_.state_.oceanFunction;
     auto total = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      total[i] = load[i] + solver.WaterDensity() * ocean[i] * slc[i];
+      total[i] = load[i] + (outsideGrid.empty() ? 0.0 : outsideGrid[i]) +
+                 solver.WaterDensity() * ocean[i] * slc[i];
     }
     return solver.Grid().Expand(total);
   }
@@ -297,6 +298,8 @@ class Evolution3D::Coupled {
     } else {
       GRDSolver::GeneralisedForcing coupled;
       coupled.directLoad = loadGrid;
+      coupled.directLoadOutsideWaterBudget = outsideGrid;
+      coupled.solidSurfaceChange = layerGrid;
       coupled.tide = tide;
       coupled.displacementResponse = std::move(displacement);
       coupled.potentialResponse = std::move(potential);
@@ -344,6 +347,11 @@ class Evolution3D::Coupled {
   /// prescribed tidal potential (empty: none).
   std::vector<double> loadGrid;
   std::vector<Complex> tide;
+  /// The node's direct load outside the water budget, which joins the
+  /// total load, and the height of a layer on the solid surface (empty:
+  /// none).
+  std::vector<double> outsideGrid;
+  std::vector<double> layerGrid;
   /// The node's point sources as forces (empty: none).
   DegreeFields sourceForces;
   /// The last pass's sea level response, and the node's ocean function
@@ -394,6 +402,8 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
   const auto& elastic = coupled.SolverFor(op.ElasticLove());
   GRDSolver::GeneralisedForcing forcing;
   forcing.directLoad = coupled.loadGrid;
+  forcing.directLoadOutsideWaterBudget = coupled.outsideGrid;
+  forcing.solidSurfaceChange = coupled.layerGrid;
   forcing.tide = coupled.tide;
   forcing.rotation = options_.rotation;
   coupled.response = elastic.SolveGeneralised(state_, forcing, coupled.sleOptions);
@@ -467,6 +477,10 @@ Evolution3D::Snapshot Evolution3D::Instantaneous(const Forcing& forcing,
              static_cast<bool>(forcing.stressGluts);
   Coupled coupled(*this, false);
   if (forcing.tide) coupled.tide = forcing.tide(t);
+  if (forcing.directLoadOutsideWaterBudget) {
+    coupled.outsideGrid = forcing.directLoadOutsideWaterBudget(t);
+  }
+  if (forcing.solidSurfaceChange) coupled.layerGrid = forcing.solidSurfaceChange(t);
   if (forcing.sources || forcing.stressGluts) {
     coupled.SetSources(
         forcing.sources ? forcing.sources(t) : std::vector<PointSource>{},
@@ -538,6 +552,12 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   };
   auto setTide = [&](double t) {
     if (tide != nullptr) coupled.tide = (*tide)(t);
+    if (interior != nullptr && interior->directLoadOutsideWaterBudget) {
+      coupled.outsideGrid = interior->directLoadOutsideWaterBudget(t);
+    }
+    if (interior != nullptr && interior->solidSurfaceChange) {
+      coupled.layerGrid = interior->solidSurfaceChange(t);
+    }
     if (interior != nullptr && (interior->sources || interior->stressGluts)) {
       coupled.SetSources(
           interior->sources ? interior->sources(t) : std::vector<PointSource>{},

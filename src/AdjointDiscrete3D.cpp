@@ -508,6 +508,26 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   auto dmdual = std::vector<Tensor>{};
   auto dddual = Tensor{};
   auto dItauKernel = std::vector<std::vector<double>>{};
+  // The kernels of a load outside the water budget and of a layer on
+  // the solid surface from a node's adjoint solve, and their derivatives
+  // from the derivative solve: the load dual with the solve's dual
+  // outside the budget in place of the one inside, and the solve's dual
+  // of the solid surface's height.
+  auto outsideKernels = std::vector<std::vector<double>>(times.size());
+  auto layerKernels = std::vector<std::vector<double>>(times.size());
+  auto dOutsideKernels = std::vector<std::vector<double>>(times.size());
+  auto dLayerKernels = std::vector<std::vector<double>>(times.size());
+  auto otherLoadKernels = [](const GRDSolver::AdjointResponse& adj,
+                             const std::vector<double>& loadDual,
+                             std::vector<double>& outside,
+                             std::vector<double>& layer) {
+    outside = loadDual;
+    for (auto i = std::size_t{0}; i < outside.size(); ++i) {
+      outside[i] +=
+          adj.directLoadOutsideWaterBudgetDual[i] - adj.directLoadDual[i];
+    }
+    layer = adj.solidSurfaceChangeDual;
+  };
   auto dloadDuals = std::vector<std::vector<double>>{};
   auto dTideKernels = std::vector<std::vector<Complex>>{};
   if (second) {
@@ -1073,6 +1093,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
     }
     directLoadKernels[n] = loadDualOf(last.adj, last.synth);
+    otherLoadKernels(last.adj, directLoadKernels[n], outsideKernels[n],
+                     layerKernels[n]);
     tideKernels[n] = tideKernelOf(last.adj, last.psiDual);
     if (moments) momentKernels[n] = momentKernelsOf(last.xdag);
     // The effective modulus's factor 1 - sum_k f_k beta_k(x) at the grid
@@ -1138,6 +1160,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             nested ? "nested solve" : "fixed point", n));
       }
       dloadDuals[n] = loadDualOf(dlast.adj, dlast.synth);
+      otherLoadKernels(dlast.adj, dloadDuals[n], dOutsideKernels[n],
+                       dLayerKernels[n]);
       dTideKernels[n] = tideKernelOf(dlast.adj, dlast.psiDual);
       if (moments) dMomentKernels[n] = momentKernelsOf(dlast.xdag);
     }
@@ -1350,6 +1374,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           "the adjoint elastic sea level solve did not converge");
     }
     directLoadKernels[0] = loadDualOf(adj, synth);
+    otherLoadKernels(adj, directLoadKernels[0], outsideKernels[0],
+                     layerKernels[0]);
     tideKernels[0] = tideKernelOf(adj, psiDual);
     // The first start dual's solution, where the material needs it.
     auto y0 = Viscoelastic3D::Solutions{};
@@ -1391,6 +1417,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             "did not converge");
       }
       dloadDuals[0] = loadDualOf(dadj, dsynth);
+      otherLoadKernels(dadj, dloadDuals[0], dOutsideKernels[0], dLayerKernels[0]);
       dTideKernels[0] = tideKernelOf(dadj, dpsiDual);
       if (moments && !material) {
         auto forces = dsph;
@@ -1463,6 +1490,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
       std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
   out.ice.tideKernels = std::move(tideKernels);
+  out.ice.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
+  out.ice.solidSurfaceChangeKernels = std::move(layerKernels);
   out.ice.momentKernels = std::move(momentKernels);
   if (trajectory != nullptr) {
     out.itauKernel3D = std::move(itauKernel);
@@ -1506,6 +1535,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
     derivatives.ice.tideKernels = std::move(dTideKernels);
+    derivatives.ice.directLoadOutsideWaterBudgetKernels =
+        std::move(dOutsideKernels);
+    derivatives.ice.solidSurfaceChangeKernels = std::move(dLayerKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);
     derivatives.itauKernel3D = std::move(dItauKernel);

@@ -56,6 +56,11 @@ namespace sl3dpp {
 /// direction is MaterialDirection3D (Adjoint3D.hpp).
 struct TangentPerturbation3D {
   std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
+  /// Per node, perturbations of a frozen run's direct load outside the
+  /// water budget and of the height of a layer on the solid surface
+  /// (Evolution3D::Forcing).
+  std::vector<std::vector<double>> directLoadOutsideWaterBudget;
+  std::vector<std::vector<double>> solidSurfaceChange;
   /// Per node, a perturbation of the prescribed tidal potential of a
   /// frozen run, its coefficients on the surface (no degree-0 part).
   std::vector<std::vector<std::complex<double>>> tide;
@@ -76,7 +81,8 @@ struct TangentPerturbation3D {
   MaterialDirection3D material;
 
   [[nodiscard]] bool Empty() const {
-    return directLoad.empty() && tide.empty() && sources.empty() &&
+    return directLoad.empty() && directLoadOutsideWaterBudget.empty() &&
+           solidSurfaceChange.empty() && tide.empty() && sources.empty() &&
            stressGluts.empty() && iceThickness.empty() &&
            initialSeaLevel.empty() && itau.empty() && logViscosity.empty() &&
            material.Empty();
@@ -194,7 +200,8 @@ class TangentLinearSolver3D {
       std::span<const std::vector<double>> oceanFunctions,
       const Direct& directAt, const Drive& drive,
       const MaterialForcing3D* material, const Tide& tideAt = {},
-      const Sources& sourcesAt = {}) const;
+      const Sources& sourcesAt = {}, const Direct& outsideAt = {},
+      const Direct& layerAt = {}) const;
   /// A material drive after the checks (the fields on the grid values).
   [[nodiscard]] std::shared_ptr<MaterialDrive3D> MakeMaterialDrive3D(
       const MaterialDirection3D& direction,

@@ -369,6 +369,25 @@ Kernels AdjointSolver::DiscreteSweep(
   auto directLoadKernels = std::vector<std::vector<double>>(times.size());
   // The tide kernels: a node's prescribed tide enters its sea level solve
   // and, beside the centrifugal potential, the radial steps' tide channel.
+  // The kernels of a load outside the water budget and of a layer on
+  // the solid surface, from a node's adjoint solve: the first is the
+  // load kernel with the solve's dual outside the budget in place of
+  // the one inside (the two differ by the conservation's uniform term;
+  // the radial step sees every direct load alike), the second the
+  // solve's dual of the solid surface's height.
+  auto outsideKernels = std::vector<std::vector<double>>(times.size());
+  auto layerKernels = std::vector<std::vector<double>>(times.size());
+  auto otherLoadKernels = [&](const GRDSolver::AdjointResponse& adj,
+                              const std::vector<double>& loadKernel,
+                              std::size_t node) {
+    auto& outside = outsideKernels[node];
+    outside = loadKernel;
+    for (auto i = std::size_t{0}; i < outside.size(); ++i) {
+      outside[i] +=
+          adj.directLoadOutsideWaterBudgetDual[i] - adj.directLoadDual[i];
+    }
+    layerKernels[node] = adj.solidSurfaceChangeDual;
+  };
   auto tideKernels = std::vector<std::vector<Complex>>(times.size());
   auto tideKernelOf = [&](const GRDSolver::AdjointResponse& adj,
                           const std::vector<Complex>& psiDual) {
@@ -489,6 +508,7 @@ Kernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       directLoadKernels[n][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
+    otherLoadKernels(adj, directLoadKernels[n], n);
     tideKernels[n] = tideKernelOf(adj, psiDual);
 
     // The forward states this step's itau sensitivity pairs with.
@@ -732,6 +752,7 @@ Kernels AdjointSolver::DiscreteSweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       directLoadKernels[0][i] = adj.directLoadDual[i] + synth[i] / r2;
     }
+    otherLoadKernels(adj, directLoadKernels[0], 0);
     tideKernels[0] = tideKernelOf(adj, psiDual);
     if (moments) {
       // the start's dual solutions: the transposed unrelaxed solves
@@ -834,6 +855,8 @@ Kernels AdjointSolver::DiscreteSweep(
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   out.tideKernels = std::move(tideKernels);
+  out.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
+  out.solidSurfaceChangeKernels = std::move(layerKernels);
   out.momentKernels = std::move(momentKernels);
   // the kernels as densities per unit volume: the weights divided out
   {

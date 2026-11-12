@@ -849,6 +849,16 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
     }
   }
   CheckPerNode(direction.directLoad, nodes, fieldSize, "directLoad");
+  CheckPerNode(direction.directLoadOutsideWaterBudget, nodes, fieldSize,
+               "directLoadOutsideWaterBudget");
+  CheckPerNode(direction.solidSurfaceChange, nodes, fieldSize,
+               "solidSurfaceChange");
+  if (migrating && (!direction.directLoadOutsideWaterBudget.empty() ||
+                    !direction.solidSurfaceChange.empty())) {
+    throw std::invalid_argument(
+        "a migrating run is driven by its ice thickness: no load outside "
+        "the water budget and no layer on the solid surface to perturb");
+  }
   CheckPerNode(direction.iceThickness, nodes, fieldSize, "iceThickness");
   if (!direction.initialSeaLevel.empty() &&
       direction.initialSeaLevel.size() != fieldSize) {
@@ -956,8 +966,17 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
                            : direction.stressGluts[node]};
     };
   }
+  Direct outsideAt{}, layerAt{};
+  if (!direction.directLoadOutsideWaterBudget.empty()) {
+    outsideAt = [&](std::size_t node) {
+      return direction.directLoadOutsideWaterBudget[node];
+    };
+  }
+  if (!direction.solidSurfaceChange.empty()) {
+    layerAt = [&](std::size_t node) { return direction.solidSurfaceChange[node]; };
+  }
   return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
-               sourcesAt);
+               sourcesAt, outsideAt, layerAt);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -1087,7 +1106,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const std::vector<double>> oceanFunctions,
     const Direct& directAt, const Drive& drive,
     const MaterialForcing3D* material, const Tide& tideAt,
-    const Sources& sourcesAt) const {
+    const Sources& sourcesAt, const Direct& outsideAt,
+    const Direct& layerAt) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -1125,13 +1145,19 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto overrideAt = [&](std::size_t node) {
     return migrating ? oceanFunctions[node] : std::vector<double>{};
   };
+  // the node's load outside the water budget, which joins the total
+  // load, and its layer on the solid surface
+  auto outsideNow = std::vector<double>{};
+  auto layerNow = std::vector<double>{};
   auto totalLoadCoefficients = [&](const std::vector<double>& f,
                                    const std::vector<double>& slc,
                                    std::size_t node) {
     const auto& Cn = oceanAt(node);
     auto total = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      total[i] = (f.empty() ? 0.0 : f[i]) + rhoW * Cn[i] * slc[i];
+      total[i] = (f.empty() ? 0.0 : f[i]) +
+                 (outsideNow.empty() ? 0.0 : outsideNow[i]) +
+                 rhoW * Cn[i] * slc[i];
     }
     return grid.Expand(total);
   };
@@ -1200,6 +1226,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto closure = [&](const Viscoelastic3D::Solutions& responses) {
     GRDSolver::GeneralisedForcing coupled;
     coupled.directLoad = f;
+    coupled.directLoadOutsideWaterBudget = outsideNow;
+    coupled.solidSurfaceChange = layerNow;
     coupled.tide = tideNow;
     coupled.displacementResponse =
         ev.Coefficients(op.Surface(responses, Component::U), ev.toNdLength_);
@@ -1240,6 +1268,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
   if (tideAt) tideNow = tideAt(0);
+  if (outsideAt) outsideNow = outsideAt(0);
+  if (layerAt) layerNow = layerAt(0);
   // The perturbed sources' forces at a node, on the open step.
   const bool sourced = static_cast<bool>(sourcesAt);
   auto nodeForces = DegreeFields{};  // the node's perturbed sources' forces
@@ -1273,9 +1303,12 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
     step.reset();
   } else if (const auto f0 = directAt(0);
-             !f0.empty() || material != nullptr || tideAt) {
+             !f0.empty() || material != nullptr || tideAt || outsideAt ||
+             layerAt) {
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
+    forcing.directLoadOutsideWaterBudget = outsideNow;
+    forcing.solidSurfaceChange = layerNow;
     forcing.tide = tideNow;
     forcing.rotation = rotation;
     forcing.oceanFunctionOverride = overrideAt(0);
@@ -1356,6 +1389,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     effectiveSolver = &solverFor(step->EffectiveLove());
     f = directAt(node);
     if (tideAt) tideNow = tideAt(node);
+    if (outsideAt) outsideNow = outsideAt(node);
+    if (layerAt) layerNow = layerAt(node);
     auto [strain, info] = close();
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
