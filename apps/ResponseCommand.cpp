@@ -1,8 +1,8 @@
 /**
  * @file ResponseCommand.cpp
  * @brief `sl3d response`: the response of the planet to a prescribed
- * surface load and external tidal potential, with no ocean. With no
- * `times` block it is the instantaneous elastic response: the radial
+ * surface load and external tidal potential, with no ocean. The static
+ * problem is the instantaneous elastic response: the radial
  * model's, or, under lateral moduli, the 3D static problem of
  * docs/adjoints.md §13j closed by the stepper's conjugate-gradient solve
  * on a branchless rheology (distributed over radial segments like the
@@ -11,8 +11,8 @@
  * for a cross-code comparison, and a model file of the response inside
  * the body for planetmodel's cutaways.
  *
- * With a `times` block it is the viscoelastic response, stepped through
- * the block's nodes under the forcing at each node: the radial model's
+ * The quasi-static problem is the viscoelastic response, stepped through
+ * its `times` block's nodes under the forcing at each node: the radial model's
  * own stepper (ViscoelasticOperator) per degree, all orders as columns,
  * or, under a lateral viscosity or lateral moduli, the 3D stepper
  * (Viscoelastic3D) distributed like the evolutions, with the radial
@@ -253,23 +253,26 @@ void WriteExchangeTable(const std::filesystem::path& path,
 
 ResponseInput ReadResponseInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  Allow(top, {"model", "lmax", "times", "forcing", "solver", "output"});
+  Allow(top,
+        {"problem", "model", "lmax", "times", "forcing", "solver", "output"});
   const auto directory = config.parent_path();
-  const auto timed = Has(top, "times");
   auto out = ResponseInput{};
+  out.problem = ReadProblem(top);
+  const auto timed = out.problem == Problem::QuasiStatic;
   const auto& model = top.At("model");
-  if (!timed && Has(model, "viscosity")) {
+  if (!timed && model.IsObject() && Has(model, "viscosity")) {
     Fail(model.At("viscosity"),
-         "is a viscosity, which needs a `times` block (a viscoelastic "
-         "response); an elastic response has no use for it");
+         std::format("is a viscosity, which {}; an elastic response has no "
+                     "use for it",
+                     kNeedsQuasiStatic));
   }
   out.model = ReadModelBlock(model, directory);
   if (timed && out.model.viscosity.empty() &&
       out.model.format != ModelFormat::Gia) {
     Fail(model.At("format"),
-         "names a deck format with no viscosity column, which a "
-         "viscoelastic response (a `times` block) needs: give a \"maxwell\" "
-         "deck with a viscosity, or a `model.viscosity` file");
+         "names a deck format with no viscosity column, which the "
+         "quasi-static problem (a viscoelastic response) needs: give a "
+         "\"maxwell\" deck with a viscosity, or a `model.viscosity` file");
   }
   out.lmax = Integer(top, "lmax");
   if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
@@ -283,8 +286,7 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
       for (const auto* name : {"scheme", "step"}) {
         if (Has(solver, name)) {
           Fail(solver.At(name),
-               "sets the time step, which needs a `times` block (a "
-               "viscoelastic response)");
+               std::format("sets the time step, which {}", kNeedsQuasiStatic));
         }
       }
     }
@@ -297,12 +299,14 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
   if (!timed) {
     if (perNode) {
       Fail(output.At("exchange"),
-           "holds `{node}`, which names a table per time node: it needs a "
-           "`times` block");
+           std::format("holds `{{node}}`, which names a table per time node, "
+                       "a member that {}",
+                       kNeedsQuasiStatic));
     }
     if (Has(output, "exchange_nodes")) {
       Fail(output.At("exchange_nodes"),
-           "chooses time nodes, which need a `times` block");
+           std::format("chooses time nodes, a member that {}",
+                       kNeedsQuasiStatic));
     }
     return out;
   }
@@ -331,7 +335,7 @@ ResponseInput ReadResponseInput(const std::filesystem::path& config) {
 
 namespace {
 
-/// The elastic response: the run without a `times` block.
+/// The elastic response: the static problem.
 std::string RunElastic(const std::filesystem::path& config,
                        const planetmodel::Json& top,
                        const ResponseInput& input) {
@@ -498,8 +502,8 @@ std::string RunElastic(const std::filesystem::path& config,
       lateral ? std::string{"3-D (lateral moduli)"}
               : (moduli ? std::string{"1-D (the moduli file is radial)"}
                         : std::string{"1-D"});
-  const auto meaning =
-      std::format("{}, elastic, {}", dimension, Summary(forcing));
+  auto meaning = std::format("{}, elastic, {}", dimension, Summary(forcing));
+  for (const auto& read : built.inputs) meaning += "; " + read;
   auto described = std::vector<std::string>{};
   for (const auto& term : forcing.load) described.push_back(Describe(term));
   for (const auto& term : forcing.tide) described.push_back(Describe(term));
@@ -721,7 +725,9 @@ NodeSurface SurfaceOf(const GRDSolver& solver, const Snapshot& snapshot) {
   for (auto& c : node.V) c *= units.Length();
   for (auto& c : node.Phi) c *= units.Factor(PotentialDimensions);
   if (!snapshot.toroidalPotential.empty()) {
-    node.W = grid.Expand(snapshot.toroidalPotential);
+    // in the frame of no net rotation of the surface: the rigid rotation
+    // in the solver's W is its gauge
+    node.W = grid.Expand(WithoutNetRotation(grid, snapshot.toroidalPotential));
     for (auto& c : node.W) c *= units.Length();
   }
   return node;
@@ -756,7 +762,7 @@ std::vector<NodeSurface> StepRadial(
   return out;
 }
 
-/// The viscoelastic response: the run with a `times` block.
+/// The viscoelastic response: the quasi-static problem.
 std::string RunViscoelastic(const std::filesystem::path& config,
                             const planetmodel::Json& top,
                             const ResponseInput& input) {
@@ -819,8 +825,8 @@ std::string RunViscoelastic(const std::filesystem::path& config,
     if (viscosity) {
       Fail(modelMember.At("viscosity").At("file"), rheology.error().message);
     }
-    Fail(deckMember, std::format("gives no viscosity, which a viscoelastic "
-                                 "response (a `times` block) needs: {}",
+    Fail(deckMember, std::format("gives no viscosity, which the quasi-static "
+                                 "problem (a viscoelastic response) needs: {}",
                                  rheology.error().message));
   }
 
@@ -990,9 +996,10 @@ std::string RunViscoelastic(const std::filesystem::path& config,
   } else {
     dimension = "1-D";
   }
-  const auto meaning = std::format(
-      "{}, viscoelastic, {} nodes {:g} to {:g} kyr, {}", dimension, nodes,
-      times.nodes_kyr.front(), times.nodes_kyr.back(), Summary(forcing));
+  auto meaning = std::format("{}, viscoelastic, {} nodes {:g} to {:g} kyr, {}",
+                             dimension, nodes, times.nodes_kyr.front(),
+                             times.nodes_kyr.back(), Summary(forcing));
+  for (const auto& read : timed.Inputs()) meaning += "; " + read;
   auto described = std::vector<std::string>{};
   for (const auto& term : forcing.load) described.push_back(Describe(term));
   for (const auto& term : forcing.tide) described.push_back(Describe(term));

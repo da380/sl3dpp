@@ -9,16 +9,18 @@
  * `love-numbers` solves the per-degree systems of a radial model and
  * writes the SI Love-number table as plain text under a provenance
  * header. `response` solves for the planet's response to a prescribed
- * load and tide, with no ocean, elastic or, with a `times` block,
- * viscoelastic through time. `sea-level` solves the sea level equation,
- * the ocean coupled to the solid Earth, under an ice load on a state read
- * from planetmodel surface files (pyslfp's `export_ice_history` writes
- * them): without `times` the elastic fingerprint of an ice change, with
- * `times` GIA through time under an ice history, restartable from disk
- * checkpoints. `kernel1d` and `kernel` give the adjoint sensitivity
- * kernels of measurements of a run through time. Each of these four
- * reads a config of blocks (Blocks.hpp, Forcing.hpp), 1-D or 3-D as its
- * `model` block makes it.
+ * load and tide, with no ocean: in the static problem the elastic
+ * response, in the quasi-static problem the viscoelastic one through
+ * time. `sea-level` solves the sea level equation, the ocean coupled to
+ * the solid Earth, under an ice load, its ice and sea level read from
+ * file inputs (pyslfp's `export_ice_history` writes such files): in the
+ * static problem the elastic fingerprint of an ice change, in the
+ * quasi-static problem GIA through time under an ice history, restartable
+ * from disk checkpoints. `kernel1d` and `kernel` give the adjoint
+ * sensitivity kernels of measurements of a run through time. Each of
+ * these four reads a config of blocks (Blocks.hpp, Forcing.hpp,
+ * Files.hpp) under a top-level `problem`, 1-D or 3-D as its `model` block
+ * makes it.
  *
  * The readers are separate from the runners so the configs can be
  * checked without running anything; both throw `planetmodel::Error`
@@ -63,10 +65,11 @@ struct LoveNumbersInput {
 [[nodiscard]] std::string RunLoveNumbers(const std::filesystem::path& config);
 
 /// The config of `sl3d sea-level`: the sea level equation, the ocean
-/// coupled to the solid Earth. Without `times` it is the elastic
-/// fingerprint of an ice change on a present-day state, on the radial
-/// Earth or, under lateral moduli, the 3-D one; with `times` it is GIA
-/// through time under an ice history, of the radial model, or, under a
+/// coupled to the solid Earth. The static problem is the elastic
+/// fingerprint of an ice change on the ice and sea level at a date, on the
+/// radial Earth or, under lateral moduli, the 3-D one; the quasi-static
+/// problem is GIA through time under an ice history, of the radial model,
+/// or, under a
 /// lateral viscosity or lateral moduli, the 3-D one, restartable from disk
 /// checkpoints.
 struct SeaLevelInput {
@@ -116,7 +119,8 @@ struct MeasurementSpec {
 };
 
 /// The config of `sl3d kernel1d` and `sl3d kernel`: the members of
-/// `sea-level`'s run through time, a recording stride, and the
+/// `sea-level`'s run through time (the quasi-static problem alone), a
+/// recording stride, and the
 /// measurements — one adjoint sweep, and one set of kernel files, per
 /// measurement. `kernel1d` runs a radial model, `kernel` a lateral
 /// viscosity.
@@ -144,17 +148,18 @@ struct KernelInput {
 
 /// The config of `sl3d response`: the response of the planet to a
 /// prescribed surface load and external tidal potential, with no ocean.
-/// Without `times` it is the instantaneous elastic response: of the radial
+/// The static problem is the instantaneous elastic response: of the radial
 /// model, or, under lateral moduli, the 3D static problem of
-/// docs/adjoints.md §13j with the radial model's response beside it. With
-/// `times` it is the viscoelastic response stepped through the nodes: of
-/// the radial model, or, under a lateral viscosity or lateral moduli, the
-/// 3D stepper's, with the radial reference model's beside it. A config is
-/// made of blocks (Blocks.hpp, Forcing.hpp).
+/// docs/adjoints.md §13j with the radial model's response beside it. The
+/// quasi-static problem is the viscoelastic response stepped through the
+/// nodes of `times`: of the radial model, or, under a lateral viscosity or
+/// lateral moduli, the 3D stepper's, with the radial reference model's
+/// beside it. A config is made of blocks (Blocks.hpp, Forcing.hpp).
 struct ResponseInput {
+  Problem problem = Problem::Static;
   ModelBlock model;
   int lmax = 0;
-  std::optional<TimesBlock> times;  ///< empty for the elastic response
+  std::optional<TimesBlock> times;  ///< the quasi-static problem's
   Forcing forcing;
   SolverBlock solver = SolverDefaults(SolverOf::Response);
   OutputBlock output;

@@ -29,14 +29,16 @@ draws each config's figures from `out/<config>/` into
 
 - **`love_numbers.json`** — the load and tidal Love numbers of the prem8
   deck to degree 256: `out/love_numbers/love_numbers.txt`.
-- **`sea_level_fingerprint.json`** — `sea-level` without a `times` block:
+- **`sea_level_fingerprint.json`** — `sea-level` in the static problem:
   the elastic sea-level fingerprint of melting a tenth of the synthetic
-  Greenland ice, at lmax 128, with full rotational feedback:
+  Greenland ice, its ice and topography read at the present day
+  (`date_kyr_bp` 0 beside each file), at lmax 128, with full rotational
+  feedback:
   `out/sea_level_fingerprint/sea_level_fingerprint.nc`.
 - **`sea_level_fingerprint_3d.json`** — that fingerprint on the synthetic
   3D elastic Earth (`../data/synthetic_moduli.nc` on
-  `../data/prem8.elastic.deck`, as `response.json`): without a `times`
-  block, a moduli file that varies laterally makes the fingerprint 3D,
+  `../data/prem8.elastic.deck`, as `response.json`): in the static
+  problem, a moduli file that varies laterally makes the fingerprint 3D,
   the instantaneous response of the 3D sea level problem, its
   zero-length step closed by the fixed point, at lmax 32 (the moduli
   file's own degree):
@@ -45,7 +47,9 @@ draws each config's figures from `out/<config>/` into
   (`*_radial_model`). The stiff craton under North America and the soft
   ridge change the sea level by a few centimetres at most, against a
   near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
-- **`sea_level_1d.json`** — `sea-level` with a `times` block: the synthetic
+- **`sea_level_1d.json`** — `sea-level` in the quasi-static problem (its
+  `times` block the window, its topography read at the window's start,
+  `"at": "start"`): the synthetic
   deglaciation from 21 ka to the present through the 1D viscoelastic Earth
   of `../data/prem8.gia.deck`, at lmax 32 in quarter-kiloyear steps, with
   full rotational feedback (the moments of inertia from the model's
@@ -57,7 +61,8 @@ draws each config's figures from `out/<config>/` into
 - **`sea_level_1d_calibrated.json`** — that deglaciation with migrating
   shorelines, its initial sea level calibrated against the synthetic Earth's
   present day rather than read at 21 ka (the device a thickness-only ice
-  history needs), by the classical update in a few runs (the `ocean` block):
+  history needs), by the classical update in a few runs (the `ocean` block:
+  its topography `"at": "end"`, and `calibration`):
   `out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc`, which also holds
   the calibrated `initial_sea_level` and the `ocean_function` at every node.
   The marine margins of the synthetic ice sheets flood as they melt.
@@ -104,8 +109,9 @@ draws each config's figures from `out/<config>/` into
   at every node, the radial reference model's beside it) and exchange tables
   at four nodes,
   `out/response_viscoelastic/response_viscoelastic_{node}.txt` (the start,
-  the peak load, the unloaded state and the end). A `times` block is what
-  makes a `response` viscoelastic; it takes about 5 s on four threads.
+  the peak load, the unloaded state and the end). The quasi-static problem
+  (`"problem": "quasi_static"` with a `times` block) is what makes a
+  `response` viscoelastic; it takes about 5 s on four threads.
 - **`response_seismic.json`** — the co-seismic and post-seismic response
   of the radial GIA deck to a thrust fault off north-east Japan (a 400 by
   150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point

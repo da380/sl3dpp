@@ -1,11 +1,10 @@
 {
+  "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
   "lmax": 64,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
-  "forcing": {
-    "sea_level": {"file": "../data/ice7g.nc"},
-    "ice": {"file": "../data/ice7g.nc"}
-  },
+  "forcing": {"ice": {"file": "../data/ice7g.nc"}},
+  "ocean": {"topography": {"file": "../data/ice7g.nc", "at": "start"}},
   "rotation": "full",
   "moments": "hydrostatic",
   "output": {"surface": "out/sea_level_1d_ice7g/sea_level_1d_ice7g.nc"}

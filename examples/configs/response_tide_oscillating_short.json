@@ -1,4 +1,5 @@
 {
+  "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
   "lmax": 4,
   "times": {"start_kyr": 0.0, "end_kyr": 0.6000000000000001, "nodes": 145},

@@ -90,17 +90,24 @@ class AppsOverRanks : public ::testing::Test {
     Barrier();
   }
 
-  [[nodiscard]] static std::string Body() {
+  /// A 3-D run through time on the toy history, its sea level read at the
+  /// window's start, or with `ocean` given at its end with these members
+  /// beside it.
+  [[nodiscard]] static std::string Body(const std::string& ocean = "") {
     const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+    const auto at = ocean.empty() ? std::string{"start"} : std::string{"end"};
     return std::string{R"(
+      "problem": "quasi_static",
       "model": {"deck": ")"} +
            data + R"(/prem8.elastic.deck", "format": "elastic",
                 "viscosity": {"file": ")" +
            data + R"(/viscosity_log.nc"}},
       "lmax": 8,
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
-      "forcing": {"sea_level": {"file": "history.nc"},
-                  "ice": {"file": "history.nc"}},
+      "forcing": {"ice": {"file": "history.nc"}},
+      "ocean": {)" +
+           (ocean.empty() ? std::string{} : ocean + ", ") +
+           R"("topography": {"file": "history.nc", "at": ")" + at + R"("}},
       "rotation": "full")";
   }
 
@@ -155,7 +162,8 @@ TEST_F(AppsOverRanks, CalibratedMigratingSeaLevelMatchesOneProcess) {
   // without calibrating again, as uninterrupted.
   if (Rank() == 0) test::WriteToyHistory(dir_ / "marine.nc", 0.0, true);
   Barrier();
-  auto body = Body();
+  auto body =
+      Body(R"("shorelines": "migrating", "calibration": {"rtol": 1e-8})");
   for (const auto* from : {"\"file\": \"history.nc\""}) {
     for (auto at = body.find(from); at != std::string::npos;
          at = body.find(from, at + 1)) {
@@ -163,9 +171,6 @@ TEST_F(AppsOverRanks, CalibratedMigratingSeaLevelMatchesOneProcess) {
                    "\"file\": \"marine.nc\"");
     }
   }
-  body += R"(,
-      "ocean": {"shorelines": "migrating",
-                "calibrate_initial_sea_level": {"rtol": 1e-8}})";
   const auto one = Write("one.json", "{" + body + R"(,
       "output": {"surface": "out/one.nc"}})");
   const auto over = Write("over.json", "{" + body + R"(,
@@ -311,7 +316,7 @@ TEST_F(AppsOverRanks, SeaLevelUnderLateralModuliMatchesOneProcess) {
 }
 
 TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
-  // The elastic fingerprint on lateral moduli (no times block) over the
+  // The elastic fingerprint on lateral moduli (the static problem) over the
   // ranks, its zero-length step closed by the fixed point and by the
   // nested conjugate gradients, the cuts balancing the elements the moduli
   // make active: the one-process fingerprint to the substructured solves'
@@ -336,17 +341,18 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
   Barrier();
   const auto config = [&](const std::string& name, const std::string& moduli,
                           const std::string& solver) {
-    return Write(name + ".json",
-                 std::format(R"({{
+    return Write(name + ".json", std::format(R"({{
+      "problem": "static",
       "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic"{}}},
       "lmax": 8,
-      "forcing": {{"sea_level": {{"file": "history.nc"}},
-                  "ice": {{"file": "history.nc", "type": "cap_thickness", "latitude": 70,
-                          "longitude": 30, "width_deg": 10,
-                          "thickness_m": -50}}}},
+      "forcing": {{"ice": {{"file": "history.nc", "date_kyr_bp": 0,
+                           "type": "cap_thickness", "latitude": 70,
+                           "longitude": 30, "width_deg": 10,
+                           "thickness_m": -50}}}},
+      "ocean": {{"topography": {{"file": "history.nc", "date_kyr_bp": 0}}}},
       "rotation": "full",{}
       "output": {{"surface": "out/{}.nc"}}}})",
-                             data, moduli, solver, name));
+                                             data, moduli, solver, name));
   };
   const auto lateral = std::string{R"(, "moduli": {"file": "moduli.nc"})"};
   for (const auto* step : {"fixed_point", "conjugate_gradients"}) {
@@ -357,7 +363,7 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
     const auto summary = app::RunSeaLevel(over);
     if (Rank() == 0) {
       EXPECT_TRUE(summary.starts_with(
-          "3-D (lateral moduli), elastic (fingerprint), rotation full; wrote "))
+          "3-D (lateral moduli), elastic (fingerprint), rotation full; ice "))
           << summary;
     } else {
       EXPECT_EQ(summary, "");
@@ -413,10 +419,11 @@ TEST_F(AppsOverRanks, RadialSeaLevelIsTheFirstRanksAlone) {
   }
   Barrier();
   const auto body = std::string{R"(
+      "problem": "quasi_static",
       "model": {"deck": "ball.deck"}, "lmax": 8,
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
-      "forcing": {"sea_level": {"file": "history.nc"},
-                  "ice": {"file": "history.nc"}},
+      "forcing": {"ice": {"file": "history.nc"}},
+      "ocean": {"topography": {"file": "history.nc", "at": "start"}},
       "rotation": "full", "moments": "hydrostatic")"};
   const auto one = Write("one.json", "{" + body + R"(,
       "output": {"surface": "out/one.nc"}})");
@@ -467,6 +474,7 @@ TEST_F(AppsOverRanks, ViscoelasticResponseMatchesOneProcess) {
   }
   Barrier();
   const auto body = std::string{R"(
+      "problem": "quasi_static",
       "model": {"deck": ")"} +
                     data +
                     R"(/prem8.elastic.deck", "format": "elastic",

@@ -1,14 +1,13 @@
 {
+  "problem": "quasi_static",
   "model": {"deck": "../data/earth_custom.gia.deck", "format": "maxwell",
             "viscosity": {"file": "../data/earth_custom_viscosity_s40rts.nc",
                           "reference": "file_radial"},
             "moduli": {"file": "../data/earth_custom_moduli_s40rts.nc"}},
   "lmax": 32,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
-  "forcing": {
-    "sea_level": {"file": "../data/ice7g.nc"},
-    "ice": {"file": "../data/ice7g.nc"}
-  },
+  "forcing": {"ice": {"file": "../data/ice7g.nc"}},
+  "ocean": {"topography": {"file": "../data/ice7g.nc", "at": "start"}},
   "rotation": "full",
   "moments": "hydrostatic",
   "solver": {"step_rtol": 1e-8, "step_max_iterations": 120},

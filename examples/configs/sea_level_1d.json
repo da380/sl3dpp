@@ -1,10 +1,11 @@
 {
+  "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
   "lmax": 32,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 85},
-  "forcing": {
-    "sea_level": {"file": "../data/synthetic_earth.nc"},
-    "ice": {"file": "../data/synthetic_earth.nc"}
+  "forcing": {"ice": {"file": "../data/synthetic_earth.nc"}},
+  "ocean": {
+    "topography": {"file": "../data/synthetic_earth.nc", "at": "start"}
   },
   "rotation": "full",
   "moments": "hydrostatic",

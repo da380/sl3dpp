@@ -1,14 +1,15 @@
 /**
  * @file SeaLevelCommand.cpp
  * @brief `sl3d sea-level`: the sea level equation, the ocean coupled to
- * the solid Earth, under an ice load on a state read from planetmodel
- * surface files. Without a `times` block it is the elastic fingerprint of
- * an ice change on the state, one solve of the linear equation: with the
+ * the solid Earth, under an ice load, the ice and the sea level read from
+ * their file inputs. The static problem is the elastic fingerprint of
+ * an ice change on the ice and sea level at their date, one solve of the
+ * linear equation: with the
  * radial model's Love numbers (Fingerprint), or, under lateral moduli, the
  * instantaneous response of the 3-D problem (Evolution3D::
  * Instantaneous, distributed over radial segments on several ranks) with
  * the radial model's fingerprint beside it, written as a surface file of
- * static fields. With a `times` block it is GIA through time under an ice
+ * static fields. The quasi-static problem is GIA through time under an ice
  * history: the radial model's evolution (Evolution), or, under a
  * lateral viscosity or lateral moduli, the 3-D one (Evolution3D,
  * distributed over radial segments on several ranks), written as a
@@ -128,8 +129,10 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
   hash.AddValue(run.lmax);
   if (!run.model.viscosity.empty()) hash.AddFile(run.model.viscosity);
   hash.AddValue(run.model.viscosity_file_radial);
-  hash.AddFile(run.forcing.seaLevel.file);
-  hash.AddFile(run.forcing.ice.history);
+  const auto& ice = run.forcing.ice.file;
+  const auto& sea = run.ocean.seaLevel;
+  hash.AddFile(sea.input.file);
+  hash.AddFile(ice.file);
   hash.AddValue(window.start_kyr_bp);
   hash.AddValue(window.end_kyr_bp);
   hash.AddValue(window.nodes);
@@ -149,6 +152,16 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
     for (const auto degree : run.solver.transform_degrees) {
       hash.AddValue(degree);
     }
+  }
+  // the inputs' variables and quantity, where they are other than the ice
+  // thickness and the topography under their own names
+  if (ice.variable != "ice_thickness") {
+    hash.Add(std::as_bytes(std::span(ice.variable)));
+  }
+  if (sea.kind != SeaLevelSource::Kind::Topography ||
+      sea.input.variable != "topography") {
+    hash.AddValue(sea.kind);
+    hash.Add(std::as_bytes(std::span(sea.input.variable)));
   }
   if (run.ocean.calibrate) {
     hash.AddValue(run.ocean.calibration_method);
@@ -436,7 +449,8 @@ void WriteHistoryFile(const SeaLevelInput& input,
                       const std::filesystem::path& config,
                       const SurfaceGrid& grid, const std::vector<Node>& history,
                       std::span<const double> initialSeaLevel,
-                      std::string_view initialSeaLevelOrigin) {
+                      std::string_view initialSeaLevelOrigin,
+                      const Loaded& world) {
   namespace pm = planetmodel;
   const auto& run = input.run;
   auto file = pm::SurfaceFile{};
@@ -459,7 +473,8 @@ void WriteHistoryFile(const SeaLevelInput& input,
   file.time = axis;
   file.meta.emplace("config", config.string());
   file.meta.emplace("model", run.model.deck.string());
-  file.meta.emplace("ice_history", run.forcing.ice.history.string());
+  file.meta.emplace("ice", world.iceRead);
+  file.meta.emplace("sea_level", world.seaLevelRead);
   file.meta.emplace("time",
                     std::string{"seconds relative to the present, negative "
                                 "in the past; dates_kyr_bp lists the nodes"});
@@ -619,10 +634,11 @@ std::string RunWith(
   options.rotation = run.rotation;
   options.rtol = run.solver.rtol;
 
-  // The initial sea level: the sea level file's at the start, or calibrated
-  // against its sea level at the end, by an evolution that streams nothing
-  // (a resumption reads back the calibrated state its run kept).
-  auto origin = std::string{"the sea level file at the window's start"};
+  // The initial sea level: the sea level input's at the start, or
+  // calibrated against its sea level at the end, by an evolution that
+  // streams nothing (a resumption reads back the calibrated state its run
+  // kept).
+  auto origin = std::string{"the sea level input at the window's start"};
   if (run.ocean.calibrate) {
     auto restored = std::optional<GRDSolver::State>{};
     if (resumed) {
@@ -638,8 +654,8 @@ std::string RunWith(
           CalibrateWorld(run, top, solver, world, calibrating, times);
       if (checkpointing) WriteInitialState(directory, hash, world.background);
       origin = std::format(
-          "calibrated against the sea level file at the window's end, {} run(s), "
-          "rms misfit {:.3g} m before, {:.3g} m after",
+          "calibrated against the sea level input at the window's end, {} "
+          "run(s), rms misfit {:.3g} m before, {:.3g} m after",
           calibrated.runs, calibrated.before_m, calibrated.after_m);
     }
   }
@@ -702,57 +718,59 @@ std::string RunWith(
   auto initial = world.background.seaLevel;
   for (auto& v : initial) v *= length;
   if (ranks.First()) {
-    WriteHistoryFile(input, config, grid, history, initial, origin);
+    WriteHistoryFile(input, config, grid, history, initial, origin, world);
   }
   return std::format("{}; wrote {}{}{}", meaning, input.output.surface.string(),
                      resumed ? ", resumed" : "", replaced);
 }
 
 /// The fingerprint's forcing on a grid at the run's degree, SI: the
-/// state's ice thickness and sea level at its date, and the ice change.
+/// ice thickness and the sea level at their dates, the ice change, and
+/// the two inputs as read.
 struct FingerprintForcing {
   std::vector<double> ice;
   std::vector<double> seaLevel;
   std::vector<double> thicknessChange;
+  std::string iceRead;
+  std::string seaLevelRead;
 };
 
-/// Reads the fingerprint's ice and sea level at its date onto the grid
-/// (`forcing.ice.file`, `forcing.sea_level.file`) and builds the ice
-/// change there.
+/// Reads the fingerprint's ice and sea level onto the grid
+/// (`forcing.ice`, `ocean.sea_level` or `ocean.topography`), each at its
+/// date where its file has a time axis, and builds the ice change there.
 FingerprintForcing ReadFingerprintForcing(const SeaLevelRun& run,
                                           const Json& top,
                                           const SurfaceGrid& grid,
                                           const SeaLevelParameters& parameters) {
-  const auto& source = run.forcing.seaLevel;
+  const auto& source = run.ocean.seaLevel;
+  const auto& iceInput = run.forcing.ice.file;
   const auto& change = *run.forcing.ice.change;
-  const auto& seaMember = top.At("forcing").At("sea_level").At("file");
-  const auto& iceMember = top.At("forcing").At("ice").At("file");
-  const auto ice = io::FieldHistory::Read(run.forcing.ice.history, grid);
-  if (!ice) Fail(iceMember, ice.error().message);
-  if (!ice->Has("ice_thickness")) {
-    Fail(iceMember, "holds no field ice_thickness");
-  }
-  auto same = std::error_code{};
-  const bool oneFile = std::filesystem::equivalent(
-                           source.file, run.forcing.ice.history, same) &&
-                       !same;
-  auto other = std::optional<io::FieldHistory>{};
-  if (!oneFile) {
-    auto sea = io::FieldHistory::Read(source.file, grid);
-    if (!sea) Fail(seaMember, sea.error().message);
-    other = std::move(*sea);
-  }
-  // the ice history's ice at the date, and the sea level there: given,
-  // or by the flotation construction with the solver's own densities
+  const auto& iceMember = IceMember(top);
+  const auto& seaMember = SeaLevelMember(run, top);
+  const auto [ice, sea] = OpenInputs(run, top, grid);
+  CheckDate(iceInput, *ice, iceMember, "date_kyr_bp");
+  CheckDate(source.input, *sea, seaMember, "date_kyr_bp");
+  // a file without a time axis is read at any date: the present's
+  const auto iceTime = -iceInput.date.value_or(0.0) * KYR;
+  const auto seaTime = -source.input.date.value_or(0.0) * KYR;
+  // the ice at its date, and the sea level at its own: given, or by the
+  // flotation construction with the solver's own densities from the
+  // topography and the ice at the same date
   auto out = FingerprintForcing{};
-  const auto date = -source.date_kyr_bp * KYR;
   try {
-    out.ice = IceThicknessAt(*ice, date);
+    out.ice = IceThicknessAt(*ice, iceInput.variable, iceTime);
   } catch (const std::runtime_error& error) {
-    Fail(iceMember, error.what());
+    Fail(iceMember.At("file"), error.what());
   }
-  out.seaLevel =
-      SeaLevelFrom(oneFile ? *ice : *other, out.ice, date, parameters, seaMember);
+  out.seaLevel = SeaLevelFrom(run, top, *sea, out.ice, seaTime, parameters);
+  const auto slice = [](const FileInput& input) {
+    return input.date ? std::format("{:g} kyr BP", *input.date)
+                      : std::string{"static"};
+  };
+  out.iceRead = DescribeInput(iceInput, slice(iceInput));
+  out.seaLevelRead =
+      std::format("{} {}", source.Quantity(),
+                  DescribeInput(source.input, slice(source.input)));
 
   // the change: the Gaussian cap's weight times the amount, of the local
   // ice thickness for a fraction
@@ -808,19 +826,18 @@ void PutStatic(planetmodel::SurfaceFile& file, std::string name,
 /// A fingerprint as a surface file of static SI fields on the run's grid:
 /// the ice change applied, the response (sea level, displacement and
 /// potential, the angular velocity in the metadata) and the state's ocean
-/// function, with the config, model, moduli, state, date and rotation in
-/// the metadata; the runner adds its own.
+/// function, with the config, model, moduli, the ice and the sea level as
+/// read and the rotation in the metadata; the runner adds its own.
 planetmodel::SurfaceFile FingerprintFile(
     const std::filesystem::path& config, const SeaLevelRun& run,
-    const SurfaceGrid& grid, std::string title,
-    const std::vector<double>& thicknessChange,
+    const FingerprintForcing& forcing, const SurfaceGrid& grid,
+    std::string title, const std::vector<double>& thicknessChange,
     const std::vector<double>& relativeSeaLevelChange,
     const std::vector<double>& displacement,
     const std::vector<double>& potential,
     const std::array<double, 3>& angularVelocity,
     std::span<const double> ocean) {
   namespace pm = planetmodel;
-  const auto& source = run.forcing.seaLevel;
   auto file = pm::SurfaceFile{};
   file.grid = pm::AngularGrid(
       std::vector<double>(grid.CoLatitudes().begin(), grid.CoLatitudes().end()),
@@ -835,9 +852,8 @@ planetmodel::SurfaceFile FingerprintFile(
   if (!run.model.moduli.empty()) {
     file.meta.emplace("moduli", run.model.moduli.string());
   }
-  file.meta.emplace("sea_level", source.file.string());
-  file.meta.emplace("ice_history", run.forcing.ice.history.string());
-  file.meta.emplace("date_kyr_bp", std::vector<double>{source.date_kyr_bp});
+  file.meta.emplace("ice", forcing.iceRead);
+  file.meta.emplace("sea_level", forcing.seaLevelRead);
   file.meta.emplace("rotation", std::string{NameOf(run.rotation)});
   file.meta.emplace("omega_x_rad_s", std::vector<double>{angularVelocity[0]});
   file.meta.emplace("omega_y_rad_s", std::vector<double>{angularVelocity[1]});
@@ -876,7 +892,7 @@ std::string RunFingerprint(const std::filesystem::path& config,
   const auto radial = SolveRadialFingerprint(input.run, top, earth);
   const auto& result = radial.result;
   auto file = FingerprintFile(
-      config, input.run, radial.fingerprint.Grid(),
+      config, input.run, radial.forcing, radial.fingerprint.Grid(),
       "elastic sea-level fingerprint", radial.forcing.thicknessChange,
       result.relativeSeaLevelChange, result.displacement, result.potential,
       result.angularVelocity, radial.fingerprint.OceanFunction());
@@ -884,7 +900,8 @@ std::string RunFingerprint(const std::filesystem::path& config,
                     std::vector<long long>{result.iterations});
   const auto& output = input.output.surface;
   WriteSurface(file, output);
-  return std::format("{}; wrote {} ({} SLE iterations)", meaning,
+  return std::format("{}; ice {}, {}; wrote {} ({} SLE iterations)", meaning,
+                     radial.forcing.iceRead, radial.forcing.seaLevelRead,
                      output.string(), result.iterations);
 }
 
@@ -966,10 +983,10 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
   for (auto& v : omega) v *= toFrequency;
 
   auto file = FingerprintFile(
-      config, run, grid,
+      config, run, forcing, grid,
       "elastic sea-level fingerprint of a laterally heterogeneous Earth",
-      forcing.thicknessChange, relativeSeaLevelChange, displacement, potential, omega,
-      state.oceanFunction);
+      forcing.thicknessChange, relativeSeaLevelChange, displacement, potential,
+      omega, state.oceanFunction);
   const auto conjugate = run.solver.step ==
                          Viscoelastic3D::Options::StepSolver::ConjugateGradients;
   file.meta.emplace("lateral", std::vector<long long>{1});
@@ -1004,15 +1021,25 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
             "the radial model's potential perturbation at the surface");
   const auto& output = input.output.surface;
   WriteSurface(file, output);
+  const auto read =
+      std::format("ice {}, {}", forcing.iceRead, forcing.seaLevelRead);
   return conjugate
-             ? std::format("{}; wrote {} ({} conjugate-gradient iterations in "
-                           "{} passes, residual {:.2e})",
-                           meaning, output.string(), response.solveIterations,
-                           response.coupledIterations, response.coupledResidual)
-             : std::format("{}; wrote {} ({} fixed-point iterations, residual "
-                           "{:.2e})",
-                           meaning, output.string(), response.coupledIterations,
-                           response.coupledResidual);
+             ? std::format(
+                   "{}; {}; wrote {} ({} conjugate-gradient iterations "
+                   "in {} passes, residual {:.2e})",
+                   meaning, read, output.string(), response.solveIterations,
+                   response.coupledIterations, response.coupledResidual)
+             : std::format(
+                   "{}; {}; wrote {} ({} fixed-point iterations, "
+                   "residual {:.2e})",
+                   meaning, read, output.string(), response.coupledIterations,
+                   response.coupledResidual);
+}
+
+/// What the config was taken to mean, followed by the inputs as read.
+std::string WithInputs(std::string_view meaning, const Loaded& world) {
+  return std::format("{}; ice {}, {}", meaning, world.iceRead,
+                     world.seaLevelRead);
 }
 
 /// The radial model's run through time.
@@ -1026,7 +1053,7 @@ std::string Run1D(const std::filesystem::path& config,
                         ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
   return RunWith<Evolution>(
-      config, input, top, meaning, solver, world,
+      config, input, top, WithInputs(meaning, world), solver, world,
       [&](Evolution::Options options) {
         return Evolution(op, solver, world.background,
                                  std::move(options));
@@ -1056,7 +1083,7 @@ std::string Run3D(const std::filesystem::path& config,
       op.ElasticLove(), ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
   return RunWith<Evolution3D>(
-      config, input, top, meaning, solver, world,
+      config, input, top, WithInputs(meaning, world), solver, world,
       [&](Evolution3D::Options options) {
         options.coupled_rtol = run.solver.step_rtol;
         options.max_coupled_iterations = run.solver.step_max_iterations;
@@ -1090,12 +1117,13 @@ SeaLevelInput ReadSeaLevelInput(const std::filesystem::path& config) {
   const auto directory = config.parent_path();
   auto out = SeaLevelInput{};
   out.run = ReadSeaLevelRun(top, directory);
-  if (!out.run.times) {
+  if (out.run.problem == Problem::Static) {
     for (const auto* name : {"checkpoint", "restart"}) {
       if (Has(top, name)) {
         Fail(top.At(name),
-             "needs a `times` block (a run through time): the elastic "
-             "fingerprint is one solve, with nothing to checkpoint");
+             std::format("{}: the elastic fingerprint is one solve, with "
+                         "nothing to checkpoint",
+                         kNeedsQuasiStatic));
       }
     }
   }
@@ -1116,9 +1144,9 @@ std::string RunSeaLevel(const std::filesystem::path& config) {
   const auto earth = BuildEarth(run, top);
   const auto meaning = Meaning(run, earth);
   const auto& ranks = TheRanks();
-  if (!run.times) {
-    // a viscosity file is refused without `times` when the config is read,
-    // so a lateral Earth here is one of lateral moduli
+  if (run.problem == Problem::Static) {
+    // a viscosity file is refused in the static problem when the config is
+    // read, so a lateral Earth here is one of lateral moduli
     if (earth.LateralModuli()) {
       return RunFingerprint3D(config, input, top, earth, meaning);
     }

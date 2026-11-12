@@ -95,9 +95,14 @@ TEST(MeasurementDuals, PointDisplacementReadsADirection) {
       EXPECT_NEAR(PairedValue(grid, a, m.tangentialPotentialDual, field),
                   d.east * gradEast + d.north * gradNorth, 1e-10);
       // W = f: -r x grad_1 f has the east part -d_theta f = north's
-      // gradient, and the north part -(1 / sin) d_phi f
+      // gradient, and the north part -(1 / sin) d_phi f; of f's degree-2
+      // term alone, its degree-1 terms being a rigid rotation, which the
+      // measurement leaves out
+      const auto east2 = -0.8 * std::sin(theta) * std::sin(2.0 * phi);
+      const auto north2 =
+          -0.8 * std::sin(theta) * std::cos(theta) * std::cos(2.0 * phi);
       EXPECT_NEAR(PairedValue(grid, a, m.toroidalPotentialDual, field),
-                  d.east * gradNorth - d.north * gradEast, 1e-10);
+                  d.east * north2 - d.north * east2, 1e-10);
     }
   }
 }
@@ -160,7 +165,9 @@ TEST(MeasurementDuals, AVectorWeightReadsTheDisplacement) {
   }
   auto mixedU = U;
   for (auto i = std::size_t{0}; i < mixedU.size(); ++i) mixedU[i] += other[i];
-  const auto u = DisplacementField(grid, mixedU, mixedV, mixedW);
+  // the measurement reads the displacement without its rigid rotation
+  const auto u = DisplacementField(grid, mixedU, mixedV,
+                                   WithoutNetRotation(grid, mixedW));
   auto dot = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < dot.size(); ++i) {
     dot[i] = weight.east[i] * u.east[i] + weight.north[i] * u.north[i] +
@@ -186,11 +193,163 @@ TEST(MeasurementDuals, AVectorWeightReadsTheDisplacement) {
   const auto gTheta = 2.0 * std::cos(theta) * std::sin(theta) +
                       0.3 * std::cos(theta) * std::cos(phi);
   const auto gPhiOverSin = -0.3 * std::sin(phi);
-  // u = U r + grad_1 g - r x grad_1 f at the site
-  const auto uEast = gPhiOverSin - dTheta(theta, phi);
-  const auto uNorth = -gTheta - dPhiOverSin(theta, phi);
+  // u = U r + grad_1 g - r x grad_1 f at the site, of f's degree-2 term
+  const auto uEast =
+      gPhiOverSin - 0.8 * std::sin(theta) * std::cos(theta) * std::cos(2.0 * phi);
+  const auto uNorth = -gTheta + 0.8 * std::sin(theta) * std::sin(2.0 * phi);
   const auto uUp = std::sin(theta) * std::sin(phi);
   EXPECT_NEAR(there, 0.3 * uEast - 0.8 * uNorth + 0.5 * uUp, 1e-10);
+}
+
+TEST(MeasurementDuals, HorizontalMeasurementsDoNotSeeARigidRotation) {
+  // A rigid rotation u = c x r is the toroidal potential c . r, found
+  // again by NetRotation; the displacement measurements pair with it to
+  // nothing, their duals of W having no degree 1.
+  const auto grid = SurfaceGrid(16, {.nmax = 1});
+  const auto a = 2.0;
+  const std::array<double, 3> c{0.3, -0.7, 0.5};
+  const auto rigid = RigidRotationPotential(grid, c);
+  const auto found = NetRotation(grid, rigid);
+  for (auto i = std::size_t{0}; i < 3; ++i) EXPECT_NEAR(found[i], c[i], 1e-12);
+
+  // its displacement field is c x r
+  const auto u = DisplacementField(grid, {}, {}, rigid);
+  const auto nphi = grid.Longitudes().size();
+  auto worst = 0.0;
+  for (auto it = std::size_t{0}; it < grid.CoLatitudes().size(); ++it) {
+    for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+      const auto theta = grid.CoLatitudes()[it];
+      const auto phi = grid.Longitudes()[ip];
+      const std::array<double, 3> r{std::sin(theta) * std::cos(phi),
+                                    std::sin(theta) * std::sin(phi),
+                                    std::cos(theta)};
+      const std::array<double, 3> cross{c[1] * r[2] - c[2] * r[1],
+                                        c[2] * r[0] - c[0] * r[2],
+                                        c[0] * r[1] - c[1] * r[0]};
+      const std::array<double, 3> east{-std::sin(phi), std::cos(phi), 0.0};
+      const std::array<double, 3> north{-std::cos(theta) * std::cos(phi),
+                                        -std::cos(theta) * std::sin(phi),
+                                        std::sin(theta)};
+      auto e = 0.0, n = 0.0;
+      for (auto i = std::size_t{0}; i < 3; ++i) {
+        e += cross[i] * east[i];
+        n += cross[i] * north[i];
+      }
+      worst = std::max({worst, std::abs(u.east[it * nphi + ip] - e),
+                        std::abs(u.north[it * nphi + ip] - n)});
+    }
+  }
+  EXPECT_LT(worst, 1e-12);
+
+  // a field with a rotation in it, and the same field without
+  const auto field = grid.FromFunction([](double theta, double phi) {
+    return std::cos(theta) + 0.7 * std::sin(theta) * std::sin(phi) +
+           0.4 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
+  });
+  const auto still = WithoutNetRotation(grid, field);
+  const auto none = NetRotation(grid, still);
+  for (auto v : none) EXPECT_NEAR(v, 0.0, 1e-12);
+  const GeographicPoint site{-32.05, 115.74};
+  const auto point = PointDisplacementMeasurement(
+      grid, a, site, {.east = 0.3, .north = -0.8});
+  EXPECT_NEAR(PairedValue(grid, a, point.toroidalPotentialDual, rigid), 0.0,
+              1e-11);
+  const auto value = PairedValue(grid, a, point.toroidalPotentialDual, field);
+  EXPECT_GT(std::abs(value), 0.1);
+  EXPECT_NEAR(value, PairedValue(grid, a, point.toroidalPotentialDual, still),
+              1e-11);
+  auto weight = DisplacementField(grid, {}, field, field);
+  const auto whole = DisplacementMeasurement(grid, weight);
+  EXPECT_NEAR(PairedValue(grid, a, whole.toroidalPotentialDual, rigid), 0.0,
+              1e-11);
+}
+
+TEST(MeasurementDuals, BaselinesAndAnglesAreTheGeometrysChanges) {
+  // The change of a length and of an angle between sites, against the
+  // sites moved by a small multiple of the displacement and the geometry
+  // measured again. The displacement holds a rigid rotation (the degree
+  // 1 of W) and the measurements, which leave it out, agree with the
+  // geometry all the same: neither quantity sees it.
+  const auto grid = SurfaceGrid(16, {.nmax = 1});
+  const auto a = 2.0;
+  auto f = [](double theta, double phi) {
+    return std::cos(theta) + 0.7 * std::sin(theta) * std::sin(phi) +
+           0.4 * std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi);
+  };
+  auto fTheta = [](double theta, double phi) {
+    return -std::sin(theta) + 0.7 * std::cos(theta) * std::sin(phi) +
+           0.8 * std::sin(theta) * std::cos(theta) * std::cos(2.0 * phi);
+  };
+  auto fPhiOverSin = [](double theta, double phi) {
+    return 0.7 * std::cos(phi) - 0.8 * std::sin(theta) * std::sin(2.0 * phi);
+  };
+  auto g = [](double theta, double phi) {
+    return 0.5 - std::cos(theta) * std::cos(theta) +
+           0.3 * std::sin(theta) * std::cos(phi);
+  };
+  auto gTheta = [](double theta, double phi) {
+    return 2.0 * std::cos(theta) * std::sin(theta) +
+           0.3 * std::cos(theta) * std::cos(phi);
+  };
+  auto gPhiOverSin = [](double, double phi) { return -0.3 * std::sin(phi); };
+  // u = U r + grad_1 V - r x grad_1 W with U = g, V = g, W = f
+  const auto U = grid.FromFunction(g), V = U;
+  const auto W = grid.FromFunction(f);
+  using Vector = std::array<double, 3>;
+  auto position = [&](GeographicPoint site, double step) {
+    const auto theta = site.CoLatitude();
+    const auto phi = site.Longitude();
+    const Vector r{std::sin(theta) * std::cos(phi),
+                   std::sin(theta) * std::sin(phi), std::cos(theta)};
+    const Vector east{-std::sin(phi), std::cos(phi), 0.0};
+    const Vector north{-std::cos(theta) * std::cos(phi),
+                       -std::cos(theta) * std::sin(phi), std::sin(theta)};
+    const auto uEast = gPhiOverSin(theta, phi) - fTheta(theta, phi);
+    const auto uNorth = -gTheta(theta, phi) - fPhiOverSin(theta, phi);
+    const auto uUp = g(theta, phi);
+    auto x = Vector{};
+    for (auto i = std::size_t{0}; i < 3; ++i) {
+      x[i] = a * r[i] + step * (uEast * east[i] + uNorth * north[i] + uUp * r[i]);
+    }
+    return x;
+  };
+  auto paired = [&](const Measurement& m) {
+    return PairedValue(grid, a, m.displacementDual, U) +
+           PairedValue(grid, a, m.tangentialPotentialDual, V) +
+           PairedValue(grid, a, m.toroidalPotentialDual, W);
+  };
+  const GeographicPoint A{-32.05, 115.74}, B{-12.4, 130.9}, C{-41.3, 174.8};
+  const auto h = 1e-5;
+
+  auto length = [&](double step) {
+    const auto x = position(A, step), y = position(B, step);
+    return std::hypot(y[0] - x[0], y[1] - x[1], y[2] - x[2]);
+  };
+  const auto baseline = paired(BaselineMeasurement(grid, a, A, B));
+  EXPECT_GT(std::abs(baseline), 0.01);
+  EXPECT_NEAR(baseline, (length(h) - length(-h)) / (2.0 * h), 1e-8);
+  // the other way round, the same change
+  EXPECT_NEAR(paired(BaselineMeasurement(grid, a, B, A)), baseline, 1e-11);
+
+  auto angle = [&](double step) {
+    const auto x = position(A, step), y = position(B, step),
+               z = position(C, step);
+    auto dot = 0.0, pp = 0.0, qq = 0.0;
+    for (auto i = std::size_t{0}; i < 3; ++i) {
+      dot += (y[i] - x[i]) * (z[i] - x[i]);
+      pp += (y[i] - x[i]) * (y[i] - x[i]);
+      qq += (z[i] - x[i]) * (z[i] - x[i]);
+    }
+    return std::acos(dot / std::sqrt(pp * qq));
+  };
+  const auto turned = paired(AngleMeasurement(grid, a, A, B, C));
+  EXPECT_GT(std::abs(turned), 0.01);
+  EXPECT_NEAR(turned, (angle(h) - angle(-h)) / (2.0 * h), 1e-8);
+
+  EXPECT_THROW(static_cast<void>(BaselineMeasurement(grid, a, A, A)),
+               std::invalid_argument);
+  EXPECT_THROW(static_cast<void>(AngleMeasurement(grid, a, A, B, B)),
+               std::invalid_argument);
 }
 
 TEST(MeasurementDuals, CoefficientDualReadsTheRealPair) {

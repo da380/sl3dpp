@@ -1184,8 +1184,9 @@ def response_load() -> None:
     stored = read_surface_file(CONFIGS / field["file"])
     # the file's own axis, in its own time scale
     stored_times = np.asarray(stored.time) * stored.scales.time / KYR
-    stored_load = at_point(stored.variables[field.get("name", "load")].values,
-                           stored.grid, *centre)
+    stored_load = at_point(
+        stored.variables[field.get("variable", "load")].values, stored.grid,
+        *centre)
     files = {n: read_surface_file(p) for n, p in paths.items()}
     times = np.asarray(files[names[0]].time) / KYR
     reference = np.asarray(files[names[0]].variables["displacement"].values)

@@ -79,12 +79,14 @@ def config(kind: str, steps: int) -> dict:
     if (START - MID) * steps % (START - END):
         raise ValueError(f"{steps} steps put no node at {MID:g} ka")
     out = {
+        "problem": "quasi_static",
         "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
         "lmax": 16,
         "times": {"start_kyr_bp": START, "end_kyr_bp": END,
                   "nodes": steps + 1},
-        "forcing": {"sea_level": {"file": "../data/synthetic_earth.nc"},
-                    "ice": {"file": "../data/synthetic_earth.nc"}},
+        "forcing": {"ice": {"file": "../data/synthetic_earth.nc"}},
+        "ocean": {"topography": {"file": "../data/synthetic_earth.nc",
+                                 "at": "start"}},
         "rotation": "none",
         "solver": {"scheme": SCHEMES.get(kind, "exponential_trapezoid")},
     }

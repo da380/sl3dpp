@@ -2,10 +2,11 @@
 // naming the config and the place, relative paths resolve against the
 // config's directory, love-numbers writes its provenance-headed table,
 // response takes its load and tide as sums of terms of every kind,
-// elastic or, with a times block, viscoelastic through time, sea-level
-// runs a toy state through the sea level equation, as the elastic
-// fingerprint or through time, 1-D or 3-D as its model block makes it,
-// and kernel1d and kernel read the same blocks for their forward runs.
+// elastic in the static problem or viscoelastic through time in the
+// quasi-static one, sea-level runs a toy ice and sea level through the
+// sea level equation, as the elastic fingerprint or through time, 1-D or
+// 3-D as its model block makes it, kernel1d and kernel read the same
+// blocks for their forward runs, and every example config is read.
 
 #include <limits>
 #include <gtest/gtest.h>
@@ -98,22 +99,24 @@ class AppsTest : public ::testing::Test {
                                    int lmax = 8) const {
     static_cast<void>(Deck());
     const auto config = Write(name + ".json", std::format(R"({{
-      "model": {{"deck": "ball.deck"}}, "lmax": {}, "forcing": {},
-      "output": {{"surface": "out/{}.nc"}}}})",
+      "problem": "static", "model": {{"deck": "ball.deck"}}, "lmax": {},
+      "forcing": {}, "output": {{"surface": "out/{}.nc"}}}})",
                                                           lmax, forcing, name));
     const auto summary = app::RunResponse(config);
     EXPECT_TRUE(summary.starts_with("1-D, elastic, ")) << summary;
     return planetmodel::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
   }
 
-  /// Runs `sl3d response` on a config of the members given, its output
-  /// block written after them (the surface file out/<name>.nc, a table per
-  /// node out/<name>_{node}.txt), and returns the summary.
+  /// Runs `sl3d response` in the quasi-static problem on a config of the
+  /// members given, its output block written after them (the surface file
+  /// out/<name>.nc, a table per node out/<name>_{node}.txt), and returns
+  /// the summary.
   std::string Run(const std::string& name, const std::string& members) const {
-    const auto config = Write(
-        name + ".json", std::format(R"({{{}, "output": {{"surface": "out/{}.nc",
+    const auto config =
+        Write(name + ".json", std::format(R"({{"problem": "quasi_static", {},
+                                          "output": {{"surface": "out/{}.nc",
                                           "exchange": "out/{}_{{node}}.txt"}}}})",
-                                    members, name, name));
+                                          members, name, name));
     return app::RunResponse(config);
   }
 
@@ -267,6 +270,37 @@ TEST_F(AppsTest, ResolvesPathsAgainstTheConfig) {
   EXPECT_EQ(input.format, app::ModelFormat::Gia);
 }
 
+TEST_F(AppsTest, TheExampleConfigsAreRead) {
+  // Every config in examples/configs is read by its command's reader
+  // without a fault: a `model` that is a path is love-numbers', a config
+  // with measurements a kernel command's, one whose forcing is the ice
+  // sea-level's, and the rest response's.
+  const auto configs =
+      fs::path{SL3DPP_TEST_DATA_DIR}.parent_path().parent_path() / "examples" /
+      "configs";
+  auto read = 0;
+  for (const auto& entry : fs::directory_iterator(configs)) {
+    const auto& path = entry.path();
+    if (path.extension() != ".json") continue;
+    const auto top = planetmodel::ReadJsonFile(path);
+    try {
+      if (top.At("model").IsString()) {
+        static_cast<void>(app::ReadLoveNumbersInput(path));
+      } else if (app::Has(top, "measurements")) {
+        static_cast<void>(app::ReadKernelInput(path));
+      } else if (app::Has(top.At("forcing"), "ice")) {
+        static_cast<void>(app::ReadSeaLevelInput(path));
+      } else {
+        static_cast<void>(app::ReadResponseInput(path));
+      }
+    } catch (const planetmodel::Error& error) {
+      ADD_FAILURE() << error.what();
+    }
+    ++read;
+  }
+  EXPECT_EQ(read, 47);
+}
+
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
   static_cast<void>(Deck());
   const auto config = Write("run.json", R"({"model": "ball.deck", "lmax": 4,
@@ -341,6 +375,7 @@ TEST_F(AppsTest, ResponseRespondsOnAToyModuliFile) {
   ASSERT_TRUE(written) << written.error().message;
 
   const auto config = Write("response.json", R"({
+    "problem": "static",
     "model": {"deck": "ball.deck", "moduli": {"file": "moduli.nc"}},
     "lmax": 8,
     "forcing": {
@@ -433,6 +468,7 @@ TEST_F(AppsTest, ResponseIsBitwiseIndependentOfTheCache) {
 
   const auto run = [&](const std::string& name, std::string_view cache) {
     const auto text = std::format(R"({{
+      "problem": "static",
       "model": {{"deck": "ball.deck", "moduli": {{"file": "moduli.nc"}}}},
       "lmax": {},
       "forcing": {{
@@ -540,7 +576,7 @@ TEST_F(AppsTest, ResponseFieldTermMatchesTheCap) {
       "longitude": -85, "width_deg": 20, "amplitude_kg_m2": 1.0e6}}]})");
   const auto same = Respond("same", R"({"load": [{"field": {"file": "own.nc"}}]})");
   const auto resampled = Respond("resampled", R"({"load": [{"field":
-      {"file": "fine.nc", "name": "sigma"}}]})");
+      {"file": "fine.nc", "variable": "sigma"}}]})");
   auto worst = 0.0;
   for (const auto* name : kResponseFields) {
     const auto& want = cap.variables.at(name).values;
@@ -646,13 +682,15 @@ TEST_F(AppsTest, ResponseLoadTermsAndTideCoefficientsAdd) {
   // the summary says what the config was taken to mean, and the metadata
   // count the terms
   static_cast<void>(Deck());
-  const auto config = Write("all.json", "{\"model\": {\"deck\": \"ball.deck\"}, "
-                                        "\"lmax\": 8, \"forcing\": {\"load\": [" +
-                                            capTerm + ", " + diskTerm +
-                                            "], \"tide\": [" + tide21 + ", " +
-                                            tide30 + "]}, \"output\": "
-                                            "{\"surface\": \"out/all.nc\", "
-                                            "\"exchange\": \"out/all.txt\"}}");
+  const auto config = Write("all.json",
+                            "{\"problem\": \"static\", "
+                            "\"model\": {\"deck\": \"ball.deck\"}, "
+                            "\"lmax\": 8, \"forcing\": {\"load\": [" +
+                                capTerm + ", " + diskTerm + "], \"tide\": [" +
+                                tide21 + ", " + tide30 +
+                                "]}, \"output\": "
+                                "{\"surface\": \"out/all.nc\", "
+                                "\"exchange\": \"out/all.txt\"}}");
   const auto summary = app::RunResponse(config);
   EXPECT_TRUE(summary.starts_with("1-D, elastic, load (2 terms) + tide (2 "
                                   "coefficients); wrote "))
@@ -814,20 +852,37 @@ TEST_F(AppsTest, DiskIsExpandedExactly) {
 TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
   // Each fault is refused naming the member: an unknown member anywhere, a
   // load term of two kinds or none, an amplitude history or a viscosity
-  // without a times block, a times block without its end, an empty
-  // forcing, the old layout's members; and, once the run reads its files,
-  // a field file with a time axis and a coefficient table above lmax.
+  // in the static problem, the problem missing, unknown or at odds with
+  // the times block, a times block without its end, an empty forcing, the
+  // old layout's members, a field's old `name`, an unknown format, a
+  // field's date in the quasi-static problem; and, once the run reads its
+  // files, a field file with a time axis and no date, a date on a file
+  // without one, a variable the file lacks (the file's own named), and a
+  // coefficient table above lmax.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   static_cast<void>(Write("high.txt", "# degree 5 at lmax 4\n0 0 1 0\n5 2 1 1\n"));
+  {
+    namespace pm = planetmodel;
+    auto file = pm::SurfaceFile{};
+    file.grid = pm::Equiangular(9, 18);
+    file.source = "sl3dpp tests";
+    file.variables.emplace(
+        "load", pm::SurfaceField(
+                    "load", std::vector<double>(9 * 18, 1.0),
+                    {.dimensions = pm::Dimensions{.mass = 1, .length = -2}}));
+    pm::WriteSurfaceFile(dir_ / "static.nc", file);
+  }
   const auto cap = std::string{
       R"({"cap": {"latitude": 60, "longitude": 0, "width_deg": 10,
                   "amplitude_kg_m2": 1.0}})"};
   const auto config = [&](const std::string& model, const std::string& forcing,
-                          const std::string& extra = "") {
-    return std::format(R"({{"model": {}, "lmax": 4, "forcing": {},{}
-                             "output": {{"surface": "out.nc"}}}})",
-                       model, forcing, extra);
+                          const std::string& extra = "",
+                          const std::string& problem = "static") {
+    return std::format(R"({{"problem": "{}", "model": {}, "lmax": 4,
+                             "forcing": {},{} "output": {{"surface":
+                             "out.nc"}}}})",
+                       problem, model, forcing, extra);
   };
   const auto ball = std::string{R"({"deck": "ball.deck"})"};
   const auto loads = [](const std::string& terms) {
@@ -865,8 +920,9 @@ TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
                        loads(cap)),
           "model.moduli.fil", "not a recognised member");
   refused(read,
-          std::format(R"({{"model": {}, "lmax": 4, "forcing": {},
-                          "output": {{"surface": "out.nc", "volum": "v.nc"}}}})",
+          std::format(R"({{"problem": "static", "model": {}, "lmax": 4,
+                          "forcing": {}, "output": {{"surface": "out.nc",
+                          "volum": "v.nc"}}}})",
                       ball, loads(cap)),
           "output.volum", "not a recognised member");
   refused(read, config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
@@ -875,17 +931,44 @@ TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
           "forcing.load[0]", "names several terms");
   refused(read, config(ball, loads(cap + ", {}")), "forcing.load[1]",
           "names no term");
-  refused(read,
-          config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
+  refused(read, config(ball, loads(R"({"cap": {"latitude": 60, "longitude": 0,
                                  "width_deg": 10, "amplitude_kg_m2": 1.0},
                                  "history_kyr": [[0, 1]]})")),
-          "forcing.load[0].history_kyr", "needs a `times` block");
-  refused(read, config(ball, loads(cap), R"( "times": {"nodes": 3},)"), "times",
-          "gives `nodes` without `end_kyr`");
+          "forcing.load[0].history_kyr", "needs the quasi-static problem");
+  refused(
+      read,
+      config(ball, loads(cap), R"( "times": {"nodes": 3},)", "quasi_static"),
+      "times", "gives `nodes` without `end_kyr`");
   refused(read,
           config(R"({"deck": "ball.deck", "viscosity": {"file": "v.nc"}})",
                  loads(cap)),
-          "model.viscosity", "needs a `times` block");
+          "model.viscosity", "needs the quasi-static problem");
+  // the problem: required, one of two words, and held to the times block
+  refused(read,
+          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
+              "forcing": {"load": [{"cap": {"latitude": 60, "longitude": 0,
+                  "width_deg": 10, "amplitude_kg_m2": 1.0}}]},
+              "output": {"surface": "out.nc"}})",
+          "bad.json", "has no `problem`");
+  refused(read, config(ball, loads(cap), "", "dynamic"), "problem",
+          "none of \"static\", \"quasi_static\"");
+  refused(read,
+          config(ball, loads(cap), R"( "times": {"end_kyr": 1, "nodes": 3},)"),
+          "times", "the static problem does not take");
+  refused(read, config(ball, loads(cap), "", "quasi_static"), "problem",
+          "needs a `times` block");
+  // a field term's members
+  refused(read, config(ball, loads(R"({"field": {"file": "static.nc",
+                                           "name": "load"}})")),
+          "forcing.load[0].field.name", "its `variable`");
+  refused(read, config(ball, loads(R"({"field": {"file": "static.nc",
+                                           "format": "netcdf"}})")),
+          "forcing.load[0].field.format", "none of \"planetmodel_surface\"");
+  refused(read,
+          config(ball, loads(R"({"field": {"file": "history.nc",
+                                           "date_kyr": 1}})"),
+                 R"( "times": {"end_kyr": 1, "nodes": 3},)", "quasi_static"),
+          "forcing.load[0].field.date_kyr", "dates the file");
   refused(read, config(ball, "{}"), "forcing", "needs at least one");
   refused(read, config(ball, R"({"load": [], "tide": []})"), "forcing",
           "needs at least one");
@@ -904,12 +987,20 @@ TEST_F(AppsTest, ResponseRefusesWhatItCannotDo) {
               "amplitude_m2_s2": 1.0}, "output": "out.nc"})",
           "tide", "not a recognised member");
 
-  refused(run,
-          config(ball, loads(R"({"field": {"file": "history.nc",
-                                           "name": "ice_thickness"}})")),
-          "forcing.load[0].field.file", "has a time axis");
+  refused(run, config(ball, loads(R"({"field": {"file": "history.nc",
+                                           "variable": "ice_thickness"}})")),
+          "forcing.load[0].field", "names a file with a time axis");
+  refused(run, config(ball, loads(R"({"field": {"file": "static.nc",
+                                           "date_kyr": 0}})")),
+          "forcing.load[0].field.date_kyr", "dates a file without a time axis");
   refused(run, config(ball, loads(R"({"field": {"file": "history.nc"}})")),
-          "forcing.load[0].field.file", "needs a `times` block");
+          "forcing.load[0].field.file",
+          "names a variable \"load\" that " + (dir_ / "history.nc").string() +
+              " does not hold; it holds \"ice_thickness\", \"topography\"");
+  refused(run, config(ball, loads(R"({"field": {"file": "history.nc",
+                                           "variable": "thk"}})")),
+          "forcing.load[0].field.variable",
+          "it holds \"ice_thickness\", \"topography\"");
   refused(run,
           config(ball, loads(R"({"coefficients": {"file": "high.txt"}})")),
           "forcing.load[0].coefficients.file", "line 3: degree 5 exceeds lmax = 4");
@@ -1011,11 +1102,10 @@ TEST_F(AppsTest, ViscoelasticResponseStartsFromTheElasticResponse) {
   const auto lateral = std::string{
       R"("model": {"deck": "ball.deck", "moduli": {"file": "moduli.nc"}},
          "lmax": 8)"};
-  static_cast<void>(app::RunResponse(
-      Write("elastic3d.json",
-            std::format(R"({{{}, "forcing": {}, "output": {{"surface":
-                       "out/elastic3d.nc"}}}})",
-                        lateral, forcing))));
+  static_cast<void>(app::RunResponse(Write(
+      "elastic3d.json", std::format(R"({{"problem": "static", {}, "forcing": {},
+                       "output": {{"surface": "out/elastic3d.nc"}}}})",
+                                    lateral, forcing))));
   const auto lateralSummary =
       Run("visco3d", std::format(R"({}, "times": {{"end_kyr": 1, "nodes": 2}},
                                     "forcing": {})",
@@ -1369,7 +1459,9 @@ TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
   // present, read from time_origin_kyr = 2, likewise; and on a 1-degree
   // grid read by the cubic rule, to the resampling's error (about 3e-8, as
   // the static field term's). Past the file's last date its last field is
-  // held. A history on a field term multiplies it.
+  // held. A history on a field term multiplies it. The static problem reads
+  // the file at its `date_kyr`: the cap at 2 kyr, half of it at 1 kyr, and
+  // its summary says so.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   constexpr auto kLmax = 8;
@@ -1440,8 +1532,8 @@ TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
   const auto own = run("own", R"({"field": {"file": "ramp.nc"}})");
   const auto shifted = run(
       "shifted", R"({"field": {"file": "ramp_bp.nc", "time_origin_kyr": 2}})");
-  const auto resampled =
-      run("resampled", R"({"field": {"file": "fine.nc", "name": "sigma"}})");
+  const auto resampled = run(
+      "resampled", R"({"field": {"file": "fine.nc", "variable": "sigma"}})");
   const auto doubled = run(
       "doubled", R"({"field": {"file": "ramp.nc"}, "history_kyr": [[0, 2]]})");
   auto worst = 0.0;
@@ -1460,6 +1552,30 @@ TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
         << name;
   }
   RecordProperty("resampled_departure", std::format("{:.3e}", worst));
+
+  // the static problem at the file's dates
+  const auto capStatic =
+      Respond("cap_static", std::format(R"({{"load": [{}]}})", kCap));
+  const auto at2 = Respond(
+      "at2", R"({"load": [{"field": {"file": "ramp.nc", "date_kyr": 2}}]})");
+  const auto at1 = Respond(
+      "at1", R"({"load": [{"field": {"file": "ramp.nc", "date_kyr": 1}}]})");
+  for (const auto* name :
+       {"load", "displacement", "tangential_potential", "potential"}) {
+    const auto& want = capStatic.variables.at(name).values;
+    EXPECT_LT(Departure(at2.variables.at(name).values, want), 1e-12) << name;
+    auto half = want;
+    for (auto& v : half) v *= 0.5;
+    EXPECT_LT(Departure(at1.variables.at(name).values, half), 1e-12) << name;
+  }
+  const auto summary = app::RunResponse(Write("dated.json", R"({
+      "problem": "static", "model": {"deck": "ball.deck"}, "lmax": 8,
+      "forcing": {"load": [{"field": {"file": "ramp.nc", "date_kyr": 2}}]},
+      "output": {"surface": "out/dated.nc"}})"));
+  EXPECT_NE(summary.find("; field " + (dir_ / "ramp.nc").string() +
+                         ":load (2 kyr); wrote "),
+            std::string::npos)
+      << summary;
 }
 
 TEST_F(AppsTest, ViscoelasticResponseConvergesUnderStepHalving) {
@@ -1567,14 +1683,14 @@ TEST_F(AppsTest, ViscoelasticResponseTakesItsNodesEitherWay) {
   }
 
   // uneven nodes, starting late, with the tables of three of them
-  const auto config = Write(
-      "uneven.json",
-      std::format(R"({{{}, "times": {{"at_kyr": [1, 1.1, 1.4, 2, 3.5, 4, 5,
+  const auto config =
+      Write("uneven.json", std::format(R"({{"problem": "quasi_static", {},
+                     "times": {{"at_kyr": [1, 1.1, 1.4, 2, 3.5, 4, 5,
                      6, 7, 8, 9.5]}}, {},
           "output": {{"surface": "out/uneven.nc",
                       "exchange": "out/uneven_{{node}}_{{node}}.txt",
                       "exchange_nodes": [10, 0, 3, 3]}}}})",
-                  kBall, forcing));
+                                       kBall, forcing));
   const auto summary = app::RunResponse(config);
   EXPECT_TRUE(summary.starts_with("1-D, viscoelastic, 11 nodes 1 to 9.5 kyr"))
       << summary;
@@ -1602,9 +1718,10 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
   // Each fault of a viscoelastic config is refused naming the member: the
   // times block's forms, given both ways or neither, out of order or too
   // short; a history out of order or malformed; an elastic deck with no
-  // viscosity file; the output's {node}, missing with times and present
-  // without, a volume file, exchange nodes out of range or without their
-  // tables; the time step's members and a time origin without times; and
+  // viscosity file; the output's {node}, missing in the quasi-static
+  // problem and present in the static one, a volume file, exchange nodes
+  // out of range or without their tables; the time step's members and a
+  // time origin in the static problem; and
   // the members of other commands. Once the run reads its deck, a Maxwell
   // deck with no viscosity anywhere.
   static_cast<void>(Deck());
@@ -1640,9 +1757,10 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
               R"({"surface": "o.nc", "exchange": "o_{node}.txt"})",
           const std::string& model = R"({"deck": "ball.deck"})",
           const std::string& load = kCap) {
-        return std::format(R"({{"model": {}, "lmax": 4, {} "forcing":
-                           {{"load": [{}]}},{} "output": {}}})",
-                           model, times, load, extra, output);
+        return std::format(R"({{"problem": "{}", "model": {}, "lmax": 4, {}
+                           "forcing": {{"load": [{}]}},{} "output": {}}})",
+                           times.empty() ? "static" : "quasi_static", model,
+                           times, load, extra, output);
       };
   const auto even = std::string{R"("times": {"end_kyr": 2, "nodes": 3},)"};
 
@@ -1703,21 +1821,22 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
           config(even, "", R"({"surface": "o.nc", "exchange_nodes": [0]})"),
           "output.exchange_nodes", "need `output.exchange`");
   refused(read, config("", "", R"({"surface": "o.nc", "exchange_nodes": [0]})"),
-          "output.exchange_nodes", "need a `times` block");
+          "output.exchange_nodes", "needs the quasi-static problem");
   refused(read,
           config("", R"( "solver": {"scheme": "backward_euler"},)",
                  R"({"surface": "o.nc"})"),
-          "solver.scheme", "needs a `times` block");
+          "solver.scheme", "needs the quasi-static problem");
   refused(read,
           config("", R"( "solver": {"step": "fixed_point"},)",
                  R"({"surface": "o.nc"})"),
-          "solver.step", "needs a `times` block");
+          "solver.step", "needs the quasi-static problem");
   refused(read, config(even, R"( "solver": {"step": "picard"},)"),
           "solver.step", "none of");
   refused(read,
           config("", "", R"({"surface": "o.nc"})", R"({"deck": "ball.deck"})",
                  R"({"field": {"file": "f.nc", "time_origin_kyr": 2}})"),
-          "forcing.load[0].field.time_origin_kyr", "needs a `times` block");
+          "forcing.load[0].field.time_origin_kyr",
+          "needs the quasi-static problem");
   for (const auto* member : {"rotation", "checkpoint", "kernels"}) {
     refused(read, config(even, std::format(R"( "{}": {{}},)", member)), member,
             "not a recognised member");
@@ -1730,15 +1849,28 @@ TEST_F(AppsTest, ViscoelasticResponseRefusesWhatItCannotDo) {
 
 // -- sea-level, kernel1d and kernel -------------------------------------------
 
-/// The toy history's window, from 2 kyr BP to the present over `nodes`
-/// nodes, and the forcing of a run through time: the state file and the
-/// ice history (by default the one toy history for both).
-std::string Window(int nodes, const std::string& state = "history.nc",
-                   const std::string& ice = "") {
+/// The quasi-static problem over the toy history's window, from 2 kyr BP
+/// to the present over `nodes` nodes, and its inputs: the ice history and
+/// the topography (by default the one toy history for both), the
+/// topography read at the window's end `at`, and the ocean block's other
+/// members `ocean` where given (the shorelines, the calibration).
+std::string Window(int nodes, const std::string& topography = "history.nc",
+                   const std::string& ice = "", const std::string& ocean = "",
+                   const std::string& at = "start") {
   return std::format(
-      R"("times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": {}}},
-    "forcing": {{"sea_level": {{"file": "{}"}}, "ice": {{"file": "{}"}}}})",
-      nodes, state, ice.empty() ? state : ice);
+      R"("problem": "quasi_static",
+    "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": {}}},
+    "forcing": {{"ice": {{"file": "{}"}}}},
+    "ocean": {{{}"topography": {{"file": "{}", "at": "{}"}}}})",
+      nodes, ice.empty() ? topography : ice,
+      ocean.empty() ? std::string{} : ocean + ", ", topography, at);
+}
+
+/// The ocean block's members of a calibrated run under the given
+/// shorelines, for Window with the topography at the window's end.
+std::string Calibrated(const std::string& shorelines) {
+  return std::format(R"("shorelines": "{}", "calibration": {{"rtol": 1e-8}})",
+                     shorelines);
 }
 
 /// Runs `run` on `config` and expects a planetmodel::Error whose message
@@ -1762,7 +1894,7 @@ void ExpectRefused(Run&& run, const fs::path& config, const std::string& member,
 }
 
 TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
-  // Without a times block, sea-level is the elastic fingerprint of an ice
+  // In the static problem, sea-level is the elastic fingerprint of an ice
   // change on the state: written as a surface file of static fields, the
   // ocean function in [0, 1], the far field raised by melting ice. With
   // the moments of inertia from the model's hydrostatic limit, it is the
@@ -1797,9 +1929,11 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
   const auto config = [&](const std::string& name, const std::string& change,
                           const std::string& extra) {
     return Write(name + ".json", std::format(R"({{
+    "problem": "static",
     "model": {{"deck": "ball.deck"}},
     "lmax": 8,
-    "forcing": {{"sea_level": {{"file": "state.nc"}}, "ice": {}}},
+    "forcing": {{"ice": {}}},
+    "ocean": {{"topography": {{"file": "state.nc"}}}},
     "rotation": "full",{}
     "output": {{"surface": "out/{}.nc"}}}})",
                                              change, extra, name));
@@ -1808,8 +1942,12 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
       config("fingerprint", R"({"file": "state.nc", "type": "cap_fraction", "latitude": 90,
              "longitude": 0, "width_deg": 15, "fraction": -0.1})",
              ""));
-  EXPECT_TRUE(
-      summary.starts_with("1-D, elastic (fingerprint), rotation full; wrote "))
+  // the inputs as read: the file, its variable, and static (no time axis)
+  const auto stateFile = (dir_ / "state.nc").string();
+  EXPECT_TRUE(summary.starts_with(std::format(
+      "1-D, elastic (fingerprint), rotation full; ice {}:ice_thickness "
+      "(static), topography {}:topography (static); wrote ",
+      stateFile, stateFile)))
       << summary;
   EXPECT_TRUE(summary.ends_with("SLE iterations)")) << summary;
 
@@ -1819,6 +1957,10 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
     EXPECT_TRUE(result.variables.contains(name)) << name;
   }
   EXPECT_TRUE(result.meta.contains("omega_z_rad_s"));
+  EXPECT_EQ(std::get<std::string>(result.meta.at("ice")),
+            stateFile + ":ice_thickness (static)");
+  EXPECT_EQ(std::get<std::string>(result.meta.at("sea_level")),
+            "topography " + stateFile + ":topography (static)");
   EXPECT_EQ(result.grid->Kind(), "gauss_legendre");
   const auto& ocean = result.variables.at("ocean_function").values;
   for (const auto value : ocean) {
@@ -1839,7 +1981,7 @@ TEST_F(AppsTest, SeaLevelFingerprintRunsAToyStateEndToEnd) {
   const auto hydrostatic = app::RunSeaLevel(
       config("hydrostatic", kOffPole, R"( "moments": "hydrostatic",)"));
   EXPECT_TRUE(hydrostatic.starts_with(
-      "1-D, elastic (fingerprint), rotation full, moments hydrostatic; wrote "))
+      "1-D, elastic (fingerprint), rotation full, moments hydrostatic; ice "))
       << hydrostatic;
   const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
   const auto mesh = RadialMesh::Create(model, {.lmax = 8});
@@ -1898,15 +2040,18 @@ TEST_F(AppsTest, SeaLevelFingerprintRefusesAStateWithoutTheFields) {
                        {.dimensions = pm::units::LENGTH}));
   pm::WriteSurfaceFile(dir_ / "state.nc", state);
   const auto config = Write("run.json", R"({
+    "problem": "static",
     "model": {"deck": "ball.deck"},
     "lmax": 4,
     "forcing": {
-      "sea_level": {"file": "state.nc"},
       "ice": {"file": "state.nc", "type": "cap_thickness", "latitude": 0, "longitude": 0,
               "width_deg": 10, "thickness_m": -1.0}},
+    "ocean": {"topography": {"file": "state.nc"}},
     "output": {"surface": "out/fingerprint.nc"}})");
-  ExpectRefused(app::RunSeaLevel, config, "forcing.sea_level.file",
-                "holds neither a field sea_level nor a field topography");
+  ExpectRefused(app::RunSeaLevel, config, "ocean.topography.file",
+                "names a variable \"topography\" that " +
+                    (dir_ / "state.nc").string() +
+                    " does not hold; it holds \"ice_thickness\"");
 }
 
 TEST_F(AppsTest, ResponseTakesSeismicSources) {
@@ -1915,18 +2060,19 @@ TEST_F(AppsTest, ResponseTakesSeismicSources) {
   // stress glut held from the start), field for field, with the toroidal
   // potential written; a source with an onset does nothing before it; a
   // fault of one patch is the point double couple at its centroid; and
-  // the elastic response (no `times`) refuses the block.
+  // the elastic response (the static problem) refuses the block.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   constexpr auto kLmax = 8;
   const auto run = [&](const std::string& name, const std::string& seismic,
                        const std::string& times =
                            R"("times": {"at_kyr": [0, 0.4, 1.0]},)") {
-    const auto config = Write(
-        name + ".json",
-        std::format(R"({{{}, {} "forcing": {{"seismic": [{}]}},
-                     "output": {{"surface": "out/{}.nc"}}}})",
-                    kBall, times, seismic, name));
+    const auto config =
+        Write(name + ".json",
+              std::format(R"({{"problem": "quasi_static", {}, {} "forcing":
+                     {{"seismic": [{}]}}, "output": {{"surface":
+                     "out/{}.nc"}}}})",
+                          kBall, times, seismic, name));
     return app::RunResponse(config);
   };
   const auto tensor = std::string{R"({"point": {"latitude": 30, "longitude": 40,
@@ -2023,18 +2169,25 @@ TEST_F(AppsTest, ResponseTakesSeismicSources) {
   }
 
   // and the refusals
-  const auto elastic = Write("elastic.json", std::format(
-      R"({{{}, "forcing": {{"seismic": [{}]}},
-          "output": {{"surface": "out/elastic.nc"}}}})", kBall, tensor));
+  const auto elastic =
+      Write("elastic.json",
+            std::format(
+                R"({{"problem": "static", {}, "forcing": {{"seismic": [{}]}},
+          "output": {{"surface": "out/elastic.nc"}}}})",
+                kBall, tensor));
   ExpectRefused(app::RunResponse, elastic, "forcing.seismic",
-                "need a `times` block");
-  const auto both = Write("both.json", std::format(
-      R"({{{}, "times": {{"at_kyr": [0, 1]}}, "forcing": {{"seismic": [
+                "needs the quasi-static problem");
+  const auto both = Write(
+      "both.json",
+      std::format(
+          R"({{"problem": "quasi_static", {}, "times": {{"at_kyr": [0, 1]}},
+          "forcing": {{"seismic": [
           {{"point": {{"latitude": 0, "longitude": 0, "depth_km": 10,
                       "moment_tensor_nm": {{"rr": 1, "tt": 0, "pp": 0, "rt": 0,
                                            "rp": 0, "tp": 0}},
                       "moment_nm": 1}}}}]}},
-          "output": {{"surface": "out/both.nc"}}}})", kBall));
+          "output": {{"surface": "out/both.nc"}}}})",
+          kBall));
   ExpectRefused(app::RunResponse, both, "forcing.seismic[0].point.moment_nm",
                 "give one");
 }
@@ -2043,14 +2196,20 @@ TEST_F(AppsTest, SeaLevelTakesAnIceHistoryAndAnInitialSeaLevel) {
   // The run's inputs are an ice history and an initial sea level: a file
   // holding topography alone serves as the sea level's (the ice it is
   // built with is the history's own), and gives the run of the one file
-  // named for both; a `state` member, a sea level file with neither
-  // field and values that are not numbers are refused.
+  // named for both; variables under other names, named by `variable`, give
+  // the same run to the bit, and the summary and the output's metadata say
+  // what was read. A sea level file without the variable (its own
+  // variables listed), an ice file without the ice, the old members
+  // (`forcing.state`, `forcing.sea_level`) and values that are not numbers
+  // are refused.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   using sl3dpp::test::ToyFields;
   WriteToyHistory(dir_ / "topography.nc", 0.0, false, ToyFields::Topography);
   WriteToyHistory(dir_ / "ice.nc", 0.0, false, ToyFields::Ice);
+  WriteToyHistory(dir_ / "renamed.nc", 0.0, false, ToyFields::Both, false,
+                  {.ice = "thk", .topography = "topo"});
   const auto run = [&](const std::string& name, const std::string& sea,
                        const std::string& ice) {
     return Write(name + ".json",
@@ -2058,24 +2217,70 @@ TEST_F(AppsTest, SeaLevelTakesAnIceHistoryAndAnInitialSeaLevel) {
                      R"(, "rotation": "none", "output": {"surface": "out/)" +
                      name + R"(.nc"}})");
   };
-  static_cast<void>(app::RunSeaLevel(run("one", "history.nc", "history.nc")));
+  const auto summary = app::RunSeaLevel(run("one", "history.nc", "history.nc"));
   static_cast<void>(app::RunSeaLevel(run("two", "topography.nc", "ice.nc")));
+  const auto renamed = Write("renamed.json", "{" + std::string{kBall} + R"(,
+      "problem": "quasi_static",
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5},
+      "forcing": {"ice": {"file": "renamed.nc", "variable": "thk"}},
+      "ocean": {"topography": {"file": "renamed.nc", "variable": "topo",
+                               "format": "planetmodel_surface",
+                               "at": "start"}},
+      "rotation": "none", "output": {"surface": "out/renamed.nc"}})");
+  const auto renamedSummary = app::RunSeaLevel(renamed);
   const auto one = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
   const auto two = pm::ReadSurfaceFile(dir_ / "out" / "two.nc");
+  const auto other = pm::ReadSurfaceFile(dir_ / "out" / "renamed.nc");
   for (const auto name :
        {"relative_sea_level_change", "displacement", "initial_sea_level"}) {
     EXPECT_EQ(one.variables.at(name).values, two.variables.at(name).values) << name;
+    EXPECT_EQ(one.variables.at(name).values, other.variables.at(name).values)
+        << name;
   }
+  const auto history = (dir_ / "history.nc").string();
+  EXPECT_NE(summary.find(std::format(
+                "; ice {}:ice_thickness (2 to 0 kyr BP), topography "
+                "{}:topography (the window's start, 2 kyr BP); wrote ",
+                history, history)),
+            std::string::npos)
+      << summary;
+  const auto file = (dir_ / "renamed.nc").string();
+  EXPECT_NE(renamedSummary.find(std::format(
+                "; ice {}:thk (2 to 0 kyr BP), topography {}:topo (the "
+                "window's start, 2 kyr BP); wrote ",
+                file, file)),
+            std::string::npos)
+      << renamedSummary;
+  EXPECT_EQ(std::get<std::string>(other.meta.at("ice")),
+            file + ":thk (2 to 0 kyr BP)");
+  EXPECT_EQ(std::get<std::string>(other.meta.at("sea_level")),
+            "topography " + file + ":topo (the window's start, 2 kyr BP)");
+
   ExpectRefused(app::RunSeaLevel, run("neither", "ice.nc", "ice.nc"),
-                "forcing.sea_level.file",
-                "holds neither a field sea_level nor a field topography");
-  ExpectRefused(app::RunSeaLevel, run("noice", "topography.nc", "topography.nc"),
-                "forcing.ice.file", "holds no field ice_thickness");
-  const auto old = Write("old.json", "{" + std::string{kBall} + R"(,
-      "times": {"start_kyr_bp": 2, "nodes": 5},
-      "forcing": {"state": {"file": "history.nc"}, "ice": {"file": "history.nc"}},
-      "rotation": "none", "output": {"surface": "out/old.nc"}})");
-  ExpectRefused(app::RunSeaLevel, old, "forcing.state", "is not a member");
+                "ocean.topography.file",
+                "names a variable \"topography\" that " +
+                    (dir_ / "ice.nc").string() +
+                    " does not hold; it holds \"ice_thickness\"");
+  ExpectRefused(app::RunSeaLevel,
+                run("noice", "topography.nc", "topography.nc"),
+                "forcing.ice.file",
+                "names a variable \"ice_thickness\" that " +
+                    (dir_ / "topography.nc").string() +
+                    " does not hold; it holds \"topography\"");
+  for (const auto* member : {"state", "sea_level"}) {
+    const auto old = Write("old.json", "{" + std::string{kBall} +
+                                           std::format(R"(,
+        "problem": "quasi_static",
+        "times": {{"start_kyr_bp": 2, "nodes": 5}},
+        "forcing": {{"{}": {{"file": "history.nc"}}, "ice": {{"file": "history.nc"}}}},
+        "ocean": {{"topography": {{"file": "history.nc", "at": "start"}}}},
+        "rotation": "none", "output": {{"surface": "out/old.nc"}}}})",
+                                                       member));
+    ExpectRefused(app::RunSeaLevel, old, std::string{"forcing."} + member,
+                  "is not a member of `forcing`");
+    ExpectRefused(app::RunSeaLevel, old, std::string{"forcing."} + member,
+                  "`ocean.sea_level`");
+  }
   WriteToyHistory(dir_ / "holed.nc", 0.0, false, ToyFields::Ice, true);
   ExpectRefused(app::RunSeaLevel, run("holed", "topography.nc", "holed.nc"),
                 "forcing.ice.file", "not a number");
@@ -2092,7 +2297,7 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   auto summary = app::RunSeaLevel(whole);
   EXPECT_TRUE(summary.starts_with(
       "1-D, viscoelastic, 5 nodes 2 to 0 kyr BP, shorelines frozen, rotation "
-      "full, moments hydrostatic; wrote "))
+      "full, moments hydrostatic; ice "))
       << summary;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
   ASSERT_TRUE(reference.time);
@@ -2195,20 +2400,21 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
 }
 
 TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
-  // With ocean.calibrate_initial_sea_level the run reaches the state file's
-  // sea level at the window's end: exactly under frozen shorelines (one
-  // linear step), to the calibration's tolerance under migrating ones; a
-  // resumed calibrating run reads its calibrated state back instead of
-  // calibrating again, and ends where the uninterrupted run does.
+  // With the sea level at the window's end ("at": "end") the run's initial
+  // sea level is calibrated so that it reaches the state file's sea level
+  // there: exactly under frozen shorelines (one linear step), to the
+  // calibration's tolerance under migrating ones; a resumed calibrating
+  // run reads its calibrated state back instead of calibrating again, and
+  // ends where the uninterrupted run does. The calibration's members take
+  // their defaults without an `ocean.calibration` block.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
-  const auto body = std::string{kBall} + ", " + Window(5) +
-                    R"(, "rotation": "full", "moments": "hydrostatic")";
-  const auto ocean = [](const std::string& shorelines) {
-    return std::format(R"(, "ocean": {{"shorelines": "{}",
-        "calibrate_initial_sea_level": {{"rtol": 1e-8}}}})",
-                       shorelines);
+  // a calibrated run under the given shorelines
+  const auto body = [](const std::string& shorelines) {
+    return std::string{kBall} + ", " +
+           Window(5, "history.nc", "", Calibrated(shorelines), "end") +
+           R"(, "rotation": "full", "moments": "hydrostatic")";
   };
 
   // the target: the state file's present-day sea level on the solver grid
@@ -2231,7 +2437,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
   };
 
   const auto frozen =
-      Write("frozen.json", "{" + body + ocean("frozen") +
+      Write("frozen.json", "{" + body("frozen") +
                                R"(, "output": {"surface": "out/frozen.nc"}})");
   auto summary = app::RunSeaLevel(frozen);
   EXPECT_NE(summary.find("initial sea level calibrated"), std::string::npos)
@@ -2239,9 +2445,19 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "frozen.nc");
   EXPECT_LT(worstOf(reference), 1e-9);
   EXPECT_FALSE(reference.variables.contains("ocean_function"));
+  // without the calibration block, its defaults
+  const auto defaults = Write(
+      "defaults.json",
+      "{" + std::string{kBall} + ", " +
+          Window(5, "history.nc", "", R"("shorelines": "frozen")", "end") +
+          R"(, "rotation": "full", "moments": "hydrostatic",
+              "output": {"surface": "out/defaults.nc"}})");
+  EXPECT_NE(app::RunSeaLevel(defaults).find("initial sea level calibrated"),
+            std::string::npos);
+  EXPECT_LT(worstOf(pm::ReadSurfaceFile(dir_ / "out" / "defaults.nc")), 1e-9);
 
   const auto migrating = Write(
-      "migrating.json", "{" + body + ocean("migrating") +
+      "migrating.json", "{" + body("migrating") +
                             R"(, "output": {"surface": "out/migrating.nc"}})");
   summary = app::RunSeaLevel(migrating);
   EXPECT_NE(summary.find("shorelines migrating, initial sea level calibrated"),
@@ -2252,7 +2468,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
   EXPECT_TRUE(moving.variables.contains("ocean_function"));
 
   // through wall-time stops: the calibration runs once, at the start
-  const auto pieces = Write("pieces.json", "{" + body + ocean("migrating") +
+  const auto pieces = Write("pieces.json", "{" + body("migrating") +
                                                R"(,
               "checkpoint": {"directory": "ckpt", "every": 2,
                              "max_walltime_min": 1e-9},
@@ -2275,7 +2491,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
   }
 
   // starting over calibrates afresh, keeping its own state
-  const auto over = Write("over.json", "{" + body + ocean("migrating") +
+  const auto over = Write("over.json", "{" + body("migrating") +
                                            R"(, "restart": false,
               "checkpoint": {"directory": "ckpt2", "every": 2},
               "output": {"surface": "out/over.nc"}})");
@@ -2285,7 +2501,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
   EXPECT_TRUE(fs::exists(dir_ / "ckpt2" / "initial_state.bin"));
 
   // the kernels about the calibrated migrating run
-  const auto kernels = Write("kernels.json", "{" + body + ocean("migrating") +
+  const auto kernels = Write("kernels.json", "{" + body("migrating") +
                                                  R"(, "adjoint": "discrete",
               "measurements": [{"type": "relative_sea_level_point", "name": "site",
                                 "latitude": -30.0, "longitude": 20.0,
@@ -2296,10 +2512,10 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
       << summary;
 
   // a state file that ends before the window's end gives no target
-  auto beyond = body;
+  auto beyond = body("frozen");
   beyond.replace(beyond.find(R"("end_kyr_bp": 0.0)"), 17,
                  R"("end_kyr_bp": -0.5)");
-  const auto future = Write("future.json", "{" + beyond + ocean("frozen") +
+  const auto future = Write("future.json", "{" + beyond +
                                                R"(, "output": {"surface":
                                                   "out/future.nc"}})");
   try {
@@ -2313,7 +2529,7 @@ TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
 
   // a migrating solve that cannot meet its tolerance is refused, not
   // finished quietly with its last iterate
-  const auto strict = Write("strict.json", "{" + body + ocean("migrating") +
+  const auto strict = Write("strict.json", "{" + body("migrating") +
                                                R"(, "solver": {"rtol": 1e-17},
                                     "output": {"surface": "out/strict.nc"}})");
   try {
@@ -2335,10 +2551,10 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
   // it thins.
   namespace pm = planetmodel;
   WriteToyHistory(dir_ / "history.nc", 0.0, true);
-  const auto body = Prem8() + ", " + Window(4) + R"(,
-    "rotation": "full",
-    "ocean": {"shorelines": "migrating",
-              "calibrate_initial_sea_level": {"rtol": 1e-8}})";
+  const auto body =
+      Prem8() + ", " +
+      Window(4, "history.nc", "", Calibrated("migrating"), "end") + R"(,
+    "rotation": "full")";
   const auto grid = SurfaceGrid(8);
   const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
   ASSERT_TRUE(history);
@@ -2352,7 +2568,10 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
   EXPECT_TRUE(summary.starts_with(
       "3-D (lateral viscosity), viscoelastic, 4 nodes 2 to 0 kyr BP, "
       "shorelines migrating, initial sea level calibrated, rotation full; "
-      "wrote "))
+      "ice "))
+      << summary;
+  EXPECT_NE(summary.find(":topography (the window's end, 0 kyr BP); wrote "),
+            std::string::npos)
       << summary;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
   EXPECT_EQ(std::get<std::string>(reference.meta.at("shorelines")),
@@ -2415,7 +2634,7 @@ TEST_F(AppsTest, SeaLevel3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   auto summary = app::RunSeaLevel(whole);
   EXPECT_TRUE(summary.starts_with(
       "3-D (lateral viscosity), viscoelastic, 4 nodes 2 to 0 kyr BP, "
-      "shorelines frozen, rotation full; wrote "))
+      "shorelines frozen, rotation full; ice "))
       << summary;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
   ASSERT_TRUE(reference.time);
@@ -2553,7 +2772,7 @@ TEST_F(AppsTest, SeaLevelUnderLateralModuliMatchesTheLibrary) {
                                R"(, "output": {"surface": "out/moduli.nc"}})"));
   EXPECT_TRUE(summary.starts_with(
       "3-D (lateral viscosity, lateral moduli), viscoelastic, 4 nodes 2 to 0 "
-      "kyr BP, shorelines frozen, rotation full; wrote "))
+      "kyr BP, shorelines frozen, rotation full; ice "))
       << summary;
   static_cast<void>(app::RunSeaLevel(Write(
       "plain.json",
@@ -2673,31 +2892,33 @@ TEST_F(AppsTest, SeaLevel3DStepSolversAgree) {
 
 /// A fingerprint config on the prem8 deck at lmax 8, the moduli member and
 /// the solver block given where they are: the off-pole cap thinned by 50 m
-/// on the toy history's present day, with the full rotational feedback.
+/// on the toy history's present day (its ice and topography at 0 kyr BP),
+/// with the full rotational feedback.
 std::string Prem8Fingerprint(const std::string& name,
                              const std::string& moduli = "",
                              const std::string& solver = "") {
   const auto data = std::string{SL3DPP_TEST_DATA_DIR};
-  return std::format(R"({{
+  return std::format(
+      R"({{
+    "problem": "static",
     "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic"{}}},
     "lmax": 8,
-    "forcing": {{"sea_level": {{"file": "history.nc"}},
-                "ice": {{"file": "history.nc", "type": "cap_thickness", "latitude": 70,
-                        "longitude": 30, "width_deg": 10,
-                        "thickness_m": -50}}}},
+    "forcing": {{"ice": {{"file": "history.nc", "date_kyr_bp": 0,
+                         "type": "cap_thickness", "latitude": 70,
+                         "longitude": 30, "width_deg": 10,
+                         "thickness_m": -50}}}},
+    "ocean": {{"topography": {{"file": "history.nc", "date_kyr_bp": 0}}}},
     "rotation": "full",{}
     "output": {{"surface": "out/{}.nc"}}}})",
-                     data,
-                     moduli.empty()
-                         ? std::string{}
-                         : std::format(R"(, "moduli": {{"file": "{}"}})", moduli),
-                     solver.empty() ? std::string{}
-                                    : std::format(R"( "solver": {},)", solver),
-                     name);
+      data,
+      moduli.empty() ? std::string{}
+                     : std::format(R"(, "moduli": {{"file": "{}"}})", moduli),
+      solver.empty() ? std::string{} : std::format(R"( "solver": {},)", solver),
+      name);
 }
 
 TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
-  // Without a times block, a laterally varying moduli file makes the
+  // In the static problem, a laterally varying moduli file makes the
   // fingerprint 3-D: the command is Evolution3D::Instantaneous on
   // the stepper of a branchless rheology under the same moduli, solved
   // here on the same state and load, to rounding (equal to the bit here),
@@ -2726,7 +2947,10 @@ TEST_F(AppsTest, SeaLevelFingerprintUnderLateralModuliMatchesTheLibrary) {
   const auto summary = app::RunSeaLevel(
       Write("lateral.json", Prem8Fingerprint("lateral", "moduli.nc")));
   EXPECT_TRUE(summary.starts_with(
-      "3-D (lateral moduli), elastic (fingerprint), rotation full; wrote "))
+      "3-D (lateral moduli), elastic (fingerprint), rotation full; ice "))
+      << summary;
+  EXPECT_NE(summary.find(":ice_thickness (0 kyr BP), topography "),
+            std::string::npos)
       << summary;
   EXPECT_NE(summary.find("fixed-point iterations, residual "),
             std::string::npos)
@@ -2916,53 +3140,60 @@ TEST_F(AppsTest, SeaLevelFingerprintStepSolversAgree) {
 
 TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
   // Each fault of a sea-level or kernel config is refused naming the
-  // member: the other command's form of the times block; the members that
-  // need a times block (the ocean's, the time step's, a viscosity file,
-  // an ice history, checkpoints) without one, and the 3-D step's without
-  // one or a moduli file, and the fingerprint's (a dated state, an ice
-  // change) with one; a member of the commands' blocks given at the top
-  // level; an unknown member in every block; the kernel commands' own
-  // limits. Once the run reads its files, the 3-D step's members on a
-  // radial moduli file without times, kernel1d on a lateral model and
-  // kernel on a radial one.
+  // member: the problem missing, unknown or at odds with the times block;
+  // the other command's form of the times block; the members only the
+  // quasi-static problem takes (the ocean's shorelines and calibration, the
+  // time step, a viscosity file, checkpoints) in the static one, and the
+  // 3-D step's there without a moduli file, and the static problem's (a
+  // dated ice or sea level, an ice change) in the quasi-static one; the
+  // ocean block's sea level missing, given twice, without its `at` or
+  // with `at` in the static problem, a calibration with the sea level at
+  // the start, a topography dated otherwise than the ice, an unknown
+  // format; the old members' names; a member of the commands' blocks
+  // given at the top level; an unknown member in every block; the kernel
+  // commands' own limits. Once the run reads its files, the 3-D step's
+  // members on a radial moduli file in the static problem, kernel1d on a
+  // lateral model and kernel on a radial one.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   const auto data = std::string{SL3DPP_TEST_DATA_DIR};
   const auto change = std::string{
-      R"({"file": "history.nc", "type": "cap_thickness", "latitude": 70, "longitude": 0,
-          "width_deg": 10, "thickness_m": -1})"};
-  // a fingerprint config, the members after `extra` replaced where given
-  const auto fingerprint = [&](const std::string& extra,
-                               const std::string& model =
-                                   R"({"deck": "ball.deck"})",
-                               const std::string& forcing = "") {
-    return std::format(R"({{"model": {}, "lmax": 4,
-        "forcing": {},{} "output": {{"surface": "o.nc"}}}})",
-                       model,
-                       forcing.empty()
-                           ? std::format(R"({{"sea_level": {{"file": "history.nc"}},
-                                 "ice": {}}})",
-                                         change)
-                           : forcing,
-                       extra);
-  };
+      R"({"file": "history.nc", "date_kyr_bp": 0, "type": "cap_thickness",
+          "latitude": 70, "longitude": 0, "width_deg": 10, "thickness_m": -1})"};
+  const auto dated = std::string{
+      R"({"topography": {"file": "history.nc", "date_kyr_bp": 0}})"};
+  // a fingerprint config, the forcing and the ocean replaced where given
+  const auto fingerprint =
+      [&](const std::string& extra,
+          const std::string& model = R"({"deck": "ball.deck"})",
+          const std::string& forcing = "", const std::string& ocean = "") {
+        return std::format(
+            R"({{"problem": "static", "model": {}, "lmax": 4,
+        "forcing": {}, "ocean": {},{} "output": {{"surface": "o.nc"}}}})",
+            model,
+            forcing.empty() ? std::format(R"({{"ice": {}}})", change) : forcing,
+            ocean.empty() ? dated : ocean, extra);
+      };
   // a run through time
+  const auto start =
+      std::string{R"({"topography": {"file": "history.nc", "at": "start"}})"};
   const auto timed = [&](const std::string& extra,
                          const std::string& times =
                              R"("times": {"start_kyr_bp": 2,
                              "nodes": 3})",
                          const std::string& forcing =
-                             R"({"sea_level": {"file": "history.nc"},
-                                 "ice": {"file": "history.nc"}})") {
-    return std::format(R"({{"model": {{"deck": "ball.deck"}}, "lmax": 4, {},
-        "forcing": {},{} "output": {{"surface": "o.nc"}}}})",
-                       times, forcing, extra);
+                             R"({"ice": {"file": "history.nc"}})",
+                         const std::string& ocean = "") {
+    return std::format(R"({{"problem": "quasi_static",
+        "model": {{"deck": "ball.deck"}}, "lmax": 4, {},
+        "forcing": {}, "ocean": {},{} "output": {{"surface": "o.nc"}}}})",
+                       times, forcing, ocean.empty() ? start : ocean, extra);
   };
   const auto kernel = [&](const std::string& model, const std::string& extra) {
-    return std::format(R"({{"model": {}, "lmax": 4,
+    return std::format(R"({{"problem": "quasi_static", "model": {}, "lmax": 4,
         "times": {{"start_kyr_bp": 2, "nodes": 3}},
-        "forcing": {{"sea_level": {{"file": "history.nc"}},
-                    "ice": {{"file": "history.nc"}}}},{}
+        "forcing": {{"ice": {{"file": "history.nc"}}}},
+        "ocean": {{"topography": {{"file": "history.nc", "at": "start"}}}},{}
         "measurements": [{{"type": "rotation", "component": "z"}}],
         "output": "k"}})",
                        model, extra);
@@ -2975,6 +3206,29 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
     ExpectRefused(run, Write("bad.json", text), member, what);
   };
 
+  // the problem: required, one of two words, and held to the times block
+  auto missing = timed("");
+  missing.replace(missing.find(R"("problem": "quasi_static",)"),
+                  std::string_view{R"("problem": "quasi_static",)"}.size(), "");
+  refused(read, missing, "bad.json", "has no `problem`");
+  refused(app::ReadKernelInput,
+          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
+              "times": {"start_kyr_bp": 2, "nodes": 3},
+              "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
+              "measurements": [{"type": "rotation", "component": "z"}],
+              "output": "k"})",
+          "bad.json", "has no `problem`");
+  auto unknown = timed("");
+  unknown.replace(unknown.find("quasi_static"), 12, "dynamic");
+  refused(read, unknown, "problem", "none of \"static\", \"quasi_static\"");
+  auto staticTimed = timed("");
+  staticTimed.replace(staticTimed.find("quasi_static"), 12, "static");
+  refused(read, staticTimed, "times", "the static problem does not take");
+  auto timeless = fingerprint("");
+  timeless.replace(timeless.find(R"("static")"), 8, R"("quasi_static")");
+  refused(read, timeless, "problem", "needs a `times` block");
+
   // the times block's form, each command its own
   refused(read, timed("", R"("times": {"end_kyr": 2, "nodes": 3})"),
           "times.end_kyr", "counts forwards");
@@ -2984,8 +3238,8 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                  R"("at_kyr": [0, 1],)");
   refused(app::ReadKernelInput, listed, "times.at_kyr", "counts forwards");
   refused(app::ReadResponseInput,
-          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
-              "times": {"start_kyr_bp": 2, "nodes": 3},
+          R"({"problem": "quasi_static", "model": {"deck": "ball.deck"},
+              "lmax": 4, "times": {"start_kyr_bp": 2, "nodes": 3},
               "forcing": {"tide": [{"degree": 2, "amplitude_m2_s2": 1}]},
               "output": {"surface": "o.nc"}})",
           "times.start_kyr_bp", "is a date before present");
@@ -2995,55 +3249,134 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
   refused(read, timed("", R"("times": {"start_kyr_bp": 2, "nodes": 1})"),
           "times.nodes", "fewer than two nodes");
 
-  // what needs a times block, without one
-  for (const auto* member : {"shorelines", "calibrate_initial_sea_level"}) {
-    refused(read,
-            fingerprint(std::format(R"( "ocean": {{"{}": {}}},)", member,
-                                    member == std::string_view{"shorelines"}
-                                        ? R"("migrating")"
-                                        : "{}")),
-            std::format("ocean.{}", member), "needs a `times` block");
-  }
+  // what only the quasi-static problem takes, in the static one
+  refused(read,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"shorelines": "migrating",
+                          "topography": {"file": "history.nc",
+                                         "date_kyr_bp": 0}})"),
+          "ocean.shorelines", "needs the quasi-static problem");
+  refused(read,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"calibration": {},
+                          "topography": {"file": "history.nc",
+                                         "date_kyr_bp": 0}})"),
+          "ocean.calibration", "needs the quasi-static problem");
   refused(read, fingerprint(R"( "solver": {"scheme": "backward_euler"},)"),
-          "solver.scheme", "needs a `times` block");
+          "solver.scheme", "needs the quasi-static problem");
   refused(read, fingerprint(R"( "solver": {"step_rtol": 1e-8},)"),
-          "solver.step_rtol", "needs a `times` block");
+          "solver.step_rtol", "needs the quasi-static problem");
   refused(read, fingerprint(R"( "solver": {"step": "conjugate_gradients"},)"),
           "solver.step", "or lateral moduli (`model.moduli`)");
   // with a moduli file the time step is still refused
   refused(read,
           fingerprint(R"( "solver": {"scheme": "backward_euler"},)",
                       R"({"deck": "ball.deck", "moduli": {"file": "m.nc"}})"),
-          "solver.scheme", "needs a `times` block");
+          "solver.scheme", "needs the quasi-static problem");
   refused(read, fingerprint("", R"({"deck": "ball.deck",
                              "viscosity": {"file": "v.nc"}})"),
-          "model.viscosity", "needs a `times` block");
+          "model.viscosity", "needs the quasi-static problem");
   refused(read,
           fingerprint("", R"({"deck": "ball.deck"})",
-                      R"({"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}})"),
-          "forcing.ice", "needs a `times` block");
+                      R"({"ice": {"file": "history.nc", "date_kyr_bp": 0}})"),
+          "forcing.ice", "gives no ice change");
   refused(read,
           fingerprint(R"( "checkpoint": {"directory": "c", "every": 1},)"),
-          "checkpoint", "needs a `times` block");
+          "checkpoint", "needs the quasi-static problem");
   refused(read, fingerprint(R"( "restart": false,)"), "restart",
-          "needs a `times` block");
-  // and the fingerprint's members with one
+          "needs the quasi-static problem");
+  refused(read,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"topography": {"file": "history.nc",
+                                         "at": "start"}})"),
+          "ocean.topography.at", "which the static problem does not have");
+  // and the static problem's members in the quasi-static one
   refused(read,
           timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
-                std::format(R"({{"sea_level": {{"file": "history.nc"}},
-                                 "ice": {}}})",
-                            change)),
-          "forcing.ice.type", "describes an ice change");
+                std::format(R"({{"ice": {}}})", change)),
+          "forcing.ice", "describes an ice change");
   refused(read,
           timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
-                R"({"sea_level": {"file": "history.nc", "date_kyr_bp": 0},
-                    "ice": {"file": "history.nc"}})"),
-          "forcing.sea_level.date_kyr_bp", "dates the sea level");
+                R"({"ice": {"file": "history.nc", "date_kyr_bp": 0}})"),
+          "forcing.ice.date_kyr_bp", "dates the ice");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "start",
+                                   "date_kyr_bp": 0}})"),
+          "ocean.topography.date_kyr_bp", "dates the sea level");
+
+  // the ocean block's sea level
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc"}})"),
+          "ocean.topography", "has no `at`");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "middle"}})"),
+          "ocean.topography.at", "none of \"start\", \"end\"");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "start"},
+                    "sea_level": {"file": "history.nc", "at": "start"}})"),
+          "ocean", "gives both `sea_level` and `topography`");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"shorelines": "frozen"})"),
+          "ocean", "gives no sea level");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "start"},
+                    "calibration": {"iterations": 4}})"),
+          "ocean.calibration", "\"at\": \"end\"");
+  refused(read,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"topography": {"file": "history.nc",
+                                         "date_kyr_bp": 1}})"),
+          "ocean.topography.date_kyr_bp", "is not the ice's date (0 kyr BP)");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "start",
+                                   "format": "netcdf"}})"),
+          "ocean.topography.format", "none of \"planetmodel_surface\"");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc", "variable": ""}})"),
+          "forcing.ice.variable", "is empty");
+  {
+    auto without = timed("");
+    const auto at = without.find(R"("ocean": )");
+    without.erase(at, without.find("},", at) + 3 - at);
+    refused(read, without, "bad.json", "has no `ocean` block");
+  }
+
+  // the old members, named with the new
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"},
+                    "sea_level": {"file": "history.nc"}})"),
+          "forcing.sea_level", "`ocean.sea_level`");
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "end"},
+                    "calibrate_initial_sea_level": {}})"),
+          "ocean.calibrate_initial_sea_level", "`ocean.calibration`");
 
   // the blocks' members at the top level
   for (const auto& [member, block] :
-       {std::pair{R"("sea_level": {"file": "history.nc"})", "`forcing.sea_level`"},
+       {std::pair{R"("sea_level": {"file": "history.nc"})",
+                  "`ocean.sea_level`"},
+        std::pair{R"("topography": {"file": "history.nc"})",
+                  "`ocean.topography`"},
+        std::pair{R"("calibrate_initial_sea_level": {})",
+                  "`ocean.calibration`"},
         std::pair{R"("ice_history": {"file": "history.nc"})", "`forcing.ice`"},
         std::pair{R"("coupled": {"rtol": 1e-8})", "`solver`"},
         std::pair{R"("shorelines": "migrating")", "`ocean.shorelines`"},
@@ -3058,17 +3391,17 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
             name, "it belongs in");
   }
   refused(read,
-          R"({"model": "ball.deck", "lmax": 4,
+          R"({"problem": "quasi_static", "model": "ball.deck", "lmax": 4,
               "times": {"start_kyr_bp": 2, "nodes": 3},
-              "forcing": {"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}},
+              "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
               "output": {"surface": "o.nc"}})",
           "model", "is not a block");
   refused(read,
-          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
-              "times": {"start_kyr_bp": 2, "nodes": 3},
-              "forcing": {"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}},
+          R"({"problem": "quasi_static", "model": {"deck": "ball.deck"},
+              "lmax": 4, "times": {"start_kyr_bp": 2, "nodes": 3},
+              "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
               "output": "o.nc"})",
           "output", "is not a block");
 
@@ -3080,31 +3413,37 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
           "times.step", "not a recognised member");
   refused(read,
           timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
-                R"({"sea_level": {"file": "history.nc"},
-                    "ice": {"file": "history.nc"}, "sediment": {}})"),
+                R"({"ice": {"file": "history.nc"}, "sediment": {}})"),
           "forcing.sediment", "not a recognised member");
   refused(read,
           timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
-                R"({"sea_level": {"file": "history.nc", "fiel": "x"},
-                    "ice": {"file": "history.nc"}})"),
-          "forcing.sea_level.fiel", "not a recognised member");
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "start",
+                                   "fiel": "x"}})"),
+          "ocean.topography.fiel", "not a recognised member");
   refused(read,
           timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
-                R"({"sea_level": {"file": "history.nc"},
-                    "ice": {"file": "history.nc", "name": "x"}})"),
+                R"({"ice": {"file": "history.nc", "name": "x"}})"),
           "forcing.ice.name", "not a recognised member");
   refused(read,
           fingerprint("", R"({"deck": "ball.deck"})",
-                      R"({"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc", "type": "cap_thickness", "latitude": 70,
+                      R"({"ice": {"file": "history.nc", "date_kyr_bp": 0,
+                                  "type": "cap_thickness", "latitude": 70,
                                   "longitude": 0, "width_deg": 10,
                                   "thickness_m": -1, "radius_deg": 3}})"),
           "forcing.ice.radius_deg", "not a recognised member");
-  refused(read, timed(R"( "ocean": {"shoreline": "migrating"},)"),
+  refused(read,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"shoreline": "migrating",
+                    "topography": {"file": "history.nc", "at": "start"}})"),
           "ocean.shoreline", "not a recognised member");
   refused(read,
-          timed(R"( "ocean": {"calibrate_initial_sea_level": {"runs": 3}},)"),
-          "ocean.calibrate_initial_sea_level.runs", "not a recognised member");
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc"}})",
+                R"({"topography": {"file": "history.nc", "at": "end"},
+                    "calibration": {"runs": 3}})"),
+          "ocean.calibration.runs", "not a recognised member");
   refused(read, timed(R"( "solver": {"max_iterations": 3},)"),
           "solver.max_iterations", "not a recognised member");
   refused(read, timed(R"( "solver": {"step": "picard"},)"), "solver.step",
@@ -3113,34 +3452,39 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                                    "stride": 2},)"),
           "checkpoint.stride", "not a recognised member");
   refused(read,
-          R"({"model": {"deck": "ball.deck", "visc": {}}, "lmax": 4,
+          R"({"problem": "quasi_static",
+              "model": {"deck": "ball.deck", "visc": {}}, "lmax": 4,
               "times": {"start_kyr_bp": 2, "nodes": 3},
-              "forcing": {"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}},
+              "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
               "output": {"surface": "o.nc"}})",
           "model.visc", "not a recognised member");
   refused(read,
-          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
-              "times": {"start_kyr_bp": 2, "nodes": 3},
-              "forcing": {"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}},
+          R"({"problem": "quasi_static", "model": {"deck": "ball.deck"},
+              "lmax": 4, "times": {"start_kyr_bp": 2, "nodes": 3},
+              "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
               "output": {"surface": "o.nc", "exchange": "o.txt"}})",
           "output.exchange", "not a recognised member");
   // response's solver has no sea level solve
   refused(app::ReadResponseInput,
-          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
+          R"({"problem": "static", "model": {"deck": "ball.deck"}, "lmax": 4,
               "forcing": {"tide": [{"degree": 2, "amplitude_m2_s2": 1}]},
               "solver": {"rtol": 1e-9}, "output": {"surface": "o.nc"}})",
           "solver.rtol", "`step_rtol`");
 
   // the kernel commands' own limits
+  auto staticKernel = kernel(R"({"deck": "ball.deck"})", "");
+  staticKernel.replace(staticKernel.find("quasi_static"), 12, "static");
+  refused(app::ReadKernelInput, staticKernel, "problem",
+          "the kernels are of a run through time");
   refused(app::ReadKernelInput,
-          R"({"model": {"deck": "ball.deck"}, "lmax": 4,
-              "forcing": {"sea_level": {"file": "history.nc"},
-                          "ice": {"file": "history.nc"}},
+          R"({"problem": "quasi_static", "model": {"deck": "ball.deck"},
+              "lmax": 4, "forcing": {"ice": {"file": "history.nc"}},
+              "ocean": {"topography": {"file": "history.nc", "at": "start"}},
               "measurements": [{"type": "rotation", "component": "z"}],
               "output": "k"})",
-          "has no `times` block", "the kernels are of a run through time");
+          "problem", "needs a `times` block");
   refused(app::ReadKernelInput,
           kernel(R"({"deck": "ball.deck", "moduli": {"file": "m.nc"}})", ""),
           "model.moduli", "do not take");
@@ -3150,8 +3494,59 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                                            "every": 1},)"),
           "checkpoint", "not a recognised member");
 
-  // once the files are read: the 3-D step's members on a radial moduli
-  // file without times, and the kernel commands on the wrong kind of model
+  // once the files are read: the inputs held to their files (a file with
+  // a time axis needs a date in the static problem, a file without one
+  // refuses it, and a variable the file lacks is refused naming those it
+  // holds), the 3-D step's members on a radial moduli file in the static
+  // problem, and the kernel commands on the wrong kind of model
+  {
+    namespace pm = planetmodel;
+    auto file = pm::SurfaceFile{};
+    file.grid = pm::Equiangular(9, 18);
+    file.source = "sl3dpp tests";
+    for (const auto* name : {"ice_thickness", "topography"}) {
+      file.variables.emplace(
+          name, pm::SurfaceField(name, std::vector<double>(9 * 18, 100.0),
+                                 {.dimensions = pm::units::LENGTH}));
+    }
+    pm::WriteSurfaceFile(dir_ / "static.nc", file);
+  }
+  const auto staticIce = std::string{
+      R"({"ice": {"file": "static.nc", "type": "cap_thickness",
+                  "latitude": 70, "longitude": 0, "width_deg": 10,
+                  "thickness_m": -1)"};
+  refused(app::RunSeaLevel,
+          fingerprint("", R"({"deck": "ball.deck"})",
+                      staticIce + R"(, "date_kyr_bp": 0}})",
+                      R"({"topography": {"file": "static.nc"}})"),
+          "forcing.ice.date_kyr_bp", "dates a file without a time axis");
+  refused(app::RunSeaLevel,
+          fingerprint("", R"({"deck": "ball.deck"})", staticIce + "}}",
+                      R"({"topography": {"file": "static.nc",
+                                         "date_kyr_bp": 0}})"),
+          "ocean.topography.date_kyr_bp", "dates a file without a time axis");
+  refused(app::RunSeaLevel,
+          fingerprint("", R"({"deck": "ball.deck"})",
+                      R"({"ice": {"file": "history.nc", "type": "cap_thickness",
+                                  "latitude": 70, "longitude": 0,
+                                  "width_deg": 10, "thickness_m": -1}})",
+                      R"({"topography": {"file": "static.nc"}})"),
+          "forcing.ice", "names a file with a time axis");
+  refused(app::RunSeaLevel,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"topography": {"file": "history.nc"}})"),
+          "ocean.topography", "give the date it is read at, `date_kyr_bp`");
+  refused(app::RunSeaLevel,
+          fingerprint("", R"({"deck": "ball.deck"})", "",
+                      R"({"topography": {"file": "history.nc", "date_kyr_bp": 0,
+                                         "variable": "topo"}})"),
+          "ocean.topography.variable",
+          "names a variable \"topo\" that " + (dir_ / "history.nc").string() +
+              " does not hold; it holds \"ice_thickness\", \"topography\"");
+  refused(app::RunSeaLevel,
+          timed("", R"("times": {"start_kyr_bp": 2, "nodes": 3})",
+                R"({"ice": {"file": "history.nc", "variable": "thk"}})"),
+          "forcing.ice.variable", "it holds \"ice_thickness\", \"topography\"");
   const auto prem8 =
       ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
   ASSERT_TRUE(io::WriteModuli(dir_ / "radial_moduli.nc", prem8, SurfaceGrid(4),
@@ -3194,11 +3589,12 @@ TEST_F(AppsTest, KernelsMatchFiniteDifferencesOfTheForwardValue) {
   auto config_with = [&](const std::string& history, const std::string& name,
                          const std::string& extra) {
     return Write(name, std::string{R"({
+      "problem": "quasi_static",
       "model": {"deck": "ball.deck"},
       "lmax": 8,
       "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 9},
-      "forcing": {"sea_level": {"file": "state.nc"},
-                  "ice": {"file": ")"} +
+      "ocean": {"topography": {"file": "state.nc", "at": "start"}},
+      "forcing": {"ice": {"file": ")"} +
                            history + R"("}},
       "rotation": "full", "moments": "hydrostatic",
       "adjoint": "discrete",
@@ -3235,6 +3631,13 @@ TEST_F(AppsTest, KernelsMatchFiniteDifferencesOfTheForwardValue) {
   auto summary = app::RunKernel1D(
       config_with("state.nc", "kernels.json", "out_kernels"));
   EXPECT_NE(summary.find("4 measurement(s)"), std::string::npos);
+  // the inputs as read, in the summary and the values' header
+  const auto state = (dir_ / "state.nc").string();
+  EXPECT_TRUE(summary.starts_with(std::format(
+      "ice {}:ice_thickness (2 to 0 kyr BP), topography {}:topography (the "
+      "window's start, 2 kyr BP); wrote ",
+      state, state)))
+      << summary;
   const auto out = dir_ / "out_kernels";
   for (const auto name :
        {"site_ice_kernels.nc", "j2_ice_kernels.nc", "lod_ice_kernels.nc",
@@ -3502,7 +3905,7 @@ TEST_F(AppsTest, CacheMbIsReadAndChecked) {
   };
   const auto responseConfig = [&](std::string_view member) {
     return Write("response.json", std::string{R"({
-      "model": {"deck": "ball.deck"}, "lmax": 4,
+      "problem": "static", "model": {"deck": "ball.deck"}, "lmax": 4,
       "forcing": {"tide": [{"degree": 2, "amplitude_m2_s2": 1.0}]},
       "solver": {)"} + std::string{member} +
                                       R"(}, "output": {"surface": "out.nc"}})");

@@ -32,7 +32,8 @@ AmplitudeHistory ReadHistory(const Json& item, bool timed) {
   if (!Has(item, "history_kyr")) return out;
   const auto& history = item.At("history_kyr");
   if (!timed) {
-    Fail(history, "is an amplitude history, which needs a `times` block");
+    Fail(history,
+         std::format("is an amplitude history, which {}", kNeedsQuasiStatic));
   }
   for (const auto& pair : history.AsArray()) {
     if (!pair.IsArray() || pair.AsArray().size() != 2) {
@@ -98,18 +99,33 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
     term.amplitude = Number(disk, "amplitude_kg_m2");
   } else if (Has(item, "field")) {
     const auto& field = item.At("field");
-    Allow(field, {"file", "name", "time_origin_kyr"});
+    if (Has(field, "name")) {
+      Fail(field.At("name"),
+           "is not a member: the field read from the file is its `variable`");
+    }
+    Allow(field, {"file", "format", "variable", "date_kyr", "time_origin_kyr"});
     term.kind = LoadTerm::Kind::Field;
-    term.file = PathOf(field, "file", directory);
-    term.name = String(field, "name", "load");
-    if (term.name.empty()) Fail(field.At("name"), "is empty");
+    term.field = ReadFileInput(field, directory, "load");
     if (Has(field, "time_origin_kyr")) {
       const auto& origin = field.At("time_origin_kyr");
-      if (!timed) Fail(origin, "is a time origin, which needs a `times` block");
+      if (!timed) {
+        Fail(origin, std::format("is a time origin, which {}; the static "
+                                 "problem reads a file with a time axis at "
+                                 "its `date_kyr`",
+                                 kNeedsQuasiStatic));
+      }
       term.time_origin_kyr = origin.AsNumber();
       if (!std::isfinite(term.time_origin_kyr)) {
         Fail(origin, "is not a finite number");
       }
+    }
+    if (Has(field, "date_kyr")) {
+      if (timed) {
+        Fail(field.At("date_kyr"),
+             "dates the file, as the static problem reads it; a run through "
+             "time reads it at each node t, at t - `time_origin_kyr`");
+      }
+      term.field.date = ReadDate(field, "date_kyr");
     }
   } else {
     const auto& coefficients = item.At("coefficients");
@@ -219,21 +235,14 @@ SeismicTerm ReadSeismicTerm(const Json& item) {
   return term;
 }
 
-/// A field term's file on the grid, holding its field. A file with a time
-/// axis is refused unless `timed`.
+/// A field term's file on the grid, holding its variable. Unless `timed`
+/// the file is read at one time: a time axis needs the term's `date_kyr`,
+/// and a file without one refuses it.
 io::FieldHistory OpenFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
-                               const Json& file, bool timed) {
-  auto history = io::FieldHistory::Read(term.file, grid);
-  if (!history) Fail(file, history.error().message);
-  if (!timed && history->Span()) {
-    Fail(file,
-         "has a time axis: a load that varies in time needs a `times` "
-         "block");
-  }
-  if (!history->Has(term.name)) {
-    Fail(file, std::format("holds no field \"{}\"", term.name));
-  }
-  return std::move(*history);
+                               const Json& field, bool timed) {
+  auto history = OpenFileInput(term.field, grid, field);
+  if (!timed) CheckDate(term.field, history, field, "date_kyr");
+  return history;
 }
 
 /// A field term's values on the grid, SI, at an SI time of its file;
@@ -243,14 +252,14 @@ std::vector<double> FieldValues(const io::FieldHistory& history,
                                 double time, std::string_view when = {}) {
   auto values = std::vector<double>{};
   try {
-    values = history.Values(term.name, time);
+    values = history.Values(term.field.variable, time);
   } catch (const std::runtime_error& error) {
     Fail(file, error.what());
   }
   if (!std::ranges::all_of(values, [](double v) { return std::isfinite(v); })) {
     Fail(file, std::format("holds a field \"{}\" that is not finite "
                            "everywhere on the run's grid{}",
-                           term.name, when));
+                           term.field.variable, when));
   }
   return values;
 }
@@ -259,10 +268,12 @@ std::vector<double> FieldValues(const io::FieldHistory& history,
 /// its coefficients, the one made from the other as the term's kind says.
 /// In a run through time (`timed`) a field term whose file has a time axis
 /// has no fixed pattern: its file comes back instead, both arrays empty.
+/// A field term says whether its file has a time axis.
 struct TermPattern {
   std::vector<double> field;
   std::vector<Complex> coefficients;
   std::optional<io::FieldHistory> history;
+  bool timeAxis = false;
 };
 
 TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
@@ -279,13 +290,17 @@ TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
       out.field = grid.Synthesise(out.coefficients);
       break;
     case LoadTerm::Kind::Field: {
-      const auto& file = item.At("field").At("file");
-      auto history = OpenFieldTerm(term, grid, file, timed);
-      if (history.Span()) {
+      const auto& field = item.At("field");
+      auto history = OpenFieldTerm(term, grid, field, timed);
+      out.timeAxis = history.Span().has_value();
+      if (timed && out.timeAxis) {
         out.history.emplace(std::move(history));
         break;
       }
-      out.field = FieldValues(history, term, file, 0.0);
+      // a static run reads a file with a time axis at its date, kyr on the
+      // file's own axis; a static file is the same at every time
+      const auto time = timed ? 0.0 : term.field.date.value_or(0.0) * KYR;
+      out.field = FieldValues(history, term, field.At("file"), time);
       out.coefficients = grid.Expand(out.field);
       break;
     }
@@ -367,8 +382,10 @@ Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
   if (Has(block, "seismic")) {
     if (!timed) {
       Fail(block.At("seismic"),
-           "gives seismic sources, which need a `times` block: the first "
-           "node of a run through time is the co-seismic response");
+           std::format("gives seismic sources, a forcing that {}: the first "
+                       "node of a run through time is the co-seismic "
+                       "response",
+                       kNeedsQuasiStatic));
     }
     for (const auto& item : block.At("seismic").AsArray()) {
       out.seismic.push_back(ReadSeismicTerm(item));
@@ -533,10 +550,15 @@ BuiltForcing BuildForcing(const Forcing& forcing, const SurfaceGrid& grid,
   auto out = BuiltForcing{.terms = {},
                           .loadCoefficients = grid.ZeroCoefficients(),
                           .load = grid.ZeroField(),
-                          .tide = grid.ZeroCoefficients()};
+                          .tide = grid.ZeroCoefficients(),
+                          .inputs = {}};
   for (auto k = std::size_t{0}; k < forcing.load.size(); ++k) {
-    auto [field, coefficients, history] =
-        PatternOf(forcing.load[k], grid, block.At("load").At(k), false);
+    const auto& term = forcing.load[k];
+    auto [field, coefficients, history, timeAxis] =
+        PatternOf(term, grid, block.At("load").At(k), false);
+    if (term.kind == LoadTerm::Kind::Field) {
+      out.inputs.push_back(DescribeField(term, timeAxis, false));
+    }
     // the first term is taken as it stands, the others added to it
     if (out.terms.empty()) {
       out.load = field;
@@ -565,6 +587,9 @@ TimedForcing::TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
     const auto& term = forcing_.load[k];
     auto pattern = PatternOf(term, grid, block.At("load").At(k), true);
     varies_ = varies_ || pattern.history.has_value() || !term.history.Empty();
+    if (term.kind == LoadTerm::Kind::Field) {
+      inputs_.push_back(DescribeField(term, pattern.timeAxis, true));
+    }
     patterns_.push_back({.field = std::move(pattern.field),
                          .coefficients = std::move(pattern.coefficients),
                          .history = std::move(pattern.history)});
@@ -579,7 +604,8 @@ BuiltForcing TimedForcing::At(double t) const {
   auto out = BuiltForcing{.terms = {},
                           .loadCoefficients = grid.ZeroCoefficients(),
                           .load = grid.ZeroField(),
-                          .tide = grid.ZeroCoefficients()};
+                          .tide = grid.ZeroCoefficients(),
+                          .inputs = {}};
   for (auto k = std::size_t{0}; k < forcing_.load.size(); ++k) {
     const auto& term = forcing_.load[k];
     const auto& pattern = patterns_[k];
@@ -638,7 +664,11 @@ std::string Describe(const LoadTerm& term) {
           term.radius * 180.0 / std::numbers::pi, term.amplitude);
       break;
     case LoadTerm::Kind::Field:
-      out = std::format("field \"{}\" of {}", term.name, term.file.string());
+      out = std::format("field {}:{}", term.field.file.string(),
+                        term.field.variable);
+      if (term.field.date) {
+        out += std::format(", at {:g} kyr", *term.field.date);
+      }
       if (term.time_origin_kyr != 0.0) {
         out += std::format(", time origin {:g} kyr", term.time_origin_kyr);
       }
@@ -651,6 +681,18 @@ std::string Describe(const LoadTerm& term) {
     out += ", history_kyr " + Pairs(term.history);
   }
   return out;
+}
+
+std::string DescribeField(const LoadTerm& term, bool timeAxis, bool timed) {
+  auto slice = std::string{"static"};
+  if (timeAxis && !timed) {
+    slice = std::format("{:g} kyr", term.field.date.value_or(0.0));
+  } else if (timeAxis) {
+    slice = term.time_origin_kyr == 0.0
+                ? std::string{"the run's clock"}
+                : std::format("time origin {:g} kyr", term.time_origin_kyr);
+  }
+  return "field " + DescribeInput(term.field, slice);
 }
 
 std::string Describe(const TideTerm& term) {
@@ -705,10 +747,11 @@ std::string Summary(const Forcing& forcing) {
 
 namespace {
 
-/// The fingerprint's ice change.
+/// The static problem's ice change, beside the ice's file input.
 IceChange ReadIceChange(const Json& change) {
-  Allow(change, {"file", "type", "latitude", "longitude", "width_deg",
-                 "fraction", "thickness_m"});
+  Allow(change,
+        {"file", "format", "variable", "date_kyr_bp", "type", "latitude",
+         "longitude", "width_deg", "fraction", "thickness_m"});
   auto out = IceChange{};
   out.kind = Choice<IceChange::Kind>(
       change.At("type"), {{"cap_fraction", IceChange::Kind::CapFraction},
@@ -738,46 +781,44 @@ GeographicPoint ReadSite(const Json& object) {
 SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                                     const std::filesystem::path& directory,
                                     bool timed) {
-  if (Has(block, "state")) {
-    Fail(block.At("state"),
-         "is not a member: give the initial sea level as `sea_level` (a "
-         "`file` holding `sea_level` or `topography`) beside the ice history "
-         "`ice`; the ice the run starts from is the history's own");
+  for (const auto* name : {"state", "sea_level"}) {
+    if (Has(block, name)) {
+      Fail(block.At(name),
+           "is not a member of `forcing`, whose one member is the ice, "
+           "`ice`: the sea level is the `ocean` block's, `ocean.sea_level` "
+           "(a sea level, used as it stands) or `ocean.topography` "
+           "(converted with the run's own ice at the same instant)");
+    }
   }
-  Allow(block, {"sea_level", "ice"});
+  Allow(block, {"ice"});
   auto out = SeaLevelForcing{};
-  const auto& sea = block.At("sea_level");
-  if (timed && Has(sea, "date_kyr_bp")) {
-    Fail(sea.At("date_kyr_bp"),
-         "dates the sea level, as the elastic fingerprint (no `times` "
-         "block) reads it; a run through time reads the sea level at its "
-         "window's start, or calibrating at its end");
-  }
-  Allow(sea, {"file", "date_kyr_bp"});
-  out.seaLevel.file = PathOf(sea, "file", directory);
-  out.seaLevel.date_kyr_bp = Number(sea, "date_kyr_bp", 0.0);
   const auto& ice = block.At("ice");
-  out.ice.history = PathOf(ice, "file", directory);
+  out.ice.file = ReadFileInput(ice, directory, "ice_thickness");
   if (timed) {
     for (const auto* name : {"type", "latitude", "longitude", "width_deg",
                              "fraction", "thickness_m"}) {
       if (Has(ice, name)) {
         Fail(ice.At(name),
-             "describes an ice change, which the elastic fingerprint (no "
-             "`times` block) takes; a run through time takes the ice "
-             "history alone, `file`");
+             "describes an ice change, which the static problem takes; a "
+             "run through time takes the ice history alone");
       }
     }
-    Allow(ice, {"file"});
+    if (Has(ice, "date_kyr_bp")) {
+      Fail(ice.At("date_kyr_bp"),
+           "dates the ice, as the static problem reads it; a run through "
+           "time takes the ice as a history over its window, read at every "
+           "node");
+    }
+    Allow(ice, {"file", "format", "variable"});
   } else {
     if (!Has(ice, "type")) {
       Fail(ice,
-           "gives the ice history alone, which needs a `times` block; the "
-           "elastic fingerprint takes an ice change on it too: `type`, "
-           "`latitude`, `longitude`, `width_deg` and `fraction` or "
-           "`thickness_m`");
+           "gives no ice change, which the static problem applies to the ice "
+           "at its date: `type`, `latitude`, `longitude`, `width_deg` and "
+           "`fraction` or `thickness_m`");
     }
     out.ice.change = ReadIceChange(ice);
+    out.ice.file.date = ReadDate(ice, "date_kyr_bp");
   }
   return out;
 }

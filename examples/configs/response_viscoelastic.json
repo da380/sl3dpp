@@ -1,4 +1,5 @@
 {
+  "problem": "quasi_static",
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic",
             "viscosity": {"file": "../data/viscosity_log.nc"},
             "moduli": {"file": "../data/synthetic_moduli.nc"}},

@@ -5,6 +5,29 @@
 
 namespace sl3dpp::app {
 
+Problem ReadProblem(const Json& top) {
+  if (!Has(top, "problem")) {
+    Fail(top,
+         "has no `problem`: \"static\" (one instant) or \"quasi_static\" (a "
+         "run through the nodes of a `times` block)");
+  }
+  const auto& member = top.At("problem");
+  const auto problem = Choice<Problem>(
+      member,
+      {{"static", Problem::Static}, {"quasi_static", Problem::QuasiStatic}});
+  if (problem == Problem::Static && Has(top, "times")) {
+    Fail(top.At("times"),
+         "is a run's time nodes, which the static problem does not take: "
+         "set \"problem\": \"quasi_static\" for a run through time");
+  }
+  if (problem == Problem::QuasiStatic && !Has(top, "times")) {
+    Fail(member,
+         "is the quasi-static problem, a run through time, which needs a "
+         "`times` block");
+  }
+  return problem;
+}
+
 DeckFormat FormatOf(ModelFormat format) {
   switch (format) {
     case ModelFormat::Gia:
@@ -162,18 +185,101 @@ TimesBlock ReadTimesBlock(const Json& block, TimesForm form) {
   return out;
 }
 
-OceanBlock ReadOceanBlock(const Json& block) {
-  Allow(block, {"shorelines", "calibrate_initial_sea_level"});
+std::string_view SeaLevelSource::Member() const {
+  return kind == Kind::SeaLevel ? "sea_level" : "topography";
+}
+
+std::string_view SeaLevelSource::Quantity() const {
+  return kind == Kind::SeaLevel ? "sea level" : "topography";
+}
+
+OceanBlock ReadOceanBlock(const Json& block,
+                          const std::filesystem::path& directory,
+                          Problem problem) {
+  if (!block.IsObject()) {
+    Fail(block,
+         "is not a block: `ocean` is an object holding the sea level, "
+         "`sea_level` or `topography`");
+  }
+  if (Has(block, "calibrate_initial_sea_level")) {
+    Fail(block.At("calibrate_initial_sea_level"),
+         "is not a member: the calibration is `ocean.calibration` (`method`, "
+         "`iterations`, `rtol`), which the sea level's \"at\": \"end\" turns "
+         "on");
+  }
+  const auto timed = problem == Problem::QuasiStatic;
+  if (timed) {
+    Allow(block, {"shorelines", "sea_level", "topography", "calibration"});
+  } else {
+    for (const auto* name : {"shorelines", "calibration"}) {
+      if (Has(block, name)) {
+        Fail(block.At(name),
+             std::format("belongs to a run through time, which {}: the "
+                         "static problem solves the linear equation on its "
+                         "sea level's own shorelines, with no initial sea "
+                         "level to calibrate",
+                         kNeedsQuasiStatic));
+      }
+    }
+    Allow(block, {"sea_level", "topography"});
+  }
+  const auto given = Has(block, "sea_level");
+  if (given && Has(block, "topography")) {
+    Fail(block,
+         "gives both `sea_level` and `topography`: give the one quantity the "
+         "file holds");
+  }
+  if (!given && !Has(block, "topography")) {
+    Fail(block,
+         "gives no sea level: `sea_level` (a sea level, used as it stands) or "
+         "`topography` (converted with the run's own ice at the same "
+         "instant)");
+  }
   auto out = OceanBlock{};
+  auto& source = out.seaLevel;
+  source.kind =
+      given ? SeaLevelSource::Kind::SeaLevel : SeaLevelSource::Kind::Topography;
+  const auto& input = block.At(source.Member());
+  source.input = ReadFileInput(input, directory, source.Member());
+  if (timed) {
+    if (Has(input, "date_kyr_bp")) {
+      Fail(input.At("date_kyr_bp"),
+           "dates the sea level, as the static problem reads it; the "
+           "quasi-static problem reads it at an end of its window, `at`");
+    }
+    Allow(input, {"file", "format", "variable", "at"});
+    if (!Has(input, "at")) {
+      Fail(input,
+           "has no `at`: the end of the window the sea level belongs to, "
+           "\"start\" (the initial sea level) or \"end\" (the sea level the "
+           "run reaches, against which the initial sea level is calibrated)");
+    }
+    source.at = Choice<WindowEnd>(
+        input.At("at"), {{"start", WindowEnd::Start}, {"end", WindowEnd::End}});
+  } else {
+    if (Has(input, "at")) {
+      Fail(input.At("at"),
+           "is an end of a run's window, which the static problem does not "
+           "have: it reads a file with a time axis at its `date_kyr_bp`");
+    }
+    Allow(input, {"file", "format", "variable", "date_kyr_bp"});
+    source.input.date = ReadDate(input, "date_kyr_bp");
+  }
   if (Has(block, "shorelines")) {
     out.shorelines = Choice<Shorelines>(
         block.At("shorelines"),
         {{"frozen", Shorelines::Frozen}, {"migrating", Shorelines::Migrating}});
   }
-  if (Has(block, "calibrate_initial_sea_level")) {
-    const auto& calibration = block.At("calibrate_initial_sea_level");
+  out.calibrate = timed && source.at == WindowEnd::End;
+  if (Has(block, "calibration")) {
+    const auto& calibration = block.At("calibration");
+    if (!out.calibrate) {
+      Fail(calibration,
+           "calibrates the initial sea level against the sea level at the "
+           "window's end, which the sea level's \"at\": \"end\" gives; with "
+           "\"at\": \"start\" the sea level is the initial one");
+    }
     Allow(calibration, {"method", "iterations", "rtol"});
-    out.calibrate = true;
     if (Has(calibration, "method")) {
       out.calibration_method = Choice<CalibrationMethod>(
           calibration.At("method"),

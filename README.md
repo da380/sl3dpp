@@ -140,17 +140,19 @@ common capabilities from JSON configs:
 ```
 sl3d love-numbers run.json     # the SI Love-number table of a radial model
 sl3d response run.json         # the response to a prescribed load and
-                               #   tide, no ocean: elastic, or with a
-                               #   "times" block viscoelastic through
+                               #   tide, no ocean: the static problem's
+                               #   elastic response, or the quasi-static
+                               #   problem's viscoelastic response through
                                #   time; 1D, or 3D under lateral moduli
                                #   (or viscosity) with the radial model's
                                #   beside it
 sl3d sea-level run.json        # the sea level equation under an ice load:
-                               #   the elastic fingerprint of an ice change,
-                               #   or with a "times" block GIA through time
-                               #   under an ice history, restartable; 1D, or
-                               #   3D under lateral moduli (the fingerprint
-                               #   too) or a lateral viscosity
+                               #   the static problem's elastic fingerprint
+                               #   of an ice change, or the quasi-static
+                               #   problem's GIA through time under an ice
+                               #   history, restartable; 1D, or 3D under
+                               #   lateral moduli (the fingerprint too) or
+                               #   a lateral viscosity
 sl3d kernel1d run.json         # adjoint kernels of configured measurements
                                #   of a radial sea-level run through time
 sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
@@ -168,30 +170,36 @@ misspelt member is refused naming the file, the member and the fault,
 and relative paths resolve against the config's directory. A config is
 made of blocks (`model`, `times`, `forcing`, `ocean`, `solver`,
 `output`, ...), each read by the same code for every command that takes
-it, and the blocks decide what is run: a `times` block makes a run go
-through time, and the `model` block's files make it 1D or 3D. A
-fingerprint's present-day state is a planetmodel surface file holding
-`ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
-one from ICE-5G/6G/7G), and the fingerprint comes back as a surface
-file of SI fields with the angular-velocity perturbation in its
-metadata. For example:
+it, under a required `problem`: `"static"` solves at one instant,
+`"quasi_static"` steps through the nodes of a `times` block, and the
+`model` block's files make a run 1D or 3D. Files are read as file
+inputs, `{"file", "format", "variable"}`, with their dates beside them.
+A fingerprint's ice and sea level come from planetmodel surface files,
+such as one holding `ice_thickness` and `topography` (pyslfp's
+`export_ice_history` writes one from ICE-5G/6G/7G), and the fingerprint
+comes back as a surface file of SI fields with the angular-velocity
+perturbation in its metadata. For example:
 
 ```json
 {
+  "problem": "static",
   "model": {"deck": "earth.deck"},
   "lmax": 256,
   "forcing": {
-    "sea_level": {"file": "ice7g.nc", "date_kyr_bp": 0.0},
-    "ice": {"type": "cap_fraction", "latitude": 72, "longitude": 320,
+    "ice": {"file": "ice7g.nc", "date_kyr_bp": 0.0,
+            "type": "cap_fraction", "latitude": 72, "longitude": 320,
             "width_deg": 16, "fraction": -0.1}
   },
+  "ocean": {"topography": {"file": "ice7g.nc", "date_kyr_bp": 0.0}},
   "rotation": "full",
   "output": {"surface": "fingerprint.nc"}
 }
 ```
 
-run by `sl3d sea-level`; with a `times` block and an ice history in
-`forcing.ice` the same command runs GIA through time.
+run by `sl3d sea-level`; with `"problem": "quasi_static"`, a `times`
+block, an ice history in `forcing.ice` and the sea level at an end of
+the window (`"at": "start"` or `"end"`) the same command runs GIA through
+time.
 
 ### Inputs
 
@@ -199,7 +207,8 @@ run by `sl3d sea-level`; with a `times` block and an ice history in
   a viscosity column, which a radial run through time uses; `"gia"` names
   the same format), MINEOS, or a six-column elastic table.
 - **Present-day states and ice histories** are planetmodel surface files
-  holding `ice_thickness` and `topography`. pyslfp's `export_ice_history`
+  holding the ice thickness and the sea level or the topography
+  (`ice_thickness` and `topography` by default). pyslfp's `export_ice_history`
   writes them from ICE-5G, ICE-6G or ICE-7G (`get_ice7g.py` in the examples
   does so), and any code can write one with planetmodel.
 - **3D viscosity**, for a run through time of `sea-level`, `kernel` or

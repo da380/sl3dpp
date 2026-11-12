@@ -8,6 +8,7 @@
 #include <planetmodel/grid.hpp>
 #include <planetmodel/surfacefile.hpp>
 #include <planetmodel/units.hpp>
+#include <string>
 #include <vector>
 
 namespace sl3dpp::test {
@@ -19,12 +20,17 @@ namespace sl3dpp::test {
 /// With `marine`, the polar ice sits in a basin 500 m below sea level and
 /// thins to a fifth by the present, so it floats off as it melts.
 /// `fields` picks what is written: both, the ice history alone, or the
-/// topography alone; `hole` puts a value that is not a number in the ice.
+/// topography alone; `hole` puts a value that is not a number in the ice;
+/// `names` are the variables' names in the file.
 enum class ToyFields { Both, Ice, Topography };
+struct ToyNames {
+  std::string ice = "ice_thickness";
+  std::string topography = "topography";
+};
 inline void WriteToyHistory(const std::filesystem::path& path,
                             double bump_last = 0.0, bool marine = false,
                             ToyFields fields = ToyFields::Both,
-                            bool hole = false) {
+                            bool hole = false, const ToyNames& names = {}) {
   namespace pm = planetmodel;
   constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
   const auto grid = pm::Equiangular(19, 36);
@@ -64,12 +70,12 @@ inline void WriteToyHistory(const std::filesystem::path& path,
   options.dimensions = pm::units::LENGTH;
   if (hole) ice[9 * 36 + 5] = std::nan("");
   if (fields != ToyFields::Topography) {
-    file.variables.emplace("ice_thickness",
-                           pm::SurfaceField("ice_thickness", ice, options));
+    file.variables.emplace(names.ice,
+                           pm::SurfaceField(names.ice, ice, options));
   }
   if (fields != ToyFields::Ice) {
-    file.variables.emplace("topography",
-                           pm::SurfaceField("topography", topo, options));
+    file.variables.emplace(names.topography,
+                           pm::SurfaceField(names.topography, topo, options));
   }
   pm::WriteSurfaceFile(path, file);
 }

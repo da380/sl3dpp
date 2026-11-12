@@ -61,6 +61,7 @@ def config(name: str, period: float, cycles: int, points: int, deck: str,
     rows = [", ".join(pairs[i:i + 4]) for i in range(0, nodes, 4)]
     history = (",\n" + " " * 30).join(rows)
     return f"""{{
+  "problem": "quasi_static",
   "model": {{"deck": {json.dumps(deck)}, "format": "maxwell"}},
   "lmax": {lmax},
   "times": {{"start_kyr": 0.0, "end_kyr": {float(cycles * period)!r}, "nodes": {nodes}}},

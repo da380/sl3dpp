@@ -399,8 +399,11 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
     allowed.push_back(name);
   }
   AllowTopLevel(top, allowed);
-  if (!Has(top, "times")) {
-    Fail(top, "has no `times` block: the kernels are of a run through time");
+  if (Has(top, "problem") && top.At("problem").IsString() &&
+      top.At("problem").AsString() == "static") {
+    Fail(top.At("problem"),
+         "is the static problem; the kernels are of a run through time: "
+         "\"problem\": \"quasi_static\", with a `times` block");
   }
   if (const auto& model = top.At("model");
       model.IsObject() && Has(model, "moduli")) {
@@ -467,11 +470,11 @@ namespace {
 template <class Snapshot>
 std::string RunKernelsWith(
     const std::filesystem::path& config, const KernelInput& input,
-    const GRDSolver& solver, std::span<const Snapshot> snapshots,
-    std::string_view command,
-    const std::function<Kernels(
-        const std::map<std::size_t, Measurement>&,
-        const std::filesystem::path& stem, const Built&)>& sweep) {
+    const GRDSolver& solver, const Loaded& world,
+    std::span<const Snapshot> snapshots, std::string_view command,
+    const std::function<Kernels(const std::map<std::size_t, Measurement>&,
+                                const std::filesystem::path& stem,
+                                const Built&)>& sweep) {
   // On several ranks every rank sweeps, rank 0 alone writes.
   const auto writes = TheRanks().First();
   if (writes) std::filesystem::create_directories(input.output);
@@ -482,6 +485,8 @@ std::string RunKernelsWith(
   values << std::format("# sl3d {} (sl3dpp {})\n", command, Version())
          << std::format("# created {}\n", CreatedNow())
          << std::format("# config {}\n", config.string())
+         << std::format("# ice {}\n", world.iceRead)
+         << std::format("# sea_level {}\n", world.seaLevelRead)
          << "# name type value_si [decay: tau_kyr amplitude_m offset_m]\n";
   const auto& items = top.At("measurements").AsArray();
   for (auto k = std::size_t{0}; k < input.measurements.size(); ++k) {
@@ -505,7 +510,8 @@ std::string RunKernelsWith(
     }
     values << '\n';
   }
-  return std::format("wrote {} measurement(s) of kernels to {}",
+  return std::format("ice {}, {}; wrote {} measurement(s) of kernels to {}",
+                     world.iceRead, world.seaLevelRead,
                      input.measurements.size(), input.output.string());
 }
 
@@ -565,7 +571,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   AdjointSolver adjoint(
       evolution, {.method = input.method, .rtol = input.run.solver.rtol});
   return RunKernelsWith<Evolution::Snapshot>(
-      config, input, solver, snapshots, "kernel1d",
+      config, input, solver, world, snapshots, "kernel1d",
       [&](const std::map<std::size_t, Measurement>& measurements,
           const std::filesystem::path& stem, const Built& built) {
         const auto kernels =
@@ -712,7 +718,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
        .max_coupled_iterations = input.run.solver.step_max_iterations,
        .coupled_rtol = input.run.solver.step_rtol});
   const auto summary = RunKernelsWith<Evolution3D::Snapshot>(
-      config, input, solver, snapshots, "kernel",
+      config, input, solver, world, snapshots, "kernel",
       [&](const std::map<std::size_t, Measurement>& measurements,
           const std::filesystem::path& stem, const Built& built) {
         const auto kernels =

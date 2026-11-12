@@ -4,6 +4,7 @@
 # the thin dispatch of sl3d.cpp. Only the program is installed.
 add_library(sl3d_app STATIC
   Input.cpp
+  Files.cpp
   Blocks.cpp
   Forcing.cpp
   Common.cpp

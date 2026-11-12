@@ -43,9 +43,11 @@ Run from build/examples:
 
 It writes data/load_<shape>.nc, or data/load_<shape>_history.nc with
 --history. A `response` config's forcing then takes it as a load term,
-{"field": {"file": "../data/load_disk.nc", "name": "load"}}, elastic (no
-`times`) for a static file and viscoelastic (with `times`) for one with a
-time axis, which is refused without `times`.
+{"field": {"file": "../data/load_disk.nc", "variable": "load"}}: in the
+static problem (the elastic response) a static file as it stands and a
+file with a time axis at the term's `date_kyr`, and in the quasi-static
+problem (the viscoelastic response through time) either, the one with a
+time axis read at each node.
 """
 from __future__ import annotations
 

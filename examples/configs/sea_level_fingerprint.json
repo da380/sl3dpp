@@ -1,10 +1,14 @@
 {
+  "problem": "static",
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
   "lmax": 128,
   "forcing": {
-    "sea_level": {"file": "../data/synthetic_earth.nc", "date_kyr_bp": 0.0},
-    "ice": {"file": "../data/synthetic_earth.nc", "type": "cap_fraction", "latitude": 72, "longitude": 318,
+    "ice": {"file": "../data/synthetic_earth.nc", "date_kyr_bp": 0.0,
+            "type": "cap_fraction", "latitude": 72, "longitude": 318,
             "width_deg": 8, "fraction": -0.1}
+  },
+  "ocean": {
+    "topography": {"file": "../data/synthetic_earth.nc", "date_kyr_bp": 0.0}
   },
   "rotation": "full",
   "output": {"surface": "out/sea_level_fingerprint/sea_level_fingerprint.nc"}

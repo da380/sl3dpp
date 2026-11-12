@@ -103,6 +103,18 @@ enum class FieldChannel {
 // weight is given as a vector field on the grid, or, to read the
 // displacement at one point along one direction, by the point and the
 // direction.
+//
+// The frame. A rigid rotation of a solid region costs no strain, so the
+// toroidal degree 1 of a solution is fixed only by the solver's gauge
+// (ToroidalOperator), and a horizontal displacement is defined only
+// relative to a frame. The measurements here read the displacement in
+// the frame of NO NET ROTATION OF THE SURFACE: the degree-1 part of W at
+// the surface, the rigid rotation u = c x r, is left out of their duals,
+// so that they do not depend on the gauge and their adjoint tractions
+// apply no torque. NetRotation, WithoutNetRotation and
+// RigidRotationPotential move a toroidal potential between frames.
+// BaselineMeasurement and AngleMeasurement read changes of length and of
+// angle between sites, which no rigid motion alters and no frame enters.
 
 /// A vector field on the surface by its components to the east, to the
 /// north and upwards, each a field on the grid; an empty component is
@@ -124,8 +136,30 @@ struct SurfaceVectorField {
     const SurfaceGrid& grid, std::span<const double> U,
     std::span<const double> V, std::span<const double> W);
 
+/// The rigid rotation in a toroidal potential W on the grid: the vector
+/// c, in W's unit, of its degree-1 part c . r, whose displacement
+/// -r x grad_1 (c . r) is c x r (r the unit radial vector; c over the
+/// radius is the rotation's angle). Cartesian components, z the polar
+/// axis and x through the zero of longitude.
+[[nodiscard]] std::array<double, 3> NetRotation(const SurfaceGrid& grid,
+                                                std::span<const double> W);
+
+/// The toroidal potential c . r of the rigid rotation u = c x r, on the
+/// grid: added to a W it moves the displacement into the frame that
+/// turns by -c against the one it was in.
+[[nodiscard]] std::vector<double> RigidRotationPotential(
+    const SurfaceGrid& grid, std::array<double, 3> c);
+
+/// W less its rigid rotation: the toroidal potential in the frame of no
+/// net rotation of the surface, in which the measurements below read
+/// the displacement.
+[[nodiscard]] std::vector<double> WithoutNetRotation(
+    const SurfaceGrid& grid, std::span<const double> W);
+
 /// The `Measurement` of the displacement against a vector weight w,
-/// J = a^2 int w . u dOmega: the upward component is the dual of U, and
+/// J = a^2 int w . u dOmega, the displacement taken in the frame of no
+/// net rotation of the surface (the dual of W has no degree 1): the
+/// upward component is the dual of U, and
 /// the tangential ones, expanded in their canonical components
 /// w^(+-)_lm, give the duals of V and W algebraically, with coefficients
 /// sqrt(l (l + 1) / 2) (w^+ + w^-)_lm and -i sqrt(l (l + 1) / 2)
@@ -149,10 +183,29 @@ struct SurfaceDirection {
 /// it reads direction . u at the site exactly, in the displacement's
 /// unit. The upward part is PointDual on the radial displacement; the
 /// horizontal part is the derivative of the grid's reproducing kernel
-/// along the direction, on V and (turned a quarter) on W.
+/// along the direction, on V and (turned a quarter) on W, the latter
+/// from degree 2: the displacement is read in the frame of no net
+/// rotation of the surface.
 [[nodiscard]] Measurement PointDisplacementMeasurement(
     const SurfaceGrid& grid, double a, GeographicPoint site,
     SurfaceDirection direction);
+
+/// The `Measurement` of the change of the straight-line distance between
+/// two sites of the surface, e . (u(to) - u(from)) with e the unit
+/// vector from the one to the other, in the displacement's unit. No
+/// rigid motion changes it, so it needs no frame. The sites must differ.
+[[nodiscard]] Measurement BaselineMeasurement(const SurfaceGrid& grid, double a,
+                                              GeographicPoint from,
+                                              GeographicPoint to);
+
+/// The `Measurement` of the change of the angle at `vertex` between the
+/// straight lines to `first` and to `second`, in radians when the
+/// displacement is in the unit of `a`. No rigid motion changes it. The
+/// three sites must not lie on one line.
+[[nodiscard]] Measurement AngleMeasurement(const SurfaceGrid& grid, double a,
+                                           GeographicPoint vertex,
+                                           GeographicPoint first,
+                                           GeographicPoint second);
 
 /// A component of the angular-velocity perturbation: X and Y drive
 /// polar motion, Z the length of day.

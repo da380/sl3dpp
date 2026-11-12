@@ -5,9 +5,9 @@
  * @brief The run scaffold the commands with an ocean share (`sea-level`,
  * `kernel1d`, `kernel`): their shared config members and the one reader of
  * them, the Earth built from the `model` block (1-D or 3-D as its files
- * make it), the background state and ice history read from surface files
- * onto the solver grid, the time grid of the window, and the initial sea
- * level's calibration.
+ * make it), the ice and the sea level read from their file inputs onto
+ * the solver grid, the background state built from them, the time grid of
+ * the window, and the initial sea level's calibration.
  */
 
 #include <memory>
@@ -36,13 +36,15 @@
 
 namespace sl3dpp::app {
 
-/// The members `sea-level`, `kernel1d` and `kernel` share: the Earth, the
-/// degree, the window, the forcing, the ocean, the rotation and the solves.
-/// Without `times` the run is the elastic fingerprint (`sea-level` alone).
+/// The members `sea-level`, `kernel1d` and `kernel` share: the problem,
+/// the Earth, the degree, the window, the forcing, the ocean, the rotation
+/// and the solves. The static problem is the elastic fingerprint
+/// (`sea-level` alone).
 struct SeaLevelRun {
+  Problem problem = Problem::Static;
   ModelBlock model;
   int lmax = 0;
-  /// The window, dates before present; empty for the elastic fingerprint.
+  /// The window, dates before present: the quasi-static problem's.
   std::optional<TimesBlock> times;
   SeaLevelForcing forcing;
   OceanBlock ocean;
@@ -65,10 +67,12 @@ struct SeaLevelRun {
 void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 
 /// Reads the shared members, relative paths against `directory`. The
-/// members that need a `times` block (a viscosity file, the ocean's and
-/// the time step's) are refused without one, naming the member, and so
-/// are the 3-D step's unless a moduli file is given (the fingerprint on
-/// lateral moduli takes them; on a radial file the runner refuses them).
+/// members only the quasi-static problem takes (a viscosity file, the
+/// ocean's shorelines and calibration, the time step) are refused in the
+/// static one, naming the member, and so are the 3-D step's unless a
+/// moduli file is given (the fingerprint on lateral moduli takes them; on
+/// a radial file the runner refuses them). In the static problem an
+/// `ocean.topography` dated otherwise than the ice is refused.
 [[nodiscard]] SeaLevelRun ReadSeaLevelRun(
     const Json& top, const std::filesystem::path& directory);
 
@@ -130,31 +134,56 @@ struct BuiltEarth {
 
 /// The world a run moves: the sea level's file and the ice history on
 /// the solver grid (one object when they are one file), the ice
-/// history's ice at the window's start (SI), and the background built
-/// from that ice and the initial sea level.
+/// history's ice at the window's start (SI), the background built
+/// from that ice and the sea level, and the two inputs as read.
 struct Loaded {
   std::shared_ptr<const io::FieldHistory> seaLevel;
   std::shared_ptr<const io::FieldHistory> ice;
   std::vector<double> ice0;  ///< the start's ice thickness, SI
   GRDSolver::State background;
+  std::string iceRead;       ///< the ice as read, for summaries and files
+  std::string seaLevelRead;  ///< the sea level as read, likewise
 };
 
-/// The sea level a file gives at a time (SI seconds), SI: its
-/// `sea_level` field, or by flotation from its `topography` with the
-/// given ice thickness (SI). A file with neither, or values that are
-/// not numbers, are refused at `member`.
-[[nodiscard]] std::vector<double> SeaLevelFrom(
-    const io::FieldHistory& file, std::span<const double> ice, double time,
-    const SeaLevelParameters& parameters, const Json& member);
+/// The `ocean` member holding the run's sea level input,
+/// `ocean.sea_level` or `ocean.topography`, and `forcing.ice`.
+[[nodiscard]] const Json& SeaLevelMember(const SeaLevelRun& run,
+                                         const Json& top);
+[[nodiscard]] const Json& IceMember(const Json& top);
 
-/// The ice history's thickness at a time (SI seconds), SI; values that
-/// are not numbers are refused.
+/// The ice and the sea level read from the same file, where the two
+/// inputs name one, or each from its own: their files opened onto `grid`
+/// and their variables checked.
+struct OpenedInputs {
+  std::shared_ptr<const io::FieldHistory> ice;
+  std::shared_ptr<const io::FieldHistory> seaLevel;
+};
+[[nodiscard]] OpenedInputs OpenInputs(const SeaLevelRun& run, const Json& top,
+                                      const SurfaceGrid& grid);
+
+/// The sea level the run's sea level input gives at a time (SI seconds of
+/// the file's axis), SI: its variable as it stands, or, for
+/// `ocean.topography`, the sea level by flotation from it with the given
+/// ice thickness (SI). Values that are not numbers are refused at the
+/// input's member.
+[[nodiscard]] std::vector<double> SeaLevelFrom(
+    const SeaLevelRun& run, const Json& top, const io::FieldHistory& file,
+    std::span<const double> ice, double time,
+    const SeaLevelParameters& parameters);
+
+/// The ice thickness of the ice's variable at a time (SI seconds), SI;
+/// values that are not numbers are refused.
 [[nodiscard]] std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
+                                                 std::string_view variable,
                                                  double time);
+
+/// Reads the run through time's world: the ice history's ice at the
+/// window's start and the sea level at the end of the window its input
+/// names (`at`), the background built from the two.
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const GRDSolver& solver);
 
-/// The sea level the sea level file gives at the window's end (with the
+/// The sea level input's sea level at the window's end (with the
 /// ice history's ice there, where it holds topography), solver units:
 /// the calibration's target. Refused when the window's end lies outside
 /// the file's time span.
@@ -196,12 +225,12 @@ struct Loaded {
 void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess);
 
-/// Calibrates the world's initial sea level against the sea level file's sea
-/// level at the window's end, as the config asks, by an evolution the
+/// Calibrates the world's initial sea level against the sea level input's
+/// sea level at the window's end (its `"at": "end"`), by an evolution the
 /// caller built to stream nothing, and adopts it as the world's
 /// background. The start is pyslfp's: the ice history's ice at the window's
 /// start, the target sea level as the guess (StartFromIceHistory), so the
-/// sea level file is read at the end alone. Refused when the calibration runs
+/// sea level's file is read at the end alone. Refused when the calibration runs
 /// out of iterations. Returns the misfits before and after (SI metres) and
 /// the runs taken.
 struct CalibrationSummary {

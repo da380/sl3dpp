@@ -380,7 +380,8 @@ Measurement DisplacementMeasurement(const SurfaceGrid& grid,
       const auto p = wp[SurfaceGrid::SpinIndex(1, l, m)];
       const auto q = wm[SurfaceGrid::SpinIndex(-1, l, m)];
       gv[SurfaceGrid::Index(l, m)] = omega * (p + q);
-      gw[SurfaceGrid::Index(l, m)] = -i * omega * (p - q);
+      // no degree 1 of W: the rigid rotation, which is gauge
+      if (l > 1) gw[SurfaceGrid::Index(l, m)] = -i * omega * (p - q);
     }
   }
   out.tangentialPotentialDual = grid.Synthesise(gv);
@@ -440,13 +441,145 @@ Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
         dBefore = std::exchange(dNow, dNext);
       }
       const auto kernel = sum / (4.0 * std::numbers::pi * a * a);
+      // W's from degree 2, its degree-1 term 3 P_1' = 3 left out: the
+      // rigid rotation is gauge
+      const auto kernelW =
+          (lmax >= 1 ? sum - 3.0 : 0.0) / (4.0 * std::numbers::pi * a * a);
       const auto i = it * nphi + ip;
       out.tangentialPotentialDual[i] =
           kernel * (x[0] * along[0] + x[1] * along[1] + x[2] * along[2]);
       out.toroidalPotentialDual[i] =
-          -kernel * (x[0] * turned[0] + x[1] * turned[1] + x[2] * turned[2]);
+          -kernelW * (x[0] * turned[0] + x[1] * turned[1] + x[2] * turned[2]);
     }
   }
+  return out;
+}
+
+namespace {
+
+using Vector3 = std::array<double, 3>;
+
+Vector3 UnitRadial(double theta, double phi) {
+  return {std::sin(theta) * std::cos(phi), std::sin(theta) * std::sin(phi),
+          std::cos(theta)};
+}
+
+double Dot(const Vector3& p, const Vector3& q) {
+  return p[0] * q[0] + p[1] * q[1] + p[2] * q[2];
+}
+
+/// A Cartesian vector's components to the east, to the north and upwards
+/// at a site.
+SurfaceDirection DirectionAt(GeographicPoint site, const Vector3& d) {
+  const auto theta = site.CoLatitude();
+  const auto phi = site.Longitude();
+  const Vector3 east{-std::sin(phi), std::cos(phi), 0.0};
+  const Vector3 north{-std::cos(theta) * std::cos(phi),
+                      -std::cos(theta) * std::sin(phi), std::sin(theta)};
+  return {.east = Dot(d, east),
+          .north = Dot(d, north),
+          .up = Dot(d, UnitRadial(theta, phi))};
+}
+
+/// into += m, over the duals of U, V and W.
+void Add(Measurement& into, const Measurement& m) {
+  auto add = [](std::vector<double>& x, const std::vector<double>& y) {
+    if (y.empty()) return;
+    if (x.empty()) x.assign(y.size(), 0.0);
+    for (auto i = std::size_t{0}; i < y.size(); ++i) x[i] += y[i];
+  };
+  add(into.displacementDual, m.displacementDual);
+  add(into.tangentialPotentialDual, m.tangentialPotentialDual);
+  add(into.toroidalPotentialDual, m.toroidalPotentialDual);
+}
+
+}  // namespace
+
+std::array<double, 3> NetRotation(const SurfaceGrid& grid,
+                                  std::span<const double> W) {
+  if (W.size() != grid.FieldSize()) {
+    throw std::invalid_argument("a toroidal potential lives on the grid");
+  }
+  // the degree-1 part of W is c . r, c_i = (3 / 4 pi) int W r_i dOmega
+  auto c = Vector3{};
+  auto weighted = std::vector<double>(grid.FieldSize());
+  const auto nphi = grid.Longitudes().size();
+  for (auto axis = std::size_t{0}; axis < 3; ++axis) {
+    for (auto it = std::size_t{0}; it < grid.CoLatitudes().size(); ++it) {
+      for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+        const auto r = UnitRadial(grid.CoLatitudes()[it], grid.Longitudes()[ip]);
+        weighted[it * nphi + ip] = W[it * nphi + ip] * r[axis];
+      }
+    }
+    c[axis] = 3.0 / (4.0 * std::numbers::pi) * grid.Integrate(weighted);
+  }
+  return c;
+}
+
+std::vector<double> RigidRotationPotential(const SurfaceGrid& grid,
+                                           std::array<double, 3> c) {
+  return grid.FromFunction([&](double theta, double phi) {
+    return Dot(c, UnitRadial(theta, phi));
+  });
+}
+
+std::vector<double> WithoutNetRotation(const SurfaceGrid& grid,
+                                       std::span<const double> W) {
+  const auto rigid = RigidRotationPotential(grid, NetRotation(grid, W));
+  auto out = std::vector<double>(W.begin(), W.end());
+  for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] -= rigid[i];
+  return out;
+}
+
+Measurement BaselineMeasurement(const SurfaceGrid& grid, double a,
+                                GeographicPoint from, GeographicPoint to) {
+  const auto x0 = UnitRadial(from.CoLatitude(), from.Longitude());
+  const auto x1 = UnitRadial(to.CoLatitude(), to.Longitude());
+  auto e = Vector3{x1[0] - x0[0], x1[1] - x0[1], x1[2] - x0[2]};
+  const auto length = std::sqrt(Dot(e, e));
+  if (!(length > 1e-12)) {
+    throw std::invalid_argument("a baseline's two sites must differ");
+  }
+  for (auto& v : e) v /= length;
+  auto out = PointDisplacementMeasurement(grid, a, to, DirectionAt(to, e));
+  for (auto& v : e) v = -v;
+  Add(out, PointDisplacementMeasurement(grid, a, from, DirectionAt(from, e)));
+  return out;
+}
+
+Measurement AngleMeasurement(const SurfaceGrid& grid, double a,
+                             GeographicPoint vertex, GeographicPoint first,
+                             GeographicPoint second) {
+  const auto x0 = UnitRadial(vertex.CoLatitude(), vertex.Longitude());
+  const auto x1 = UnitRadial(first.CoLatitude(), first.Longitude());
+  const auto x2 = UnitRadial(second.CoLatitude(), second.Longitude());
+  auto p = Vector3{}, q = Vector3{};
+  for (auto i = std::size_t{0}; i < 3; ++i) {
+    p[i] = a * (x1[i] - x0[i]);
+    q[i] = a * (x2[i] - x0[i]);
+  }
+  const auto pp = Dot(p, p), qq = Dot(q, q);
+  if (!(pp > 1e-24 * a * a) || !(qq > 1e-24 * a * a)) {
+    throw std::invalid_argument("an angle's three sites must differ");
+  }
+  const auto pq = std::sqrt(pp * qq);
+  const auto cosine = Dot(p, q) / pq;
+  const auto sine = std::sqrt(std::max(0.0, 1.0 - cosine * cosine));
+  if (!(sine > 1e-9)) {
+    throw std::invalid_argument("an angle's three sites lie on one line");
+  }
+  // cos = p . q / (|p| |q|), p and q the lines from the vertex:
+  // d cos = (dp . q + p . dq) / (|p| |q|) - cos (p . dp / p^2 + q . dq / q^2),
+  // d angle = -d cos / sin, with dp = u(first) - u(vertex) and dq likewise.
+  auto g1 = Vector3{}, g2 = Vector3{}, g0 = Vector3{};
+  for (auto i = std::size_t{0}; i < 3; ++i) {
+    g1[i] = -(q[i] / pq - cosine * p[i] / pp) / sine;
+    g2[i] = -(p[i] / pq - cosine * q[i] / qq) / sine;
+    g0[i] = -(g1[i] + g2[i]);
+  }
+  auto out = PointDisplacementMeasurement(grid, a, first, DirectionAt(first, g1));
+  Add(out, PointDisplacementMeasurement(grid, a, second, DirectionAt(second, g2)));
+  Add(out, PointDisplacementMeasurement(grid, a, vertex, DirectionAt(vertex, g0)));
   return out;
 }
 

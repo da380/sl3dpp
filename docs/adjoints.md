@@ -1046,9 +1046,9 @@ benchmarks' exchange form, and the response at the memory nodes as a
 model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
 planetmodel's cutaways. ExampleStatic3D and `configs/response.json` run
 it on the synthetic 3D elastic Earth the build writes
-(MakeSyntheticModuli, io::WriteModuli). With a `times` block the same
-command steps the viscoelastic response through time instead, its first
-node this problem's solve (docs/sl3d-configs.md).
+(MakeSyntheticModuli, io::WriteModuli). In the quasi-static problem (a
+`times` block) the same command steps the viscoelastic response through
+time instead, its first node this problem's solve (docs/sl3d-configs.md).
 
 ### 13k. Lateral moduli in the 3D stepper
 
@@ -1153,7 +1153,7 @@ on the background state's shorelines coupled to the rotational feedback,
 by the zero-length step's fixed point (or the nested closure of §13n)
 under lateral moduli and by the unrelaxed Love numbers without — the
 elastic sea-level fingerprint of a laterally heterogeneous Earth, which
-`sl3d sea-level` solves without a `times` block on a lateral moduli
+`sl3d sea-level` solves in the static problem on a lateral moduli
 file. `Run`'s first node is the same code (`Start`), so `Run(times,
 load)[0]` is `Instantaneous(load(times[0]), times[0])`; it is distributed
 over radial segments as the run is. The check of the transverse
@@ -1686,6 +1686,18 @@ along a direction, band-limited as the point dual is, and needs no
 transform: the upward part is the grid's reproducing kernel
 K(x . x0), the horizontal part its derivative along the direction,
 (x . d) K'(x . x0), on V, and along d x r on W.
+
+A rigid rotation of a solid region carries no strain, so the toroidal
+degree 1 of a solution is the solver's gauge, and an adjoint force that
+applies a torque has no solution to drive. A measurement must therefore
+not depend on the rigid rotation. The displacement measurements leave
+the degree 1 out of the dual of W: they read the displacement in the
+frame of no net rotation of the surface (`NetRotation`,
+`WithoutNetRotation` and `RigidRotationPotential` move a W between
+frames). `BaselineMeasurement` and `AngleMeasurement` read the change of
+the distance between two sites and of the angle at one site between the
+lines to two others: sums of point measurements whose forces balance,
+which no rigid motion alters and no frame enters.
 
 **The toroidal potential.** A radial model under a load and a tide has
 no toroidal displacement: W is absent from its responses, and its

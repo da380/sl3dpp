@@ -25,6 +25,11 @@ using planetmodel::Json;
 /// configs' dates are kyr before present.
 inline constexpr auto KYR = 1.0e3 * 365.25 * 86400.0;
 
+/// How a refusal ends that names a member only a run through time takes.
+inline constexpr auto kNeedsQuasiStatic = std::string_view{
+    "needs the quasi-static problem (\"problem\": \"quasi_static\", with a "
+    "`times` block)"};
+
 /// Throws an error naming the file, the member and the fault.
 [[noreturn]] void Fail(const Json& json, std::string_view message);
 

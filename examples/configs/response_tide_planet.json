@@ -1,4 +1,5 @@
 {
+  "problem": "static",
   "model": {"deck": "../data/planet.elastic.deck", "format": "elastic"},
   "lmax": 32,
   "forcing": {

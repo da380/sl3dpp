@@ -7,9 +7,9 @@
  * external tidal potential, the sum of a list of coefficients; the block's
  * reader, and its builder onto a run's grid; and, in a run through time,
  * seismic sources, point moment tensors and planar faults inside the
- * body (SeismicTerm). `sea-level`'s (and the kernel commands'): an ice
- * history and the initial sea level (SeaLevelForcing, at the end of this
- * file).
+ * body (SeismicTerm). `sea-level`'s (and the kernel commands'): the ice
+ * (SeaLevelForcing, at the end of this file); their sea level is the
+ * `ocean` block's (Blocks.hpp).
  *
  * A load term is one of
  *
@@ -19,19 +19,21 @@
  * - `disk`: a uniform density A within great-circle distance alpha of its
  *   centre and zero outside, expanded exactly to the grid's degree
  *   (DiskCoefficients) rather than sampled across its edge;
- * - `field`: a field of a planetmodel surface file, resampled onto the
+ * - `field`: a variable of a file input (Files.hpp), resampled onto the
  *   grid by the field's own lateral rule and converted to SI by its
  *   declared dimensions (io::FieldHistory), then expanded;
  * - `coefficients`: a text table of the density's coefficients
  *   (ReadCoefficientTable).
  *
  * The load is the sum of its terms, and the tide the sum of its
- * coefficients. In a run stepped through time (a `times` block) a term may
- * carry an amplitude history (`history_kyr`), the piecewise-linear factor
- * its pattern is scaled by at each time, and a `field` term may come from
- * a file with a time axis, read at each time by the file's own time rule;
- * BuildForcing builds the fixed forcing of an elastic run and TimedForcing
- * the forcing of a run through time. Coefficients throughout are the
+ * coefficients. In the static problem a `field` term's file with a time
+ * axis is read at the term's `date_kyr`. In the quasi-static problem (a
+ * run stepped through time) a term may carry an amplitude history
+ * (`history_kyr`), the piecewise-linear factor its pattern is scaled by at
+ * each time, and a `field` term may come from a file with a time axis,
+ * read at each time by the file's own time rule; BuildForcing builds the
+ * fixed forcing of a static run and TimedForcing the forcing of a run
+ * through time. Coefficients throughout are the
  * grid's (SurfaceGrid.hpp): complex, orthonormal, with the Condon-Shortley
  * phase, Y_lm = sqrt((2l+1)/4pi) d^l_0m(theta) e^{i m phi}, the m >= 0 ones
  * of a real field (f_(l,-m) = (-1)^m conj(f_lm)), in SI.
@@ -43,6 +45,7 @@
 #include <string>
 #include <vector>
 
+#include "Files.hpp"
 #include "Input.hpp"
 #include "sl3dpp/Fault.hpp"
 #include "sl3dpp/Geography.hpp"
@@ -74,12 +77,14 @@ struct LoadTerm {
   double radius = 0.0;     ///< a disk's angular radius alpha, radians
   /// kg m^-2: a cap's at its centre, a disk's within it.
   double amplitude = 0.0;
-  /// A field's surface file, or a coefficient table.
-  std::filesystem::path file;
-  std::string name = "load";  ///< a field's name in its file
-  /// The run's time, kyr, at which a field file's time zero falls: the
-  /// file is read at (t - time_origin_kyr) kyr, in seconds, at the run's
-  /// time t.
+  /// A field's file input (its variable by default `load`) and, in the
+  /// static problem, the time its file is read at, kyr (`date_kyr`),
+  /// required of a file with a time axis.
+  FileInput field;
+  std::filesystem::path file;  ///< a coefficient table
+  /// The quasi-static problem: the run's time, kyr, at which a field
+  /// file's time zero falls: the file is read at (t - time_origin_kyr)
+  /// kyr, in seconds, at the run's time t.
   double time_origin_kyr = 0.0;
   AmplitudeHistory history;  ///< the term's factor through time
 };
@@ -138,12 +143,15 @@ struct Forcing {
 
 /// Reads a `forcing` block for a run at `lmax`, relative paths against
 /// `directory`. Each element of `load` is an object holding exactly one of
-/// `cap`, `disk`, `field` and `coefficients`, and, in a run through time
-/// (`timed`), optionally `history_kyr`; each element of `tide` is a
-/// coefficient, likewise with an optional `history_kyr`. A history is a
-/// list of `[time_kyr, factor]` pairs, its times strictly increasing; a
-/// `field` term of a timed run may set `time_origin_kyr`. At least one
-/// load term, tide coefficient or seismic source is needed. Each element
+/// `cap`, `disk`, `field` and `coefficients`, and, in the quasi-static
+/// problem (`timed`), optionally `history_kyr`; each element of `tide` is
+/// a coefficient, likewise with an optional `history_kyr`. A history is a
+/// list of `[time_kyr, factor]` pairs, its times strictly increasing. A
+/// `field` term is a file input (`file`, `format`, `variable`, the
+/// variable by default `load`) with, in the static problem, `date_kyr`
+/// (the time its file is read at, kyr on the file's own axis) and, in the
+/// quasi-static problem, `time_origin_kyr`. At least one load term, tide
+/// coefficient or seismic source is needed. Each element
 /// of `seismic` is an object holding exactly one of `point` (`latitude`,
 /// `longitude`, `depth_km` and either `moment_tensor_nm` with members
 /// `rr`, `tt`, `pp`, `rt`, `rp`, `tp`, or `strike_deg`, `dip_deg`,
@@ -152,7 +160,8 @@ struct Forcing {
 /// `length_km`, `width_km`, `moment_nm`, and optionally
 /// `patches_along_strike` and `patches_down_dip`), with optionally
 /// `onset_kyr` and `history_kyr`. Without `timed`, a history, a time
-/// origin or a seismic source is refused: it needs a `times` block.
+/// origin or a seismic source is refused: it needs the quasi-static
+/// problem; with it, a field's `date_kyr` is refused.
 [[nodiscard]] Forcing ReadForcing(const Json& block,
                                   const std::filesystem::path& directory,
                                   int lmax, bool timed = false);
@@ -171,13 +180,16 @@ struct BuiltForcing {
   std::vector<double> load;
   /// The tidal potential's coefficients, m^2 s^-2: the coefficients' sum.
   std::vector<std::complex<double>> tide;
+  /// BuildForcing: each `field` term's input as read (DescribeField).
+  std::vector<std::string> inputs;
 };
 
 /// Builds a fixed forcing on `grid`, reading the files its terms name.
 /// `block` is the config's `forcing` block, where a fault in a term's file
-/// is reported: a field file that cannot be read, has a time axis, lacks
-/// the field or does not cover the grid, or a coefficient table that is
-/// malformed or exceeds the grid's degree.
+/// is reported: a field file that cannot be read, lacks the variable or
+/// does not cover the grid, that has a time axis but no `date_kyr` or a
+/// `date_kyr` but no time axis, or a coefficient table that is malformed
+/// or exceeds the grid's degree.
 [[nodiscard]] BuiltForcing BuildForcing(const Forcing& forcing,
                                         const SurfaceGrid& grid,
                                         const Json& block);
@@ -208,6 +220,11 @@ class TimedForcing {
   /// time axis.
   [[nodiscard]] bool Varies() const { return varies_; }
 
+  /// Each `field` term's input as read (DescribeField).
+  [[nodiscard]] const std::vector<std::string>& Inputs() const {
+    return inputs_;
+  }
+
  private:
   /// A load term's pattern: fixed, or read from its file's time axis.
   struct Pattern {
@@ -219,8 +236,16 @@ class TimedForcing {
   const SurfaceGrid* grid_;
   const Json* block_;
   std::vector<Pattern> patterns_;
+  std::vector<std::string> inputs_;
   bool varies_ = false;
 };
+
+/// A `field` term's input as read, for a summary line and the outputs'
+/// metadata: `field <file>:<variable> (<slice>)`, the slice `static` for a
+/// file without a time axis, `<t> kyr` for the static problem's date, and
+/// in a run through time `the run's clock` or `time origin <t> kyr`.
+[[nodiscard]] std::string DescribeField(const LoadTerm& term, bool timeAxis,
+                                        bool timed);
 
 /// A site's `latitude` and `longitude`, degrees; a latitude outside
 /// [-90, 90] is refused.
@@ -271,17 +296,6 @@ class TimedForcing {
 
 // -- the forcing of a run with an ocean ---------------------------------------
 
-/// The sea level the run starts from: a planetmodel surface file holding
-/// `sea_level` or `topography` (the sea level then follows by flotation
-/// with the ice history's own ice at the same date).
-struct SeaLevelSource {
-  std::filesystem::path file;
-  /// The date the elastic fingerprint reads the sea level and the ice
-  /// at, kyr before present; a run through time reads them at its
-  /// window's start (the sea level, calibrating, at its end) instead.
-  double date_kyr_bp = 0.0;
-};
-
 /// The elastic fingerprint's ice change: a Gaussian cap, of a fraction of
 /// the ice thickness at the date or of a thickness.
 struct IceChange {
@@ -291,30 +305,33 @@ struct IceChange {
   double amount = 0.0;  ///< the fraction, or the thickness in metres
 };
 
-/// The ice: an ice history, a surface file's `ice_thickness` through
-/// time (a static field is a history that does not change), and, for
-/// the elastic fingerprint, a change applied to its ice at the date.
+/// The ice: a file input of the ice thickness (its variable by default
+/// `ice_thickness`). In the quasi-static problem it is an ice history,
+/// the thickness through the window (a static file is a history that does
+/// not change); in the static problem it is read at its date
+/// (`date_kyr_bp`, kyr before present, required of a file with a time
+/// axis) and carries the fingerprint's change.
 struct IceForcing {
-  std::filesystem::path history;    ///< the ice history's file
-  std::optional<IceChange> change;  ///< the fingerprint's
+  FileInput file;
+  std::optional<IceChange> change;  ///< the static problem's
 };
 
-/// The `forcing` block of `sea-level` and the kernel commands: an ice
-/// history and the initial sea level. The ice the run starts from is the
-/// history's own, so the two inputs cannot disagree; the load is the
-/// history's change from its start.
+/// The `forcing` block of `sea-level` and the kernel commands: the ice, a
+/// direct load. The ice the run starts from is the history's own, so the
+/// ice and the sea level cannot disagree; the load is the history's change
+/// from its start. The sea level is the `ocean` block's (Blocks.hpp).
 struct SeaLevelForcing {
-  SeaLevelSource seaLevel;
   IceForcing ice;
 };
 
 /// Reads a `forcing` block of a run with an ocean, relative paths against
-/// `directory`: `sea_level` (`file`, and `date_kyr_bp` for the
-/// fingerprint) and `ice`, both required. `ice` gives the ice history,
-/// `file`; for the fingerprint it gives a change too, `type`
-/// ("cap_fraction" or "cap_thickness"), `latitude`, `longitude`,
-/// `width_deg` and the amount, `fraction` or `thickness_m`. The members of
-/// the other kind of run are refused, naming what this run takes.
+/// `directory`: `ice`, required, a file input. In the quasi-static problem
+/// (`timed`) it is the ice history alone; in the static problem it takes
+/// `date_kyr_bp` beside its file and the change, `type` ("cap_fraction"
+/// or "cap_thickness"), `latitude`, `longitude`, `width_deg` and the
+/// amount, `fraction` or `thickness_m`. The members of the other problem
+/// are refused, naming what this one takes, and so are `sea_level` and
+/// `state`, naming the `ocean` block's members.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
     const Json& block, const std::filesystem::path& directory, bool timed);
 
