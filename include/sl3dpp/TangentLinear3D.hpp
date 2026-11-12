@@ -55,8 +55,8 @@ namespace sl3dpp {
 /// `itau` and `logViscosity` may both be given (they add). The material
 /// direction is MaterialDirection3D (Adjoint3D.hpp).
 struct TangentPerturbation3D {
-  std::vector<std::vector<double>> directLoad;    ///< per node, frozen runs
-  /// Per node, perturbations of a frozen run's direct load outside the
+  std::vector<std::vector<double>> directLoad;    ///< per node
+  /// Per node, perturbations of the run's direct load outside the
   /// water budget and of the height of a layer on the solid surface
   /// (Evolution3D::Forcing).
   std::vector<std::vector<double>> directLoadOutsideWaterBudget;
@@ -65,8 +65,8 @@ struct TangentPerturbation3D {
   /// frozen run, its coefficients on the surface (no degree-0 part).
   std::vector<std::vector<std::complex<double>>> tide;
   /// Per node, a perturbation of the interior sources acting there
-  /// (Evolution3D::Forcing::sources and stressGluts, solver units), about
-  /// a frozen run; the run is linear in them.
+  /// (Evolution3D::Forcing::sources and stressGluts, solver units); the
+  /// run is linear in them, the shorelines of a migrating one held.
   std::vector<std::vector<PointSource>> sources;
   std::vector<std::vector<StressGlut>> stressGluts;
   std::vector<std::vector<double>> iceThickness;  ///< per node

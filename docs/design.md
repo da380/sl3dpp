@@ -415,6 +415,9 @@ surface U, V and W of a source at half the radius, to degree 16).
   §3.3; the shoreline-motion singular terms cancel), the grounding factors
   are per node, and the initial sea level kernel
   ρ_w Σₙ (Cₙ − C₀) directLoadKernelsₙ is formed (zero under frozen shorelines).
+  The loads beside the ice, the layer on the solid surface and the
+  interior sources of a migrating run are perturbed, and their kernels
+  formed, as about a frozen one, each node on its own ocean function.
 - **Viscosity kernels**, in the multiplier form of Yu et al. (2025), as
   pyslfp: in 1D, dJ/d itau = ∫ W_k m†/itau (d − m) dt per branch, mapped to
   dJ/dη by dη = −η² d(itau)/μ; in 3D, μ_k m†:(d − m)/itau per branch and

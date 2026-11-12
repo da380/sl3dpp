@@ -58,13 +58,14 @@ namespace sl3dpp {
 
 /// A direction in the evolution's inputs. Empty members are absent.
 struct TangentPerturbation {
-  /// Per time node, a perturbation of the non-ocean load a frozen `Run`
-  /// was driven by; refused about a migrating trajectory, which is driven
-  /// by its thickness.
+  /// Per time node, a perturbation of the direct load inside the water
+  /// budget the run was driven by, frozen or migrating.
   std::vector<std::vector<double>> directLoad;
-  /// Per time node, perturbations of a frozen run's direct load outside
-  /// the water budget and of the height of a layer on the solid surface
-  /// (Evolution::Forcing); refused about a migrating trajectory.
+  /// Per time node, perturbations of the run's direct load outside the
+  /// water budget and of the height of a layer on the solid surface
+  /// (Evolution::Forcing), frozen or migrating: about a migrating
+  /// trajectory the layer's place in the flotation is held, as the
+  /// shorelines are.
   std::vector<std::vector<double>> directLoadOutsideWaterBudget;
   std::vector<std::vector<double>> solidSurfaceChange;
   /// Per time node, a perturbation of the prescribed tidal potential a
@@ -73,7 +74,7 @@ struct TangentPerturbation {
   std::vector<std::vector<std::complex<double>>> tide;
   /// Per time node, a perturbation of the interior sources acting there
   /// (Evolution::Forcing::sources and stressGluts: each node's point
-  /// sources and stress gluts, solver units), about a frozen run. The
+  /// sources and stress gluts, solver units), frozen or migrating. The
   /// run is linear in them, so no trajectory is needed; the snapshots
   /// carry the toroidal potential.
   std::vector<std::vector<PointSource>> sources;

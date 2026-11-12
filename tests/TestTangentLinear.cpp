@@ -218,15 +218,18 @@ TEST(TangentLinear, DiscretePairAreTransposes) {
                           measurements),
                 lhs, 1e-10 * std::abs(lhs));
 
-    // Refusals: itau without a trajectory, an empty direction, a direct
-    // load about a migrating trajectory.
+    // Refusals: itau without a trajectory, an empty direction.
     EXPECT_THROW((void)tangent.Run(times, itauOnly), std::invalid_argument);
     EXPECT_THROW((void)tangent.Run(times, TangentPerturbation{}),
                  std::invalid_argument);
+    // A direct load about a migrating trajectory whose every node has
+    // the background's ocean function is the load about the frozen run.
     const auto oceans = std::vector<std::vector<double>>(
         times.size(), setup.state.oceanFunction);
-    EXPECT_THROW((void)tangent.Run(times, loadsOnly, nullptr, oceans),
-                 std::invalid_argument);
+    const auto frozen = Objective(setup, tangent.Run(times, loadsOnly), measurements);
+    EXPECT_NEAR(Objective(setup, tangent.Run(times, loadsOnly, nullptr, oceans),
+                          measurements),
+                frozen, 1e-12 * std::abs(frozen));
   }
 }
 
@@ -1834,6 +1837,220 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   for (const auto& snap : still) {
     EXPECT_EQ(MaxAbs(snap.relativeSeaLevelChange), 0.0);
   }
+}
+
+TEST(TangentLinear, AboutAForcedMigratingTrajectory) {
+  // About a migrating run under forcings beside the ice — a load inside
+  // the water budget, one outside it, a layer on the solid surface and a
+  // point source, present from the first node, whose shorelines the
+  // start's solve already moves from the background's — the tangent
+  // along every one of them, the thickness and the initial sea level
+  // (flipping no cell) is the central difference of migrating runs, for
+  // both methods; and the discrete kernels pair with the direction to
+  // the same number, the moment kernels with the source's.
+  auto setup = Scene::Make(1e21);
+  const auto& sle = setup.solver.SolverScales();
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto cap = MarineCap::Make(setup, 5);
+  const auto& times = cap.times;
+  const auto nodes = times.size();
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  std::mt19937 rng(29);
+  const auto g = setup.Smooth(rng, 1.0);
+  const auto surface = setup.material.Radius() *
+                       setup.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e21 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto point = BodyPoint{.radius = surface - 400e3 / sle.Length(),
+                               .colatitude = 0.6,
+                               .longitude = 4.6};
+  auto sourceOf = [&](double scale) {
+    return PointSource{
+        .at = point,
+        .moment = {.rr = 0.9 * unit * scale, .tt = -0.2 * unit * scale,
+                   .pp = -0.7 * unit * scale, .rt = 0.3 * unit * scale,
+                   .rp = -0.7 * unit * scale, .tp = 0.6 * unit * scale}};
+  };
+
+  // the base forcing and its perturbation, per node
+  struct PerNode {
+    std::vector<std::vector<double>> inside, outside, layer, ice;
+    std::vector<std::vector<PointSource>> sources;
+  };
+  PerNode base, delta;
+  const auto in0 = setup.Smooth(rng, 2e4 * setup.Sigma());
+  const auto out0 = setup.Smooth(rng, 1e4 * setup.Sigma());
+  const auto layer0 = setup.Smooth(rng, 400.0 * setup.Metre());
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    const auto shape = 0.5 + times[n] / times.back();
+    auto scaled = [&](std::vector<double> f) {
+      for (auto& v : f) v *= shape;
+      return f;
+    };
+    base.inside.push_back(scaled(in0));
+    base.outside.push_back(scaled(out0));
+    // held through the run: it moves the start's shorelines and no more
+    base.layer.push_back(layer0);
+    base.ice.push_back(cap.Thickness(times[n]));
+    base.sources.push_back({sourceOf(shape)});
+    delta.inside.push_back(setup.Smooth(rng, 10.0 * setup.Sigma()));
+    delta.outside.push_back(setup.Smooth(rng, 10.0 * setup.Sigma()));
+    delta.layer.push_back(setup.Smooth(rng, 0.02 * setup.Metre()));
+    delta.ice.push_back(n == 0 ? std::vector<double>(g.size(), 0.0)
+                               : setup.Smooth(rng, 0.1 * setup.Metre()));
+    delta.sources.push_back({sourceOf(0.1 * std::cos(1.0 + 2.0 * n))});
+  }
+  const auto deltaSea = setup.Smooth(rng, 0.1 * setup.Metre());
+
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  // the run under base + sign * delta
+  auto runAt = [&](double sign, const GRDSolver::State& start) {
+    auto field = [&, sign](const std::vector<std::vector<double>>& b,
+                           const std::vector<std::vector<double>>& d) {
+      return [&, sign](double t) {
+        const auto n = nodeOf(t);
+        auto out = b[n];
+        for (auto i = std::size_t{0}; i < out.size(); ++i) {
+          out[i] += sign * d[n][i];
+        }
+        return out;
+      };
+    };
+    const auto forcing = Evolution::Forcing{
+        .directLoad = field(base.inside, delta.inside),
+        .directLoadOutsideWaterBudget = field(base.outside, delta.outside),
+        .solidSurfaceChange = field(base.layer, delta.layer),
+        .sources = [&, sign](double t) {
+          const auto n = nodeOf(t);
+          auto out = base.sources[n];
+          auto extra = delta.sources[n][0];
+          for (auto* c : {&extra.moment.rr, &extra.moment.tt, &extra.moment.pp,
+                          &extra.moment.rt, &extra.moment.rp, &extra.moment.tp}) {
+            *c *= sign;
+          }
+          out.push_back(extra);
+          return out;
+        }};
+    Evolution trial(op, setup.solver, start,
+                    {.rtol = 1e-12,
+                     .max_nonlinear_iterations = 200,
+                     .record_stride = 1});
+    return std::pair{trial.RunMigrating(times, field(base.ice, delta.ice), forcing),
+                     std::move(trial)};
+  };
+
+  auto [run, evolution] = runAt(0.0, state);
+  const auto oceans = OceanFunctionsOf(run);
+  // the forcing moves shorelines, the start's among them
+  EXPECT_NE(oceans.front(), state.oceanFunction);
+  EXPECT_NE(oceans.back(), oceans.front());
+  const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+
+  auto measurement = std::map<std::size_t, Measurement>{};
+  measurement[nodes - 1].relativeSeaLevelDual = g;
+  measurement[1].displacementDual = setup.Smooth(rng, 0.7);
+  measurement[0].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
+  auto functional = [&](double sign) {
+    auto sea = state.seaLevel;
+    for (auto i = std::size_t{0}; i < sea.size(); ++i) {
+      sea[i] += sign * deltaSea[i];
+    }
+    const auto start = setup.solver.MakeState(state.iceThickness, sea);
+    EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
+    const auto snaps = runAt(sign, start).first;
+    for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
+      EXPECT_TRUE(snaps[n].converged) << "node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+    }
+    return Objective(setup, snaps, measurement);
+  };
+  const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
+  ASSERT_NE(fd, 0.0);
+
+  TangentPerturbation surfaceAlone;
+  surfaceAlone.directLoad = delta.inside;
+  surfaceAlone.directLoadOutsideWaterBudget = delta.outside;
+  surfaceAlone.solidSurfaceChange = delta.layer;
+  surfaceAlone.iceThickness = delta.ice;
+  surfaceAlone.initialSeaLevel = deltaSea;
+  auto direction = surfaceAlone;
+  direction.sources = delta.sources;
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    TangentLinearSolver tangent(evolution, {.method = method, .rtol = 1e-12});
+    const auto snaps = tangent.Run(times, direction, &trajectory, oceans);
+    EXPECT_NEAR(Objective(setup, snaps, measurement), fd, 1e-6 * std::abs(fd))
+        << "method " << static_cast<int>(method);
+  }
+
+  // each forcing matters to the number, and the kernels pair with each
+  const auto kernels =
+      AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                .rtol = 1e-12,
+                                .moment_points = {point}})
+          .FirstOrderKernels(times, measurement, &trajectory, oceans);
+  TangentLinearSolver tangent(evolution,
+                              {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+  auto along = [&](const TangentPerturbation& d) {
+    return Objective(setup, tangent.Run(times, d, &trajectory, oceans),
+                     measurement);
+  };
+  auto pairing = [&](const std::vector<std::vector<double>>& kernel,
+                     const std::vector<std::vector<double>>& d) {
+    auto out = 0.0;
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      out += setup.Surface(kernel[n], d[n]);
+    }
+    return out;
+  };
+  auto total = 0.0;
+  auto check = [&](const char* what, double paired, const TangentPerturbation& d) {
+    const auto want = along(d);
+    EXPECT_GT(std::abs(want), 1e-6 * std::abs(fd)) << what;
+    EXPECT_NEAR(paired, want, 1e-7 * std::abs(want)) << what;
+    total += paired;
+  };
+  {
+    TangentPerturbation d;
+    d.directLoad = delta.inside;
+    check("inside", pairing(kernels.directLoadKernels, delta.inside), d);
+  }
+  {
+    TangentPerturbation d;
+    d.directLoadOutsideWaterBudget = delta.outside;
+    check("outside",
+          pairing(kernels.directLoadOutsideWaterBudgetKernels, delta.outside), d);
+  }
+  {
+    TangentPerturbation d;
+    d.solidSurfaceChange = delta.layer;
+    check("layer", pairing(kernels.solidSurfaceChangeKernels, delta.layer), d);
+  }
+  {
+    TangentPerturbation d;
+    d.iceThickness = delta.ice;
+    check("ice", pairing(kernels.thickness, delta.ice), d);
+  }
+  {
+    TangentPerturbation d;
+    d.initialSeaLevel = deltaSea;
+    check("initial sea level", setup.Surface(kernels.initialSeaLevel, deltaSea), d);
+  }
+  {
+    TangentPerturbation d;
+    d.sources = delta.sources;
+    ASSERT_EQ(kernels.momentKernels.size(), nodes);
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      paired += kernels.momentKernels[n][0].Contract(delta.sources[n][0].moment);
+    }
+    check("sources", paired, d);
+  }
+  EXPECT_NEAR(total, fd, 1e-6 * std::abs(fd));
 }
 
 // -- second order -----------------------------------------------------------

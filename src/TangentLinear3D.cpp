@@ -827,11 +827,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (direction.Empty()) {
     throw std::invalid_argument("the tangent-linear run needs a direction");
   }
-  if (migrating && !direction.directLoad.empty()) {
-    throw std::invalid_argument(
-        "a migrating run is driven by its ice thickness, not a direct "
-        "load: perturb iceThickness");
-  }
   if (!direction.tide.empty()) {
     if (migrating) {
       throw std::invalid_argument(
@@ -853,12 +848,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
                "directLoadOutsideWaterBudget");
   CheckPerNode(direction.solidSurfaceChange, nodes, fieldSize,
                "solidSurfaceChange");
-  if (migrating && (!direction.directLoadOutsideWaterBudget.empty() ||
-                    !direction.solidSurfaceChange.empty())) {
-    throw std::invalid_argument(
-        "a migrating run is driven by its ice thickness: no load outside "
-        "the water budget and no layer on the solid surface to perturb");
-  }
   CheckPerNode(direction.iceThickness, nodes, fieldSize, "iceThickness");
   if (!direction.initialSeaLevel.empty() &&
       direction.initialSeaLevel.size() != fieldSize) {
@@ -948,10 +937,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   }
   Sources sourcesAt{};
   if (!direction.sources.empty() || !direction.stressGluts.empty()) {
-    if (migrating) {
-      throw std::invalid_argument(
-          "a migrating run takes no interior sources: none to perturb");
-    }
     if ((!direction.sources.empty() && direction.sources.size() != nodes) ||
         (!direction.stressGluts.empty() &&
          direction.stressGluts.size() != nodes)) {

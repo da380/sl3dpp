@@ -597,6 +597,246 @@ TEST(DiscreteAdjoint3D, InteriorSourcesInThePair) {
   }
 }
 
+TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
+  // Under lateral viscosity, about a migrating run under the forcings
+  // beside the ice (a load inside the water budget, one outside it, a
+  // layer on the solid surface that moves the start's shorelines, a
+  // point source): the tangent along each of them, the thickness and
+  // the initial sea level is the central difference of migrating runs
+  // that flip no cell, and the discrete sweep's kernels pair with each
+  // direction to the tangent's number, the viscosity's among them.
+  auto scene = Scene::Make(1e21);
+  const auto& sle = scene.solver.SolverScales();
+  const auto& grid = scene.solver.Grid();
+  const auto metre = 1.0 / sle.Length();
+  // a marine ice cap on a uniform ocean, melting through the run
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(10.0 * n / 3.0 * scene.Kyr());
+  const auto nodes = times.size();
+  auto ice0 = grid.Synthesise(grid.Expand(grid.FromFunction(
+      [&](double theta, double phi) {
+        const auto theta0 = 30.0 * std::numbers::pi / 180.0;
+        const auto phi0 = 275.0 * std::numbers::pi / 180.0;
+        const auto radius = 20.0 * std::numbers::pi / 180.0;
+        const auto c = std::cos(theta) * std::cos(theta0) +
+                       std::sin(theta) * std::sin(theta0) * std::cos(phi - phi0);
+        const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+        if (d >= radius) return 0.0;
+        const auto taper = std::cos(0.5 * std::numbers::pi * d / radius);
+        return 5000.0 * metre * taper * taper;
+      })));
+  const auto state = scene.solver.MakeState(
+      ice0, std::vector<double>(grid.FieldSize(), 3000.0 * metre));
+  auto thicknessAt = [&](double t) {
+    auto out = ice0;
+    for (auto& v : out) v *= std::clamp(1.0 - t / times.back(), 0.0, 1.0);
+    return out;
+  };
+  std::mt19937 rng(31);
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e21 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto point = BodyPoint{.radius = surface - 400e3 / sle.Length(),
+                               .colatitude = 0.6,
+                               .longitude = 4.6};
+  auto sourceOf = [&](double scale) {
+    return PointSource{
+        .at = point,
+        .moment = {.rr = 0.9 * unit * scale, .tt = -0.2 * unit * scale,
+                   .pp = -0.7 * unit * scale, .rt = 0.3 * unit * scale,
+                   .rp = -0.7 * unit * scale, .tp = 0.6 * unit * scale}};
+  };
+  struct PerNode {
+    std::vector<std::vector<double>> inside, outside, layer, ice;
+    std::vector<std::vector<PointSource>> sources;
+  };
+  PerNode base, delta;
+  const auto in0 = scene.Smooth(rng, 2e4 * scene.Sigma());
+  const auto out0 = scene.Smooth(rng, 1e4 * scene.Sigma());
+  const auto layer0 = scene.Smooth(rng, 400.0 * metre);
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    const auto shape = 0.5 + times[n] / times.back();
+    auto scaled = [&](std::vector<double> f) {
+      for (auto& v : f) v *= shape;
+      return f;
+    };
+    base.inside.push_back(scaled(in0));
+    base.outside.push_back(scaled(out0));
+    base.layer.push_back(layer0);  // held: it moves the start's shorelines
+    base.ice.push_back(thicknessAt(times[n]));
+    base.sources.push_back(std::vector<PointSource>{sourceOf(shape)});
+    delta.inside.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
+    delta.outside.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
+    delta.layer.push_back(scene.Smooth(rng, 0.02 * metre));
+    delta.ice.push_back(n == 0 ? std::vector<double>(in0.size(), 0.0)
+                               : scene.Smooth(rng, 0.1 * metre));
+    delta.sources.push_back(
+        std::vector<PointSource>{sourceOf(0.1 * std::cos(1.0 + 2.0 * n))});
+  }
+  const auto deltaSea = scene.Smooth(rng, 0.1 * metre);
+  auto nodeOf = [&](double t) {
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * times.back()) return n;
+    }
+    throw std::runtime_error("the test history is read off its nodes");
+  };
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  auto runAt = [&](double sign, const GRDSolver::State& start) {
+    auto field = [&, sign](const std::vector<std::vector<double>>& b,
+                           const std::vector<std::vector<double>>& d) {
+      return [&, sign](double t) {
+        const auto n = nodeOf(t);
+        auto out = b[n];
+        for (auto i = std::size_t{0}; i < out.size(); ++i) {
+          out[i] += sign * d[n][i];
+        }
+        return out;
+      };
+    };
+    const auto forcing = Evolution3D::Forcing{
+        .directLoad = field(base.inside, delta.inside),
+        .directLoadOutsideWaterBudget = field(base.outside, delta.outside),
+        .solidSurfaceChange = field(base.layer, delta.layer),
+        .sources = [&, sign](double t) {
+          const auto n = nodeOf(t);
+          auto out = base.sources[n];
+          auto extra = delta.sources[n][0];
+          for (auto* c : {&extra.moment.rr, &extra.moment.tt, &extra.moment.pp,
+                          &extra.moment.rt, &extra.moment.rp, &extra.moment.tp}) {
+            *c *= sign;
+          }
+          out.push_back(extra);
+          return out;
+        }};
+    Evolution3D trial(op, scene.solver, start,
+                      {.rtol = 1e-12,
+                       .coupled_rtol = 1e-12,
+                       .max_nonlinear_iterations = 200,
+                       .record_stride = 1});
+    return std::pair{trial.RunMigrating(times, field(base.ice, delta.ice), forcing),
+                     std::move(trial)};
+  };
+
+  auto [run, evolution] = runAt(0.0, state);
+  const auto oceans = OceanFunctionsOf(run);
+  EXPECT_NE(oceans.front(), state.oceanFunction);
+  EXPECT_NE(oceans.back(), oceans.front());
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
+
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.4);
+  measurements[1].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
+  auto functional = [&](double sign) {
+    auto sea = state.seaLevel;
+    for (auto i = std::size_t{0}; i < sea.size(); ++i) {
+      sea[i] += sign * deltaSea[i];
+    }
+    const auto start = scene.solver.MakeState(state.iceThickness, sea);
+    EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
+    const auto snaps = runAt(sign, start).first;
+    for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
+      EXPECT_TRUE(snaps[n].converged) << "node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+    }
+    return Objective(scene, snaps, measurements);
+  };
+  const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
+  ASSERT_NE(fd, 0.0);
+
+  TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                            .rtol = 1e-12,
+                                            .coupled_rtol = 1e-12});
+  auto along = [&](const TangentPerturbation3D& d) {
+    return Objective(scene, tangent.Run(times, d, &trajectory, oceans),
+                     measurements);
+  };
+  TangentPerturbation3D all;
+  all.directLoad = delta.inside;
+  all.directLoadOutsideWaterBudget = delta.outside;
+  all.solidSurfaceChange = delta.layer;
+  all.iceThickness = delta.ice;
+  all.initialSeaLevel = deltaSea;
+  all.sources = delta.sources;
+  EXPECT_NEAR(along(all), fd, 1e-6 * std::abs(fd));
+
+  const auto kernels =
+      AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                  .rtol = 1e-12,
+                                  .coupled_rtol = 1e-12,
+                                  .moment_points = {point}})
+          .FirstOrderKernels(times, measurements, &trajectory, oceans);
+  auto pairing = [&](const std::vector<std::vector<double>>& kernel,
+                     const std::vector<std::vector<double>>& d) {
+    auto out = 0.0;
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      out += scene.Surface(kernel[n], d[n]);
+    }
+    return out;
+  };
+  auto total = 0.0;
+  auto check = [&](const char* what, double paired,
+                   const TangentPerturbation3D& d, bool counted = true) {
+    const auto want = along(d);
+    EXPECT_GT(std::abs(want), 1e-6 * std::abs(fd)) << what;
+    EXPECT_NEAR(paired, want, 1e-7 * std::abs(want)) << what;
+    if (counted) total += paired;
+  };
+  {
+    TangentPerturbation3D d;
+    d.directLoad = delta.inside;
+    check("inside", pairing(kernels.ice.directLoadKernels, delta.inside), d);
+  }
+  {
+    TangentPerturbation3D d;
+    d.directLoadOutsideWaterBudget = delta.outside;
+    check("outside",
+          pairing(kernels.ice.directLoadOutsideWaterBudgetKernels, delta.outside),
+          d);
+  }
+  {
+    TangentPerturbation3D d;
+    d.solidSurfaceChange = delta.layer;
+    check("layer", pairing(kernels.ice.solidSurfaceChangeKernels, delta.layer), d);
+  }
+  {
+    TangentPerturbation3D d;
+    d.iceThickness = delta.ice;
+    check("ice", pairing(kernels.ice.thickness, delta.ice), d);
+  }
+  {
+    TangentPerturbation3D d;
+    d.initialSeaLevel = deltaSea;
+    check("initial sea level",
+          scene.Surface(kernels.ice.initialSeaLevel, deltaSea), d);
+  }
+  {
+    TangentPerturbation3D d;
+    d.sources = delta.sources;
+    ASSERT_EQ(kernels.ice.momentKernels.size(), nodes);
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      paired +=
+          kernels.ice.momentKernels[n][0].Contract(delta.sources[n][0].moment);
+    }
+    check("sources", paired, d);
+  }
+  EXPECT_NEAR(total, fd, 1e-6 * std::abs(fd));
+  {
+    TangentPerturbation3D d;
+    d.logViscosity = OnCoupling(op.Coupling(), [](double theta, double phi) {
+      return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+    });
+    const auto ditau = TangentLinearSolver3D::ItauOfLogViscosity(op, d.logViscosity);
+    check("viscosity", GridPairing(op.Coupling(), kernels.itauKernel3D, ditau), d,
+          false);
+  }
+}
+
 TEST(DiscreteAdjoint3D, ViscosityAboutASourceDrivenRun) {
   // The viscosity as a parameter of a run under point sources with
   // lateral viscosity: the discrete tangent-linear run along a lateral

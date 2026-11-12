@@ -1978,4 +1978,4 @@ evolution asked for one solve.
 
 **What is not yet taken.** The 3D moment and tide kernels of the
 continuous sweep, and the discrete moment kernels, are formed on one
-process. A migrating run takes no tide and no interior source.
+process. A migrating run takes no tide.
