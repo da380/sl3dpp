@@ -173,10 +173,13 @@ made of blocks (`model`, `times`, `forcing`, `ocean`, `solver`,
 it, under a required `problem`: `"static"` solves at one instant,
 `"quasi_static"` steps through the nodes of a `times` block, and the
 `model` block's files make a run 1D or 3D. Files are read as file
-inputs, `{"file", "format", "variable"}`, with their dates beside them.
-A fingerprint's ice and sea level come from planetmodel surface files,
+inputs, `{"file", "format", "variable"}`. A run with an ocean takes a
+state, the sea level and the ice on the body at one instant (the `ocean`
+block), and an ice change, a sum of terms (`forcing.ice_change`): the
+history of a thickness file, a file of thickness change, or, in the
+static problem, a Gaussian cap. Both come from planetmodel surface files,
 such as one holding `ice_thickness` and `topography` (pyslfp's
-`export_ice_history` writes one from ICE-5G/6G/7G), and the fingerprint
+`export_ice_history` writes one from ICE-5G/6G/7G), and a fingerprint
 comes back as a surface file of SI fields with the angular-velocity
 perturbation in its metadata. For example:
 
@@ -186,20 +189,20 @@ perturbation in its metadata. For example:
   "model": {"deck": "earth.deck"},
   "lmax": 256,
   "forcing": {
-    "ice": {"file": "ice7g.nc", "date_kyr_bp": 0.0,
-            "type": "cap_fraction", "latitude": 72, "longitude": 320,
-            "width_deg": 16, "fraction": -0.1}
+    "ice_change": [{"cap_fraction": {"latitude": 72, "longitude": 320,
+                                     "width_deg": 16, "fraction": -0.1}}]
   },
-  "ocean": {"topography": {"file": "ice7g.nc", "date_kyr_bp": 0.0}},
+  "ocean": {"date_kyr_bp": 0.0,
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "rotation": "full",
   "output": {"surface": "fingerprint.nc"}
 }
 ```
 
 run by `sl3d sea-level`; with `"problem": "quasi_static"`, a `times`
-block, an ice history in `forcing.ice` and the sea level at an end of
-the window (`"at": "start"` or `"end"`) the same command runs GIA through
-time.
+block, the state at an end of the window (`"at": "start"` or `"end"`)
+and an ice history as a `thickness` term of the ice change, the same
+command runs GIA through time.
 
 ### Inputs
 

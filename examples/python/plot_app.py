@@ -1027,10 +1027,11 @@ def sea_level_3d_ice7g() -> None:
 
 
 def ocean_load() -> None:
-    """What the ocean adds: one ice cap melted on the synthetic Earth,
-    through `response` (the ice's load alone) and through `sea-level` (the
-    fingerprint, the meltwater spread over the ocean): the displacement of
-    each, their difference (the ocean's load), and the sea-level change."""
+    """What the ocean adds: one cap of ice laid on the synthetic Earth's
+    bare land, through `response` (the ice's load alone) and through
+    `sea-level` (the fingerprint, the water drawn from the ocean): the
+    displacement of each, their difference (the ocean's load), and the
+    sea-level change."""
     name, alone = "sea_level_fingerprint_melt", "response_melt"
     path, alone_path = OUT / name / f"{name}.nc", OUT / alone / f"{alone}.nc"
     if not (path.exists() and alone_path.exists()):
@@ -1054,7 +1055,7 @@ def ocean_load() -> None:
     fig = plt.figure(figsize=(12, 7.5))
     ax = world_map(fig, 2, 2, 1, central_longitude=-100.0,
                    extent=(-150.0, -50.0, 15.0, 85.0))
-    mesh = plot_field(ax, ex, "alone", title="displacement under the melt "
+    mesh = plot_field(ax, ex, "alone", title="displacement under the cap "
                       "(response, the load alone; m)")
     mark_sites(ax, [cap])
     fig.colorbar(mesh, ax=ax, shrink=0.7)
@@ -1082,13 +1083,13 @@ def ocean_load() -> None:
     ax.set_xlim(15.0, 180.0)
     ax.set_xlabel("distance from the cap's centre (degrees)")
     ax.set_ylabel("displacement (cm)")
-    ax.set_title("away from the melt: the load alone, and with the ocean",
+    ax.set_title("away from the cap: the load alone, and with the ocean",
                  fontsize=10)
     ax.legend(fontsize=8, markerscale=8)
-    fig.suptitle("sl3d: 1 km of ice (a 3 degree cap) melted on the synthetic "
+    fig.suptitle("sl3d: 1 km of ice (a 3 degree cap) laid on the synthetic "
                  "Earth, elastic, without rotation:\n`response` (the ice's "
                  "load alone) against `sea-level` (the fingerprint, the "
-                 "meltwater in the ocean)", fontsize=11)
+                 "water drawn from the ocean)", fontsize=11)
     fig.tight_layout()
     save(fig, name, "ocean")
 

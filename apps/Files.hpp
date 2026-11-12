@@ -11,10 +11,12 @@
  * there. `planetmodel_surface`, a planetmodel surface file read onto the
  * run's grid by io::FieldHistory, is the default and the only type.
  * `variable` names the field read, by default the quantity the member
- * names (`ice_thickness`, `sea_level`, `topography`, a `field` term's
- * `load`). When an input is read is its member's business: a date beside
- * the file in a static problem, the window's nodes or one of its ends in
- * a quasi-static one.
+ * names (`ice_thickness` for `ocean.ice` and a `thickness` term,
+ * `ice_thickness_change` for a `change` term, `sea_level`, `topography`,
+ * `land`, a `field` term's `load`). When an input is read is its
+ * member's business: the state's members at the `ocean` block's instant,
+ * a term's file at a date beside it in a static problem and at the
+ * window's nodes in a quasi-static one.
  */
 
 #include <filesystem>
@@ -33,8 +35,8 @@ enum class FileFormat { PlanetmodelSurface };
 
 /// A file input: the file, its type, the variable read from it and,
 /// where its member gives one, the date it is read at (kyr before present
-/// for `sea-level`'s inputs, `date_kyr_bp`; kyr on the run's clock for
-/// `response`'s `field` term, `date_kyr`).
+/// for `sea-level`'s ice change terms, `date_kyr_bp`; kyr on the run's
+/// clock for `response`'s `field` term, `date_kyr`).
 struct FileInput {
   std::filesystem::path file;
   FileFormat format = FileFormat::PlanetmodelSurface;

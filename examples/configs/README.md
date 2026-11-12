@@ -31,9 +31,10 @@ draws each config's figures from `out/<config>/` into
   deck to degree 256: `out/love_numbers/love_numbers.txt`.
 - **`sea_level_fingerprint.json`** — `sea-level` in the static problem:
   the elastic sea-level fingerprint of melting a tenth of the synthetic
-  Greenland ice, its ice and topography read at the present day
-  (`date_kyr_bp` 0 beside each file), at lmax 128, with full rotational
-  feedback:
+  Greenland ice, its state (the ice and the topography) read at the
+  present day (`ocean.date_kyr_bp` 0) and the melt a `cap_fraction` term
+  of the ice change (`forcing.ice_change`), at lmax 128, with full
+  rotational feedback:
   `out/sea_level_fingerprint/sea_level_fingerprint.nc`.
 - **`sea_level_fingerprint_3d.json`** — that fingerprint on the synthetic
   3D elastic Earth (`../data/synthetic_moduli.nc` on
@@ -48,8 +49,9 @@ draws each config's figures from `out/<config>/` into
   ridge change the sea level by a few centimetres at most, against a
   near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
 - **`sea_level_1d.json`** — `sea-level` in the quasi-static problem (its
-  `times` block the window, its topography read at the window's start,
-  `"at": "start"`): the synthetic
+  `times` block the window, its state, the topography and the ice, read at
+  the window's start, `"at": "start"`, and the synthetic history a
+  `thickness` term of the ice change): the synthetic
   deglaciation from 21 ka to the present through the 1D viscoelastic Earth
   of `../data/prem8.gia.deck`, at lmax 32 in quarter-kiloyear steps, with
   full rotational feedback (the moments of inertia from the model's
@@ -62,7 +64,7 @@ draws each config's figures from `out/<config>/` into
   shorelines, its initial sea level calibrated against the synthetic Earth's
   present day rather than read at 21 ka (the device a thickness-only ice
   history needs), by the classical update in a few runs (the `ocean` block:
-  its topography `"at": "end"`, and `calibration`):
+  its state, the present day's, `"at": "end"`, and `calibration`):
   `out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc`, which also holds
   the calibrated `initial_sea_level` and the `ocean_function` at every node.
   The marine margins of the synthetic ice sheets flood as they melt.
@@ -183,20 +185,22 @@ draws each config's figures from `out/<config>/` into
 - **`sea_level_fingerprint_melt.json`** with **`response_melt.json`** — what
   the ocean adds: one ice change through both commands, elastic, on the
   radial Earth of `../data/prem8.elastic.deck` at lmax 128. The
-  fingerprint melts a `cap_thickness` cap, 1 km at the centre of the
-  synthetic North America (50° N, 100° W) and 3° wide, without rotation
-  (so that what differs is the ocean alone); `response` applies the load
-  of the same melt, a `cap` of 917 kg m^-3 times -1 km. The fingerprint
-  loads only grounded ice, 917 x the change x (1 - C), and the cap lies
-  18° from the nearest coast, so the ocean function cuts 5e-8 of its mass:
-  the two loads agree to 1e-7 of their peak (the fingerprint writes
-  `ice_change` and `ocean_function`, from which this is checked). The melt,
-  6.4e17 kg, raises the ocean by 1.50 m on average (from -1.2 m near the
-  melt to +1.78 m far from it). The ice's load alone lifts the cap's
-  centre by 25.9 m; the meltwater's load changes the displacement by
-  -21 to +14 cm, pressing the ocean floor down by 11 cm on average and
-  lifting the cap's centre by a further 12 cm. A fraction of a second
-  each.
+  fingerprint lays a `cap_thickness` cap of ice, 1 km at the centre of the
+  synthetic North America (50° N, 100° W) and 3° wide, on the present
+  day's bare land (a change may not take ice the state does not hold, so
+  the cap is grown rather than melted: a melt is its negative), without
+  rotation (so that what differs is the ocean alone); `response` applies
+  the load of the same ice, a `cap` of 917 kg m^-3 times 1 km. The
+  fingerprint loads only grounded ice, 917 x the change x (1 - C), and the
+  cap lies 18° from the nearest coast, so the ocean function cuts 5e-8 of
+  its mass: the two loads agree to 1e-7 of their peak (the fingerprint
+  writes `ice_change` and `ocean_function`, from which this is checked).
+  The ice, 6.4e17 kg drawn from the ocean, lowers it by 1.50 m on average
+  (from +1.2 m near the cap to -1.78 m far from it). The ice's load alone
+  presses the cap's centre down by 25.9 m; the water's unloading changes
+  the displacement by -14 to +21 cm, lifting the ocean floor by 11 cm on
+  average and pressing the cap's centre down by a further 12 cm. A
+  fraction of a second each.
 - **`response_cap_weak.json`** and **`response_cap_strong.json`** — the
   same Hudson Bay-sized cap (10° wide, 1.834e6 kg m^-2) switched on at 0,
   held, and removed over 6 to 6.5 kyr, from 0 to 12 kyr in half-kyr steps

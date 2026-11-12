@@ -12,11 +12,12 @@
  * load and tide, with no ocean: in the static problem the elastic
  * response, in the quasi-static problem the viscoelastic one through
  * time. `sea-level` solves the sea level equation, the ocean coupled to
- * the solid Earth, under an ice load, its ice and sea level read from
- * file inputs (pyslfp's `export_ice_history` writes such files): in the
- * static problem the elastic fingerprint of an ice change, in the
- * quasi-static problem GIA through time under an ice history, restartable
- * from disk checkpoints. `kernel1d` and `kernel` give the adjoint
+ * the solid Earth, under an ice load, its state (the sea level and the
+ * ice at one instant) and the ice change read from file inputs (pyslfp's
+ * `export_ice_history` writes such files): in the static problem the
+ * elastic fingerprint of an ice change, in the quasi-static problem GIA
+ * through time under an ice change from a state at an end of the window,
+ * restartable from disk checkpoints. `kernel1d` and `kernel` give the adjoint
  * sensitivity kernels of measurements of a run through time. Each of
  * these four reads a config of blocks (Blocks.hpp, Forcing.hpp,
  * Files.hpp) under a top-level `problem`, 1-D or 3-D as its `model` block
@@ -66,10 +67,10 @@ struct LoveNumbersInput {
 
 /// The config of `sl3d sea-level`: the sea level equation, the ocean
 /// coupled to the solid Earth. The static problem is the elastic
-/// fingerprint of an ice change on the ice and sea level at a date, on the
-/// radial Earth or, under lateral moduli, the 3-D one; the quasi-static
-/// problem is GIA through time under an ice history, of the radial model,
-/// or, under a
+/// fingerprint of an ice change on the state (the sea level and the ice)
+/// at a date, on the radial Earth or, under lateral moduli, the 3-D one;
+/// the quasi-static problem is GIA through time under an ice change from a
+/// state at an end of the window, of the radial model, or, under a
 /// lateral viscosity or lateral moduli, the 3-D one, restartable from disk
 /// checkpoints.
 struct SeaLevelInput {

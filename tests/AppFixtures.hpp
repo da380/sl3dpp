@@ -80,6 +80,48 @@ inline void WriteToyHistory(const std::filesystem::path& path,
   pm::WriteSurfaceFile(path, file);
 }
 
+/// The toy history's ice thickness CHANGE from its first date (2 kyr BP),
+/// `scale` times (WriteToyHistory's ice, without a bump or the marine
+/// basin), as a file of one variable, `name`: on the history's own time
+/// axis, the change at each date, or, without `timeAxis`, the change at
+/// the present alone as a static field. The values are the differences of
+/// the history's own, formed as it forms them.
+inline void WriteToyChange(const std::filesystem::path& path, bool timeAxis,
+                           double scale = 1.0,
+                           const std::string& name = "ice_thickness_change") {
+  namespace pm = planetmodel;
+  constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
+  const auto grid = pm::Equiangular(19, 36);
+  const auto dates = std::vector<double>{2.0, 1.0, 0.0};  // kyr BP
+  const auto fractions = std::vector<double>{1.0, 0.7, 0.7};
+  auto time = std::vector<double>{};
+  auto change = std::vector<double>{};
+  for (auto k = std::size_t{0}; k < dates.size(); ++k) {
+    if (!timeAxis && k + 1 < dates.size()) continue;
+    time.push_back(-dates[k] * kyr);
+    for (const auto theta : grid.Colatitudes()) {
+      for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+        const auto shape = std::exp(-std::pow(theta / 0.3, 2));
+        const auto now = theta < 0.45 ? fractions[k] * 1500.0 * shape : 0.0;
+        const auto then = theta < 0.45 ? fractions[0] * 1500.0 * shape : 0.0;
+        change.push_back(scale * (now - then));
+      }
+    }
+  }
+  auto file = pm::SurfaceFile{};
+  file.grid = grid;
+  file.source = "sl3dpp tests";
+  auto options = pm::SurfaceFieldOptions{};
+  options.dimensions = pm::units::LENGTH;
+  if (timeAxis) {
+    file.time = time;
+    options.support = "node";
+    options.time_interpolation = "linear";
+  }
+  file.variables.emplace(name, pm::SurfaceField(name, change, options));
+  pm::WriteSurfaceFile(path, file);
+}
+
 /// A field held as land for the toy world, without a time axis: one over
 /// a band of the southern ocean (colatitudes 1.9 to 2.5), zero elsewhere,
 /// under the name given. `hole` puts a value that is not a number in it.

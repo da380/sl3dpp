@@ -11,7 +11,7 @@ sl3d <command> <config.json>
 | --- | --- | --- |
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
 | `response` | the response to a prescribed surface load and tide, no ocean: in the static problem the elastic response, in the quasi-static problem the viscoelastic response through time; 1D or 3D as the model's moduli (and viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
-| `sea-level` | the sea level equation under an ice load: in the static problem the elastic fingerprint of an ice change, in the quasi-static problem GIA through time under an ice history from an initial sea level; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem) |
+| `sea-level` | the sea level equation under an ice load, from a state (the sea level and the ice at one instant) under an ice change: in the static problem the elastic fingerprint of the change, in the quasi-static problem GIA through time from the state at an end of the window; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem) |
 | `kernel1d` | adjoint sensitivity kernels of configured measurements of a `sea-level` run through time, on a radial model | a directory of kernel files |
 | `kernel` | their 3D counterpart, on a laterally varying viscosity | a directory of kernel files |
 
@@ -78,8 +78,8 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
   value of the wrong type, a non-integer where an integer is wanted, and a
   word outside a member's choices are refused too. The error names the
   config file as given, the member's path within it and the fault, for
-  example `run.json: forcing.ice.width_deg: is not a positive angle`; a JSON
-  syntax error names the line and column instead.
+  example `run.json: forcing.ice_change[0].cap_thickness.width_deg: is not a
+  positive angle`; a JSON syntax error names the line and column instead.
 - Comments and trailing commas are not JSON and are refused.
 - A relative path resolves against the directory holding the config, not
   the working directory; an absolute path is kept. The parent directories
@@ -92,8 +92,9 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 - Files are SI throughout: lengths in metres, viscosities in Pa s, times in
   seconds unless a file's own scales say otherwise.
 - Dates in configs are in kiloyears before present (`_kyr_bp` members:
-  the `times` of `sea-level` and the kernel commands, the dates of their
-  file inputs and their measurements' dates), a kiloyear being 1000 Julian
+  the `times` of `sea-level` and the kernel commands, the state's date and
+  the dates of the ice change's terms, and their measurements' dates), a
+  kiloyear being 1000 Julian
   years, 3.15576e10 s. A date of D kyr BP is the time -D kyr: the time
   axes of the files sl3d writes are in seconds relative to the present,
   negative in the past. `response`'s `times` and the date of its `field`
@@ -147,10 +148,10 @@ refused, and so is a static one with a `times` block or a quasi-static
 one without. `kernel1d` and `kernel` take the quasi-static problem alone,
 their kernels being those of a run through time. A member only the
 quasi-static problem takes (a viscosity file, an amplitude history, the
-time step, the shorelines, checkpoints, ...) is refused in the static
-problem, and a member only the static problem takes (a dated input, the
-fingerprint's ice change) in the quasi-static one, the error naming the
-problem the member needs.
+time step, the shorelines, checkpoints, the state's end of the window,
+...) is refused in the static problem, and a member only the static
+problem takes (the state's date, a term's date, a cap of ice change) in
+the quasi-static one, the error naming the problem the member needs.
 
 ### File inputs
 
@@ -160,27 +161,32 @@ A member read from a file is a file input, an object of
 | --- | --- | --- | --- |
 | `file` | path | required | the file |
 | `format` | word | `"planetmodel_surface"` | the file's type: `"planetmodel_surface"`, a planetmodel surface file, is the only one |
-| `variable` | string | the member's own quantity | the variable read: `ice_thickness` for `forcing.ice`, `sea_level` for `ocean.sea_level`, `topography` for `ocean.topography`, `load` for a `field` load term |
+| `variable` | string | the member's own quantity | the variable read: `ice_thickness` for `ocean.ice` and a `thickness` term, `ice_thickness_change` for a `change` term, `sea_level` for `ocean.sea_level`, `topography` for `ocean.topography`, `land` for `ocean.land`, `load` for a `field` load term |
 
-and, beside them, when the input is read: a date in the static problem
-(`date_kyr_bp` for `sea-level`'s inputs, `date_kyr` for `response`'s
-`field` term), an end of the window (`at`) for the sea level of the
-quasi-static problem (sea-level, below). A variable the file does not
-hold is refused, the error listing the variables the file does hold.
-Conversion from other sources (ICE-NG, other formats) happens outside
-sl3d, in pyslfp.
+When the input is read is its member's business: the state's members
+(`ocean.sea_level` or `ocean.topography`, `ocean.ice`, `ocean.land`) at
+the `ocean` block's instant, `ocean.date_kyr_bp` in the static problem
+and an end of the window, `ocean.at`, in the quasi-static one; a term of
+the ice change at its own `date_kyr_bp` beside the file in the static
+problem and at each node's date in the quasi-static one; `response`'s
+`field` term at its `date_kyr` (The state and the ice change, below). A
+variable the file does not hold is refused, the error listing the
+variables the file does hold. Conversion from other sources (ICE-NG,
+other formats) happens outside sl3d, in pyslfp.
 
 A planetmodel surface file (`planetmodel.surface/1`) holds named scalar
 fields on one angular grid, static or on a time axis. pyslfp's
 `export_ice_history` (`from pyslfp.ice import export_ice_history`) writes
 one from ICE-5G, ICE-6G or ICE-7G, holding the `ice_thickness` and
 `topography` histories in metres at the model's stored dates: such a file
-is a source of an ice history and of a sea level at once, and may be
-named by both inputs.
+is a source of a state, its ice and its topography at one date, and of an
+ice history, a `thickness` term of the ice change, at once, and may be
+named by all three.
 
-- Dates sit with the files. In the static problem a file with a time axis
-  needs its date (the slice read), and a file without one refuses a date,
-  its fields being the same at every date.
+- In the static problem a file with a time axis needs a date (the slice
+  read: the state's for the state's members, a term's own for a term),
+  and a file without one refuses a date, its fields being the same at
+  every date.
 - Fields are resampled once onto the run's Gauss–Legendre grid at `lmax`,
   by each field's own lateral interpolation rule, and converted to SI by
   their declared dimensions (a field declaring none is used as it stands).
@@ -189,31 +195,37 @@ named by both inputs.
   its stored dates. Outside the file's span the first or last stored values
   are held, without a warning, so check that the file covers the dates
   asked of it. A static field is read at every date.
-- Two inputs naming one file (of one format) read and hold it once.
+- Inputs naming one file (of one format) read and hold it once.
 - A value that is not a number (a surface file marks uncovered points
-  so) is refused in the ice and in the sea level: fill the file before
+  so) is refused in the state and in the ice change: fill the file before
   the run.
 
-### The ice and the sea level
+### The state and the ice change
 
-A run with an ocean (`sea-level`, `kernel1d`, `kernel`) takes two inputs:
-the ice, a direct load (`forcing.ice`), and the sea level of the sea
-level equation (`ocean.sea_level` or `ocean.topography`). An ice history
-is the ice thickness through time and nothing else. In the quasi-static
-problem the ice a run starts from is the history's own at the start, so
-the two inputs cannot disagree, and the load is the history's change from
-its start.
+A run with an ocean (`sea-level`, `kernel1d`, `kernel`) takes two kinds
+of input, kept apart. The STATE is what is on the body at one instant:
+the sea level of the sea level equation and the ice, the `ocean` block's
+(`ocean.sea_level` or `ocean.topography`, and `ocean.ice`), with the one
+instant of the whole block: its date, `ocean.date_kyr_bp`, in the static
+problem, and an end of the window, `ocean.at`, in the quasi-static one.
+The FORCING is what happens: an ice thickness CHANGE is one kind of it,
+the sum of the terms of the list `forcing.ice_change` (sea-level, The
+forcing block, below). The ice at a time is the state's ice plus the
+change there; it is formed in one place for every use the run makes of
+it (the state a run starts from, its loads, its migrating thickness,
+the calibration's start and the fingerprint's change).
 
-- The ice (`forcing.ice`) is a file input of the ice thickness.
+- The state's ice (`ocean.ice`) is a file input of the ice thickness,
+  required.
 - The sea level is exactly one of `ocean.sea_level`, a file input of the
   sea level, used as it stands, and `ocean.topography`, a file input of
   the topography in the ICE-NG convention (the ice surface where the ice
-  is grounded, the sea floor under floating ice), converted with the run's
-  own ice at the same instant: -T over the ocean (T < 0) and -T + I over
-  land, raised by the floating fraction (917/1000) of the ice where ice
-  sits on the ocean floor (pyslfp's construction). The member names the
-  quantity the file holds; no other is tried. The ocean function follows
-  from the sea level.
+  is grounded, the sea floor under floating ice), converted with the
+  state's ice, at the same instant by construction: -T over the ocean
+  (T < 0) and -T + I over land, raised by the floating fraction
+  (917/1000) of the ice where ice sits on the ocean floor (pyslfp's
+  construction). The member names the quantity the file holds; no other
+  is tried. The ocean function follows from the sea level.
 - The ocean function is decided by flotation, so every depression below
   sea level is ocean, joined to the sea or not. `ocean.land`, optional,
   is a file input of a field that is one where the surface is held as
@@ -222,11 +234,46 @@ its start.
   shorelines those points stay land. pyslfp's `export_ice_history`
   (4.2 or later) writes such a field, `land`, beside the ice thickness
   and the topography, so one file may be named for all three.
+- A `thickness` term of the ice change is a file of ice THICKNESS, an ice
+  history: its change is its value less its own value at the state's
+  instant, so naming for it the file the state's ice comes from gives the
+  ice of that file at every date. A `change` term is a file holding a
+  thickness change, taken as it stands; a cap (`cap_thickness`,
+  `cap_fraction`, the static problem alone) is a Gaussian cap of change.
 - An ice thickness change loads the Earth only where the ice is grounded:
   the load is 917 kg m^-3 times the thickness change times (1 - C), with C
   the ocean function of the start. The sea level equation is the linear
   one, its shorelines fixed at the start's, unless a run through time
   lets them migrate (`ocean.shorelines`).
+- A change may not take more ice than the state holds: the state's ice
+  plus the change more negative, at any point of the run's grid at the
+  date of the static problem or at any node of a run through time, than
+  1e-9 times the state's largest ice thickness (1e-9 m where the state
+  holds no ice) is refused at `forcing.ice_change`, the error giving the
+  worst deficit in metres, its place and, through time, its date. Where
+  a resampled state's own thickness falls below zero it is taken to hold
+  none.
+
+The static problem: the state is ICE-7G at 26 ka, and the change the
+whole way to the present is a `thickness` term read at the present (its
+ICE-7G thickness there less its thickness at 26 ka):
+
+```json
+"ocean": {"date_kyr_bp": 26,
+          "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"},
+          "land": {"file": "ice7g.nc"}},
+"forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc", "date_kyr_bp": 0}}]}
+```
+
+The same state with a change from a file of one's own, a thickness change
+in metres (its variable `ice_thickness_change` by default):
+`"forcing": {"ice_change": [{"change": {"file": "my_melt.nc"}}]}`.
+
+The quasi-static problem: the state at the window's start, and the ICE-7G
+history over the window as a `thickness` term, read at every node:
+`"ocean": {"at": "start", "topography": {"file": "ice7g.nc"}, "ice":
+{"file": "ice7g.nc"}}` with `"forcing": {"ice_change": [{"thickness":
+{"file": "ice7g.nc"}}]}`.
 
 ### 3D viscosity models
 
@@ -254,8 +301,9 @@ runs the 1D problem (The model block, below).
 blocks, JSON objects each read by one piece of code for every command that
 takes it: `model` (the deck, its format, the lateral moduli and the 3D
 viscosity), `times` (the time nodes of a run through time), `forcing`
-(what drives the run), `ocean` (the sea level, the shorelines and the
-initial sea level's calibration), `solver` (the solves' tolerances,
+(what drives the run), `ocean` (the state, the sea level and the ice at
+one instant, the shorelines and the initial sea level's calibration),
+`solver` (the solves' tolerances,
 budgets and transforms, and the time step), `checkpoint` (a run's
 checkpoints) and `output` (the files written), with `problem`, `lmax`,
 `rotation`, `moments` and `restart` beside them. A member a command does
@@ -273,8 +321,8 @@ Which command takes which:
 | `model.moduli` | yes | yes | no |
 | `lmax` | yes | yes | yes |
 | `times` | quasi-static, required: the forwards form | quasi-static, required: the before-present form | the before-present form, required |
-| `forcing` | `load`, `tide` and, quasi-static, `seismic` | `ice` | `ice` |
-| `ocean` | no | required: static, the sea level alone | required |
+| `forcing` | `load`, `tide` and, quasi-static, `seismic` | `ice_change` and, quasi-static, `load` and `seismic` | `ice_change`, of `thickness` and `change` terms |
+| `ocean` | no | required: the state; static, at `date_kyr_bp`; quasi-static, at `at`, with the shorelines and the calibration | required, as `sea-level`'s quasi-static |
 | `rotation`, `moments` | no | yes | yes |
 | `solver.rtol` | no | yes | yes |
 | `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | yes | in a 3D run (the fingerprint's on lateral moduli too) | `kernel` |
@@ -360,29 +408,38 @@ In either form the step is not limited by the shortest Maxwell time.
 
 ### The ocean block
 
-`sea-level` and the kernel commands; required. It holds the sea level of
-the sea level equation, exactly one of `ocean.sea_level` and
-`ocean.topography` (The ice and the sea level, above), and, in the
+`sea-level` and the kernel commands; required. It holds the state, what
+is on the body at one instant (The state and the ice change, above): the
+sea level of the sea level equation, exactly one of `ocean.sea_level` and
+`ocean.topography`, the ice, `ocean.ice`, and the land held,
+`ocean.land`, each a file input of `file`, `format` and `variable`
+alone; the instant, one for the whole block, `ocean.date_kyr_bp` in the
+static problem and `ocean.at` in the quasi-static one; and, in the
 quasi-static problem, the shorelines and the initial sea level's
-calibration. The static problem takes the sea level alone, solving the
-linear equation on its own shorelines; `shorelines` and `calibration` are
-refused there.
+calibration. The static problem solves the linear equation on the
+state's own shorelines; `shorelines`, `calibration` and `at` are refused
+there, and `date_kyr_bp` in the quasi-static problem.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `ocean.sea_level` | file input | one of the two | a sea level, used as it stands (variable `sea_level` by default) |
-| `ocean.topography` | file input | one of the two | a topography, converted with the run's own ice at the same instant (variable `topography` by default) |
-| `ocean.<sea level>.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one; for `ocean.topography`, refused when it is not the ice's date (`forcing.ice.date_kyr_bp`) |
-| `ocean.<sea level>.at` | word | required | the quasi-static problem: the end of the window the sea level belongs to, `"start"` (the initial sea level, read at `times.start_kyr_bp` where the file has a time axis) or `"end"` (the sea level the run reaches at `times.end_kyr_bp`, against which the initial sea level is calibrated); refused in the static problem, which takes `date_kyr_bp` instead |
-| `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default; `file`, `format` and `variable` alone, the field being the same at every date). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
+| `ocean.topography` | file input | one of the two | a topography, converted with the state's ice, `ocean.ice` (variable `topography` by default) |
+| `ocean.ice` | file input | required | the ice thickness on the body at the state's instant (variable `ice_thickness` by default) |
+| `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
+| `ocean.date_kyr_bp` | number | absent | the static problem: the state's date, kyr BP, at which every member's file with a time axis is read; required when any of the state's files (the sea level's, the ice's, the land's) has a time axis, refused when none has one; refused in the quasi-static problem |
+| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis) or `"end"` (the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its files reaching that date); refused in the static problem |
 | `ocean.shorelines` | word | `"frozen"` | the quasi-static problem: `"frozen"`, the start's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (sea-level, The run through time) |
-| `ocean.calibration` | object | absent | the quasi-static problem with the sea level `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the sea level is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
+| `ocean.calibration` | object | absent | the quasi-static problem with `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the state is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
 | `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
 | `ocean.calibration.iterations` | integer >= 1 | 10 | the most runs under migrating shorelines; running out is an error |
 | `ocean.calibration.rtol` | number > 0 | 1e-4 | convergence under migrating shorelines: the largest update below this times the largest initial sea level (1e-4 is of order a metre) |
 
-`forcing.sea_level`, `forcing.state` and `ocean.calibrate_initial_sea_level`
-are refused, the error naming the members that hold what they would.
+A date or an `at` on a member of the state (`ocean.topography.date_kyr_bp`,
+`ocean.ice.at`, ...) is refused, naming the block's; so are
+`forcing.ice` (the state's ice is `ocean.ice`, a change of it a term of
+`forcing.ice_change`), `forcing.sea_level`, `forcing.state` and
+`ocean.calibrate_initial_sea_level`, the error naming the members that
+hold what they would.
 
 ### Rotation and moments
 
@@ -929,20 +986,22 @@ A coefficient table, degrees 0 and 2 of a load (the m = 0 rows real):
 ## sea-level
 
 The sea level equation: the ocean coupled to the solid Earth under an ice
-load, the ice and the sea level read from file inputs, with rotational
-feedback. The config is made of blocks (The blocks, above): `model`,
-`times`, `forcing`, `ocean`, `solver`, `checkpoint` and `output`, with
-`problem`, `lmax`, `rotation`, `moments` and `restart` beside them.
+load, the state (the sea level and the ice at one instant) and the ice
+change read from file inputs, with rotational feedback. The config is
+made of blocks (The blocks, above): `model`, `times`, `forcing`, `ocean`,
+`solver`, `checkpoint` and `output`, with `problem`, `lmax`, `rotation`,
+`moments` and `restart` beside them.
 
 The problem decides what is solved:
 
-- `"problem": "static"` is the elastic sea-level fingerprint of an ice
-  change applied to the ice at a date: one solve of the linear sea level
-  equation on the shorelines of the sea level read, with the Love numbers
+- `"problem": "static"` is the elastic sea-level fingerprint of the ice
+  change on the state at its date: one solve of the linear sea level
+  equation on the state's shorelines, with the Love numbers
   of the deck's elastic structure at `lmax`, or, under lateral moduli, on
   the laterally heterogeneous elastic Earth (The fingerprint, below);
-- `"problem": "quasi_static"` is GIA through time under an ice history:
-  the viscoelastic Earth through the sea level equation over the window
+- `"problem": "quasi_static"` is GIA through time under the ice change
+  from the state at an end of the window: the viscoelastic Earth through
+  the sea level equation over the window
   of dates of its `times` block (The run through time, below),
   restartable from checkpoints.
 
@@ -964,8 +1023,8 @@ deck's moduli as they are; it has no use for a viscosity, and
 | `model` | object | required | the Earth model (The model block, above) |
 | `lmax` | integer >= 1 | required | the degree of the run and of its grid |
 | `times` | object | quasi-static: required | the window, dates before present (The times block, above); refused in the static problem |
-| `forcing` | object | required | the ice (below) |
-| `ocean` | object | required | the sea level and, in the quasi-static problem, the shorelines and the initial sea level's calibration (The ocean block, above) |
+| `forcing` | object | required | the ice change and, in the quasi-static problem, surface loads and seismic sources (below) |
+| `ocean` | object | required | the state, its instant and, in the quasi-static problem, the shorelines and the initial sea level's calibration (The ocean block, above) |
 | `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above) |
 | `moments` | word | `"input"` | the moments of inertia (Rotation and moments, above) |
 | `solver` | object | absent | the solves (The solver block, above): in the static problem, `rtol` alone on a radial Earth, and the 3D step's members too on lateral moduli |
@@ -975,36 +1034,42 @@ deck's moduli as they are; it has no use for a viscosity, and
 
 ### The forcing block
 
-The forcing is the ice, a direct load, and in a run through time any
-further surface loads and seismic sources; the sea level belongs to the
-sea level equation, in the `ocean` block.
+The forcing is what happens to the state (The state and the ice change,
+above): the ice change, a direct load where the ice is grounded, and in
+a run through time any further surface loads and seismic sources; the
+state itself, the sea level and the ice at one instant, is the `ocean`
+block's.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `forcing.ice` | file input | required | the ice thickness (File inputs, above; variable `ice_thickness` by default): in the quasi-static problem an ice history over the window, in the static problem the ice at a date |
-| `forcing.ice.date_kyr_bp` | number | absent | the static problem: the date the ice is read at, kyr BP; required of a file with a time axis, refused for a file without one |
+| `forcing.ice_change` | list | required, but for a run through time with `load` or `seismic` | the ice thickness change, the sum of its terms, at least one in the static problem; each term an object holding exactly one of the members below |
+| `forcing.ice_change[k].thickness` | file input | one of the four | a file of ice THICKNESS (variable `ice_thickness` by default) with a time axis: its change is its value less its own value at the state's instant (a file without a time axis, whose change would be zero, is refused) |
+| `forcing.ice_change[k].thickness.date_kyr_bp` | number | required in the static problem | the date the file is read at, kyr BP: the change is the file at this date less the file at the state's date (which the state must have, `ocean.date_kyr_bp`); refused in the quasi-static problem, which reads the file at each node's date |
+| `forcing.ice_change[k].change` | file input | one of the four | a file holding a thickness CHANGE in metres (variable `ice_thickness_change` by default), taken as it stands. The static problem reads a file without a time axis as it is; the quasi-static problem reads a file with a time axis at each node's date and holds one without through the run. Refused with the state at the window's end (`"at": "end"`), where the ice changes are thickness histories, `thickness` terms |
+| `forcing.ice_change[k].change.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one |
+| `forcing.ice_change[k].cap_thickness` | object | one of the four | the static problem alone: a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt) |
+| `forcing.ice_change[k].cap_fraction` | object | one of the four | the static problem alone: a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt) |
 
-In the quasi-static problem the ice history is all `forcing.ice` holds:
-it takes no date, being read at every node. In the static problem
-`forcing.ice` also gives the change applied to the ice at its date:
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `forcing.ice.type` | word | required | `"cap_fraction"` or `"cap_thickness"` |
-| `forcing.ice.latitude` | number | required | the cap's centre, degrees |
-| `forcing.ice.longitude` | number | required | the cap's centre, degrees |
-| `forcing.ice.width_deg` | number > 0 | required | the cap's width w, degrees |
-| `forcing.ice.fraction` | number | required for `cap_fraction` | the fraction of the local ice thickness added (negative to melt) |
-| `forcing.ice.thickness_m` | number | required for `cap_thickness` | the thickness added at the cap's centre, metres (negative to melt) |
+The ice at a time is the state's ice plus the terms' changes summed
+there. A change that takes more ice than the state holds is refused (The
+state and the ice change, above), and so, under migrating shorelines with
+the state at the window's start, is a change present at the start (a
+`change` file whose change is not zero there): the first node of a
+migrating run is the state itself. Under frozen shorelines a change
+present at the start is a load there, the first node the response of the
+unrelaxed body to it.
 
 The members of the other problem are refused, naming what this one
-takes: a date or an ice change in the quasi-static problem, an ice with
-no change in the static one. `forcing.sea_level` and `forcing.state` are
-refused, naming the `ocean` block's members.
+takes: a term's date or a cap in the quasi-static problem, a thickness
+term without a date in the static one, as is a term naming no kind or
+several. `forcing.ice`, `forcing.sea_level` and `forcing.state` are
+refused, naming the members that hold the state's ice and sea level and
+the ice change.
 
 In the quasi-static problem `sea-level` takes two more members beside
-the ice, both lists; the static problem and the kernel commands refuse
-them.
+the ice change, both lists; the static problem and the kernel commands
+refuse them. With either of them `forcing.ice_change` may be left out or
+empty: the ice is then the state's throughout.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1018,8 +1083,8 @@ them.
 Times here are dates, kyr before present, as the window's are: a
 history is `history_kyr_bp` and an onset `onset_kyr_bp`, and a `field`
 term's file with a time axis is read at each node's date, as the ice
-history is, so a load file and an ice file on one calendar agree with
-nothing more said. `response`'s names for times on a run's own clock
+change's files are, so a load file and an ice file on one calendar agree
+with nothing more said. `response`'s names for times on a run's own clock
 (`history_kyr`, `onset_kyr`, `time_origin_kyr`) are refused, naming
 these. The loads and the sources are changes from the run's start. A term
 present at the first node acts there: the first node is then the
@@ -1030,25 +1095,29 @@ budget, it does not move the solid surface (the solid surface is the one
 under the ice) and it alone enters the flotation that places the
 shorelines.
 
-A run forced beside its ice is not calibrated (`"at": "end"` is
-refused), and a run under seismic sources is not checkpointed. The
+A run forced beside its ice is not calibrated (the state at the
+window's end, `"at": "end"`, is refused), and a run under seismic
+sources is not checkpointed. The
 output file's metadata lists the loads (`load`) and the sources
 (`seismic`); its fields are those of the run under the ice alone.
 
 ### The fingerprint
 
 The static problem: the elastic fingerprint of the ice change on the
-ice of `forcing.ice` and the sea level of `ocean.sea_level` or
-`ocean.topography`, each read at its own `date_kyr_bp` where its file
-has a time axis (a topography at the ice's date, with whose ice it is
-converted). The cap is
-Gaussian in great-circle distance d from its centre, weighted
-exp(-d^2 / (2 w^2)) with no cut-off. A `cap_fraction` change is
-`fraction` times the weight times the ice thickness at the date, so it acts
-only where there is ice; a `cap_thickness` change is `thickness_m` times
-the weight. Either loads the Earth only where the ice is grounded. Giving
-the amount member of the other type is refused. The solve's tolerance is
-`solver.rtol`; a solve that does not converge is an error.
+state, the ice of `ocean.ice` and the sea level of `ocean.sea_level` or
+`ocean.topography` (a topography converted with the state's ice), each
+file with a time axis read at the state's date, `ocean.date_kyr_bp`. The
+change is the sum of the terms of `forcing.ice_change`, each read at its
+own date: a `thickness` term's file at its date less at the state's, a
+`change` term's file as it stands. A cap is Gaussian in great-circle
+distance d from its centre, weighted exp(-d^2 / (2 w^2)) with no cut-off:
+a `cap_fraction` change is `fraction` times the weight times the state's
+ice thickness, so it acts only where there is ice (and, `fraction` no
+less than -1, takes no more than there is); a `cap_thickness` change is
+`thickness_m` times the weight, and a negative one, its tail reaching
+past the ice, takes ice where the state holds none, which is refused.
+The change loads the Earth only where the ice is grounded. The solve's
+tolerance is `solver.rtol`; a solve that does not converge is an error.
 
 The output is a surface file of static SI fields on the run's
 Gauss–Legendre grid:
@@ -1062,10 +1131,15 @@ Gauss–Legendre grid:
 | `ocean_function` | 1 | the ocean function at the date |
 
 Its metadata record the config and deck paths (and the moduli file's,
-where given), the inputs as read, `ice` (`<file>:<variable> (<slice>)`)
-and `sea_level` (the same after its quantity, `topography` or `sea
-level`), the slice being the date read, `<d> kyr BP`, or `static` for a
-file without a time axis; the `rotation`, the angular velocity
+where given), the state's inputs as read, `ice` (`<file>:<variable>
+(<slice>)`) and `sea_level` (the same after its quantity, `topography`
+or `sea level`), the slice being the state's date, `<d> kyr BP`, or
+`static` for a file without a time axis; the ice change's terms,
+`ice_change`, each described (`thickness <file>:<variable>, from the
+state's date to <d> kyr BP`, `change <file>:<variable>[, at <d> kyr BP]`,
+`cap at latitude <lat>, longitude <lon>, width <w> deg, <t> m of ice` or
+`..., fraction <f> of the state's ice`) and joined by `; `; the
+`rotation`, the angular velocity
 perturbation as `omega_x_rad_s`, `omega_y_rad_s` and `omega_z_rad_s`
 (rad s^-1), and the number of sea level iterations (`sle_iterations`).
 
@@ -1125,15 +1199,16 @@ angular velocity perturbation (`omega_x_radial_model_rad_s`,
 
 ### The run through time
 
-The quasi-static problem: viscoelastic GIA under the ice history over the
-window. The run starts from the ice history's ice and the initial sea
-level at the window's start: the background is built from `forcing.ice`
-read at `times.start_kyr_bp` and the ocean's sea level with `"at":
-"start"` read there too (a file without a time axis as it stands), and
-the load at each time node is the change of grounded ice thickness in
-`forcing.ice` from its own value at the start. The outputs are changes
-from the window's start. The time nodes are `times.nodes` evenly spaced
-dates from `start_kyr_bp` to `end_kyr_bp`, stepped by `solver.scheme`.
+The quasi-static problem: viscoelastic GIA under the ice change over the
+window. With the state at the window's start (`"at": "start"`) the run
+starts from it: the background is built from `ocean.ice` and the state's
+sea level read at `times.start_kyr_bp` (a file without a time axis as it
+stands), and the load at each time node is the grounded part of the ice
+change there, each `thickness` term's file read at the node's date less
+its value at the start, each `change` term's read at the node's date (or
+held, without a time axis). The outputs are changes from the window's
+start. The time nodes are `times.nodes` evenly spaced dates from
+`start_kyr_bp` to `end_kyr_bp`, stepped by `solver.scheme`.
 
 The `ocean` block changes the start and the equation, as pyslfp's
 `run_ice_history` does:
@@ -1142,20 +1217,26 @@ The `ocean` block changes the start and the equation, as pyslfp's
   at every node instead of the linear one: the ocean function follows the
   flotation condition as the ice and sea level change, so melting marine
   ice floods and grounding ice displaces the ocean. The ice thickness at
-  each node is the background's plus the history's change since the
-  start. In a 3D run the nonlinear solve runs in every pass of each
+  each node is the background's plus the change since the start, which
+  must be zero at the start (a change present there is refused: the
+  first node is the state itself). In a 3D run the nonlinear solve runs in every pass of each
   step's combined fixed point. The kernels of `kernel1d` and `kernel` then
   linearise about the run's own shorelines, and their
   `initial_sea_level_dual` is no longer zero.
-- The sea level `"at": "end"` makes it the sea level the run reaches at
+- `"at": "end"` makes the state the one the run reaches at
   `times.end_kyr_bp` (usually the present day), and calibrates the
-  initial sea level against it (`ocean.calibration`): the standard device
-  when the ice history carries thickness alone. The run then starts as
-  pyslfp's calibration does: the ice is the ice history's at the start,
-  and the starting guess for the sea level is the target itself (a
-  topography converted with the ice history's ice at the end), so the sea
-  level's file is read at the window's end alone, which must lie within
-  the file's time span. Under frozen shorelines the problem is linear and
+  initial sea level against its sea level (`ocean.calibration`): the
+  standard device when the ice history carries thickness alone. The ice
+  changes are then `thickness` terms, each read back from the end: the
+  ice at the window's start is `ocean.ice` at the end plus each term's
+  thickness at the start less its thickness at the end, so a state and a
+  term naming one file give that file's ice at the start (to rounding),
+  and the load at a node is each term's change since the start. The run
+  then starts as pyslfp's calibration does: the ice is the run's at the
+  start, and the starting guess for the sea level is the target itself (a
+  topography converted with the state's ice), so the state's files are
+  read at the window's end alone, which must lie within their time
+  spans. Under frozen shorelines the problem is linear and
   one run gives the answer exactly, the guess's shorelines kept; under
   migrating shorelines the calibration iterates, by the classical update
   or by steepest descent with the adjoint gradient, each accelerated by
@@ -1185,14 +1266,18 @@ interpolation:
 | `ocean_function` | 1 | migrating shorelines alone: the ocean function at each node |
 
 Its metadata record the shorelines (`shorelines`), where the initial sea
-level came from (`initial_sea_level`: the sea level input at the start,
-or the calibration with its runs and misfits), the config and deck paths
-(and the viscosity and moduli files', where given), the inputs as read,
-`ice` (`<file>:<variable> (<slice>)`, the slice the window, `<start> to
-<end> kyr BP`, or `static`) and `sea_level` (the same after its quantity,
-the slice `the window's start, <d> kyr BP` or `the window's end, <d> kyr
-BP`, or for a file without a time axis `static, at the window's start`
-or `... end`), the node dates as `dates_kyr_bp`, and the angular velocity
+level came from (`initial_sea_level`: the state's sea level at the
+window's start, or the calibration with its runs and misfits), the config
+and deck paths (and the viscosity and moduli files', where given), the
+state's inputs as read, `ice` (`<file>:<variable> (<slice>)`) and
+`sea_level` (the same after its quantity), the slice the state's end of
+the window, `the window's start, <d> kyr BP` or `the window's end, <d>
+kyr BP`, or for a file without a time axis `static, at the window's
+start` or `... end`; the ice change's terms, `ice_change`, each described
+(`thickness <file>:<variable>, from the state's instant to each node's
+date` or `change <file>:<variable>, read by date`) and joined by `; `
+(absent without terms); the loads and sources beside the ice, where
+given; the node dates as `dates_kyr_bp`, and the angular velocity
 perturbation at each node as `omega_x_rad_s`, `omega_y_rad_s` and
 `omega_z_rad_s` (rad s^-1).
 
@@ -1224,10 +1309,12 @@ output again.
 
 A checkpoint is bound to its run: it records a hash of the members that
 decide the computation (everything but `checkpoint`, `restart`,
-`solver.cache_mb` and `output`, the inputs' variables and the sea level's
-quantity among them) and of the contents of the files the config names
-(the deck, the sea level's file, the ice history and the viscosity and
-moduli files where given). A run is refused, with an error naming the
+`solver.cache_mb` and `output`, the inputs' variables, the sea level's
+quantity, the state's end of the window and the ice change's terms among
+them) and of the contents of the files the config names (the deck, the
+state's sea level and ice files, each ice change term's file, and the
+land, the surface loads' and the viscosity and moduli files where
+given). A run is refused, with an error naming the
 checkpoint, rather than resuming another run's state when any of these
 differ: another time grid, tolerance or model, or the same config over an
 input file that has changed since. The output, the checkpoint stride, the
@@ -1264,20 +1351,23 @@ the model and files are read.
 What the config was taken to mean, the inputs as read, then the file:
 
 - the fingerprint: `<model>, elastic (fingerprint), rotation
-  <rotation>[, moments hydrostatic]; ice <ice>, <sea level>; wrote
-  <surface> (<n> SLE iterations)`; on lateral moduli the parenthesis is
+  <rotation>[, moments hydrostatic]; ice <ice>, <sea level>; ice change
+  <change>; wrote <surface> (<n> SLE iterations)`; on lateral moduli the parenthesis is
   the 3D closure's, `(<n> fixed-point iterations, residual <r>)`, or under
   `"conjugate_gradients"` `(<n> conjugate-gradient iterations in <k>
   passes, residual <r>)`;
 - a run through time: `<model>, viscoelastic, <n> nodes <start> to <end>
   kyr BP, shorelines <frozen|migrating>[, initial sea level calibrated],
-  rotation <rotation>[, moments hydrostatic]; ice <ice>, <sea level>;
-  wrote <surface>`, ending in `, resumed` when the run resumed from a
+  rotation <rotation>[, moments hydrostatic]; ice <ice>, <sea level>[;
+  ice change <change>]; wrote <surface>`, ending in `, resumed` when the
+  run resumed from a
   checkpoint, and in `, replacing <k> earlier checkpoint(s)` when a run
   starting over removed some.
 
 `<ice>` and `<sea level>` are the metadata's `ice` and `sea_level`
-(above): the file, the variable and the slice read. `<model>` is `1-D`,
+(above): the state's file, variable and slice read. `<change>` is the
+ice change's terms as the metadata's `ice_change` describes them, joined
+by ` + ` (a run through time without terms leaves it out). `<model>` is `1-D`,
 `1-D (the viscosity file is radial)`, `1-D (the moduli file is radial)`,
 `1-D (the viscosity and moduli files are radial)`, `3-D (lateral
 viscosity)`, `3-D (lateral moduli)` or `3-D (lateral viscosity, lateral
@@ -1287,9 +1377,9 @@ moduli)`. The example configs
 `examples/configs/sea_level_3d_calibrated.json` print
 
 ```
-sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); wrote out/sea_level_fingerprint/sea_level_fingerprint.nc (9 SLE iterations) in 0.30 s
-sl3d sea-level: 3-D (lateral moduli), elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.54 s
-sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (21 to 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 14.20 s
+sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc (9 SLE iterations) in 0.32 s
+sl3d sea-level: 3-D (lateral moduli), elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.54 s
+sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 14.20 s
 ```
 
 ### Examples
@@ -1300,17 +1390,20 @@ sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, 
   "model": {"deck": "earth.deck"},
   "lmax": 128,
   "forcing": {
-    "ice": {"file": "ice7g.nc", "date_kyr_bp": 0.0,
-            "type": "cap_thickness", "latitude": -75, "longitude": 250,
-            "width_deg": 8, "thickness_m": -10}
+    "ice_change": [{"thickness": {"file": "ice7g.nc", "date_kyr_bp": 0}}]
   },
-  "ocean": {"topography": {"file": "ice7g.nc", "date_kyr_bp": 0.0}},
+  "ocean": {"date_kyr_bp": 26,
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"},
+            "land": {"file": "ice7g.nc"}},
   "output": {"surface": "fingerprint.nc"}
 }
 ```
 
-The fingerprint of thinning West Antarctic ice by 10 m at its centre, on
-ICE-7G's present day.
+The elastic fingerprint of the whole deglaciation on the state at the
+last glacial maximum: the state is ICE-7G at 26 ka, and the change is
+its ice thickness at the present less its thickness at 26 ka. The same
+state takes a change from a file of one's own as
+`"forcing": {"ice_change": [{"change": {"file": "my_melt.nc"}}]}`.
 
 ```json
 {
@@ -1319,11 +1412,12 @@ ICE-7G's present day.
             "moduli": {"file": "s40rts_moduli.nc"}},
   "lmax": 64,
   "forcing": {
-    "ice": {"file": "ice7g.nc", "date_kyr_bp": 0.0,
-            "type": "cap_fraction", "latitude": 72, "longitude": 318,
-            "width_deg": 8, "fraction": -0.1}
+    "ice_change": [{"cap_fraction": {"latitude": 72, "longitude": 318,
+                                     "width_deg": 8, "fraction": -0.1}}]
   },
-  "ocean": {"sea_level": {"file": "present_day.nc", "variable": "rsl0"}},
+  "ocean": {"date_kyr_bp": 0,
+            "sea_level": {"file": "present_day.nc", "variable": "rsl0"},
+            "ice": {"file": "ice7g.nc"}},
   "rotation": "full",
   "solver": {"step": "conjugate_gradients", "step_rtol": 1e-9},
   "output": {"surface": "fingerprint_3d.nc"}
@@ -1335,7 +1429,8 @@ moduli of `s40rts_moduli.nc` (a planetmodel model file of `mu` and
 `kappa`), its zero-length step closed by the sea level closure nested
 over conjugate-gradient solves, with the radial model's fingerprint
 beside it in `fingerprint_3d.nc`. Its sea level is the static variable
-`rsl0` of `present_day.nc`, used as it stands, so it takes no date.
+`rsl0` of `present_day.nc`, used as it stands, the same at every date;
+the state's date reads ICE-7G's ice at the present.
 
 ```json
 {
@@ -1343,16 +1438,17 @@ beside it in `fingerprint_3d.nc`. Its sea level is the static variable
   "model": {"deck": "earth.deck"},
   "lmax": 64,
   "times": {"start_kyr_bp": 26.0, "nodes": 53},
-  "forcing": {"ice": {"file": "ice7g.nc"}},
-  "ocean": {"topography": {"file": "ice7g.nc", "at": "start"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "output": {"surface": "histories.nc"}
 }
 ```
 
-A radial run through time from ICE-7G's ice and topography at 26 kyr BP.
-A thickness-only history under migrating shorelines, its initial sea
-level calibrated against the present-day sea level, checkpointed every
-four nodes:
+A radial run through time from ICE-7G's state at 26 kyr BP under its ice
+history. A thickness-only history under migrating shorelines, its
+initial sea level calibrated against the present-day sea level,
+checkpointed every four nodes:
 
 ```json
 {
@@ -1360,19 +1456,23 @@ four nodes:
   "model": {"deck": "earth.deck"},
   "lmax": 64,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
-  "forcing": {"ice": {"file": "my_ice_history.nc", "variable": "thk"}},
-  "ocean": {"shorelines": "migrating",
-            "sea_level": {"file": "present_day.nc", "variable": "rsl0",
-                          "at": "end"},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "my_ice_history.nc",
+                                  "variable": "thk"}}]
+  },
+  "ocean": {"at": "end", "shorelines": "migrating",
+            "sea_level": {"file": "present_day.nc", "variable": "rsl0"},
+            "ice": {"file": "my_ice_history.nc", "variable": "thk"},
             "calibration": {"method": "fixed_point", "iterations": 12}},
   "checkpoint": {"directory": "checkpoints", "every": 4},
   "output": {"surface": "histories.nc"}
 }
 ```
 
-Here the sea level's file need only hold the present day: with `"at":
-"end"` it is read at the window's end alone, and a file without a time
-axis is the present day's.
+Here the state is the present day's: with `"at": "end"` its files are
+read at the window's end alone, so the sea level's file need only hold
+the present day (a file without a time axis is the present day's), and
+the ice at the window's start is the history's own.
 
 ```json
 {
@@ -1382,8 +1482,9 @@ axis is the present day's.
                           "reference": "geometric_mean"}},
   "lmax": 128,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 105},
-  "forcing": {"ice": {"file": "ice7g.nc"}},
-  "ocean": {"topography": {"file": "ice7g.nc", "at": "start"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "rotation": "full",
   "moments": "hydrostatic",
   "solver": {"scheme": "exponential_trapezoid", "rtol": 1e-9,
@@ -1406,12 +1507,13 @@ Adjoint sensitivity kernels of configured measurements of a run through
 time. The forward run is `sea-level`'s run through time of the same
 blocks (The blocks, above): `"problem": "quasi_static"` (required; the
 static problem is refused), `model`, `lmax`, `times` (required, dates
-before present), `forcing` (the ice history), `ocean` (the sea level, the
-shorelines and the calibration), `rotation`, `moments` and `solver`, each
-meaning what it means there.
-Then, for each measurement, one reverse (adjoint) sweep gives its
-sensitivity to the ice history and to the viscosity, by the continuous
-adjoint or the exact discrete transpose.
+before present), `forcing` (the ice change, of `thickness` and `change`
+terms; `load` and `seismic` are refused), `ocean` (the state, at `at`,
+the shorelines and the calibration), `rotation`, `moments` and `solver`,
+each meaning what it means there. Then, for each measurement, one
+reverse (adjoint) sweep gives its sensitivity to the ice thickness at
+each node and to the viscosity, by the continuous adjoint or the exact
+discrete transpose.
 
 `kernel1d` runs a radial model: the deck's viscosity column, or a
 `model.viscosity` file whose viscosity is radial; a laterally varying one
@@ -1495,8 +1597,9 @@ naming the member, rather than after the forward run.
 In the `output` directory:
 
 - `measurements.txt`: under a header of `#` lines (program and version,
-  creation time, config, and the inputs as read, `ice` and `sea_level`, as
-  `sea-level`'s metadata give them), one row per measurement:
+  creation time, config, and the inputs as read, `ice`, `sea_level` and
+  `ice_change`, as `sea-level`'s metadata give them), one row per
+  measurement:
   `name type value_si`, the forward value in the SI unit of the table
   above; a `decay_time` row adds `tau_kyr amplitude_m offset_m` from the fit.
 - `<name>_ice_kernels.nc`: the ice-history kernels, a surface file on the
@@ -1529,8 +1632,9 @@ In the `output` directory:
   elements' nodes, one part per contiguous run of viscous elements, with the
   model's density alongside.
 
-Summary: `ice <ice>, <sea level>; wrote <n> measurement(s) of kernels to
-<output>`, the inputs as read as in `sea-level`'s summary.
+Summary: `ice <ice>, <sea level>; ice change <change>; wrote <n>
+measurement(s) of kernels to <output>`, the inputs as read as in
+`sea-level`'s summary.
 
 ### Examples
 
@@ -1540,8 +1644,9 @@ Summary: `ice <ice>, <sea level>; wrote <n> measurement(s) of kernels to
   "model": {"deck": "earth.deck"},
   "lmax": 32,
   "times": {"start_kyr_bp": 20.0, "nodes": 41},
-  "forcing": {"ice": {"file": "ice7g.nc"}},
-  "ocean": {"topography": {"file": "ice7g.nc", "at": "start"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "measurements": [
     {"type": "relative_sea_level_point", "name": "fremantle",
      "latitude": -32.05, "longitude": 115.74}
@@ -1556,8 +1661,9 @@ Summary: `ice <ice>, <sea level>; wrote <n> measurement(s) of kernels to
   "model": {"deck": "earth.deck"},
   "lmax": 64,
   "times": {"start_kyr_bp": 20.0, "end_kyr_bp": 0.0, "nodes": 41},
-  "forcing": {"ice": {"file": "ice7g.nc"}},
-  "ocean": {"topography": {"file": "ice7g.nc", "at": "start"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "rotation": "full",
   "moments": "hydrostatic",
   "record_stride": 6,
@@ -1591,8 +1697,9 @@ Summary: `ice <ice>, <sea level>; wrote <n> measurement(s) of kernels to
             "viscosity": {"file": "s40rts_viscosity.nc"}},
   "lmax": 64,
   "times": {"start_kyr_bp": 20.0, "end_kyr_bp": 0.0, "nodes": 81},
-  "forcing": {"ice": {"file": "ice7g.nc"}},
-  "ocean": {"topography": {"file": "ice7g.nc", "at": "start"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "solver": {"step_rtol": 1e-9, "step_max_iterations": 60},
   "record_stride": 9,
   "trajectory": {"directory": "/scratch/trajectory"},

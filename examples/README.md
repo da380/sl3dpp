@@ -78,7 +78,7 @@ uses it; `inputs.py` holds what they share.
 | `make_earth_deck.py` | `earth_custom.gia.deck`, `earth_custom.elastic.deck`: PREM without its ocean, an elastic lithosphere (100 km), Maxwell upper and lower mantles (5e20 and 5e21 Pa s), isotropic where they relax | `model.deck` |
 | `make_planet_deck.py` | `planet.gia.deck`, `planet.elastic.deck`: a three-layer toy Mars (fluid core, Maxwell mantle, elastic lid); prints its mass and surface gravity | `model.deck`; `response_tide_planet*.json` |
 | `make_lateral_model.py` | `<deck>_<field>_<kind>.nc`: a 3D viscosity or lateral moduli on a deck's own body, an analytic pattern, S40RTS or a Gaussian random field; from S40RTS the viscosity by sl3d's conversion chain (optionally renormalised to the deck's mean, with a lid), the moduli from the shear speed and a scaled P speed (`--vp-scaling`) | `model.viscosity.file`, `model.moduli.file` |
-| `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `forcing.ice`, `ocean.topography` |
+| `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice` and `ocean.topography` (the state), a `thickness` term of `forcing.ice_change` (the history) |
 | `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term of `response` |
 | `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term of `response` |
 | `make_tide_history.py` | `configs/response_tide_oscillating.json`: a `response` config of a sinusoidal degree-2 tide at a chosen period | `sl3d response` |
@@ -126,7 +126,7 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | `response_tide_oscillating` | `oscillating.png`: the potential and the response through the run, and the Love numbers' amplitudes and lags at its period and those of `response_tide_oscillating_short` and `_long` |
 | `response_tide_planet` | `body_tide.png`: the toy planet's tidal displacement and potential, with its h2 and k2 |
 | `response_tide_planet_relax` | `love_numbers.png`: the toy planet's h2 and k2 through time, beside the Earth's |
-| `sea_level_fingerprint_melt` (with `response_melt`) | `ocean.png`: one melt through `response` and through `sea-level`, the displacement each way, its difference (the ocean's load) and the sea-level change |
+| `sea_level_fingerprint_melt` (with `response_melt`) | `ocean.png`: one cap of ice laid on bare land through `response` and through `sea-level`, the displacement each way, its difference (the ocean's load) and the sea-level change |
 | `response_cap_weak` (with `response_cap_strong`) | `relaxation.png`: the lateral viscosity with the two caps, and the displacement at each cap's centre through time, 3D and radial model |
 | `response_load_field` (with `response_load_cap`, `response_load_coefficients`) | `agreement.png`: the forcing on the run's clock and the file's axis, the three runs' displacement, and their agreement |
 | `timestep_study` (the `timestep_*` configs) | `accuracy.png`: the error against the step of the sea level by both schemes and of the viscosity kernels by both adjoints, and the kernels at 1 kyr steps |

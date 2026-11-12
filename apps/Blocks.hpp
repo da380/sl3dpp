@@ -6,8 +6,9 @@
  * `sea-level`, `kernel1d`, `kernel`), each read by one reader here:
  * `problem` (static, or quasi-static through time), `model` (the deck,
  * its format, the lateral moduli and the 3D viscosity), `times` (the time
- * nodes of a run stepped through time), `ocean` (the sea level, the
- * shorelines and the initial sea level's calibration), `solver` (the
+ * nodes of a run stepped through time), `ocean` (the state, the sea level
+ * and the ice on the body at one instant, the shorelines and the initial
+ * sea level's calibration), `solver` (the
  * solves' tolerances, budget and transforms, and the time step),
  * `checkpoint` (a run's checkpoints) and `output` (the files written),
  * and the words of `rotation` and `moments`. The `forcing` blocks have
@@ -123,18 +124,12 @@ enum class WindowEnd { Start, End };
 /// The sea level of the sea level equation: a file input that holds the
 /// sea level itself (`ocean.sea_level`, used as it stands) or the
 /// topography (`ocean.topography`, the ICE-NG convention, converted with
-/// the run's own ice at the same instant by SeaLevelFromTopography).
+/// the state's own ice, `ocean.ice`, by SeaLevelFromTopography).
 struct SeaLevelSource {
   enum class Kind { SeaLevel, Topography };
   Kind kind = Kind::Topography;
-  /// The file, its variable (by default `sea_level` or `topography`) and,
-  /// in the static problem, its date (`date_kyr_bp`, kyr before present),
-  /// required of a file with a time axis.
+  /// The file and its variable (by default `sea_level` or `topography`).
   FileInput input;
-  /// The quasi-static problem: the end of the window the sea level is
-  /// read at (where its file has a time axis), the start's being the
-  /// initial sea level and the end's the target of the calibration.
-  WindowEnd at = WindowEnd::Start;
 
   /// The member's name, `sea_level` or `topography`.
   [[nodiscard]] std::string_view Member() const;
@@ -142,22 +137,36 @@ struct SeaLevelSource {
   [[nodiscard]] std::string_view Quantity() const;
 };
 
-/// The `ocean` block of a run with an ocean: the sea level and, in the
-/// quasi-static problem, the shorelines and the initial sea level's
-/// calibration.
+/// The `ocean` block of a run with an ocean: the state, what is on the
+/// body at one instant (the sea level and the ice, each a file input, and
+/// the land held), the instant itself and, in the quasi-static problem,
+/// the shorelines and the initial sea level's calibration. What happens
+/// to the ice is the forcing's (`forcing.ice_change`, Forcing.hpp).
 struct OceanBlock {
   SeaLevelSource seaLevel;
+  /// `ocean.ice`: the ice thickness on the body at the state's instant
+  /// (its variable by default `ice_thickness`).
+  FileInput ice;
   /// `ocean.land`, where given: a field that is one where the surface is
   /// held as land whatever the flotation and zero elsewhere (landlocked
   /// depressions), the same at every date. Absent, flotation alone.
   std::optional<FileInput> land;
+  /// The static problem: the state's date, kyr before present
+  /// (`ocean.date_kyr_bp`), at which every member's file with a time axis
+  /// is read; absent when none has one.
+  std::optional<double> date_kyr_bp;
+  /// The quasi-static problem: the end of the window the state belongs to
+  /// (`ocean.at`), the start's being the initial state and the end's the
+  /// state the run reaches, the target of the calibration.
+  WindowEnd at = WindowEnd::Start;
   /// The shorelines: frozen at the start's (the linear equation), or
   /// following flotation.
   Shorelines shorelines = Shorelines::Frozen;
-  /// With the sea level at the window's end, the initial sea level is
-  /// calibrated so that the run reaches it there, by the method and within
-  /// the iterations and tolerance given (InitialSeaLevel.hpp); with the
-  /// sea level at the start, it is the initial sea level itself.
+  /// With the state at the window's end, the initial sea level is
+  /// calibrated so that the run reaches the state's sea level there, by
+  /// the method and within the iterations and tolerance given
+  /// (InitialSeaLevel.hpp); with the state at the start, its sea level is
+  /// the initial sea level itself.
   bool calibrate = false;
   CalibrationMethod calibration_method = CalibrationMethod::FixedPoint;
   int calibration_iterations = 10;
@@ -165,14 +174,17 @@ struct OceanBlock {
 };
 
 /// Reads an `ocean` block of a run of `problem`, relative paths against
-/// `directory`. It holds exactly one of `sea_level` and `topography`, a
-/// file input (Files.hpp): in the static problem with its `date_kyr_bp`
-/// beside the file where the file has a time axis; in the quasi-static
-/// problem with `at` ("start" or "end", required) and no date. The
-/// quasi-static problem takes `shorelines` (a word, default "frozen") and
-/// `calibration` (an object of `method`, `iterations` and `rtol`, each
-/// optional), which the sea level's `"at": "end"` alone takes and turns
-/// on; the static problem refuses both.
+/// `directory`. It holds exactly one of `sea_level` and `topography` and,
+/// required, `ice`, each a file input (Files.hpp) of `file`, `format` and
+/// `variable` alone, and optionally `land`. The state's instant is the
+/// block's: in the static problem `date_kyr_bp` (whether it is required
+/// is the files' business, checked once they are read); in the
+/// quasi-static problem `at` ("start" or "end", required). The
+/// quasi-static problem also takes `shorelines` (a word, default
+/// "frozen") and `calibration` (an object of `method`, `iterations` and
+/// `rtol`, each optional), which `"at": "end"` alone takes and turns on;
+/// the static problem refuses both, and each problem refuses the other's
+/// instant. A date or an `at` on a member is refused, naming the block's.
 [[nodiscard]] OceanBlock ReadOceanBlock(const Json& block,
                                         const std::filesystem::path& directory,
                                         Problem problem);

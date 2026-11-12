@@ -84,9 +84,11 @@ def config(kind: str, steps: int) -> dict:
         "lmax": 16,
         "times": {"start_kyr_bp": START, "end_kyr_bp": END,
                   "nodes": steps + 1},
-        "forcing": {"ice": {"file": "../data/synthetic_earth.nc"}},
-        "ocean": {"topography": {"file": "../data/synthetic_earth.nc",
-                                 "at": "start"}},
+        "forcing": {"ice_change": [
+            {"thickness": {"file": "../data/synthetic_earth.nc"}}]},
+        "ocean": {"at": "start",
+                  "topography": {"file": "../data/synthetic_earth.nc"},
+                  "ice": {"file": "../data/synthetic_earth.nc"}},
         "rotation": "none",
         "solver": {"scheme": SCHEMES.get(kind, "exponential_trapezoid")},
     }

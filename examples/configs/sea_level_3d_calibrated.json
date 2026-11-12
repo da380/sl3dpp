@@ -5,10 +5,14 @@
                           "reference": "geometric_mean"}},
   "lmax": 16,
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
-  "forcing": {"ice": {"file": "../data/synthetic_earth.nc"}},
+  "forcing": {
+    "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
+  },
   "ocean": {
+    "at": "end",
     "shorelines": "migrating",
-    "topography": {"file": "../data/synthetic_earth.nc", "at": "end"},
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"},
     "calibration": {"method": "fixed_point", "iterations": 12}
   },
   "rotation": "full",

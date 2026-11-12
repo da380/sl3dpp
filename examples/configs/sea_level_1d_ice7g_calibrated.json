@@ -3,10 +3,12 @@
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
   "lmax": 64,
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
-  "forcing": {"ice": {"file": "../data/ice7g.nc"}},
+  "forcing": {"ice_change": [{"thickness": {"file": "../data/ice7g.nc"}}]},
   "ocean": {
+    "at": "end",
     "shorelines": "migrating",
-    "topography": {"file": "../data/ice7g.nc", "at": "end"},
+    "topography": {"file": "../data/ice7g.nc"},
+    "ice": {"file": "../data/ice7g.nc"},
     "land": {"file": "../data/ice7g.nc"},
     "calibration": {"method": "fixed_point", "iterations": 12}
   },

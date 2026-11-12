@@ -4,8 +4,8 @@
  * of measurements of a run through time. The forward run is `sea-level`'s,
  * read by the same block readers (Common.hpp): `kernel1d` on a radial
  * model, `kernel` on a laterally varying viscosity; then one reverse sweep
- * per measurement gives its sensitivity to the ice history and to the
- * viscosity.
+ * per measurement gives its sensitivity to the ice thickness at each node
+ * and to the viscosity.
  */
 #include <algorithm>
 #include <cctype>
@@ -418,7 +418,7 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
     if (const auto& forcing = top.At("forcing"); Has(forcing, name)) {
       Fail(forcing.At(name),
            "is a forcing beside the ice, which the kernel commands do not "
-           "take: their runs are under the ice history alone");
+           "take: their runs are under the ice change alone");
     }
   }
   out.record_stride = Integer(top, "record_stride", 1);
@@ -494,6 +494,7 @@ std::string RunKernelsWith(
          << std::format("# config {}\n", config.string())
          << std::format("# ice {}\n", world.iceRead)
          << std::format("# sea_level {}\n", world.seaLevelRead)
+         << std::format("# ice_change {}\n", DescribeIceChange(input.run, "; "))
          << "# name type value_si [decay: tau_kyr amplitude_m offset_m]\n";
   const auto& items = top.At("measurements").AsArray();
   for (auto k = std::size_t{0}; k < input.measurements.size(); ++k) {
@@ -517,9 +518,10 @@ std::string RunKernelsWith(
     }
     values << '\n';
   }
-  return std::format("ice {}, {}; wrote {} measurement(s) of kernels to {}",
-                     world.iceRead, world.seaLevelRead,
-                     input.measurements.size(), input.output.string());
+  return std::format(
+      "ice {}, {}; ice change {}; wrote {} measurement(s) of kernels to {}",
+      world.iceRead, world.seaLevelRead, DescribeIceChange(input.run, " + "),
+      input.measurements.size(), input.output.string());
 }
 
 }  // namespace

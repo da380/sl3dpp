@@ -165,7 +165,8 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
     if (start && Has(field, "time_origin_kyr")) {
       Fail(field.At("time_origin_kyr"),
            "is a time origin on a run's own clock; here a file with a time "
-           "axis is read by date, at each node's, as the ice history is");
+           "axis is read by date, at each node's, as the ice change's files "
+           "are");
     }
     Allow(field, {"file", "format", "variable", "date_kyr", "time_origin_kyr"});
     term.kind = LoadTerm::Kind::Field;
@@ -838,28 +839,90 @@ std::string Summary(const Forcing& forcing) {
 
 namespace {
 
-/// The static problem's ice change, beside the ice's file input.
-IceChange ReadIceChange(const Json& change) {
-  Allow(change,
-        {"file", "format", "variable", "date_kyr_bp", "type", "latitude",
-         "longitude", "width_deg", "fraction", "thickness_m"});
-  auto out = IceChange{};
-  out.kind = Choice<IceChange::Kind>(
-      change.At("type"), {{"cap_fraction", IceChange::Kind::CapFraction},
-                          {"cap_thickness", IceChange::Kind::CapThickness}});
-  out.site = ReadSite(change);
-  const auto width = Number(change, "width_deg");
-  if (!(width > 0.0)) Fail(change.At("width_deg"), "is not a positive angle");
-  out.width = width * std::numbers::pi / 180.0;
-  const auto fraction = out.kind == IceChange::Kind::CapFraction;
-  if (Has(change, fraction ? "thickness_m" : "fraction")) {
-    Fail(change, "gives the amount of the other kind of change");
+constexpr auto kIceChangeKinds = std::array<std::string_view, 4>{
+    "thickness", "change", "cap_thickness", "cap_fraction"};
+
+/// One term of an ice change; `timed`, a run through time's.
+IceChangeTerm ReadIceChangeTerm(const Json& item,
+                                const std::filesystem::path& directory,
+                                bool timed) {
+  if (!item.IsObject()) {
+    Fail(item,
+         "is not a term: a term of an ice change is an object holding one of "
+         "\"thickness\", \"change\", \"cap_thickness\" and \"cap_fraction\"");
   }
-  out.amount = Number(change, fraction ? "fraction" : "thickness_m");
-  return out;
+  Allow(item, std::span(kIceChangeKinds));
+  const auto kinds = std::ranges::count_if(
+      kIceChangeKinds,
+      [&item](std::string_view kind) { return Has(item, kind); });
+  if (kinds != 1) {
+    Fail(item,
+         std::format("{}: a term of an ice change is exactly one of "
+                     "\"thickness\", \"change\", \"cap_thickness\" and "
+                     "\"cap_fraction\"",
+                     kinds == 0 ? "names no term" : "names several terms"));
+  }
+  auto term = IceChangeTerm{};
+  if (Has(item, "thickness") || Has(item, "change")) {
+    const auto thickness = Has(item, "thickness");
+    term.kind = thickness ? IceChangeTerm::Kind::Thickness
+                          : IceChangeTerm::Kind::Change;
+    const auto& file = item.At(term.Member());
+    term.file = ReadFileInput(
+        file, directory, thickness ? "ice_thickness" : "ice_thickness_change");
+    if (timed) {
+      if (Has(file, "date_kyr_bp")) {
+        Fail(file.At("date_kyr_bp"),
+             "dates the file, as the static problem reads it; a run through "
+             "time reads it at each node's date");
+      }
+      Allow(file, {"file", "format", "variable"});
+      term.dated = true;
+    } else {
+      Allow(file, {"file", "format", "variable", "date_kyr_bp"});
+      term.file.date = ReadDate(file, "date_kyr_bp");
+      if (thickness && !term.file.date) {
+        Fail(file,
+             "has no `date_kyr_bp`: a thickness term's change is its file's "
+             "value at that date less its value at the state's date");
+      }
+    }
+    return term;
+  }
+  const auto fraction = Has(item, "cap_fraction");
+  term.kind = fraction ? IceChangeTerm::Kind::CapFraction
+                       : IceChangeTerm::Kind::CapThickness;
+  const auto& cap = item.At(term.Member());
+  if (timed) {
+    Fail(cap,
+         "is a cap of ice change, which the static problem alone takes: a "
+         "run through time takes `thickness` and `change` terms");
+  }
+  Allow(cap, {"latitude", "longitude", "width_deg",
+              fraction ? "fraction" : "thickness_m"});
+  term.site = ReadSite(cap);
+  const auto width = Number(cap, "width_deg");
+  if (!(width > 0.0)) Fail(cap.At("width_deg"), "is not a positive angle");
+  term.width = width * std::numbers::pi / 180.0;
+  term.amount = Number(cap, fraction ? "fraction" : "thickness_m");
+  return term;
 }
 
 }  // namespace
+
+std::string_view IceChangeTerm::Member() const {
+  switch (kind) {
+    case Kind::Thickness:
+      return "thickness";
+    case Kind::Change:
+      return "change";
+    case Kind::CapThickness:
+      return "cap_thickness";
+    case Kind::CapFraction:
+      break;
+  }
+  return "cap_fraction";
+}
 
 GeographicPoint ReadSite(const Json& object) {
   const auto latitude = Number(object, "latitude");
@@ -873,16 +936,28 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                                     const std::filesystem::path& directory,
                                     std::optional<double> start_kyr_bp) {
   const auto timed = start_kyr_bp.has_value();
+  if (!block.IsObject()) {
+    Fail(block,
+         "is not a block: `forcing` is an object of the ice change, "
+         "`ice_change`, and, in a run through time, `load` and `seismic`");
+  }
   for (const auto* name : {"state", "sea_level"}) {
     if (Has(block, name)) {
       Fail(block.At(name),
-           "is not a member of `forcing`, whose one member is the ice, "
-           "`ice`: the sea level is the `ocean` block's, `ocean.sea_level` "
-           "(a sea level, used as it stands) or `ocean.topography` "
-           "(converted with the run's own ice at the same instant)");
+           "is not a member of `forcing`, which holds what happens to the "
+           "state: the sea level is the state's, the `ocean` block's, "
+           "`ocean.sea_level` (a sea level, used as it stands) or "
+           "`ocean.topography` (converted with the state's ice, "
+           "`ocean.ice`)");
     }
   }
-  Allow(block, {"ice", "load", "seismic"});
+  if (Has(block, "ice")) {
+    Fail(block.At("ice"),
+         "is not a member of `forcing`: the ice on the body is the state's, "
+         "`ocean.ice`, and a change of it is a term of `forcing.ice_change` "
+         "(`thickness`, `change`, `cap_thickness` or `cap_fraction`)");
+  }
+  Allow(block, {"ice_change", "load", "seismic"});
   auto out = SeaLevelForcing{};
   for (const auto* name : {"load", "seismic"}) {
     if (!timed && Has(block, name)) {
@@ -934,35 +1009,67 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
       out.seismic.push_back(ReadSeismicTerm(item, start_kyr_bp));
     }
   }
-  const auto& ice = block.At("ice");
-  out.ice.file = ReadFileInput(ice, directory, "ice_thickness");
-  if (timed) {
-    for (const auto* name : {"type", "latitude", "longitude", "width_deg",
-                             "fraction", "thickness_m"}) {
-      if (Has(ice, name)) {
-        Fail(ice.At(name),
-             "describes an ice change, which the static problem takes; a "
-             "run through time takes the ice history alone");
-      }
+  if (Has(block, "ice_change")) {
+    for (const auto& item : block.At("ice_change").AsArray()) {
+      out.ice_change.push_back(ReadIceChangeTerm(item, directory, timed));
     }
-    if (Has(ice, "date_kyr_bp")) {
-      Fail(ice.At("date_kyr_bp"),
-           "dates the ice, as the static problem reads it; a run through "
-           "time takes the ice as a history over its window, read at every "
-           "node");
+  }
+  if (out.ice_change.empty() && (!timed || !out.BesideTheIce())) {
+    const auto what =
+        timed ? std::string_view{"nothing else forces the run (`load`, "
+                                 "`seismic`): a term is one of \"thickness\" "
+                                 "and \"change\""}
+              : std::string_view{"the static problem is the fingerprint of "
+                                 "an ice change: a term is one of "
+                                 "\"thickness\", \"change\", \"cap_thickness\" "
+                                 "and \"cap_fraction\""};
+    if (Has(block, "ice_change")) {
+      Fail(block.At("ice_change"), std::format("holds no term, and {}", what));
     }
-    Allow(ice, {"file", "format", "variable"});
-  } else {
-    if (!Has(ice, "type")) {
-      Fail(ice,
-           "gives no ice change, which the static problem applies to the ice "
-           "at its date: `type`, `latitude`, `longitude`, `width_deg` and "
-           "`fraction` or `thickness_m`");
-    }
-    out.ice.change = ReadIceChange(ice);
-    out.ice.file.date = ReadDate(ice, "date_kyr_bp");
+    Fail(block,
+         std::format("gives no ice change, `ice_change`, a list of terms, "
+                     "and {}",
+                     what));
   }
   return out;
+}
+
+std::string Describe(const IceChangeTerm& term) {
+  const auto degrees = 180.0 / std::numbers::pi;
+  switch (term.kind) {
+    case IceChangeTerm::Kind::Thickness:
+      return term.dated
+                 ? std::format("thickness {}:{}, from the state's instant to "
+                               "each node's date",
+                               term.file.file.string(), term.file.variable)
+                 : std::format("thickness {}:{}, from the state's date to "
+                               "{:g} kyr BP",
+                               term.file.file.string(), term.file.variable,
+                               term.file.date.value_or(0.0));
+    case IceChangeTerm::Kind::Change: {
+      auto out = std::format("change {}:{}", term.file.file.string(),
+                             term.file.variable);
+      if (term.dated) {
+        out += ", read by date";
+      } else if (term.file.date) {
+        out += std::format(", at {:g} kyr BP", *term.file.date);
+      }
+      return out;
+    }
+    case IceChangeTerm::Kind::CapThickness:
+      return std::format(
+          "cap at latitude {:g}, longitude {:g}, width {:g} deg, {:g} m of "
+          "ice",
+          term.site.latitude, term.site.longitude, term.width * degrees,
+          term.amount);
+    case IceChangeTerm::Kind::CapFraction:
+      break;
+  }
+  return std::format(
+      "cap at latitude {:g}, longitude {:g}, width {:g} deg, fraction {:g} "
+      "of the state's ice",
+      term.site.latitude, term.site.longitude, term.width * degrees,
+      term.amount);
 }
 
 std::string Describe(const SurfaceLoadTerm& term) {

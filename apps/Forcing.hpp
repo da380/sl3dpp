@@ -8,10 +8,11 @@
  * reader, and its builder onto a run's grid; and, in a run through time,
  * seismic sources, point moment tensors and planar faults inside the
  * body (SeismicTerm). `sea-level`'s (and the kernel commands'): the ice
- * and, in a run through time, surface loads that each state their place
- * in the water budget and whether they move the solid surface, and
- * seismic sources (SeaLevelForcing, at the end of this file); their sea
- * level is the `ocean` block's (Blocks.hpp).
+ * change, a sum of terms, and, in a run through time, surface loads that
+ * each state their place in the water budget and whether they move the
+ * solid surface, and seismic sources (SeaLevelForcing, at the end of this
+ * file); the state they change, the sea level and the ice on the body at
+ * one instant, is the `ocean` block's (Blocks.hpp).
  *
  * A load term is one of
  *
@@ -45,6 +46,7 @@
 #include <filesystem>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "Files.hpp"
@@ -309,24 +311,42 @@ class TimedForcing {
 
 // -- the forcing of a run with an ocean ---------------------------------------
 
-/// The elastic fingerprint's ice change: a Gaussian cap, of a fraction of
-/// the ice thickness at the date or of a thickness.
-struct IceChange {
-  enum class Kind { CapFraction, CapThickness } kind = Kind::CapFraction;
-  GeographicPoint site;
-  double width = 0.0;   ///< the Gaussian cap's width, radians
-  double amount = 0.0;  ///< the fraction, or the thickness in metres
-};
-
-/// The ice: a file input of the ice thickness (its variable by default
-/// `ice_thickness`). In the quasi-static problem it is an ice history,
-/// the thickness through the window (a static file is a history that does
-/// not change); in the static problem it is read at its date
-/// (`date_kyr_bp`, kyr before present, required of a file with a time
-/// axis) and carries the fingerprint's change.
-struct IceForcing {
+/// One term of an ice change (`forcing.ice_change`): a change of the ice
+/// thickness, metres, the change being the sum of the terms. The ice at
+/// a time is the state's (`ocean.ice`) plus the change there.
+///
+/// - `thickness`: a file of ice THICKNESS (its variable by default
+///   `ice_thickness`), whose change is its value less its own value at
+///   the state's instant. The static problem reads it at its date
+///   (`date_kyr_bp`, required), a run through time at each node's date;
+///   its file has a time axis, a change of a file without one being
+///   identically zero.
+/// - `change`: a file holding a thickness CHANGE (its variable by default
+///   `ice_thickness_change`), taken as it stands. The static problem reads
+///   a file with a time axis at its date (`date_kyr_bp`) and one without
+///   as it is; a run through time reads one with a time axis at each
+///   node's date and holds one without through the run.
+/// - `cap_thickness`, `cap_fraction` (the static problem alone): a
+///   Gaussian cap, weighted exp(-d^2 / (2 w^2)) in great-circle distance d
+///   from its centre with no cut-off, of a thickness at its centre or of a
+///   fraction of the state's ice.
+struct IceChangeTerm {
+  enum class Kind { Thickness, Change, CapThickness, CapFraction };
+  Kind kind = Kind::Thickness;
+  /// `thickness` and `change`: the file input and, in the static problem,
+  /// the date it is read at, kyr before present.
   FileInput file;
-  std::optional<IceChange> change;  ///< the static problem's
+  /// Whether the file is read at each node's date (a run through time).
+  bool dated = false;
+  GeographicPoint site{};  ///< a cap's centre
+  double width = 0.0;      ///< a cap's Gaussian width, radians
+  /// A cap's amount: its thickness at the centre in metres, or the
+  /// fraction of the state's ice.
+  double amount = 0.0;
+
+  /// The term's member: `thickness`, `change`, `cap_thickness` or
+  /// `cap_fraction`.
+  [[nodiscard]] std::string_view Member() const;
 };
 
 /// A surface load of a run with an ocean: a load term (a surface mass
@@ -344,15 +364,15 @@ struct SurfaceLoadTerm {
   double density = 0.0;  ///< kg m^-3, of a load that moves the surface
 };
 
-/// The `forcing` block of `sea-level` and the kernel commands: the ice, a
-/// direct load. The ice the run starts from is the history's own, so the
-/// ice and the sea level cannot disagree; the load is the history's change
-/// from its start. The sea level is the `ocean` block's (Blocks.hpp). A
-/// run through time takes surface loads and seismic sources beside the
-/// ice, changes from the run's start on the run's clock (kyr from the
-/// window's start): a term present at the first node acts there.
+/// The `forcing` block of `sea-level` and the kernel commands: what
+/// happens to the state (the `ocean` block's, Blocks.hpp). The ice change
+/// is the sum of its terms; the ice at a time is the state's plus the
+/// change there, a direct load where it is grounded. A run through time
+/// takes surface loads and seismic sources beside the ice, changes from
+/// the run's start on the run's clock (kyr from the window's start): a
+/// term present at the first node acts there.
 struct SeaLevelForcing {
-  IceForcing ice;
+  std::vector<IceChangeTerm> ice_change;
   std::vector<SurfaceLoadTerm> load;
   std::vector<SeismicTerm> seismic;
 
@@ -363,14 +383,19 @@ struct SeaLevelForcing {
 };
 
 /// Reads a `forcing` block of a run with an ocean, relative paths against
-/// `directory`: `ice`, required, a file input. In the quasi-static problem
-/// (`timed`) it is the ice history alone; in the static problem it takes
-/// `date_kyr_bp` beside its file and the change, `type` ("cap_fraction"
-/// or "cap_thickness"), `latitude`, `longitude`, `width_deg` and the
-/// amount, `fraction` or `thickness_m`. The members of the other problem
-/// are refused, naming what this one takes, and so are `sea_level` and
-/// `state`, naming the `ocean` block's members. The quasi-static problem
-/// also takes `load`, a list of load terms as `response`'s (ReadForcing),
+/// `directory`. `ice_change` is a list of terms (IceChangeTerm), each an
+/// object holding exactly one of `thickness` and `change` (file inputs,
+/// in the static problem with `date_kyr_bp`, required of `thickness`) and,
+/// in the static problem alone, `cap_thickness` (`latitude`, `longitude`,
+/// `width_deg`, `thickness_m`) and `cap_fraction` (`latitude`,
+/// `longitude`, `width_deg`, `fraction`). The static problem requires at
+/// least one term; a run through time requires one unless it takes a
+/// surface load or a seismic source, without which nothing would force
+/// it. The members of the other problem are refused, naming what this one
+/// takes, and so are `ice`, naming `ocean.ice` and `ice_change`, and
+/// `sea_level` and `state`, naming the `ocean` block's members. The
+/// quasi-static problem also takes `load`, a list of load terms as
+/// `response`'s (ReadForcing),
 /// each with `water_budget` and `moves_solid_surface` (both required,
 /// true or false) and, where it moves the solid surface, `density_kg_m3`
 /// (positive; refused otherwise), and `seismic`, a list of sources as
@@ -378,13 +403,17 @@ struct SeaLevelForcing {
 /// kyr before present, as the window's are: a history is
 /// `history_kyr_bp`, pairs `[date_kyr_bp, factor]` from the oldest (the
 /// dates strictly decreasing), an onset `onset_kyr_bp`, and a `field`
-/// file with a time axis is read at each node's date, as the ice history
-/// is (`time_origin_kyr` is refused); `response`'s names are refused,
-/// naming these. `start_kyr_bp` is the window's start, which the dates
-/// are turned to the run's clock by; absent in the static problem.
+/// file with a time axis is read at each node's date, as the ice change's
+/// files are (`time_origin_kyr` is refused); `response`'s names are
+/// refused, naming these. `start_kyr_bp` is the window's start, which the
+/// dates are turned to the run's clock by; absent in the static problem.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
     const Json& block, const std::filesystem::path& directory,
     std::optional<double> start_kyr_bp);
+
+/// One line describing a term of an ice change, for provenance: its kind,
+/// its file and variable and when they are read, or its cap.
+[[nodiscard]] std::string Describe(const IceChangeTerm& term);
 
 /// One line describing a surface load, for provenance: its term, its
 /// place in the water budget and, of a layer, its density.

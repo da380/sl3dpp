@@ -198,31 +198,41 @@ OceanBlock ReadOceanBlock(const Json& block,
                           Problem problem) {
   if (!block.IsObject()) {
     Fail(block,
-         "is not a block: `ocean` is an object holding the sea level, "
-         "`sea_level` or `topography`");
+         "is not a block: `ocean` is an object holding the state, the sea "
+         "level (`sea_level` or `topography`) and the ice (`ice`)");
   }
   if (Has(block, "calibrate_initial_sea_level")) {
     Fail(block.At("calibrate_initial_sea_level"),
          "is not a member: the calibration is `ocean.calibration` (`method`, "
-         "`iterations`, `rtol`), which the sea level's \"at\": \"end\" turns "
-         "on");
+         "`iterations`, `rtol`), which the state's \"at\": \"end\" turns on");
   }
   const auto timed = problem == Problem::QuasiStatic;
   if (timed) {
-    Allow(block,
-          {"shorelines", "sea_level", "topography", "land", "calibration"});
+    if (Has(block, "date_kyr_bp")) {
+      Fail(block.At("date_kyr_bp"),
+           "dates the state, as the static problem reads it; the "
+           "quasi-static problem puts the state at an end of its window, "
+           "`at` (\"start\" or \"end\")");
+    }
+    Allow(block, {"at", "shorelines", "sea_level", "topography", "ice", "land",
+                  "calibration"});
   } else {
+    if (Has(block, "at")) {
+      Fail(block.At("at"),
+           "is an end of a run's window, which the static problem does not "
+           "have: it reads the state at its date, `date_kyr_bp`");
+    }
     for (const auto* name : {"shorelines", "calibration"}) {
       if (Has(block, name)) {
         Fail(block.At(name),
              std::format("belongs to a run through time, which {}: the "
                          "static problem solves the linear equation on its "
-                         "sea level's own shorelines, with no initial sea "
+                         "state's own shorelines, with no initial sea "
                          "level to calibrate",
                          kNeedsQuasiStatic));
       }
     }
-    Allow(block, {"sea_level", "topography", "land"});
+    Allow(block, {"date_kyr_bp", "sea_level", "topography", "ice", "land"});
   }
   const auto given = Has(block, "sea_level");
   if (given && Has(block, "topography")) {
@@ -233,38 +243,55 @@ OceanBlock ReadOceanBlock(const Json& block,
   if (!given && !Has(block, "topography")) {
     Fail(block,
          "gives no sea level: `sea_level` (a sea level, used as it stands) or "
-         "`topography` (converted with the run's own ice at the same "
-         "instant)");
+         "`topography` (converted with the state's ice, `ice`)");
+  }
+  if (!Has(block, "ice")) {
+    Fail(block,
+         "gives no ice, `ice`: the state is the sea level and the ice on the "
+         "body at one instant, the ice a file input of its thickness (a "
+         "change of it is a term of `forcing.ice_change`)");
   }
   auto out = OceanBlock{};
   auto& source = out.seaLevel;
   source.kind =
       given ? SeaLevelSource::Kind::SeaLevel : SeaLevelSource::Kind::Topography;
-  const auto& input = block.At(source.Member());
-  source.input = ReadFileInput(input, directory, source.Member());
-  if (timed) {
+  // the state's members are read at the block's instant, not their own
+  for (const auto& name : {source.Member(), std::string_view{"ice"}}) {
+    const auto& input = block.At(name);
+    if (!input.IsObject()) continue;  // ReadFileInput says what it is
     if (Has(input, "date_kyr_bp")) {
       Fail(input.At("date_kyr_bp"),
-           "dates the sea level, as the static problem reads it; the "
-           "quasi-static problem reads it at an end of its window, `at`");
+           timed ? "is not a member: the state's date is the block's, in the "
+                   "quasi-static problem an end of the window, `ocean.at`"
+                 : "is not a member: the state's date is the block's, "
+                   "`ocean.date_kyr_bp`");
     }
-    Allow(input, {"file", "format", "variable", "at"});
-    if (!Has(input, "at")) {
-      Fail(input,
-           "has no `at`: the end of the window the sea level belongs to, "
-           "\"start\" (the initial sea level) or \"end\" (the sea level the "
-           "run reaches, against which the initial sea level is calibrated)");
-    }
-    source.at = Choice<WindowEnd>(
-        input.At("at"), {{"start", WindowEnd::Start}, {"end", WindowEnd::End}});
-  } else {
     if (Has(input, "at")) {
       Fail(input.At("at"),
-           "is an end of a run's window, which the static problem does not "
-           "have: it reads a file with a time axis at its `date_kyr_bp`");
+           timed ? "is not a member: the end of the window the state belongs "
+                   "to is the block's, `ocean.at`"
+                 : "is not a member: the state's instant is the block's, in "
+                   "the static problem its date, `ocean.date_kyr_bp`");
     }
-    Allow(input, {"file", "format", "variable", "date_kyr_bp"});
-    source.input.date = ReadDate(input, "date_kyr_bp");
+  }
+  const auto& input = block.At(source.Member());
+  source.input = ReadFileInput(input, directory, source.Member());
+  Allow(input, {"file", "format", "variable"});
+  const auto& ice = block.At("ice");
+  out.ice = ReadFileInput(ice, directory, "ice_thickness");
+  Allow(ice, {"file", "format", "variable"});
+  if (timed) {
+    if (!Has(block, "at")) {
+      Fail(block,
+           "has no `at`: the end of the window the state belongs to, "
+           "\"start\" (the initial state) or \"end\" (the state the run "
+           "reaches, against whose sea level the initial sea level is "
+           "calibrated)");
+    }
+    out.at = Choice<WindowEnd>(
+        block.At("at"), {{"start", WindowEnd::Start}, {"end", WindowEnd::End}});
+  } else {
+    out.date_kyr_bp = ReadDate(block, "date_kyr_bp");
   }
   if (Has(block, "land")) {
     const auto& land = block.At("land");
@@ -276,14 +303,14 @@ OceanBlock ReadOceanBlock(const Json& block,
         block.At("shorelines"),
         {{"frozen", Shorelines::Frozen}, {"migrating", Shorelines::Migrating}});
   }
-  out.calibrate = timed && source.at == WindowEnd::End;
+  out.calibrate = timed && out.at == WindowEnd::End;
   if (Has(block, "calibration")) {
     const auto& calibration = block.At("calibration");
     if (!out.calibrate) {
       Fail(calibration,
-           "calibrates the initial sea level against the sea level at the "
-           "window's end, which the sea level's \"at\": \"end\" gives; with "
-           "\"at\": \"start\" the sea level is the initial one");
+           "calibrates the initial sea level against the state's sea level "
+           "at the window's end, which \"at\": \"end\" gives; with \"at\": "
+           "\"start\" the state's sea level is the initial one");
     }
     Allow(calibration, {"method", "iterations", "rtol"});
     if (Has(calibration, "method")) {

@@ -109,10 +109,11 @@ def grid_from_latlon(lat_deg, lon_deg):
 
 def write_ice_history(path, grid, dates_kyr_bp, ice_thickness, topography,
                       *, title: str):
-    """An ice history sl3d reads as `forcing.ice` (and, holding the
-    topography, as `ocean.topography`): node fields in metres, linear
-    in time, on a time axis in kiloyears relative to the present (negative
-    in the past) as pyslfp's export_ice_history writes. The arrays are
+    """An ice history sl3d reads as a `thickness` term of
+    `forcing.ice_change` (and, holding the topography, as the state's
+    `ocean.ice` and `ocean.topography` at one date): node fields in metres,
+    linear in time, on a time axis in kiloyears relative to the present
+    (negative in the past) as pyslfp's export_ice_history writes. The arrays are
     (ntime, nlat, nlon) on the grid, the dates in kyr BP in any order, at
     least two of them."""
     dates = np.asarray(dates_kyr_bp, float)
@@ -134,7 +135,7 @@ def write_ice_history(path, grid, dates_kyr_bp, ice_thickness, topography,
 
 
 def write_state(path, grid, ice_thickness, topography, *, title: str):
-    """A present-day state sl3d reads as `forcing.ice` and
+    """A present-day state sl3d reads as `ocean.ice` and
     `ocean.topography`: static `ice_thickness` and `topography`, metres,
     (nlat, nlon) on the grid."""
     fields = {
