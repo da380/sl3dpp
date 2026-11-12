@@ -18,6 +18,7 @@
 #include <cmath>
 #include <complex>
 #include <cstddef>
+#include <cstdint>
 #include <filesystem>
 #include <format>
 #include <fstream>
@@ -277,8 +278,9 @@ TEST_F(AppsTest, ResolvesPathsAgainstTheConfig) {
 TEST_F(AppsTest, TheExampleConfigsAreRead) {
   // Every config in examples/configs is read by its command's reader
   // without a fault: a `model` that is a path is love-numbers', a config
-  // with measurements a kernel command's, one with an `ocean` block
-  // sea-level's, and the rest response's.
+  // with measurements a kernel command's, one with an `ocean` block or
+  // named `sea_level_*` sea-level's (a run without an ocean has no such
+  // block), and the rest response's.
   const auto configs =
       fs::path{SL3DPP_TEST_DATA_DIR}.parent_path().parent_path() / "examples" /
       "configs";
@@ -292,7 +294,8 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
         static_cast<void>(app::ReadLoveNumbersInput(path));
       } else if (app::Has(top, "measurements")) {
         static_cast<void>(app::ReadKernelInput(path));
-      } else if (app::Has(top, "ocean")) {
+      } else if (app::Has(top, "ocean") ||
+                 path.filename().string().starts_with("sea_level")) {
         static_cast<void>(app::ReadSeaLevelInput(path));
       } else {
         static_cast<void>(app::ReadResponseInput(path));
@@ -302,7 +305,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 49);
+  EXPECT_EQ(read, 50);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -2741,7 +2744,8 @@ TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
   // outside it that is a layer on the solid surface, and a point source,
   // all present from the first node. Under frozen and under migrating
   // shorelines the command is the library's evolution run here under the
-  // same forcing; the output says what forced it; and the terms that do
+  // same forcing, the tangential and toroidal potentials at every node
+  // included; the output says what forced it; and the terms that do
   // not state their properties, a calibrated start, checkpoints under
   // sources and the kernel commands are refused. Without an ice change the
   // loads alone force the run.
@@ -2895,6 +2899,30 @@ TEST_F(AppsTest, SeaLevelTakesLoadsAndSeismicSourcesBesideTheIce) {
       }
       EXPECT_LT(Departure(file.variables.at(variable).values, want), 1e-9)
           << variable << ", " << name;
+    }
+    // the potentials of the tangential displacement at every node, the
+    // toroidal one in the frame of no net rotation of the surface
+    {
+      auto tangential = std::vector<double>{};
+      auto toroidal = std::vector<double>{};
+      for (const auto& snapshot : snapshots) {
+        ASSERT_FALSE(snapshot.toroidalPotential.empty());
+        for (const auto v : snapshot.tangentialPotential) {
+          tangential.push_back(v * length);
+        }
+        for (const auto v :
+             WithoutNetRotation(grid, snapshot.toroidalPotential)) {
+          toroidal.push_back(v * length);
+        }
+      }
+      EXPECT_LT(Departure(file.variables.at("tangential_potential").values,
+                          tangential),
+                1e-9)
+          << name;
+      EXPECT_LT(
+          Departure(file.variables.at("toroidal_potential").values, toroidal),
+          1e-9)
+          << name;
     }
     // the forcing beside the ice matters to the run
     static_cast<void>(app::RunSeaLevel(
@@ -3770,11 +3798,14 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
   ASSERT_TRUE(rebuilt.time);
   EXPECT_EQ(*rebuilt.time, *reference.time);
-  for (const auto name : {"relative_sea_level_change", "displacement", "potential"}) {
+  for (const auto name : {"relative_sea_level_change", "displacement",
+                          "tangential_potential", "potential"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
   }
+  // a radial run under the ice alone has no toroidal displacement
+  EXPECT_FALSE(reference.variables.contains("toroidal_potential"));
   EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"), reference.meta.at("omega_z_rad_s"));
 
   // the checkpoints belong to the run, not to the config's text: the same
@@ -3841,6 +3872,40 @@ TEST_F(AppsTest, SeaLevel1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
               "output": {"surface": "out/again.nc"}})");
   summary = app::RunSeaLevel(again);
   EXPECT_NE(summary.find("resumed"), std::string::npos) << summary;
+
+  // a checkpoint of another format (its magic's version another) is
+  // refused, not read; starting over replaces it
+  fs::create_directories(dir_ / "older");
+  {
+    auto out = std::ofstream(dir_ / "older" / "node_000002.ckpt",
+                             std::ios::binary);
+    const auto magic = std::uint64_t{0x534c3344434b5031};  // "SL3DCKP1"
+    out.write(reinterpret_cast<const char*>(&magic), sizeof(magic));
+  }
+  const auto older = Write("older.json", "{" + body + R"(,
+              "checkpoint": {"directory": "older", "every": 2},
+              "output": {"surface": "out/older.nc"}})");
+  EXPECT_THROW(
+      {
+        try {
+          static_cast<void>(app::RunSeaLevel(older));
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(std::string{error.what()}.find(
+                        "is a checkpoint of another format"),
+                    std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+  const auto fresh = Write("fresh.json", "{" + body + R"(, "restart": false,
+              "checkpoint": {"directory": "older", "every": 2},
+              "output": {"surface": "out/fresh.nc"}})");
+  summary = app::RunSeaLevel(fresh);
+  EXPECT_NE(summary.find("replacing 1 earlier checkpoint(s)"),
+            std::string::npos)
+      << summary;
+  EXPECT_TRUE(fs::exists(dir_ / "out" / "fresh.nc"));
 }
 
 TEST_F(AppsTest, SeaLevelCalibratesTheInitialSeaLevel) {
@@ -4105,10 +4170,23 @@ TEST_F(AppsTest, SeaLevel3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
   }
   EXPECT_GE(attempts, 1);
   const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
-  for (const auto name : {"relative_sea_level_change", "displacement", "potential"}) {
+  for (const auto name :
+       {"relative_sea_level_change", "displacement", "tangential_potential",
+        "toroidal_potential", "potential"}) {
     EXPECT_EQ(rebuilt.variables.at(name).values,
               reference.variables.at(name).values)
         << name;
+  }
+  // a 3-D run's toroidal displacement: none at the radial start, some
+  // after it
+  {
+    const auto& toroidal = reference.variables.at("toroidal_potential").values;
+    const auto size = toroidal.size() / reference.time->size();
+    EXPECT_TRUE(std::all_of(toroidal.begin(),
+                            toroidal.begin() + static_cast<std::ptrdiff_t>(size),
+                            [](double v) { return v == 0.0; }));
+    EXPECT_TRUE(std::any_of(toroidal.begin() + static_cast<std::ptrdiff_t>(size),
+                            toroidal.end(), [](double v) { return v != 0.0; }));
   }
   EXPECT_EQ(rebuilt.meta.at("omega_z_rad_s"),
             reference.meta.at("omega_z_rad_s"));
@@ -4587,6 +4665,618 @@ TEST_F(AppsTest, SeaLevelFingerprintStepSolversAgree) {
   RecordProperty("solver_departure", std::format("{:.3e}", worst));
 }
 
+/// A cap and a disk as load terms, their properties left to the run.
+constexpr auto kCapTerm = R"({"cap": {"latitude": 60, "longitude": -85,
+    "width_deg": 20, "amplitude_kg_m2": 1.0e6})";
+constexpr auto kDiskTerm = R"({"disk": {"latitude": -20, "longitude": 100,
+    "radius_deg": 25, "amplitude_kg_m2": 4600})";
+
+TEST_F(AppsTest, SeaLevelWithoutAnOceanIsResponsesStaticProblem) {
+  // Without an `ocean` block the body has no ocean: the static problem
+  // under a cap and a disk, their properties left at their defaults (no
+  // water budget, no layer), is `response`'s elastic response to the same
+  // load, field by field, to rounding (about 2e-15 here: the same
+  // unrelaxed solves by two routes), with no rotational feedback, which
+  // `response` has none of. The relative sea level change is then
+  // -(u + phi / g); the water budget changes nothing, and a load laid on
+  // the solid surface lowers the relative sea level change by the layer's
+  // thickness, the body's response the same. The file holds the loads
+  // applied and no field or metadata of a state, its metadata and the
+  // summary saying there is no ocean.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  const auto response = Respond(
+      "response", std::format(R"({{"load": [{}}}, {}}}]}})", kCapTerm,
+                              kDiskTerm));
+  const auto config = [&](const std::string& name, const std::string& disk) {
+    return Write(name + ".json", std::format(R"({{{}, "problem": "static",
+      "forcing": {{"load": [{}}}, {}]}}, "rotation": "none",
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, kCapTerm, disk, name));
+  };
+  const auto summary = app::RunSeaLevel(config("dry", std::string{kDiskTerm} + "}"));
+  EXPECT_EQ(summary,
+            std::format("1-D, elastic, no ocean, rotation none; load (2 "
+                        "terms); wrote {}",
+                        (dir_ / "out" / "dry.nc").string()));
+  static_cast<void>(app::RunSeaLevel(config(
+      "budget", std::string{kDiskTerm} + R"(, "water_budget": true})")));
+  static_cast<void>(app::RunSeaLevel(config(
+      "layered", std::string{kDiskTerm} +
+                     R"(, "moves_solid_surface": true, "density_kg_m3": 2300})")));
+  const auto read = [&](const std::string& name) {
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto dry = read("dry");
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure = Departure(dry.variables.at(name).values,
+                                     response.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+  }
+  RecordProperty("response_departure", std::format("{:.3e}", worst));
+
+  // the relative sea level change, -(u + phi / g)
+  const auto ball = ElasticBall::Make(dir_ / "ball.deck");
+  const auto& scales = ball.solver->SolverScales();
+  const auto g = ball.solver->SurfaceGravity() *
+                 scales.Factor(Dimensions{.length = 1, .time = -2});
+  const auto& u = dry.variables.at("displacement").values;
+  const auto& phi = dry.variables.at("potential").values;
+  auto equipotential = std::vector<double>(u.size());
+  for (auto i = std::size_t{0}; i < u.size(); ++i) {
+    equipotential[i] = -(u[i] + phi[i] / g);
+  }
+  EXPECT_LT(Departure(dry.variables.at("relative_sea_level_change").values,
+                      equipotential),
+            1e-12);
+
+  // the loads applied, the response's band-limited; nothing of a state
+  const auto& grid = ball.solver->Grid();
+  EXPECT_LT(Departure(dry.variables.at("load_outside_water_budget").values,
+                      grid.Synthesise(grid.Expand(
+                          response.variables.at("load").values))),
+            1e-12);
+  for (const auto* name : {"load_in_water_budget", "solid_surface_change",
+                           "ice_change", "ocean_function",
+                           "ocean_function_final", "toroidal_potential"}) {
+    EXPECT_FALSE(dry.variables.contains(name)) << name;
+  }
+  EXPECT_EQ(std::get<std::string>(dry.meta.at("ocean")), "none");
+  EXPECT_EQ(std::get<std::string>(dry.meta.at("rotation")), "none");
+  for (const auto* name : {"ice", "sea_level", "shorelines", "ice_change"}) {
+    EXPECT_FALSE(dry.meta.contains(name)) << name;
+  }
+  EXPECT_EQ(std::get<std::string>(dry.meta.at("load")),
+            "cap at latitude 60, longitude -85, width 20 deg, 1e+06 kg m^-2, "
+            "outside the water budget; disk at latitude -20, longitude 100, "
+            "radius 25 deg, 4600 kg m^-2, outside the water budget");
+
+  // the water budget has no ocean to change
+  const auto budget = read("budget");
+  for (const auto* name : {"relative_sea_level_change", "displacement",
+                           "tangential_potential", "potential"}) {
+    EXPECT_LT(Departure(budget.variables.at(name).values,
+                        dry.variables.at(name).values),
+              1e-14)
+        << name;
+  }
+  EXPECT_TRUE(budget.variables.contains("load_in_water_budget"));
+
+  // a layer: its thickness off the relative sea level change, and nothing
+  // more
+  const auto layered = read("layered");
+  const auto& layer = layered.variables.at("solid_surface_change").values;
+  auto lowered = dry.variables.at("relative_sea_level_change").values;
+  for (auto i = std::size_t{0}; i < lowered.size(); ++i) lowered[i] -= layer[i];
+  EXPECT_LT(Departure(layered.variables.at("relative_sea_level_change").values,
+                      lowered),
+            1e-12);
+  EXPECT_GT(*std::ranges::max_element(layer), 1.0);
+  for (const auto* name :
+       {"displacement", "tangential_potential", "potential"}) {
+    EXPECT_LT(Departure(layered.variables.at(name).values,
+                        dry.variables.at(name).values),
+              1e-14)
+        << name;
+  }
+}
+
+TEST_F(AppsTest, SeaLevelWithoutAnOceanIsResponsesRunThroughTime) {
+  // The quasi-static problem without an ocean: a cap with an amplitude
+  // history, a tide coefficient with its own and a point source from a
+  // date on, over a window from 2 kyr BP to the present in half-kyr
+  // steps, is `response`'s viscoelastic run under the same forcing on its
+  // own clock (0 to 2 kyr, the histories' and the onset's dates turned to
+  // times), node by node, to rounding (about 1e-14 here), the tangential
+  // and toroidal potentials included. Without the source the run is
+  // checkpointed, a run resumed from its checkpoints is the uninterrupted
+  // one to the bit, and the same run with an ocean is refused them.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  constexpr auto kPointAt = R"({"point": {"latitude": 30, "longitude": 40,
+      "depth_km": 300, "moment_tensor_nm": {"rr": 9e20, "tt": -2e20,
+      "pp": -7e20, "rt": 3e20, "rp": -7e20, "tp": 6e20}}, )";
+  constexpr auto kTideTerm = R"({"degree": 2, "order": 1,
+      "amplitude_m2_s2": 1.0, "imaginary_m2_s2": 0.5, )";
+  static_cast<void>(Run(
+      "response", std::format(R"({}, "times": {{"end_kyr": 2, "nodes": 5}},
+      "forcing": {{"load": [{}, "history_kyr": [[0, 0.5], [1.5, 1.5]]}}],
+                  "tide": [{}"history_kyr": [[0, 1], [2, -1]]}}],
+                  "seismic": [{}"onset_kyr": 0.5}}]}})",
+                              kBall, kCapTerm, kTideTerm, kPointAt)));
+  const auto config = [&](const std::string& name, const std::string& rest) {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5}},
+      {}, "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, rest, name));
+  };
+  const auto summary = app::RunSeaLevel(config(
+      "dry", std::format(R"("forcing": {{
+      "load": [{}, "history_kyr_bp": [[2, 0.5], [0.5, 1.5]]}}],
+      "tide": [{}"history_kyr_bp": [[2, 1], [0, -1]]}}],
+      "seismic": [{}"onset_kyr_bp": 1.5}}]}})",
+                         kCapTerm, kTideTerm, kPointAt)));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 5 nodes 2 to 0 kyr BP, no ocean, rotation none; "
+      "load (1 term) + tide (1 coefficient) + seismic (1 source); wrote "))
+      << summary;
+  const auto dry = pm::ReadSurfaceFile(dir_ / "out" / "dry.nc");
+  const auto response = Output("response");
+  ASSERT_TRUE(dry.time);
+  ASSERT_EQ(dry.time->size(), 5u);
+  auto worst = 0.0;
+  for (const auto* name : {"displacement", "tangential_potential",
+                           "toroidal_potential", "potential"}) {
+    const auto departure = Departure(dry.variables.at(name).values,
+                                     response.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-12) << name;
+  }
+  RecordProperty("response_departure", std::format("{:.3e}", worst));
+  EXPECT_EQ(std::get<std::string>(dry.meta.at("tide")),
+            "tide degree 2 order 1, 1 + 0.5 i m^2 s^-2, history_kyr_bp [[2, "
+            "1], [0, -1]]");
+  EXPECT_EQ(std::get<std::string>(dry.meta.at("ocean")), "none");
+  for (const auto* name : {"initial_sea_level", "ocean_function"}) {
+    EXPECT_FALSE(dry.variables.contains(name)) << name;
+  }
+  for (const auto* name : {"ice", "sea_level", "shorelines",
+                           "initial_sea_level"}) {
+    EXPECT_FALSE(dry.meta.contains(name)) << name;
+  }
+
+  // checkpointed without the source, and resumed
+  const auto loads = std::format(R"("forcing": {{
+      "load": [{}, "history_kyr_bp": [[2, 0.5], [0.5, 1.5]],
+                "water_budget": true, "moves_solid_surface": false}}],
+      "tide": [{}"history_kyr_bp": [[2, 1], [0, -1]]}}]}})",
+                                 kCapTerm, kTideTerm);
+  static_cast<void>(app::RunSeaLevel(config("whole", loads)));
+  const auto pieces = config(
+      "pieces", loads + R"(, "checkpoint": {"directory": "ckpt", "every": 1,
+                                            "max_walltime_min": 1e-9})");
+  auto attempts = 0;
+  auto part = std::string{};
+  for (; attempts < 8; ++attempts) {
+    part = app::RunSeaLevel(pieces);
+    if (part.find("wrote") != std::string::npos) break;
+    EXPECT_NE(part.find("checkpointed"), std::string::npos) << part;
+  }
+  EXPECT_GE(attempts, 1);
+  EXPECT_NE(part.find("resumed"), std::string::npos) << part;
+  const auto whole = pm::ReadSurfaceFile(dir_ / "out" / "whole.nc");
+  const auto rebuilt = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
+  for (const auto* name : {"relative_sea_level_change", "displacement",
+                           "tangential_potential", "potential"}) {
+    EXPECT_EQ(rebuilt.variables.at(name).values, whole.variables.at(name).values)
+        << name;
+  }
+  const auto wet =
+      config("wet", loads + R"(, "ocean": {"at": "start",
+                 "topography": {"file": "history.nc"},
+                 "ice": {"file": "history.nc"}},
+                 "checkpoint": {"directory": "ckpt", "every": 1})");
+  EXPECT_THROW(
+      {
+        try {
+          static_cast<void>(app::RunSeaLevel(wet));
+        } catch (const std::runtime_error& error) {
+          EXPECT_NE(std::string{error.what()}.find("different run"),
+                    std::string::npos)
+              << error.what();
+          throw;
+        }
+      },
+      std::runtime_error);
+}
+
+TEST_F(AppsTest, SeaLevelTakesATideWithAnOcean) {
+  // A prescribed tide, `forcing.tide`, beside the ice change of the toy
+  // state, under the full rotational feedback: in the static problem the
+  // command is the library's one-node Evolution::Run on a branchless
+  // rheology under the ice's grounded load and the tide, and through time
+  // its Evolution run under the history's load and the tide ramped up by
+  // its history, with the hydrostatic moments, both built here, to
+  // rounding (equal to the bit here), the angular velocity included. The
+  // tide matters to the run, and the summary and metadata say it is
+  // there.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  constexpr auto kTides = R"([
+      {"degree": 2, "order": 1, "amplitude_m2_s2": 500, "imaginary_m2_s2": 200},
+      {"degree": 2, "order": 0, "amplitude_m2_s2": -300}])";
+  constexpr auto kRampedTides = R"([
+      {"degree": 2, "order": 1, "amplitude_m2_s2": 500, "imaginary_m2_s2": 200,
+       "history_kyr_bp": [[2, 0], [0, 1]]},
+      {"degree": 2, "order": 0, "amplitude_m2_s2": -300,
+       "history_kyr_bp": [[2, 0], [0, 1]]}])";
+  const auto tideAt = [](const GRDSolver& solver, double factor) {
+    const auto& grid = solver.Grid();
+    const auto potential = solver.SolverScales().Factor(PotentialDimensions);
+    auto out = grid.ZeroCoefficients();
+    out[SurfaceGrid::Index(2, 1)] = factor * Complex{500.0, 200.0} / potential;
+    out[SurfaceGrid::Index(2, 0)] = factor * Complex{-300.0, 0.0} / potential;
+    return out;
+  };
+  const auto compare = [](const pm::SurfaceFile& file, const GRDSolver& solver,
+                          const auto& snapshots, const std::string& label) {
+    const auto& scales = solver.SolverScales();
+    const auto length = scales.Length();
+    auto worst = 0.0;
+    for (const auto* name : {"relative_sea_level_change", "displacement",
+                             "tangential_potential", "potential"}) {
+      const auto which = std::string_view{name};
+      const auto factor =
+          which == "potential" ? scales.Factor(PotentialDimensions) : length;
+      auto want = std::vector<double>{};
+      for (const auto& snapshot : snapshots) {
+        EXPECT_TRUE(snapshot.converged);
+        const auto& field =
+            which == "relative_sea_level_change" ? snapshot.relativeSeaLevelChange
+            : which == "displacement"            ? snapshot.displacement
+            : which == "tangential_potential"    ? snapshot.tangentialPotential
+                                                 : snapshot.potential;
+        for (const auto v : field) want.push_back(v * factor);
+      }
+      const auto departure = Departure(file.variables.at(name).values, want);
+      worst = std::max(worst, departure);
+      EXPECT_LT(departure, 1e-12) << name << ", " << label;
+    }
+    for (const auto& [name, k] : {std::pair{"omega_x_rad_s", 0},
+                                  std::pair{"omega_y_rad_s", 1},
+                                  std::pair{"omega_z_rad_s", 2}}) {
+      auto want = std::vector<double>{};
+      for (const auto& snapshot : snapshots) {
+        want.push_back(snapshot.angularVelocity[k] / scales.Time());
+      }
+      EXPECT_LT(Departure(std::get<std::vector<double>>(file.meta.at(name)),
+                          want),
+                1e-12)
+          << name << ", " << label;
+    }
+    return worst;
+  };
+
+  // the static problem
+  {
+    const auto config = Write("static.json", std::format(R"({{{},
+      "problem": "static",
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc",
+                                                  "date_kyr_bp": 0}}}}],
+                  "tide": {}}},
+      "ocean": {{"date_kyr_bp": 2, "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full", "output": {{"surface": "out/static.nc"}}}})",
+                                                         kBall, kTides));
+    const auto summary = app::RunSeaLevel(config);
+    EXPECT_NE(summary.find("; tide (2 coefficients); wrote "),
+              std::string::npos)
+        << summary;
+    const auto file = pm::ReadSurfaceFile(dir_ / "out" / "static.nc");
+    EXPECT_EQ(std::get<std::string>(file.meta.at("tide")),
+              "tide degree 2 order 1, 500 + 200 i m^2 s^-2; tide degree 2 "
+              "order 0, -300 + 0 i m^2 s^-2");
+    const auto ball = ElasticBall::Make(dir_ / "ball.deck");
+    const auto& solver = *ball.solver;
+    const auto& grid = solver.Grid();
+    const auto length = solver.SolverScales().Length();
+    const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
+    ASSERT_TRUE(history);
+    const auto ice0 = history->Values("ice_thickness", -2.0 * app::KYR);
+    auto sea = SeaLevelFromTopography(
+        history->Values("topography", -2.0 * app::KYR), ice0,
+        solver.Parameters());
+    auto ice = ice0;
+    for (auto& v : ice) v /= length;
+    for (auto& v : sea) v /= length;
+    const auto state = solver.MakeState(std::move(ice), std::move(sea));
+    const auto now = history->Values("ice_thickness", 0.0);
+    auto load = std::vector<double>(now.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
+                (now[i] - ice0[i]) / length;
+    }
+    Evolution evolution(*ball.op, solver, state,
+                        {.rotation = RotationalFeedback::Full});
+    const auto snapshots = evolution.Run(
+        std::vector<double>{0.0},
+        Evolution::Forcing{.directLoad = [&](double) { return load; },
+                           .tide = [&](double) { return tideAt(solver, 1.0); }});
+    RecordProperty("static_departure",
+                   std::format("{:.3e}", compare(file, solver, snapshots,
+                                                 "static")));
+  }
+
+  // through time, the tide ramped up from nothing at the window's start
+  const auto body = std::string{kBall} + ", " + Window(4) +
+                    R"(, "rotation": "full", "moments": "hydrostatic")";
+  auto tidal = body;
+  const auto term = std::string{R"([{"thickness": {"file": "history.nc"}}])"};
+  tidal.replace(tidal.find(term), term.size(),
+                term + R"(, "tide": )" + kRampedTides);
+  static_cast<void>(app::RunSeaLevel(Write(
+      "bare.json", "{" + body + R"(, "output": {"surface": "out/bare.nc"}})")));
+  const auto summary = app::RunSeaLevel(Write(
+      "tidal.json", "{" + tidal + R"(, "output": {"surface": "out/tidal.nc"}})"));
+  EXPECT_NE(summary.find("; tide (2 coefficients); wrote "), std::string::npos)
+      << summary;
+  const auto file = pm::ReadSurfaceFile(dir_ / "out" / "tidal.nc");
+  const auto bare = pm::ReadSurfaceFile(dir_ / "out" / "bare.nc");
+  EXPECT_GT(Departure(file.variables.at("displacement").values,
+                      bare.variables.at("displacement").values),
+            1e-3);
+  EXPECT_FALSE(bare.meta.contains("tide"));
+  const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+  const auto mesh = RadialMesh::Create(model, {.lmax = 8});
+  ASSERT_TRUE(mesh);
+  const auto material = Material::Create(model, *mesh);
+  ASSERT_TRUE(material);
+  const auto rheology = Rheology::FromModel(*material, model);
+  ASSERT_TRUE(rheology);
+  const ViscoelasticOperator op(*rheology, 8);
+  const GRDSolver solver(
+      SurfaceGrid(8), op.ElasticLoveNumbers(),
+      WithHydrostaticMoments(SeaLevelParameters{},
+                             FluidTidalNumber(*material, 2)));
+  const auto& grid = solver.Grid();
+  const auto& scales = solver.SolverScales();
+  const auto length = scales.Length();
+  const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
+  ASSERT_TRUE(history);
+  const auto start = -2.0 * app::KYR;
+  const auto ice0 = history->Values("ice_thickness", start);
+  auto sea = SeaLevelFromTopography(history->Values("topography", start), ice0,
+                                    solver.Parameters());
+  auto ice = ice0;
+  for (auto& v : ice) v /= length;
+  for (auto& v : sea) v /= length;
+  const auto state = solver.MakeState(std::move(ice), std::move(sea));
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < 4; ++n) {
+    times.push_back(2.0 * app::KYR * n / 3 / scales.Time());
+  }
+  Evolution evolution(op, solver, state,
+                      {.rotation = RotationalFeedback::Full});
+  const auto snapshots = evolution.Run(
+      times,
+      Evolution::Forcing{
+          .directLoad =
+              [&](double t) {
+                const auto thickness =
+                    history->Values("ice_thickness", start + t * scales.Time());
+                auto out = std::vector<double>(thickness.size());
+                for (auto i = std::size_t{0}; i < out.size(); ++i) {
+                  out[i] = solver.IceDensity() *
+                           (1.0 - state.oceanFunction[i]) *
+                           (thickness[i] - ice0[i]) / length;
+                }
+                return out;
+              },
+          .tide =
+              [&](double t) {
+                return tideAt(solver, t * scales.Time() / app::KYR / 2.0);
+              }});
+  ASSERT_EQ(snapshots.size(), 4u);
+  RecordProperty("library_departure",
+                 std::format("{:.3e}", compare(file, solver, snapshots,
+                                               "through time")));
+}
+
+TEST_F(AppsTest, SeaLevelWithoutAnOceanIn3DIsResponses) {
+  // Without an ocean the 3-D runs are `response`'s: through time on the
+  // prem8 deck's lateral viscosity under a cap with a history and a tide,
+  // the 3-D evolution of both commands, node by node to rounding (about
+  // 1e-14 here), its toroidal displacement written, zero at the radial
+  // start; and the static problem on lateral moduli, the zero-length
+  // step's fixed point of sea-level against `response`'s conjugate
+  // gradients, to their tolerances (1e-11 here; about 6e-12), with the
+  // radial model's response beside it to rounding.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  constexpr auto kSolver = R"("solver": {"step_rtol": 1e-11,
+                                         "step_max_iterations": 200})";
+  static_cast<void>(Run(
+      "response", std::format(R"({}, "times": {{"end_kyr": 1.5, "nodes": 4}},
+      "forcing": {{"load": [{}, "history_kyr": [[0, 0.5], [1, 1]]}}],
+                  "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                            "imaginary_m2_s2": 0.5}}]}}, {})",
+                              Prem8(), kCapTerm, kSolver)));
+  const auto summary = app::RunSeaLevel(Write(
+      "dry.json", std::format(R"({{{}, "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 1.5, "end_kyr_bp": 0, "nodes": 4}},
+      "forcing": {{"load": [{}, "history_kyr_bp": [[1.5, 0.5], [0.5, 1]]}}],
+                  "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                            "imaginary_m2_s2": 0.5}}]}},
+      "rotation": "none", {}, "output": {{"surface": "out/dry.nc"}}}})",
+                              Prem8(), kCapTerm, kSolver)));
+  EXPECT_TRUE(summary.starts_with(
+      "3-D (lateral viscosity), viscoelastic, 4 nodes 1.5 to 0 kyr BP, no "
+      "ocean, rotation none; load (1 term) + tide (1 coefficient); wrote "))
+      << summary;
+  const auto dry = pm::ReadSurfaceFile(dir_ / "out" / "dry.nc");
+  const auto response = Output("response");
+  auto worst = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure = Departure(dry.variables.at(name).values,
+                                     response.variables.at(name).values);
+    worst = std::max(worst, departure);
+    EXPECT_LT(departure, 1e-10) << name;
+  }
+  RecordProperty("lateral_departure", std::format("{:.3e}", worst));
+  {
+    const auto& toroidal = dry.variables.at("toroidal_potential").values;
+    const auto size = toroidal.size() / dry.time->size();
+    EXPECT_TRUE(std::all_of(toroidal.begin(),
+                            toroidal.begin() + static_cast<std::ptrdiff_t>(size),
+                            [](double v) { return v == 0.0; }));
+    EXPECT_TRUE(std::any_of(toroidal.begin() + static_cast<std::ptrdiff_t>(size),
+                            toroidal.end(), [](double v) { return v != 0.0; }));
+  }
+
+  // the static problem on lateral moduli
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto model =
+      ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic);
+  ASSERT_TRUE(io::WriteModuli(dir_ / "moduli.nc", model, SurfaceGrid(8),
+                              [](double, double theta, double phi) {
+                                return 0.1 * std::sin(theta) * std::cos(phi);
+                              },
+                              [](double, double theta, double) {
+                                return 0.05 * std::cos(theta);
+                              },
+                              {.name = "toy moduli", .elementMetres = 500e3}));
+  const auto lateral = std::format(
+      R"("model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic",
+                   "moduli": {{"file": "moduli.nc"}}}}, "lmax": 8)",
+      data);
+  const auto forcing = std::format(
+      R"("forcing": {{"load": [{}}}],
+                  "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+                            "imaginary_m2_s2": 0.5}}]}})",
+      kCapTerm);
+  static_cast<void>(app::RunResponse(Write(
+      "elastic.json", std::format(R"({{"problem": "static", {}, {}, {},
+      "output": {{"surface": "out/elastic.nc"}}}})",
+                                  lateral, forcing, kSolver))));
+  const auto staticSummary = app::RunSeaLevel(Write(
+      "static.json", std::format(R"({{"problem": "static", {}, {}, {},
+      "rotation": "none", "output": {{"surface": "out/static.nc"}}}})",
+                                 lateral, forcing, kSolver)));
+  EXPECT_TRUE(staticSummary.starts_with(
+      "3-D (lateral moduli), elastic, no ocean, rotation none; load (1 term) "
+      "+ tide (1 coefficient); wrote "))
+      << staticSummary;
+  const auto elastic = Output("elastic");
+  const auto still = Output("static");
+  auto worstStatic = 0.0;
+  for (const auto* name : kResponseFields) {
+    const auto departure = Departure(still.variables.at(name).values,
+                                     elastic.variables.at(name).values);
+    worstStatic = std::max(worstStatic, departure);
+    EXPECT_LT(departure, 1e-9) << name;
+  }
+  RecordProperty("static_departure", std::format("{:.3e}", worstStatic));
+  for (const auto* name :
+       {"displacement_radial_model", "potential_radial_model"}) {
+    EXPECT_LT(Departure(still.variables.at(name).values,
+                        elastic.variables.at(name).values),
+              1e-12)
+        << name;
+  }
+}
+
+TEST_F(AppsTest, SeaLevelRefusesWhatAnOceanOrATideCannotDo) {
+  // Refused, naming the member: an ice change without an ocean (its water
+  // has nowhere to go), a layer without its density without an ocean as
+  // with one, a tide under migrating shorelines (the library's migrating
+  // runs take none) and under a calibrated start, a tide's history in the
+  // static problem and `response`'s `history_kyr` on a tide; the kernel
+  // commands without an ocean and under a tide.
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  const auto read = [](const fs::path& path) {
+    return app::ReadSeaLevelInput(path);
+  };
+  const auto refused = [&](auto&& run, const std::string& text,
+                           const std::string& member, const std::string& what) {
+    ExpectRefused(run, Write("bad.json", text), member, what);
+  };
+  constexpr auto kTide = R"({"degree": 2, "amplitude_m2_s2": 1.0)";
+  const auto dryStatic = [&](const std::string& forcing) {
+    return std::format(R"({{{}, "problem": "static", "forcing": {},
+        "output": {{"surface": "o.nc"}}}})",
+                       kBall, forcing);
+  };
+  refused(read,
+          dryStatic(R"({"ice_change": [{"cap_thickness": {"latitude": 70,
+              "longitude": 0, "width_deg": 10, "thickness_m": 1}}]})"),
+          "forcing.ice_change",
+          "the config has no `ocean` block: without an ocean the ice's water "
+          "has nowhere to go");
+  refused(read,
+          dryStatic(std::format(R"({{"load": [{},
+              "moves_solid_surface": true}}]}})",
+                                kCapTerm)),
+          "forcing.load[0]", "gives no `density_kg_m3`");
+  refused(read,
+          dryStatic(std::format(R"({{"tide": [{}, "history_kyr_bp": [[0, 1]]}}]}})",
+                                kTide)),
+          "forcing.tide[0].history_kyr_bp", "needs the quasi-static problem");
+  refused(read,
+          dryStatic(std::format(R"({{"tide": [{}, "history_kyr": [[0, 1]]}}]}})",
+                                kTide)),
+          "forcing.tide[0].history_kyr", "`history_kyr_bp`");
+  const auto timed = [&](const std::string& forcing, const std::string& ocean) {
+    return std::format(R"({{{}, "problem": "quasi_static",
+        "times": {{"start_kyr_bp": 2, "nodes": 3}}, "forcing": {},
+        "ocean": {}, "output": {{"surface": "o.nc"}}}})",
+                       kBall, forcing, ocean);
+  };
+  const auto withTide = std::format(
+      R"({{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}],
+          "tide": [{}, "history_kyr": [[0, 1]]}}]}})",
+      kTide);
+  refused(read,
+          timed(withTide, R"({"at": "start", "topography": {"file": "history.nc"},
+                              "ice": {"file": "history.nc"}})"),
+          "forcing.tide[0].history_kyr", "`history_kyr_bp`");
+  const auto tide = std::format(
+      R"({{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}],
+          "tide": [{}}}]}})",
+      kTide);
+  refused(read,
+          timed(tide, R"({"at": "start", "shorelines": "migrating",
+                          "topography": {"file": "history.nc"},
+                          "ice": {"file": "history.nc"}})"),
+          "forcing.tide", "migrating shorelines");
+  refused(read,
+          timed(tide, R"({"at": "end", "topography": {"file": "history.nc"},
+                          "ice": {"file": "history.nc"}})"),
+          "forcing.tide", "a calibrated initial sea level does not take");
+  // the kernel commands: an ocean, and the ice change alone
+  const auto kernel = [&](const std::string& forcing, const std::string& ocean) {
+    return std::format(R"({{{}, "problem": "quasi_static",
+        "times": {{"start_kyr_bp": 2, "nodes": 3}}, "forcing": {},{}
+        "measurements": [{{"type": "rotation", "component": "z"}}],
+        "output": "k"}})",
+                       kBall, forcing, ocean);
+  };
+  refused(app::ReadKernelInput,
+          kernel(R"({"ice_change": [{"thickness": {"file": "history.nc"}}]})",
+                 ""),
+          "bad.json", "has no `ocean` block: the kernels are");
+  refused(app::ReadKernelInput,
+          kernel(tide, R"( "ocean": {"at": "start",
+              "topography": {"file": "history.nc"},
+              "ice": {"file": "history.nc"}},)"),
+          "forcing.tide", "which the kernel commands do not take");
+}
+
 TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
   // Each fault of a sea-level or kernel config is refused naming the
   // member: the problem missing, unknown or at odds with the times block;
@@ -4597,8 +5287,9 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
   // (the state's date, a dated term) in the quasi-static one; the ocean
   // block's sea level missing or given twice, its ice missing, its `at`
   // missing or unknown, a calibration with the state at the start, an
-  // unknown format; no forcing at all, an empty ice change with nothing
-  // beside it, or a term naming no kind or several; the old members'
+  // unknown format; an ice change without an ocean block; no forcing at
+  // all, an empty ice change with nothing beside it, or a term naming no
+  // kind or several; the old members'
   // names (the ice as `forcing.ice`, a date or an `at` on the sea level);
   // a member of the commands' blocks given at the top level; an unknown
   // member in every block; the kernel commands' own limits. Once the run
@@ -4808,12 +5499,13 @@ TEST_F(AppsTest, SeaLevelAndKernelsRefuseWhatTheyCannotDo) {
                 R"({"ice_change": [{"thickness": {"file": "history.nc",
                                                   "variable": ""}}]})"),
           "forcing.ice_change[0].thickness.variable", "is empty");
+  // without an ocean, an ice change is refused: its water has nowhere to go
   refused(read,
           std::format(R"({{"problem": "quasi_static",
               "model": {{"deck": "ball.deck"}}, "lmax": 4, {},
               "forcing": {}, "output": {{"surface": "o.nc"}}}})",
                       kTimes, history),
-          "bad.json", "has no `ocean` block");
+          "forcing.ice_change", "the config has no `ocean` block");
 
   // the forcing: some term of some kind, each of one kind
   refused(read, fingerprint("", R"({"deck": "ball.deck"})", "{}"), "forcing",

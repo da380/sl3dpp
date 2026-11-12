@@ -149,15 +149,17 @@ sl3d response run.json         # the response to a prescribed load and
                                #   (or viscosity) with the radial model's
                                #   beside it
 sl3d sea-level run.json        # the sea level equation under an ice
-                               #   change, surface loads and seismic
-                               #   sources, shorelines frozen or migrating:
-                               #   the static problem's elastic solve at
-                               #   one date (an ice change's fingerprint, a
-                               #   fault's co-seismic sea level), or the
-                               #   quasi-static problem's GIA through time,
-                               #   restartable; 1D, or 3D under lateral
-                               #   moduli (the static problem too) or a
-                               #   lateral viscosity
+                               #   change, surface loads, a tide and
+                               #   seismic sources, shorelines frozen or
+                               #   migrating: the static problem's elastic
+                               #   solve at one date (an ice change's
+                               #   fingerprint, a fault's co-seismic sea
+                               #   level), or the quasi-static problem's
+                               #   GIA through time, restartable; without
+                               #   an ocean block, response's problems
+                               #   with rotational feedback; 1D, or 3D
+                               #   under lateral moduli (the static
+                               #   problem too) or a lateral viscosity
 sl3d kernel1d run.json         # adjoint kernels of configured measurements
                                #   of a radial sea-level run through time
 sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
@@ -182,8 +184,10 @@ inputs, `{"file", "format", "variable"}`. A run with an ocean takes a
 state, the sea level and the ice on the body at one instant (the `ocean`
 block), and a forcing: an ice change, a sum of terms
 (`forcing.ice_change`: the history of a thickness file, a file of
-thickness change, or a Gaussian cap), surface loads (`forcing.load`) and
-seismic sources (`forcing.seismic`), in any mix. The state and the ice
+thickness change, or a Gaussian cap), surface loads (`forcing.load`), a
+tide (`forcing.tide`) and seismic sources (`forcing.seismic`), in any
+mix; without an `ocean` block the body has no ocean, and the forcing is
+the loads, the tide and the sources. The state and the ice
 change come from planetmodel surface files, such as one holding
 `ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
 one from ICE-5G/6G/7G), and a static solve comes back as a surface file
@@ -227,12 +231,13 @@ the ice change, the same command runs GIA through time.
   `viscosity` field, as planetmodel's conversion of a tomography model
   writes it; lateral elastic moduli (`model.moduli`) are a model file's
   `mu` and `kappa`.
-- **Loads and tides**, for `response`, are sums of terms: Gaussian caps,
-  uniform disks (expanded exactly), fields of planetmodel surface files and
-  tables of spherical-harmonic coefficients, and tidal potential
-  coefficients; through time each term may carry a piecewise-linear
-  amplitude history, and a surface file's field may have a time axis. Its
-  lateral moduli are a planetmodel model file's `mu` and `kappa`.
+- **Loads and tides**, for `response` and `sea-level`, are sums of
+  terms: Gaussian caps, uniform disks (expanded exactly), fields of
+  planetmodel surface files and tables of spherical-harmonic
+  coefficients, and tidal potential coefficients; through time each term
+  may carry a piecewise-linear amplitude history, and a surface file's
+  field may have a time axis. `response`'s lateral moduli are a
+  planetmodel model file's `mu` and `kappa`.
 
 ### Outputs
 

@@ -2,10 +2,11 @@
 
 /**
  * @file Common.hpp
- * @brief The run scaffold the commands with an ocean share (`sea-level`,
- * `kernel1d`, `kernel`): their shared config members and the one reader of
- * them, the Earth built from the `model` block (1-D or 3-D as its files
- * make it), the state (the sea level and the ice at one instant) and the
+ * @brief The run scaffold the commands of the sea level equation share
+ * (`sea-level`, `kernel1d`, `kernel`): their shared config members and the
+ * one reader of them, the Earth built from the `model` block (1-D or 3-D
+ * as its files make it), the state (the sea level and the ice at one
+ * instant, where the run has an ocean) and the
  * ice change read from their file inputs onto the solver grid, the ice at
  * any time (RunIce, the one place it is formed), the background state
  * built from them, the time grid of the window, and the initial sea
@@ -42,7 +43,8 @@ namespace sl3dpp::app {
 /// The members `sea-level`, `kernel1d` and `kernel` share: the problem,
 /// the Earth, the degree, the window, the forcing, the ocean, the rotation
 /// and the solves. The static problem, the solve at the state's one
-/// instant on the elastic Earth, is `sea-level`'s alone.
+/// instant on the elastic Earth, and a run without an ocean are
+/// `sea-level`'s alone.
 struct SeaLevelRun {
   Problem problem = Problem::Static;
   ModelBlock model;
@@ -50,7 +52,10 @@ struct SeaLevelRun {
   /// The window, dates before present: the quasi-static problem's.
   std::optional<TimesBlock> times;
   SeaLevelForcing forcing;
-  OceanBlock ocean;
+  /// The state, its instant, the shorelines and the calibration, the
+  /// `ocean` block's; absent, the body has no ocean (GRDSolver::
+  /// NoOceanState), and no state, shorelines or calibration.
+  std::optional<OceanBlock> ocean;
   RotationalFeedback rotation = RotationalFeedback::Full;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
@@ -58,6 +63,13 @@ struct SeaLevelRun {
   /// sustain less oblateness than the model's tidal response.
   bool hydrostatic_moments = false;
   SolverBlock solver = SolverDefaults(SolverOf::SeaLevel);
+
+  /// Whether the shorelines migrate (never without an ocean).
+  [[nodiscard]] bool Migrating() const {
+    return ocean && ocean->shorelines == Shorelines::Migrating;
+  }
+  /// Whether the initial sea level is calibrated (never without an ocean).
+  [[nodiscard]] bool Calibrating() const { return ocean && ocean->calibrate; }
 };
 
 /// The top-level members `ReadSeaLevelRun` reads, for a command's list of
@@ -77,7 +89,9 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// moduli takes them; on a radial file the runner refuses them). In the
 /// static problem a `thickness` term of the ice change without the
 /// state's date is refused, and with the state at the window's end a
-/// `change` term or a cap.
+/// `change` term or a cap. The `ocean` block is optional: without it the
+/// body has no ocean, and an ice change is refused. A tide is refused
+/// under migrating shorelines.
 [[nodiscard]] SeaLevelRun ReadSeaLevelRun(
     const Json& top, const std::filesystem::path& directory);
 
@@ -239,7 +253,8 @@ class RunIce {
 /// The world a run moves: the sea level's file on the solver grid, the
 /// run's ice, the ice the run starts from (SI), the background built
 /// from that ice and the state's sea level, and the state's inputs as
-/// read.
+/// read. Without an ocean the background is GRDSolver::NoOceanState and
+/// the rest is empty.
 struct Loaded {
   std::shared_ptr<const io::FieldHistory> seaLevel;
   std::shared_ptr<const RunIce> ice;
@@ -255,9 +270,9 @@ struct Loaded {
   double changeAtStart = 0.0;
 
   /// Whether a change is present at the window's start: one larger than
-  /// the ice's tolerance (RunIce::Tolerance).
+  /// the ice's tolerance (RunIce::Tolerance); never without an ocean.
   [[nodiscard]] bool ChangedAtStart() const {
-    return changeAtStart > ice->Tolerance();
+    return ice && changeAtStart > ice->Tolerance();
   }
 };
 
@@ -308,7 +323,8 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
 /// window's end is refused when the state is there), the run's ice, held
 /// at every node to what the state holds (RunIce::CheckHeld), with the
 /// change present at the window's start, and the background built from
-/// the ice at the window's start and the state's sea level.
+/// the ice at the window's start and the state's sea level. Without an
+/// ocean, the world of a body without one (Loaded), nothing read.
 [[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
                                const GRDSolver& solver);
 

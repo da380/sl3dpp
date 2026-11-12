@@ -239,10 +239,11 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
   return term;
 }
 
-TideTerm ReadTideTerm(const Json& item, int lmax, bool timed) {
-  auto history = ReadHistory(item, timed);
+TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
+                      const Clock& clock = {}) {
+  auto history = ReadHistory(item, timed, clock);
   Allow(item, {"degree", "order", "amplitude_m2_s2", "imaginary_m2_s2",
-               "history_kyr"});
+               clock.dated ? "history_kyr_bp" : "history_kyr"});
   auto term = TideTerm{};
   term.history = std::move(history);
   term.degree = Integer(item, "degree");
@@ -997,14 +998,16 @@ GeographicPoint ReadSite(const Json& object) {
 
 SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                                     const std::filesystem::path& directory,
-                                    std::optional<double> start_kyr_bp) {
+                                    int lmax,
+                                    std::optional<double> start_kyr_bp,
+                                    bool ocean) {
   const auto timed = start_kyr_bp.has_value();
   const auto clock = Clock{.dated = true, .start_kyr_bp = start_kyr_bp};
   if (!block.IsObject()) {
     Fail(block,
          "is not a block: `forcing` is an object of the ice change, "
-         "`ice_change`, the surface loads, `load`, and the seismic sources, "
-         "`seismic`");
+         "`ice_change`, the surface loads, `load`, the tide, `tide`, and the "
+         "seismic sources, `seismic`");
   }
   for (const auto* name : {"state", "sea_level"}) {
     if (Has(block, name)) {
@@ -1022,7 +1025,14 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
          "`ocean.ice`, and a change of it is a term of `forcing.ice_change` "
          "(`thickness`, `change`, `cap_thickness` or `cap_fraction`)");
   }
-  Allow(block, {"ice_change", "load", "seismic"});
+  Allow(block, {"ice_change", "load", "tide", "seismic"});
+  if (!ocean && Has(block, "ice_change")) {
+    Fail(block.At("ice_change"),
+         "is an ice change, a change of the state's ice, and the config has "
+         "no `ocean` block: without an ocean the ice's water has nowhere to "
+         "go. Give the ice's load as a `load` term, or give the state, the "
+         "`ocean` block");
+  }
   auto out = SeaLevelForcing{};
   if (Has(block, "load")) {
     constexpr auto kProperties = std::array<std::string_view, 3>{
@@ -1030,8 +1040,10 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
     for (const auto& item : block.At("load").AsArray()) {
       auto term = SurfaceLoadTerm{};
       term.term = ReadLoadTerm(item, directory, timed, kProperties, clock);
+      // a run with an ocean is told both properties; without one they
+      // default to false, the water budget then having no ocean to change
       for (const auto* name : {"water_budget", "moves_solid_surface"}) {
-        if (!Has(item, name)) {
+        if (ocean && !Has(item, name)) {
           Fail(item,
                std::format("does not say `{}` (true or false): a surface "
                            "load of a run with an ocean states whether its "
@@ -1041,8 +1053,12 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
                            name));
         }
       }
-      term.water_budget = item.At("water_budget").AsBool();
-      term.moves_solid_surface = item.At("moves_solid_surface").AsBool();
+      if (Has(item, "water_budget")) {
+        term.water_budget = item.At("water_budget").AsBool();
+      }
+      if (Has(item, "moves_solid_surface")) {
+        term.moves_solid_surface = item.At("moves_solid_surface").AsBool();
+      }
       if (term.moves_solid_surface) {
         if (!Has(item, "density_kg_m3")) {
           Fail(item,
@@ -1061,6 +1077,11 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
       out.load.push_back(std::move(term));
     }
   }
+  if (Has(block, "tide")) {
+    for (const auto& item : block.At("tide").AsArray()) {
+      out.tide.push_back(ReadTideTerm(item, lmax, timed, clock));
+    }
+  }
   if (Has(block, "seismic")) {
     for (const auto& item : block.At("seismic").AsArray()) {
       out.seismic.push_back(ReadSeismicTerm(item, timed, clock));
@@ -1073,17 +1094,19 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
     }
   }
   if (out.ice_change.empty() && !out.BesideTheIce()) {
-    constexpr auto kWhat = std::string_view{
-        "at least one term of the ice change (`ice_change`: \"thickness\", "
-        "\"change\", \"cap_thickness\" or \"cap_fraction\"), a surface load "
-        "(`load`) or a seismic source (`seismic`)"};
+    const auto what = std::format(
+        "at least one {}a surface load (`load`), a tide coefficient (`tide`) "
+        "or a seismic source (`seismic`)",
+        ocean ? "term of the ice change (`ice_change`: \"thickness\", "
+                "\"change\", \"cap_thickness\" or \"cap_fraction\"), "
+              : "");
     if (Has(block, "ice_change")) {
       Fail(block.At("ice_change"),
            std::format("holds no term, and nothing else forces the run: "
                        "give {}",
-                       kWhat));
+                       what));
     }
-    Fail(block, std::format("holds no forcing: give {}", kWhat));
+    Fail(block, std::format("holds no forcing: give {}", what));
   }
   return out;
 }
@@ -1131,6 +1154,17 @@ std::string Describe(const SurfaceLoadTerm& term) {
   if (term.moves_solid_surface) {
     out += std::format(", a layer on the solid surface of {:g} kg m^-3",
                        term.density);
+  }
+  return out;
+}
+
+std::vector<std::complex<double>> TideAt(std::span<const TideTerm> tide,
+                                         const SurfaceGrid& grid,
+                                         double t_kyr) {
+  auto out = grid.ZeroCoefficients();
+  for (const auto& term : tide) {
+    out[SurfaceGrid::Index(term.degree, term.order)] +=
+        term.history.At(t_kyr) * Complex{term.amplitude, term.imaginary};
   }
   return out;
 }

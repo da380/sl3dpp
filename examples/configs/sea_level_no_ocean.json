@@ -1,0 +1,13 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "lmax": 32,
+  "times": {"start_kyr_bp": 12.0, "end_kyr_bp": 0.0, "nodes": 49},
+  "forcing": {
+    "load": [{"cap": {"latitude": 60.0, "longitude": -85.0, "width_deg": 5.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history_kyr_bp": [[10.0, 0.0], [9.0, 1.0], [5.0, 1.0], [4.5, 0.0]]}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/sea_level_no_ocean/sea_level_no_ocean.nc"}
+}

@@ -138,7 +138,8 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 alone has run), so it has no folder of its own. The static problem's
 `sea_level_static_migrating` (the synthetic deglaciation under migrating
 shorelines) and `sea_level_static_coseismic` (a fault alone) have no
-figures; their surface files hold the fields
+figures, nor has `sea_level_no_ocean` (`response_load_cap`'s run as a
+`sea-level` run without an ocean); their surface files hold the fields
 `examples/configs/README.md` names.
 
 The tide figures show three things. On the synthetic 3D Earth the lunar

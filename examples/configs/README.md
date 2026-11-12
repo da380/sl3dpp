@@ -270,6 +270,18 @@ draws each config's figures from `out/<config>/` into
   (band-limited), so it differs from the sampled cap's by about 1% at the
   centre while the loads' coefficients, and so the responses, agree. About
   1 s each.
+- **`sea_level_no_ocean.json`** — `sea-level` without an `ocean` block,
+  on a body without an ocean: `response_load_cap.json`'s run in
+  `sea-level`'s terms, its window from 12 kyr BP to the present in
+  quarter-kyr steps and the cap's history in dates before present
+  (`history_kyr_bp` `[[10, 0], [9, 1], [5, 1], [4.5, 0]]`), the load's
+  properties left at their defaults and no rotational feedback
+  (`response` has none): `out/sea_level_no_ocean/sea_level_no_ocean.nc`.
+  Its displacement, potential and tangential potential are
+  `response_load_cap`'s at every node to 1e-11 of their largest values
+  (9e-13 for the displacement), the rounding of the two clocks' node
+  times; its relative sea level change is -(u + phi / g), the height of
+  an equipotential above the surface. About 1 s.
 - **The time-step study**, `timestep_{et,be}_n<N>.json` (sea-level) and
   `timestep_{discrete,continuous}_n<N>.json` (kernel1d) — one problem at
   several step sizes: the synthetic deglaciation from 16 to 6 ka on the

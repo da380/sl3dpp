@@ -1,6 +1,7 @@
 // sl3d's 3D runs over MPI ranks (apps/Ranks.hpp), built with
-// SL3DPP_WITH_MPI and run under mpiexec: sea-level's 3-D run and its
-// fingerprint on lateral moduli, kernel and
+// SL3DPP_WITH_MPI and run under mpiexec: sea-level's 3-D run, its
+// fingerprint on lateral moduli and its static problem there without an
+// ocean, kernel and
 // the viscoelastic response over the ranks against the same configs on one
 // process (rank 0 alone, as a run of one rank), a run resumed from
 // per-rank checkpoints against the uninterrupted one, the spilled
@@ -402,6 +403,75 @@ TEST_F(AppsOverRanks, SeaLevelFingerprintUnderLateralModuliMatchesOneProcess) {
   for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
     EXPECT_EQ(first.variables.at(name).values,
               reference.variables.at(name).values)
+        << name;
+  }
+}
+
+TEST_F(AppsOverRanks, SeaLevelWithoutAnOceanUnderLateralModuliMatchesOneProcess) {
+  // The static problem without an ocean on lateral moduli, under a load
+  // that is both in the water budget and a layer on the solid surface and
+  // a point source, its zero-length step distributed over the ranks: the
+  // one-process answer to the substructured solves' round-off, the
+  // toroidal displacement and the radial model's fields beside it
+  // included.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  if (Rank() == 0) {
+    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic));
+    ASSERT_TRUE(deck);
+    const auto model = EarthModel::FromDeck(*deck);
+    ASSERT_TRUE(model);
+    ASSERT_TRUE(io::WriteModuli(
+        dir_ / "moduli.nc", *model, SurfaceGrid(8),
+        [](double, double theta, double phi) {
+          return 0.1 * std::sin(theta) * std::cos(phi);
+        },
+        [](double, double theta, double) { return 0.05 * std::cos(theta); },
+        {.name = "toy moduli", .elementMetres = 500e3}));
+  }
+  Barrier();
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "static",
+      "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic",
+                 "moduli": {{"file": "moduli.nc"}}}},
+      "lmax": 8,
+      "forcing": {{
+        "load": [{{"cap": {{"latitude": 60, "longitude": -85, "width_deg": 20,
+                            "amplitude_kg_m2": 2000}},
+                   "water_budget": true, "moves_solid_surface": true,
+                   "density_kg_m3": 2300}}],
+        "seismic": [{{"point": {{"latitude": 30, "longitude": 40,
+                      "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
+                      "rake_deg": 90, "moment_nm": 1e21}}}}]}},
+      "rotation": "full",
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             data, name));
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunSeaLevel(one)); });
+  const auto summary = app::RunSeaLevel(over);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with(
+        "3-D (lateral moduli), elastic, no ocean, rotation full; load (1 "
+        "term) + seismic (1 source); wrote "))
+        << summary;
+  } else {
+    EXPECT_EQ(summary, "");
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  for (const auto* name :
+       {"relative_sea_level_change", "displacement", "tangential_potential",
+        "toroidal_potential", "potential",
+        "relative_sea_level_change_radial_model", "displacement_radial_model",
+        "potential_radial_model"}) {
+    EXPECT_LT(Relative(distributed.variables.at(name).values,
+                       reference.variables.at(name).values),
+              1e-10)
         << name;
   }
 }

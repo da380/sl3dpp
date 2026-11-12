@@ -9,10 +9,11 @@
  * seismic sources, point moment tensors and planar faults inside the
  * body (SeismicTerm). `sea-level`'s (and the kernel commands'): the ice
  * change, a sum of terms, surface loads that each state their place in
- * the water budget and whether they move the solid surface, and seismic
- * sources (SeaLevelForcing, at the end of this file); the state they
- * change, the sea level and the ice on the body at one instant, is the
- * `ocean` block's (Blocks.hpp).
+ * the water budget and whether they move the solid surface, a tide and
+ * seismic sources (SeaLevelForcing, at the end of this file); the state
+ * they change, the sea level and the ice on the body at one instant, is
+ * the `ocean` block's (Blocks.hpp), and without one the body has no
+ * ocean and no ice to change.
  *
  * A load term is one of
  *
@@ -46,6 +47,7 @@
 #include <complex>
 #include <filesystem>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -318,7 +320,7 @@ class TimedForcing {
 /// What a forcing holds, as `load (2 terms) + tide (1 coefficient)`.
 [[nodiscard]] std::string Summary(const Forcing& forcing);
 
-// -- the forcing of a run with an ocean ---------------------------------------
+// -- the forcing of `sea-level` and the kernel commands -----------------------
 
 /// One term of an ice change (`forcing.ice_change`): a change of the ice
 /// thickness, metres, the change being the sum of the terms. The ice at
@@ -363,14 +365,16 @@ struct IceChangeTerm {
   [[nodiscard]] std::string_view Member() const;
 };
 
-/// A surface load of a run with an ocean: a load term (a surface mass
-/// density, as `response`'s) with the two properties the sea level
-/// equation needs of it. A load in the WATER BUDGET takes its mass from
-/// the ocean (a hydrological load); one outside it moves no water
-/// (sediment, any other mass). A load that MOVES THE SOLID SURFACE is a
-/// layer laid on it, of thickness its mass over its density: the sea
-/// level, measured from the solid surface, falls by the thickness, and
-/// under migrating shorelines the shorelines move with it.
+/// A surface load of `sea-level`: a load term (a surface mass density, as
+/// `response`'s) with the two properties the sea level equation needs of
+/// it. A load in the WATER BUDGET takes its mass from the ocean (a
+/// hydrological load); one outside it moves no water (sediment, any other
+/// mass). A load that MOVES THE SOLID SURFACE is a layer laid on it, of
+/// thickness its mass over its density: the sea level, measured from the
+/// solid surface, falls by the thickness, and under migrating shorelines
+/// the shorelines move with it. On a body without an ocean the water
+/// budget has no ocean to change, and a layer is its thickness off the
+/// relative sea level change alone.
 struct SurfaceLoadTerm {
   LoadTerm term;
   bool water_budget = false;
@@ -381,50 +385,62 @@ struct SurfaceLoadTerm {
 /// The `forcing` block of `sea-level` and the kernel commands: what
 /// happens to the state (the `ocean` block's, Blocks.hpp). The ice change
 /// is the sum of its terms; the ice at a time is the state's plus the
-/// change there, a direct load where it is grounded. Surface loads and
-/// seismic sources act beside the ice, changes from the state: in the
+/// change there, a direct load where it is grounded. Surface loads, the
+/// tide (a sum of coefficients of an external potential, as `response`'s)
+/// and seismic sources act beside the ice, changes from the state: in the
 /// static problem at its one instant, in a run through time on the run's
 /// clock (kyr from the window's start), a term present at the first node
-/// acting there.
+/// acting there. A run without an ocean has no ice change.
 struct SeaLevelForcing {
   std::vector<IceChangeTerm> ice_change;
   std::vector<SurfaceLoadTerm> load;
+  std::vector<TideTerm> tide;
   std::vector<SeismicTerm> seismic;
 
   /// Whether the run is forced by more than its ice.
   [[nodiscard]] bool BesideTheIce() const {
-    return !load.empty() || !seismic.empty();
+    return !load.empty() || !tide.empty() || !seismic.empty();
   }
 };
 
-/// Reads a `forcing` block of a run with an ocean, relative paths against
-/// `directory`. `ice_change` is a list of terms (IceChangeTerm), each an
-/// object holding exactly one of `thickness` and `change` (file inputs,
-/// in the static problem with `date_kyr_bp`, required of `thickness`),
-/// `cap_thickness` (`latitude`, `longitude`, `width_deg`, `thickness_m`)
-/// and `cap_fraction` (`latitude`, `longitude`, `width_deg`, `fraction`),
-/// a cap in a run through time with an optional `history_kyr_bp` beside
-/// it. `load` is a list of load terms as `response`'s (ReadForcing), each
-/// with `water_budget` and `moves_solid_surface` (both required, true or
-/// false) and, where it moves the solid surface, `density_kg_m3`
-/// (positive; refused otherwise), and `seismic` a list of sources as
-/// `response`'s. At least one term of the three is required. Their times
-/// are DATES, kyr before present, as the window's are: a history is
-/// `history_kyr_bp`, pairs `[date_kyr_bp, factor]` from the oldest (the
-/// dates strictly decreasing), an onset `onset_kyr_bp`; a `field` file
-/// with a time axis is read at the term's `date_kyr_bp` in the static
-/// problem and at each node's date in a run through time, as the ice
-/// change's files are (`time_origin_kyr` is refused); `response`'s names
-/// (`history_kyr`, `onset_kyr`, `date_kyr`) are refused, naming these.
-/// The members of the other problem are refused, naming what this one
-/// takes: a history or an onset in the static problem, a term's date in a
-/// run through time. So are `ice`, naming `ocean.ice` and `ice_change`,
-/// and `sea_level` and `state`, naming the `ocean` block's members.
-/// `start_kyr_bp` is the window's start, which the dates are turned to the
-/// run's clock by; absent in the static problem.
+/// Reads a `forcing` block of `sea-level` or a kernel command at `lmax`,
+/// relative paths against `directory`, of a run with an ocean (`ocean`,
+/// the config having an `ocean` block) or without one. `ice_change` is a
+/// list of terms (IceChangeTerm), each an object holding exactly one of
+/// `thickness` and `change` (file inputs, in the static problem with
+/// `date_kyr_bp`, required of `thickness`), `cap_thickness` (`latitude`,
+/// `longitude`, `width_deg`, `thickness_m`) and `cap_fraction`
+/// (`latitude`, `longitude`, `width_deg`, `fraction`), a cap in a run
+/// through time with an optional `history_kyr_bp` beside it; without an
+/// ocean the member is refused, its water having nowhere to go. `load` is
+/// a list of load terms as `response`'s (ReadForcing), each with
+/// `water_budget` and `moves_solid_surface` (true or false; required with
+/// an ocean, false by default without one) and, where it moves the solid
+/// surface, `density_kg_m3` (positive; refused otherwise); `tide` a list
+/// of tide coefficients and `seismic` a list of sources, as `response`'s.
+/// At least one term of the lists is required. Their times are DATES, kyr
+/// before present, as the window's are: a history is `history_kyr_bp`,
+/// pairs `[date_kyr_bp, factor]` from the oldest (the dates strictly
+/// decreasing), an onset `onset_kyr_bp`; a `field` file with a time axis
+/// is read at the term's `date_kyr_bp` in the static problem and at each
+/// node's date in a run through time, as the ice change's files are
+/// (`time_origin_kyr` is refused); `response`'s names (`history_kyr`,
+/// `onset_kyr`, `date_kyr`) are refused, naming these. The members of the
+/// other problem are refused, naming what this one takes: a history or an
+/// onset in the static problem, a term's date in a run through time. So
+/// are `ice`, naming `ocean.ice` and `ice_change`, and `sea_level` and
+/// `state`, naming the `ocean` block's members. `start_kyr_bp` is the
+/// window's start, which the dates are turned to the run's clock by;
+/// absent in the static problem.
 [[nodiscard]] SeaLevelForcing ReadSeaLevelForcing(
-    const Json& block, const std::filesystem::path& directory,
-    std::optional<double> start_kyr_bp);
+    const Json& block, const std::filesystem::path& directory, int lmax,
+    std::optional<double> start_kyr_bp, bool ocean);
+
+/// The tide's coefficients on `grid` at time `t_kyr` of the run's clock,
+/// m^2 s^-2: each coefficient times its amplitude history's factor there,
+/// summed.
+[[nodiscard]] std::vector<std::complex<double>> TideAt(
+    std::span<const TideTerm> tide, const SurfaceGrid& grid, double t_kyr);
 
 /// One line describing a term of an ice change, for provenance: its kind,
 /// its file and variable and when they are read, or its cap.
@@ -434,8 +450,8 @@ struct SeaLevelForcing {
 /// place in the water budget and, of a layer, its density.
 [[nodiscard]] std::string Describe(const SurfaceLoadTerm& term);
 
-/// The surface loads of a run with an ocean on its grid, at any time of
-/// the run's clock, by their properties.
+/// The surface loads of a `sea-level` run on its grid, at any time of the
+/// run's clock, by their properties.
 class SurfaceLoads {
  public:
   /// Reads the terms' files onto `grid`; `block` is the config's `forcing`

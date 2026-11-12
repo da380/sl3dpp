@@ -411,10 +411,18 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
          "gives lateral moduli, which the kernel commands do not take: their "
          "runs are on the deck's moduli");
   }
+  if (!Has(top, "ocean")) {
+    Fail(top,
+         "has no `ocean` block: the kernels are sensitivities to the ice of "
+         "a run with an ocean, which needs its state, the sea level, "
+         "`ocean.sea_level` (a sea level, used as it stands) or "
+         "`ocean.topography` (converted with the state's ice), and the ice, "
+         "`ocean.ice`, at one instant");
+  }
   const auto directory = config.parent_path();
   auto out = KernelInput{};
   out.run = ReadSeaLevelRun(top, directory);
-  for (const auto* name : {"load", "seismic"}) {
+  for (const auto* name : {"load", "tide", "seismic"}) {
     if (const auto& forcing = top.At("forcing"); Has(forcing, name)) {
       Fail(forcing.At(name),
            "is a forcing beside the ice, which the kernel commands do not "
@@ -563,7 +571,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   options.scheme = input.run.solver.scheme;
   options.rotation = input.run.rotation;
   options.rtol = input.run.solver.rtol;
-  if (input.run.ocean.calibrate) {
+  if (input.run.ocean->calibrate) {
     // calibrated by runs that record nothing; the recording run follows
     Evolution calibrating(op, solver, world.background, options);
     static_cast<void>(
@@ -584,7 +592,7 @@ std::string RunKernel1D(const std::filesystem::path& config) {
   }
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
   // about a migrating run, the sweeps linearise about its own shorelines
-  const auto oceans = input.run.ocean.shorelines == Shorelines::Migrating
+  const auto oceans = input.run.ocean->shorelines == Shorelines::Migrating
                           ? OceanFunctionsOf(snapshots)
                           : std::vector<std::vector<double>>{};
 
@@ -679,7 +687,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   options.rtol = input.run.solver.rtol;
   options.coupled_rtol = input.run.solver.step_rtol;
   options.max_coupled_iterations = input.run.solver.step_max_iterations;
-  if (input.run.ocean.calibrate) {
+  if (input.run.ocean->calibrate) {
     Evolution3D calibrating(op, solver, world.background, options);
     static_cast<void>(
         CalibrateWorld(input.run, top, solver, world, calibrating, times));
@@ -719,7 +727,7 @@ std::string RunKernel3D(const std::filesystem::path& config) {
   }
   auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
   // about a migrating run, the sweep linearises about its own shorelines
-  const auto oceans = input.run.ocean.shorelines == Shorelines::Migrating
+  const auto oceans = input.run.ocean->shorelines == Shorelines::Migrating
                           ? OceanFunctionsOf(snapshots)
                           : std::vector<std::vector<double>>{};
   if (spilling) {

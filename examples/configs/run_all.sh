@@ -58,6 +58,7 @@ run response response_melt.json
 run response response_cap_weak.json
 run response response_cap_strong.json
 run response response_load_cap.json
+run sea-level sea_level_no_ocean.json
 for n in 10 20 40; do  # the time-step study's short family
   run sea-level timestep_et_n$n.json
   run sea-level timestep_be_n$n.json

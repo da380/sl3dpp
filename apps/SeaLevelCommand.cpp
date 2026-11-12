@@ -3,17 +3,20 @@
  * @brief `sl3d sea-level`: the sea level equation, the ocean coupled to
  * the solid Earth, on a state (the sea level and the ice at one instant)
  * read from its file inputs, under a forcing of any mix of an ice change,
- * surface loads and seismic sources, with frozen or migrating shorelines.
- * The static problem is the solve at the state's date on the elastic
- * Earth, a run of one node of the library's evolutions: of the radial
- * model (Evolution, on a branchless rheology), or, under lateral moduli,
- * of the 3-D one (Evolution3D, distributed over radial segments on several
- * ranks) with the radial model's answer beside it, written as a surface
- * file of static fields. The quasi-static problem is GIA through time
- * from a state at an end of the window: the radial model's evolution
- * (Evolution), or, under a lateral viscosity or lateral moduli, the 3-D
- * one (Evolution3D, distributed over radial segments on several ranks),
- * written as a surface file with a slice per node and restartable from
+ * surface loads, a tide and seismic sources, with frozen or migrating
+ * shorelines; without a state (no `ocean` block), the same runs on a body
+ * without an ocean (GRDSolver::NoOceanState) under the loads, the tide and
+ * the sources. The static problem is the solve at the state's date on the
+ * elastic Earth, a run of one node of the library's evolutions: of the
+ * radial model (Evolution, on a branchless rheology), or, under lateral
+ * moduli, of the 3-D one (Evolution3D, distributed over radial segments
+ * on several ranks) with the radial model's answer beside it, written as
+ * a surface file of static fields. The quasi-static problem is GIA
+ * through time from a state at an end of the window: the radial model's
+ * evolution (Evolution), or, under a lateral viscosity or lateral moduli,
+ * the 3-D one (Evolution3D, distributed over radial segments on several
+ * ranks), written as a surface file with a slice per node (the response
+ * and the potentials of the tangential displacement) and restartable from
  * disk checkpoints. The `model` block alone decides between 1-D and 3-D.
  */
 #include <algorithm>
@@ -51,15 +54,23 @@ namespace sl3dpp::app {
 
 namespace {
 
-/// One node of the accumulated history, SI, kept across restarts.
+/// One node of the accumulated history, SI, kept across restarts: the
+/// response, the potentials of the tangential displacement (the toroidal
+/// one in the frame of no net rotation of the surface, empty where the
+/// node has none) and, under migrating shorelines, the ocean function.
 struct Node {
   double date_kyr_bp = 0.0;
   std::vector<double> relativeSeaLevelChange;
   std::vector<double> displacement;
   std::vector<double> potential;
+  std::vector<double> tangentialPotential;
+  std::vector<double> toroidalPotential;
   std::array<double, 3> angularVelocity{};
   std::vector<double> oceanFunction;  ///< migrating runs alone
 };
+
+/// The outputs' `ocean` metadata of a run without an ocean.
+constexpr auto kNoOcean = std::string_view{"none"};
 
 /// A run stopped on purpose at a checkpoint: the wall clock passed the
 /// configured limit after the checkpoint was written.
@@ -69,7 +80,12 @@ struct WalltimeReached {
 
 // -- the checkpoint files: private scratch of a run, machine-local ----------
 
-constexpr auto kMagic = std::uint64_t{0x534c3344434b5031};  // "SL3DCKP1"
+/// The checkpoints' magic, its last character the format's version: the
+/// file of another version (a history of other fields) is refused.
+constexpr auto kMagic = std::uint64_t{0x534c3344434b5032};  // "SL3DCKP2"
+constexpr bool OtherFormat(std::uint64_t magic) {
+  return magic != kMagic && (magic >> 8) == (kMagic >> 8);
+}
 constexpr auto kKind1D = std::uint64_t{1};
 constexpr auto kKind3D = std::uint64_t{2};
 
@@ -129,10 +145,13 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
   hash.AddValue(run.lmax);
   if (!run.model.viscosity.empty()) hash.AddFile(run.model.viscosity);
   hash.AddValue(run.model.viscosity_file_radial);
-  const auto& ice = run.ocean.ice;
-  const auto& sea = run.ocean.seaLevel;
-  hash.AddFile(sea.input.file);
-  hash.AddFile(ice.file);
+  // the state's files, or the body's having no ocean
+  if (run.ocean) {
+    hash.AddFile(run.ocean->seaLevel.input.file);
+    hash.AddFile(run.ocean->ice.file);
+  } else {
+    hash.Add(std::as_bytes(std::span(kNoOcean)));
+  }
   // the ice change, term by term: its kind, its file's contents and
   // variable, or a cap's description (its place, size, amount and
   // history)
@@ -158,30 +177,34 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
   hash.AddValue(run.solver.rtol);
   // the members below enter only when set away from their defaults: a run
   // that leaves them there hashes the members above alone
-  if (run.ocean.shorelines != Shorelines::Frozen) {
-    hash.AddValue(run.ocean.shorelines);
+  if (run.Migrating()) hash.AddValue(Shorelines::Migrating);
+  if (run.ocean && run.ocean->at != WindowEnd::Start) {
+    hash.AddValue(run.ocean->at);
   }
-  if (run.ocean.at != WindowEnd::Start) hash.AddValue(run.ocean.at);
   if (!run.solver.transform_degrees.empty()) {
     hash.AddValue(run.solver.transform_degrees.size());
     for (const auto degree : run.solver.transform_degrees) {
       hash.AddValue(degree);
     }
   }
-  // the state's variables and quantity, where they are other than the ice
-  // thickness and the topography under their own names
-  if (ice.variable != "ice_thickness") {
-    hash.Add(std::as_bytes(std::span(ice.variable)));
-  }
-  // the land held, where the run is told one
-  if (run.ocean.land) {
-    hash.AddFile(run.ocean.land->file);
-    hash.Add(std::as_bytes(std::span(run.ocean.land->variable)));
-  }
-  if (sea.kind != SeaLevelSource::Kind::Topography ||
-      sea.input.variable != "topography") {
-    hash.AddValue(sea.kind);
-    hash.Add(std::as_bytes(std::span(sea.input.variable)));
+  if (run.ocean) {
+    const auto& ice = run.ocean->ice;
+    const auto& sea = run.ocean->seaLevel;
+    // the state's variables and quantity, where they are other than the
+    // ice thickness and the topography under their own names
+    if (ice.variable != "ice_thickness") {
+      hash.Add(std::as_bytes(std::span(ice.variable)));
+    }
+    // the land held, where the run is told one
+    if (run.ocean->land) {
+      hash.AddFile(run.ocean->land->file);
+      hash.Add(std::as_bytes(std::span(run.ocean->land->variable)));
+    }
+    if (sea.kind != SeaLevelSource::Kind::Topography ||
+        sea.input.variable != "topography") {
+      hash.AddValue(sea.kind);
+      hash.Add(std::as_bytes(std::span(sea.input.variable)));
+    }
   }
   // the forcing beside the ice, where there is one
   // (a term's description less its file's path, and the file's contents:
@@ -192,16 +215,42 @@ std::uint64_t RunHashOf(const SeaLevelInput& input) {
     unplaced.term.file.clear();
     const auto described = Describe(unplaced);
     hash.Add(std::as_bytes(std::span(described)));
+    // and its numbers whole, which the description rounds
+    for (const auto value :
+         {term.term.site.latitude, term.term.site.longitude, term.term.width,
+          term.term.radius, term.term.amplitude, term.term.time_origin_kyr,
+          term.density}) {
+      hash.AddValue(value);
+    }
+    for (const auto* values :
+         {&term.term.history.times_kyr, &term.term.history.factors}) {
+      for (const auto value : *values) hash.AddValue(value);
+    }
     if (term.term.kind == LoadTerm::Kind::Field) {
       hash.AddFile(term.term.field.file);
     } else if (term.term.kind == LoadTerm::Kind::Coefficients) {
       hash.AddFile(term.term.file);
     }
   }
-  if (run.ocean.calibrate) {
-    hash.AddValue(run.ocean.calibration_method);
-    hash.AddValue(run.ocean.calibration_iterations);
-    hash.AddValue(run.ocean.calibration_rtol);
+  // the tide, coefficient by coefficient, its numbers whole
+  if (!run.forcing.tide.empty()) {
+    hash.AddValue(run.forcing.tide.size());
+    for (const auto& term : run.forcing.tide) {
+      hash.AddValue(term.degree);
+      hash.AddValue(term.order);
+      hash.AddValue(term.amplitude);
+      hash.AddValue(term.imaginary);
+      hash.AddValue(term.history.times_kyr.size());
+      for (auto k = std::size_t{0}; k < term.history.times_kyr.size(); ++k) {
+        hash.AddValue(term.history.times_kyr[k]);
+        hash.AddValue(term.history.factors[k]);
+      }
+    }
+  }
+  if (run.Calibrating()) {
+    hash.AddValue(run.ocean->calibration_method);
+    hash.AddValue(run.ocean->calibration_iterations);
+    hash.AddValue(run.ocean->calibration_rtol);
   }
   if (!run.model.moduli.empty()) {
     hash.AddFile(run.model.moduli);
@@ -349,6 +398,8 @@ void WriteCheckpoint(const std::filesystem::path& directory, std::uint64_t hash,
       PutVector(out, kept.relativeSeaLevelChange);
       PutVector(out, kept.displacement);
       PutVector(out, kept.potential);
+      PutVector(out, kept.tangentialPotential);
+      PutVector(out, kept.toroidalPotential);
       Put(out, kept.angularVelocity.data(), 3 * sizeof(double));
       if (migrating) PutVector(out, kept.oceanFunction);
     }
@@ -380,7 +431,16 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
     const std::filesystem::path& path, std::uint64_t hash, bool migrating) {
   {
     auto in = std::ifstream(path, std::ios::binary);
-    if (!in || GetOne<std::uint64_t>(in) != kMagic) return std::nullopt;
+    if (!in) return std::nullopt;
+    const auto magic = GetOne<std::uint64_t>(in);
+    if (OtherFormat(magic)) {
+      throw std::runtime_error(std::format(
+          "{} is a checkpoint of another format, which this program does "
+          "not read; set \"restart\": false to start over, or point "
+          "checkpoint.directory elsewhere",
+          path.string()));
+    }
+    if (magic != kMagic) return std::nullopt;
     if (GetOne<std::uint64_t>(in) != hash) {
       throw std::runtime_error(std::format(
           "{} was checkpointed by a different run (another config, changed "
@@ -407,6 +467,8 @@ std::optional<ReadBack<CheckpointT>> ReadCheckpointFile(
       kept.relativeSeaLevelChange = GetVector(in);
       kept.displacement = GetVector(in);
       kept.potential = GetVector(in);
+      kept.tangentialPotential = GetVector(in);
+      kept.toroidalPotential = GetVector(in);
       in.read(reinterpret_cast<char*>(kept.angularVelocity.data()),
               3 * sizeof(double));
       if (migrating) kept.oceanFunction = GetVector(in);
@@ -479,7 +541,9 @@ std::optional<ReadBack<CheckpointT>> ReadCommonCheckpoint(
 }
 
 /// The histories as one surface file: SI node fields on a time axis in
-/// seconds relative to the present (negative past).
+/// seconds relative to the present (negative past). Without an ocean the
+/// fields and metadata of the state (the initial sea level, the state's
+/// inputs, the shorelines) are left out, and `ocean` says there is none.
 void WriteHistoryFile(const SeaLevelInput& input,
                       const std::filesystem::path& config,
                       const SurfaceGrid& grid, const std::vector<Node>& history,
@@ -508,8 +572,12 @@ void WriteHistoryFile(const SeaLevelInput& input,
   file.time = axis;
   file.meta.emplace("config", config.string());
   file.meta.emplace("model", run.model.deck.string());
-  file.meta.emplace("ice", world.iceRead);
-  file.meta.emplace("sea_level", world.seaLevelRead);
+  if (run.ocean) {
+    file.meta.emplace("ice", world.iceRead);
+    file.meta.emplace("sea_level", world.seaLevelRead);
+  } else {
+    file.meta.emplace("ocean", std::string{kNoOcean});
+  }
   if (const auto change = DescribeIceChange(run, "; "); !change.empty()) {
     file.meta.emplace("ice_change", change);
   }
@@ -526,8 +594,13 @@ void WriteHistoryFile(const SeaLevelInput& input,
   if (!run.model.moduli.empty()) {
     file.meta.emplace("moduli", run.model.moduli.string());
   }
-  file.meta.emplace("shorelines", std::string{NameOf(run.ocean.shorelines)});
-  file.meta.emplace("initial_sea_level", std::string{initialSeaLevelOrigin});
+  if (run.ocean) {
+    file.meta.emplace("shorelines",
+                      std::string{NameOf(run.ocean->shorelines)});
+    file.meta.emplace("initial_sea_level",
+                      std::string{initialSeaLevelOrigin});
+  }
+  file.meta.emplace("rotation", std::string{NameOf(run.rotation)});
   auto listed = [](const auto& terms) {
     auto out = std::string{};
     for (const auto& term : terms) {
@@ -538,6 +611,9 @@ void WriteHistoryFile(const SeaLevelInput& input,
   };
   if (!run.forcing.load.empty()) {
     file.meta.emplace("load", listed(run.forcing.load));
+  }
+  if (!run.forcing.tide.empty()) {
+    file.meta.emplace("tide", listed(run.forcing.tide));
   }
   if (!run.forcing.seismic.empty()) {
     file.meta.emplace("seismic", listed(run.forcing.seismic));
@@ -567,9 +643,33 @@ void WriteHistoryFile(const SeaLevelInput& input,
       "sea-level change from the window's start");
   put("displacement", gather(&Node::displacement), pm::units::LENGTH,
       "radial surface displacement");
+  put("tangential_potential", gather(&Node::tangentialPotential),
+      pm::units::LENGTH,
+      "the tangential displacement's potential V (the displacement its "
+      "surface gradient)");
+  // the toroidal potential where the run has one (seismic sources, a 3-D
+  // run), zero at a node without (a 3-D run's radial start)
+  if (std::ranges::any_of(history, [](const Node& kept) {
+        return !kept.toroidalPotential.empty();
+      })) {
+    auto values = std::vector<double>{};
+    values.reserve(history.size() * fieldSize);
+    for (const auto& kept : history) {
+      if (kept.toroidalPotential.empty()) {
+        values.insert(values.end(), fieldSize, 0.0);
+      } else {
+        values.insert(values.end(), kept.toroidalPotential.begin(),
+                      kept.toroidalPotential.end());
+      }
+    }
+    put("toroidal_potential", std::move(values), pm::units::LENGTH,
+        "the toroidal displacement's potential W (the displacement minus the "
+        "radial unit vector crossed with its surface gradient), in the frame "
+        "of no net rotation of the surface");
+  }
   put("potential", gather(&Node::potential), potential,
       "gravitational potential perturbation at the surface");
-  {
+  if (run.ocean) {
     auto options = pm::SurfaceFieldOptions{};
     options.support = "static";
     options.dimensions = pm::units::LENGTH;
@@ -583,7 +683,7 @@ void WriteHistoryFile(const SeaLevelInput& input,
             std::vector<double>(initialSeaLevel.begin(), initialSeaLevel.end()),
             options));
   }
-  if (run.ocean.shorelines == Shorelines::Migrating) {
+  if (run.Migrating()) {
     put("ocean_function", gather(&Node::oceanFunction), std::nullopt,
         "the ocean function at each node, following flotation");
   }
@@ -595,37 +695,45 @@ void WriteHistoryFile(const SeaLevelInput& input,
 
 /// What the config was taken to mean, for the summary: the model's
 /// dimension, elastic (with migrating shorelines where they are) or
-/// viscoelastic with the window, the shorelines and the calibration, and
-/// the rotation and moments.
+/// viscoelastic with the window, the shorelines and the calibration (or,
+/// in their place, that the body has no ocean), and the rotation and
+/// moments.
 std::string Meaning(const SeaLevelRun& run, const BuiltEarth& earth) {
   auto out = earth.Dimension();
   if (!run.times) {
-    out += ", elastic (fingerprint)";
-    if (run.ocean.shorelines == Shorelines::Migrating) {
-      out += ", shorelines migrating";
+    if (!run.ocean) {
+      out += ", elastic, no ocean";
+    } else {
+      out += ", elastic (fingerprint)";
+      if (run.Migrating()) out += ", shorelines migrating";
     }
   } else {
     const auto& window = *run.times;
-    out += std::format(
-        ", viscoelastic, {} nodes {} to {} kyr BP, shorelines {}", window.nodes,
-        window.start_kyr_bp, window.end_kyr_bp, NameOf(run.ocean.shorelines));
-    if (run.ocean.calibrate) out += ", initial sea level calibrated";
+    out += std::format(", viscoelastic, {} nodes {} to {} kyr BP",
+                       window.nodes, window.start_kyr_bp, window.end_kyr_bp);
+    if (!run.ocean) {
+      out += ", no ocean";
+    } else {
+      out += std::format(", shorelines {}", NameOf(run.ocean->shorelines));
+      if (run.Calibrating()) out += ", initial sea level calibrated";
+    }
   }
   out += std::format(", rotation {}", NameOf(run.rotation));
   if (run.hydrostatic_moments) out += ", moments hydrostatic";
   return out;
 }
 
-/// The forcing of a run with an ocean in the form the library's evolutions
+/// The forcing of a `sea-level` run in the form the library's evolutions
 /// take, in the solver's units, each channel a function of the solver's
 /// time read on the run's clock (kyr from the window's start through time;
 /// the static problem's one node is at zero, where its terms are what they
-/// are): under frozen shorelines the ice change's grounded load,
-/// `iceLoad`, joined by the surface loads in the water budget; under
-/// migrating ones those loads alone, the ice being given as its thickness;
-/// the loads outside the water budget, the layer on the solid surface and
-/// the seismic sources. A channel no term gives is absent. `loads` are the
-/// run's surface loads (null without any), held by the forcing.
+/// are): the ice change's grounded load, `iceLoad` (given under frozen
+/// shorelines alone: under migrating ones the ice is given as its
+/// thickness, and a body without an ocean has none), joined by the surface
+/// loads in the water budget; the loads outside the water budget, the
+/// layer on the solid surface, the tide and the seismic sources. A channel
+/// no term gives is absent. `loads` are the run's surface loads (null
+/// without any), held by the forcing.
 template <class EvolutionForcing>
 EvolutionForcing ForcingOf(
     const SeaLevelRun& run, const GRDSolver& solver,
@@ -635,7 +743,7 @@ EvolutionForcing ForcingOf(
   const auto length = scales.Length();
   const auto toKyr = scales.Time() / KYR;
   const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
-  const auto migrating = run.ocean.shorelines == Shorelines::Migrating;
+  const auto ice = static_cast<bool>(iceLoad);
   auto forcing = EvolutionForcing{};
   if (loads) {
     // a node's loads are built once, whichever is asked first
@@ -660,9 +768,9 @@ EvolutionForcing ForcingOf(
         any([](const SurfaceLoadTerm& term) { return !term.water_budget; });
     const auto layered = any(
         [](const SurfaceLoadTerm& term) { return term.moves_solid_surface; });
-    if (inside || !migrating) {
-      forcing.directLoad = [at, iceLoad, migrating, inside, toLoad](double t) {
-        auto out = migrating ? std::vector<double>{} : iceLoad(t);
+    if (inside || ice) {
+      forcing.directLoad = [at, iceLoad, ice, inside, toLoad](double t) {
+        auto out = ice ? iceLoad(t) : std::vector<double>{};
         if (!inside) return out;
         const auto& given = at(t).inside;
         if (out.empty()) out.assign(given.size(), 0.0);
@@ -686,8 +794,17 @@ EvolutionForcing ForcingOf(
         return out;
       };
     }
-  } else if (!migrating) {
+  } else if (ice) {
     forcing.directLoad = iceLoad;
+  }
+  if (!run.forcing.tide.empty()) {
+    const auto toPotential = scales.Factor(PotentialDimensions);
+    forcing.tide = [tide = run.forcing.tide, grid = &solver.Grid(), toKyr,
+                    toPotential](double t) {
+      auto out = TideAt(tide, *grid, t * toKyr);
+      for (auto& c : out) c /= toPotential;
+      return out;
+    };
   }
   if (!run.forcing.seismic.empty()) {
     auto seismic = Forcing{};
@@ -730,18 +847,23 @@ std::string RunWith(
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto times = MakeTimes(run, scales);
-  const auto directLoad = IceLoadOf(run, solver, world);
-  const auto migrating = run.ocean.shorelines == Shorelines::Migrating;
+  const auto migrating = run.Migrating();
+  // the ice's grounded load under frozen shorelines; a body without an
+  // ocean has no ice
+  const auto directLoad = run.ocean && !migrating
+                              ? IceLoadOf(run, solver, world)
+                              : std::function<std::vector<double>(double)>{};
   const auto thickness = migrating
                              ? IceThicknessOf(run, solver, world)
                              : std::function<std::vector<double>(double)>{};
 
-  // The forcing beside the ice: the surface loads by their properties and
-  // the seismic sources (ForcingOf). Under frozen shorelines the ice's
-  // load joins the loads in the water budget; under migrating ones the ice
-  // is given as its thickness, and a change present at the window's start
-  // is taken through the forcing's entries (with nothing beside the ice,
-  // an empty forcing), so that the start is solved.
+  // The forcing beside the ice: the surface loads by their properties, the
+  // tide and the seismic sources (ForcingOf). Under frozen shorelines the
+  // ice's load joins the loads in the water budget; under migrating ones
+  // the ice is given as its thickness, and a change present at the
+  // window's start is taken through the forcing's entries (with nothing
+  // beside the ice, an empty forcing), so that the start is solved. A run
+  // without an ocean is forced beside the ice alone.
   const auto forced = run.forcing.BesideTheIce() ||
                       (migrating && world.ChangedAtStart());
   auto forcing = typename Evolution::Forcing{};
@@ -764,9 +886,18 @@ std::string RunWith(
     kept.relativeSeaLevelChange = snapshot.relativeSeaLevelChange;
     kept.displacement = snapshot.displacement;
     kept.potential = snapshot.potential;
+    kept.tangentialPotential = snapshot.tangentialPotential;
+    if (!snapshot.toroidalPotential.empty()) {
+      // in the frame of no net rotation of the surface: the rigid rotation
+      // in the solver's W is its gauge
+      kept.toroidalPotential =
+          WithoutNetRotation(grid, snapshot.toroidalPotential);
+    }
     for (auto& v : kept.relativeSeaLevelChange) v *= length;
     for (auto& v : kept.displacement) v *= length;
     for (auto& v : kept.potential) v *= toPotential;
+    for (auto& v : kept.tangentialPotential) v *= length;
+    for (auto& v : kept.toroidalPotential) v *= length;
     for (auto k = 0; k < 3; ++k) {
       kept.angularVelocity[k] = snapshot.angularVelocity[k] * toOmega;
     }
@@ -808,7 +939,7 @@ std::string RunWith(
   // against the state's at the end, by an evolution that streams nothing
   // (a resumption reads back the calibrated state its run kept).
   auto origin = std::string{"the state's sea level at the window's start"};
-  if (run.ocean.calibrate) {
+  if (run.Calibrating()) {
     auto restored = std::optional<GRDSolver::State>{};
     if (resumed) {
       restored = ReadInitialState(directory, hash, world.background);
@@ -908,7 +1039,8 @@ std::string RunWith(
 /// with a time axis read at `ocean.date_kyr_bp`, and `ocean.land`), the
 /// background state built from it in the solver's units, its ocean
 /// function flotation's, the ice change at the date (RunIce, held to what
-/// the state holds), SI, and the state's inputs as read.
+/// the state holds), SI, and the state's inputs as read. Without an ocean
+/// the background is GRDSolver::NoOceanState and the rest is empty.
 struct StaticWorld {
   GRDSolver::State background;
   std::vector<double> change;
@@ -918,14 +1050,19 @@ struct StaticWorld {
 
 StaticWorld LoadStaticWorld(const SeaLevelRun& run, const Json& top,
                             const GRDSolver& solver) {
-  const auto& source = run.ocean.seaLevel;
+  if (!run.ocean) {
+    auto out = StaticWorld{};
+    out.background = solver.NoOceanState();
+    return out;
+  }
+  const auto& source = run.ocean->seaLevel;
   const auto length = solver.SolverScales().Length();
   auto files = InputFiles(solver.Grid());
   CheckStateDate(run, top, files);
   const auto sea = files.Open(source.input, SeaLevelMember(run, top));
-  const auto iceFile = files.Open(run.ocean.ice, IceMember(top));
+  const auto iceFile = files.Open(run.ocean->ice, IceMember(top));
   // a state without a time axis is read at any date: the present's
-  const auto date = run.ocean.date_kyr_bp;
+  const auto date = run.ocean->date_kyr_bp;
   const auto time = -date.value_or(0.0) * KYR;
   const RunIce ice(run, top, files, time);
   ice.CheckHeld(std::span(&time, 1), false);
@@ -946,7 +1083,7 @@ StaticWorld LoadStaticWorld(const SeaLevelRun& run, const Json& top,
     return file.Span() ? std::format("{:g} kyr BP", date.value_or(0.0))
                        : std::string{"static"};
   };
-  out.iceRead = DescribeInput(run.ocean.ice, slice(*iceFile));
+  out.iceRead = DescribeInput(run.ocean->ice, slice(*iceFile));
   out.seaLevelRead = std::format("{} {}", source.Quantity(),
                                  DescribeInput(source.input, slice(*sea)));
   if (!land.read.empty()) out.seaLevelRead += ", " + land.read;
@@ -970,8 +1107,10 @@ std::shared_ptr<const SurfaceLoads> StaticLoadsOf(const SeaLevelRun& run,
 /// grounded load on the state's ocean function, rho_ice (1 - C) dI, in the
 /// water budget; under migrating shorelines the nonlinear one, the ice the
 /// state's plus the change, whose flotation, with the sea level's, places
-/// the shorelines. The surface loads and the seismic sources join either
-/// (ForcingOf).
+/// the shorelines. The surface loads, the tide and the seismic sources
+/// join either (ForcingOf). Without an ocean, the linear equation on a
+/// body without one under the forcing beside the ice alone: the solid
+/// body's response.
 template <class Evolution>
 typename Evolution::Snapshot SolveStatic(
     const SeaLevelRun& run, const GRDSolver& solver, const StaticWorld& world,
@@ -979,9 +1118,9 @@ typename Evolution::Snapshot SolveStatic(
   const auto length = solver.SolverScales().Length();
   const auto& background = world.background;
   const auto& change = world.change;
-  const auto migrating = run.ocean.shorelines == Shorelines::Migrating;
+  const auto migrating = run.Migrating();
   auto iceLoad = std::function<std::vector<double>(double)>{};
-  if (!migrating) {
+  if (run.ocean && !migrating) {
     auto load = std::vector<double>(change.size());
     for (auto i = std::size_t{0}; i < load.size(); ++i) {
       load[i] = solver.IceDensity() * (1.0 - background.oceanFunction[i]) *
@@ -1091,7 +1230,7 @@ RadialStatic SolveRadialStatic(const SeaLevelRun& run, const Json& top,
   auto snapshot = SolveStatic(run, solver, out.world, loads, evolution);
   if (!snapshot.converged) {
     throw std::runtime_error(
-        run.ocean.shorelines == Shorelines::Migrating
+        run.Migrating()
             ? "the sea level equation did not converge (shoreline cells "
               "flipping back and forth defeat the migrating solve's "
               "tolerance); loosen solver.rtol"
@@ -1129,8 +1268,10 @@ std::string Listed(const Terms& terms) {
 /// angular velocity in the metadata), the state's ocean function and,
 /// under migrating shorelines, the one the solve reaches; with the
 /// config, model, moduli, the state's ice and sea level as read, the
-/// forcing's terms, the shorelines and the rotation in the metadata. The
-/// runner adds its own.
+/// forcing's terms, the shorelines and the rotation in the metadata.
+/// Without an ocean the state's fields and metadata (the ice change, the
+/// ocean function, the ice, the sea level, the shorelines) are left out,
+/// and `ocean` says there is none. The runner adds its own.
 planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
                                     const SeaLevelRun& run,
                                     const StaticWorld& world,
@@ -1152,18 +1293,28 @@ planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
   if (!run.model.moduli.empty()) {
     file.meta.emplace("moduli", run.model.moduli.string());
   }
-  file.meta.emplace("ice", world.iceRead);
-  file.meta.emplace("sea_level", world.seaLevelRead);
+  if (run.ocean) {
+    file.meta.emplace("ice", world.iceRead);
+    file.meta.emplace("sea_level", world.seaLevelRead);
+  } else {
+    file.meta.emplace("ocean", std::string{kNoOcean});
+  }
   if (!run.forcing.ice_change.empty()) {
     file.meta.emplace("ice_change", DescribeIceChange(run, "; "));
   }
   if (!run.forcing.load.empty()) {
     file.meta.emplace("load", Listed(run.forcing.load));
   }
+  if (!run.forcing.tide.empty()) {
+    file.meta.emplace("tide", Listed(run.forcing.tide));
+  }
   if (!run.forcing.seismic.empty()) {
     file.meta.emplace("seismic", Listed(run.forcing.seismic));
   }
-  file.meta.emplace("shorelines", std::string{NameOf(run.ocean.shorelines)});
+  if (run.ocean) {
+    file.meta.emplace("shorelines",
+                      std::string{NameOf(run.ocean->shorelines)});
+  }
   file.meta.emplace("rotation", std::string{NameOf(run.rotation)});
   const auto& omega = answer.angularVelocity;
   file.meta.emplace("omega_x_rad_s", std::vector<double>{omega[0]});
@@ -1171,8 +1322,10 @@ planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
   file.meta.emplace("omega_z_rad_s", std::vector<double>{omega[2]});
   const auto length = pm::units::LENGTH;
   const auto load = pm::Dimensions{.mass = 1, .length = -2};
-  PutStatic(file, "ice_change", world.change, length,
-            "the ice-thickness change applied");
+  if (run.ocean) {
+    PutStatic(file, "ice_change", world.change, length,
+              "the ice-thickness change applied");
+  }
   if (!applied.inside.empty()) {
     PutStatic(file, "load_in_water_budget", applied.inside, load,
               "the surface loads applied whose mass is exchanged with the "
@@ -1203,10 +1356,12 @@ planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
   PutStatic(file, "potential", answer.potential,
             pm::Dimensions{.length = 2, .time = -2},
             "gravitational potential perturbation at the surface");
-  PutStatic(file, "ocean_function",
-            std::vector<double>(world.background.oceanFunction.begin(),
-                                world.background.oceanFunction.end()),
-            std::nullopt, "the ocean function of the state");
+  if (run.ocean) {
+    PutStatic(file, "ocean_function",
+              std::vector<double>(world.background.oceanFunction.begin(),
+                                  world.background.oceanFunction.end()),
+              std::nullopt, "the ocean function of the state");
+  }
   if (!answer.oceanFunction.empty()) {
     PutStatic(file, "ocean_function_final", answer.oceanFunction,
               std::nullopt,
@@ -1225,22 +1380,25 @@ void WriteSurface(const planetmodel::SurfaceFile& file,
 }
 
 /// What forces a run beside its ice, for a summary: `load (<n> term[s])`,
-/// `seismic (<n> source[s])`, or both joined by ` + `; empty without
-/// either.
+/// `tide (<n> coefficient[s])`, `seismic (<n> source[s])`, or several
+/// joined by ` + `; empty without any.
 std::string DescribeBesideTheIce(const SeaLevelRun& run) {
   auto forcing = Forcing{};
   for (const auto& term : run.forcing.load) forcing.load.push_back(term.term);
+  forcing.tide = run.forcing.tide;
   forcing.seismic = run.forcing.seismic;
   return Summary(forcing);
 }
 
 /// What the config was taken to mean, followed by the state's inputs as
-/// read, the ice change's terms and the forcing beside the ice, where
-/// there are any.
+/// read (none without an ocean), the ice change's terms and the forcing
+/// beside the ice, where there are any.
 std::string WithInputs(std::string_view meaning, const SeaLevelRun& run,
                        std::string_view iceRead,
                        std::string_view seaLevelRead) {
-  auto out = std::format("{}; ice {}, {}", meaning, iceRead, seaLevelRead);
+  auto out = run.ocean ? std::format("{}; ice {}, {}", meaning, iceRead,
+                                     seaLevelRead)
+                       : std::string{meaning};
   if (const auto change = DescribeIceChange(run, " + "); !change.empty()) {
     out += "; ice change " + change;
   }
@@ -1465,9 +1623,11 @@ SeaLevelInput ReadSeaLevelInput(const std::filesystem::path& config) {
   // what a run forced beside its ice does not do
   if (out.run.forcing.BesideTheIce()) {
     const auto& forcing = top.At("forcing");
-    const auto& member =
-        forcing.At(out.run.forcing.load.empty() ? "seismic" : "load");
-    if (out.run.ocean.calibrate) {
+    const auto& member = forcing.At(
+        !out.run.forcing.load.empty()
+            ? "load"
+            : (!out.run.forcing.tide.empty() ? "tide" : "seismic"));
+    if (out.run.Calibrating()) {
       Fail(member,
            "is a forcing beside the ice, which a calibrated initial sea "
            "level does not take: the calibration's runs are under the ice "

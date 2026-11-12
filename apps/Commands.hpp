@@ -14,11 +14,13 @@
  * time. `sea-level` solves the sea level equation, the ocean coupled to
  * the solid Earth, on a state (the sea level and the ice at one instant)
  * read from file inputs (pyslfp's `export_ice_history` writes such
- * files), under any mix of an ice change, surface loads and seismic
- * sources, with frozen or migrating shorelines: in the static problem
- * the solve at the state's date on the elastic Earth, in the
+ * files), under any mix of an ice change, surface loads, a tide and
+ * seismic sources, with frozen or migrating shorelines: in the static
+ * problem the solve at the state's date on the elastic Earth, in the
  * quasi-static problem GIA through time from a state at an end of the
- * window, restartable from disk checkpoints. `kernel1d` and `kernel` give the adjoint
+ * window, restartable from disk checkpoints; without a state, the same
+ * problems on a body without an ocean, `response`'s with the rotational
+ * feedback as asked. `kernel1d` and `kernel` give the adjoint
  * sensitivity kernels of measurements of a run through time. Each of
  * these four reads a config of blocks (Blocks.hpp, Forcing.hpp,
  * Files.hpp) under a top-level `problem`, 1-D or 3-D as its `model` block
@@ -68,12 +70,14 @@ struct LoveNumbersInput {
 
 /// The config of `sl3d sea-level`: the sea level equation, the ocean
 /// coupled to the solid Earth, under any mix of an ice change, surface
-/// loads and seismic sources, with frozen or migrating shorelines. The
-/// static problem is the solve on the state (the sea level and the ice)
-/// at its date on the elastic Earth, radial or, under lateral moduli, 3-D;
-/// the quasi-static problem is GIA through time from a state at an end of
-/// the window, of the radial model, or, under a lateral viscosity or
-/// lateral moduli, the 3-D one, restartable from disk checkpoints.
+/// loads, a tide and seismic sources, with frozen or migrating shorelines.
+/// The static problem is the solve on the state (the sea level and the
+/// ice) at its date on the elastic Earth, radial or, under lateral moduli,
+/// 3-D; the quasi-static problem is GIA through time from a state at an
+/// end of the window, of the radial model, or, under a lateral viscosity
+/// or lateral moduli, the 3-D one, restartable from disk checkpoints.
+/// Without an `ocean` block the state is absent and the body has no
+/// ocean.
 struct SeaLevelInput {
   SeaLevelRun run;
   CheckpointBlock checkpoint;  ///< no directory: no checkpoints
