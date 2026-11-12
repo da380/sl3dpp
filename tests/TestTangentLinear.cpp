@@ -1234,14 +1234,97 @@ TEST(TangentLinear, LoadsOutsideTheWaterBudgetAndLayersInTheRun) {
   }
 }
 
-TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
-  // The tide's rows of the Hessian from the continuous second-order
-  // sweep: about a tide-driven run, the derivative of the tide kernels
-  // along the relaxation times and along the moduli, paired with a
-  // perturbation of the tide smooth in time, against the exact mixed
-  // derivative (the discrete second-order tangent-linear run). The gap
-  // falls as the steps are halved, with an ocean and the rotational
-  // feedback and without either.
+TEST(TangentLinear, TheContinuousSweepFormsTheKernelsOfEveryLoad) {
+  // The continuous sweep's kernels in a direct load inside the water
+  // budget, in one outside it and in the height of a layer on the solid
+  // surface: against the exact derivative (the tangent-linear run along
+  // a perturbation smooth in time) the gap falls at second order as the
+  // steps are halved, under each rotational feedback, the sea level, the
+  // displacement and the potential measured.
+  auto setup = Scene::Make(1e22);
+  const auto span = 10.0 * setup.Kyr();
+  std::mt19937 fields(29);
+  const auto in0 = setup.Smooth(fields, 100.0 * setup.Sigma());
+  const auto out0 = setup.Smooth(fields, 100.0 * setup.Sigma());
+  const auto layer0 = setup.Smooth(fields, 5.0 * setup.Metre());
+  const auto gSea = setup.Smooth(fields, 1.0);
+  const auto gU = setup.Smooth(fields, 0.5);
+  const auto gPhi = setup.Smooth(fields, 0.4);
+  for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
+    const auto label = "rotation " + std::to_string(static_cast<int>(rotation));
+    auto gaps = std::array<std::vector<double>, 3>{};
+    for (const auto nodes : {5, 9, 17}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() / 2].relativeSeaLevelDual = gSea;
+      measurements[times.size() / 2].potentialDual = gPhi;
+      measurements[times.size() - 1].displacementDual = gU;
+      measurements[times.size() - 1].relativeSeaLevelDual = gSea;
+      auto directions = std::array<TangentPerturbation, 3>{};
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        const auto shape = std::sin(0.5 * std::numbers::pi * times[n] / span) + 0.3;
+        auto scaled = [&](const std::vector<double>& f) {
+          auto out = f;
+          for (auto& v : out) v *= shape;
+          return out;
+        };
+        directions[0].directLoad.push_back(scaled(in0));
+        directions[1].directLoadOutsideWaterBudget.push_back(scaled(out0));
+        directions[2].solidSurfaceChange.push_back(scaled(layer0));
+      }
+      ViscoelasticOperator op(setup.rheology, kLmax);
+      Evolution evolution(op, setup.solver, setup.state,
+                          {.rotation = rotation, .rtol = 1e-12});
+      TangentLinearSolver tangent(
+          evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+      const auto kernels =
+          AdjointSolver(evolution,
+                        {.method = AdjointMethod::Continuous, .rtol = 1e-12})
+              .FirstOrderKernels(times, measurements);
+      ASSERT_EQ(kernels.directLoadOutsideWaterBudgetKernels.size(), times.size());
+      ASSERT_EQ(kernels.solidSurfaceChangeKernels.size(), times.size());
+      const std::array<const std::vector<std::vector<double>>*, 3> kernel{
+          &kernels.directLoadKernels,
+          &kernels.directLoadOutsideWaterBudgetKernels,
+          &kernels.solidSurfaceChangeKernels};
+      const std::array<const std::vector<std::vector<double>>*, 3> delta{
+          &directions[0].directLoad,
+          &directions[1].directLoadOutsideWaterBudget,
+          &directions[2].solidSurfaceChange};
+      for (auto k = std::size_t{0}; k < 3; ++k) {
+        const auto along =
+            Objective(setup, tangent.Run(times, directions[k]), measurements);
+        ASSERT_NE(along, 0.0);
+        auto paired = 0.0;
+        for (auto n = std::size_t{0}; n < times.size(); ++n) {
+          paired += setup.Surface((*kernel[k])[n], (*delta[k])[n]);
+        }
+        gaps[k].push_back(std::abs(paired - along) / std::abs(along));
+      }
+    }
+    const char* what[3] = {"inside the budget", "outside the budget", "layer"};
+    for (auto k = std::size_t{0}; k < 3; ++k) {
+      EXPECT_LT(gaps[k][2], 0.05)
+          << what[k] << ", " << label << ": " << gaps[k][0] << " " << gaps[k][1]
+          << " " << gaps[k][2];
+      EXPECT_GT(gaps[k][1] / gaps[k][2], 3.0)
+          << what[k] << ", " << label << ": " << gaps[k][0] << " " << gaps[k][1]
+          << " " << gaps[k][2];
+    }
+  }
+}
+
+TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
+  // The surface forcings' rows of the Hessian from the continuous
+  // second-order sweep: about a tide-driven run, the derivatives of the
+  // kernels in the tide, in a direct load inside the water budget and
+  // outside it, and in a layer on the solid surface, along the
+  // relaxation times and along the moduli, paired with a perturbation
+  // of all four smooth in time, against the exact mixed derivative (the
+  // discrete second-order tangent-linear run). The gap falls as the
+  // steps are halved, with an ocean and the rotational feedback and
+  // without either.
   auto setup = Scene::Make(1e22);
   const auto& grid = setup.solver.Grid();
   const auto& sle = setup.solver.SolverScales();
@@ -1256,6 +1339,9 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
   const auto gSea = setup.Smooth(fields, 1.0);
   const auto gU = setup.Smooth(fields, 0.5);
   const auto gV = setup.Smooth(fields, 0.6);
+  const auto in0 = setup.Smooth(fields, 100.0 * setup.Sigma());
+  const auto out0 = setup.Smooth(fields, 100.0 * setup.Sigma());
+  const auto layer0 = setup.Smooth(fields, 5.0 * setup.Metre());
   auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
     const auto fa = grid.Synthesise(a);
     const auto fb = grid.Synthesise(b);
@@ -1305,6 +1391,14 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
         for (auto& c : t) c *= 0.3 + std::sin(0.5 * std::numbers::pi * x);
         base.push_back(std::move(b));
         tideOnly.tide.push_back(std::move(t));
+        auto scaled = [&](const std::vector<double>& f) {
+          auto out = f;
+          for (auto& v : out) v *= 0.3 + std::sin(0.5 * std::numbers::pi * x);
+          return out;
+        };
+        tideOnly.directLoad.push_back(scaled(in0));
+        tideOnly.directLoadOutsideWaterBudget.push_back(scaled(out0));
+        tideOnly.solidSurfaceChange.push_back(scaled(layer0));
       }
       ViscoelasticOperator op(setup.rheology, kLmax);
       Evolution evolution(
@@ -1355,9 +1449,18 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheTideRows) {
                                         .tide_kernels = true});
       auto row = [&](const KernelDerivatives& derivatives) {
         EXPECT_EQ(derivatives.tideKernels.size(), times.size());
+        EXPECT_EQ(derivatives.directLoadOutsideWaterBudgetKernels.size(),
+                  times.size());
+        EXPECT_EQ(derivatives.solidSurfaceChangeKernels.size(), times.size());
         auto out = 0.0;
         for (auto n = std::size_t{0}; n < times.size(); ++n) {
-          out += pair(derivatives.tideKernels[n], tideOnly.tide[n]);
+          out += pair(derivatives.tideKernels[n], tideOnly.tide[n]) +
+                 setup.Surface(derivatives.directLoadKernels[n],
+                               tideOnly.directLoad[n]) +
+                 setup.Surface(derivatives.directLoadOutsideWaterBudgetKernels[n],
+                               tideOnly.directLoadOutsideWaterBudget[n]) +
+                 setup.Surface(derivatives.solidSurfaceChangeKernels[n],
+                               tideOnly.solidSurfaceChange[n]);
         }
         return out;
       };

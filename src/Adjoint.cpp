@@ -975,6 +975,7 @@ Kernels AdjointSolver::ContinuousSweep(
   // that drive the radial jump.
   struct Jump {
     std::vector<double> xiA;
+    double shift = 0.0;  // the conservation's uniform part of xiA
     std::vector<Complex> lam, psiA, zu, zphi, zv;  // z* empty when absent
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
@@ -1020,6 +1021,7 @@ Kernels AdjointSolver::ContinuousSweep(
     }
     Jump out;
     out.xiA = resp.relativeSeaLevelChange;
+    out.shift = resp.uniformShift;
     const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1129,6 +1131,19 @@ Kernels AdjointSolver::ContinuousSweep(
   // The memory-only adjoint equilibrium of the current state: its sea
   // level (the smooth kernel density, per material time) and the load
   // and centrifugal coefficients the next reversed step starts from.
+  // The two other properties of a surface load in the continuous view.
+  // The adjoint solves are solves of the sea level equation, and the
+  // load kernel is their sea level change. A load outside the water
+  // budget is conjugate to that change before the water's conservation
+  // is imposed, the change less its uniform part; the height of a layer
+  // on the solid surface to minus the adjoint's own surface load, the
+  // measurement's dual and the ocean's. Kept beside each density and
+  // lump: the uniform parts and the adjoint loads.
+  auto equilibriumShift = 0.0;
+  std::vector<double> shiftLate(times.size(), 0.0), shiftEarly(times.size(), 0.0);
+  std::vector<std::vector<double>> loadLate(times.size()), loadEarly(times.size());
+  auto lumpShift = std::map<std::size_t, double>{};
+  auto lumpLoad = std::map<std::size_t, std::vector<double>>{};
   auto smoothEquilibrium = [&](std::size_t node) {
     const auto solutions = op.SolveElastic(vstate);
     GRDSolver::GeneralisedForcing f;
@@ -1155,6 +1170,7 @@ Kernels AdjointSolver::ContinuousSweep(
     psiC = rotation != RotationalFeedback::None
                ? solver.CentrifugalCoefficients(resp.angularVelocity)
                : grid.ZeroCoefficients();
+    equilibriumShift = resp.uniformShift;
     return resp.relativeSeaLevelChange;
   };
 
@@ -1529,8 +1545,14 @@ Kernels AdjointSolver::ContinuousSweep(
       }
     }
     if (tidal) addTide(lumpSolutions, j.lam, node, 1.0);
+    lumpShift.emplace(node, j.shift);
+    lumpLoad.emplace(node, grid.Synthesise(j.lam));
     auto early = smoothEquilibrium(node);
-    if (node > 0) densityEarly[node] = std::move(early);
+    if (node > 0) {
+      densityEarly[node] = std::move(early);
+      shiftEarly[node] = equilibriumShift;
+      loadEarly[node] = grid.Synthesise(sigmaC);
+    }
   };
 
   // The reversed sweep, nodes N down to 0; the state starts undisturbed,
@@ -1558,6 +1580,7 @@ Kernels AdjointSolver::ContinuousSweep(
           "the adjoint coupled solve at node {} did not converge", n - 1));
     }
     densityLate[n - 1] = resp.relativeSeaLevelChange;
+    shiftLate[n - 1] = resp.uniformShift;
     const auto& Cn = oceanAt(n - 1);
     auto sig = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1567,6 +1590,7 @@ Kernels AdjointSolver::ContinuousSweep(
     psiC = rotation != RotationalFeedback::None
                ? solver.CentrifugalCoefficients(resp.angularVelocity)
                : grid.ZeroCoefficients();
+    loadLate[n - 1] = grid.Synthesise(sigmaC);
     auto [next, solutions] =
         step.Finish(ev.Columns(sigmaC, ev.toMatDensity_),
                     ev.Columns(psiC, ev.toMatPotential_));
@@ -1587,12 +1611,14 @@ Kernels AdjointSolver::ContinuousSweep(
   // late side, the half towards times[0] with the early side.
   std::vector<std::vector<double>> directLoadKernels(times.size()),
       densityLoad(times.size());
+  std::vector<std::vector<double>> outsideKernels(times.size()),
+      layerKernels(times.size());
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     directLoadKernels[n].assign(fieldSize, 0.0);
     densityLoad[n].assign(fieldSize, 0.0);
     const auto* late = densityLate[n].empty() ? nullptr : &densityLate[n];
-    const auto* early =
-        densityEarly[n].empty() ? late : &densityEarly[n];
+    const bool split = !densityEarly[n].empty();
+    const auto* early = split ? &densityEarly[n] : late;
     const auto lump = lumps.find(n);
     const auto totalW = wEarly[n] + wLate[n];
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1603,11 +1629,32 @@ Kernels AdjointSolver::ContinuousSweep(
           smooth + (lump == lumps.end() ? 0.0 : lump->second[i]);
       densityLoad[n][i] = totalW > 0.0 ? smooth / totalW : 0.0;
     }
+    // the same assembly of the uniform parts and of the adjoint loads
+    const auto lateShift = late == nullptr ? 0.0 : shiftLate[n];
+    const auto earlyShift = split ? shiftEarly[n] : lateShift;
+    const auto* lateLoad = late == nullptr ? nullptr : &loadLate[n];
+    const auto* earlyLoad = split ? &loadEarly[n] : lateLoad;
+    const auto uniform =
+        (wEarly[n] * earlyShift + wLate[n] * lateShift) * perTime +
+        (lump == lumps.end() ? 0.0 : lumpShift.at(n));
+    outsideKernels[n] = directLoadKernels[n];
+    for (auto& v : outsideKernels[n]) v -= uniform;
+    layerKernels[n].assign(fieldSize, 0.0);
+    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+      const double lateV = lateLoad == nullptr ? 0.0 : (*lateLoad)[i] * perTime;
+      const double earlyV =
+          earlyLoad == nullptr ? 0.0 : (*earlyLoad)[i] * perTime;
+      layerKernels[n][i] =
+          -(wEarly[n] * earlyV + wLate[n] * lateV +
+            (lump == lumps.end() ? 0.0 : lumpLoad.at(n)[i]));
+    }
   }
 
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
                            std::move(lumps), oceanFunctions);
   out.momentKernels = std::move(momentKernels);
+  out.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
+  out.solidSurfaceChangeKernels = std::move(layerKernels);
   for (auto& kernel : tideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
   out.tideKernels = std::move(tideKernels);
   // the kernels as densities per unit volume: the weights divided out

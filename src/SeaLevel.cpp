@@ -574,6 +574,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
   const Block2 layer2 = layered ? BlockOf(layerLm) : Block2{};
 
+  auto lastShift = 0.0;  // the conservation's uniform part, last formed
   // One iteration: the mass-conserving sea level change of a load.
   auto seaLevelFromLoad = [&](std::span<const std::complex<double>> loadLm,
                               std::array<double, 3>& omega) {
@@ -611,6 +612,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
     }
     const auto shift = meanSlc - IntegrateSurface(cslc) * perOceanArea;
     for (auto& v : slc) v += shift;
+    lastShift = shift;
     return slc;
   };
 
@@ -693,6 +695,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   response.potential = grid_.Synthesise(potLm);
   response.tangentialPotential = grid_.Synthesise(tanLm);
   response.angularVelocity = omega;
+  response.uniformShift = lastShift;
   response.iterations = count;
   response.error = err;
   response.converged = converged;

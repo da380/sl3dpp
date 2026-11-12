@@ -1037,6 +1037,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   struct Carried {
     ViscoelasticState state;
     std::vector<Complex> sigma, psi;
+    double shift = 0.0;  // the conservation's uniform part of the last solve
   };
   auto vs = Carried{op.ZeroState([](int l) { return 2 * (l + 1); }),
                     grid.ZeroCoefficients(), grid.ZeroCoefficients()};
@@ -1072,6 +1073,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   // perturbation of its inverse.
   struct Jump {
     std::vector<double> xiA;
+    double shift = 0.0;  // the conservation's uniform part of xiA
     std::vector<Complex> lam, psiA, zu, zphi, zv;
   };
   auto jump = [&](const Measurement& m, std::size_t node) {
@@ -1117,6 +1119,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     }
     Jump out;
     out.xiA = resp.relativeSeaLevelChange;
+    out.shift = resp.uniformShift;
     const auto& Cn = oceanAt(node);
     auto lamGrid = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1219,7 +1222,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       }
     }
     return std::tuple(std::move(response), resp.relativeSeaLevelChange,
-                      std::move(dlamCoefficients));
+                      std::move(dlamCoefficients), resp.uniformShift);
   };
   // m += factor(x) d-tilde, with the factor itau (the adjoint state) or
   // v's delta itau (its derivative), at the memory points.
@@ -1277,6 +1280,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     carried.sigma = grid.Expand(sig);
+    carried.shift = resp.uniformShift;
     carried.psi = rotation != RotationalFeedback::None
                       ? solver.CentrifugalCoefficients(resp.angularVelocity)
                       : grid.ZeroCoefficients();
@@ -1321,6 +1325,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
     carried.sigma = grid.Expand(sig);
+    carried.shift = resp.uniformShift;
     carried.psi = rotation != RotationalFeedback::None
                       ? solver.CentrifugalCoefficients(resp.angularVelocity)
                       : grid.ZeroCoefficients();
@@ -1334,6 +1339,30 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     return resp.relativeSeaLevelChange;
   };
 
+  // The two other properties of a surface load, as the first-order
+  // continuous sweep forms them (Adjoint.cpp): beside each density and
+  // lump, the sea level change before the water's conservation (the
+  // change less its uniform part: a load outside the water budget) and
+  // minus the adjoint's own surface load (a layer on the solid surface);
+  // and the same of the derivative state.
+  struct Sides {
+    std::vector<std::vector<double>> late, early;
+    std::map<std::size_t, std::vector<double>> lumps;
+  };
+  auto sides = [&] {
+    return Sides{std::vector<std::vector<double>>(times.size()),
+                 std::vector<std::vector<double>>(times.size()), {}};
+  };
+  auto outside = sides(), layer = sides(), dOutside = sides(), dLayer = sides();
+  auto lessShift = [](std::vector<double> field, double shift) {
+    for (auto& v : field) v -= shift;
+    return field;
+  };
+  auto minusLoad = [&](const std::vector<Complex>& load) {
+    auto field = grid.Synthesise(load);
+    for (auto& v : field) v = -v;
+    return field;
+  };
   std::vector<std::vector<double>> densityLate(times.size()),
       densityEarly(times.size()), dDensityLate(times.size()),
       dDensityEarly(times.size());
@@ -1650,6 +1679,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     if (found == measurements.end()) return;
     const auto j = jump(found->second, node);
     lumps.emplace(node, j.xiA);
+    outside.lumps.emplace(node, lessShift(j.xiA, j.shift));
+    layer.lumps.emplace(node, minusLoad(j.lam));
     const auto xJ = jumpSolutions(j);
     const auto strains = strainsOf(xJ);
     applyJump(vs.state, strains, false);
@@ -1657,8 +1688,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     auto dxJ = Fields{};
     if (tidal) addTide(xJ, j.lam, node, 1.0, tideKernels);
     if (materialV) {
-      auto [dx, dxi, dlam] = jumpDerivative(xJ, node);
+      auto [dx, dxi, dlam, dshift] = jumpDerivative(xJ, node);
       applyJump(ds.state, strainsOf(dx), false);
+      dOutside.lumps.emplace(node, lessShift(dxi, dshift));
+      dLayer.lumps.emplace(node, minusLoad(dlam));
       dlumps.emplace(node, std::move(dxi));
       if (tidal) addTide(dx, dlam, node, 1.0, dTideKernels);
       dxJ = std::move(dx);
@@ -1735,6 +1768,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       }
     }
     if (node > 0) {
+      outside.early[node] = lessShift(early, vs.shift);
+      layer.early[node] = minusLoad(vs.sigma);
+      dOutside.early[node] = lessShift(dearly, ds.shift);
+      dLayer.early[node] = minusLoad(ds.sigma);
       densityEarly[node] = std::move(early);
       dDensityEarly[node] = std::move(dearly);
     }
@@ -1753,6 +1790,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     StepRecord record;
     densityLate[n - 1] = reversedStep(vs, dt, n - 1, nullptr, nullptr,
                                       materialV ? &record : nullptr);
+    outside.late[n - 1] = lessShift(densityLate[n - 1], vs.shift);
+    layer.late[n - 1] = minusLoad(vs.sigma);
     const auto drive = TangentLinearSolver::FirstOrderDrive(
         op, AdjointMethod::Continuous, scheme, dt, before, vs.state,
         ditauPoints);
@@ -1760,6 +1799,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     if (materialV) force = tools->Force(dt, record.full, record.mem);
     dDensityLate[n - 1] = reversedStep(ds, dt, n - 1, &drive,
                                        materialV ? &force : nullptr, nullptr);
+    dOutside.late[n - 1] = lessShift(dDensityLate[n - 1], ds.shift);
+    dLayer.late[n - 1] = minusLoad(ds.sigma);
     if (twisting) {
       const auto twistBefore = tadj;
       auto twistForce = TwistFields{};
@@ -1810,6 +1851,12 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
       dDensityLoad;
   assemble(densityLate, densityEarly, lumps, directLoadKernels, densityLoad);
   assemble(dDensityLate, dDensityEarly, dlumps, dloadDuals, dDensityLoad);
+  std::vector<std::vector<double>> outsideKernels, layerKernels,
+      dOutsideKernels, dLayerKernels, unused;
+  assemble(outside.late, outside.early, outside.lumps, outsideKernels, unused);
+  assemble(layer.late, layer.early, layer.lumps, layerKernels, unused);
+  assemble(dOutside.late, dOutside.early, dOutside.lumps, dOutsideKernels, unused);
+  assemble(dLayer.late, dLayer.early, dLayer.lumps, dLayerKernels, unused);
   auto kernels = AssembleViews(times, std::move(directLoadKernels),
                                std::move(densityLoad), std::move(lumps),
                                oceanFunctions);
@@ -1842,6 +1889,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   }
   kernels.tideKernels = std::move(tideKernels);
   derivatives.tideKernels = std::move(dTideKernels);
+  kernels.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
+  kernels.solidSurfaceChangeKernels = std::move(layerKernels);
+  derivatives.directLoadOutsideWaterBudgetKernels = std::move(dOutsideKernels);
+  derivatives.solidSurfaceChangeKernels = std::move(dLayerKernels);
   return {std::move(kernels), std::move(derivatives)};
 }
 

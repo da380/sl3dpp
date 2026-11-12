@@ -1744,12 +1744,14 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
   }
 }
 
-TEST(SecondOrderAdjoint3D, ContinuousTideRowsConverge) {
-  // The tide's rows of the Hessian about a tide-driven run with lateral
-  // viscosity and the rotational feedback: the continuous sweep's, along
-  // a direction in the viscosity and the moduli and paired with a tide
-  // smooth in time, tend to the discrete sweep's as the steps are
-  // halved; so do its load rows.
+TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
+  // The surface forcings' rows of the Hessian about a tide-driven run
+  // with lateral viscosity and the rotational feedback: the continuous
+  // sweep's, along a direction in the viscosity and the moduli and
+  // paired with forcings smooth in time (a tide, a load inside the
+  // water budget and one outside it, a layer on the solid surface), tend
+  // to the discrete sweep's as the steps are halved; and so do its
+  // first-order kernels of the load outside the budget and of the layer.
   auto scene = Scene::Make(1e22);
   const auto& grid = scene.solver.Grid();
   const auto& sle = scene.solver.SolverScales();
@@ -1791,7 +1793,12 @@ TEST(SecondOrderAdjoint3D, ContinuousTideRowsConverge) {
       coupling, scene.material, kappaMu.second,
       [](double r) { return 0.1 * (0.5 + r * r); }, angular);
 
-  auto tideGaps = std::vector<double>{}, loadGaps = std::vector<double>{};
+  const auto layerPattern = scene.Smooth(rng, 5.0 / sle.Length());
+  constexpr auto kRows = std::size_t{6};
+  const char* names[kRows] = {"tide",          "load",
+                              "outside",       "layer",
+                              "outside, first order", "layer, first order"};
+  auto gaps = std::array<std::vector<double>, kRows>{};
   for (const auto nodes : {5, 9, 17}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
@@ -1809,49 +1816,62 @@ TEST(SecondOrderAdjoint3D, ContinuousTideRowsConverge) {
           for (auto& c : out) c *= 0.4 + std::cos(0.5 * std::numbers::pi * t / span);
           return out;
         }}));
-    auto rows = std::map<AdjointMethod, std::pair<double, double>>{};
+    auto rows = std::map<AdjointMethod, std::array<double, kRows>>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto run = TangentLinearSolver3D(evolution, {.method = method,
                                                          .rtol = 1e-12,
                                                          .coupled_rtol = 1e-12,
                                                          .record = true})
                            .Run(times, u, &trajectory);
-      const auto along =
+      const auto [first, along] =
           AdjointSolver3D(evolution, {.method = method,
                                       .rtol = 1e-12,
                                       .coupled_rtol = 1e-12,
                                       .material_kernels = true,
                                       .tide_kernels = true})
               .SecondOrderKernels(times, measurements, run, u.itau, trajectory,
-                                  {}, u.material)
-              .second;
+                                  {}, u.material);
       ASSERT_EQ(along.ice.tideKernels.size(), times.size());
       ASSERT_EQ(along.ice.directLoadKernels.size(), times.size());
-      auto tide = 0.0, load = 0.0;
+      ASSERT_EQ(along.ice.directLoadOutsideWaterBudgetKernels.size(),
+                times.size());
+      ASSERT_EQ(along.ice.solidSurfaceChangeKernels.size(), times.size());
+      ASSERT_EQ(first.ice.directLoadOutsideWaterBudgetKernels.size(),
+                times.size());
+      ASSERT_EQ(first.ice.solidSurfaceChangeKernels.size(), times.size());
+      auto row = std::array<double, kRows>{};
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         const auto shape = 0.3 + std::sin(0.5 * std::numbers::pi * times[n] / span);
         auto t = tide1;
         for (auto& c : t) c *= shape;
-        tide += pair(along.ice.tideKernels[n], t);
+        row[0] += pair(along.ice.tideKernels[n], t);
         auto f = loadPattern;
         for (auto& v : f) v *= shape;
-        load += scene.Surface(along.ice.directLoadKernels[n], f);
+        auto h = layerPattern;
+        for (auto& v : h) v *= shape;
+        row[1] += scene.Surface(along.ice.directLoadKernels[n], f);
+        row[2] +=
+            scene.Surface(along.ice.directLoadOutsideWaterBudgetKernels[n], f);
+        row[3] += scene.Surface(along.ice.solidSurfaceChangeKernels[n], h);
+        row[4] +=
+            scene.Surface(first.ice.directLoadOutsideWaterBudgetKernels[n], f);
+        row[5] += scene.Surface(first.ice.solidSurfaceChangeKernels[n], h);
       }
-      rows[method] = {tide, load};
+      rows[method] = row;
     }
     const auto& d = rows[AdjointMethod::Discrete];
     const auto& c = rows[AdjointMethod::Continuous];
-    ASSERT_NE(d.first, 0.0);
-    ASSERT_NE(d.second, 0.0);
-    tideGaps.push_back(std::abs(c.first - d.first) / std::abs(d.first));
-    loadGaps.push_back(std::abs(c.second - d.second) / std::abs(d.second));
+    for (auto k = std::size_t{0}; k < kRows; ++k) {
+      ASSERT_NE(d[k], 0.0) << names[k];
+      gaps[k].push_back(std::abs(c[k] - d[k]) / std::abs(d[k]));
+    }
   }
-  for (const auto* gaps : {&tideGaps, &loadGaps}) {
-    const auto what = gaps == &tideGaps ? "tide" : "load";
-    EXPECT_LT((*gaps)[2], 0.05)
-        << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
-    EXPECT_GT((*gaps)[1] / (*gaps)[2], 3.0)
-        << what << ": " << (*gaps)[0] << " " << (*gaps)[1] << " " << (*gaps)[2];
+  for (auto k = std::size_t{0}; k < kRows; ++k) {
+    EXPECT_LT(gaps[k][2], 0.05) << names[k] << ": " << gaps[k][0] << " "
+                                << gaps[k][1] << " " << gaps[k][2];
+    EXPECT_GT(gaps[k][1] / gaps[k][2], 3.0)
+        << names[k] << ": " << gaps[k][0] << " " << gaps[k][1] << " "
+        << gaps[k][2];
   }
 }
 

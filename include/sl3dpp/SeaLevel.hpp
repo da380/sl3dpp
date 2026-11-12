@@ -297,6 +297,11 @@ class GRDSolver {
     /// tide has no toroidal displacement).
     std::vector<double> toroidalPotential;
     std::array<double, 3> angularVelocity{0.0, 0.0, 0.0};
+    /// The uniform part the water's conservation adds to the sea level
+    /// change (zero without an ocean): the relative sea level change
+    /// less this is the change before the conservation is imposed, the
+    /// output conjugate to a load outside the water budget.
+    double uniformShift = 0.0;
     int iterations = 0;
     double error = 0.0;
     bool converged = true;
