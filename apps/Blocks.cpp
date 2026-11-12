@@ -209,7 +209,8 @@ OceanBlock ReadOceanBlock(const Json& block,
   }
   const auto timed = problem == Problem::QuasiStatic;
   if (timed) {
-    Allow(block, {"shorelines", "sea_level", "topography", "calibration"});
+    Allow(block,
+          {"shorelines", "sea_level", "topography", "land", "calibration"});
   } else {
     for (const auto* name : {"shorelines", "calibration"}) {
       if (Has(block, name)) {
@@ -221,7 +222,7 @@ OceanBlock ReadOceanBlock(const Json& block,
                          kNeedsQuasiStatic));
       }
     }
-    Allow(block, {"sea_level", "topography"});
+    Allow(block, {"sea_level", "topography", "land"});
   }
   const auto given = Has(block, "sea_level");
   if (given && Has(block, "topography")) {
@@ -264,6 +265,11 @@ OceanBlock ReadOceanBlock(const Json& block,
     }
     Allow(input, {"file", "format", "variable", "date_kyr_bp"});
     source.input.date = ReadDate(input, "date_kyr_bp");
+  }
+  if (Has(block, "land")) {
+    const auto& land = block.At("land");
+    out.land = ReadFileInput(land, directory, "land");
+    Allow(land, {"file", "format", "variable"});
   }
   if (Has(block, "shorelines")) {
     out.shorelines = Choice<Shorelines>(

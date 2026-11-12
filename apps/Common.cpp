@@ -296,6 +296,32 @@ std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
   return thickness;
 }
 
+LandMask ReadLand(const SeaLevelRun& run, const Json& top,
+                  const SurfaceGrid& grid, double time) {
+  if (!run.ocean.land) return {};
+  const auto& input = *run.ocean.land;
+  const auto& member = top.At("ocean").At("land");
+  const auto file = OpenFileInput(input, grid, member);
+  auto values = std::vector<double>{};
+  try {
+    values = file.Values(input.variable, time);
+  } catch (const std::runtime_error& error) {
+    Fail(member.At("file"), error.what());
+  }
+  auto out = LandMask{};
+  out.held.reserve(values.size());
+  for (auto v : values) {
+    if (!std::isfinite(v)) {
+      Fail(member,
+           "gives a land field that is not a number somewhere (a surface "
+           "file marks uncovered points so): fill it before the run");
+    }
+    out.held.push_back(v > 0.5 ? 1 : 0);
+  }
+  out.read = std::format("land {}", DescribeInput(input, "held at every date"));
+  return out;
+}
+
 std::vector<double> SeaLevelFrom(const SeaLevelRun& run, const Json& top,
                                  const io::FieldHistory& file,
                                  std::span<const double> ice, double time,
@@ -399,12 +425,15 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
     ice_nd[i] = ice0[i] / length;
     sl_nd[i] /= length;
   }
-  auto background = solver.MakeState(std::move(ice_nd), std::move(sl_nd));
+  const auto land = ReadLand(run, top, grid, start_si);
+  auto background =
+      solver.MakeState(std::move(ice_nd), std::move(sl_nd), land.held);
   auto iceRead =
       DescribeInput(run.forcing.ice.file, WindowSlice(run, *ice, std::nullopt));
   auto seaRead = std::format(
       "{} {}", source.Quantity(),
       DescribeInput(source.input, WindowSlice(run, *sea, source.at)));
+  if (!land.read.empty()) seaRead += ", " + land.read;
   return {std::move(sea),        std::move(ice),     std::move(ice0),
           std::move(background), std::move(iceRead), std::move(seaRead)};
 }
@@ -535,9 +564,11 @@ void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
                               -run.times->start_kyr_bp * KYR);
   auto ice = world.ice0;
   for (auto& v : ice) v /= length;
+  // the land held stays the run's own
+  const auto land = world.background.forcedLand;
   world.background = solver.MakeState(
       std::move(ice),
-      std::vector<double>(seaLevelGuess.begin(), seaLevelGuess.end()));
+      std::vector<double>(seaLevelGuess.begin(), seaLevelGuess.end()), land);
 }
 
 namespace {

@@ -731,6 +731,7 @@ struct FingerprintForcing {
   std::vector<double> ice;
   std::vector<double> seaLevel;
   std::vector<double> thicknessChange;
+  std::vector<char> land;  ///< held as land whatever the flotation
   std::string iceRead;
   std::string seaLevelRead;
 };
@@ -771,6 +772,9 @@ FingerprintForcing ReadFingerprintForcing(const SeaLevelRun& run,
   out.seaLevelRead =
       std::format("{} {}", source.Quantity(),
                   DescribeInput(source.input, slice(source.input)));
+  auto land = ReadLand(run, top, grid, seaTime);
+  out.land = std::move(land.held);
+  if (!land.read.empty()) out.seaLevelRead += ", " + land.read;
 
   // the change: the Gaussian cap's weight times the amount, of the local
   // ice thickness for a fraction
@@ -803,7 +807,8 @@ RadialFingerprint SolveRadialFingerprint(const SeaLevelRun& run,
   auto out = RadialFingerprint{Fingerprint(run.lmax, love, options), {}, {}};
   out.forcing = ReadFingerprintForcing(run, top, out.fingerprint.Grid(),
                                        options.parameters);
-  out.fingerprint.SetState(out.forcing.ice, out.forcing.seaLevel);
+  out.fingerprint.SetState(out.forcing.ice, out.forcing.seaLevel,
+                           out.forcing.land);
   out.result = out.fingerprint.SolveForIceChange(out.forcing.thicknessChange,
                                                  run.rotation);
   if (!out.result.converged) {
@@ -942,7 +947,8 @@ std::string RunFingerprint3D(const std::filesystem::path& config,
   auto sea = forcing.seaLevel;
   for (auto& v : ice) v /= length;
   for (auto& v : sea) v /= length;
-  const auto state = solver.MakeState(std::move(ice), std::move(sea));
+  const auto state =
+      solver.MakeState(std::move(ice), std::move(sea), forcing.land);
   auto load = std::vector<double>(grid.FieldSize());
   for (auto i = std::size_t{0}; i < load.size(); ++i) {
     load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *

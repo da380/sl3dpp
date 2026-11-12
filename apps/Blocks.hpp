@@ -147,6 +147,10 @@ struct SeaLevelSource {
 /// calibration.
 struct OceanBlock {
   SeaLevelSource seaLevel;
+  /// `ocean.land`, where given: a field that is one where the surface is
+  /// held as land whatever the flotation and zero elsewhere (landlocked
+  /// depressions), the same at every date. Absent, flotation alone.
+  std::optional<FileInput> land;
   /// The shorelines: frozen at the start's (the linear equation), or
   /// following flotation.
   Shorelines shorelines = Shorelines::Frozen;

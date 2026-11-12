@@ -145,6 +145,17 @@ struct Loaded {
   std::string seaLevelRead;  ///< the sea level as read, likewise
 };
 
+/// The surface held as land whatever the flotation, `ocean.land`: its
+/// field read onto `grid` at `time` (SI; a field without a time axis is
+/// the same at every date) and cut at one half, with the input as read.
+/// Both empty without the member: flotation alone.
+struct LandMask {
+  std::vector<char> held;
+  std::string read;
+};
+[[nodiscard]] LandMask ReadLand(const SeaLevelRun& run, const Json& top,
+                                const SurfaceGrid& grid, double time);
+
 /// The `ocean` member holding the run's sea level input,
 /// `ocean.sea_level` or `ocean.topography`, and `forcing.ice`.
 [[nodiscard]] const Json& SeaLevelMember(const SeaLevelRun& run,
