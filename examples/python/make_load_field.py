@@ -1,6 +1,6 @@
 """Writes a surface mass density (kg m^-2) as a planetmodel surface file,
-for a `field` load term of the sl3d program's `response` command: static,
-or with --history on a time axis.
+for a `field` load term of an sl3d config: static, or with --history on a
+time axis.
 
 --shape disk (the default): a disk of uniform surface density, --radius-deg
 wide at (--lat, --lon), --amplitude kg m^-2 (default 1.834e6, about 2 km of
@@ -13,8 +13,8 @@ from (--lat, --lon), w = --width-deg (default 5) and A = --amplitude,
 sampled at the nodes of the Gauss-Legendre grid of degree --lmax, which is
 the run's own grid when --lmax is the run's: the run then reads the field
 at its own nodes, and the term is sl3d's own `cap` load term of the same
-members, to rounding (the configs response_load_field.json and
-response_load_cap.json show it).
+members, to rounding (the configs no_ocean_load_field.json and
+no_ocean_load_cap.json show it).
 
 --shape greenland: the direct load of melting --fraction (default 0.1) of
 the Greenland ice sheet of ICE-7G today, pyslfp's EarthState.greenland_load
@@ -24,15 +24,16 @@ It needs pyslfp's ICE-7G data (~/.pyslfp_data); if they are not there the
 script says what it would download and stops, unless --download is given.
 
 --history [T:F ...] multiplies the pattern by the factor F at the time T,
-in kiloyears on the response run's clock (default 0:0 1:1 5:1 5.5:0: the
-load grows over the first kiloyear, is held to 5 kyr and removed by 5.5),
-and writes a node field linear in time. The file's time axis is in
-kiloyears: the run's time t kyr reads it at t - time_origin_kyr (the
+in kiloyears on a run's own clock (default 0:0 1:1 5:1 5.5:0: the load
+grows over the first kiloyear, is held to 5 kyr and removed by 5.5), and
+writes a node field linear in time. The file's time axis is in
+kiloyears: a run counting forwards in kyr (`"times": {"unit": "kyr",
+...}`) reads it at t - time_origin at its time t (`time_origin` the
 term's member, default 0), so with the default the file's time 0 is the
 run's start; outside the file's span its first or last field is held. A
 file whose axis counts from the present instead, negative in the past (an
-ice history, a sea-level output), is read from its date -D kyr at the
-run's start by "time_origin_kyr": D.
+ice history, a dated run's output), is read from its date -D kyr at the
+run's start by "time_origin": D, or by date in a dated run.
 
 Run from build/examples:
 
@@ -42,12 +43,12 @@ Run from build/examples:
         [--history [T:F ...]] [--out FILE]
 
 It writes data/load_<shape>.nc, or data/load_<shape>_history.nc with
---history. A `response` config's forcing then takes it as a load term,
+--history. A config's forcing then takes it as a load term,
 {"field": {"file": "../data/load_disk.nc", "variable": "load"}}: in the
 static problem (the elastic response) a static file as it stands and a
-file with a time axis at the term's `date_kyr`, and in the quasi-static
-problem (the viscoelastic response through time) either, the one with a
-time axis read at each node.
+file with a time axis at the term's `date` with its `unit` (on the file's
+own axis), and in the quasi-static problem (the viscoelastic response
+through time) either, the one with a time axis read at each node.
 """
 from __future__ import annotations
 

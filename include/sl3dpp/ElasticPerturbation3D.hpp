@@ -73,6 +73,11 @@ class ElasticPerturbation3D {
   [[nodiscard]] const GridCoupling& Coupling() const { return coupling_; }
   [[nodiscard]] int LMax() const { return lmax_; }
   [[nodiscard]] const Material& GetMaterial() const { return material_; }
+  /// The rheology the coupling is built on: a coupling over part of the
+  /// same nodes (a process's own elements of a radial distribution, say)
+  /// is built on it with the coupling's options and another element
+  /// range.
+  [[nodiscard]] const Rheology& GetRheology() const { return rheology_; }
 
   /// The reference response to a surface mass load given by its m >= 0
   /// coefficients on the lmax grid (SurfaceGrid::Index; material units

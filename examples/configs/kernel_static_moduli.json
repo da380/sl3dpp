@@ -1,0 +1,21 @@
+{
+  "problem": "static",
+  "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
+  "discretisation": {"lmax": 32},
+  "forcing": {
+    "load": [{"disk": {"latitude": 60, "longitude": 275, "radius_deg": 8,
+                       "amplitude_kg_m2": 1.0e5}}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/kernel_static_moduli/response.nc"},
+  "kernels": {
+    "parameters": ["load", "moduli"],
+    "measurements": [
+      {"type": "displacement_cap", "name": "uplift",
+       "latitude": 60, "longitude": 275, "width_deg": 2},
+      {"type": "displacement_vector_point", "name": "north_shift",
+       "latitude": 50, "longitude": 275, "direction": {"north": 1}}
+    ],
+    "output": "out/kernel_static_moduli"
+  }
+}

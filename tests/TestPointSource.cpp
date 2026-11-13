@@ -9,6 +9,7 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
+#include <format>
 #include <map>
 #include <memory>
 #include <random>
@@ -425,10 +426,18 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
   // degree: the spheroidal pair grad(r^l Y) and r^2 grad(r^l Y) +
   // alpha_l x r^l Y, alpha_l = -2 (l lam + (3l + 1) mu) / ((l + 3) lam +
   // (l + 5) mu), and the toroidal r^l. The code's side is the source's
-  // forces on the non-gravitating degree systems, solved. Degree 1 is
-  // left out: a rigid motion is free without gravity. The source is at
-  // half the radius, so the surface fields are band-limited to rounding
-  // at the grid's degree.
+  // forces on the non-gravitating degree systems, solved. At degree 1
+  // the regular pair is the translation grad(r Y), which bears no
+  // traction, and r^2 grad(r Y) + alpha_1 x r Y, which cancels the
+  // full-space traction alone (its net force is zero); the translation is
+  // then set by the frame of the centre of mass, int rho u dV = 0, the
+  // full-space part's integral over the ball being
+  // -M_jk oint G_ij(x - xi) n_k dS by the divergence theorem. The code's
+  // degree 1 is checked besides for its frame to rounding, for not
+  // depending on the pinned dof, and for solving the full (unpinned)
+  // system. The toroidal degree 1 is a rigid rotation's gauge and is not
+  // compared. The source is at half the radius, so the surface fields are
+  // band-limited to rounding at the grid's degree.
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   auto deck = Deck::Read(data / "e1_homogeneous.deck",
                          DeckFormat("elastic",
@@ -454,27 +463,18 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
   auto spheroidal = std::map<int, std::unique_ptr<DegreeOperator>>{};
   auto toroidal = std::map<int, std::unique_ptr<ToroidalOperator>>{};
   for (auto l = 0; l <= kDegree; ++l) {
-    if (l != 1) {
-      spheroidal.emplace(
-          l, std::make_unique<DegreeOperator>(
-                 material, l, DegreeOperator::Options{.gravitating = false}));
-    }
-    if (l >= 2) {
+    spheroidal.emplace(
+        l, std::make_unique<DegreeOperator>(
+               material, l, DegreeOperator::Options{.gravitating = false}));
+    if (l >= 1) {
       toroidal.emplace(l, std::make_unique<ToroidalOperator>(
                               material, l, ToroidalOperator::Options{}));
     }
   }
-  // degree 1 is not compared: any systems serve its forces
-  const DegreeOperator one(material, 1, DegreeOperator::Options{});
-  const ToroidalOperator oneT(material, 1, ToroidalOperator::Options{});
   const auto forces = PointSourceForces(
       material, kDegree,
-      [&](int l) -> const DegreeOperator& {
-        return l == 1 ? one : *spheroidal.at(l);
-      },
-      [&](int l) -> const ToroidalOperator& {
-        return l == 1 ? oneT : *toroidal.at(l);
-      },
+      [&](int l) -> const DegreeOperator& { return *spheroidal.at(l); },
+      [&](int l) -> const ToroidalOperator& { return *toroidal.at(l); },
       source);
   const auto size = SurfaceGrid::Index(kDegree, kDegree) + 1;
   auto U = std::vector<Complex>(size, 0.0), V = U, W = U;
@@ -491,7 +491,6 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
     return x;
   };
   for (auto l = 0; l <= kDegree; ++l) {
-    if (l == 1) continue;
     const auto& system = *spheroidal.at(l);
     const auto ndof = static_cast<std::size_t>(system.DofCount());
     const auto x = solve(system, forces.spheroidal.at(l), l);
@@ -508,6 +507,71 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
         W[SurfaceGrid::Index(l, m)] = w[m * tdof + twist.SurfaceDof()];
       }
     }
+  }
+
+  // -- degree 1 on its own: the frame, the gauge and the residual
+  {
+    const auto& b = forces.spheroidal.at(1);
+    auto realPart = [](const std::vector<Complex>& v) {
+      auto out = std::vector<double>(v.size());
+      for (auto i = std::size_t{0}; i < v.size(); ++i) out[i] = v[i].real();
+      return out;
+    };
+    auto imagPart = [](const std::vector<Complex>& v) {
+      auto out = std::vector<double>(v.size());
+      for (auto i = std::size_t{0}; i < v.size(); ++i) out[i] = v[i].imag();
+      return out;
+    };
+    // the real and imaginary columns of orders 0 and 1
+    auto rhs = realPart(b);
+    const auto im = imagPart(b);
+    rhs.insert(rhs.end(), im.begin(), im.end());
+    const auto& base = *spheroidal.at(1);
+    const auto n = static_cast<std::size_t>(base.DofCount());
+    const auto translation = base.RigidTranslation();
+    const auto row = base.CentreOfMassRow();
+    auto worstForce = 0.0, worstFrame = 0.0, worstResidual = 0.0,
+         worstGauge = 0.0;
+    const auto x0 = base.Solve(rhs, 4);
+    for (const auto fraction : {0.0, 0.37, 0.8}) {
+      const DegreeOperator pinned(
+          material, 1, {.gravitating = false, .pin_fraction = fraction});
+      const auto x = pinned.Solve(rhs, 4);
+      const auto Ax = pinned.Apply(x, 4);
+      for (auto c = std::size_t{0}; c < 4; ++c) {
+        auto force = 0.0, forceScale = 0.0, moment = 0.0, momentScale = 0.0;
+        auto residual = 0.0, rhsScale = 0.0, gauge = 0.0, size = 0.0;
+        for (auto d = std::size_t{0}; d < n; ++d) {
+          const auto k = c * n + d;
+          force += translation[d] * rhs[k];
+          forceScale += std::abs(translation[d] * rhs[k]);
+          moment += row[d] * x[k];
+          momentScale += std::abs(row[d] * x[k]);
+          residual = std::max(residual, std::abs(Ax[k] - rhs[k]));
+          rhsScale = std::max(rhsScale, std::abs(rhs[k]));
+          gauge = std::max(gauge, std::abs(x[k] - x0[k]));
+          size = std::max(size, std::abs(x0[k]));
+        }
+        if (forceScale > 0.0) {
+          worstForce = std::max(worstForce, std::abs(force) / forceScale);
+        }
+        if (momentScale > 0.0) {
+          worstFrame = std::max(worstFrame, std::abs(moment) / momentScale);
+        }
+        if (rhsScale > 0.0) {
+          worstResidual = std::max(worstResidual, residual / rhsScale);
+        }
+        if (size > 0.0) worstGauge = std::max(worstGauge, gauge / size);
+      }
+    }
+    RecordProperty("degree1_net_force", std::format("{:.3e}", worstForce));
+    RecordProperty("degree1_frame", std::format("{:.3e}", worstFrame));
+    RecordProperty("degree1_residual", std::format("{:.3e}", worstResidual));
+    RecordProperty("degree1_gauge", std::format("{:.3e}", worstGauge));
+    EXPECT_LT(worstForce, 1e-12);
+    EXPECT_LT(worstFrame, 1e-13);
+    EXPECT_LT(worstResidual, 1e-10);
+    EXPECT_LT(worstGauge, 1e-10);
   }
 
   // -- the closed form
@@ -621,15 +685,74 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
   const auto uK = coefficientsOf(uField);
   const auto tK = coefficientsOf(tField);
 
+  auto kelvinMoment = std::array<Complex, 2>{};
+  // The full-space part's integral over the ball, J_i =
+  // -M_jk oint G_ij(x - xi) n_k dS, and its degree-1 radial moments
+  // I_m = int (U_1m + 2 V_1m) r^2 dr = E(m) . J / (4 pi / 3), E_c(m) the
+  // degree-1 coefficients of the unit vector's Cartesian components.
+  auto J = Vector{};
+  {
+    const auto c = 1.0 / (16.0 * std::numbers::pi * mu * (1.0 - nu));
+    std::array<std::vector<double>, 3> integrand;
+    std::array<std::vector<double>, 3> unit;
+    for (auto theta : grid.CoLatitudes()) {
+      for (auto phi : grid.Longitudes()) {
+        const Basis here(theta, phi);
+        const Vector R{a * here.r[0] - xi[0], a * here.r[1] - xi[1],
+                       a * here.r[2] - xi[2]};
+        const auto r1 = std::sqrt(R[0] * R[0] + R[1] * R[1] + R[2] * R[2]);
+        for (auto i = 0; i < 3; ++i) {
+          auto sum = 0.0;
+          for (auto j = 0; j < 3; ++j) {
+            const auto G = c * ((3.0 - 4.0 * nu) * (i == j ? 1.0 : 0.0) / r1 +
+                                R[i] * R[j] / (r1 * r1 * r1));
+            for (auto k = 0; k < 3; ++k) sum -= M[j][k] * G * here.r[k];
+          }
+          integrand[i].push_back(a * a * sum);
+          unit[i].push_back(here.r[i]);
+        }
+      }
+    }
+    for (auto i = 0; i < 3; ++i) J[i] = grid.Integrate(integrand[i]);
+    std::array<std::vector<Complex>, 3> E;
+    for (auto i = 0; i < 3; ++i) E[i] = grid.Expand(unit[i]);
+    for (auto m = 0; m <= 1; ++m) {
+      auto moment = Complex{};
+      for (auto i = 0; i < 3; ++i) moment += E[i][SurfaceGrid::Index(1, m)] * J[i];
+      kelvinMoment[m] = moment / (4.0 * std::numbers::pi / 3.0);
+    }
+  }
+
   auto scale = 0.0, worst = 0.0, worstW = 0.0, scaleW = 0.0;
+  auto scale1 = 0.0, worst1 = 0.0, consistency = 0.0;
   for (auto l = 0; l <= kDegree; ++l) {
-    if (l == 1) continue;
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       auto exactU = uK.U[i], exactV = uK.V[i], exactW = uK.W[i];
       if (l == 0) {
         // U = r: the traction (3 lam + 2 mu)
         exactU += -tK.U[i] / (3.0 * lam + 2.0 * mu) * a;
+      } else if (l == 1) {
+        // B = r^2 grad(r Y) + alpha_1 x r Y cancels the traction; the
+        // translation A = grad(r Y) (U = V = 1/a) sets the frame
+        const auto alpha = -2.0 * (lam + 4.0 * mu) / (4.0 * lam + 6.0 * mu);
+        const auto UB = (1.0 + alpha) * a, VB = a, dUB = 2.0 * (1.0 + alpha),
+                   dVB = 2.0;
+        const auto radialB =
+            (lam + 2.0 * mu) * dUB + lam * (2.0 * UB - 2.0 * VB) / a;
+        const auto shearB = mu * (dVB - VB / a + UB / a);
+        const auto cB = -tK.U[i] / radialB;
+        consistency = std::max(consistency,
+                               std::abs(cB + tK.V[i] / shearB) / std::abs(cB));
+        // int (U + 2 V) r^2 dr: a^2 for A, (3 + alpha) a^4 / 5 for B
+        const auto cA = -(kelvinMoment[m] +
+                          cB * (3.0 + alpha) * a * a * a * a / 5.0) /
+                        (a * a);
+        exactU += cA / a + cB * UB;
+        exactV += cA / a + cB * VB;
+        scale1 = std::max({scale1, std::abs(exactU), std::abs(exactV)});
+        worst1 = std::max({worst1, std::abs(U[i] - exactU),
+                           std::abs(V[i] - exactV)});
       } else {
         const auto alpha = -2.0 * (l * lam + (3.0 * l + 1.0) * mu) /
                            ((l + 3.0) * lam + (l + 5.0) * mu);
@@ -656,15 +779,21 @@ TEST(PointSource, AHomogeneousSphereWithoutGravityInClosedForm) {
       }
       scale = std::max({scale, std::abs(exactU), std::abs(exactV)});
       worst = std::max({worst, std::abs(U[i] - exactU), std::abs(V[i] - exactV)});
+      if (l == 1) continue;  // W: a rigid rotation's gauge
       scaleW = std::max(scaleW, std::abs(exactW));
       worstW = std::max(worstW, std::abs(W[i] - exactW));
     }
   }
-  RecordProperty("spheroidal_departure", std::to_string(worst / scale));
-  RecordProperty("toroidal_departure", std::to_string(worstW / scaleW));
+  RecordProperty("spheroidal_departure", std::format("{:.3e}", worst / scale));
+  RecordProperty("degree1_departure", std::format("{:.3e}", worst1 / scale1));
+  RecordProperty("degree1_traction_consistency", std::format("{:.3e}", consistency));
+  RecordProperty("toroidal_departure", std::format("{:.3e}", worstW / scaleW));
   EXPECT_GT(scale, 0.0);
+  EXPECT_GT(scale1, 0.0);
   EXPECT_GT(scaleW, 0.0);
   EXPECT_LT(worst, 1e-6 * scale);
+  EXPECT_LT(worst1, 1e-6 * scale1);
+  EXPECT_LT(consistency, 1e-8);
   EXPECT_LT(worstW, 1e-6 * scaleW);
 }
 

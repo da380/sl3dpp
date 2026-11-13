@@ -524,11 +524,13 @@ Viscoelastic3D::ApplyLateralOperator(
   auto [sph, tor] = lateralForce(x);
   auto tasks = std::vector<Task>{};
   for (const auto& [l, xl] : x.spheroidal) {
-    tasks.push_back({.l = l, .x = &xl, .sph = &spheroidal(l), .out = &sph.at(l)});
+    tasks.push_back(
+        {.l = l, .x = &xl, .sph = &spheroidal(l), .real = {}, .out = &sph.at(l)});
   }
   for (const auto& [l, wl] : x.toroidal) {
     if (l < 1) continue;
-    tasks.push_back({.l = l, .x = &wl, .tor = &toroidal(l), .out = &tor.at(l)});
+    tasks.push_back(
+        {.l = l, .x = &wl, .tor = &toroidal(l), .real = {}, .out = &tor.at(l)});
   }
   // the real pairs, as shares when distributed, summed in one
   // collective for every degree (the collective serial, in the

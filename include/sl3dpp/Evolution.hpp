@@ -22,6 +22,19 @@
  * nonlinear equation each step, for a given ice thickness history, the
  * ocean function following the flotation condition and every snapshot
  * recording it (the C(t) an adjoint about the trajectory reads back).
+ *
+ * On an operator without gravity (ViscoelasticOperator::Options::
+ * gravitating = false) there is no sea level equation, no potential and
+ * no rotational feedback: a run is the solid body stepped under interior
+ * sources alone (Forcing::sources and stressGluts), on a background
+ * without an ocean (GRDSolver::NoOceanState) and with RotationalFeedback::
+ * None. The snapshots carry the displacement, the tangential and the
+ * toroidal potentials; the sea level change and the potential are left
+ * empty. A load (the weight of a surface mass), a layer on the solid
+ * surface, a tide, an ocean, the rotational feedback and the migrating
+ * runs are refused, and the solver serves for its grid and its scales
+ * alone (its Love numbers are not read). The derivative solvers
+ * (AdjointSolver, TangentLinearSolver) refuse such an evolution.
  */
 
 #include <array>
@@ -128,6 +141,10 @@ class Evolution {
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
     std::function<void(std::size_t node, const Snapshot&)> on_snapshot{};
+    /// Whether the run returns its snapshots. false: each is handed to
+    /// on_snapshot and then dropped, and the run returns none, so that a
+    /// caller keeping its outputs its own way holds no node twice.
+    bool keep_snapshots = true;
     /// Hand every checkpoint_stride-th node's recurrence, and the last
     /// node's, to on_checkpoint (0 hands none), after that node's
     /// on_snapshot. Strides count within the call, for `Run` and
@@ -303,6 +320,11 @@ class Evolution {
   /// their unit radial solutions.
   [[nodiscard]] std::vector<Snapshot> MarchFactored(
       std::span<const double> times, const Forcing& forcing);
+
+  /// The run on an operator without gravity: the solid body stepped under
+  /// the interior sources, no sea level solve; `resumed` as March's.
+  [[nodiscard]] std::vector<Snapshot> MarchWithoutGravity(
+      std::span<const double> times, const Forcing& forcing, bool resumed);
 
   /// Restores a checkpoint's recurrence into the members below.
   void Restore(const Checkpoint& from, std::span<const double> times);

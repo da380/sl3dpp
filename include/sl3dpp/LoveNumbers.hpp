@@ -169,7 +169,8 @@ struct LoveNumberKernels {
 /// generalised Love numbers per unit of traction rather than of surface
 /// density. `gravitating` records which problem was solved; on the
 /// non-gravitating one (the E1 tier of the cross-code benchmarks) degree 1
-/// is excluded and its entries are NaN. Self-adjointness gives
+/// is excluded, a unit traction there having a net force, and its entries
+/// are NaN. Self-adjointness gives
 /// h_v = l(l + 1) l_u, which `ReciprocityResidual` measures.
 struct TractionNumbers {
   std::vector<int> degrees;
@@ -186,10 +187,11 @@ struct TractionNumbers {
 /// The surface response per unit normal and tangential traction for every
 /// degree from 0 to lmax, on the non-gravitating problem by default or on
 /// the full problem with `gravitating = true` -- the same forcing on both,
-/// so the pair isolates the effect of gravity. The non-gravitating problem
-/// takes a solid material, and its degree 1 is NaN. Degrees in parallel
-/// under OpenMP unless `options.parallel` is false. Mirrors pyslfp's
-/// `traction_numbers`.
+/// so the pair isolates the effect of gravity. The non-gravitating
+/// problem's degree 1 is NaN, and on a model with a fluid core its systems
+/// stop at the core's top above degree zero (DegreeOperator.hpp). Degrees
+/// in parallel under OpenMP unless `options.parallel` is false. Mirrors
+/// pyslfp's `traction_numbers` (on a solid model, without gravity).
 [[nodiscard]] TractionNumbers ComputeTractionNumbers(
     const Material& material, int lmax, bool gravitating = false,
     LoveNumberOptions options = {});

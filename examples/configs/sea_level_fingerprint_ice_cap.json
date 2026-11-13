@@ -1,7 +1,7 @@
 {
   "problem": "static",
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
-  "lmax": 128,
+  "discretisation": {"lmax": 128},
   "forcing": {
     "ice_change": [{"cap_thickness": {"latitude": 50, "longitude": 260,
                                       "width_deg": 3, "thickness_m": 1000}}]
@@ -12,5 +12,5 @@
     "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "none",
-  "output": {"surface": "out/sea_level_fingerprint_melt/sea_level_fingerprint_melt.nc"}
+  "output": {"surface": "out/sea_level_fingerprint_ice_cap/sea_level_fingerprint_ice_cap.nc"}
 }

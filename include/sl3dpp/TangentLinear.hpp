@@ -41,7 +41,8 @@
  * Conventions are the evolution's: times increasing in SLE units, grids in
  * the solver's units, the itau perturbation nodal (element, gll) per
  * branch over the material's mesh in MATERIAL units (the layout of
- * Kernels::itauKernel, which pairs with it by the plain nodal sum).
+ * Kernels::itauKernel, a density per unit volume, which pairs with it as
+ * VolumePairing(mesh, kernel, perturbation)).
  */
 
 #include <complex>
@@ -80,7 +81,14 @@ struct TangentPerturbation {
   std::vector<std::vector<PointSource>> sources;
   std::vector<std::vector<StressGlut>> stressGluts;
   /// Per time node, a perturbation of the ice thickness, grounded by the
-  /// node's ocean function relative to the first node's.
+  /// node's ocean function relative to the first node's: the load at node
+  /// n is rho_i (1 - C_n) dI_n - rho_i (1 - C) dI_0, C the background
+  /// state's ocean function, so the background's ice moves with the first
+  /// node's. About a migrating run whose start is solved under an ice
+  /// change (the ice at the first node other than the background's, the
+  /// background held), the derivative along the history alone is this
+  /// one plus the run along the direct load rho_i (1 - C) dI_0 at every
+  /// node; a direction zero at the first node means the same either way.
   std::vector<std::vector<double>> iceThickness;
   /// A perturbation of the initial sea level, which enters through the
   /// shorelines that moved: nothing under frozen shorelines.
@@ -159,6 +167,7 @@ class TangentLinearSolver {
     std::function<void(std::size_t node)> on_node{};
   };
 
+  /// Refused for an evolution without gravity (Evolution.hpp).
   explicit TangentLinearSolver(const Evolution& evolution,
                                Options options);
   explicit TangentLinearSolver(const Evolution& evolution)

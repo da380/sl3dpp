@@ -17,8 +17,8 @@ set -euo pipefail
 
 LMAX="${1:-32}"
 THREADS="${2:-$(nproc)}"
-# Huge pages for the large 3D tensors where they are on request only (the
-# top-level README, Running); harmless elsewhere. An existing setting wins.
+# Huge pages for the large 3D tensors where they are on request only
+# (docs/running.md, Memory); harmless elsewhere. An existing setting wins.
 export GLIBC_TUNABLES="${GLIBC_TUNABLES:-glibc.malloc.hugetlb=1}"
 if [ -z "${SL3D_DIR:-}" ]; then
   echo "set SL3D_DIR to a checkout of da380/sl3d (the Fortran code)" >&2

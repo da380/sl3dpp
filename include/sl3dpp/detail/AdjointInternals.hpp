@@ -135,23 +135,6 @@ inline void CheckGrids(const Measurement& m, std::size_t fieldSize,
   }
 }
 
-/// Refuses a measurement with a toroidal part, where a sweep's model has
-/// toroidal surface displacement that the sweep does not carry.
-inline void RefuseToroidal(
-    const std::map<std::size_t, Measurement>& measurements) {
-  for (const auto& [node, m] : measurements) {
-    for (const auto v : m.toroidalPotentialDual) {
-      if (v != 0.0) {
-        throw std::invalid_argument(std::format(
-            "the displacement measurement at node {} has a toroidal part, "
-            "which the continuous 3D sweep does not carry: use the "
-            "discrete one",
-            node));
-      }
-    }
-  }
-}
-
 /// The adjoint tangential traction of a measurement of the tangential
 /// displacement's potential V, as the coefficients of its potential in
 /// load units: the measurement int g_v V dS is that of the tangential

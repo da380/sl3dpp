@@ -69,7 +69,9 @@ struct TangentPerturbation3D {
   /// run is linear in them, the shorelines of a migrating one held.
   std::vector<std::vector<PointSource>> sources;
   std::vector<std::vector<StressGlut>> stressGluts;
-  std::vector<std::vector<double>> iceThickness;  ///< per node
+  /// Per node, relative to the first node's, as
+  /// TangentPerturbation::iceThickness.
+  std::vector<std::vector<double>> iceThickness;
   std::vector<double> initialSeaLevel;            ///< migrating runs
   /// Per branch over the grid values, material units.
   std::vector<std::vector<double>> itau;

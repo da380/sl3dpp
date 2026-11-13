@@ -13,15 +13,15 @@ figures/sl3d/<config>/:
     sea_level_3d_calibrated/calibration.png
     kernel1d/kernels.png
     kernel/viscosity_kernels.png
-    response/displacement.png
-    response_viscoelastic/displacement.png
-    response1d_disk/displacement.png
-    response1d_tide/love_numbers.png
-    response_tide_3d/body_tide.png
-    response_tide_oscillating/oscillating.png   (with the _short and _long
+    no_ocean/displacement.png
+    no_ocean_viscoelastic/displacement.png
+    no_ocean_1d_disk/displacement.png
+    no_ocean_1d_tide/love_numbers.png
+    no_ocean_tide_3d/body_tide.png
+    no_ocean_tide_oscillating/oscillating.png   (with the _short and _long
                                                  runs' amplitudes and lags)
-    sea_level_fingerprint_melt/ocean.png        (with response_melt)
-    response_cap_weak/relaxation.png            (with response_cap_strong)
+    sea_level_fingerprint_ice_cap/ocean.png     (with no_ocean_ice_cap)
+    no_ocean_cap_weak/relaxation.png            (with no_ocean_cap_strong)
     timestep_study/accuracy.png                 (the timestep_* runs)
 
 and, where the ICE-7G runs exist, sea_level_fingerprint_ice7g/fingerprint.png,
@@ -30,10 +30,10 @@ sea_level_1d_ice7g_calibrated/calibration.png; where those on the custom
 PREM deck with S40RTS exist too, sea_level_fingerprint_3d_ice7g/fingerprint.png
 and sea_level_3d_ice7g/sea_level.png (with sea_level_1d_ice7g_custom); where
 the toy planet's runs exist (make_planet_deck.py),
-response_tide_planet/body_tide.png and
-response_tide_planet_relax/love_numbers.png; and where the load from a file
-and from a table have run, response_load_field/agreement.png (with
-response_load_cap and response_load_coefficients). A missing output skips
+no_ocean_tide_planet/body_tide.png and
+no_ocean_tide_planet_relax/love_numbers.png; and where the load from a file
+and from a table have run, no_ocean_load_field/agreement.png (with
+no_ocean_load_cap and no_ocean_load_coefficients). A missing output skips
 its figure.
 """
 from __future__ import annotations
@@ -85,8 +85,10 @@ def surface(path: Path, fields, index=None) -> Example:
 
 
 def save(fig, config: str, name: str) -> None:
-    """Writes a config's figure, figures/sl3d/<config>/<name>.png."""
+    """Writes a config's figure, figures/sl3d/<config>/<name>.png, and
+    closes it."""
     save_figure(fig, FIGURES / config / f"{name}.png", dpi=150)
+    plt.close(fig)
 
 
 def nearest(grid, lat: float, lon: float) -> tuple[int, int]:
@@ -213,7 +215,7 @@ def sea_level_fingerprint_3d() -> None:
         mesh = plot_field(ax, ex, field, title=title)
         mark_sites(ax, [melt] + structure, colors=["k", "C0", "C3"])
         fig.colorbar(mesh, ax=ax, shrink=0.7)
-    fig.suptitle("sl3d sea-level, the fingerprint on the synthetic 3D elastic "
+    fig.suptitle("sl3d solve, the fingerprint on the synthetic 3D elastic "
                  "Earth: 10% of the synthetic Greenland melted\n(black: the "
                  "melt; blue: the stiff craton; red: the soft ridge)",
                  fontsize=11)
@@ -222,7 +224,7 @@ def sea_level_fingerprint_3d() -> None:
 
 
 def histories(path: Path):
-    """A sea-level run's grid, node dates (kyr BP) and sea-level change."""
+    """A dated run's grid, node dates (kyr BP) and sea-level change."""
     file = read_surface_file(path)
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
     sea_level = np.asarray(file.variables["relative_sea_level_change"].values)
@@ -263,7 +265,7 @@ def sea_level() -> None:
     ax.set_ylabel("sea level change since the start (m)")
     ax.axhline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8, ncol=3)
-    fig.suptitle("sl3d sea-level, 1D (solid) and 3D viscosity (dashed): the "
+    fig.suptitle("sl3d solve, 1D (solid) and 3D viscosity (dashed): the "
                  "synthetic deglaciation")
     fig.tight_layout()
     save(fig, runs[0][0], "sea_level")
@@ -344,7 +346,7 @@ def sea_level_ice7g() -> None:
     ax.set_ylabel(f"sea level change since {dates[0]:g} ka (m)")
     ax.axhline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8)
-    fig.suptitle("sl3d sea-level (1D) on ICE-7G")
+    fig.suptitle("sl3d solve (1D) on ICE-7G")
     fig.tight_layout()
     save(fig, "sea_level_1d_ice7g", "sea_level")
 
@@ -393,7 +395,7 @@ def kernels1d() -> None:
     ax.set_ylabel("depth (km)")
     ax.axvline(0.0, color="0.7", linewidth=0.6)
     ax.legend(fontsize=8)
-    fig.suptitle("sl3d kernel1d: kernels of the synthetic deglaciation's "
+    fig.suptitle("sl3d kernel (1D): kernels of the synthetic deglaciation's "
                  "measurements")
     fig.tight_layout()
     save(fig, "kernel1d", "kernels")
@@ -438,8 +440,8 @@ def kernels3d() -> None:
     save(fig, "kernel", "viscosity_kernels")
 
 
-def response() -> None:
-    path = OUT / "response" / "response.nc"
+def no_ocean() -> None:
+    path = OUT / "no_ocean" / "no_ocean.nc"
     if not path.exists():
         return
     ex = surface(path, ["displacement", "displacement_radial_model", "potential"])
@@ -454,18 +456,18 @@ def response() -> None:
         mesh = plot_field(ax, ex, name, title=title)
         mark_sites(ax, [HUDSON_BAY])
         fig.colorbar(mesh, ax=ax, shrink=0.7)
-    fig.suptitle("sl3d response: a cap load over Hudson Bay on the synthetic 3D "
-                 "elastic Earth")
+    fig.suptitle("sl3d solve, no ocean: a cap load over Hudson Bay on the "
+                 "synthetic 3D elastic Earth")
     fig.tight_layout()
-    save(fig, "response", "displacement")
+    save(fig, "no_ocean", "displacement")
 
 
-def response_viscoelastic() -> None:
+def no_ocean_viscoelastic() -> None:
     """The cap load grown and removed on the synthetic 3D viscoelastic Earth:
     the displacement under full load, just after the load has gone and at the
     end, the lateral structure's part of the last, and the histories at the
     cap's centre of the load, the displacement and the radial model's."""
-    path = OUT / "response_viscoelastic" / "response_viscoelastic.nc"
+    path = OUT / "no_ocean_viscoelastic" / "no_ocean_viscoelastic.nc"
     if not path.exists():
         return
     file = read_surface_file(path)
@@ -510,17 +512,17 @@ def response_viscoelastic() -> None:
     ax.set_xlabel("time (kyr)")
     ax.set_title("the response")
     ax.legend()
-    fig.suptitle("sl3d response: a cap load grown and removed over Hudson Bay "
-                 "on the synthetic 3D viscoelastic Earth")
+    fig.suptitle("sl3d solve, no ocean: a cap load grown and removed over "
+                 "Hudson Bay on the synthetic 3D viscoelastic Earth")
     fig.tight_layout()
-    save(fig, "response_viscoelastic", "displacement")
+    save(fig, "no_ocean_viscoelastic", "displacement")
 
 
-def response1d_disk() -> None:
+def no_ocean_1d_disk() -> None:
     """A disk load held and then removed on the radial viscoelastic Earth:
     the displacement against distance from the disk's centre at a few times,
     the peripheral bulge growing under the load and the uplift after it."""
-    path = OUT / "response1d_disk" / "response1d_disk.nc"
+    path = OUT / "no_ocean_1d_disk" / "no_ocean_1d_disk.nc"
     if not path.exists():
         return
     file = read_surface_file(path)
@@ -551,10 +553,10 @@ def response1d_disk() -> None:
         ax.set_title(title)
         ax.legend()
     axes[0].set_ylabel("radial displacement (m)")
-    fig.suptitle("sl3d response: a disk load of 8 degrees held for 10 kyr on "
-                 "the radial viscoelastic Earth")
+    fig.suptitle("sl3d solve, no ocean: a disk load of 8 degrees held for "
+                 "10 kyr on the radial viscoelastic Earth")
     fig.tight_layout()
-    save(fig, "response1d_disk", "displacement")
+    save(fig, "no_ocean_1d_disk", "displacement")
 
 
 def exchange_table(path: Path):
@@ -594,12 +596,12 @@ def held_tide(name: str):
     return np.asarray(times), np.asarray(h2), np.asarray(k2)
 
 
-def response1d_tide() -> None:
+def no_ocean_1d_tide() -> None:
     """A degree-2 tidal potential switched on and held: the tidal Love
     numbers of the radial viscoelastic Earth through time, from the elastic
     values at the start towards the fluid limit, read from the exchange
     tables of the nodes."""
-    held = held_tide("response1d_tide")
+    held = held_tide("no_ocean_1d_tide")
     if held is None:
         return
     times, h2, k2 = held
@@ -612,10 +614,10 @@ def response1d_tide() -> None:
                   "point is the elastic response)")
     ax.set_ylabel("degree-2 tidal Love number")
     ax.legend()
-    ax.set_title("sl3d response: a held degree-2 tide on the radial "
+    ax.set_title("sl3d solve, no ocean: a held degree-2 tide on the radial "
                  "viscoelastic Earth")
     fig.tight_layout()
-    save(fig, "response1d_tide", "love_numbers")
+    save(fig, "no_ocean_1d_tide", "love_numbers")
 
 
 def tide_coefficients(name: str) -> dict[tuple[int, int], complex]:
@@ -642,13 +644,13 @@ def peak(grid, values) -> tuple[float, float]:
             np.rad2deg(grid.longitudes[j]))
 
 
-def response_tide_3d() -> None:
+def no_ocean_tide_3d() -> None:
     """The lunar body tide on the synthetic 3D elastic Earth: the radial
     model's displacement, the lateral structure's part of the 3D model's
     (3D minus radial) and the spectrum of that part by degree. The radial
     model answers a degree-2 potential in degree 2 alone; everything the
     3D model puts into the other degrees is the lateral coupling."""
-    name = "response_tide_3d"
+    name = "no_ocean_tide_3d"
     path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
@@ -694,19 +696,19 @@ def response_tide_3d() -> None:
                  f"{outside:.1e} of its rms, all of it the lateral coupling",
                  fontsize=10)
     ax.legend()
-    fig.suptitle("sl3d response: the lunar body tide on the synthetic 3D "
-                 "elastic Earth (gold: the sub-lunar point; blue: the stiff "
+    fig.suptitle("sl3d solve, no ocean: the lunar body tide on the synthetic "
+                 "3D elastic Earth (gold: the sub-lunar point; blue: the stiff "
                  "craton; red: the soft ridge)", fontsize=11)
     fig.tight_layout()
     save(fig, name, "body_tide")
 
 
-def response_tide_planet() -> None:
+def no_ocean_tide_planet() -> None:
     """The Sun's tide on the toy planet of make_planet_deck.py, elastic and
     radial: the displacement and the potential perturbation, with the
     planet's degree-2 Love numbers read off the exchange table, from each
     order's coefficients over the potential's."""
-    name = "response_tide_planet"
+    name = "no_ocean_tide_planet"
     path = OUT / name / f"{name}.nc"
     table = OUT / name / f"{name}.txt"
     if not (path.exists() and table.exists()):
@@ -735,7 +737,7 @@ def response_tide_planet() -> None:
         fig.colorbar(mesh, ax=ax, shrink=0.75)
     spread = max(np.ptp(h2) / np.mean(h2), np.ptp(k2) / np.mean(k2))
     fig.suptitle(
-        "sl3d response: the Sun's tide on the toy planet (radius "
+        "sl3d solve, no ocean: the Sun's tide on the toy planet (radius "
         f"{radius / 1e3:.0f} km, g = {gravity:.2f} m s$^{{-2}}$; gold: the "
         "sub-solar point)\n"
         f"degree-2 tidal Love numbers h$_2$ = {np.mean(h2):.4f}, "
@@ -745,14 +747,14 @@ def response_tide_planet() -> None:
     save(fig, name, "body_tide")
 
 
-def response_tide_planet_relax() -> None:
+def no_ocean_tide_planet_relax() -> None:
     """A held degree-2 tide on the toy planet's Maxwell mantle: its tidal
-    Love numbers through time, beside the Earth's (response1d_tide) where
+    Love numbers through time, beside the Earth's (no_ocean_1d_tide) where
     that has run."""
-    planet = held_tide("response_tide_planet_relax")
+    planet = held_tide("no_ocean_tide_planet_relax")
     if planet is None:
         return
-    earth = held_tide("response1d_tide")
+    earth = held_tide("no_ocean_1d_tide")
     fig, ax = plt.subplots(figsize=(7.5, 4.8))
     for label, held, style in (("toy planet", planet, "o-"),
                                ("Earth (prem8)", earth, "--")):
@@ -768,10 +770,10 @@ def response_tide_planet_relax() -> None:
                   "point is the elastic response)")
     ax.set_ylabel("degree-2 tidal Love number")
     ax.legend(fontsize=9)
-    ax.set_title("sl3d response: a held degree-2 tide on the toy planet's "
-                 "Maxwell mantle", fontsize=11)
+    ax.set_title("sl3d solve, no ocean: a held degree-2 tide on the toy "
+                 "planet's Maxwell mantle", fontsize=11)
     fig.tight_layout()
-    save(fig, "response_tide_planet_relax", "love_numbers")
+    save(fig, "no_ocean_tide_planet_relax", "love_numbers")
 
 
 def oscillation(name: str):
@@ -785,7 +787,7 @@ def oscillation(name: str):
     if not (path.exists() and tables):
         return None
     tide = json.loads((CONFIGS / f"{name}.json").read_text())["forcing"]["tide"][0]
-    history = np.asarray(tide["history_kyr"])
+    history = np.asarray(tide["history"])
     rising = (history[:-1, 1] < 0.0) & (history[1:, 1] >= 0.0)
     period = history[1:, 0][rising][0] - history[0, 0]  # sin(2 pi t / P)
     gravity = float(exchange_table(tables[0])[0]["surface_gravity"][0])
@@ -810,12 +812,12 @@ def oscillation(name: str):
     return times, forcing, h2, k2, period, fits
 
 
-def response_tide_oscillating() -> None:
+def no_ocean_tide_oscillating() -> None:
     """An oscillating degree-2 tide on the radial viscoelastic Earth: the
     potential and the response through the run at one period, the response
     lagging; and the Love numbers' amplitudes and lags at the three periods
     of the oscillating configs that have run."""
-    name = "response_tide_oscillating"
+    name = "no_ocean_tide_oscillating"
     run = oscillation(name)
     if run is None:
         return
@@ -849,7 +851,7 @@ def response_tide_oscillating() -> None:
     runs = [run for run in runs if run is not None]
     periods = np.array([run[4] for run in runs])
     fits = np.array([run[5] for run in runs])  # (run, h or k, abs or lag)
-    held = held_tide("response1d_tide")
+    held = held_tide("no_ocean_1d_tide")
     for column, ylabel in ((0, "amplitude"), (1, "lag behind the potential "
                                                  "(degrees)")):
         ax = fig.add_subplot(2, 2, 3 + column)
@@ -868,8 +870,8 @@ def response_tide_oscillating() -> None:
                          "dotted: held 500 kyr)", fontsize=10)
         else:
             ax.set_title("their lags", fontsize=10)
-    fig.suptitle("sl3d response: an oscillating degree-2 tide on the radial "
-                 "viscoelastic Earth (prem8, a 1e21 Pa s mantle)")
+    fig.suptitle("sl3d solve, no ocean: an oscillating degree-2 tide on the "
+                 "radial viscoelastic Earth (prem8, a 1e21 Pa s mantle)")
     fig.tight_layout()
     save(fig, name, "oscillating")
 
@@ -942,7 +944,7 @@ def sea_level_fingerprint_3d_ice7g() -> None:
         mark_sites(ax, [melt])
         fig.colorbar(mesh, ax=ax, shrink=0.7,
                      extend="both" if limit is not None else "neither")
-    fig.suptitle("sl3d sea-level, the fingerprint of 10% of ICE-7G's Greenland "
+    fig.suptitle("sl3d solve, the fingerprint of 10% of ICE-7G's Greenland "
                  "ice melted, on PREM (no ocean) with S40RTS's lateral moduli "
                  f"(lmax {grid.lmax})", fontsize=11)
     fig.tight_layout()
@@ -950,7 +952,7 @@ def sea_level_fingerprint_3d_ice7g() -> None:
 
 
 def site_histories(path: Path, sites):
-    """A sea-level run's dates (kyr BP) and each site's relative sea level,
+    """A dated run's dates (kyr BP) and each site's relative sea level,
     the sea level at each date less the present's, by site name."""
     file = read_surface_file(path)
     dates = np.asarray(file.meta["dates_kyr_bp"], dtype=float)
@@ -1019,7 +1021,7 @@ def sea_level_3d_ice7g() -> None:
     ax_d.set_ylabel("3D minus radial model (m)")
     ax_d.set_title("the lateral structure's part", fontsize=10)
     ax_d.legend(fontsize=8)
-    fig.suptitle("sl3d sea-level on ICE-7G: PREM (no ocean) with S40RTS's "
+    fig.suptitle("sl3d solve on ICE-7G: PREM (no ocean) with S40RTS's "
                  "lateral viscosity and moduli, against its radial model "
                  f"(lmax {grid.lmax})", fontsize=11)
     fig.tight_layout()
@@ -1028,11 +1030,11 @@ def sea_level_3d_ice7g() -> None:
 
 def ocean_load() -> None:
     """What the ocean adds: one cap of ice laid on the synthetic Earth's
-    bare land, through `response` (the ice's load alone) and through
-    `sea-level` (the fingerprint, the water drawn from the ocean): the
-    displacement of each, their difference (the ocean's load), and the
-    sea-level change."""
-    name, alone = "sea_level_fingerprint_melt", "response_melt"
+    bare land, without an ocean (no_ocean_ice_cap: the ice's load alone) and
+    with one (sea_level_fingerprint_ice_cap: the fingerprint, the water drawn
+    from the ocean): the displacement of each, their difference (the
+    ocean's load), and the sea-level change."""
+    name, alone = "sea_level_fingerprint_ice_cap", "no_ocean_ice_cap"
     path, alone_path = OUT / name / f"{name}.nc", OUT / alone / f"{alone}.nc"
     if not (path.exists() and alone_path.exists()):
         return
@@ -1056,12 +1058,12 @@ def ocean_load() -> None:
     ax = world_map(fig, 2, 2, 1, central_longitude=-100.0,
                    extent=(-150.0, -50.0, 15.0, 85.0))
     mesh = plot_field(ax, ex, "alone", title="displacement under the cap "
-                      "(response, the load alone; m)")
+                      "(no ocean, the load alone; m)")
     mark_sites(ax, [cap])
     fig.colorbar(mesh, ax=ax, shrink=0.7)
     ax = world_map(fig, 2, 2, 2, central_longitude=-100.0)
-    mesh = plot_field(ax, ex, "difference", title="displacement, sea-level "
-                      "minus response: the ocean's load (cm)")
+    mesh = plot_field(ax, ex, "difference", title="displacement, with the "
+                      "ocean minus without: the ocean's load (cm)")
     mark_sites(ax, [cap])
     fig.colorbar(mesh, ax=ax, shrink=0.7)
     ax = world_map(fig, 2, 2, 3, central_longitude=-100.0)
@@ -1073,7 +1075,7 @@ def ocean_load() -> None:
     far = distance > 15.0
     order = np.argsort(distance[far])
     ax.plot(distance[far][order], 1e2 * load_alone[far][order], color="0.2",
-            lw=1.5, label="the load alone (response)")
+            lw=1.5, label="the load alone (no ocean)")
     for where, color, label in ((ocean, "C0", "with the ocean, under it"),
                                 (~ocean, "C5", "with the ocean, on land")):
         pick = far & where
@@ -1086,21 +1088,21 @@ def ocean_load() -> None:
     ax.set_title("away from the cap: the load alone, and with the ocean",
                  fontsize=10)
     ax.legend(fontsize=8, markerscale=8)
-    fig.suptitle("sl3d: 1 km of ice (a 3 degree cap) laid on the synthetic "
-                 "Earth, elastic, without rotation:\n`response` (the ice's "
-                 "load alone) against `sea-level` (the fingerprint, the "
-                 "water drawn from the ocean)", fontsize=11)
+    fig.suptitle("sl3d solve: 1 km of ice (a 3 degree cap) laid on the "
+                 "synthetic Earth, elastic, without rotation:\nwithout an "
+                 "ocean (the ice's load alone) against with one (the "
+                 "fingerprint, the water drawn from the ocean)", fontsize=11)
     fig.tight_layout()
     save(fig, name, "ocean")
 
 
 
-def response_cap_by_location() -> None:
+def no_ocean_cap_by_location() -> None:
     """The same cap loaded and removed at two places of the synthetic 3D
     viscoelastic Earth, over weak and over stiff mantle: the viscosity
     file's lateral pattern with the two caps, and the displacement at each
     cap's centre through time, 3D and radial model."""
-    runs = {"weak": "response_cap_weak", "strong": "response_cap_strong"}
+    runs = {"weak": "no_ocean_cap_weak", "strong": "no_ocean_cap_strong"}
     paths = {k: OUT / n / f"{n}.nc" for k, n in runs.items()}
     if not all(p.exists() for p in paths.values()):
         return
@@ -1155,33 +1157,33 @@ def response_cap_by_location() -> None:
     ax_r.set_ylabel("3D minus radial model (m)")
     ax_r.set_title("the lateral structure's part", fontsize=10)
     ax_r.legend(fontsize=8)
-    fig.suptitle("sl3d response: the same cap load over weak and over stiff "
-                 "mantle on the synthetic 3D viscoelastic Earth "
+    fig.suptitle("sl3d solve, no ocean: the same cap load over weak and over "
+                 "stiff mantle on the synthetic 3D viscoelastic Earth "
                  "(viscosity_log.nc)", fontsize=11)
     fig.tight_layout()
-    save(fig, "response_cap_weak", "relaxation")
+    save(fig, "no_ocean_cap_weak", "relaxation")
 
 
-def response_load() -> None:
+def no_ocean_load() -> None:
     """One load history given three ways: an analytic cap with a history
-    (response_load_cap), the same cap sampled into a surface file on a time
-    axis read with a time origin (response_load_field), and its expansion
-    as a coefficient table with the cap's history (response_load_coefficients):
+    (no_ocean_load_cap), the same cap sampled into a surface file on a time
+    axis read with a time origin (no_ocean_load_field), and its expansion
+    as a coefficient table with the cap's history (no_ocean_load_coefficients):
     the forcing on the run's clock and on the file's axis, the displacement
     at the cap's centre through time, and how far each run departs from the
     analytic one anywhere on the grid."""
-    names = ["response_load_cap", "response_load_field",
-             "response_load_coefficients"]
+    names = ["no_ocean_load_cap", "no_ocean_load_field",
+             "no_ocean_load_coefficients"]
     paths = {n: OUT / n / f"{n}.nc" for n in names}
     if not all(p.exists() for p in paths.values()):
         return
-    term = json.loads((CONFIGS / "response_load_cap.json").read_text())[
+    term = json.loads((CONFIGS / "no_ocean_load_cap.json").read_text())[
         "forcing"]["load"][0]
     centre = (term["cap"]["latitude"], term["cap"]["longitude"])
-    history = np.asarray(term["history_kyr"])
-    field = json.loads((CONFIGS / "response_load_field.json").read_text())[
+    history = np.asarray(term["history"])
+    field = json.loads((CONFIGS / "no_ocean_load_field.json").read_text())[
         "forcing"]["load"][0]["field"]
-    origin = field.get("time_origin_kyr", 0.0)
+    origin = field.get("time_origin", 0.0)
     stored = read_surface_file(CONFIGS / field["file"])
     # the file's own axis, in its own time scale
     stored_times = np.asarray(stored.time) * stored.scales.time / KYR
@@ -1191,15 +1193,15 @@ def response_load() -> None:
     files = {n: read_surface_file(p) for n, p in paths.items()}
     times = np.asarray(files[names[0]].time) / KYR
     reference = np.asarray(files[names[0]].variables["displacement"].values)
-    styles = {"response_load_cap": ("C0", "-", "cap, history_kyr"),
-              "response_load_field": ("C1", "--",
-                                      f"field file, time_origin_kyr {origin:g}"),
-              "response_load_coefficients": ("C2", ":",
-                                             "coefficient table, history_kyr")}
+    styles = {"no_ocean_load_cap": ("C0", "-", "cap, history"),
+              "no_ocean_load_field": ("C1", "--",
+                                      f"field file, time_origin {origin:g}"),
+              "no_ocean_load_coefficients": ("C2", ":",
+                                             "coefficient table, history")}
 
     fig, (ax_f, ax, ax_e) = plt.subplots(1, 3, figsize=(15, 4.4))
     factor = np.interp(times, history[:, 0], history[:, 1])
-    ax_f.plot(times, factor, color="C0", lw=2.0, label="history_kyr of the "
+    ax_f.plot(times, factor, color="C0", lw=2.0, label="history of the "
               "cap and the table (held beyond its ends)")
     ax_f.plot(stored_times + origin, stored_load / stored_load.max(), "o",
               color="C1", label="the file's stored times, read at "
@@ -1233,11 +1235,11 @@ def response_load() -> None:
     ax_e.set_ylabel("largest |difference| from the cap run, over its largest")
     ax_e.set_title("agreement, everywhere on the grid", fontsize=10)
     ax_e.legend(fontsize=8)
-    fig.suptitle("sl3d response: a load history from a file and from a "
+    fig.suptitle("sl3d solve, no ocean: a load history from a file and from a "
                  "coefficient table, on the radial viscoelastic Earth "
                  "(prem8, 1e21 Pa s)", fontsize=11)
     fig.tight_layout()
-    save(fig, "response_load_field", "agreement")
+    save(fig, "no_ocean_load_field", "agreement")
 
 
 def timestep_study() -> None:
@@ -1331,38 +1333,38 @@ def timestep_study() -> None:
 if __name__ == "__main__":
     love_numbers()
     sea_level_fingerprint("sea_level_fingerprint",
-                          "sl3d sea-level, the fingerprint: 10% of the "
+                          "sl3d solve, the fingerprint: 10% of the "
                           "synthetic Greenland melted", synthetic=True)
     sea_level_fingerprint_3d()
     sea_level_fingerprint("sea_level_fingerprint_ice7g",
-                          "sl3d sea-level, the fingerprint: 10% of the "
+                          "sl3d solve, the fingerprint: 10% of the "
                           "ICE-7G Greenland ice melted", synthetic=False)
     sea_level()
     sea_level_calibrated("sea_level_1d_calibrated", "sea_level_1d", None,
-                         "sl3d sea-level (1D), migrating shorelines, initial "
+                         "sl3d solve (1D), migrating shorelines, initial "
                          "sea level calibrated against the present day")
     sea_level_calibrated("sea_level_1d_ice7g_calibrated", "sea_level_1d_ice7g",
                          ICE7G,
-                         "sl3d sea-level (1D) on ICE-7G, migrating shorelines, "
+                         "sl3d solve (1D) on ICE-7G, migrating shorelines, "
                          "initial sea level calibrated against the present "
                          "day")
     sea_level_calibrated("sea_level_3d_calibrated", "sea_level_3d", None,
-                         "sl3d sea-level (3D), migrating shorelines, initial "
+                         "sl3d solve (3D), migrating shorelines, initial "
                          "sea level calibrated against the present day")
     sea_level_ice7g()
     kernels1d()
     kernels3d()
-    response()
-    response_viscoelastic()
-    response1d_disk()
-    response1d_tide()
-    response_tide_3d()
-    response_tide_planet()
-    response_tide_planet_relax()
-    response_tide_oscillating()
+    no_ocean()
+    no_ocean_viscoelastic()
+    no_ocean_1d_disk()
+    no_ocean_1d_tide()
+    no_ocean_tide_3d()
+    no_ocean_tide_planet()
+    no_ocean_tide_planet_relax()
+    no_ocean_tide_oscillating()
     sea_level_fingerprint_3d_ice7g()
     sea_level_3d_ice7g()
     ocean_load()
-    response_cap_by_location()
-    response_load()
+    no_ocean_cap_by_location()
+    no_ocean_load()
     timestep_study()

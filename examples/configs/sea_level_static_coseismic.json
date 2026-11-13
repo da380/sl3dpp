@@ -1,7 +1,7 @@
 {
   "problem": "static",
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "forcing": {
     "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
                            "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,

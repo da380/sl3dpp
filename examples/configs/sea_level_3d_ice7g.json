@@ -4,7 +4,7 @@
             "viscosity": {"file": "../data/earth_custom_viscosity_s40rts.nc",
                           "reference": "file_radial"},
             "moduli": {"file": "../data/earth_custom_moduli_s40rts.nc"}},
-  "lmax": 32,
+  "discretisation": {"lmax": 32},
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 53},
   "forcing": {"ice_change": [{"thickness": {"file": "../data/ice7g.nc"}}]},
   "ocean": {"at": "start",

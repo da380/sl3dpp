@@ -3,14 +3,16 @@
 /**
  * @file Common.hpp
  * @brief The run scaffold the commands of the sea level equation share
- * (`sea-level`, `kernel1d`, `kernel`): their shared config members and the
- * one reader of them, the Earth built from the `model` block (1-D or 3-D
- * as its files make it), the state (the sea level and the ice at one
- * instant, where the run has an ocean) and the
- * ice change read from their file inputs onto the solver grid, the ice at
- * any time (RunIce, the one place it is formed), the background state
- * built from them, the time grid of the window, and the initial sea
- * level's calibration.
+ * (`solve` and `kernel`): their shared config members and the one reader
+ * of them, the Earth built from the `model` block (1-D or 3-D as its
+ * files make it), the state (the sea level and the ice at one instant,
+ * where the run has an ocean) and the ice change read from their file
+ * inputs onto the solver grid, the ice at any time (RunIce, the one place
+ * it is formed), the background state built from them, the time grid of
+ * the window, the initial sea level's calibration, the forcing in the
+ * evolutions' form and the drive of a run through time, the static
+ * problem's world and its one-node solve, and the summary's account of
+ * what a config was taken to mean.
  */
 
 #include <memory>
@@ -40,30 +42,33 @@
 
 namespace sl3dpp::app {
 
-/// The members `sea-level`, `kernel1d` and `kernel` share: the problem,
-/// the Earth, the degree, the window, the forcing, the ocean, the rotation
-/// and the solves. The static problem, the solve at the state's one
-/// instant on the elastic Earth, and a run without an ocean are
-/// `sea-level`'s alone.
-struct SeaLevelRun {
+/// The members `solve` and `kernel` share, a run: the problem, the Earth,
+/// the degree, the window, the forcing, the ocean, the rotation and the
+/// solves.
+struct Run {
   Problem problem = Problem::Static;
   ModelBlock model;
   int lmax = 0;
   /// The quasi-static problem's nodes: dates before present (a dated
   /// run), or times on the run's own clock (a run counting forwards).
   std::optional<Window> times;
-  SeaLevelForcing forcing;
+  Forcing forcing;
   /// The state, its instant, the shorelines and the calibration, the
   /// `ocean` block's; absent, the body has no ocean (GRDSolver::
   /// NoOceanState), and no state, shorelines or calibration.
   std::optional<OceanBlock> ocean;
   RotationalFeedback rotation = RotationalFeedback::Full;
+  /// Whether the run carries gravity, `gravity` ("full", the default, or
+  /// "none"): without it the body has no ocean, no tide, no surface load
+  /// and no rotational feedback, and is forced by seismic sources alone on
+  /// a radial model (ViscoelasticOperator::Options::gravitating).
+  bool gravitating = true;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
   /// which the full transverse feedback needs when the input moments
   /// sustain less oblateness than the model's tidal response.
   bool hydrostatic_moments = false;
-  SolverBlock solver = SolverDefaults(SolverOf::SeaLevel);
+  SolverBlock solver;
 
   /// Whether the shorelines migrate (never without an ocean).
   [[nodiscard]] bool Migrating() const {
@@ -73,9 +78,9 @@ struct SeaLevelRun {
   [[nodiscard]] bool Calibrating() const { return ocean && ocean->calibrate; }
 };
 
-/// The top-level members `ReadSeaLevelRun` reads, for a command's list of
-/// its members.
-[[nodiscard]] std::vector<std::string_view> SeaLevelRunMemberNames();
+/// The top-level members `ReadRun` reads, for a command's list of its
+/// members.
+[[nodiscard]] std::vector<std::string_view> RunMemberNames();
 
 /// Refuses every top-level member not among `allowed`: one a block of the
 /// layout holds instead (`state`, `coupled`, `shorelines`, ...) is named
@@ -89,14 +94,19 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// 3-D step's unless a moduli file is given (the static problem on lateral
 /// moduli takes them; on a radial file the runner refuses them). The
 /// `times` block's form (ReadWindow) sets the form of the terms' times
-/// (ReadSeaLevelForcing) and of the state's instant (ReadOceanBlock). In
+/// (ReadForcing) and of the state's instant (ReadOceanBlock). In
 /// the static problem a `thickness` term of the ice change without the
 /// state's date is refused, and with the state at the window's end a
 /// `change` term or a cap. The `ocean` block is optional: without it the
 /// body has no ocean, and an ice change is refused. A tide is refused
-/// under migrating shorelines.
-[[nodiscard]] SeaLevelRun ReadSeaLevelRun(
-    const Json& top, const std::filesystem::path& directory);
+/// under migrating shorelines, and a forcing beside the ice (a load, a
+/// tide, a seismic source) with a calibrated initial sea level, whose
+/// calibration runs under the ice alone. Without gravity (`gravity`:
+/// "none") the `ocean` block, a tide, a surface load, a rotational
+/// feedback other than "none" (the default then) and hydrostatic moments
+/// are refused, each naming its member.
+[[nodiscard]] Run ReadRun(const Json& top,
+                          const std::filesystem::path& directory);
 
 /// Refuses the `solver` members that set the 3-D step (`step`,
 /// `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`)
@@ -133,7 +143,7 @@ struct BuiltEarth {
 /// Builds the run's Earth: the deck's model and material at lmax, and the
 /// model files of `model.viscosity` and `model.moduli` read about their
 /// chosen references.
-[[nodiscard]] BuiltEarth BuildEarth(const SeaLevelRun& run, const Json& top);
+[[nodiscard]] BuiltEarth BuildEarth(const Run& run, const Json& top);
 
 /// The Maxwell rheology of a run through time: the viscosity file's
 /// radial reference where given, the deck's viscosity column otherwise.
@@ -143,7 +153,7 @@ struct BuiltEarth {
 /// cuts (OperatorOptions), the step solver, and the lateral moduli where
 /// the model has them.
 [[nodiscard]] Viscoelastic3D::Options OperatorOptionsOf(
-    const SeaLevelRun& run, const BuiltEarth& earth, const Rheology& rheology);
+    const Run& run, const BuiltEarth& earth, const Rheology& rheology);
 
 /// The lateral perturbation delta of a 3-D run's viscosity: the viscosity
 /// file's, or zero under the deck's column.
@@ -151,7 +161,7 @@ struct BuiltEarth {
     const BuiltEarth& earth);
 
 /// The SLE parameters, the moments set hydrostatically where asked.
-[[nodiscard]] SeaLevelParameters ParametersOf(const SeaLevelRun& run,
+[[nodiscard]] SeaLevelParameters ParametersOf(const Run& run,
                                               const Material& material);
 
 /// The files a run's inputs name, read onto the solver grid: each file
@@ -202,7 +212,7 @@ class RunIce {
   /// and in a run counting forwards a `change` file with a time axis is
   /// refused). Values that are not numbers are refused at the member
   /// reading them. `top`, the config, must outlive the ice.
-  RunIce(const SeaLevelRun& run, const Json& top, InputFiles& files,
+  RunIce(const Run& run, const Json& top, InputFiles& files,
          double stateTime);
 
   /// The state's ice thickness, SI.
@@ -256,7 +266,7 @@ class RunIce {
 
 /// The ice change's terms as described (Describe), joined by
 /// `separator`; empty without terms.
-[[nodiscard]] std::string DescribeIceChange(const SeaLevelRun& run,
+[[nodiscard]] std::string DescribeIceChange(const Run& run,
                                             std::string_view separator);
 
 /// The world a run moves: the sea level's file on the solver grid, the
@@ -293,13 +303,13 @@ struct LandMask {
   std::vector<char> held;
   std::string read;
 };
-[[nodiscard]] LandMask ReadLand(const SeaLevelRun& run, const Json& top,
+[[nodiscard]] LandMask ReadLand(const Run& run, const Json& top,
                                 InputFiles& files, double time);
 
 /// The `ocean` member holding the state's sea level input,
 /// `ocean.sea_level` or `ocean.topography`, the one holding its ice,
 /// `ocean.ice`, and the ice change, `forcing.ice_change`.
-[[nodiscard]] const Json& SeaLevelMember(const SeaLevelRun& run,
+[[nodiscard]] const Json& SeaLevelMember(const Run& run,
                                          const Json& top);
 [[nodiscard]] const Json& IceMember(const Json& top);
 [[nodiscard]] const Json& IceChangeMember(const Json& top);
@@ -308,7 +318,7 @@ struct LandMask {
 /// counting forwards, once the state's files are read through `files`:
 /// `ocean.date_kyr_bp` is required when any of them (the sea level, the
 /// ice, the land) has a time axis, and refused when none has one.
-void CheckStateDate(const SeaLevelRun& run, const Json& top,
+void CheckStateDate(const Run& run, const Json& top,
                     InputFiles& files);
 
 /// The sea level the state's sea level input gives at a time (SI seconds
@@ -317,7 +327,7 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
 /// ice thickness (SI), the state's. Values that are not numbers are
 /// refused at the input's member.
 [[nodiscard]] std::vector<double> SeaLevelFrom(
-    const SeaLevelRun& run, const Json& top, const io::FieldHistory& file,
+    const Run& run, const Json& top, const io::FieldHistory& file,
     std::span<const double> ice, double time,
     const SeaLevelParameters& parameters);
 
@@ -336,12 +346,12 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
 /// the change present at the window's start, and the background built
 /// from the ice at the window's start and the state's sea level. Without
 /// an ocean, the world of a body without one (Loaded), nothing read.
-[[nodiscard]] Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
+[[nodiscard]] Loaded LoadWorld(const Run& run, const Json& top,
                                const GRDSolver& solver);
 
 /// The state's sea level at the window's end (a topography converted
 /// with the state's ice), solver units: the calibration's target.
-[[nodiscard]] std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run,
+[[nodiscard]] std::vector<double> FinalSeaLevelOf(const Run& run,
                                                   const Json& top,
                                                   const GRDSolver& solver,
                                                   const Loaded& world);
@@ -350,11 +360,11 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
 /// start) as a summary or an error states it: its date, `<d> kyr BP`, in
 /// a dated run, its time on the run's clock, `<t> <unit>`, in one counting
 /// forwards (Window::Label).
-[[nodiscard]] std::string WhenOf(const SeaLevelRun& run, const Scales& scales,
+[[nodiscard]] std::string WhenOf(const Run& run, const Scales& scales,
                                  double t);
 
 /// The window's time nodes, SLE units, zero at its start (Window::Times).
-[[nodiscard]] std::vector<double> MakeTimes(const SeaLevelRun& run,
+[[nodiscard]] std::vector<double> MakeTimes(const Run& run,
                                             const Scales& scales);
 
 /// The terms' clock (TermClock) against the solver's time: the time on it
@@ -367,7 +377,7 @@ struct SolverClock {
   double rate = 0.0;
   [[nodiscard]] double At(double t) const { return zero + t * rate; }
 };
-[[nodiscard]] SolverClock SolverClockOf(const SeaLevelRun& run,
+[[nodiscard]] SolverClock SolverClockOf(const Run& run,
                                         const Scales& scales);
 
 /// The grounded ice load of the change from the ice the run starts from
@@ -377,25 +387,25 @@ struct SolverClock {
 /// node; with the state at its end it is the change since the start. The
 /// references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceLoadOf(
-    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
+    const Run& run, const GRDSolver& solver, const Loaded& world);
 
 /// The ice thickness the migrating runs take, solver units: the
 /// background's ice plus the same change as IceLoadOf's, so that a change
 /// present at the window's start is ice the start's solve takes. The
 /// references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
-    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world);
+    const Run& run, const GRDSolver& solver, const Loaded& world);
 
 /// The run's ice history under its shorelines: IceLoadOf when frozen,
 /// IceThicknessOf when migrating.
-[[nodiscard]] IceHistory HistoryOf(const SeaLevelRun& run,
+[[nodiscard]] IceHistory HistoryOf(const Run& run,
                                    const GRDSolver& solver,
                                    const Loaded& world);
 
 /// Rebuilds the world's start from the run's ice: its ice at the
 /// window's start (world.ice0 too) under the given sea level, the ocean
 /// function by flotation.
-void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
+void StartFromIceHistory(const Run& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess);
 
 /// Calibrates the world's initial sea level against the state's sea level
@@ -410,13 +420,140 @@ struct CalibrationSummary {
   double after_m = 0.0;
   std::size_t runs = 0;
 };
-CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
+CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
                                   const GRDSolver& solver, Loaded& world,
                                   Evolution& evolution,
                                   std::span<const double> times);
-CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
+CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
                                   const GRDSolver& solver, Loaded& world,
                                   Evolution3D& evolution,
                                   std::span<const double> times);
+
+/// The forcing of a run in the form the library's evolutions take
+/// (Evolution::Forcing or Evolution3D::Forcing), in the solver's units,
+/// each channel a function of the solver's time read on the terms' clock
+/// (SolverClockOf: kyr from the window's start in a dated run, the run's
+/// own clock in its unit in one counting forwards; the static problem's
+/// one node is at zero, where its terms are what they are): the ice
+/// change's grounded load, `iceLoad` (given under frozen shorelines alone:
+/// under migrating ones the ice is given as its thickness, and a body
+/// without an ocean has none), joined by the surface loads in the water
+/// budget; the loads outside the water budget, the layer on the solid
+/// surface, the tide and the seismic sources. A channel no term gives is
+/// absent. `loads` are the run's surface loads (null without any), held
+/// by the forcing.
+template <class EvolutionForcing>
+[[nodiscard]] EvolutionForcing ForcingOf(
+    const Run& run, const GRDSolver& solver,
+    const std::function<std::vector<double>(double)>& iceLoad,
+    std::shared_ptr<const SurfaceLoads> loads);
+
+/// What drives a run through time on its world: the ice's grounded load
+/// under frozen shorelines (IceLoadOf; none without an ocean), its
+/// thickness under migrating ones (IceThicknessOf), whether the run is
+/// forced beside them, and that forcing (ForcingOf) with the surface loads
+/// it holds (null without any). A run is forced by its loads, tide and
+/// seismic sources, and, under migrating shorelines, by an ice change
+/// present at the window's start, taken through the forcing's entries
+/// (with nothing beside the ice, an empty forcing) so that the start is
+/// solved. The world must outlive the drive.
+template <class EvolutionForcing>
+struct Drive {
+  std::function<std::vector<double>(double)> directLoad;
+  std::function<std::vector<double>(double)> thickness;
+  bool forced = false;
+  EvolutionForcing forcing;
+  std::shared_ptr<const SurfaceLoads> loads;
+};
+
+/// The drive of a run through time on its world (Drive), the surface
+/// loads read onto the solver's grid against the config's `forcing`.
+template <class EvolutionForcing>
+[[nodiscard]] Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
+                                              const GRDSolver& solver,
+                                              const Loaded& world);
+
+/// The run of an evolution through the times under a drive: the frozen
+/// run under the ice's load or the forcing, or the migrating run under
+/// the ice's thickness and, where forced, the forcing; and the same from a
+/// checkpoint, `remaining` the window's times from the checkpoint's node.
+template <class EvolutionT>
+[[nodiscard]] std::vector<typename EvolutionT::Snapshot> RunDriven(
+    EvolutionT& evolution, std::span<const double> times,
+    const Drive<typename EvolutionT::Forcing>& drive, bool migrating);
+template <class EvolutionT>
+[[nodiscard]] std::vector<typename EvolutionT::Snapshot> ResumeDriven(
+    EvolutionT& evolution, const typename EvolutionT::Checkpoint& from,
+    std::span<const double> remaining,
+    const Drive<typename EvolutionT::Forcing>& drive, bool migrating);
+
+/// A 1-D run's refusal of an unconverged node, `when` the node as the
+/// window labels it.
+void Check1D(const Evolution::Snapshot& snapshot, std::string_view when);
+/// A 3-D run's refusal of an unconverged node.
+void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when);
+
+/// The static problem's world on a run's grid: the state at its date
+/// (`ocean.ice` and `ocean.sea_level` or `ocean.topography`, each file
+/// with a time axis read at `ocean.date_kyr_bp`, and `ocean.land`), the
+/// background state built from it in the solver's units, its ocean
+/// function flotation's, the ice change at the date (RunIce, held to what
+/// the state holds), SI, and the state's inputs as read. Without an ocean
+/// the background is GRDSolver::NoOceanState and the rest is empty.
+struct StaticWorld {
+  GRDSolver::State background;
+  std::vector<double> change;
+  std::string iceRead;
+  std::string seaLevelRead;
+};
+[[nodiscard]] StaticWorld LoadStaticWorld(const Run& run, const Json& top,
+                                          const GRDSolver& solver);
+
+/// The static problem's surface loads on a grid (SurfaceLoads, each term
+/// read once, a `field` file at its date), or null without any.
+[[nodiscard]] std::shared_ptr<const SurfaceLoads> StaticLoadsOf(
+    const Run& run, const Json& top, const SurfaceGrid& grid);
+
+/// The static problem solved as a run of one node of either evolution,
+/// built by the caller on the world's background: the solve of the start
+/// alone on the unrelaxed body, its one snapshot. Under frozen shorelines
+/// the linear sea level equation under the forcing, the ice change
+/// entering as its grounded load on the state's ocean function, rho_ice (1
+/// - C) dI, in the water budget; under migrating shorelines the nonlinear
+/// one, the ice the state's plus the change, whose flotation, with the sea
+/// level's, places the shorelines. The surface loads, the tide and the
+/// seismic sources join either (ForcingOf). Without an ocean, the linear
+/// equation on a body without one under the forcing beside the ice alone:
+/// the solid body's response.
+template <class EvolutionT>
+[[nodiscard]] std::vector<typename EvolutionT::Snapshot> SolveStatic(
+    const Run& run, const GRDSolver& solver, const StaticWorld& world,
+    std::shared_ptr<const SurfaceLoads> loads, EvolutionT& evolution);
+
+/// The elastic rheology of the static problem: the deck's elastic
+/// structure with no relaxing branch.
+[[nodiscard]] Rheology ElasticRheologyOf(const BuiltEarth& earth,
+                                         const Json& top);
+
+/// What the config was taken to mean, for a summary: the model's
+/// dimension, elastic and static (the static problem) or viscoelastic
+/// with the window (its dates, or its times on the run's clock in its
+/// unit), the shorelines and, through time, the calibration (or, in
+/// their place, that the body has no ocean), that the run has no gravity
+/// where it has none, and the rotation and moments. The forcing follows
+/// in the summary (WithInputs).
+[[nodiscard]] std::string Meaning(const Run& run, const BuiltEarth& earth);
+
+/// What the config was taken to mean, followed by the state's inputs as
+/// read (none without an ocean), the ice change's terms, the forcing
+/// beside the ice, where there are any, and each `field` load's input as
+/// read (`inputs`, DescribeField).
+[[nodiscard]] std::string WithInputs(std::string_view meaning, const Run& run,
+                                     std::string_view iceRead,
+                                     std::string_view seaLevelRead,
+                                     std::span<const std::string> inputs);
+
+/// Each `field` load's input as read, of a run's loads (none: empty).
+[[nodiscard]] std::vector<std::string> InputsOf(const SurfaceLoads* loads);
 
 }  // namespace sl3dpp::app

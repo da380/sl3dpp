@@ -3,7 +3,7 @@
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell",
             "viscosity": {"file": "../data/viscosity_log.nc",
                           "reference": "geometric_mean"}},
-  "lmax": 16,
+  "discretisation": {"lmax": 16},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
     "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]

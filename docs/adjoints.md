@@ -234,12 +234,13 @@ dual by the dot product; densities/rates are per unit SLE time.
 - **Discrete option**: the exact transpose of the reduced pipeline —
   Scatter/batched-synthesis/pointwise-multiply/analysis/force-rows in
   reverse, the m ≥ 0 column reduction and the spin orbit relation
-  transposed consistently (the pipeline ordering was fixed with this
-  in mind), and the transpose of the converged within-step fixed point
+  transposed consistently (the pipeline is ordered for it), and the
+  transpose of the converged within-step fixed point
   solved by the same Anderson-mixed iteration on the transposed
-  system (as the SLE adjoint already does). This is the
-  machine-precision gate for the 3D machinery; whether it is also
-  worth production use the diagnostics will say.
+  system (as the SLE adjoint is). This is the machine-precision gate
+  for the 3D machinery, and an option of the sweeps beside the
+  continuous one (`AdjointMethod::Discrete`; in `sl3d kernel`,
+  `kernels.method`: `"discrete"`).
 - Gate chain: zero-lateral limit — the 3D sweeps must reproduce the 1D
   sweeps' kernels (machine precision for the discrete, tight for the
   continuous); dot-product identity for the discrete 3D transpose; FD
@@ -997,7 +998,8 @@ not definite, the iteration continued on magnitudes).
 The forcing is any `Forces` pair: `LoadForces` (a surface mass load),
 `TideForces` (an external potential of every degree and order through
 `DegreeOperator::Tide(power)` — the static body tide of a laterally
-heterogeneous body, which is what the app will expose),
+heterogeneous body; `sl3d solve` solves that problem by the stepper,
+§13k),
 `SurfaceDualForces` (a measurement's dual), or their sum, with toroidal
 forces allowed. Because the operator is symmetric, the solve of a
 measurement's dual forces under the lateral structure is the adjoint
@@ -1033,22 +1035,27 @@ Not built: aspherical geometry by particle relabelling (the papers'
 mapping ξ, which turns the geometry into laterally varying tensorial
 coefficients of the same form), lateral
 δρ (the hydrostatic background does not admit it, §13l), and
-distribution of the static solve (OpenMP over the grid pipeline only).
+distribution of `SolveLateral` itself (OpenMP over the grid pipeline
+only; the static problem over MPI ranks is the stepper's, below and
+§13m).
 
-The program: `sl3d response` (apps/ResponseCommand.cpp) runs this problem
-on a model file's lateral moduli (io::ModelModuli:
-the relative perturbations of its `mu` and `kappa` about their lateral
-means or a stored radial reference) through the stepper's conjugate
-gradients on a branchless rheology, distributed over radial segments,
-with the radial model's response from ElasticPerturbation3D beside it;
-it writes the surface fields, the surface coefficients in the
-benchmarks' exchange form, and the response at the memory nodes as a
-model file (io::WriteNodeFields, io::ResponseFieldsAtNodes) for
-planetmodel's cutaways. ExampleStatic3D and `configs/response.json` run
-it on the synthetic 3D elastic Earth the build writes
-(MakeSyntheticModuli, io::WriteModuli). In the quasi-static problem (a
-`times` block) the same command steps the viscoelastic response through
-time instead, its first node this problem's solve (docs/sl3d-configs.md).
+The program: `sl3d solve` (apps/SolveCommand.cpp) runs this problem in
+its static problem without an ocean and without rotational feedback, on
+a model file's lateral moduli (io::ModelModuli: the relative
+perturbations of its `mu` and `kappa` about their lateral means or a
+stored radial reference), as the zero-length step of the stepper on a
+branchless rheology (§13k; its combined fixed point, or the nested
+closure of §13n), distributed over radial segments, with the radial
+model's response beside it; it writes the surface fields, the surface
+coefficients in the benchmarks' exchange form, and the response at the
+memory nodes (the stepper's conjugate-gradient elastic solve under the
+static solve's loads) as a model file (io::WriteNodeFields,
+io::ResponseFieldsAtNodes) for planetmodel's cutaways. ExampleStatic3D
+and `configs/no_ocean.json` run it on the synthetic 3D elastic Earth the
+build writes (MakeSyntheticModuli, io::WriteModuli). In the quasi-static
+problem (a `times` block) the same command steps the viscoelastic
+response through time instead, its first node this problem's solve
+(docs/sl3d-configs.md).
 
 ### 13k. Lateral moduli in the 3D stepper
 
@@ -1153,7 +1160,7 @@ on the background state's shorelines coupled to the rotational feedback,
 by the zero-length step's fixed point (or the nested closure of §13n)
 under lateral moduli and by the unrelaxed Love numbers without — the
 elastic sea-level fingerprint of a laterally heterogeneous Earth, which
-`sl3d sea-level` solves in the static problem on a lateral moduli
+`sl3d solve` solves in the static problem on a lateral moduli
 file. `Run`'s first node is the same code (`Start`), so `Run(times,
 load)[0]` is `Instantaneous(load(times[0]), times[0])`; it is distributed
 over radial segments as the run is. The check of the transverse
@@ -1264,8 +1271,8 @@ whole solid sampling the functions; `GridCoupling::Options::
 active_elements`), so a perturbation confined to the mantle costs no
 lithosphere or inner-core nodes.
 
-Two properties of the distribution, which the program's `response`
-command relies on. Whether an operator has lateral moduli is a
+Two properties of the distribution, which the program's static problem
+on lateral moduli relies on. Whether an operator has lateral moduli is a
 property of the RUN, not of a rank: with the moduli confined to the
 upper mantle, an inner rank's segment holds no element where they are
 non-zero, its coupling no node, and its sampled arrays are empty — but
@@ -1274,9 +1281,9 @@ every rank must take the lateral route, since the solve is collective
 `RadialRanks.ConfinedLateralModuliMatchTheOneProcessStatic` holds a
 node-less rank to the one-process answer). And the rank cuts balance
 the transform work of the coupling's nodes, which for a branchless
-rheology the rheology does not know: the response command weights the
-active elements the moduli make (`OperatorOptions` takes them), or the
-partition is degenerate and the conjugate gradients stall.
+rheology the rheology does not know: the program weights the active
+elements the moduli make (`OperatorOptions` takes them), or the
+partition is degenerate and the solves stall.
 
 ### 13n. The step by conjugate gradients, and the nested closure
 
@@ -1970,12 +1977,69 @@ term: the transposed unrelaxed solve (discrete) or the jump (continuous)
 with the start's pairings for the kernels in the moduli and the source
 moments and their derivatives. The thickness kernel is the
 instantaneous one; the rate and density views, which divide by a node's
-interval, are zero. A rheology with no relaxing layer is taken alike.
-The static problems therefore have no sweeps of their own: load, tide
-and source kernels, kernels in kappa and mu about a laterally
+interval, are zero. A rheology with no relaxing layer is taken alike,
+and so is one with no branch at all (the static problem's): the sweeps
+size their arrays at the memory points by the points themselves, not by
+a branch. The static problems therefore have no sweeps of their own:
+load, tide and source kernels, kernels in kappa and mu about a laterally
 heterogeneous background, and the Hessian's action, are those of the
-evolution asked for one solve.
+evolution asked for one solve. Without an ocean they are
+ElasticPerturbation3D's static kernels (§13h, §13j):
+`StaticDerivatives.OneNodeSweepsReproduceTheStaticKernels` holds the
+one-node sweeps' kernels in kappa and mu, both methods, to the static
+kernels' means over the sphere at every node of the static coupling at
+1e-11, under a load and under a body tide measured in U, V and phi, and
+`…UnderLateralModuli` to the static kernels themselves at every grid
+value of the coupling at 1e-11, the static solutions from the full
+lateral solves. The 3D one-node route forms its kernels at the
+coupling's memory nodes only, which on a branchless rheology are where
+the lateral moduli are non-zero.
 
-**What is not yet taken.** The 3D moment and tide kernels of the
-continuous sweep, and the discrete moment kernels, are formed on one
-process. A migrating run takes no tide.
+**What is formed on one process.** The 3D moment kernels of both
+sweeps and the continuous sweep's tide kernels are formed on one
+process (the discrete sweep's tide kernels are distributed). A migrating
+run takes no tide.
+
+## 20. Unequal steps, solved starts and forced trajectories
+
+The derivative classes read every step's size from the time grid (the
+per-dt caches of weights and effective systems, the cursors' rebuilt
+steps, the trapezoid node weights and the continuous sweeps' split
+weights), so a grid of unequal steps needs nothing further.
+`TestUnevenSteps` holds them on steps 1 : 3 : 0.5 : 2 : 1.5 kyr, both
+schemes, 1D and under lateral viscosity in 3D: the tangent along the
+loads and the thickness the difference of two runs at 1e-8; along the
+relaxation times (the log viscosity in 3D) and the moduli the
+derivative of the run, central differences at second order with
+Richardson at 1e-6; the discrete sweeps the tangents' transposes at
+1e-8 (every kernel, and a stride-2 recording); the distributional and
+quelled views equal to the thickness view; the discrete Hessian
+symmetric and equal to the second-order run (1e-9 in 1D, 1e-8 in 3D,
+where they agree to parts in 1e12), which is itself
+the derivative of the first-order run (Richardson at 1e-6); the
+continuous forms converging to the discrete at the scheme's order as
+every step is halved (rates near 4 for the trapezoid and 2 for
+backward Euler, the even grids' — the load, relaxation-time and moduli
+kernels, the continuous tangent and the continuous Hessian); and a
+decay time fitted over the uneven window, its weights the fit's
+derivative and its kernel the forward runs' derivative.
+
+A migrating run whose start is solved — under an ice change at the
+first node, or under forcings beside the ice — is linearised about its
+ocean functions node by node, the start's included; the thickness
+direction is relative to the first node's (TangentPerturbation::
+iceThickness), the derivative with the background's ice moved with the
+first node's. With the background held, the derivative along the
+history adds the run along rho_i (1 - C) dI_0 at every node, and its
+kernel at the first node is the thickness view less the baseline.
+`TestMigratingDerivatives` holds both readings against central
+differences of migrating runs that flip no cell (1e-7), the viscosity
+and the moduli about such runs (Richardson at 1e-6; 1e-5 for the 1D
+moduli, whose step that flips no cell leaves the solves' noise at parts
+in 1e6), the discrete kernels as the transposes (1e-8) and the
+Hessian's symmetry and equality with the second-order run about a
+forced trajectory, and every continuous kernel (the loads inside and
+outside the water budget, the layer, the thickness, the initial sea
+level, the moments, the relaxation times or log viscosity, the moduli)
+and the continuous Hessian converging to the discrete at second order,
+1D and 3D.

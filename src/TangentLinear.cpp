@@ -261,7 +261,13 @@ std::map<int, std::vector<double>> TangentLinearSolver::SecondWeightDrive(
 
 TangentLinearSolver::TangentLinearSolver(const Evolution& evolution,
                                          Options options)
-    : evolution_(&evolution), options_(std::move(options)) {}
+    : evolution_(&evolution), options_(std::move(options)) {
+  if (!evolution.op_->Gravitating()) {
+    throw std::invalid_argument(
+        "the tangent-linear runs are not built for the problem without "
+        "gravity");
+  }
+}
 
 /// What March takes for the material: a start response and a force per
 /// step, from a direction (MaterialDrive) or from a pair of directions

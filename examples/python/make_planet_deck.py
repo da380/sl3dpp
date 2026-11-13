@@ -19,8 +19,8 @@ elastic structure alone ("format": "elastic"). Run from build/examples:
         [--vp 5000 8000 7000] [--vs 0 4500 4000] [--viscosity 1e21]
         [--out data/planet]
 
-The tide configs response_tide_planet.json (the elastic tidal response
-and the planet's Love numbers) and response_tide_planet_relax.json (a
+The tide configs no_ocean_tide_planet.json (the elastic tidal response
+and the planet's Love numbers) and no_ocean_tide_planet_relax.json (a
 held tide relaxing on the Maxwell mantle) read these decks; run_all.sh
 runs them once data/planet.gia.deck exists.
 """

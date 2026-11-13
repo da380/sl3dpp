@@ -162,17 +162,75 @@ TEST(TractionNumbers, TieToTheGravitatingLoveNumbers) {
 }
 
 TEST(TractionNumbers, Refusals) {
+  // Without gravity degree 1 is kept, in the frame of the centre of mass
+  // (PointSource.AHomogeneousSphereWithoutGravityInClosedForm gates it); a
+  // surface traction there has a net force, so its numbers stay NaN.
   const auto material = MaterialFromDeck("e1_homogeneous.deck");
-  EXPECT_THROW(sl3dpp::DegreeOperator(material, 1, {.gravitating = false}),
+  const auto one = sl3dpp::DegreeOperator(material, 1, {.gravitating = false});
+  EXPECT_EQ(one.PinnedDofs().size(), 1u);
+  EXPECT_EQ(one.RigidTranslation().size(),
+            static_cast<std::size_t>(one.DofCount()));
+  EXPECT_TRUE(std::isnan(
+      sl3dpp::ComputeTractionNumbers(material, 2, false).h_u[1]));
+  EXPECT_THROW(sl3dpp::DegreeOperator(material, 1,
+                                      {.gravitating = false,
+                                       .pin_fraction = 1.0}),
                std::invalid_argument);
+  const auto two = sl3dpp::DegreeOperator(material, 2, {.gravitating = false});
+  EXPECT_TRUE(two.PinnedDofs().empty());
+  EXPECT_THROW((void)two.RigidTranslation(), std::invalid_argument);
+  EXPECT_THROW((void)two.CentreOfMassRow(), std::invalid_argument);
 
-  // A fluid region has no restoring force without gravity.
+  // A fluid core: above degree zero the system stops at its top, the
+  // mantle's base traction-free; at degree zero it keeps the whole body.
   const auto data = std::filesystem::path(SL3DPP_TEST_DATA_DIR);
   auto deck =
       sl3dpp::Deck::Read(data / "prem8.elastic.deck", ElasticFormat()).value();
   auto model = sl3dpp::EarthModel::FromDeck(deck).value();
   auto mesh = sl3dpp::RadialMesh::Create(model, {.lmax = 4}).value();
   auto prem = sl3dpp::Material::Create(model, mesh).value();
-  EXPECT_THROW(sl3dpp::DegreeOperator(prem, 2, {.gravitating = false}),
-               std::invalid_argument);
+  auto base = 0;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (prem.IsFluid(e)) base = e + 1;
+  }
+  ASSERT_GT(base, 0);
+  for (const auto l : {1, 2, 3}) {
+    const auto op = sl3dpp::DegreeOperator(prem, l, {.gravitating = false});
+    EXPECT_EQ(op.FirstElement(), base) << l;
+  }
+  EXPECT_EQ(sl3dpp::DegreeOperator(prem, 0, {.gravitating = false})
+                .FirstElement(),
+            0);
+
+  // More than one fluid region is refused.
+  auto layered = std::vector<double>{};
+  auto rho = std::vector<double>{}, vp = rho, vs = rho;
+  const std::array<std::array<double, 3>, 5> layers{
+      {{1.0e6, 9.0e3, 4.0e3},
+       {2.0e6, 9.0e3, 0.0},
+       {3.0e6, 9.0e3, 4.0e3},
+       {3.5e6, 9.0e3, 0.0},
+       {6.371e6, 9.0e3, 4.0e3}}};
+  auto below = 0.0;
+  for (const auto& [top, p, s] : layers) {
+    for (const auto r : {below, top}) {
+      layered.push_back(r);
+      rho.push_back(5000.0);
+      vp.push_back(p);
+      vs.push_back(s);
+    }
+    below = top;
+  }
+  auto twoFluid = sl3dpp::Deck::Create(
+                      std::move(layered),
+                      {{"rho", rho}, {"vpv", vp}, {"vsv", vs}, {"vph", vp},
+                       {"vsh", vs}, {"eta", std::vector<double>(rho.size(), 1.0)}})
+                      .value();
+  auto twoModel = sl3dpp::EarthModel::FromDeck(twoFluid).value();
+  auto twoMesh = sl3dpp::RadialMesh::Create(twoModel, {.lmax = 4}).value();
+  auto twoMaterial = sl3dpp::Material::Create(twoModel, twoMesh).value();
+  EXPECT_THROW(
+      sl3dpp::DegreeOperator(twoMaterial, 2, {.gravitating = false}),
+      std::invalid_argument);
+  EXPECT_NO_THROW(sl3dpp::DegreeOperator(twoMaterial, 2));
 }

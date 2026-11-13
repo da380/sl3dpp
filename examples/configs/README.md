@@ -2,11 +2,19 @@
 
 A config or more per `sl3d` command, each a working example of the program's
 JSON input, made of the blocks the commands share (the members are
-documented in `docs/sl3d-configs.md`). The
-build copies this directory to `build/examples/configs` when the files are
-missing and never overwrites them, so the copies there are yours to edit
-and experiment with; delete one (or the directory) and reconfigure to
-restore the original. Run the configs from there, where their relative
+documented in `docs/sl3d-configs.md`). The `sea_level_*` configs are sea
+level problems, with an ocean (but `sea_level_no_ocean.json`); the
+`no_ocean*` configs are problems of a body's response without an ocean;
+the `timestep_*` configs are the time-step study (below); the `kernel*`
+and `timestep_{discrete,continuous}_*` configs, which hold a `kernels`
+block, run as `sl3d kernel`. Every other one but `love_numbers.json` runs
+as `sl3d solve`. The build
+copies this directory to `build/examples/configs`, and copies a file again
+when its source has changed and its copy has not been edited, so the
+copies there are yours to edit and experiment with (an edited copy is
+kept, and the configure step says so); delete one (or the directory) and
+reconfigure to restore the original. Run the configs from there, where
+their relative
 paths reach the examples' inputs in `../data/` (`synthetic_earth.nc` and
 `synthetic_moduli.nc`, written by the build, `prem8.elastic.deck`,
 `prem8.gia.deck` and `viscosity_log.nc`) and each config's outputs land in
@@ -15,35 +23,42 @@ paths reach the examples' inputs in `../data/` (`synthetic_earth.nc` and
 ```sh
 cd build/examples/configs
 ./run_all.sh                       # every config, stopping at a failure
-../../apps/sl3d sea-level sea_level_1d.json   # or one at a time
+../../apps/sl3d solve sea_level_1d.json   # or one at a time
 ```
 
 The synthetic configs need no data and run in about a minute together on four
 threads (`OMP_NUM_THREADS=4`); CI runs them with `run_all.sh`. They are
-sized for that, so their degrees are low; raise `lmax` and `nodes` for
-sharper results. `poetry run python plot_app.py`, from `build/examples`,
-draws each config's figures from `out/<config>/` into
+sized for that, so their degrees are low; raise `discretisation.lmax`
+and `times.nodes` for sharper results. `poetry run python plot_app.py`,
+from `build/examples`, draws each config's figures from `out/<config>/` into
 `figures/sl3d/<config>/` (examples/README.md lists them).
 
-A `sea-level` run through time gives its nodes in one of two forms
+A run through time gives its nodes in one of two forms
 (docs/sl3d-configs.md, The times block). Dated, as the deglaciations
 here: `start_kyr_bp`, `end_kyr_bp` and `nodes`, or the dates listed in
 `at_kyr_bp`, its terms' times dates too (`history_kyr_bp`,
 `onset_kyr_bp`), its files read by date and its state at an end of the
 window (`ocean.at`). Counting forwards on the run's own clock, as
-`sea_level_postseismic.json`: a `unit` (`"kyr"`, `"yr"` or `"day"`) with
-`start`, `end` and `nodes` or the times listed in `at`, its terms' times
-on that clock (`history`, `onset`, a load file's `time_origin`), its
-state a snapshot of its files at `ocean.date_kyr_bp`, and its output's
-nodes in the unit (`times`, `time_unit`) rather than in dates
-(`dates_kyr_bp`). The static problem reads a load file with a time axis
-at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
+`sea_level_postseismic.json` and the `no_ocean*` runs through time: a
+`unit` (`"kyr"`, `"yr"` or `"day"`) with `start`, `end` and `nodes` or the
+times listed in `at`, its terms' times on that clock (`history`, `onset`,
+a load file's `time_origin`), its state, where it has one, a snapshot of
+its files at `ocean.date_kyr_bp`, and its output's nodes in the unit
+(`times`, `time_unit`) rather than in dates (`dates_kyr_bp`). The static
+problem reads a load file with a time axis at `date_kyr_bp`, or at `date`
+with its `unit` on the file's own axis.
+
+The `no_ocean*` configs have no `ocean` block, so the body has no ocean,
+and give `"rotation": "none"`, so the response is the solid body's alone
+(`postseismic_no_gravity.json` is such a response without gravity too);
+those on lateral structure set `solver.step_rtol` 1e-10 and
+`step_max_iterations` 200, tighter than the defaults (1e-9, 60).
 
 ## The synthetic Earth
 
 - **`love_numbers.json`** — the load and tidal Love numbers of the prem8
   deck to degree 256: `out/love_numbers/love_numbers.txt`.
-- **`sea_level_fingerprint.json`** — `sea-level` in the static problem:
+- **`sea_level_fingerprint.json`** — the static problem:
   the elastic sea-level fingerprint of melting a tenth of the synthetic
   Greenland ice, its state (the ice and the topography) read at the
   present day (`ocean.date_kyr_bp` 0) and the melt a `cap_fraction` term
@@ -52,7 +67,7 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   `out/sea_level_fingerprint/sea_level_fingerprint.nc`.
 - **`sea_level_fingerprint_3d.json`** — that fingerprint on the synthetic
   3D elastic Earth (`../data/synthetic_moduli.nc` on
-  `../data/prem8.elastic.deck`, as `response.json`): in the static
+  `../data/prem8.elastic.deck`, as `no_ocean.json`): in the static
   problem, a moduli file that varies laterally makes the fingerprint 3D,
   the instantaneous response of the 3D sea level problem, its
   zero-length step closed by the fixed point, at lmax 32 (the moduli
@@ -62,8 +77,8 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   (`*_radial_model`). The stiff craton under North America and the soft
   ridge change the sea level by a few centimetres at most, against a
   near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
-- **`sea_level_static_migrating.json`** — `sea-level` in the static
-  problem under migrating shorelines (`ocean.shorelines`): the elastic
+- **`sea_level_static_migrating.json`** — the static problem under
+  migrating shorelines (`ocean.shorelines`): the elastic
   response to the whole synthetic deglaciation, its state the synthetic
   Earth at 21 ka (`ocean.date_kyr_bp` 21) and the change a `thickness`
   term read at the present, so that the ice at the solve is the present
@@ -75,8 +90,8 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   ocean, and the marine margins of the ice sheets flood: the ocean covers
   83.75% of the surface at the solve against 83.33% at 21 ka. A fraction
   of a second.
-- **`sea_level_static_coseismic.json`** — `sea-level` in the static
-  problem forced by a fault alone, no ice change (`forcing.seismic`): the
+- **`sea_level_static_coseismic.json`** — the static problem forced by a
+  fault alone, no ice change (`forcing.seismic`): the
   co-seismic sea level change of a thrust off the synthetic South
   America's west coast (centred at 22° S, 74.5° W, 25 km deep), a 600 by
   150 km plane of scalar moment 2e22 N m dipping 18° east under the
@@ -90,7 +105,7 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   potentials (the horizontal motion) beside the rest. About 1 s and
   0.5 GB on four threads.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
-  relaxation, `sea-level` in the quasi-static problem counting forwards
+  relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
   nine uneven nodes from 0 to 500 yr) rather than in dates: the fault
   acts from the run's start (`"onset": 0`), the state is a snapshot of
@@ -104,7 +119,20 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   the fault); the mantle's relaxation brings the uplift down to 0.34 m
   after a century and 0.27 m after five. About 7 s and 1.5 GB on four
   threads.
-- **`sea_level_1d.json`** — `sea-level` in the quasi-static problem (its
+- **`postseismic_no_gravity.json`** — the problem without gravity
+  (`"gravity": "none"`): a point thrust at that fault's centroid (25 km
+  deep, dipping 18° east, 2e22 N m) relaxing on the same nine nodes in
+  years, on the radial Maxwell deck at lmax 64, without an ocean, a
+  potential or a rotational feedback, the degree systems taking the
+  displacement alone and stopping at the core-mantle boundary:
+  `out/postseismic_no_gravity/postseismic_no_gravity.nc` (the
+  displacement and the tangential and toroidal potentials; no potential
+  and no sea level change) and exchange tables of the displacement at the
+  first and last nodes, `out/postseismic_no_gravity/postseismic_no_gravity_{node}.txt`.
+  The uplift over the source is 0.31 m at the event and 0.19 m after 500
+  years, against 0.29 m and 0.17 m for the same run with gravity. About
+  2 s on four threads.
+- **`sea_level_1d.json`** — the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a
   `thickness` term of the ice change): the synthetic
@@ -116,6 +144,8 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   nodes to `out/sea_level_1d/checkpoints`, so a rerun resumes rather than
   starting again; a rerun after the config or an input has changed is
   refused instead, until `"restart": false` is set or the directory removed.
+  `run_all.sh` removes the directory before its run, a build being free to
+  write the inputs again.
 - **`sea_level_1d_calibrated.json`** — that deglaciation with migrating
   shorelines, its initial sea level calibrated against the synthetic Earth's
   present day rather than read at 21 ka (the device a thickness-only ice
@@ -136,69 +166,100 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   `out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc`. Each pass of the
   3D fixed point solves the nonlinear sea level equation; the calibration
   takes four runs (about 20 s on 8 threads).
-- **`kernel1d.json`** — adjoint kernels in 1D of five measurements of that
-  deglaciation (its forward run read from the same blocks as
-  `sea_level_1d.json`'s): the present sea level averaged over Hudson Bay,
-  the sea level at a far-field point at 10 ka, the length of day (the axial
-  rotation), the degree-2 zonal Stokes coefficient J2, and the decay time of
-  the Hudson Bay series over the last 7 kyr. Each gets its ice-history
-  kernels and its radial viscosity kernel: `out/kernel1d/`.
-- **`kernel.json`** — the 3D counterpart for the Hudson Bay sea level and
-  decay time, with the log-viscosity kernels of the 3D viscosity:
-  `out/kernel/`.
-- **`response.json`** — the instantaneous elastic response of the
+- **`kernel1d.json`** (`sl3d kernel`) — adjoint kernels in 1D of five
+  measurements of that deglaciation (its forward run read from the same
+  blocks as `sea_level_1d.json`'s, the measurements in its `kernels`
+  block): the present sea level averaged over Hudson Bay, the sea level at
+  a far-field point at 10 ka, the length of day (the axial rotation), the
+  degree-2 zonal Stokes coefficient J2, and the decay time of the Hudson
+  Bay series over the last 7 kyr. Each gets its ice-history kernels and
+  its radial viscosity kernel (`"parameters": ["ice", "viscosity"]`):
+  `out/kernel1d/`. About 5 s on four threads.
+- **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
+  sea level and decay time, with the log-viscosity kernels of the 3D
+  viscosity: `out/kernel/`. About 3 s on four threads.
+- **`kernel_static_moduli.json`** (`sl3d kernel`) — the static problem
+  without an ocean on the radial `../data/prem8.elastic.deck` at lmax 32,
+  under a disk of 1e5 kg m^-2 over Hudson Bay: the kernels in the load and
+  in the moduli kappa and mu of the uplift averaged over a 2° cap at its
+  centre and of the northward displacement 10° south of it (a vector
+  displacement, through the tangential potential). Its `output` block is
+  `solve`'s, so `sl3d solve` on the same config writes the response the
+  kernels are of: `out/kernel_static_moduli/`. About 0.15 s.
+- **`kernel_postseismic.json`** (`sl3d solve`, then `sl3d kernel`) —
+  `sea_level_postseismic`'s thrust off northern Chile (as 6 by 2 patches,
+  at lmax 32) on the run's own clock in years, from the event to a century
+  after it: the kernels, by the discrete adjoint, in the moment tensors of
+  the fault's patches at every node and in the viscosity, of a GPS
+  station's eastward and upward displacement 20 years on and of a tide
+  gauge's sea level a century on: `out/kernel_postseismic/`. The one config
+  serves both commands, the workflow of a run swept for many
+  measurements: `sl3d solve` writes the run (`run.nc`) and records it into
+  the trajectory store `out/kernel_postseismic/trajectory`, and `sl3d
+  kernel` sweeps from the store without running the forward problem
+  again; a kernel config of other measurements against the same store
+  (the same blocks, another `kernels` block) would too. A run under
+  seismic sources is recorded at every node, each state with its strain,
+  its toroidal state and the sources' forces: 7 state records of 83 MB
+  (15 MB of them the internal variables) and 7 surface records of 104 kB,
+  557 MiB in all. On four threads the solve takes 0.95 s recording (0.73
+  s without), and the kernels 1.9 s from the store against 2.4 s with the
+  forward run in memory, bitwise the same. `run_all.sh` removes a former
+  store first, its inputs being the build's to rewrite.
+- **`no_ocean.json`** — the instantaneous elastic response of the
   synthetic 3D elastic Earth (`../data/synthetic_moduli.nc`, written by the
   build: the PREM-like moduli with a stiff craton and a soft ridge in the
-  upper mantle) to a 2 km ice-equivalent cap over Hudson Bay and a unit
-  degree-2 tide, at lmax 16, by conjugate gradients on the radial
-  systems: `out/response/response.nc` (the surface displacement, potential
-  and the radial model's beside them), `out/response/response.txt` (the
-  surface coefficients in the cross-code exchange form) and
-  `out/response/response_volume.nc` (the response inside the body, for
-  planetmodel's cutaways). The forcing's `load` and `tide` are lists of
-  terms, summed.
-- **`response_viscoelastic.json`** — the viscoelastic response of the
+  upper mantle) without an ocean to a 2 km ice-equivalent cap over Hudson
+  Bay and a unit degree-2 tide, at lmax 16, the static problem's
+  zero-length step closed by the fixed point: `out/no_ocean/no_ocean.nc`
+  (the surface displacement, potential and the radial model's beside
+  them), `out/no_ocean/no_ocean.txt` (the surface coefficients in the
+  cross-code exchange form) and `out/no_ocean/no_ocean_volume.nc` (the
+  response inside the body, for planetmodel's cutaways). The forcing's
+  `load` and `tide` are lists of terms, summed.
+- **`no_ocean_viscoelastic.json`** — the viscoelastic response of the
   synthetic 3D Earth, the lateral viscosity of `../data/viscosity_log.nc`
   with the lateral moduli of `../data/synthetic_moduli.nc`, to the same
   Hudson Bay cap loaded linearly over 6 kyr and removed over the next one
-  (its `history_kyr`) and a constant unit degree-2 tide, from 0 to 12 kyr in
-  half-kyr steps at lmax 16, by the 3D stepper:
-  `out/response_viscoelastic/response_viscoelastic.nc` (the surface response
+  (its `history`) and a constant unit degree-2 tide, from 0 to 12 kyr in
+  half-kyr steps on the run's own clock (`"unit": "kyr"`) at lmax 16, by
+  the 3D stepper:
+  `out/no_ocean_viscoelastic/no_ocean_viscoelastic.nc` (the surface response
   at every node, the radial reference model's beside it) and exchange tables
   at four nodes,
-  `out/response_viscoelastic/response_viscoelastic_{node}.txt` (the start,
+  `out/no_ocean_viscoelastic/no_ocean_viscoelastic_{node}.txt` (the start,
   the peak load, the unloaded state and the end). The quasi-static problem
-  (`"problem": "quasi_static"` with a `times` block) is what makes a
-  `response` viscoelastic; it takes about 5 s on four threads.
-- **`response_seismic.json`** — the co-seismic and post-seismic response
+  (`"problem": "quasi_static"` with a `times` block) is what makes the
+  response viscoelastic; it takes about 5 s on four threads.
+- **`no_ocean_seismic.json`** — the co-seismic and post-seismic response
   of the radial GIA deck to a thrust fault off north-east Japan (a 400 by
   150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point
   sources): `forcing.seismic` in a run through time, the first node the
   co-seismic response and the later ones the relaxation, to 2 kyr at lmax
-  64. `out/response_seismic/response_seismic.nc` holds the radial
+  64. `out/no_ocean_seismic/no_ocean_seismic.nc` holds the radial
   displacement, the tangential potential V, the toroidal potential W and
   the potential at every node. About 5 s on two threads.
-- **`response1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
+- **`no_ocean_1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
   mass of about 2 km of ice, held for 10 kyr and removed over the next half,
   on the radial viscoelastic Earth of `../data/prem8.gia.deck` (no lateral
   files, so the 1D stepper), from 0 to 20 kyr in half-kyr steps at lmax 64:
-  `out/response1d_disk/response1d_disk.nc`. The disk is the exact expansion
+  `out/no_ocean_1d_disk/no_ocean_1d_disk.nc`. The disk is the exact expansion
   to lmax, not a sampled step. The figure shows the displacement against
   distance from the centre, the peripheral bulge growing under the load and
   the uplift after it; about 5 s on four threads.
-- **`response1d_tide.json`** — a degree-2 tidal potential switched on and
+- **`no_ocean_1d_tide.json`** — a degree-2 tidal potential switched on and
   held on the same radial Earth, at unevenly spaced nodes out to 500 kyr
-  (`times.at_kyr`), with an exchange table at every node:
-  `out/response1d_tide/response1d_tide.nc` and
-  `out/response1d_tide/response1d_tide_{node}.txt`. The coefficients over
+  (`times.at`, in kyr), with an exchange table at every node:
+  `out/no_ocean_1d_tide/no_ocean_1d_tide.nc` and
+  `out/no_ocean_1d_tide/no_ocean_1d_tide_{node}.txt`. The coefficients over
   the applied potential are the tidal Love numbers through time, from the
   elastic values at the start towards the fluid limit, which the figure
   draws; a fraction of a second.
-- **`response_tide_3d.json`** — the lunar body tide on the synthetic 3D
+- **`no_ocean_tide_3d.json`** — the lunar body tide on the synthetic 3D
   elastic Earth (`../data/synthetic_moduli.nc` on
   `../data/prem8.elastic.deck`), at lmax 32:
-  `out/response_tide_3d/response_tide_3d.nc` (the 3D and the radial model's
-  surface responses) and `out/response_tide_3d/response_tide_3d.txt`. The
+  `out/no_ocean_tide_3d/no_ocean_tide_3d.nc` (the 3D and the radial model's
+  surface responses) and `out/no_ocean_tide_3d/no_ocean_tide_3d.txt`. The
   forcing is an instantaneous degree-2 tidal potential with (2,0), (2,1)
   and (2,2) coefficients: the Moon (GM = 4.9028e12 m^3 s^-2) at its mean
   distance d = 384400 km, at declination 20° N over longitude 100° W, whose
@@ -220,9 +281,9 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   onto the coupling's grid, not its structure (under a cubic lateral rule
   the floor is hundreds of times lower). About 3 s and 0.9 GB on four
   threads.
-- **`response_tide_oscillating.json`**, with
-  **`response_tide_oscillating_short.json`** and
-  **`response_tide_oscillating_long.json`** — a degree-2 tide oscillating
+- **`no_ocean_tide_oscillating.json`**, with
+  **`no_ocean_tide_oscillating_short.json`** and
+  **`no_ocean_tide_oscillating_long.json`** — a degree-2 tide oscillating
   on the radial viscoelastic Earth of `../data/prem8.gia.deck`, whose
   mantle's Maxwell times (viscosity over shear modulus) run from 0.11 to
   0.43 kyr: the (2,0) coefficient of 1 m^2 s^-2 times sin(2 pi t / P),
@@ -230,23 +291,25 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   at 24 nodes a period, at lmax 4:
   `out/<config>/<config>.nc` and one exchange table at the last crest of
   the potential. They are the output of `make_tide_history.py` (in
-  `build/examples`), whose amplitude history `history_kyr` has a point at
-  every node, where the run sees the forcing. With a unit potential the degree-2 coefficients
+  `build/examples`), whose amplitude history `history` has a point at
+  every node, where the run sees the forcing. With a unit potential the
+  degree-2 coefficients
   are the Love numbers at the forcing's frequency; over the last cycle at
   P = 1 kyr |h2| = 0.811 lagging the potential by 23.0° and |k2| = 0.409
   lagging by 24.1°, at 0.1 kyr |k2| = 0.301 lagging by 4.0°, and at
   10 kyr |k2| = 0.787 lagging by 12.2°: the lag is largest between the
   elastic and the fluid limits. Against 96 nodes a period, 24 put k2
   within 0.7% and its lag within 0.4°. A fraction of a second each.
-- **`sea_level_fingerprint_melt.json`** with **`response_melt.json`** — what
-  the ocean adds: one ice change through both commands, elastic, on the
-  radial Earth of `../data/prem8.elastic.deck` at lmax 128. The
+- **`sea_level_fingerprint_ice_cap.json`** with **`no_ocean_ice_cap.json`**
+  — what the ocean adds: one ice change with an ocean and without one,
+  elastic, on the radial Earth of `../data/prem8.elastic.deck` at lmax 128. The
   fingerprint lays a `cap_thickness` cap of ice, 1 km at the centre of the
   synthetic North America (50° N, 100° W) and 3° wide, on the present
   day's bare land (a change may not take ice the state does not hold, so
   the cap is grown rather than melted: a melt is its negative), without
-  rotation (so that what differs is the ocean alone); `response` applies
-  the load of the same ice, a `cap` of 917 kg m^-3 times 1 km. The
+  rotation (so that what differs is the ocean alone); `no_ocean_ice_cap.json`
+  applies the load of the same ice to the body without an ocean, a `cap`
+  of 917 kg m^-3 times 1 km. The
   fingerprint loads only grounded ice, 917 x the change x (1 - C), and the
   cap lies 18° from the nearest coast, so the ocean function cuts 5e-8 of
   its mass: the two loads agree to 1e-7 of their peak (the fingerprint
@@ -257,7 +320,7 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   the displacement by -14 to +21 cm, lifting the ocean floor by 11 cm on
   average and pressing the cap's centre down by a further 12 cm. A
   fraction of a second each.
-- **`response_cap_weak.json`** and **`response_cap_strong.json`** — the
+- **`no_ocean_cap_weak.json`** and **`no_ocean_cap_strong.json`** — the
   same Hudson Bay-sized cap (10° wide, 1.834e6 kg m^-2) switched on at 0,
   held, and removed over 6 to 6.5 kyr, from 0 to 12 kyr in half-kyr steps
   at lmax 16, on the synthetic 3D viscoelastic Earth
@@ -273,21 +336,22 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   and after the load is removed it rebounds faster (20 m left at 12 kyr,
   against 32 m in the radial model and 45 m at the stiff site). About 3 s
   each on four threads, 13 to 15 fixed-point iterations a step.
-- **`response_load_cap.json`**, with **`response_load_field.json`** and
-  **`response_load_coefficients.json`** — one load history given three
+- **`no_ocean_load_cap.json`**, with **`no_ocean_load_field.json`** and
+  **`no_ocean_load_coefficients.json`** — one load history given three
   ways, on the radial viscoelastic Earth of `../data/prem8.gia.deck` from 0
   to 12 kyr in quarter-kyr steps at lmax 32: a Gaussian cap (60° N, 85° W,
   5° wide, 1.834e6 kg m^-2) with the history `[[2, 0], [3, 1], [7, 1],
-  [7.5, 0]]` (`response_load_cap`, no inputs but the deck); the same cap
+  [7.5, 0]]` (`no_ocean_load_cap`, no inputs but the deck); the same cap
   sampled into a surface file on a time axis, `../data/load_cap_history.nc`,
-  read as a `field` term (`response_load_field`); and its coefficient
+  read as a `field` term (`no_ocean_load_field`); and its coefficient
   table, `../data/load_cap_lm.txt`, as a `coefficients` term with the
-  cap's history (`response_load_coefficients`). The two files come from
+  cap's history (`no_ocean_load_coefficients`). The two files come from
   `make_load_field.py` and `make_load_coefficients.py` (examples/README.md),
   and `run_all.sh` runs these two configs once they exist. The file's own
   time axis runs from 0 to 5.5 kyr (the load grows over its first
-  kiloyear, is held to 5 and removed by 5.5); `"time_origin_kyr": 2` reads
-  it at t - 2 kyr when the run's clock says t, so the file's time 0 is the
+  kiloyear, is held to 5 and removed by 5.5); `"time_origin": 2` reads it
+  at t - 2 kyr when the run's clock says t (in its unit, kyr), so the
+  file's time 0 is the
   run's 2 kyr, and before it and after 7.5 kyr the file's first and last
   (zero) loads are held. The coefficient table holds the LOAD's
   coefficients in the exchange table's harmonics (an exchange table holds
@@ -299,20 +363,19 @@ at `date_kyr_bp`, or at `date` with its `unit` on the file's own axis.
   (band-limited), so it differs from the sampled cap's by about 1% at the
   centre while the loads' coefficients, and so the responses, agree. About
   1 s each.
-- **`sea_level_no_ocean.json`** — `sea-level` without an `ocean` block,
-  on a body without an ocean: `response_load_cap.json`'s run in
-  `sea-level`'s terms, its window from 12 kyr BP to the present in
-  quarter-kyr steps and the cap's history in dates before present
-  (`history_kyr_bp` `[[10, 0], [9, 1], [5, 1], [4.5, 0]]`), the load's
-  properties left at their defaults and no rotational feedback
-  (`response` has none): `out/sea_level_no_ocean/sea_level_no_ocean.nc`.
-  Its displacement, potential and tangential potential are
-  `response_load_cap`'s at every node to 1e-11 of their largest values
-  (9e-13 for the displacement), the rounding of the two clocks' node
-  times; its relative sea level change is -(u + phi / g), the height of
-  an equipotential above the surface. About 1 s.
-- **The time-step study**, `timestep_{et,be}_n<N>.json` (sea-level) and
-  `timestep_{discrete,continuous}_n<N>.json` (kernel1d) — one problem at
+- **`sea_level_no_ocean.json`** — `no_ocean_load_cap.json`'s run dated:
+  its window from 12 kyr BP to the present in quarter-kyr steps and the
+  cap's history in dates before present (`history_kyr_bp` `[[10, 0], [9,
+  1], [5, 1], [4.5, 0]]`), without an `ocean` block, the load's properties
+  left at their defaults and no rotational feedback:
+  `out/sea_level_no_ocean/sea_level_no_ocean.nc`. Its displacement,
+  potential and tangential potential are `no_ocean_load_cap`'s at every
+  node to 1e-11 of their largest values (9e-13 for the displacement), the
+  rounding of the two clocks' node times, and its `load` at every node to
+  2e-15; its relative sea level change is -(u + phi / g), the height of an
+  equipotential above the surface. About 1 s.
+- **The time-step study**, `timestep_{et,be}_n<N>.json` (solve) and
+  `timestep_{discrete,continuous}_n<N>.json` (kernel) — one problem at
   several step sizes: the synthetic deglaciation from 16 to 6 ka on the
   radial Earth of `../data/prem8.gia.deck` (Maxwell times 0.11 to
   0.43 kyr) at lmax 16, without rotation, with the sea level averaged over
@@ -440,10 +503,10 @@ gravity 3.66 m s^-2), which `python make_planet_deck.py` writes from
 `../data/planet.elastic.deck`; `run_all.sh` runs them once those exist
 and skips them otherwise.
 
-- **`response_tide_planet.json`** — the Sun's tide on the toy planet,
+- **`no_ocean_tide_planet.json`** — the Sun's tide on the toy planet,
   elastic and radial, at lmax 32:
-  `out/response_tide_planet/response_tide_planet.nc` and
-  `out/response_tide_planet/response_tide_planet.txt`. The potential is
+  `out/no_ocean_tide_planet/no_ocean_tide_planet.nc` and
+  `out/no_ocean_tide_planet/no_ocean_tide_planet.txt`. The potential is
   the Sun's (GM = 1.32712e20 m^3 s^-2) at Mars's mean distance, 1.524 AU,
   at declination 25° N (about Mars's obliquity) over longitude 0°:
   A = 0.1287 m^2 s^-2 at the surface, so (2,0) 0.04735, (2,1) 0.09571 and
@@ -452,9 +515,9 @@ and skips them otherwise.
   tidal Love numbers off the exchange table, each order's coefficients
   over the potential's: h2 = 0.3390 and k2 = 0.1823, the three orders
   agreeing to rounding, and a bulge of about 12 mm.
-- **`response_tide_planet_relax.json`** — a unit degree-2 potential
+- **`no_ocean_tide_planet_relax.json`** — a unit degree-2 potential
   switched on and held on the planet's Maxwell deck, as
-  `response1d_tide.json` is on the Earth's, at the same nodes out to
+  `no_ocean_1d_tide.json` is on the Earth's, at the same nodes out to
   500 kyr: the Love numbers relax from h2 = 0.34 and k2 = 0.18 to 1.83 and
   0.99, most of the way between 1 and 10 kyr, several times later than
   the Earth's under the same viscosity.

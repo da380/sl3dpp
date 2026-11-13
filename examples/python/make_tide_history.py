@@ -1,27 +1,28 @@
-"""Writes an sl3d `response` config of an oscillating degree-2 tide on a
-radial viscoelastic Earth: the tidal potential's (2, 0) coefficient times
-sin(2 pi t / P), from t = 0 over a whole number of periods P.
+"""Writes an sl3d config of an oscillating degree-2 tide on a radial
+viscoelastic Earth without an ocean and without rotational feedback: the
+tidal potential's (2, 0) coefficient times sin(2 pi t / P), from t = 0
+over a whole number of periods P, on the run's own clock in kyr.
 
 The run's time nodes are evenly spaced, --points to a period, and the
-amplitude history (`history_kyr`) has a point at every node: the forcing
-enters a viscoelastic run at its nodes alone (docs/sl3d-configs.md, The
-viscoelastic run), so these are the sinusoid's values wherever the run
+amplitude history (`history`) has a point at every node: the forcing
+enters a run through time at its nodes alone (docs/sl3d-configs.md, The
+run through time), so these are the sinusoid's values wherever the run
 sees it. The tide starts from zero, so there is no elastic jump at the
 start; the transient that the start excites dies away over the first
 cycles, and the last cycles show the periodic response, its amplitude and
 its lag behind the potential: the Love numbers at the forcing's frequency.
 The potential's amplitude, 1 m^2 s^-2 by default, makes the response's
-coefficients those Love numbers in SI (as in response1d_tide.json).
+coefficients those Love numbers in SI (as in no_ocean_1d_tide.json).
 
-The configs response_tide_oscillating_short.json,
-response_tide_oscillating.json and response_tide_oscillating_long.json
+The configs no_ocean_tide_oscillating_short.json,
+no_ocean_tide_oscillating.json and no_ocean_tide_oscillating_long.json
 are this script's output at periods of 0.1, 1 and 10 kyr on
 data/prem8.gia.deck, whose Maxwell mantle (1e21 Pa s) has Maxwell times
 of 0.11 to 0.43 kyr. Run from build/examples:
 
     poetry run python make_tide_history.py [--period-kyr 1] [--cycles 6]
         [--points 24] [--deck ../data/prem8.gia.deck] [--lmax 4]
-        [--name response_tide_oscillating] [--out FILE | --out -]
+        [--name no_ocean_tide_oscillating] [--out FILE | --out -]
 
 It writes configs/<name>.json (`--out -` prints it instead). Run from
 configs/, the config writes out/<name>/<name>.nc, the surface response at
@@ -29,16 +30,16 @@ every node, and one exchange table, out/<name>/<name>_<node>.txt, at the
 last cycle's crest of the potential (its header carries the surface
 gravity, which turns the displacement into h2):
 
-    cd configs && ../../apps/sl3d response <name>.json
+    cd configs && ../../apps/sl3d solve <name>.json
 
 The three example configs are, from build/examples (each overwriting the
 copy in configs/):
 
     poetry run python make_tide_history.py --period-kyr 0.1 \
-        --name response_tide_oscillating_short
+        --name no_ocean_tide_oscillating_short
     poetry run python make_tide_history.py --period-kyr 1
     poetry run python make_tide_history.py --period-kyr 10 \
-        --name response_tide_oscillating_long
+        --name no_ocean_tide_oscillating_long
 """
 from __future__ import annotations
 
@@ -59,16 +60,20 @@ def config(name: str, period: float, cycles: int, points: int, deck: str,
         pairs.append(f"[{float(round(period * k / points, 9))!r}, "
                      f"{factor!r}]")
     rows = [", ".join(pairs[i:i + 4]) for i in range(0, nodes, 4)]
-    history = (",\n" + " " * 30).join(rows)
+    history = (",\n" + " " * 26).join(rows)
+    # the window's end rounded as the history's times are, so that it is
+    # the number the period and cycles give (0.6, not 0.6000000000000001)
+    end = float(round(cycles * period, 9))
     return f"""{{
   "problem": "quasi_static",
   "model": {{"deck": {json.dumps(deck)}, "format": "maxwell"}},
-  "lmax": {lmax},
-  "times": {{"start_kyr": 0.0, "end_kyr": {float(cycles * period)!r}, "nodes": {nodes}}},
+  "discretisation": {{"lmax": {lmax}}},
+  "times": {{"unit": "kyr", "start": 0.0, "end": {end!r}, "nodes": {nodes}}},
   "forcing": {{
     "tide": [{{"degree": 2, "order": 0, "amplitude_m2_s2": {float(amplitude)!r},
-              "history_kyr": [{history}]}}]
+              "history": [{history}]}}]
   }},
+  "rotation": "none",
   "output": {{"surface": "out/{name}/{name}.nc",
              "exchange": "out/{name}/{name}_{{node}}.txt",
              "exchange_nodes": [{crest}]}}
@@ -90,9 +95,9 @@ def main() -> None:
     parser.add_argument("--lmax", type=int, default=4)
     parser.add_argument("--amplitude", type=float, default=1.0,
                         help="the potential's amplitude, m^2 s^-2 (default 1)")
-    parser.add_argument("--name", default="response_tide_oscillating",
+    parser.add_argument("--name", default="no_ocean_tide_oscillating",
                         help="the config's name (default "
-                             "response_tide_oscillating)")
+                             "no_ocean_tide_oscillating)")
     parser.add_argument("--out", default=None,
                         help="the file to write (default configs/<name>.json; "
                              "- prints it)")

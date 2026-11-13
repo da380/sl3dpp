@@ -25,12 +25,6 @@ ModelFormat ReadFormat(const Json& top) {
                               {"elastic", ModelFormat::Elastic}});
 }
 
-int ReadLmax(const Json& top) {
-  const auto lmax = Integer(top, "lmax");
-  if (lmax < 0) Fail(top.At("lmax"), "is not a degree");
-  return lmax;
-}
-
 /// The model, mesh and material of a config's deck.
 Material MaterialOf(const std::filesystem::path& deck_path, ModelFormat format,
                     int lmax, const Json& top) {
@@ -51,12 +45,13 @@ Material MaterialOf(const std::filesystem::path& deck_path, ModelFormat format,
 
 LoveNumbersInput ReadLoveNumbersInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  Allow(top,
-        {"model", "model_format", "lmax", "output", "conventional_output"});
+  const auto lmax = ReadDiscretisationBlock(top, 0).lmax;
+  Allow(top, {"model", "model_format", "discretisation", "output",
+              "conventional_output"});
   const auto directory = config.parent_path();
   auto out = LoveNumbersInput{.model = PathOf(top, "model", directory),
                               .format = ReadFormat(top),
-                              .lmax = ReadLmax(top),
+                              .lmax = lmax,
                               .output = PathOf(top, "output", directory)};
   if (Has(top, "conventional_output")) {
     out.conventional_output = PathOf(top, "conventional_output", directory);

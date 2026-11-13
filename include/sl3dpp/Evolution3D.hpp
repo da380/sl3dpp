@@ -83,8 +83,9 @@ class Evolution3D {
     std::vector<double> oceanFunction;
     /// Under interior sources, when recording: the sources' forces at
     /// the node. Such a run is recorded at every node (record_stride 1),
-    /// each state with its strain: the strain of a source-driven
-    /// solution is not regenerated from the loads alone.
+    /// each state with its strain (on the snapshot, or handed to
+    /// Options::on_state): the strain of a source-driven solution is not
+    /// regenerated from the loads alone.
     std::optional<DegreeFields> sourceForces;
   };
 
@@ -134,12 +135,18 @@ class Evolution3D {
     /// caller can stream outputs (and checkpoint them) without waiting
     /// for the run to return.
     std::function<void(std::size_t node, const Snapshot&)> on_snapshot{};
+    /// Whether the run returns its snapshots. false: each is handed to
+    /// on_snapshot and then dropped, and the run returns none, so that a
+    /// caller keeping its outputs its own way holds no node twice.
+    bool keep_snapshots = true;
     /// With record_stride set, hand each kept node's internal state to
     /// on_state (after its on_snapshot) INSTEAD of keeping it on the
     /// snapshot: the recording then lives where the callback puts it (a
-    /// disk store, say), the snapshots keep the loads alone, and a
-    /// reverse sweep reads the states back through
-    /// ForwardTrajectory3D's fetch.
+    /// disk store, say, io::TrajectoryStore), the snapshots keep the loads
+    /// alone, and a reverse sweep reads the states back through
+    /// ForwardTrajectory3D's fetch. Under interior sources the state
+    /// handed out carries its strain, and the snapshot keeps the sources'
+    /// forces.
     std::function<void(std::size_t node, Viscoelastic3D::State&&)> on_state{};
     /// Hand every checkpoint_stride-th node's recurrence, and the last
     /// node's, to on_checkpoint (0 hands none), after that node's

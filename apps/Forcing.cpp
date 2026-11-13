@@ -35,31 +35,17 @@ struct ClockNames {
 };
 
 ClockNames NamesOf(Form form) {
-  switch (form) {
-    case Form::Response:
-      return {"history_kyr", "onset_kyr"};
-    case Form::Dated:
-      return {"history_kyr_bp", "onset_kyr_bp"};
-    case Form::Forwards:
-      break;
-  }
-  return {"history", "onset"};
+  return form == Form::Dated ? ClockNames{"history_kyr_bp", "onset_kyr_bp"}
+                             : ClockNames{"history", "onset"};
 }
 
-/// Why a name of the form `given` is refused in a term of the form
-/// `mine` (in a run through time, `timed`), naming this form's `wanted`.
-std::string OtherClock(Form mine, Form given, std::string_view wanted,
-                       bool timed) {
-  if (mine == Form::Response) {
-    return std::format(
-        "is a date; here times are on the run's clock, kyr: `{}`", wanted);
-  }
-  if (mine == Form::Dated && given == Form::Response) {
-    return std::format(
-        "is a time on a run's own clock in kyr, `response`'s form; here "
-        "times are dates, kyr before present: `{}`",
-        wanted);
-  }
+/// The names of a history and an onset in kyr on a run's own clock
+/// without a unit, which no form takes.
+constexpr auto kKyrNames = ClockNames{"history_kyr", "onset_kyr"};
+
+/// Why a name of the other form is refused in a term of the form `mine`
+/// (in a run through time, `timed`), naming this form's `wanted`.
+std::string OtherClock(Form mine, std::string_view wanted, bool timed) {
   if (mine == Form::Dated) {
     return timed ? std::format("is a time on a run's own clock, the form of a "
                                "`times` block counting forwards with a "
@@ -71,40 +57,51 @@ std::string OtherClock(Form mine, Form given, std::string_view wanted,
                                kNeedsQuasiStatic);
   }
   return std::format(
-      "is {}; this run counts forwards on its own clock, in its `unit` "
-      "(`times.unit`): `{}`",
-      given == Form::Dated
-          ? "a date before present, the dated form of `times`"
-          : "a time in kyr, `response`'s form",
+      "is a date before present, the dated form of `times`; this run counts "
+      "forwards on its own clock, in its `unit` (`times.unit`): `{}`",
       wanted);
 }
 
-/// Refuses the other forms' names of a history (and, with `onsets`, of an
-/// onset) in a term, naming this form's. `response`'s terms know their
-/// own names alone, the forwards form's being unknown members to them.
+/// Why a time in kyr on a run's own clock without a unit is refused in a
+/// term of the form `mine`, naming this form's `wanted`.
+std::string KyrWithoutUnit(Form mine, std::string_view wanted) {
+  return mine == Form::Dated
+             ? std::format("is a time in kyr on a run's own clock, without "
+                           "its unit; here times are dates, kyr before "
+                           "present: `{}`",
+                           wanted)
+             : std::format("is a time in kyr without its unit; this run "
+                           "counts forwards on its own clock, in its `unit` "
+                           "(`times.unit`): `{}`",
+                           wanted);
+}
+
+/// Refuses the other form's names of a history (and, with `onsets`, of an
+/// onset) in a term, and the names of times in kyr without a unit, naming
+/// this form's.
 void RefuseOtherClock(const Json& item, const TermClock& clock, bool timed,
                       bool onsets = true) {
   const auto mine = NamesOf(clock.form);
-  for (const auto form : {Form::Response, Form::Dated, Form::Forwards}) {
-    if (form == clock.form ||
-        (clock.form == Form::Response && form == Form::Forwards)) {
-      continue;
-    }
-    const auto other = NamesOf(form);
-    if (Has(item, other.history)) {
-      Fail(item.At(other.history),
-           OtherClock(clock.form, form, mine.history, timed));
-    }
-    if (onsets && Has(item, other.onset)) {
-      Fail(item.At(other.onset),
-           OtherClock(clock.form, form, mine.onset, timed));
-    }
+  const auto other =
+      NamesOf(clock.form == Form::Dated ? Form::Forwards : Form::Dated);
+  if (Has(item, kKyrNames.history)) {
+    Fail(item.At(kKyrNames.history), KyrWithoutUnit(clock.form, mine.history));
+  }
+  if (Has(item, other.history)) {
+    Fail(item.At(other.history), OtherClock(clock.form, mine.history, timed));
+  }
+  if (!onsets) return;
+  if (Has(item, kKyrNames.onset)) {
+    Fail(item.At(kKyrNames.onset), KyrWithoutUnit(clock.form, mine.onset));
+  }
+  if (Has(item, other.onset)) {
+    Fail(item.At(other.onset), OtherClock(clock.form, mine.onset, timed));
   }
 }
 
-/// A term's amplitude history under its form's name (`history_kyr`,
-/// `history_kyr_bp` or `history`): refused without a `times` block
-/// (`timed`), which a forcing fixed in time cannot take.
+/// A term's amplitude history under its form's name (`history_kyr_bp` or
+/// `history`): refused without a `times` block (`timed`), which a forcing
+/// fixed in time cannot take.
 AmplitudeHistory ReadHistory(const Json& item, bool timed,
                              const TermClock& clock = {}) {
   auto out = AmplitudeHistory{};
@@ -142,10 +139,9 @@ AmplitudeHistory ReadHistory(const Json& item, bool timed,
     }
     return out;
   }
-  // on the run's own clock: kyr (`response`), or the run's unit
-  const auto forwards = clock.form == Form::Forwards;
-  const auto pairName = forwards ? "[time, factor]" : "[time_kyr, factor]";
-  if (forwards) out.unit = clock.unit;
+  // on the run's own clock, in its unit
+  constexpr auto pairName = std::string_view{"[time, factor]"};
+  out.unit = clock.unit;
   for (const auto& pair : history.AsArray()) {
     if (!pair.IsArray() || pair.AsArray().size() != 2) {
       Fail(pair, std::format("is not a pair {}", pairName));
@@ -246,13 +242,8 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                                  "on the file's own axis",
                                  kNeedsQuasiStatic));
       }
-      if (Has(field, "date_kyr")) {
-        Fail(field.At("date_kyr"),
-             "is a time on the file's own axis; here dates are kyr before "
-             "present: `date_kyr_bp`");
-      }
       if (timed) {
-        for (const auto* name : {"date_kyr_bp", "date"}) {
+        for (const auto* name : {"date_kyr_bp", "date", "date_kyr"}) {
           if (Has(field, name)) {
             Fail(field.At(name),
                  "dates the file, as the static problem reads it; a run "
@@ -272,6 +263,12 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
         term.dated = true;
         term.time_origin = clock.start_kyr_bp.value();
       } else {
+        if (Has(field, "date_kyr")) {
+          Fail(field.At("date_kyr"),
+               "is a time in kyr on the file's own axis, without its unit: "
+               "give `date` with its `unit` (\"unit\": \"kyr\"), or the "
+               "date before present, `date_kyr_bp`");
+        }
         Allow(field,
               {"file", "format", "variable", "date_kyr_bp", "date", "unit"});
         term.field = ReadFileInput(field, directory, "load");
@@ -303,7 +300,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
           term.field.date = ReadDate(field, "date_kyr_bp");
         }
       }
-    } else if (clock.form == Form::Forwards) {
+    } else {
       // times on the run's own clock in its unit: the file read at
       // t - `time_origin`
       for (const auto* name : {"date_kyr_bp", "date_kyr", "date"}) {
@@ -321,7 +318,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
       }
       if (Has(field, "time_origin_kyr")) {
         Fail(field.At("time_origin_kyr"),
-             "is a time origin in kyr, `response`'s form; this run counts "
+             "is a time origin in kyr without its unit; this run counts "
              "forwards on its own clock, in its `unit` (`times.unit`): "
              "`time_origin`");
       }
@@ -333,32 +330,6 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
         if (!std::isfinite(term.time_origin)) {
           Fail(origin, "is not a finite number");
         }
-      }
-    } else {
-      Allow(field,
-            {"file", "format", "variable", "date_kyr", "time_origin_kyr"});
-      term.field = ReadFileInput(field, directory, "load");
-      if (Has(field, "time_origin_kyr")) {
-        const auto& origin = field.At("time_origin_kyr");
-        if (!timed) {
-          Fail(origin, std::format("is a time origin, which {}; the static "
-                                   "problem reads a file with a time axis at "
-                                   "its `date_kyr`",
-                                   kNeedsQuasiStatic));
-        }
-        term.time_origin = origin.AsNumber();
-        if (!std::isfinite(term.time_origin)) {
-          Fail(origin, "is not a finite number");
-        }
-      }
-      if (Has(field, "date_kyr")) {
-        if (timed) {
-          Fail(field.At("date_kyr"),
-               "dates the file, as the static problem reads it; a run "
-               "through time reads it at each node t, at t - "
-               "`time_origin_kyr`");
-        }
-        term.field.date = ReadDate(field, "date_kyr");
       }
     }
   } else {
@@ -492,8 +463,8 @@ SeismicTerm ReadSeismicTerm(const Json& item, bool timed = true,
 
 /// A field term's file on the grid, holding its variable. Unless `timed`
 /// the file is read at one time: a time axis needs the term's date
-/// (`date_kyr`, `date_kyr_bp` before present, or `date` on the file's own
-/// axis), and a file without one refuses it.
+/// (`date_kyr_bp` before present, or `date` on the file's own axis), and
+/// a file without one refuses it.
 io::FieldHistory OpenFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
                                const Json& field, bool timed) {
   auto history = OpenFileInput(term.field, grid, field);
@@ -583,17 +554,16 @@ std::string Pairs(const AmplitudeHistory& history) {
   return out + "]";
 }
 
-/// A history as a term's description ends with it: its pairs under the
-/// name it was given by, dates where it was given as dates, and the unit
-/// of a run's own clock where it was given on one.
+/// A history as a term's description ends with it: its pairs as dates
+/// where it was given as dates, and on a run's own clock with the clock's
+/// unit where it was given on one.
 std::string History(const AmplitudeHistory& history) {
   if (history.unit) {
     return std::format(", history in {} {}", history.unit->name,
                        Pairs(history));
   }
-  if (!history.start_kyr_bp) return ", history_kyr " + Pairs(history);
   auto dated = history;
-  for (auto& t : dated.times) t = *history.start_kyr_bp - t;
+  for (auto& t : dated.times) t = history.start_kyr_bp.value_or(0.0) - t;
   return ", history_kyr_bp " + Pairs(dated);
 }
 
@@ -639,48 +609,15 @@ double AmplitudeHistory::At(double t) const {
   return factors[i] + w * (factors[i + 1] - factors[i]);
 }
 
-Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
-                    int lmax, bool timed) {
-  Allow(block, {"load", "tide", "seismic"});
-  auto out = Forcing{};
-  if (Has(block, "load")) {
-    for (const auto& item : block.At("load").AsArray()) {
-      out.load.push_back(ReadLoadTerm(item, directory, timed));
-    }
-  }
-  if (Has(block, "tide")) {
-    for (const auto& item : block.At("tide").AsArray()) {
-      out.tide.push_back(ReadTideTerm(item, lmax, timed));
-    }
-  }
-  if (Has(block, "seismic")) {
-    if (!timed) {
-      Fail(block.At("seismic"),
-           std::format("gives seismic sources, a forcing that {}: the first "
-                       "node of a run through time is the co-seismic "
-                       "response",
-                       kNeedsQuasiStatic));
-    }
-    for (const auto& item : block.At("seismic").AsArray()) {
-      out.seismic.push_back(ReadSeismicTerm(item));
-    }
-  }
-  if (out.load.empty() && out.tide.empty() && out.seismic.empty()) {
-    Fail(block,
-         "needs at least one load term, tide coefficient or seismic source");
-  }
-  return out;
-}
-
 double SeismicTerm::FactorAt(double t) const {
   if (onset && t < *onset - 1e-12 * (1.0 + std::abs(*onset))) return 0.0;
   return history.At(t);
 }
 
-std::vector<PointSource> SeismicSourcesAt(const Forcing& forcing, double t,
-                                          double surfaceRadius) {
+std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
+                                          double t, double surfaceRadius) {
   auto out = std::vector<PointSource>{};
-  for (const auto& term : forcing.seismic) {
+  for (const auto& term : seismic) {
     const auto factor = term.FactorAt(t);
     auto sources = std::vector<PointSource>{};
     if (term.kind == SeismicTerm::Kind::Point) {
@@ -817,48 +754,12 @@ std::vector<Complex> ReadCoefficientTable(const std::filesystem::path& path,
   return out;
 }
 
-BuiltForcing BuildForcing(const Forcing& forcing, const SurfaceGrid& grid,
-                          const Json& block) {
-  auto out = BuiltForcing{.terms = {},
-                          .loadCoefficients = grid.ZeroCoefficients(),
-                          .load = grid.ZeroField(),
-                          .tide = grid.ZeroCoefficients(),
-                          .inputs = {}};
-  for (auto k = std::size_t{0}; k < forcing.load.size(); ++k) {
-    const auto& term = forcing.load[k];
-    auto [field, coefficients, history, timeAxis] =
-        PatternOf(term, grid, block.At("load").At(k), false);
-    if (term.kind == LoadTerm::Kind::Field) {
-      out.inputs.push_back(DescribeField(term, timeAxis, false));
-    }
-    // the first term is taken as it stands, the others added to it
-    if (out.terms.empty()) {
-      out.load = field;
-      out.loadCoefficients = coefficients;
-    } else {
-      for (auto i = std::size_t{0}; i < field.size(); ++i) {
-        out.load[i] += field[i];
-      }
-      for (auto i = std::size_t{0}; i < coefficients.size(); ++i) {
-        out.loadCoefficients[i] += coefficients[i];
-      }
-    }
-    out.terms.push_back(std::move(coefficients));
-  }
-  for (const auto& term : forcing.tide) {
-    out.tide[SurfaceGrid::Index(term.degree, term.order)] +=
-        Complex{term.amplitude, term.imaginary};
-  }
-  return out;
-}
-
-TimedForcing::TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
-                           const Json& block, bool timed)
-    : forcing_(forcing), grid_(&grid), block_(&block) {
-  for (auto k = std::size_t{0}; k < forcing_.load.size(); ++k) {
-    const auto& term = forcing_.load[k];
+TimedLoads::TimedLoads(std::vector<LoadTerm> terms, const SurfaceGrid& grid,
+                       const Json& block, bool timed)
+    : terms_(std::move(terms)), grid_(&grid), block_(&block) {
+  for (auto k = std::size_t{0}; k < terms_.size(); ++k) {
+    const auto& term = terms_[k];
     auto pattern = PatternOf(term, grid, block.At("load").At(k), timed);
-    varies_ = varies_ || pattern.history.has_value() || !term.history.Empty();
     if (term.kind == LoadTerm::Kind::Field) {
       inputs_.push_back(DescribeField(term, pattern.timeAxis, timed));
     }
@@ -866,20 +767,13 @@ TimedForcing::TimedForcing(const Forcing& forcing, const SurfaceGrid& grid,
                          .coefficients = std::move(pattern.coefficients),
                          .history = std::move(pattern.history)});
   }
-  for (const auto& term : forcing_.tide) {
-    varies_ = varies_ || !term.history.Empty();
-  }
 }
 
-BuiltForcing TimedForcing::At(double t) const {
+BuiltLoads TimedLoads::At(double t) const {
   const auto& grid = *grid_;
-  auto out = BuiltForcing{.terms = {},
-                          .loadCoefficients = grid.ZeroCoefficients(),
-                          .load = grid.ZeroField(),
-                          .tide = grid.ZeroCoefficients(),
-                          .inputs = {}};
-  for (auto k = std::size_t{0}; k < forcing_.load.size(); ++k) {
-    const auto& term = forcing_.load[k];
+  auto out = BuiltLoads{.terms = {}, .load = grid.ZeroField()};
+  for (auto k = std::size_t{0}; k < terms_.size(); ++k) {
+    const auto& term = terms_[k];
     const auto& pattern = patterns_[k];
     auto field = std::vector<double>{};
     auto coefficients = std::vector<Complex>{};
@@ -901,20 +795,12 @@ BuiltForcing TimedForcing::At(double t) const {
     // the first term is taken as it stands, the others added to it
     if (out.terms.empty()) {
       out.load = field;
-      out.loadCoefficients = coefficients;
     } else {
       for (auto i = std::size_t{0}; i < field.size(); ++i) {
         out.load[i] += field[i];
       }
-      for (auto i = std::size_t{0}; i < coefficients.size(); ++i) {
-        out.loadCoefficients[i] += coefficients[i];
-      }
     }
     out.terms.push_back(std::move(coefficients));
-  }
-  for (const auto& term : forcing_.tide) {
-    out.tide[SurfaceGrid::Index(term.degree, term.order)] +=
-        term.history.At(t) * Complex{term.amplitude, term.imaginary};
   }
   return out;
 }
@@ -1146,11 +1032,9 @@ GeographicPoint ReadSite(const Json& object) {
   return {latitude, Number(object, "longitude")};
 }
 
-SeaLevelForcing ReadSeaLevelForcing(const Json& block,
-                                    const std::filesystem::path& directory,
-                                    int lmax,
-                                    const std::optional<TermClock>& given,
-                                    bool ocean) {
+Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
+                    int lmax, const std::optional<TermClock>& given,
+                    bool ocean) {
   // the static problem's terms are dated, and have no window
   const auto timed = given.has_value();
   const auto clock = given.value_or(
@@ -1185,7 +1069,7 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
          "go. Give the ice's load as a `load` term, or give the state, the "
          "`ocean` block");
   }
-  auto out = SeaLevelForcing{};
+  auto out = Forcing{};
   if (Has(block, "load")) {
     constexpr auto kProperties = std::array<std::string_view, 3>{
         "water_budget", "moves_solid_surface", "density_kg_m3"};
@@ -1247,8 +1131,8 @@ SeaLevelForcing ReadSeaLevelForcing(const Json& block,
   }
   if (out.ice_change.empty() && !out.BesideTheIce()) {
     const auto what = std::format(
-        "at least one {}a surface load (`load`), a tide coefficient (`tide`) "
-        "or a seismic source (`seismic`)",
+        "at least one {}surface load (`load`), tide coefficient (`tide`) or "
+        "seismic source (`seismic`)",
         ocean ? "term of the ice change (`ice_change`: \"thickness\", "
                 "\"change\", \"cap_thickness\" or \"cap_fraction\"), "
               : "");
@@ -1323,23 +1207,25 @@ std::vector<std::complex<double>> TideAt(std::span<const TideTerm> tide,
 }
 
 namespace {
-Forcing LoadsAlone(const SeaLevelForcing& forcing) {
-  auto out = Forcing{};
-  for (const auto& term : forcing.load) out.load.push_back(term.term);
+
+/// The load terms of a forcing's surface loads, in the order given.
+std::vector<LoadTerm> TermsOf(const Forcing& forcing) {
+  auto out = std::vector<LoadTerm>{};
+  for (const auto& term : forcing.load) out.push_back(term.term);
   return out;
 }
+
 }  // namespace
 
-SurfaceLoads::SurfaceLoads(const SeaLevelForcing& forcing,
-                           const SurfaceGrid& grid, const Json& block,
-                           bool timed)
+SurfaceLoads::SurfaceLoads(const Forcing& forcing, const SurfaceGrid& grid,
+                           const Json& block, bool timed)
     : terms_(forcing.load),
       grid_(&grid),
-      timed_(LoadsAlone(forcing), grid, block, timed) {}
+      timed_(TermsOf(forcing), grid, block, timed) {}
 
 SurfaceLoads::Node SurfaceLoads::At(double t) const {
   const auto& grid = *grid_;
-  const auto built = timed_.At(t);
+  auto built = timed_.At(t);
   auto inside = std::vector<Complex>{}, outside = std::vector<Complex>{};
   auto layer = std::vector<Complex>{};
   auto add = [&](std::vector<Complex>& to, const std::vector<Complex>& term,
@@ -1357,6 +1243,7 @@ SurfaceLoads::Node SurfaceLoads::At(double t) const {
   if (!inside.empty()) out.inside = grid.Synthesise(inside);
   if (!outside.empty()) out.outside = grid.Synthesise(outside);
   if (!layer.empty()) out.layer = grid.Synthesise(layer);
+  if (!terms_.empty()) out.given = std::move(built.load);
   return out;
 }
 

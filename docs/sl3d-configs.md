@@ -10,10 +10,8 @@ sl3d <command> <config.json>
 | Command | What it computes | Writes |
 | --- | --- | --- |
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
-| `response` | the response to a prescribed surface load and tide, no ocean: in the static problem the elastic response, in the quasi-static problem the viscoelastic response through time; 1D or 3D as the model's moduli (and viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
-| `sea-level` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, with rotational feedback as asked; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem) |
-| `kernel1d` | adjoint sensitivity kernels of configured measurements of a `sea-level` run through time, on a radial model | a directory of kernel files |
-| `kernel` | their 3D counterpart, on a laterally varying viscosity | a directory of kernel files |
+| `solve` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, elastic or viscoelastic, with the rotational feedback as asked; without gravity, a radial body's response to seismic sources alone; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
+| `kernel` | adjoint sensitivity kernels of configured measurements of the problems `solve` solves, read from the same config with a `kernels` block: in the ice history, surface loads, a tide, the moment tensors of seismic sources, the viscosity and the elastic moduli; 1D or 3D as `solve`'s run | a directory of kernel files |
 
 ## Running sl3d
 
@@ -23,23 +21,23 @@ sl3d <command> <config.json>
 - A run prints one summary line to standard error, as
   `sl3d <command>: <summary> in <seconds> s`; the summary of each command
   is given with it below.
-- Exit status: 0 when the command finished (including a `sea-level` run
-  that stopped at its wall-time limit, below), 1 when it failed, with the error
+- Exit status: 0 when the command finished (including a `solve` run that
+  stopped at its wall-time limit, below), 1 when it failed, with the error
   on standard error as `sl3d <command>: <message>`, and 2 for a usage
   error (a wrong number of arguments or an unknown command).
 - The library runs threaded with OpenMP on every core by default; set
   `OMP_NUM_THREADS` to choose the thread count. One-thread runs are bitwise
-  reproducible; threaded runs agree to round-off.
+  reproducible; threaded runs agree to round-off. Placing the threads, the
+  memory a run needs and long runs are in [running.md](running.md).
 
 ### Over MPI ranks
 
-Built with the CMake option `SL3DPP_WITH_MPI`, `response`, `sea-level`
-and `kernel` run under `mpiexec` over several ranks, the same config on
-every rank:
+Built with the CMake option `SL3DPP_WITH_MPI`, `solve` and `kernel` run
+under `mpiexec` over several ranks, the same config on every rank:
 
 ```
 OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
-  mpiexec -n 4 -bind-to core:32 sl3d sea-level sea_level_3d.json
+  mpiexec -n 4 -bind-to core:32 sl3d solve sea_level_3d.json
 ```
 
 (the binding flags are MPICH's; another MPI names them otherwise). The
@@ -47,27 +45,39 @@ run is split over radius, one contiguous radial segment per rank, the cuts
 balancing the transform work ([radial-partitioning.md](radial-partitioning.md) §7 and §9):
 each rank holds and steps its own segment's internal variables, with its
 threads inside, and every rank reads the inputs and solves the sea level
-equation, the first rank's solution serving all (a `response` run has no
-sea level equation: every rank builds the forcing, the first rank's
-coefficients serving all). A 1D run of these commands (`sea-level`'s
-static problem on a radial Earth, a radial `sea-level` run through time, a
-1D viscoelastic `response`) is the first rank's alone, as a run of one process, its
-checkpoints in `checkpoint.directory` itself; the other ranks return at
-once. One rank per socket (or per node) with threads inside is the
-intended shape. Rank 0 writes every output and prints the summary, with
-`on <n> ranks` appended. A failure on any rank ends the whole job, the
-message naming the rank. `love-numbers` and `kernel1d` refuse several
-ranks (exit status 2).
+equation alike, the first rank's results serving all: the coefficients
+of the total load and of the centrifugal and tidal potential, which force
+every segment, the surface response and, under migrating shorelines, the
+ocean function. A 1D run (the static
+problem on a radial Earth, a radial run through time) is the first rank's
+alone, as a run of one process, its checkpoints in `checkpoint.directory`
+itself; the other ranks return at once. One rank per socket (or per
+node) with threads inside is the intended shape. Rank 0 writes every
+output and prints the summary, with `on <n> ranks` appended. The radial
+reference model written beside a 3D run through time is stepped on rank
+0 alone, after the run. A failure on any rank ends the whole job, the
+message naming the rank. A 1D `kernel` run is the first rank's alone,
+as `solve`'s, and a 3D one refuses on several ranks what its sweeps form
+on one process (kernel, below). `love-numbers` refuses several ranks
+(exit status 2).
 
 The results agree with a one-process run to round-off of the radially
 substructured solves (about 1e-12 relative), not bitwise. Each rank's
 checkpoints go to its own subdirectory, `rank_RRRR` of
 `checkpoint.directory`, holding its own segment's state (rank 0's holds
-the histories too), and a recorded trajectory spills to `rank_RRRR` of
-`trajectory.directory` likewise. A run resumes from the newest node whose
-checkpoint every rank has, and over the same number of ranks only: the
-rank count is part of the checkpoints' hash, so a resumption over another
-count is refused like another run's.
+the histories too, the others' each node's iteration counts alone), and
+the trajectory store's states go to `rank_RRRR`
+of `trajectory.directory` likewise, rank 0 writing its manifest, its start
+and its surface records; a store is read over the count of ranks that
+recorded it, and the same parts of the mesh, only (The trajectory block,
+below). A run resumes from the newest node whose
+checkpoint every rank has (of the first rank's newest two), and over the
+same number of ranks only: the rank count is part of the checkpoints'
+hash, so a resumption over another count is refused like another run's.
+Where the ranks have no checkpoint in common (a run stopped while they
+wrote its first, say), each rank's checkpoints and any kept initial state
+are stale: they are removed and the run starts over, the summary saying
+`, replacing <k> earlier checkpoint(s)` where the first rank removed some.
 
 ## Configs
 
@@ -92,26 +102,27 @@ A config is one JSON object, read strictly by planetmodel's JSON reader:
 - Files are SI throughout: lengths in metres, viscosities in Pa s, times in
   seconds unless a file's own scales say otherwise.
 - Dates in configs are in kiloyears before present (`_kyr_bp` members:
-  the dated `times` of `sea-level` and the kernel commands, the state's
-  date, the dates of the forcing's terms, their histories and onsets, and
-  the measurements' dates), a kiloyear being 1000 Julian
-  years, 3.15576e10 s. A date of D kyr BP is the time -D kyr: the time
-  axes of the files with dates that sl3d writes are in seconds relative
-  to the present, negative in the past.
-- Times counted forwards on a run's own clock are the other form.
-  `sea-level` takes them with a `unit` beside them (`times.unit`: `"kyr"`,
-  `"yr"`, a Julian year of 3.15576e7 s, or `"day"`, 86400 s), every time
-  of the run and its terms in that unit under unsuffixed names (`start`,
-  `end`, `at`, `history`, `onset`, `time_origin`, and the static
-  problem's `date` beside its own `unit`); `response`'s `times` and the
-  times of its terms count forwards in kyr (`_kyr` members). The time
-  axis of the file of such a run is its clock in seconds (sea-level, The
-  run through time; response, below).
+  the dated `times`, the state's date, the dates of the forcing's terms,
+  their histories and onsets, and the measurements' dates), a kiloyear
+  being 1000 Julian years, 3.15576e10 s. A date of D kyr BP is the time
+  -D kyr: the time axes of the files with dates that sl3d writes are in
+  seconds relative to the present, negative in the past.
+- Times counted forwards on a run's own clock are the other form, with a
+  `unit` beside them (`times.unit`: `"kyr"`, `"yr"`, a Julian year of
+  3.15576e7 s, or `"day"`, 86400 s), every time of the run and its terms
+  in that unit under unsuffixed names (`start`, `end`, `at`, `history`,
+  `onset`, `time_origin`, and the static problem's `date` beside its own
+  `unit`). The time axis of the file of such a run is its clock in
+  seconds (solve, The run through time). A time in kyr without a unit
+  (`start_kyr`, `end_kyr`, `at_kyr`, `history_kyr`, `onset_kyr`,
+  `time_origin_kyr`, a field's `date_kyr`) is no form's, and is refused,
+  the error naming the member to give.
 - Latitudes and longitudes are in degrees, latitude north positive and
   longitude east positive; cap widths and disk radii are in degrees.
 - `rotation` chooses the rotational feedback: `"none"`, `"axial"` (the
   length-of-day change alone) or `"full"` (polar wander as well); the
-  default is `"full"` wherever the member is accepted.
+  default is `"full"` wherever the member is accepted, and `"none"` in a
+  run without gravity, which takes no other (solve, Without gravity).
 
 ### Earth models
 
@@ -127,32 +138,31 @@ repeated radius marks a layer boundary. `model.format` says which kind
 
 All values are SI. Blank lines and lines starting with `#` in the table are
 skipped. The elastic structure always comes from the deck. The
-quasi-static problem (`response`, `sea-level`, `kernel1d`, `kernel`)
-takes the viscosity from the model file of `model.viscosity` when given,
-ignoring any viscosity column, and from the deck's `viscosity` column
-otherwise, which then needs a deck that has one (`"maxwell"`): each layer
-holding a viscosity is a Maxwell body, and a deck with no viscosity at all
-is refused. The static problem (an elastic `response`, `sea-level`'s
-static problem) uses no viscosity.
+quasi-static problem (`solve`, `kernel`) takes the viscosity
+from the model file of `model.viscosity` when given, ignoring any
+viscosity column, and from the deck's `viscosity` column otherwise, which
+then needs a deck that has one (`"maxwell"`): each layer holding a
+viscosity is a Maxwell body, and a deck with no viscosity at all is
+refused. The static problem uses no viscosity.
 
-The radial mesh is built for the run's `lmax` from the deck alone; there
-are no mesh members.
+The radial mesh is built for the run's degree, `discretisation.lmax`
+(The discretisation block, below), from the deck alone; there are no mesh
+members.
 
 ### The problem
 
-Every config of `response`, `sea-level`, `kernel1d` and `kernel` names
-its problem in the required top-level member `problem`:
+Every config of `solve` and `kernel` names its problem in the required
+top-level member `problem`:
 
 | `problem` | What is solved | `times` |
 | --- | --- | --- |
-| `"static"` | the problem at one instant: `response`'s elastic response, `sea-level`'s solve at the state's date on the elastic Earth | refused |
-| `"quasi_static"` | the problem stepped through the nodes of a `times` block: `response`'s viscoelastic response, `sea-level`'s GIA through time, and the kernels of such a run | required |
+| `"static"` | the problem at one instant: the solve at the state's date on the elastic Earth, or without a state the body's elastic response, and its kernels | refused |
+| `"quasi_static"` | the problem stepped through the nodes of a `times` block: GIA through time, or without a state the body's viscoelastic response, and its kernels | required |
 
 The rheology is the `model` block's business, and nothing is implied by
 the presence or absence of another block: a config without `problem` is
 refused, and so is a static one with a `times` block or a quasi-static
-one without. `kernel1d` and `kernel` take the quasi-static problem alone,
-their kernels being those of a run through time. A member only the
+one without. A member only the
 quasi-static problem takes (a viscosity file, an amplitude history, an
 onset, the time step, the initial sea level's calibration, checkpoints,
 the state's end of the window, ...) is refused in the static problem,
@@ -174,17 +184,16 @@ When the input is read is its member's business: the state's members
 (`ocean.sea_level` or `ocean.topography`, `ocean.ice`, `ocean.land`) at
 the `ocean` block's instant, `ocean.date_kyr_bp` in the static problem
 and in a run counting forwards, and an end of the window, `ocean.at`, in
-a dated run; a term of the ice change, and `sea-level`'s `field` load
-term, at its own `date_kyr_bp` beside the file in the static problem
-(a `field` term at its `date` on the file's own axis instead, where it
-gives one) and at each node's date in a dated run; a `field` term on the
-run's clock, from its `time_origin`, in a run counting forwards;
-`response`'s `field` term at its `date_kyr` (The state and the ice
-change, below; sea-level, The forcing block; response, The forcing
-block). A
-variable the file does not hold is refused, the error listing the
-variables the file does hold. Conversion from other sources (ICE-NG,
-other formats) happens outside sl3d, in pyslfp.
+a dated run (the land there at the window's start, whichever end the
+state is at); a term of the ice change, and a `field` load term, at its
+own `date_kyr_bp` beside the file in the static problem (a `field` term
+at its `date` on the file's own axis instead, where it gives one) and at
+each node's date in a dated run; a `field` term on the run's clock, from
+its `time_origin`, in a run counting forwards (The state and the ice
+change, below; solve, The forcing block). A variable the file does not
+hold is refused, the error listing the variables the file does hold.
+Conversion from other sources (ICE-NG, other formats) happens outside
+sl3d, in pyslfp.
 
 A planetmodel surface file (`planetmodel.surface/1`) holds named scalar
 fields on one angular grid, static or on a time axis. pyslfp's
@@ -206,7 +215,9 @@ named by all three.
   `node` field with linear time interpolation (what pyslfp writes) between
   its stored dates. Outside the file's span the first or last stored values
   are held, without a warning, so check that the file covers the dates
-  asked of it. A static field is read at every date.
+  asked of it; the one read refused there is the state at a calibrated
+  run's end (`"at": "end"`), whose sea level's and ice's files must reach
+  the window's end. A static field is read at every date.
 - Inputs naming one file (of one format) read and hold it once.
 - A value that is not a number (a surface file marks uncovered points
   so) is refused in the state and in the ice change: fill the file before
@@ -214,26 +225,24 @@ named by all three.
 
 ### The state and the ice change
 
-A run of the sea level equation (`sea-level`, `kernel1d`, `kernel`)
-takes two kinds of input, kept apart. The STATE is what is on the body at
-one instant:
-the sea level of the sea level equation and the ice, the `ocean` block's
-(`ocean.sea_level` or `ocean.topography`, and `ocean.ice`), with the one
-instant of the whole block: its date, `ocean.date_kyr_bp`, in the static
-problem, and an end of the window, `ocean.at`, in the quasi-static one;
-a run counting forwards on its own clock, which has no calendar, reads
-its state's files at their date `ocean.date_kyr_bp` too, a snapshot put
-at the window's start.
-The FORCING is what happens: an ice thickness CHANGE is one kind of it,
-the sum of the terms of the list `forcing.ice_change`, beside surface
-loads, a tide and seismic sources (sea-level, The forcing block, below).
-The ice at a time is the state's ice plus the change there; it is formed
-in one place for every use the run makes of it (the state a run starts
-from, its loads, its migrating thickness, the calibration's start and the
-static problem's change). The state is optional in `sea-level`: without
-an `ocean` block the body has no ocean, no ice and no ice change, and the
-forcing is the loads, the tide and the sources alone (sea-level, Without
-an ocean, below).
+A run of the sea level equation (`solve`, `kernel`) takes two
+kinds of input, kept apart. The STATE is what is on the body at one
+instant: the sea level of the sea level equation and the ice, the `ocean`
+block's (`ocean.sea_level` or `ocean.topography`, and `ocean.ice`), with
+the one instant of the whole block: its date, `ocean.date_kyr_bp`, in the
+static problem, and an end of the window, `ocean.at`, in the
+quasi-static one; a run counting forwards on its own clock, which has no
+calendar, reads its state's files at their date `ocean.date_kyr_bp` too,
+a snapshot put at the window's start. The FORCING is what happens: an ice
+thickness CHANGE is one kind of it, the sum of the terms of the list
+`forcing.ice_change`, beside surface loads, a tide and seismic sources
+(solve, The forcing block, below). The ice at a time is the state's ice
+plus the change there; it is formed in one place for every use the run
+makes of it (the state a run starts from, its loads, its migrating
+thickness, the calibration's start and the static problem's change). The
+state is optional: without an `ocean` block the body has no
+ocean, no ice and no ice change, and the forcing is the loads, the tide
+and the sources alone (solve, Without an ocean, below).
 
 - The state's ice (`ocean.ice`) is a file input of the ice thickness,
   required.
@@ -309,8 +318,8 @@ history over the window as a `thickness` term, read at every node:
 
 `model.viscosity` names a planetmodel model file (`planetmodel.model/1`)
 with a field named `viscosity`, as planetmodel's tomography conversion
-writes, for the quasi-static problem of `response`, `sea-level`,
-`kernel1d` or `kernel`. The viscosity is split as
+writes, for the quasi-static problem of `solve` or `kernel`.
+The viscosity is split as
 eta(r, theta, phi) = eta_bar(r) exp(delta(r, theta, phi)) about a radial
 reference eta_bar, chosen by `model.viscosity.reference`:
 
@@ -327,44 +336,78 @@ runs the 1D problem (The model block, below).
 
 ## The blocks
 
-`response`, `sea-level`, `kernel1d` and `kernel` read their configs as
-blocks, JSON objects each read by one piece of code for every command that
-takes it: `model` (the deck, its format, the lateral moduli and the 3D
-viscosity), `times` (the time nodes of a run through time), `forcing`
-(what drives the run), `ocean` (the state, the sea level and the ice at
-one instant, the shorelines and the initial sea level's calibration),
-`solver` (the solves' tolerances,
-budgets and transforms, and the time step), `checkpoint` (a run's
-checkpoints) and `output` (the files written), with `problem`, `lmax`,
-`rotation`, `moments` and `restart` beside them. A member a command does
-not take is refused, and so is a block's member given at the top level,
-the error naming the block it belongs in (a top-level `sea_level`, for
-one, belongs in `ocean.sea_level`).
+`solve` and `kernel` read their configs as blocks, JSON objects each
+read by one piece of code for every command that takes it:
+`discretisation` (the degree the run is truncated at), `model` (the
+deck, its format, the lateral moduli and the 3D viscosity),
+`times` (the time nodes of a run through time), `forcing` (what drives
+the run), `ocean` (the state, the sea level and the ice at one instant,
+the shorelines and the initial sea level's calibration), `solver` (the
+solves' tolerances, budgets and transforms, and the time step),
+`checkpoint` (a run's checkpoints), `output` (solve's files),
+`trajectory` (where the forward run is recorded, for the kernels) and
+`kernels` (the measurements and the kernels written), with `problem`,
+`gravity`, `rotation`, `moments` and `restart` beside them. A
+member a command does not take is refused ("is not a recognised
+member"), and so is a block's member given at the top level. For the
+block members the top-level reader lists (`lmax`, `sea_level`,
+`topography`, `ice`, `date_kyr_bp`, `at`, `shorelines`, `calibration`,
+`scheme`, `rtol`, `measurements`, `parameters`, `method`,
+`record_stride`, ...)
+the error names the member each belongs in (a top-level `sea_level` "is
+not a top-level member: it belongs in `ocean.sea_level`"), and for
+`state`, `ice_history` and `coupled` the members that hold what they
+would; any other is not recognised.
+
+One config serves both commands. `solve` reads a `kernels` block with the
+same reader as `kernel`, so that a fault in it is found before the run,
+and does not otherwise use it; `kernel` reads `output`, `checkpoint` and
+`restart` with `solve`'s readers, held to the run as `solve` holds them,
+and writes no surface file, exchange table or checkpoint.
 
 Which command takes which:
 
-| Block or member | `response` | `sea-level` | `kernel1d`, `kernel` |
-| --- | --- | --- | --- |
-| `problem` | `"static"` or `"quasi_static"`, required | `"static"` or `"quasi_static"`, required | `"quasi_static"`, required |
-| `model.deck`, `model.format` | yes | yes | yes |
-| `model.viscosity` | quasi-static | quasi-static | `kernel1d`: a radial one; `kernel`: required, varying laterally |
-| `model.moduli` | yes | yes | no |
-| `lmax` | yes | yes | yes |
-| `times` | quasi-static, required: kyr counted forwards | quasi-static, required: dates before present, or times counted forwards in a `unit` | dates before present, evenly spaced, required |
-| `forcing` | `load`, `tide` and, quasi-static, `seismic` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | `ice_change`, its change zero at the window's start |
-| `ocean` | no | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | required, as `sea-level`'s dated quasi-static |
-| `rotation`, `moments` | no | yes | yes |
-| `solver.rtol` | no | yes | yes |
-| `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | yes | in a 3D run (the static problem's on lateral moduli too) | `kernel` |
-| `solver.scheme` | quasi-static | quasi-static | yes |
-| `solver.step` | quasi-static | in a 3D run (the static problem's on lateral moduli too) | `kernel` |
-| `checkpoint`, `restart` | no | quasi-static | no |
-| `output` | a block: `surface`, `exchange`, `exchange_nodes`, `volume` | a block: `surface` | a path: the directory of the kernel files |
+| Block or member | `solve` | `kernel` |
+| --- | --- | --- |
+| `problem` | `"static"` or `"quasi_static"`, required | as `solve` |
+| `model.deck`, `model.format` | yes | yes |
+| `model.viscosity` | quasi-static | as `solve` |
+| `model.moduli` | yes | yes |
+| `discretisation` | required: `lmax` | as `solve` |
+| `times` | quasi-static, required: dates before present, or times counted forwards in a `unit` | as `solve` |
+| `forcing` | `ice_change`, `load`, `tide` and `seismic`, any mix (`ice_change` with an ocean alone) | as `solve` |
+| `ocean` | optional: the state and the shorelines; static, at `date_kyr_bp`; quasi-static, at `at`, with the calibration (counting forwards, at `"at": "start"` and `date_kyr_bp`); absent, a body without an ocean | as `solve` |
+| `rotation`, `moments` | yes | yes |
+| `gravity` | `"full"` or `"none"`; `"none"` a radial run under seismic sources alone | `"full"` alone: `"none"` is refused |
+| `solver.rtol` | yes | yes (the adjoint solves' too) |
+| `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) |
+| `solver.scheme` | quasi-static | as `solve` |
+| `solver.step` | in a 3D run (the static problem's on lateral moduli too) | as `solve` |
+| `checkpoint`, `restart` | quasi-static | checked as `solve` checks them, not used |
+| `output` | a block, required: `surface`, `exchange`, `exchange_nodes`, `volume` | optional, checked as `solve` checks it, not used |
+| `trajectory` | optional: `directory` records the run into the trajectory store there; `record_stride` its stride | optional: `record_stride`, the forward run's recording; `directory` sweeps from the store of the run there, or records into it (The trajectory block, below) |
+| `kernels` | optional, checked as `kernel` checks it, not used | required: the measurements, the kernels and their directory (kernel, below) |
 
-The kernel commands also take members of their own (kernel1d and kernel,
-below). "In a 3D run" means a run on a model the `model` block makes 3D
-(each command says when); a 1D run of `sea-level` (its static problem
-included) and `kernel1d` refuse the members of the 3D step.
+"In a 3D run" means a run on a model the `model` block makes 3D (solve
+says when); a 1D run (the static problem on a radial Earth included)
+refuses the members of the 3D step.
+
+### The discretisation block
+
+The degree every command's run is truncated at, a block required in the
+configs of `love-numbers`, `solve` and `kernel` alike:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `discretisation.lmax` | integer | required | the largest spherical harmonic degree: the band of every field and expansion of the run, the degree of its Gauss–Legendre grid and the degree its radial mesh is built for (Earth models, above); at least 1 in `solve` and `kernel`, at least 0 in `love-numbers` |
+
+The block holds `lmax` alone, and refuses any other member. A top-level
+`lmax` is refused, naming the block ("is not a top-level member: it
+belongs in `discretisation.lmax`").
+
+```json
+"discretisation": {"lmax": 64}
+```
 
 ### The model block
 
@@ -372,7 +415,7 @@ included) and `kernel1d` refuse the members of the 3D step.
 | --- | --- | --- | --- |
 | `model.deck` | path | required | the deck (Earth models, above) |
 | `model.format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
-| `model.moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli; absent, the radial model alone |
+| `model.moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli, either alone (the other modulus then radial; a file holding neither is refused); absent, the radial model alone |
 | `model.moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
 | `model.viscosity.file` | path | absent | the quasi-static problem alone: a planetmodel model file of the 3D viscosity (3D viscosity models, above); absent, the deck's own viscosity column |
 | `model.viscosity.reference` | word | `"geometric_mean"` | `"geometric_mean"` or `"file_radial"`: the radial reference (3D viscosity models, above) |
@@ -401,32 +444,16 @@ at `model.format`, and a `"maxwell"` deck with no viscosity anywhere at
 
 A model file whose fields are stored as functions of the radius alone is
 radial, and leaves a run 1D; a field stored on an angular grid varies
-laterally, even where its values happen not to, and makes a run through
-time 3D. Each command's section says what that decides.
+laterally, even where its values happen not to, and makes a run 3D: a
+moduli file in either problem, a viscosity file through time (solve says
+what that decides).
 
 ### The times block
 
 The time nodes of the quasi-static problem, required there and refused
-in the static one. `response` counts forwards in kyr on the run's own
-clock:
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `times.start_kyr` | number | 0 | the first node |
-| `times.end_kyr` | number > `start_kyr` | required with `nodes` | the last node |
-| `times.nodes` | integer >= 2 | required with `end_kyr` | the number of nodes, evenly spaced from `start_kyr` to `end_kyr`, both included |
-| `times.at_kyr` | array of numbers | instead of the three above | the nodes themselves, at least two, strictly increasing; the first is the start |
-
-Exactly one way is given: `end_kyr` and `nodes` (with `start_kyr` or
-its default), or `at_kyr` alone (`start_kyr` beside it is refused). Evenly
-spaced nodes take one step length, (end - start) / (nodes - 1), for every
-step; listed nodes step by their differences, so uneven steps are
-allowed. Listed nodes that coincide with evenly spaced ones give the same
-run to the bit. `sea-level`'s dates are refused, naming this form.
-
-`sea-level` takes one of two forms, chosen by the members present. The
-DATED form gives dates before present, on the calendar the files with a
-time axis share:
+in the static one. The block takes one of two forms, chosen by the
+members present. The DATED form gives dates before present, on the
+calendar the files with a time axis share:
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -436,9 +463,9 @@ time axis share:
 | `times.at_kyr_bp` | array of numbers | instead of the three above | the dates themselves, at least two, from the oldest (strictly decreasing); the first is the start |
 
 The FORWARDS form counts on the run's own clock, in a unit it names; the
-run then has no calendar of its own (the state is a snapshot of its files
-at a date, The ocean block, below, and the terms' times are on the
-clock, sea-level, The forcing block):
+run then has no calendar of its own (the state, where there is one, is a
+snapshot of its files at a date, The ocean block, below, and the terms'
+times are on the clock, solve, The forcing block):
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -448,40 +475,40 @@ clock, sea-level, The forcing block):
 | `times.nodes` | integer >= 2 | required with `end` | the number of nodes, evenly spaced from `start` to `end`, both included |
 | `times.at` | array of numbers | instead of `start`, `end` and `nodes` | the nodes themselves, at least two, strictly increasing; the first is the start |
 
-In either form exactly one way of giving the nodes is taken, as
-`response`'s: the window and `nodes`, or the list (`start_kyr_bp` or
-`start` beside it is refused). Members of the two forms together are
-refused, naming both, and so are `response`'s `start_kyr`, `end_kyr` and
-`at_kyr`, naming the forwards form with its `unit`. Listed dates that
-coincide with evenly spaced ones give the same run to the bit. A run
-counting forwards in kyr steps through `response`'s times for the same
-nodes to the bit; a step's response moves with the last bit of its
-length (a one-ulp change of a node moves `response`'s fields by up to
-about 1e-12 relative), so the same nodes stated in another unit, or as
-dates, give the same run to about that.
+In either form exactly one way of giving the nodes is taken: the window
+and `nodes`, or the list (`start_kyr_bp` or `start` beside it is
+refused). Evenly spaced nodes take one step length, the window over
+(nodes - 1), for every step; listed nodes step by their differences, so
+uneven steps are allowed, and listed nodes that coincide with evenly
+spaced ones give the same run to the bit. Members of the two forms
+together are refused, naming both, and so are `start_kyr`, `end_kyr` and
+`at_kyr` (kyr without a unit), naming the forwards form's `start`, `end`
+or `at` with its `unit`. A step's response moves with the last bit of its
+length (a one-ulp change of a node moves the fields by up to about 1e-12
+relative), so the same nodes stated in another unit, or as dates, give
+the same run to about that.
 
-`kernel1d` and `kernel` take the dated form with evenly spaced nodes
-alone, on which their measurements' dates are located: the forwards form
-and `at_kyr_bp` are refused. In every form the step is not limited by
-the shortest Maxwell time.
+`kernel` takes either form, evenly spaced or listed, and locates its
+measurements' instants on the nodes: dates before present in the dated
+form, times on the run's clock in the forwards one (kernel, below). In
+every form the step is not limited by the shortest Maxwell time.
 
 ### The ocean block
 
-`sea-level`, where it is optional, and the kernel commands, which
-require it (and refuse a config without it). Without it the body has no
-ocean (sea-level, Without an ocean, below), and none of the members below
-applies. It holds the state, what
-is on the body at one instant (The state and the ice change, above): the
-sea level of the sea level equation, exactly one of `ocean.sea_level` and
-`ocean.topography`, the ice, `ocean.ice`, and the land held,
-`ocean.land`, each a file input of `file`, `format` and `variable`
-alone; the instant, one for the whole block, `ocean.date_kyr_bp` in the
-static problem and `ocean.at` in the quasi-static one (with
-`ocean.date_kyr_bp` too in a run counting forwards); the shorelines,
-in either problem; and, in the quasi-static problem, the initial sea
-level's calibration. `calibration` and `at` are refused in the static
-problem, which has no initial sea level to calibrate, and `date_kyr_bp`
-in a dated run, whose state is at an end of its window.
+`solve` and `kernel`, optional in both. Without it the body has no ocean
+(solve, Without an ocean, below), and none of the members below applies.
+It holds the state, what is on the body at one instant (The state and the
+ice change, above): the sea level of the sea level equation, exactly one
+of `ocean.sea_level` and `ocean.topography`, the ice, `ocean.ice`, and
+the land held, `ocean.land`, each a file input of `file`, `format` and
+`variable` alone; the instant, one for the whole block,
+`ocean.date_kyr_bp` in the static problem and `ocean.at` in the
+quasi-static one (with `ocean.date_kyr_bp` too in a run counting
+forwards); the shorelines, in either problem; and, in the quasi-static
+problem, the initial sea level's calibration. `calibration` and `at` are
+refused in the static problem, which has no initial sea level to
+calibrate, and `date_kyr_bp` in a dated run, whose state is at an end of
+its window.
 
 A run counting forwards on its own clock has no calendar: its state is
 a snapshot, the content of the state's files at `ocean.date_kyr_bp`, put
@@ -499,8 +526,8 @@ against the state's, and a run counting forwards has no such history.
 | `ocean.ice` | file input | required | the ice thickness on the body at the state's instant (variable `ice_thickness` by default) |
 | `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
 | `ocean.date_kyr_bp` | number | absent | the static problem and a run counting forwards: the state's date, kyr BP, at which every member's file with a time axis is read; required when any of the state's files (the sea level's, the ice's, the land's) has a time axis, refused when none has one; refused in a dated run |
-| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its files reaching that date); refused in the static problem |
-| `ocean.shorelines` | word | `"frozen"` | `"frozen"`, the state's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (the nonlinear equation; sea-level, The static problem and The run through time) |
+| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its sea level's and ice's files reaching that date; the land is read at the window's start); refused in the static problem |
+| `ocean.shorelines` | word | `"frozen"` | `"frozen"`, the state's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (the nonlinear equation; solve, The static problem and The run through time) |
 | `ocean.calibration` | object | absent | the quasi-static problem with `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the state is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
 | `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
 | `ocean.calibration.iterations` | integer >= 1 | 10 | the most runs under migrating shorelines; running out is an error |
@@ -515,47 +542,179 @@ hold what they would.
 
 ### Rotation and moments
 
-`sea-level` and the kernel commands; top-level members.
+`solve` and `kernel`; top-level members.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `rotation` | word | `"full"` | `"none"`, `"axial"` or `"full"` (Units and conventions, above) |
-| `moments` | word | `"input"` | `"input"`: the Earth's standard moments of inertia; `"hydrostatic"`: their difference set from the model's own hydrostatic fluid limit, which full rotational feedback needs when the standard moments sustain less oblateness than the model's tidal response |
+| `rotation` | word | `"full"` (`"none"` without gravity) | `"none"`, `"axial"` or `"full"` (Units and conventions, above); `"none"` alone without gravity |
+| `moments` | word | `"input"` | `"input"`: the Earth's standard moments of inertia; `"hydrostatic"`: their difference set from the model's own hydrostatic fluid limit, which full rotational feedback needs when the standard moments sustain less oblateness than the model's tidal response; refused without gravity |
 
 ### The solver block
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `solver.rtol` | number > 0 | 1e-9 | `sea-level` and the kernel commands: the relative tolerance of the sea level solves (and, for the kernels and the gradient calibration, of the adjoint solves); a sea level solve that misses it is an error. Without an ocean the solve closes in one pass and it has no effect. `response` has no sea level equation and refuses it |
-| `solver.step_rtol` | number > 0 | 1e-10 in `response`, 1e-9 in the others | the relative tolerance of a 3D step's closure. `sea-level` and `kernel`: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the static problem's one zero-length step). `response`: each step's closure (the fixed point's relative change of the strain, or the conjugate gradients' relative residual), under lateral moduli the zero-length step of a viscoelastic run's first node too, and an elastic response's one solve under lateral moduli |
-| `solver.step_max_iterations` | integer >= 1 | 200 in `response`, 60 in the others | its iteration budget; a step or solve that runs out of it is an error |
+| `solver.rtol` | number > 0 | 1e-9 | the relative tolerance of the sea level solves (and, for the kernels and the gradient calibration, of the adjoint solves); a sea level solve that misses it is an error. Without an ocean the solve closes in one pass and it has no effect |
+| `solver.step_rtol` | number > 0 | 1e-9 | the relative tolerance of a 3D step's closure: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the static problem's one zero-length step) |
+| `solver.step_max_iterations` | integer >= 1 | 60 | its iteration budget; a step that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the lateral structure's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
 | `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are bitwise independent of it: it sets only how many fields a batched transform takes at a time |
 | `solver.scheme` | word | `"exponential_trapezoid"` | the quasi-static problem alone: the time step, `"exponential_trapezoid"` (second order) or `"backward_euler"` (first) |
-| `solver.step` | word | `"fixed_point"` | the quasi-static problem alone, but for `sea-level`'s static problem on lateral moduli: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`). In `sea-level` and `kernel` the conjugate-gradient solves are nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`); in `response` they are the step's closure, to `step_rtol` |
+| `solver.step` | word | `"fixed_point"` | the quasi-static problem alone, but for the static problem on lateral moduli: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`), the conjugate-gradient solves nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`) |
 
 The members of the 3D step (`step`, `step_rtol`, `step_max_iterations`,
-`transform_degrees`, `cache_mb`) are refused by a 1D run of `sea-level`
-and by `kernel1d`, and by `sea-level`'s static problem on a radial
-Earth, which takes `rtol` alone (without a `model.moduli` file they are
-refused when the config is read, with a radial one once the file is
-read); `sea-level`'s static problem on lateral moduli takes them all.
-`scheme` is refused in every static problem. `response` takes them in 1D too, where its
-steps are direct solves and they have no effect, and takes all but
-`scheme` and `step` in the static problem (its 3D elastic solve under
-lateral moduli).
+`transform_degrees`, `cache_mb`) are refused by a 1D run, and by the
+static problem on a radial Earth, which takes
+`rtol` alone (without a `model.moduli` file they are refused when the
+config is read, with a radial one once the file is read); the static
+problem on lateral moduli takes them all. `scheme` is refused in the
+static problem.
 
 ### The output block
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `output.surface` | path | required | the surface file to write |
-| `output.exchange` | path | absent | `response` alone: the surface coefficients as a cross-code exchange table (response, Outputs) |
-| `output.exchange_nodes` | array of integers | every node | `response` alone (response, Outputs) |
-| `output.volume` | path | absent | `response` alone (response, Outputs) |
+| `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table; in the quasi-static problem one table per node, the path holding `{node}` (solve, Exchange tables and the volume file) |
+| `output.exchange_nodes` | array of integers | every node | the quasi-static problem alone: the indices (from 0) of the nodes whose tables are written |
+| `output.volume` | path | absent | the static problem alone: the response inside the body as a planetmodel model file (likewise) |
 
-The kernel commands' `output` is a path, the directory their files go
-into (kernel1d and kernel, below).
+In the quasi-static problem `output.exchange` must hold the literal
+`{node}`, which is replaced by the node's index zero-padded to the width
+of the last index (`00` to `40` for 41 nodes); in the static problem it
+must not. `exchange_nodes` needs `output.exchange`, and an index past the
+last node is refused. `output.volume` is refused in the quasi-static
+problem and under seismic sources (the response inside the body is solved
+from the static solve's loads and potentials, which do not hold the
+sources' forces). On lateral moduli over several MPI ranks each rank forms
+the response inside the body over its own radial segment, and the first
+rank gathers the parts and writes the file.
+
+`kernel` checks an `output` block as `solve` does and writes none of it;
+its files go into `kernels.output` (kernel, below).
+
+### The trajectory block
+
+Where the forward run is recorded for the kernels, and how densely:
+`solve` records its run into a trajectory store, and `kernel` sweeps from
+that store without running the forward problem again, as many times as
+there are measurements to take, in other processes, on other days. The
+store is the library's (`io::TrajectoryStore`); its on-disk form is
+[trajectory-store.md](trajectory-store.md).
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `trajectory.directory` | path | none | the trajectory store: `solve` records into it, `kernel` sweeps from it or records into it |
+| `trajectory.record_stride` | integer >= 1 | 1 | through time: keep the forward state at every `record_stride`-th node (and the last); the sweeps rebuild the states in between |
+
+A run without gravity (`"gravity": "none"`), which has no kernels, refuses
+the block.
+
+Recording every n-th of N nodes holds about N/n + n forward states during
+a sweep, fewest near n = sqrt(N); in 3D each is large
+([running.md](running.md), Memory), and with a directory the kept states
+live on disk, the sweep reading each back as it reaches it. The static
+problem has one node, recorded whole, and refuses `record_stride`; a run
+under seismic sources is recorded at every node, each state with its
+strain (its states are not rebuilt without the sources' forces), and
+refuses a stride other than 1. Without a directory `solve` records nothing and
+`kernel` records in memory at the stride, as without the block.
+
+**solve.** With `trajectory.directory`, the run (static or through
+time, 1D or 3D, over any number of ranks) is recorded into the store
+there, created if absent, as it runs: its start (the calibrated initial
+sea level's, where it calibrates), every node's surface fields, loads and
+tides (and ocean function under migrating shorelines) and every kept
+node's state, each rank's in its own `rank_RRRR`. The store is complete
+once the run finishes; a run stopped (at the wall-time limit, or by a
+fault) leaves it incomplete, its manifest saying so. The run's outputs
+are those of the same run without the block.
+
+- A directory that is absent, empty, or holds an incomplete store of this
+  run is recorded into; the incomplete store's own files are removed
+  first, and nothing else.
+- A directory holding this run's complete store, recorded at the same
+  stride over the same ranks, is left as it is: the run runs and writes
+  its outputs, and the summary says so.
+- Anything else is refused, nothing in the directory touched: another
+  run's store, complete or not (another config, or changed input files);
+  this run's store at another stride, or over another count of ranks or
+  another partition of the mesh; files no store writes; a store of
+  another format. The message says to give another directory, or to
+  remove that one.
+- A recording is a run's from its first node: a run that resumes from a
+  checkpoint (Checkpoints and restarts, below) is refused a store it would
+  record, with `"restart": false` (start over) or no
+  `trajectory.directory` as the ways on. A run stopped at the wall-time
+  limit thus leaves its store incomplete; `kernel` records it whole.
+
+**kernel.** With `trajectory.directory`:
+
+- a complete store of this run there (the same run, stride and ranks):
+  the sweeps run from it, the forward run not run, its calibrated start
+  read back rather than calibrated again (the summary says so);
+- an absent or empty directory, or an incomplete store of this run: the
+  forward run runs as without a directory, recording into the store, the
+  sweeps fetching the kept states back from it, and the store is left in
+  place for later sweeps (remove it once it has served);
+- anything else is refused as by `solve`.
+
+A store is swept over the ranks that recorded it: the 3D kernels about a
+run under seismic sources, and the continuous sweep's tide kernels of a
+3D run, are formed on one process (kernel, below), so their store is
+recorded on one rank too (by `solve` on one, or by `kernel` itself).
+
+The kernels and values from a store are bitwise those of the same
+`kernel` run doing its forward run in memory at the same stride (the
+tests hold this within one process; FFTW's measured plans are each
+process's own, and where two processes' plans differ the last bits may
+too).
+
+The store belongs to its run by a hash of the members that decide the
+forward run's numbers and of the contents of the files the config names:
+the members `solve`'s checkpoints hash (Checkpoints and restarts, below),
+and the seismic sources, the static problem's dates of its terms and the
+file inputs' formats beside them. The `kernels`, `output`, `checkpoint`
+and `trajectory` blocks, `restart`, `solver.cache_mb` and the paths are
+left out, so that one store serves every kernel config of one run and a
+run directory can move; the stride and the ranks are checked beside the
+hash, each with its own message.
+
+**Solve once, kernel many.** One config, the run and its `trajectory`
+block, with a `kernels` block per batch of measurements (or one config
+edited between batches):
+
+```sh
+sl3d solve run.json        # the forward run, recorded into the store
+sl3d kernel run.json       # sweeps from the store: no forward run
+sl3d kernel run_more.json  # other measurements, the same store
+```
+
+`run_more.json` differs from `run.json` in its `kernels` block alone (its
+measurements, kernels, method or output directory). Its sweeps take as
+long as `run.json`'s; the forward run, and in 3D its calibration, are not
+paid again.
+
+**Size on disk.** With L = `lmax`, N nodes and stride n (k = N/n + 1
+states kept, the last always), the store holds about
+
+- 1D: k x 24 K E (L + 1)(L + 2) bytes of states, K the relaxing branches
+  (one in a Maxwell deck) and E the radial mesh's points (its elements
+  times their GLL points, which the mesh refines with L: about 160 for
+  the prem8 deck at L = 8, 560 at L = 32), plus about N x 80 (L + 1)^2
+  bytes of surface records. Under seismic sources every node is kept, each
+  with its strain, the toroidal systems' state and strain and the sources'
+  forces: about five and a half times the internal variables alone;
+- 3D: k x 40 K G bytes of states over all ranks (each rank its share), G
+  the grid values of the memory nodes, about their count times 2 (L +
+  1)^2 (fewer with `solver.transform_degrees`), plus the same surface
+  records; under seismic sources each state with its strain and the
+  sources' forces, several times more.
+
+At L = 8 on the prem8 deck a 1D state is 346 kB and a 3D one (lateral
+viscosity) 2 MB; at L = 64 a 3D state is of order 100 MB, and a run of
+81 nodes at stride 9 about 1 GB. Under seismic sources at L = 32
+(examples/configs/kernel_postseismic.json, 1D, 7 nodes) each node's
+record is 83 MB, 557 MiB in all. The summaries give each store's size.
 
 ## love-numbers
 
@@ -567,7 +726,7 @@ et al. 2024).
 | --- | --- | --- | --- |
 | `model` | path | required | the deck |
 | `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
-| `lmax` | integer >= 0 | required | the largest degree |
+| `discretisation` | object | required | `lmax`, the largest degree, an integer >= 0 (The discretisation block, above) |
 | `output` | path | required | the table to write |
 | `conventional_output` | path | absent | where to write the conventional dimensionless numbers too (below); not `output`'s file |
 
@@ -615,7 +774,7 @@ Summary: `wrote <output> (degrees 0..<lmax>)`, or `wrote <output> and
 ```json
 {
   "model": "earth.deck",
-  "lmax": 256,
+  "discretisation": {"lmax": 256},
   "output": "love_numbers.txt"
 }
 ```
@@ -624,443 +783,12 @@ Summary: `wrote <output> (degrees 0..<lmax>)`, or `wrote <output> and
 {
   "model": "prem8.elastic.deck",
   "model_format": "elastic",
-  "lmax": 1024,
+  "discretisation": {"lmax": 1024},
   "output": "out/prem8_love_numbers.txt"
 }
 ```
 
-## response
-
-The planet's response to a prescribed surface load and external tidal
-potential, with no ocean: no sea level equation is solved, and there is
-no rotational feedback. The config is made of blocks (The blocks, above):
-`model`, `times`, `forcing`, `solver` and `output`, with `problem` and
-`lmax` beside them. `sea-level` without an `ocean` block solves the same
-problems on a body without an ocean, its times dates before present or
-counted forwards in a `unit` of its choice, and with the rotational
-feedback it is given (`"rotation": "none"` for `response`'s); what it
-writes and what it does not are listed there (sea-level, Without an
-ocean).
-
-The problem decides whether the response is elastic or viscoelastic:
-
-- `"problem": "static"` is the instantaneous elastic response;
-- `"problem": "quasi_static"` is the viscoelastic response, stepped
-  through the time nodes of its `times` block under the forcing at each
-  node (The viscoelastic run, below).
-
-Whether the run is 1D or 3D is decided by the `model` block alone:
-
-- elastic: with no `moduli`, or with a moduli file whose perturbations do
-  not vary laterally, the run is the radial model's, by direct per-degree
-  solves; with laterally varying moduli it is the 3D static problem
-  (docs/adjoints.md §13j), closed by preconditioned conjugate gradients
-  on the radial systems, over MPI ranks like a 3D `sea-level` run, and
-  the radial model's response to the same forcing is written beside it;
-- viscoelastic: the run is 3D when the viscosity file's viscosity
-  (`model.viscosity`) or the moduli file's moduli vary laterally, by the
-  3D stepper (`Viscoelastic3D`) over MPI ranks like a 3D `sea-level`
-  run, with the radial reference model's response written beside it;
-  otherwise it is
-  the radial model's, by its own stepper per degree, every order a column
-  (`ViscoelasticOperator`), with no 3D machinery.
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `problem` | word | required | `"static"` or `"quasi_static"` (The problem, above) |
-| `model` | object | required | the Earth model (The model block, above) |
-| `lmax` | integer >= 1 | required | the degree of the solve and of its grid |
-| `times` | object | quasi-static: required | the time nodes of a viscoelastic run, the forwards form (The times block, above); refused in the static problem |
-| `forcing` | object | required | the load and the tide (below) |
-| `solver` | object | absent | the 3D solves' tolerance, budget and transforms, and the time step (The solver block, above): `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`, and in the quasi-static problem `scheme` and `step` |
-| `output` | object | required | the files to write (below) |
-
-### The forcing block
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `forcing.load` | array | absent | the load terms, summed (below) |
-| `forcing.tide` | array | absent | the tide coefficients, summed (below) |
-| `forcing.seismic` | array | absent | the quasi-static problem alone: the seismic sources (below) |
-
-At least one load term, tide coefficient or seismic source is needed. In
-the static problem every term is a fixed pattern; in the quasi-static
-problem a term may vary in time (Forcing through time, below).
-
-**Load terms.** Each element of `forcing.load` is an object with exactly
-one member naming the term's kind, whose value holds the term's members,
-and, in the quasi-static problem, optionally `history_kyr` beside it.
-Each is a surface mass density in kg m^-2:
-
-| Kind | Members | Surface mass density |
-| --- | --- | --- |
-| `cap` | `latitude`, `longitude`, `width_deg` (> 0), `amplitude_kg_m2` | A exp(-d^2 / (2 w^2)), with d the great-circle distance from the centre, w = `width_deg` and A = `amplitude_kg_m2`; no cut-off |
-| `disk` | `latitude`, `longitude`, `radius_deg` (in (0, 180]), `amplitude_kg_m2` | A where d <= alpha (alpha = `radius_deg`), zero outside |
-| `field` | a file input (File inputs, above): `file`, `format`, `variable` (default `"load"`); static: `date_kyr`; quasi-static: `time_origin_kyr` (default 0) | the variable of the file |
-| `coefficients` | `file` | the coefficients in a text table |
-
-All members are required but a field's `format`, `variable`, `date_kyr`
-and `time_origin_kyr`; latitudes lie in [-90, 90]. A field's `name` is
-refused, naming `variable`.
-
-- `cap` is sampled at the run's grid points and expanded by the grid's
-  quadrature.
-- `disk` is not sampled across its edge but expanded exactly to `lmax`.
-  By the Funk–Hecke theorem its coefficients are
-
-  ```
-  f_lm = 2 pi A I_l conj(Y_lm(theta_0, phi_0))
-  I_0 = 1 - cos(alpha)
-  I_l = sin(alpha) P_l^1(cos(alpha)) / (l (l + 1))     (l >= 1)
-  ```
-
-  with I_l the integral of the Legendre polynomial P_l over
-  [cos(alpha), 1], P_l^1 the associated Legendre function without the
-  Condon–Shortley phase (by its upward recurrence), (theta_0, phi_0) the
-  centre and Y_lm the harmonics of the coefficient tables below. The load
-  is this truncated exact expansion, so it rings at the disk's edge as a
-  band-limited step does; its mean is A (1 - cos(alpha)) / 2.
-- `field` is read as every file input is (File inputs, above):
-  resampled onto the run's Gauss–Legendre grid by the field's own lateral
-  rule and converted to SI by its declared dimensions (a field declaring
-  none is used as it stands, so it should hold kg m^-2), then expanded by
-  the grid's quadrature. In the static problem a file with a time axis is
-  read at the term's `date_kyr`, a time t kyr on the file's own axis read
-  at t x 3.15576e10 s, which it requires; a file without one refuses
-  `date_kyr`. The quasi-static problem refuses `date_kyr` (Forcing through
-  time, below).
-- `coefficients` names a text table. Lines starting with `#` and blank
-  lines are skipped; every other line is a row `l m re im`: integers
-  0 <= m <= l and the real and imaginary parts of the coefficient f_lm of
-  the surface mass density, in kg m^-2. The harmonics are the exchange
-  table's (Outputs, below): the library's complex orthonormal harmonics
-  with the Condon–Shortley phase,
-  Y_lm(theta, phi) = sqrt((2l + 1) / (4 pi)) d^l_0m(theta) e^(i m phi),
-  each squared modulus integrating to 1 over the unit sphere; the field is
-  real, so the coefficients of m < 0 follow as
-  f_(l,-m) = (-1)^m conj(f_lm) and the imaginary part at m = 0 must be
-  zero. From the real orthonormal coefficients a_lm (cosine) and b_lm
-  (sine) of pyshtools' `"ortho"` normalisation without the Condon–Shortley
-  phase, f_l0 = a_l0 and f_lm = (-1)^m (a_lm - i b_lm) / sqrt(2) for
-  m > 0. Degrees absent from the table are zero; a degree above `lmax`, a
-  row given twice or a malformed row is refused, naming the line.
-
-The load applied is the sum of the terms' coefficients. The `load` field
-written is the sum of each term's field at the grid points whose
-expansion is that term's coefficients: a cap's and a field's values as
-sampled, a disk's and a table's synthesised from their coefficients.
-
-**Tide coefficients.** Each element of `forcing.tide` is one coefficient
-of the external potential, in the harmonics of the coefficient tables;
-coefficients of the same degree and order add.
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `degree` | integer in [2, lmax] | required | the degree |
-| `order` | integer in [0, degree] | 0 | the order (m >= 0: the potential is real) |
-| `amplitude_m2_s2` | number | required | the coefficient's real part, m^2 s^-2 |
-| `imaginary_m2_s2` | number | 0 | its imaginary part, zero at order 0 |
-| `history_kyr` | array | absent | the quasi-static problem alone: its amplitude history (below) |
-
-**Forcing through time.** In the quasi-static problem, the forcing at a
-node is each term's pattern at the node's time t times the term's factor
-there, summed as above:
-
-- `history_kyr`, on a load term or a tide coefficient, is a list of
-  `[time_kyr, factor]` pairs, at least one, its times strictly increasing
-  on the run's clock. The factor at t is the piecewise-LINEAR interpolant
-  of the factors between the pairs' times, held CONSTANT at the first
-  factor before the first time and at the last factor after the last; a
-  single pair is a constant factor. A term without a history has the
-  factor 1 throughout. A history is refused in the static problem.
-- A `field` term whose file has a time axis is read at each node by the
-  file's own time rule, as `sea-level` reads an ice history at its nodes: a
-  `node` field with linear time interpolation (what pyslfp and this
-  program write) between its stored times, its first or last field held
-  outside the file's span, without a warning; then expanded. The file's
-  time axis is in seconds (Units and conventions, above), and the run's
-  time t kyr reads the file at (t - `time_origin_kyr`) x 3.15576e10 s:
-  with the default origin 0, t kyr on the run's clock is t kyr on the
-  file's axis, so a `response` surface file (whose axis is the run's
-  clock) reads back as it was written; a file whose axis counts from the
-  present, negative in the past (an ice history, a `sea-level` output),
-  is read from its date -D kyr at the run's start by
-  `"time_origin_kyr": D` with `start_kyr` 0. A static file is the same
-  pattern at every node. A field term may also carry `history_kyr`: its
-  factor multiplies the field read. `time_origin_kyr` is refused in the
-  static problem.
-
-**Seismic sources.** In the quasi-static problem, each element of
-`forcing.seismic` is a
-source inside the body: an object holding exactly one of `point` and
-`fault`, and optionally `onset_kyr` and `history_kyr`. The source is the
-stress glut itself, a moment tensor: it acts from `onset_kyr` on the
-run's clock (from the start when absent) and is held, times its
-amplitude history where one is given, so the node at which it first acts
-holds the co-seismic response and the nodes after it the post-seismic
-relaxation. The onset should be a node of the run. A source excites
-toroidal motion as well as spheroidal, and the surface file then holds
-`toroidal_potential`.
-
-A `point` is a moment tensor at a point:
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `latitude`, `longitude` | number | required | the point, degrees |
-| `depth_km` | number > 0 | required | its depth below the body's surface |
-| `moment_tensor_nm` | object | one of the two | the tensor's components `rr`, `tt`, `pp`, `rt`, `rp`, `tp` in the spherical polar basis at the point (r up, theta south, phi east), N m |
-| `strike_deg`, `dip_deg`, `rake_deg`, `moment_nm` | number | one of the two | a double couple instead: the fault plane and slip as Aki & Richards give them (strike clockwise from north with the fault dipping to its right, dip from the horizontal in [0, 90], rake of the hanging wall's slip in the plane from the strike direction) and the scalar moment, N m |
-
-A `fault` is a flat rectangle of uniform slip, laid out as point sources
-at the centres of equal patches, each with an equal share of the moment:
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `latitude`, `longitude`, `depth_km` | number | required | the centroid |
-| `strike_deg`, `dip_deg`, `rake_deg` | number | required | the plane and the slip at the centroid, as for a point |
-| `length_km`, `width_km` | number > 0 | required | along strike and down dip |
-| `moment_nm` | number | required | the total scalar moment, N m |
-| `patches_along_strike`, `patches_down_dip` | integer >= 1 | 1 | the patches each way |
-
-A patch whose centre lies above the surface is left out, its share of
-the moment with it. One point source is band-limited by `lmax`; a fault
-of several patches is the way to a smoother source. The block is refused
-in the static problem.
-
-### The output files
-
-| Member | Type | Default | Meaning |
-| --- | --- | --- | --- |
-| `output.surface` | path | required | the surface file to write |
-| `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table; in the quasi-static problem, one table per node, the path holding `{node}` |
-| `output.exchange_nodes` | array of integers | every node | the quasi-static problem alone: the indices (from 0) of the nodes whose tables are written |
-| `output.volume` | path | absent | the static problem alone: the response inside the body as a planetmodel model file |
-
-In the quasi-static problem `output.exchange` must hold the literal
-`{node}`, which is replaced by the node's index zero-padded to the width
-of the last index (`00` to `40` for 41 nodes); in the static problem it
-must not. `exchange_nodes` needs `output.exchange`, and an index past the
-last node is refused. `output.volume` is refused on lateral moduli over
-several MPI ranks (each rank holds the solution on its own segment alone),
-and in the quasi-static problem: the volume file is written for the
-elastic response alone.
-
-### The viscoelastic run
-
-The run is the library's evolution (`Evolution`, `Evolution3D`) of a
-body without an ocean and without rotational feedback. It starts at the
-first node with no memory: the response there is the instantaneous
-elastic one to the forcing at the first node (the unrelaxed solve; under
-lateral moduli a zero-length step, closed as the steps are). Each step then advances from one node to the next
-under the forcing AT the next node, the scheme's end-time loads being
-that node's: the forcing enters at the nodes alone, and a history's or a
-field file's variation between two nodes is not seen. This is
-`sea-level`'s convention: a load that is non-zero at the first
-node includes the elastic jump at the start (the run is the response to
-a load switched on there), while a load ramped up from zero has none.
-
-- 1D: the radial model's stepper, every degree with all its orders as
-  columns, each step one direct solve per degree.
-- 3D: `Viscoelastic3D`, each step closed by the fixed point or by
-  conjugate gradients (`solver.step`) to `solver.step_rtol` within
-  `solver.step_max_iterations`; a step that does not converge is an
-  error. Over MPI ranks it is distributed over radial segments as a 3D
-  `sea-level` run is, every rank reading the inputs and the first rank's
-  loads and response serving all. The radial reference model (the deck's radial moduli and
-  the radial reference viscosity: the viscosity file's reference, or the
-  deck's column) is stepped beside it by the 1D stepper under the same
-  forcing, on the first rank. A 1D run on several ranks is the first
-  rank's alone.
-
-The first node's response is the elastic run's for the same forcing to
-rounding (about 1e-11 relative on the test decks; under lateral moduli to
-the solves' tolerances), the radial stepper's unrelaxed
-systems carrying the branch moduli at the memory points rather than at
-the nodes.
-
-### Outputs
-
-**The static problem.** The surface file, on the run's Gauss–Legendre grid,
-holds `load` (kg m^-2, with a load term: the field above), `displacement`
-(the radial displacement, m), `tangential_potential` (V, m: the
-tangential displacement is its surface gradient), `potential`
-(m^2 s^-2) and, under lateral moduli, `displacement_radial_model` and
-`potential_radial_model`, the radial model's under the same forcing. Its
-metadata record the config, deck and moduli paths, `lateral` (1 for the
-3D solve), `load_terms` and `tide_coefficients` (the counts), `forcing`
-(each term described, `; ` between them) and `solve_iterations` and
-`solve_residual` (0 in 1D); when the load is exactly one `cap`, also
-`load_latitude_deg`, `load_longitude_deg`, `load_width_deg` and
-`load_amplitude_kg_m2`, and when the tide is exactly one coefficient,
-`tide_degree`, `tide_order`, `tide_amplitude_m2_s2` and
-`tide_imaginary_m2_s2`.
-
-The exchange table is the format of AdGIA's benchmarks:
-
-- `#` provenance lines: what the table holds, the code's version and the
-  date, the config, deck and moduli paths (quasi-static, the viscosity
-  file's too), and a line `# forcing ...` describing each load term and
-  tide coefficient (a `field` term's file and variable, with its date,
-  time origin and history where set);
-- named scalars, one per line as `name value`: `radius` (m),
-  `surface_gravity` (m s^-2), `lmax`, `lateral`, `load_terms` and
-  `tide_coefficients`; then, when the load is exactly one `cap`,
-  `cap_latitude_deg`, `cap_longitude_deg`, `cap_width_deg` and
-  `cap_amplitude_kg_m2`, and when the tide is exactly one coefficient,
-  `tide_degree`, `tide_order` and `tide_amplitude_m2_s2` (two numbers,
-  the real and imaginary parts), so that a table of one cap and one tide
-  carries the same scalars whatever else it holds;
-- `columns l m U_re U_im Phi_re Phi_im` and one row per (l, m), m >= 0:
-  the coefficients of the surface displacement (m) and potential
-  (m^2 s^-2) in the harmonics of the coefficient tables above, SI,
-  `%.17g`.
-
-The volume file holds `radial_displacement` (m), `deviatoric_strain`
-(sqrt(e:e), dimensionless) and, under lateral moduli, `mu_relative` and
-`kappa_relative` (the perturbations applied) at the memory nodes of every
-solid element but the one holding the centre, with the model's density
-as the radial reference; planetmodel's `slices.cutaway` and
-`plotting.cutaway` draw it (as `examples/python/plot_static_3d.py` does
-for the library's example of the same problem).
-
-**The quasi-static problem.** The surface file has one slice per node: its fields are
-SI node fields with linear time interpolation, `load` (with a load term:
-the load applied at each node, each term's field times its factor),
-`displacement`, `tangential_potential` and `potential`, under seismic
-sources `toroidal_potential` (W, m: the toroidal displacement is minus
-the radial unit vector crossed with its surface gradient; in the frame of
-no net rotation of the surface, a rigid rotation of the body being
-undetermined) and, in a 3D run,
-`displacement_radial_model` and `potential_radial_model`, the radial
-reference model's under the same forcing. Its time axis is the run's
-clock in seconds: a node at t kyr is at t x 3.15576e10 s, so the axis
-starts at `start_kyr` (zero by default). Its metadata record what the
-elastic file's do, with `viscosity` (the viscosity file's path, where
-given) and, in place of `solve_iterations` and `solve_residual`,
-`dates_kyr` (the nodes, kyr), `time` (the axis's meaning), `scheme`,
-`step_solver` (`"fixed_point"` or `"conjugate_gradients"` in 3D,
-`"direct"` in 1D), and `step_iterations` (the passes of each step's
-closure), `solve_iterations` (its conjugate-gradient iterations, zero
-under the fixed point) and `step_residual`, one per node (the first
-node's those of its zero-length step under lateral moduli, zero
-otherwise; zero throughout in 1D).
-
-Each exchange table is the elastic one's format for one node, with two
-named scalars more, `node` (the node's index) and `time_kyr` (its time),
-before `columns`.
-
-**Summary.** What the config was taken to mean, the inputs as read,
-then the files. Static: `<model>, elastic, <forcing>[; <field>...];
-wrote <surface> [and <exchange>] [and <volume>]`, ending under lateral
-moduli in `(<n> conjugate-gradient iterations, residual <r>)`; `<model>`
-is `3-D (lateral moduli)`, `1-D`, or `1-D (the moduli file is radial)`.
-Quasi-static: `<model>, viscoelastic, <n> nodes <start> to <end> kyr,
-<forcing>[; <field>...]; wrote <surface> [and <k> exchange tables]`,
-ending in 3D in `(<i> fixed-point iterations over <s> steps)` or `(<i>
-conjugate-gradient iterations over <s> steps)`, the iterations of the
-steps summed; `<model>` is `3-D (lateral viscosity)`, `3-D (lateral
-moduli)`, `3-D (lateral viscosity, lateral moduli)`, `1-D`, or `1-D`
-followed by `(the viscosity file is radial)`, `(the moduli file is
-radial)` or `(the viscosity and moduli files are radial)`. `<forcing>`
-is `load (<n> term[s])`, `tide (<n> coefficient[s])`, `seismic (<n>
-source[s])`, or several joined by ` + `. Each `field` term follows as
-read, `field <file>:<variable> (<slice>)`, the slice `static` for a file
-without a time axis, `<t> kyr` for the static problem's date, and in the
-quasi-static problem `the run's clock` or `time origin <t> kyr`. The
-example configs
-`examples/configs/response.json` and
-`examples/configs/response_viscoelastic.json` print
-
-```
-sl3d response: 3-D (lateral moduli), elastic, load (1 term) + tide (1 coefficient); wrote out/response/response.nc and out/response/response.txt and out/response/response_volume.nc (5 conjugate-gradient iterations, residual 3.52e-11) in 1.29 s
-sl3d response: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr, load (1 term) + tide (1 coefficient); wrote out/response_viscoelastic/response_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.49 s
-```
-
-### Examples
-
-```json
-{
-  "problem": "static",
-  "model": {"deck": "earth.deck"},
-  "lmax": 128,
-  "forcing": {
-    "load": [{"disk": {"latitude": 64, "longitude": 20, "radius_deg": 6,
-                       "amplitude_kg_m2": 1.0e5}}]
-  },
-  "output": {"surface": "out/disk.nc"}
-}
-```
-
-```json
-{
-  "problem": "static",
-  "model":   {"deck": "prem.deck", "format": "elastic",
-              "moduli": {"file": "s40rts_moduli.nc", "reference": "lateral_mean"}},
-  "lmax":    64,
-  "forcing": {
-    "load": [
-      {"cap":  {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6}},
-      {"disk": {"latitude": -75, "longitude": 0, "radius_deg": 8, "amplitude_kg_m2": -9.0e5}},
-      {"field": {"file": "load.nc", "variable": "sigma"}},
-      {"field": {"file": "load_history.nc", "date_kyr": 10}},
-      {"coefficients": {"file": "load_lm.txt"}}
-    ],
-    "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0, "imaginary_m2_s2": 0.0}]
-  },
-  "solver":  {"step_rtol": 1e-10, "step_max_iterations": 200, "transform_degrees": [16, 32], "cache_mb": 0},
-  "output":  {"surface": "out/response.nc", "exchange": "out/response.txt", "volume": "out/response_volume.nc"}
-}
-```
-
-The first is a 1D run (the deck's radial model); the second solves the
-3D problem under the lateral moduli of `s40rts_moduli.nc`, its loads
-including the variable `sigma` of the static file `load.nc` and the
-variable `load` of `load_history.nc`, a file with a time axis, at 10 kyr
-on that axis.
-
-```json
-{
-  "problem": "quasi_static",
-  "model": {
-    "deck": "prem_maxwell.deck", "format": "maxwell",
-    "viscosity": {"file": "visc3d.nc", "reference": "geometric_mean"},
-    "moduli":    {"file": "s40rts_moduli.nc"}
-  },
-  "lmax":  64,
-  "times": {"start_kyr": 0, "end_kyr": 20, "nodes": 41},
-  "forcing": {
-    "load": [
-      {"cap": {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6},
-       "history_kyr": [[0, 0.0], [10, 1.0], [10.5, 0.0]]},
-      {"field": {"file": "load_history.nc"}}
-    ],
-    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0,
-              "history_kyr": [[0, 1.0]]}]
-  },
-  "solver": {"scheme": "exponential_trapezoid", "step": "fixed_point",
-             "step_rtol": 1e-10, "step_max_iterations": 200,
-             "transform_degrees": [16, 32], "cache_mb": 0},
-  "output": {"surface": "out/relax.nc", "exchange": "out/relax_{node}.txt"}
-}
-```
-
-A viscoelastic 3D run under a lateral viscosity and lateral moduli: a cap
-loaded linearly over 10 kyr and removed over the next 0.5 kyr, a load
-history read from a surface file on the run's clock, and a constant
-tide, over 20 kyr in half-kyr steps, with a table per node
-(`out/relax_00.txt` to `out/relax_40.txt`). Without `viscosity` and
-`moduli` the same config runs the deck's radial Maxwell model in 1D.
-
-A coefficient table, degrees 0 and 2 of a load (the m = 0 rows real):
-
-```
-# a load's coefficients, kg m^-2
-0 0 3.5e3 0
-2 0 -1.2e3 0
-2 1 4.0e2 -2.5e2
-```
-
-## sea-level
+## solve
 
 The sea level equation: the ocean coupled to the solid Earth, with
 rotational feedback, on a state (the sea level and the ice at one
@@ -1068,10 +796,13 @@ instant) read from file inputs, under a forcing of any mix of an ice
 change, surface loads, a tide and seismic sources, with frozen or
 migrating shorelines. The state is optional: without one the body has
 no ocean, and the run is the response of the solid body, with its
-rotational feedback, to the loads, the tide and the sources (Without an
-ocean, below). The config is made of blocks (The blocks, above): `model`,
-`times`, `forcing`, `ocean`, `solver`, `checkpoint` and `output`, with
-`problem`, `lmax`, `rotation`, `moments` and `restart` beside them.
+rotational feedback as asked, to the loads, the tide and the sources
+(Without an ocean, below); without gravity, a radial body's response
+to seismic sources alone (Without gravity, below). The config is made of
+blocks (The blocks, above): `model`, `times`, `forcing`, `ocean`,
+`solver`, `checkpoint`, `trajectory`, `output` and `discretisation`,
+with `problem`, `gravity`, `rotation`, `moments` and `restart` beside
+them.
 
 The problem decides what is solved:
 
@@ -1082,13 +813,15 @@ The problem decides what is solved:
   under lateral moduli, on the laterally heterogeneous elastic Earth (The
   static problem, below). Under an ice change alone it is the elastic
   sea-level fingerprint of the change; under a fault alone, the
-  co-seismic sea level change;
+  co-seismic sea level change; without an ocean, the body's elastic
+  response;
 - `"problem": "quasi_static"` is the run through time under the forcing
   from the state at an end of the window: the viscoelastic Earth through
   the sea level equation over the nodes of its `times` block, dates
   before present (GIA over a deglaciation) or times on the run's own
   clock in a `unit` (a post-seismic relaxation over years, say) (The run
-  through time, below), restartable from checkpoints.
+  through time, below), restartable from checkpoints; without an ocean,
+  the body's viscoelastic response through time.
 
 Both are runs of the library's evolutions (`Evolution`, `Evolution3D`):
 the static problem is a run of one node, the solve of its start alone,
@@ -1097,30 +830,33 @@ Maxwell branch).
 
 Whether the run is 1D or 3D is decided by the `model` block alone. A run
 through time is 3D when the viscosity of `model.viscosity` or the moduli
-of `model.moduli` vary laterally: `Evolution3D`, each step
-solving the combined fixed point of the strain, the ocean load and the
-rotation about the radial reference, over MPI ranks; otherwise it is the
-radial model's (`Evolution`), on the deck's viscosity column or
-the radial viscosity of `model.viscosity`. The static problem is 3D when
-the moduli of `model.moduli` vary laterally (The static problem on
-lateral moduli, below), and radial otherwise, a radial moduli file
-leaving the deck's moduli as they are; it has no use for a viscosity,
-and `model.viscosity` is refused in the static problem.
+of `model.moduli` vary laterally: `Evolution3D`, each step solving the
+combined fixed point of the strain, the ocean load and the rotation
+about the radial reference, over MPI ranks, with the radial reference
+model's run written beside it; otherwise it is the radial model's
+(`Evolution`), on the deck's viscosity column or the radial viscosity of
+`model.viscosity`. The static problem is 3D when the moduli of
+`model.moduli` vary laterally (The static problem on lateral moduli,
+below), and radial otherwise, a radial moduli file leaving the deck's
+moduli as they are; it has no use for a viscosity, and `model.viscosity`
+is refused in the static problem.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `problem` | word | required | `"static"` (the solve at the state's date) or `"quasi_static"` (the run through time) (The problem, above) |
 | `model` | object | required | the Earth model (The model block, above) |
-| `lmax` | integer >= 1 | required | the degree of the run and of its grid |
+| `discretisation` | object | required | `lmax`, the degree of the run and of its grid, an integer >= 1 (The discretisation block, above) |
 | `times` | object | quasi-static: required | the nodes, dates before present or times on the run's own clock in its `unit` (The times block, above); refused in the static problem |
 | `forcing` | object | required | the ice change, surface loads, the tide and seismic sources, any mix of them (below) |
 | `ocean` | object | absent | the state, its instant, the shorelines and, in the quasi-static problem, the initial sea level's calibration (The ocean block, above); absent, the body has no ocean (Without an ocean, below) |
-| `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above) |
+| `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above); without gravity `"none"`, its default then |
 | `moments` | word | `"input"` | the moments of inertia (Rotation and moments, above) |
+| `gravity` | word | `"full"` | `"full"`, the problem with self-gravitation, or `"none"`, the problem without gravity: a radial body under seismic sources alone, with no ocean, tide, surface load or rotational feedback (Without gravity, below) |
 | `solver` | object | absent | the solves (The solver block, above): in the static problem, `rtol` alone on a radial Earth, and the 3D step's members too on lateral moduli |
 | `checkpoint` | object | absent | the quasi-static problem alone: the checkpoints (Checkpoints and restarts, below) |
 | `restart` | boolean | `true` | the quasi-static problem alone: whether to resume from a checkpoint (Checkpoints and restarts, below) |
-| `output` | object | required | `output.surface`, the surface file to write (the block's other members are `response`'s) |
+| `trajectory` | object | absent | the trajectory store the run is recorded into (The trajectory block, above) |
+| `output` | object | required | the files to write (The output block, above; Exchange tables and the volume file, below) |
 
 ### The forcing block
 
@@ -1144,20 +880,15 @@ conserved. Without an ocean there is no ice to change, and
 | `forcing.ice_change[k].change.date_kyr_bp` | number | absent | the static problem: the date the file is read at, kyr BP; required of a file with a time axis, refused for a file without one |
 | `forcing.ice_change[k].cap_thickness` | object | one of the four | a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds). Refused with the state at the window's end |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt). Refused with the state at the window's end |
-| `forcing.ice_change[k].history_kyr_bp` | list of pairs | absent | a dated run, beside a cap: the cap's amplitude history, as a surface load's (below); without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
-| `forcing.ice_change[k].history` | list of pairs | absent | a run counting forwards, beside a cap: its amplitude history on the run's clock, as a surface load's `history` (below) |
-| `forcing.load` | list | absent | surface loads: each a load term as `response`'s (one of `cap`, `disk`, `field`, `coefficients`; response, The forcing block), with the properties below |
-| `forcing.load[k].field.date_kyr_bp` | number | absent | the static problem: the date a `field` term's file is read at, kyr BP; required of a file with a time axis (or `date`, below), refused for a file without one; refused in the quasi-static problem, which reads the file at each node's date or on the run's clock |
-| `forcing.load[k].field.date`, `forcing.load[k].field.unit` | number, word | absent | the static problem, instead of `date_kyr_bp`: the time on the file's OWN axis the file is read at, in `unit` (`"kyr"`, `"yr"` or `"day"`, required with `date`), the file read at +`date` x the unit; so `"date": -1500, "unit": "yr"` is `"date_kyr_bp": 1.5`. Both dates together are refused |
-| `forcing.load[k].field.time_origin` | number | 0 | a run counting forwards: the time on the run's clock, in its unit, at which the file's time zero falls: the file is read at (t - `time_origin`) x the unit, in seconds, at the run's time t (`response`'s `time_origin_kyr`) |
-| `forcing.load[k].history_kyr_bp` | list of pairs | absent | a dated run: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing), the factor interpolated linearly between them and held outside them; without one the factor is 1 throughout |
-| `forcing.load[k].history` | list of pairs | absent | a run counting forwards: the term's amplitude history, pairs `[time, factor]` on the run's clock in its unit, the times strictly increasing, interpolated and held as above |
+| `forcing.ice_change[k].history_kyr_bp`, `forcing.ice_change[k].history` | list of pairs | absent | the quasi-static problem, beside a cap: the cap's amplitude history, as a surface load's (below), dated in a dated run and on the run's clock in one counting forwards; without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
+| `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below |
 | `forcing.load[k].water_budget` | true or false | required with an ocean; `false` without one | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water. Without an ocean there is no water to exchange, and it has no effect |
 | `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
-| `forcing.tide` | list | absent | the tide: coefficients of an external potential, as `response`'s (`degree`, `order`, `amplitude_m2_s2`, `imaginary_m2_s2`; response, The forcing block), summed. Refused under migrating shorelines |
-| `forcing.tide[k].history_kyr_bp`, `forcing.tide[k].history` | list of pairs | absent | the quasi-static problem: the coefficient's amplitude history, as a surface load's (dated, `history_kyr_bp`; counting forwards, `history`); refused in the static problem |
-| `forcing.seismic` | list | absent | seismic sources, as `response`'s (`point` or `fault`), with, in the quasi-static problem, an optional onset, the time the source acts from (absent: from the window's start), `onset_kyr_bp` (a date, kyr BP) in a dated run and `onset` (on the run's clock, in its unit) in one counting forwards, and the history of the run's form |
+| `forcing.load[k].history_kyr_bp` | list of pairs | absent | a dated run: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing) |
+| `forcing.load[k].history` | list of pairs | absent | a run counting forwards: the term's amplitude history, pairs `[time, factor]` on the run's clock in its unit, the times strictly increasing |
+| `forcing.tide` | list | absent | the tide: coefficients of an external potential (below), summed. Refused under migrating shorelines |
+| `forcing.seismic` | list | absent | seismic sources (below) |
 
 The ice at a time is the state's ice plus the terms' changes summed
 there. A change that takes more ice than the state holds is refused (The
@@ -1173,50 +904,194 @@ migrating shorelines the run solves its start, the nonlinear equation on
 the unrelaxed body with the ice the state's plus the change there, so
 that the first node's shorelines may differ from the state's.
 
-The members of the other problem are refused, naming what this one
-takes: a term's date in the quasi-static problem (a file term's of the
-ice change, a `field` load's), and a history or an onset in the static
-one (on a cap, a load, a tide coefficient or a source); a thickness term without a date is
-refused in the static problem, as is a term naming no kind or several
-in either. `forcing.ice`, `forcing.sea_level` and `forcing.state` are
-refused, naming the members that hold the state's ice and sea level and
-the ice change.
+**Load terms.** Each element of `forcing.load` is an object with exactly
+one member naming the term's kind, whose value holds the term's members,
+beside the load's properties above and, in the quasi-static problem, its
+history. Each is a surface mass density in kg m^-2:
 
-The terms' times take the form of the run's. In the static problem and
-a DATED run they are dates, kyr before present, as the window's are: a
-history is `history_kyr_bp` and an onset `onset_kyr_bp`, and a `field`
-term's file with a time axis is read at its `date_kyr_bp` in the static
-problem (or at `date` in its `unit` on the file's own axis) and at each
-node's date in the quasi-static one, as the ice change's files are, so a
-load file and an ice file on one calendar agree with nothing more said.
-In a run COUNTING FORWARDS they are times on the run's own clock in its
-unit, `times.unit`: a history is `history`, pairs `[time, factor]`, an
-onset `onset`, and a `field` term's file with a time axis is read at
-t - `time_origin` at the clock's time t (`time_origin` 0 by default:
-the file's axis is the clock's); its ice changes by caps and by `change`
-files without a time axis alone. The names of the other forms are
-refused, naming this form's: `response`'s names for times on a run's own
-clock in kyr or on a file's own axis (`history_kyr`, `onset_kyr`,
-`time_origin_kyr`, `date_kyr`) everywhere, the dated names in a run
-counting forwards and the forwards names in a dated run. The loads, the
-tide and the sources are changes from the state: in the static problem
-they act at its date, at their full amounts; in the quasi-static problem
-a term present at the first node acts there, the first node then the
-response of the unrelaxed body to it, and under migrating shorelines its
-shorelines may already differ from the start's. Each load is
+| Kind | Members | Surface mass density |
+| --- | --- | --- |
+| `cap` | `latitude`, `longitude`, `width_deg` (> 0), `amplitude_kg_m2` | A exp(-d^2 / (2 w^2)), with d the great-circle distance from the centre, w = `width_deg` and A = `amplitude_kg_m2`; no cut-off |
+| `disk` | `latitude`, `longitude`, `radius_deg` (in (0, 180]), `amplitude_kg_m2` | A where d <= alpha (alpha = `radius_deg`), zero outside |
+| `field` | a file input (File inputs, above): `file`, `format`, `variable` (default `"load"`); static: `date_kyr_bp`, or `date` with `unit`; counting forwards: `time_origin` (default 0) | the variable of the file |
+| `coefficients` | `file` | the coefficients in a text table |
+
+All members are required but a field's `format`, `variable`, dates and
+time origin; latitudes lie in [-90, 90]. A field's `name` is refused,
+naming `variable`.
+
+- `cap` is sampled at the run's grid points and expanded by the grid's
+  quadrature.
+- `disk` is not sampled across its edge but expanded exactly to `lmax`.
+  By the Funk–Hecke theorem its coefficients are
+
+  ```
+  f_lm = 2 pi A I_l conj(Y_lm(theta_0, phi_0))
+  I_0 = 1 - cos(alpha)
+  I_l = sin(alpha) P_l^1(cos(alpha)) / (l (l + 1))     (l >= 1)
+  ```
+
+  with I_l the integral of the Legendre polynomial P_l over
+  [cos(alpha), 1], P_l^1 the associated Legendre function without the
+  Condon–Shortley phase (by its upward recurrence), (theta_0, phi_0) the
+  centre and Y_lm the harmonics of the coefficient tables below. The load
+  is this truncated exact expansion, so it rings at the disk's edge as a
+  band-limited step does; its mean is A (1 - cos(alpha)) / 2.
+- `field` is read as every file input is (File inputs, above):
+  resampled onto the run's Gauss–Legendre grid by the field's own lateral
+  rule and converted to SI by its declared dimensions (a field declaring
+  none is used as it stands, so it should hold kg m^-2), then expanded by
+  the grid's quadrature. When its file is read is set out below (Times
+  of the terms).
+- `coefficients` names a text table. Lines starting with `#` and blank
+  lines are skipped; every other line is a row `l m re im`: integers
+  0 <= m <= l and the real and imaginary parts of the coefficient f_lm of
+  the surface mass density, in kg m^-2. The harmonics are the exchange
+  table's (Exchange tables and the volume file, below): the library's
+  complex orthonormal harmonics with the Condon–Shortley phase,
+  Y_lm(theta, phi) = sqrt((2l + 1) / (4 pi)) d^l_0m(theta) e^(i m phi),
+  each squared modulus integrating to 1 over the unit sphere; the field is
+  real, so the coefficients of m < 0 follow as
+  f_(l,-m) = (-1)^m conj(f_lm) and the imaginary part at m = 0 must be
+  zero. From the real orthonormal coefficients a_lm (cosine) and b_lm
+  (sine) of pyshtools' `"ortho"` normalisation without the Condon–Shortley
+  phase, f_l0 = a_l0 and f_lm = (-1)^m (a_lm - i b_lm) / sqrt(2) for
+  m > 0. Degrees absent from the table are zero; a degree above `lmax`, a
+  row given twice or a malformed row is refused, naming the line. For
+  example, degrees 0 and 2 of a load (the m = 0 rows real):
+
+  ```
+  # a load's coefficients, kg m^-2
+  0 0 3.5e3 0
+  2 0 -1.2e3 0
+  2 1 4.0e2 -2.5e2
+  ```
+
+The loads applied are the terms' coefficients, summed by their
+properties and band-limited to `lmax`. The `load` field written is the
+sum of each term's field at the grid points whose expansion is that
+term's coefficients: a cap's and a field's values as sampled, a disk's
+and a table's synthesised from their coefficients.
+
+**Tide coefficients.** Each element of `forcing.tide` is one coefficient
+of the external potential, in the harmonics of the coefficient tables;
+coefficients of the same degree and order add.
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `degree` | integer in [2, lmax] | required | the degree |
+| `order` | integer in [0, degree] | 0 | the order (m >= 0: the potential is real) |
+| `amplitude_m2_s2` | number | required | the coefficient's real part, m^2 s^-2 |
+| `imaginary_m2_s2` | number | 0 | its imaginary part, zero at order 0 |
+| `history_kyr_bp`, `history` | list of pairs | absent | the quasi-static problem alone: its amplitude history, as a load term's |
+
+The tide is an external potential: the body answers it through its
+tidal Love numbers, as it answers the centrifugal potential of the
+rotation, and the potential moves the equipotentials, so it is in the
+relative sea level change and not in the `potential` written, which is
+the body's own perturbation. The ocean's load and the rotational
+feedback answer the body's deformation under it as they answer any
+other. A tide is refused under migrating shorelines, whose runs take
+none.
+
+**Seismic sources.** Each element of `forcing.seismic` is a source inside
+the body: an object holding exactly one of `point` and `fault`, and, in
+the quasi-static problem, optionally an onset and a history. The source is
+the stress glut itself, a moment tensor: in the static problem it acts
+whole, the co-seismic response; through time it acts from its onset
+(`onset_kyr_bp`, a date, in a dated run, `onset` on the run's clock in
+one counting forwards; from the window's start when absent) and is held,
+times its amplitude history where one is given, so the node at which it
+first acts holds the co-seismic response and the nodes after it the
+post-seismic relaxation. The onset should be a node of the run. A source
+excites toroidal motion as well as spheroidal, and the surface file then
+holds `toroidal_potential`.
+
+A `point` is a moment tensor at a point:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `latitude`, `longitude` | number | required | the point, degrees |
+| `depth_km` | number > 0 | required | its depth below the body's surface |
+| `moment_tensor_nm` | object | one of the two | the tensor's components `rr`, `tt`, `pp`, `rt`, `rp`, `tp` in the spherical polar basis at the point (r up, theta south, phi east), N m |
+| `strike_deg`, `dip_deg`, `rake_deg`, `moment_nm` | number | one of the two | a double couple instead: the fault plane and slip as Aki & Richards give them (strike clockwise from north with the fault dipping to its right, dip from the horizontal in [0, 90], rake of the hanging wall's slip in the plane from the strike direction) and the scalar moment, N m |
+
+A `fault` is a flat rectangle of uniform slip, laid out as point sources
+at the centres of equal patches, each with an equal share of the moment:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `latitude`, `longitude`, `depth_km` | number | required | the centroid |
+| `strike_deg`, `dip_deg`, `rake_deg` | number | required | the plane and the slip at the centroid, as for a point |
+| `length_km`, `width_km` | number > 0 | required | along strike and down dip |
+| `moment_nm` | number | required | the total scalar moment, N m |
+| `patches_along_strike`, `patches_down_dip` | integer >= 1 | 1 | the patches each way |
+
+A patch whose centre lies above the surface is left out, its share of
+the moment with it. One point source is band-limited by `lmax`; a fault
+of several patches is the way to a smoother source.
+
+**Times of the terms.** The terms' times take the form of the run's. In
+the static problem and a DATED run they are dates, kyr before present,
+as the window's are: a history is `history_kyr_bp`, pairs `[date_kyr_bp,
+factor]` from the oldest (the dates strictly decreasing), and an onset
+`onset_kyr_bp`. In a run COUNTING FORWARDS they are times on the run's
+own clock in its unit, `times.unit`: a history is `history`, pairs
+`[time, factor]` (the times strictly increasing), and an onset `onset`.
+A history's factor at a time is the piecewise-LINEAR interpolant of its
+factors between the pairs' times, held CONSTANT at the first factor
+before the first time and at the last after the last; a single pair is a
+constant factor, and a term without a history has the factor 1
+throughout. A `field` load's file is read
+
+- in the static problem: a file with a time axis at the term's
+  `date_kyr_bp`, kyr before present (the file read at minus that on its
+  axis), or at `date` with its `unit` (`"kyr"`, `"yr"` or `"day"`), a
+  time on the file's OWN axis, read at +`date` x the unit, so `"date":
+  -1500, "unit": "yr"` is `"date_kyr_bp": 1.5`; one of the two is
+  required of a file with a time axis, and both together, or either on a
+  file without one, are refused;
+- in a dated run: at each node's date, as the ice change's files are, so
+  a load file and an ice file on one calendar agree with nothing more
+  said;
+- in a run counting forwards: at t - `time_origin` (in the run's unit,
+  0 by default) at the clock's time t, so with the default the file's
+  axis is the clock's; a file whose axis counts from the present,
+  negative in the past (an ice history, a dated run's output), is read
+  from its date -D at the run's start by `"time_origin": D`.
+
+A file with a time axis is read by its own rule (a `node` field with
+linear time interpolation between its stored times, its first or last
+field held outside its span, without a warning) and expanded at each
+time; a static file is the same pattern at every node, and a history on
+a field term multiplies the field read. The forcing at a node is each
+term's pattern at the node's time times its factor there: the forcing
+enters a run through time at its nodes alone, and a history's or a field
+file's variation between two nodes is not seen.
+
+The names of the other form are refused, naming this form's: the dated
+names in a run counting forwards and the forwards names in a dated run
+or the static problem; so are times in kyr without a unit
+(`history_kyr`, `onset_kyr`, `time_origin_kyr`, a field's `date_kyr`),
+naming the member to give, and the members of the other problem: a
+term's date in a run through time (a file term's of the ice change, a
+`field` load's), and a history or an onset in the static problem (on a
+cap, a load, a tide coefficient or a source). A thickness term without a
+date is refused in the static problem, as is a term naming no kind or
+several in either. `forcing.ice`, `forcing.sea_level` and
+`forcing.state` are refused, naming the members that hold the state's
+ice and sea level and the ice change.
+
+The loads, the tide and the sources are changes from the state: in the
+static problem they act at its date, at their full amounts; in the
+quasi-static problem a term present at the first node acts there, the
+first node then the response of the unrelaxed body to it, and under
+migrating shorelines its shorelines may already differ from the start's;
+a term ramped up from zero has no response there. Each load is
 band-limited to the run's degree. The ice is not such a load: it is in
 the water budget, it does not move the solid surface (the solid surface
 is the one under the ice) and it alone enters the flotation that places
 the shorelines.
-
-The tide is the external potential `response` takes: the body answers it
-through its tidal Love numbers, as it answers the centrifugal potential
-of the rotation, and the potential moves the equipotentials, so it is in
-the relative sea level change and not in the `potential` written, which
-is the body's own perturbation. The ocean's load and the rotational
-feedback answer the body's deformation under it as they answer any
-other. A tide is refused under migrating shorelines, whose runs take
-none, and by the kernel commands.
 
 A run through time forced beside its ice is not calibrated (the state at
 the window's end, `"at": "end"`, is refused), and a run under seismic
@@ -1224,8 +1099,9 @@ sources is not checkpointed. The output file's metadata lists the loads
 (`load`), the tide (`tide`) and the sources (`seismic`), each term
 described and joined by `; ` (a tide coefficient as `tide degree <l>
 order <m>, <re> + <im> i m^2 s^-2`, with its history where it has one);
-the static problem's file holds the loads applied too (The static
-problem, below).
+the files hold the loads applied too, the static problem's and a run
+through time's at each node (The static problem, The run through time,
+below).
 
 For example, in a run through time from 21 kyr BP, a fifth of the ice
 under a cap melted between 21 and 15 kyr BP and held after, from a
@@ -1299,13 +1175,14 @@ Gauss–Legendre grid:
 | Field | Unit | Meaning |
 | --- | --- | --- |
 | `ice_change` | m | with an ocean: the ice thickness change applied (before the grounded-ice mask; zero without an ice change) |
+| `load` | kg m^-2 | with a surface load: every load applied, summed as given (a cap's or a field's values as sampled at the grid points, a disk's or a table's synthesised from its coefficients) |
 | `load_in_water_budget` | kg m^-2 | with a surface load in the water budget: the sum of those loads applied, band-limited to `lmax` |
 | `load_outside_water_budget` | kg m^-2 | with a surface load outside it: likewise |
 | `solid_surface_change` | m | with a load that moves the solid surface: the height of the layers laid on it, each load over its density |
 | `relative_sea_level_change` | m | the sea-level change |
 | `displacement` | m | the radial surface displacement |
 | `tangential_potential` | m | the potential V of the tangential displacement (the displacement its surface gradient) |
-| `toroidal_potential` | m | under seismic sources, and on lateral moduli: the potential W of the toroidal displacement (minus the radial unit vector crossed with its surface gradient), in the frame of no net rotation of the surface, as `response`'s |
+| `toroidal_potential` | m | under seismic sources, and on lateral moduli: the potential W of the toroidal displacement (minus the radial unit vector crossed with its surface gradient), in the frame of no net rotation of the surface, a rigid rotation of the body being undetermined |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
 | `ocean_function` | 1 | with an ocean: the state's ocean function |
 | `ocean_function_final` | 1 | migrating shorelines alone: the ocean function the solve reaches |
@@ -1323,11 +1200,20 @@ without terms); the loads (`load`), the tide (`tide`) and the sources
 (`seismic`), each described as the quasi-static file's are (a `field`
 term's with `, at <d> kyr BP`, or `, at <t> <unit>` on its own axis) and
 joined by `; ` (absent without them);
-the `shorelines`, the `rotation`, and the angular velocity perturbation
-as `omega_x_rad_s`, `omega_y_rad_s` and `omega_z_rad_s` (rad s^-1).
-Without an ocean the state's inputs, the shorelines and the fields of
-the state (`ice_change`, `ocean_function`) are left out, and `ocean` is
-`none` (Without an ocean, below).
+the forcing's counts, `load_terms` and `tide_coefficients`, and, where
+the load is exactly one cap or the tide exactly one coefficient, its
+members (`load_latitude_deg`,
+`load_longitude_deg`, `load_width_deg`, `load_amplitude_kg_m2`;
+`tide_degree`, `tide_order`, `tide_amplitude_m2_s2`,
+`tide_imaginary_m2_s2`); the `shorelines`, the `rotation`, and the
+angular velocity perturbation as `omega_x_rad_s`, `omega_y_rad_s` and
+`omega_z_rad_s` (rad s^-1); `lateral` (0 on a radial Earth) and the
+solve's closure as a 3D one's: on a radial Earth `step_solver` `direct`
+and `step_iterations`, `solve_iterations` and `step_residual` zero (on
+lateral moduli, below, the closure's own). Without an ocean the state's
+inputs, the shorelines and the fields of the state (`ice_change`,
+`ocean_function`) are left out, and `ocean` is `none` (Without an ocean,
+below).
 
 ### The static problem on lateral moduli
 
@@ -1341,8 +1227,7 @@ ocean load and the rotation over a step of zero length about the radial
 reference (docs/adjoints.md §13k, §13n), under migrating shorelines with
 the nonlinear equation solved in each of its passes. It is what a 3D
 run through time solves at its start; the solid is the deck's elastic
-structure carrying the lateral moduli, as in `response`'s elastic 3D
-solve, and no viscosity enters. With the lateral part of the moduli
+structure carrying the lateral moduli, and no viscosity enters. With the lateral part of the moduli
 zero (a file stored laterally but uniform) it is the radial problem's
 answer to the solves' tolerance.
 
@@ -1422,9 +1307,10 @@ The `ocean` block changes the start and the equation, as pyslfp's
   nonlinear equation on the unrelaxed body under the state's ice plus
   that change, and its first node is that solve; otherwise the first
   node is the state itself. In a 3D run the nonlinear solve runs in every
-  pass of each step's combined fixed point. The kernels of `kernel1d` and `kernel` then
-  linearise about the run's own shorelines, and their
-  `initial_sea_level_dual` is not zero, as it is under frozen shorelines.
+  pass of each step's combined fixed point. The kernels of such a run
+  (`kernel`) linearise about the run's own shorelines, its start's
+  included, and their `initial_sea_level_dual` is not zero, as it is
+  under frozen shorelines.
 - `"at": "end"` makes the state the one the run reaches at
   `times.end_kyr_bp` (usually the present day), and calibrates the
   initial sea level against its sea level (`ocean.calibration`): the
@@ -1436,14 +1322,15 @@ The `ocean` block changes the start and the equation, as pyslfp's
   and the load at a node is each term's change since the start. The run
   then starts as pyslfp's calibration does: the ice is the run's at the
   start, and the starting guess for the sea level is the target itself (a
-  topography converted with the state's ice), so the state's files are
-  read at the window's end alone, which must lie within their time
-  spans. Under frozen shorelines the problem is linear and
-  one run gives the answer exactly, the guess's shorelines kept; under
-  migrating shorelines the calibration iterates, by the classical update
-  or by steepest descent with the adjoint gradient, each accelerated by
-  Anderson mixing. The calibration runs before the run proper, which then
-  costs one more run.
+  topography converted with the state's ice), so the state's sea level
+  and ice files are read at the window's end alone, which must lie
+  within their time spans (the land held, `ocean.land`, is read at the
+  window's start, as in any dated run). Under frozen shorelines the
+  problem is linear and one run gives the answer exactly, the guess's
+  shorelines kept; under migrating shorelines the calibration iterates,
+  by the classical update or by steepest descent with the adjoint
+  gradient, each accelerated by Anderson mixing. The calibration runs
+  before the run proper, which then costs one more run.
 
 A sea level solve that misses `solver.rtol` is an error, and in 3D so is
 a node whose combined fixed point does not converge within
@@ -1453,6 +1340,19 @@ or the 3D fixed point, above a tight tolerance: loosen it). A 1D run
 refuses the solver members of the 3D step. Under lateral moduli the
 start's instantaneous response is the combined fixed point of a
 zero-length step (`Evolution3D`).
+
+The run starts at the first node with no memory before it: the response
+there is the unrelaxed one to the forcing at the first node, the static
+problem's for the same forcing and state to the difference of their
+discretisations, the radial stepper's unrelaxed systems carrying the
+branch moduli at the memory points rather than at the nodes (about 1e-11
+relative on the test decks under a load, 5e-10 under a point source's
+sharper forcing; under lateral moduli to the solves' tolerances). Each
+step then advances from one node to the next under the forcing AT the
+next node, the scheme's end-time loads being that node's: a load that is
+non-zero at the first node includes the elastic jump at the start (the
+run is the response to a load switched on there), while a load ramped up
+from zero has none.
 
 The output is a surface file on the run's Gauss–Legendre grid with one
 slice per time node, its time axis in seconds relative to the present
@@ -1465,10 +1365,13 @@ forwards. Its fields are SI node fields with linear time interpolation:
 | `relative_sea_level_change` | m | the sea-level change from the window's start |
 | `displacement` | m | the radial surface displacement |
 | `tangential_potential` | m | the potential V of the tangential displacement (the displacement its surface gradient) |
-| `toroidal_potential` | m | under seismic sources, and in a 3D run: the potential W of the toroidal displacement (minus the radial unit vector crossed with its surface gradient), in the frame of no net rotation of the surface, as the static problem's and `response`'s; zero at a node that has none (a 3D run's start on the radial unrelaxed body) |
+| `toroidal_potential` | m | under seismic sources, and in a 3D run: the potential W of the toroidal displacement (minus the radial unit vector crossed with its surface gradient), in the frame of no net rotation of the surface, as the static problem's; zero at a node that has none (a 3D run's start on the radial unrelaxed body) |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
 | `initial_sea_level` | m | with an ocean, static: the initial sea level the run started from (the sea level at a node is this plus `relative_sea_level_change` there) |
 | `ocean_function` | 1 | migrating shorelines alone: the ocean function at each node |
+| `load` | kg m^-2 | with a surface load: every load applied at each node, summed as given (each term's field times its factor there) |
+| `load_in_water_budget`, `load_outside_water_budget`, `solid_surface_change` | kg m^-2, kg m^-2, m | with a load of each kind: the loads applied at each node by their properties, as the static problem's (The static problem, above) |
+| `relative_sea_level_change_radial_model`, `displacement_radial_model`, `potential_radial_model` | m, m, m^2 s^-2 | a 3D run: the radial reference model's, under the same forcing (below) |
 
 Its metadata record the shorelines (`shorelines`), where the initial sea
 level came from (`initial_sea_level`: the state's sea level at the
@@ -1492,9 +1395,89 @@ the `rotation`; the nodes, in a dated run their dates as `dates_kyr_bp`
 their times in its unit as `times` with the unit's name as `time_unit`
 (`kyr`, `yr` or `day`; `time` says how the axis is formed); and the
 angular velocity perturbation at each node as `omega_x_rad_s`,
-`omega_y_rad_s` and `omega_z_rad_s` (rad s^-1). Without an ocean the
-shorelines, the initial sea level and the state's inputs are left out,
-and `ocean` is `none`.
+`omega_y_rad_s` and `omega_z_rad_s` (rad s^-1); `lateral` (1 in a 3D
+run), the forcing's counts and single terms as the static problem's
+(above), the time step (`scheme`) and each node's closure:
+`step_solver` (`"direct"` in 1D, `"fixed_point"` or
+`"conjugate_gradients"` in 3D), and one per node `step_iterations` (the
+passes of its combined fixed point), `solve_iterations` (their
+conjugate-gradient iterations, zero under the fixed point) and
+`step_residual` (its last residual), zero throughout in 1D and at the
+first node of a run without lateral moduli; in a 3D run, the radial
+reference model's angular velocity perturbation at each node,
+`omega_x_radial_model_rad_s`, `omega_y_radial_model_rad_s` and
+`omega_z_radial_model_rad_s`. Without an ocean the shorelines, the
+initial sea level and the state's inputs are left out, and `ocean` is
+`none`.
+
+A 3D run writes the radial reference model beside it, as the static
+problem on lateral moduli does: the radial Maxwell body the 3D
+run is about (the deck's moduli, and the viscosity file's radial
+reference or the deck's column), run through the same window by the 1D
+evolution from its own world, the same state under the same forcing,
+shorelines and rotation, with its own calibration where the run
+calibrates. It is run on the first rank alone once the 3D run is done,
+and is not checkpointed: a resumed run runs it whole. Its cost is a 1D
+run's.
+
+### Exchange tables and the volume file
+
+Beside the surface file, `output` takes an exchange table and a volume
+file (The output block, above).
+
+The exchange table holds the coefficients of the fields on the surface
+file's grid, in the format of AdGIA's benchmarks:
+
+- `#` provenance lines: what the table holds, `<elastic|viscoelastic>
+  surface response from sl3dpp solve (<radial|laterally heterogeneous>
+  <elastic|viscoelastic> model, <no ocean|shorelines frozen|shorelines
+  migrating>, rotation <rotation>)` (`viscoelastic` through time) and the
+  quantities (`, no gravity` follows the ocean's words in a run without
+  gravity); the code's version and the date; `config <path> model
+  <deck> moduli <file or none>`, through time with `viscosity <file or
+  none>`; with an ocean, `state ice <ice>, <sea level>`, the state's
+  inputs as read; and a line `forcing <term>` per term of the forcing,
+  the ice change's first, each described as the metadata describe it (a
+  `field` term's file and variable, with its date, time origin and
+  history where set; a load's place in the water budget);
+- named scalars, one per line as `name value`: `radius` (m),
+  `surface_gravity` (m s^-2), `lmax`, `lateral`, `load_terms` and
+  `tide_coefficients` (the surface loads and the tide's coefficients: an
+  ice change has no scalars of its own); then, when the load is exactly
+  one `cap`, `cap_latitude_deg`, `cap_longitude_deg`, `cap_width_deg` and
+  `cap_amplitude_kg_m2`, and when the tide is exactly one coefficient,
+  `tide_degree`, `tide_order` and `tide_amplitude_m2_s2` (two numbers,
+  the real and imaginary parts), so that a table of one cap and one tide
+  carries the same scalars whatever else it holds; through time, `node`
+  (the node's index), then in a dated run `time_kyr` (kyr from the
+  window's start, the terms' clock) and `date_kyr_bp` (the node's date),
+  and in a run counting forwards `time_<unit>` (the node's time in the
+  run's unit: `time_kyr`, `time_yr` or `time_day`);
+- `columns l m U_re U_im Phi_re Phi_im`, and, with an ocean, `SL_re SL_im`
+  after them, and one row per (l, m), m >= 0: the coefficients of the
+  surface displacement (m), the potential (m^2 s^-2) and the relative sea
+  level change (m) in the harmonics of the coefficient tables (The
+  forcing block, above), SI, `%.17g`. Without gravity there is no
+  potential, and the columns are `l m U_re U_im`. A reader that matches
+  columns by name reads tables with and without an ocean, and with and
+  without gravity, alike.
+
+The volume file holds `radial_displacement` (m), `deviatoric_strain`
+(sqrt(e:e), dimensionless) and, on lateral moduli, `mu_relative` and
+`kappa_relative` (the perturbations applied) at the memory nodes of every
+solid element but the one holding the centre, with the model's density
+as the radial reference; planetmodel's `slices.cutaway` and
+`plotting.cutaway` draw it (as `examples/python/plot_static_3d.py` does
+for the library's example of the same problem). The response inside the
+body is the elastic response to the total load the static solve's body
+answered (the surface loads, the ice's grounded load and the ocean's)
+and to the potential it answered (the tide, and the rotation's
+centrifugal change, its degree-0 part the spherical mean of such a
+change): by the radial reference's systems on a radial Earth, and on
+lateral moduli by the operator's conjugate-gradient elastic solve (to
+1e-12 within 200 iterations; one that misses them is an error). Asked
+for it, the static solve records its loads, and the file costs one more
+elastic solve.
 
 ### Without an ocean
 
@@ -1511,7 +1494,7 @@ and the rotation): there is no water to load the body or to conserve.
   `forcing.seismic`, as with an ocean. `forcing.ice_change` is refused:
   an ice change is a change of the state's ice, and its water has
   nowhere to go; give the ice's load as a `load` term (917 kg m^-3 times
-  the thickness, as `examples/configs/response_melt.json` does), or give
+  the thickness, as `examples/configs/no_ocean_ice_cap.json` does), or give
   the state.
 - A load's `water_budget` and `moves_solid_surface` may be left out,
   each `false`. The water budget has no ocean to change, and has no
@@ -1529,49 +1512,39 @@ and the rotation): there is no water to load the body or to conserve.
   none, so a run with an ocean is refused a run's without one, and the
   other way round.
 
+With `"rotation": "none"` the run is the solid body's response to the
+forcing alone: in the static problem its elastic response (on a radial
+Earth the unrelaxed solves of the radial systems; on lateral moduli the
+zero-length step's closure, The static problem on lateral moduli, above),
+through time its viscoelastic response, the first node the unrelaxed
+solve under the forcing there with no memory before it and each step
+ending under the forcing at its end node. The examples'
+`examples/configs/no_ocean*.json` are runs of this kind, counting forwards
+on their own clock in kyr; those on lateral structure set
+`solver.step_rtol` 1e-10 and `step_max_iterations` 200, tighter than the
+defaults.
+
 The fields are those with an ocean: `relative_sea_level_change` is the
 change of an equipotential's height above the solid surface,
 -(u + (phi + psi) / g) with psi the potential of the rotation's change
 and of the tide, less the height of any layer, with no uniform shift;
 `displacement`, `tangential_potential`, `toroidal_potential` (where the
-run has one), `potential` and, in the static problem, the loads applied.
-The fields and metadata of the state (`ice_change`, `ocean_function`,
-`initial_sea_level`; `ice`, `sea_level`, `shorelines`) are left out, and
-the metadata's `ocean` is `none`. The summary reads `no ocean` where it
-would give the shorelines (Summary, below).
+run has one), `potential` and the loads applied (in a run through time
+at each node). The fields and metadata of the state (`ice_change`,
+`ocean_function`, `initial_sea_level`; `ice`, `sea_level`, `shorelines`)
+are left out, and the metadata's `ocean` is `none`. The summary reads `no
+ocean` where it would give the shorelines (Summary, below).
 
-Under `"rotation": "none"` these are `response`'s problems. The static
-problem is `response`'s elastic response to the same loads and tide (on
-a radial Earth the same unrelaxed solves by two routes, to rounding; on
-lateral moduli `sea-level`'s zero-length step against `response`'s
-conjugate gradients, to their tolerances). A run through time is
-`response`'s viscoelastic run under the same forcing at the same nodes,
-to rounding. Counting forwards in kyr it is `response`'s config in
-`sea-level`'s names: `times` `{"unit": "kyr", "at": [...]}` for
-`at_kyr` (`start`, `end` and `nodes` for `start_kyr`, `end_kyr` and
-`nodes`), and `history`, `onset` and a field's `time_origin` for
-`history_kyr`, `onset_kyr` and `time_origin_kyr`, the two stepping
-through the same times to the bit.
-Dated, its clock is turned: in a window from S kyr BP, the node at D
-kyr BP is `response`'s at S - D kyr, a history `[[D, f], ...]` given as
-`history_kyr_bp` is `response`'s `history_kyr` `[[S - D, f], ...]`, and
-an `onset_kyr_bp` of D is an `onset_kyr` of S - D. `response` alone writes
-the exchange tables and the volume file, a run through time's `load`
-field at every node, the radial reference model's fields of a 3D run
-through time (`displacement_radial_model`, `potential_radial_model`) and
-its steps' iterations and residuals in the metadata, and the metadata
-of a single cap or tide coefficient.
-
-`examples/configs/response_load_cap.json` (a Hudson Bay cap loaded from
+`examples/configs/no_ocean_load_cap.json` (a Hudson Bay cap loaded from
 2 to 3 kyr on the run's clock, held to 7 kyr and removed by 7.5 kyr, on
-the radial Maxwell deck) as a run without an ocean, its window the same
-12 kyr in quarter-kyr steps, ending at the present:
+the radial Maxwell deck) dated, its window the same 12 kyr in
+quarter-kyr steps, ending at the present:
 
 ```json
 {
   "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "lmax": 32,
+  "discretisation": {"lmax": 32},
   "times": {"start_kyr_bp": 12.0, "end_kyr_bp": 0.0, "nodes": 49},
   "forcing": {
     "load": [{"cap": {"latitude": 60.0, "longitude": -85.0, "width_deg": 5.0,
@@ -1584,12 +1557,88 @@ the radial Maxwell deck) as a run without an ocean, its window the same
 ```
 
 This is `examples/configs/sea_level_no_ocean.json`: its displacement,
-potential and tangential potential are `response_load_cap.json`'s at
-every node to 1e-11 of their largest values. With a degree-2 tide beside
+potential and tangential potential are `no_ocean_load_cap.json`'s at
+every node to 1e-11 of their largest values, the rounding of the two
+clocks' node times, and its `load` to 2e-15. With a degree-2 tide beside
 the cap, `"tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0,
 "history_kyr_bp": [[12, 0], [10, 1]]}]` switches a potential on over the
 first two kiloyears, and without `"rotation": "none"` the run takes the
 full rotational feedback (Rotation and moments, above).
+
+### Without gravity
+
+`"gravity": "none"` is the problem without gravity: the solid body's
+response to seismic sources with no self-gravitation, no potential and no
+buoyancy, the systems of the radial operator taking the displacement
+alone (docs/design.md §3a). Much post-seismic work is done so; its solves
+are quicker, and reach higher degrees. The default, `"full"`, is the
+problem with gravity, every other section's; giving it changes nothing.
+
+- **What it takes.** A radial model (a deck, with a radial viscosity or
+  moduli file if any) in either problem: the static problem is the
+  elastic response, a run through time the viscoelastic one, on the
+  run's own clock or dated, under `forcing.seismic` alone.
+- **What it refuses**, each naming its member: the `ocean` block (there
+  is no sea level without gravity), `forcing.tide` (an external
+  potential), `forcing.load` (a surface load acts by its weight) and so
+  every forcing but the seismic sources (`forcing.ice_change` needs an
+  ocean); a `rotation` other than `"none"`, which is the default without
+  gravity (the rotational feedback reads the inertia's change from the
+  degree-2 potential, which is absent); `"moments": "hydrostatic"`; a
+  model file that varies laterally (a 3D run without gravity is not
+  built: `model.moduli.file` or `model.viscosity.file`); the `trajectory`
+  and `kernels` blocks, and `kernel` itself, at `gravity` (no kernels);
+  and, as under any seismic sources, `checkpoint` and `output.volume`.
+- **The body.** A fluid core has no degree-l pressure without gravity
+  above degree zero: there the systems stop at the core-mantle boundary,
+  the mantle's base traction-free, and the core (with an inner core
+  below it) is not solved; at degree zero the core keeps its bulk
+  modulus. A deck with more than one fluid region is refused. Degree 1
+  is kept, in the frame of the centre of mass of the solved region (the
+  density-weighted mean displacement zero), the frame the potential sets
+  with gravity.
+- **The outputs.** The surface file holds `displacement`,
+  `tangential_potential` and `toroidal_potential`; there is no
+  `potential` and no `relative_sea_level_change` (an equipotential's
+  height has no meaning without gravity). Its metadata add `gravity`,
+  `none` (absent with gravity, as `ocean` is with an ocean), beside
+  `ocean`, `none`, and `rotation`, `none`. An exchange table holds the
+  displacement's coefficients alone (`columns l m U_re U_im`), its heading
+  saying `no ocean, no gravity`. The summary reads `no ocean, no gravity`
+  where it would give the shorelines (Summary, below).
+- **The hash.** A run without gravity is another run to the hashes of
+  the checkpoints and the trajectory store; `"gravity": "full"`, or no
+  member, hashes as every run with gravity does.
+
+`examples/configs/postseismic_no_gravity.json` is a run of this kind: a
+point thrust 25 km under the synthetic South America's west coast
+(22° S, 74.5° W, dipping 18°, 2e22 N m) on the radial Maxwell deck at
+lmax 64, its nodes the nine of `sea_level_postseismic.json` on the run's
+clock in years, with exchange tables at the first and last:
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 64},
+  "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]},
+  "forcing": {
+    "seismic": [{"point": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+                           "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+                           "moment_nm": 2.0e22},
+                 "onset": 0.0}]
+  },
+  "gravity": "none",
+  "output": {"surface": "out/postseismic_no_gravity/postseismic_no_gravity.nc",
+             "exchange": "out/postseismic_no_gravity/postseismic_no_gravity_{node}.txt",
+             "exchange_nodes": [0, 8]}
+}
+```
+
+The uplift over the source is 0.31 m at the event and 0.19 m after 500
+years, against 0.29 m and 0.17 m for the same run with gravity (`"gravity":
+"full"`, no ocean, `"rotation": "none"`); about 2.2 s on four threads
+against 3.0 s with gravity.
 
 ### Checkpoints and restarts
 
@@ -1607,8 +1656,10 @@ Without a `checkpoint` block nothing is written until the run finishes.
 With one, the run writes a checkpoint after every `checkpoint.every`-th
 node it steps and after the last node. Each is a file `node_NNNNNN.ckpt`
 in `checkpoint.directory`, named by its node, holding the run's state
-there and the histories so far (every field and angular velocity the
-output holds at each node). It is written to a temporary file and
+there and the histories so far (the response's fields, the angular
+velocity and the step's closure at each node; the loads applied and a
+3D run's radial reference model are formed when the output is written).
+It is written to a temporary file and
 renamed into place, so an interrupted write leaves no partial checkpoint,
 and only the newest two are kept.
 
@@ -1622,7 +1673,10 @@ A checkpoint is bound to its run: it records a hash of the members that
 decide the computation (everything but `checkpoint`, `restart`,
 `solver.cache_mb` and `output`, the inputs' variables, the sea level's
 quantity, the state's end of the window, the ice change's terms, the
-tide's coefficients and whether the body has an ocean among them; the
+surface loads and the tide's coefficients, every number whole, and
+whether the body has an ocean among them, and a run's having no gravity
+(the member enters the hash only as `"none"`, so that a config with
+gravity hashes the same with or without it); the
 nodes by their form: evenly spaced dates by their window and count,
 listed dates and times counted forwards by the list and, forwards, the
 unit and the state's date, so that the same nodes in another form or
@@ -1647,6 +1701,12 @@ A calibrating run also keeps its calibrated initial state in the directory
 (`initial_state.bin`, bound to the run by the same hash), and a resumption
 reads it back instead of calibrating again.
 
+A run that would record a trajectory store (`trajectory.directory`, The
+trajectory block, above) records it from its first node, so a resumption
+of it is refused: `"restart": false` starts it over, recording, and
+without `trajectory.directory` it resumes as any other. A store complete
+already is left as it is, and does not stop a resumption.
+
 With `restart` set to `false` the run starts over: it first removes the
 checkpoints it finds in the directory (and any kept initial state), then
 writes its own. Only this program's checkpoint files (`node_NNNNNN.ckpt`,
@@ -1657,38 +1717,62 @@ a chain of jobs that is meant to resume.
 `checkpoint.max_walltime_min` serves batch systems with a time limit.
 After writing a checkpoint, a run that has been stepping for longer than
 the limit and has nodes still to go stops cleanly, with the summary
-`<meaning>; checkpointed node <n> of <last> to <directory> at the
-wall-time limit; rerun the same config to resume`. It exits with status 0
-and writes no output yet, so a script can tell a stopped run from a
-finished one by the summary or by whether `output.surface` exists;
-rerunning the same config resumes it, so a chain of jobs running one
-config completes the run. The clock starts with the time stepping, after
-the model and files are read.
+`<meaning>; <the inputs as read>; checkpointed node <n> of <last> to
+<directory> at the wall-time limit[, replacing <k> earlier
+checkpoint(s)]; rerun the same config to resume` (with `"restart":
+false`, `; set "restart": true (the default) to resume` instead), the
+trajectory store's note ending it where there is one (Summary, below).
+It exits with status 0 and writes no output yet, so a script can tell a
+stopped run from a finished one by the summary or by whether
+`output.surface` exists; rerunning the same config resumes it, so a
+chain of jobs running one config completes the run. The clock starts
+with the time stepping (a calibration's runs among it), after the model
+and files are read.
 
 ### Summary
 
-What the config was taken to mean, the inputs as read, then the file:
+What the config was taken to mean, the inputs as read, then the files:
 
-- the static problem: `<model>, elastic (fingerprint)[, shorelines
-  migrating], rotation <rotation>[, moments hydrostatic]; ice <ice>, <sea
-  level>[; ice change <change>][; <forcing>]; wrote <surface>`, ending on
-  lateral moduli in the 3D closure's parenthesis, `(<n> fixed-point
-  iterations, residual <r>)`, or under `"conjugate_gradients"` `(<n>
-  conjugate-gradient iterations in <k> passes, residual <r>)`;
+- the static problem: `<model>, elastic, static, shorelines
+  <frozen|migrating>, rotation <rotation>[, moments hydrostatic]; ice
+  <ice>, <sea level>[; ice change <change>][; <forcing>][; <field>...];
+  wrote <surface>[ and <exchange>][ and <volume>]` (without an ocean,
+  `<model>, elastic, static, no ocean, rotation <rotation>; <forcing>[;
+  <field>...]; wrote ...`), ending on lateral moduli in
+  the 3D closure's parenthesis, `(<n> fixed-point iterations, residual
+  <r>)`, or under `"conjugate_gradients"` `(<n> conjugate-gradient
+  iterations in <k> passes, residual <r>)`;
 - a run through time: `<model>, viscoelastic, <n> nodes <start> to <end>
   kyr BP, shorelines <frozen|migrating>[, initial sea level calibrated],
   rotation <rotation>[, moments hydrostatic]; ice <ice>, <sea level>[;
-  ice change <change>][; <forcing>]; wrote <surface>` (counting forwards,
-  `<n> nodes <start> to <end> <unit> on the run's clock`), ending in
-  `, resumed` when the run resumed from a
-  checkpoint, and in `, replacing <k> earlier checkpoint(s)` when a run
-  starting over removed some;
+  ice change <change>][; <forcing>][; <field>...]; wrote <surface>[ and
+  <k> exchange table[s]]` (counting forwards, `<n> nodes <start> to
+  <end> <unit> on the run's clock`), ending in a 3D run in the steps'
+  closures summed, `(<i> fixed-point iterations over <s> steps)` or `(<i>
+  conjugate-gradient iterations over <s> steps)`, then in `, resumed`
+  when the run resumed from a checkpoint, and in `, replacing <k> earlier
+  checkpoint(s)` when a run starting over removed some (with `"restart":
+  false`, or over MPI ranks that had no checkpoint in common);
+- with `trajectory.directory`, either summary ends in `; recorded the
+  trajectory to the store <directory> (<size>)`, or, where the directory
+  holds the run's complete store already, `; the trajectory store
+  <directory> holds this run complete (<size>), left as it is`; a run
+  stopped at the wall-time limit ends in `; the trajectory store
+  <directory> left incomplete (a resumption does not record)`;
 - without an ocean, the state's words are left out: `<model>, elastic,
-  no ocean, rotation <rotation>[, moments hydrostatic]; <forcing>; wrote
-  <surface>` in the static problem (ending as above on lateral moduli),
-  and `<model>, viscoelastic, <n> nodes <start> to <end> kyr BP, no
-  ocean, rotation <rotation>[, moments hydrostatic]; <forcing>; wrote
-  <surface>` through time (ending as above).
+  no ocean, rotation <rotation>[, moments hydrostatic]; <forcing>[;
+  <field>...]; wrote <surface>[ and <exchange>][ and <volume>]` in the
+  static problem (ending as above on lateral moduli), and `<model>,
+  viscoelastic, <n> nodes <start> to <end> kyr BP, no ocean, rotation
+  <rotation>[, moments hydrostatic]; <forcing>[; <field>...]; wrote
+  <surface>[ and <k> exchange table[s]]` through time (counting forwards
+  as above; ending as above);
+- without gravity, `, no gravity` follows `no ocean`: `<model>, elastic,
+  static, no ocean, no gravity, rotation none; seismic (<n> source[s]);
+  wrote <surface>[ and <exchange>]` and `<model>, viscoelastic, <n> nodes
+  <start> to <end> <unit> on the run's clock, no ocean, no gravity,
+  rotation none; seismic (<n> source[s]); wrote <surface>[ and <k>
+  exchange table[s]]` (dated, `<n> nodes <start> to <end> kyr BP`).
 
 `<ice>` and `<sea level>` are the metadata's `ice` and `sea_level`
 (above): the state's file, variable and slice read. `<change>` is the
@@ -1696,27 +1780,36 @@ ice change's terms as the metadata's `ice_change` describes them, joined
 by ` + ` (a run without terms leaves it out). `<forcing>` is what forces
 the run beside its ice, `load (<n> term[s])`, `tide (<n>
 coefficient[s])`, `seismic (<n> source[s])` or several joined by ` + `
-(left out without any). `<model>` is `1-D`,
-`1-D (the viscosity file is radial)`, `1-D (the moduli file is radial)`,
-`1-D (the viscosity and moduli files are radial)`, `3-D (lateral
-viscosity)`, `3-D (lateral moduli)` or `3-D (lateral viscosity, lateral
-moduli)`. The example configs
+(left out without any). Each `field` load follows as read, `field
+<file>:<variable> (<slice>)`, the slice `static` for a file without a
+time axis, `<d> kyr BP` or `<t> <unit>` for the static problem's date,
+and through time `each node's date`, `the run's clock` or `time origin
+<t> <unit>`. `<model>` is `1-D`, `1-D (the viscosity file is radial)`,
+`1-D (the moduli file is radial)`, `1-D (the viscosity and moduli files
+are radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
+(lateral viscosity, lateral moduli)`. The example configs
 `examples/configs/sea_level_fingerprint.json`,
 `examples/configs/sea_level_fingerprint_3d.json`,
 `examples/configs/sea_level_static_migrating.json`,
 `examples/configs/sea_level_static_coseismic.json`,
 `examples/configs/sea_level_3d_calibrated.json`,
-`examples/configs/sea_level_no_ocean.json` and
-`examples/configs/sea_level_postseismic.json` print
+`examples/configs/sea_level_postseismic.json`,
+`examples/configs/postseismic_no_gravity.json`,
+`examples/configs/sea_level_no_ocean.json`,
+`examples/configs/no_ocean.json` and
+`examples/configs/no_ocean_viscoelastic.json` print
 
 ```
-sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc in 0.36 s
-sl3d sea-level: 3-D (lateral moduli), elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.24 s
-sl3d sea-level: 1-D, elastic (fingerprint), shorelines migrating, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (21 kyr BP), topography ../data/synthetic_earth.nc:topography (21 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's date to 0 kyr BP; wrote out/sea_level_static_migrating/sea_level_static_migrating.nc in 0.37 s
-sl3d sea-level: 1-D, elastic (fingerprint), rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_static_coseismic/sea_level_static_coseismic.nc in 1.03 s
-sl3d sea-level: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc in 14.20 s
-sl3d sea-level: 1-D, viscoelastic, 49 nodes 12 to 0 kyr BP, no ocean, rotation none; load (1 term); wrote out/sea_level_no_ocean/sea_level_no_ocean.nc in 0.99 s
-sl3d sea-level: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 7.14 s
+sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc in 0.35 s
+sl3d solve: 3-D (lateral moduli), elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.24 s
+sl3d solve: 1-D, elastic, static, shorelines migrating, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (21 kyr BP), topography ../data/synthetic_earth.nc:topography (21 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's date to 0 kyr BP; wrote out/sea_level_static_migrating/sea_level_static_migrating.nc in 0.36 s
+sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_static_coseismic/sea_level_static_coseismic.nc in 1.02 s
+sl3d solve: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc (352 fixed-point iterations over 42 steps) in 13.98 s
+sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 7.12 s
+sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, no ocean, no gravity, rotation none; seismic (1 source); wrote out/postseismic_no_gravity/postseismic_no_gravity.nc and 2 exchange tables in 2.23 s
+sl3d solve: 1-D, viscoelastic, 49 nodes 12 to 0 kyr BP, no ocean, rotation none; load (1 term); wrote out/sea_level_no_ocean/sea_level_no_ocean.nc in 1.06 s
+sl3d solve: 3-D (lateral moduli), elastic, static, no ocean, rotation none; load (1 term) + tide (1 coefficient); wrote out/no_ocean/no_ocean.nc and out/no_ocean/no_ocean.txt and out/no_ocean/no_ocean_volume.nc (8 fixed-point iterations, residual 4.51e-11) in 1.45 s
+sl3d solve: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr on the run's clock, no ocean, rotation none; load (1 term) + tide (1 coefficient); wrote out/no_ocean_viscoelastic/no_ocean_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.39 s
 ```
 
 ### Examples
@@ -1725,7 +1818,7 @@ sl3d sea-level: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shore
 {
   "problem": "static",
   "model": {"deck": "earth.deck"},
-  "lmax": 128,
+  "discretisation": {"lmax": 128},
   "forcing": {
     "ice_change": [{"thickness": {"file": "ice7g.nc", "date_kyr_bp": 0}}]
   },
@@ -1756,7 +1849,7 @@ state takes a change from a file of one's own as
 {
   "problem": "static",
   "model": {"deck": "earth.deck"},
-  "lmax": 128,
+  "discretisation": {"lmax": 128},
   "forcing": {
     "seismic": [{"fault": {"latitude": 38.3, "longitude": 142.4, "depth_km": 25,
                            "strike_deg": 200, "dip_deg": 12, "rake_deg": 90,
@@ -1787,7 +1880,7 @@ and 2.2 GB on four threads.
   "problem": "static",
   "model": {"deck": "prem8.elastic.deck", "format": "elastic",
             "moduli": {"file": "s40rts_moduli.nc"}},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "forcing": {
     "ice_change": [{"cap_fraction": {"latitude": 72, "longitude": 318,
                                      "width_deg": 8, "fraction": -0.1}}]
@@ -1813,7 +1906,7 @@ the state's date reads ICE-7G's ice at the present.
 {
   "problem": "quasi_static",
   "model": {"deck": "earth.deck"},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "times": {"start_kyr_bp": 26.0, "nodes": 53},
   "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
   "ocean": {"at": "start",
@@ -1831,7 +1924,7 @@ checkpointed every four nodes:
 {
   "problem": "quasi_static",
   "model": {"deck": "earth.deck"},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
     "ice_change": [{"thickness": {"file": "my_ice_history.nc",
@@ -1857,7 +1950,7 @@ the ice at the window's start is the history's own.
   "model": {"deck": "prem8.elastic.deck", "format": "elastic",
             "viscosity": {"file": "s40rts_viscosity.nc",
                           "reference": "geometric_mean"}},
-  "lmax": 128,
+  "discretisation": {"lmax": 128},
   "times": {"start_kyr_bp": 26.0, "end_kyr_bp": 0.0, "nodes": 105},
   "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
   "ocean": {"at": "start",
@@ -1882,7 +1975,7 @@ viscosity of `s40rts_viscosity.nc`.
 {
   "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]},
   "forcing": {
     "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
@@ -1915,149 +2008,394 @@ over the fault rises by 0.360 m; the relaxation brings that down to
 0.34 m after a century and 0.27 m after five. About 7 s and 1.5 GB on
 four threads.
 
-## kernel1d and kernel
+Without an ocean and without rotational feedback, the response of the
+solid body:
 
-Adjoint sensitivity kernels of configured measurements of a run through
-time. The forward run is `sea-level`'s run through time of the same
-blocks (The blocks, above): `"problem": "quasi_static"` (required; the
-static problem is refused), `model`, `lmax`, `times` (required, dates
-before present evenly spaced, `start_kyr_bp`, `end_kyr_bp` and `nodes`,
-on which the measurements' dates are located: the forwards form and
-`at_kyr_bp` are refused), `forcing` (the ice change, of any of its terms; `load`,
-`tide` and `seismic` are refused), `ocean` (required: the state, at
-`at`, the shorelines and the calibration; a config without it is
-refused), `rotation`, `moments` and `solver`, each meaning
-what it means there. Then, for each measurement, one reverse (adjoint)
-sweep gives its sensitivity to the ice thickness at each node and to the
-viscosity, by the continuous adjoint or the exact discrete transpose.
+```json
+{
+  "problem": "static",
+  "model": {"deck": "earth.deck"},
+  "discretisation": {"lmax": 128},
+  "forcing": {
+    "load": [{"disk": {"latitude": 64, "longitude": 20, "radius_deg": 6,
+                       "amplitude_kg_m2": 1.0e5}}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/disk.nc"}
+}
+```
 
-The sweeps take the ice at the first node to be the state's: an ice
-change present at the window's start (a `change` file whose change is
-not zero there, a cap without a history, or one whose history does not
-start at a factor of zero) is refused under either shorelines, once the
-files are read, with the largest change there. A cap whose history
-starts at zero is taken.
+```json
+{
+  "problem": "static",
+  "model":   {"deck": "prem.deck", "format": "elastic",
+              "moduli": {"file": "s40rts_moduli.nc", "reference": "lateral_mean"}},
+  "discretisation": {"lmax": 64},
+  "forcing": {
+    "load": [
+      {"cap":  {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6}},
+      {"disk": {"latitude": -75, "longitude": 0, "radius_deg": 8, "amplitude_kg_m2": -9.0e5}},
+      {"field": {"file": "load.nc", "variable": "sigma"}},
+      {"field": {"file": "load_history.nc", "date": 10, "unit": "kyr"}},
+      {"coefficients": {"file": "load_lm.txt"}}
+    ],
+    "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0, "imaginary_m2_s2": 0.0}]
+  },
+  "rotation": "none",
+  "solver":  {"step_rtol": 1e-10, "step_max_iterations": 200, "transform_degrees": [16, 32], "cache_mb": 0},
+  "output":  {"surface": "out/response.nc", "exchange": "out/response.txt", "volume": "out/response_volume.nc"}
+}
+```
 
-`kernel1d` runs a radial model: the deck's viscosity column, or a
-`model.viscosity` file whose viscosity is radial; a laterally varying one
-is refused (use `kernel`), and so are the solver members of the 3D step.
-`kernel` runs a laterally varying viscosity: `model.viscosity` is
-required, and a radial one is refused (use `kernel1d`). Neither takes
-`model.moduli`, `checkpoint` or `restart`.
+The first is a 1D run (the deck's radial model); the second solves the
+3D problem under the lateral moduli of `s40rts_moduli.nc`, its loads
+including the variable `sigma` of the static file `load.nc` and the
+variable `load` of `load_history.nc`, a file with a time axis, at 10 kyr
+on that axis.
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {
+    "deck": "prem_maxwell.deck", "format": "maxwell",
+    "viscosity": {"file": "visc3d.nc", "reference": "geometric_mean"},
+    "moduli":    {"file": "s40rts_moduli.nc"}
+  },
+  "discretisation": {"lmax": 64},
+  "times": {"unit": "kyr", "start": 0, "end": 20, "nodes": 41},
+  "forcing": {
+    "load": [
+      {"cap": {"latitude": 60, "longitude": -85, "width_deg": 10, "amplitude_kg_m2": 1.8e6},
+       "history": [[0, 0.0], [10, 1.0], [10.5, 0.0]]},
+      {"field": {"file": "load_history.nc"}}
+    ],
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0,
+              "history": [[0, 1.0]]}]
+  },
+  "rotation": "none",
+  "solver": {"scheme": "exponential_trapezoid", "step": "fixed_point",
+             "step_rtol": 1e-10, "step_max_iterations": 200,
+             "transform_degrees": [16, 32], "cache_mb": 0},
+  "output": {"surface": "out/relax.nc", "exchange": "out/relax_{node}.txt"}
+}
+```
+
+A viscoelastic 3D run under a lateral viscosity and lateral moduli: a cap
+loaded linearly over 10 kyr and removed over the next 0.5 kyr, a load
+history read from a surface file on the run's clock, and a constant
+tide, over 20 kyr in half-kyr steps, with a table per node
+(`out/relax_00.txt` to `out/relax_40.txt`). Without `viscosity` and
+`moduli` (and the solver members of the 3D step) the same config runs
+the deck's radial Maxwell model in 1D.
+
+## kernel
+
+Adjoint sensitivity kernels of configured measurements of the problems
+`solve` solves. A kernel config is a `solve` config with a `kernels`
+block (The blocks, above): the forward run is `solve`'s run of the same
+blocks, built by the same pieces, the static problem (a run of one node
+on the elastic Earth) or the quasi-static one, with an ocean or without
+one, under any mix of an ice change, surface loads, a tide and seismic
+sources, with frozen or migrating shorelines, its times dated or on its
+own clock, evenly spaced or listed, and 1D or 3D as the `model` block
+makes it (the static problem on lateral moduli in 3D; through time a
+lateral viscosity, lateral moduli or both). Its states are recorded (in
+memory, or in the trajectory store of `trajectory.directory`, from which
+a later run sweeps without the forward run: The trajectory block, above),
+and then, for each measurement, one reverse (adjoint) sweep of the library's
+derivative classes gives the kernels the block names, by the continuous
+adjoint or by the exact discrete transpose of the time-stepped map
+(docs/adjoints.md). In the static problem the two methods agree to
+rounding, there being no step to commute; through time they differ by
+the commute error, which falls as the steps are refined.
+
+With the state at the window's start the initial sea level is the
+state's; with it at the end (`"at": "end"`) it is calibrated first, as
+`solve` calibrates it, and the kernels hold the calibrated initial sea
+level fixed.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| the shared blocks | | | as for `sea-level`'s run through time (The blocks, above) |
-| `record_stride` | integer >= 1 | 1 | record the forward state at every `record_stride`-th node (and the last); the sweep rebuilds the states in between |
-| `adjoint` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map; in 3D distributed like the continuous sweep) |
-| `trajectory.directory` | path | none | `kernel` alone: spill the recorded states to this directory instead of holding them in memory |
-| `measurements` | array | required | the measurements, at least one (below) |
-| `output` | path | required | the directory the kernel files go into |
+| the shared blocks | | | as for `solve` (The blocks, above); `output`, `checkpoint` and `restart` checked as `solve` checks them and not used |
+| `kernels.method` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map) |
+| `kernels.parameters` | array of words | required | the kernels written, at least one, each where the run gives it (below) |
+| `kernels.measurements` | array | required | the measurements, at least one (below) |
+| `kernels.output` | path | required | the directory the kernel files go into |
 
-The kernel commands have no checkpoints. Recording every n-th of N nodes
-holds about N/n + n forward states during the sweep, fewest near n = sqrt(N);
-in 3D each is large (see the README's notes on memory). With
-`trajectory.directory`, `kernel` writes each recorded state to a file
-`node_NNNNNN.traj` there as the forward run passes it, and the sweep reads
-them back one at a time: the lever for large `lmax`. The files are raw
-binary; the run removes the ones it wrote once its sweeps are done (the
-summary says how many), leaving anything else in the directory alone, and
-a run that fails leaves them in place. `kernel1d` refuses a
-`trajectory` section, its trajectory fitting in memory.
+The members of the block given at the top level (`adjoint`,
+`measurements`, `parameters`, `method`) are refused, naming the block's
+member, and so is a top-level `output` that is a path: the top-level
+`output` is `solve`'s block. The forward run's recording is the
+top-level `trajectory` block's (The trajectory block, above), which
+`solve` shares: `kernels.record_stride` and `kernels.trajectory` are
+refused, naming `trajectory.record_stride` and `trajectory.directory`. A
+run without gravity (`"gravity": "none"`) has no kernels: `kernel` refuses
+it at `gravity`, and `solve` a `kernels` block beside it.
+
+### The kernels
+
+Each word of `kernels.parameters` names a set of kernels, written per
+measurement into `kernels.output` as files whose names begin with the
+measurement's name. The member is required, and its absence is refused,
+the error listing the words the run takes; a word the run cannot give is
+refused when the config is read, saying why. The kernels in the sources
+are `"moment"`'s: the forcing's word for them, `"seismic"`, is not a
+kernel's, and is refused here, the error naming `"moment"`.
+
+| Word | The kernels | Taken | Files |
+| --- | --- | --- | --- |
+| `"ice"` | in the ice history: the ice thickness at each node, its rates, the state's ice and the initial sea level | with an ocean | `<name>_ice_kernels.nc` |
+| `"load"` | in a surface load at each node: in the water budget, outside it, and the height of a layer on the solid surface | always; without an ocean the one load kernel | `<name>_load_kernels.nc` |
+| `"tide"` | in the coefficients of a tidal potential at each node | under frozen shorelines (migrating runs take no tide) | `<name>_tide_kernels.txt` |
+| `"moment"` | in the point moment tensors of the run's seismic sources at each node, at every point source and every patch of a fault | with `forcing.seismic` | `<name>_moment_kernels.txt` |
+| `"viscosity"` | in the viscosity | through time | 1D `<name>_viscosity_kernel.txt`, 3D `<name>_viscosity_kernels.nc` |
+| `"moduli"` | in the bulk modulus kappa and the unrelaxed shear modulus mu | always | 1D `<name>_moduli_kernel.txt`, 3D `<name>_moduli_kernels.nc` |
+
+The kernels in the surface fields (ice, load) are densities per square
+metre of the surface of the run's sphere (its radius, `radius_m`, in each
+file's metadata), and dJ = integral of K delta dS, summed over the nodes
+(intervals, instants) for the fields that have them. The kernels in the
+Earth's parameters (viscosity, moduli) are densities per unit volume
+(docs/adjoints.md, "The kernels' convention"), and dJ = integral of K
+delta dV. Every kernel is SI: the measurement's unit (`measurement_unit`,
+or the `J in` line of a table) per unit of the perturbation and per
+square or cubic metre. Each file states the measurement, its type and
+unit, and the pairing, with the points and weights the pairing needs
+where the run has them.
+
+**The ice and the state.** The ice at a node is the state's ice plus the
+ice change there (The state and the ice change, above). With the state
+at the window's start, and in the static problem, the state is held:
+`thickness_dual` at every node, the first included, is the derivative
+with respect to the ice there with the state's ice held, which is the
+derivative with respect to the ice change at that node; an ice change
+present at the first node is taken (the library's thickness view moves
+the background's ice with the first node's, and its first node less its
+baseline is this one; docs/adjoints.md §20). With the state at the
+window's end, the run starts from the ice at the window's start, and the
+first node's `thickness_dual` moves that start with it, the ice at the
+other nodes held. The surface file's `ice_views` says which
+(`state_held` or `run_start_moves`). Every field holds the initial sea
+level, and `initial_sea_level_dual` holds the ice. The fields:
+
+| Field | Support | Meaning |
+| --- | --- | --- |
+| `thickness_dual` | node (static in the static problem) | dJ per metre of grounded ice thickness at each node, as above |
+| `rate_dual` | interval | through time: the quelled view, dJ = sum_k integral of K_k (I_{k+1} - I_k) dS (= sum_k h_k integral of K_k (dI/dt)_k dS), the first node's ice held |
+| `instantaneous_dual` | instant | through time: the delta amplitude at each measurement instant of the thickness kernel's distributional view, per metre of ice |
+| `thickness_baseline_dual` | static | dJ per metre of the state's ice (with the state at the end, of the ice the run starts from), the ice at every node held; with the state at the end no config moves it alone (the run starts from the first node's ice, whose `thickness_dual` folds it in) |
+| `initial_sea_level_dual` | static | dJ per metre of the initial sea level, the ice held; zero under frozen shorelines |
+
+With the state held, the ice change at the first node with the later
+nodes' ice held pairs with `thickness_dual` there, and a change of the
+state's ice with the ice change held (the ice at every node moving with
+it) pairs with `thickness_baseline_dual` plus the sum of `thickness_dual`
+over the nodes. With the state at the end, such a change moves the ice
+at every node and the run's start alike, and so leaves the run's loads
+(the ice's changes from its start) as they were: it pairs with the sum
+of `thickness_dual` over the nodes, which is zero, and acts through the
+calibration's target alone (below).
+
+A calibrated run's initial sea level (`"at": "end"`) is not an input: it
+follows the run's ice and its target, the state's sea level at the end,
+and solve re-calibrates it for every run. A change of a calibrated run's
+ice therefore changes J by the thickness kernels paired with the change
+of the ice plus `initial_sea_level_dual` paired with the change of the
+calibrated initial sea level (solve's `initial_sea_level`), and a change
+of its target by the second term alone. Under frozen shorelines that
+dual is zero, and the thickness kernels alone are the derivative of the
+re-calibrated run; under migrating ones it lives on the cells whose
+shorelines moved, and the second term is part of the derivative.
+
+**The load.** `<name>_load_kernels.nc` holds, at each node (static
+fields in the static problem):
+
+| Field | Meaning |
+| --- | --- |
+| `load_dual` | dJ per kg m^-2 of a surface load in the water budget (without an ocean, of any surface load) |
+| `load_outside_water_budget_dual` | with an ocean: dJ per kg m^-2 of a surface load outside the water budget |
+| `solid_surface_change_dual` | with an ocean: dJ per metre of the height of a layer laid on the solid surface, its mass a load beside it |
+
+A layer of density rho whose mass is outside the water budget has the
+kernel rho `load_outside_water_budget_dual` + `solid_surface_change_dual`
+in its height; one in the budget, rho `load_dual` +
+`solid_surface_change_dual`.
+
+**The tide.** `<name>_tide_kernels.txt` is a table of rows `node <time>
+l m dJ_damplitude dJ_dimaginary` for every degree 2 to `lmax` and order
+0 to l at every node: the derivatives of J with respect to the real and
+imaginary parts of the tidal potential's coefficient there, the members
+`amplitude_m2_s2` and `imaginary_m2_s2` of a `forcing.tide` term (the
+orthonormal complex coefficient, Condon-Shortley phase, m >= 0, of a
+real potential), in J's unit per m^2 s^-2. A term's coefficient at a
+node is its value times its history's factor there, so the derivative
+with respect to a term's member is the sum over the nodes of the factor
+times the row's entry. The imaginary part is zero at m = 0, and so is its
+column. `<time>` is the node's date (`date_kyr_bp`) in a dated run, its
+time on the run's clock (`time_<unit>`) in one counting forwards, and 0
+(`instant`) in the static problem; the moment table's likewise.
+
+**The seismic sources.** `<name>_moment_kernels.txt` lists the run's
+source points under its header (`# point p term patch latitude_deg
+longitude_deg depth_m`, a point source one patch, a fault's patches along
+strike then down dip), then rows `node <time> point dJ_dMrr dJ_dMtt
+dJ_dMpp dJ_dMrt dJ_dMrp dJ_dMtp`: the derivatives of J with respect to
+the members of the point's moment tensor at the node, in the basis of
+`moment_tensor_nm` (r up, theta south, phi east), an off-diagonal member
+setting the symmetric pair, in J's unit per N m. A term's moment at a
+node is its tensor times its factor there (zero before its onset), so
+the derivative with respect to a point source's member is the sum over
+the nodes of the factor times the entry.
+
+**The viscosity.** In 1D, `<name>_viscosity_kernel.txt`: columns `r_m`,
+`K_branch_<b>` per Maxwell branch and `W_m3`, the kernel in eta in SI,
+dJ = integral of K delta eta dV = sum over the rows of W_m3 K delta eta,
+eta in Pa s; the rows are the radial mesh's nodes, element by element (a
+shared element edge twice, once per element), `W_m3` the node's volume
+weight (4 pi r^2 times its radial quadrature weight). In 3D,
+`<name>_viscosity_kernels.nc`: the log-viscosity kernels as a planetmodel
+model file, a field `K_ln_eta_<b>` per branch, dJ = integral of K
+delta(ln eta) dV, written on the angular grid of the run's 3D coupling at
+the memory nodes, one part per contiguous run of elements, with the
+model's density alongside. Its metadata holds two pairings, in J's unit:
+`lateral_log_viscosity_pairing`, the kernels paired with the run's own
+lateral log-viscosity perturbation (dJ per unit scale of it, as the
+operator samples it), and `uniform_log_viscosity_pairing`, the kernels
+paired with one (dJ per unit of ln eta raised alike wherever the
+coupling carries memory nodes).
+
+**The moduli.** The kernels in kappa and in the unrelaxed shear modulus
+mu, with respect to their absolute perturbations in Pa (the branch
+moduli fixed fractions of the unrelaxed one, the relaxation times held;
+a relative perturbation delta ln mu pairs as K_mu mu). In 1D,
+`<name>_moduli_kernel.txt`: rows at the operator's memory points, element
+by element, columns `r_m W_m3 kappa_Pa mu_Pa K_kappa K_mu`, dJ = sum over
+the rows of W_m3 (K_kappa delta kappa + K_mu delta mu), with the model's
+moduli at each point. In 3D, `<name>_moduli_kernels.nc`: fields
+`K_kappa` and `K_mu` as the viscosity's, at the coupling's memory nodes,
+which are the viscous elements and those where the lateral moduli are
+not zero (in the static problem, these alone): a perturbation elsewhere
+is not covered. Its metadata `lateral_moduli_pairing` is the kernels
+paired with the run's own lateral moduli perturbation, dJ per unit scale
+of it.
+
+**Over MPI ranks.** A 1D run is the first rank's alone. A 3D run is
+distributed over radial segments, its 3D kernels gathered to rank 0 and
+written over the whole mesh, except what the sweeps form on one process,
+refused on several ranks naming the member: the kernels about a run
+under seismic sources (`forcing.seismic`), and the tide kernels of the
+continuous sweep (`"tide"` with `"method": "continuous"`; the discrete
+sweep's are distributed).
 
 ### Measurements
 
-Each element of `measurements` is an object with a `type` and a `name`.
-The `name` (by default `measurement_<k>`, with k the element's position
-from 0) is the stem of the measurement's files, so names must be distinct
-plain file names: letters, digits, `_`, `-` and `.`, not starting with `.`
-(anything else is refused when the config is read). A measurement taken on one date reads the outputs
-at that date, which must be a time node of the run (`times`). Every
-measurement is held to the run when the config is read, before anything
-runs: a date that is not a node, a coefficient that does not exist at
-`lmax`, or a decay window holding fewer than four nodes is refused then,
-naming the member, rather than after the forward run.
+Each element of `kernels.measurements` is an object with a `type` and a
+`name`. The `name` (by default `measurement_<k>`, with k the element's
+position from 0) is the stem of the measurement's files, so names must be
+distinct plain file names: letters, digits, `_`, `-` and `.`, not
+starting with `.`. A measurement at one instant reads the outputs at a
+node of the run: in a dated run at `date_kyr_bp` (default 0, the
+present), in a run counting forwards at `time` on the run's clock in its
+unit (default the window's last node), each located on the node list (to
+1e-9 of the window's span); in the static problem at its one instant,
+which takes neither member. The member of the other form is refused,
+naming this form's. Every measurement is held to the run when the config
+is read, before anything runs: an instant that is not a node, a
+coefficient that does not exist at `lmax`, a decay window holding fewer
+than four nodes, or a measurement of the sea level without an ocean is
+refused then, naming the member.
 
 | `type` | Members | Value (SI) |
 | --- | --- | --- |
-| `relative_sea_level_cap` | `latitude`, `longitude`, `width_deg`, `date_kyr_bp` | the cap-weighted mean sea-level change, m |
-| `relative_sea_level_point` | `latitude`, `longitude`, `date_kyr_bp` | the sea-level change at the point, m |
-| `displacement_cap` | `latitude`, `longitude`, `width_deg`, `date_kyr_bp` | the cap-weighted mean radial displacement, m |
-| `displacement_point` | `latitude`, `longitude`, `date_kyr_bp` | the radial displacement at the point, m |
-| `potential_cap` | `latitude`, `longitude`, `width_deg`, `date_kyr_bp` | the cap-weighted mean potential perturbation, m^2 s^-2 |
-| `potential_point` | `latitude`, `longitude`, `date_kyr_bp` | the potential perturbation at the point, m^2 s^-2 |
-| `stokes_coefficient` | `degree`, `order`, `date_kyr_bp` | a real orthonormal coefficient of the potential perturbation, m^2 s^-2 |
-| `rotation` | `component`, `date_kyr_bp` | a component of the angular velocity perturbation, rad s^-1 |
-| `decay_time` | `latitude`, `longitude`, `width_deg`, `window_start_kyr_bp`, `window_end_kyr_bp`, `time_uncertainty_kyr`, `value_uncertainty_m` | the relaxation time of a site's sea-level series, s |
+| `relative_sea_level_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean sea-level change, m |
+| `relative_sea_level_point` | `latitude`, `longitude`, the instant | the sea-level change at the point, m |
+| `displacement_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean radial displacement, m |
+| `displacement_point` | `latitude`, `longitude`, the instant | the radial displacement at the point, m |
+| `displacement_vector_cap` | `latitude`, `longitude`, `width_deg`, `direction`, the instant | the cap-weighted mean of the displacement along the direction, m |
+| `displacement_vector_point` | `latitude`, `longitude`, `direction`, the instant | the displacement at the point along the direction, m |
+| `potential_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean potential perturbation, m^2 s^-2 |
+| `potential_point` | `latitude`, `longitude`, the instant | the potential perturbation at the point, m^2 s^-2 |
+| `stokes_coefficient` | `degree`, `order`, the instant | a real orthonormal coefficient of the potential perturbation, m^2 s^-2 |
+| `rotation` | `component`, the instant | a component of the angular velocity perturbation, rad s^-1 |
+| `decay_time` | `latitude`, `longitude`, `width_deg`, the window, `value_uncertainty_m` | the relaxation time of a site's sea-level series, s |
 
+- The instant is `date_kyr_bp` or `time` as above. The sea-level
+  measurements and `decay_time` need an ocean.
 - `latitude`, `longitude` (degrees) and `width_deg` (degrees, > 0) are
-  required where listed; `date_kyr_bp` defaults to 0, the present.
+  required where listed.
 - A cap is Gaussian in great-circle distance d from its centre, weighted
   exp(-d^2 / (2 w^2)) with w = `width_deg` and normalised to unit area
   integral, so it reads a weighted mean. A point value is the band-limited
   value at `lmax` (the grid's reproducing kernel); a narrow cap is often the
   steadier datum.
+- `displacement_vector_cap`, `displacement_vector_point`: `direction` is an
+  object of `east`, `north` and `up` (each optional, default 0, not all
+  zero), the components along the local east, north and upward unit
+  vectors at each point of the cap, or at the point; it need not be a
+  unit vector (a line of sight is one). The tangential displacement is
+  read through the potentials V and W of u = U r + grad_1 V - r x grad_1
+  W, in the frame of no net rotation of the surface, as `solve`'s
+  `toroidal_potential` is.
 - `stokes_coefficient`: `degree` l and `order` m are required integers,
-  0 <= l <= `lmax` and |m| <= l, with m >= 0 the cosine term and m < 0 the sine term of |m| (the pyshtools
-  convention); the value is the coefficient of the potential perturbation
-  in the orthonormal real harmonics (each squared integrates to 1 over the
-  unit sphere), so a GRACE-style geodetic coefficient differs from it by a
-  normalisation constant alone.
+  0 <= l <= `lmax` and |m| <= l, with m >= 0 the cosine term and m < 0 the
+  sine term of |m| (the pyshtools convention); the value is the
+  coefficient of the potential perturbation in the orthonormal real
+  harmonics (each squared integrates to 1 over the unit sphere), so a
+  GRACE-style geodetic coefficient differs from it by a normalisation
+  constant alone.
 - `rotation`: `component` is `"x"`, `"y"` or `"z"`; x and y drive polar
   motion, z the length of day.
-- `decay_time`: the cap-mean sea-level change at every node from
-  `window_start_kyr_bp` (required) to `window_end_kyr_bp` (default 0) is
-  fitted by a e^(-t / tau) + b, following Al-Attar & Tromp (2014,
-  Appendix C), and the datum is tau. Both window ends must be time nodes,
-  the start the earlier, and the window must hold at least four nodes, the
-  fit's minimum. `time_uncertainty_kyr` (>= 0, required) and
+- `decay_time`, a run through time's: the cap-mean sea-level change at
+  every node of the window is fitted by a e^(-t / tau) + b, following
+  Al-Attar & Tromp (2014, Appendix C), and the datum is tau. In a dated
+  run the window is `window_start_kyr_bp` (required) to
+  `window_end_kyr_bp` (default 0), with `time_uncertainty_kyr`; in a run
+  counting forwards it is `window_start` (required) to `window_end`
+  (default the window's last node), in the run's unit, with
+  `time_uncertainty` in that unit. Both ends must be nodes, the start the
+  earlier, and the window must hold at least four nodes, the fit's
+  minimum. The timing uncertainty (>= 0, required) and
   `value_uncertainty_m` (> 0, required) are the one-sigma timing and
   series errors; only their ratio shapes the fit, and a zero timing
-  uncertainty holds the times at the nodes.
+  uncertainty holds the times at the nodes. The window is held to the
+  nodes when the config is read, the uncertainties only by the fit, which
+  runs on the forward run's series when the measurement's turn comes
+  (the measurements listed before it swept and written by then). The fit
+  refuses a `value_uncertainty_m` that is not positive and a negative
+  timing uncertainty; a timing uncertainty not smaller than the window's
+  span (in the uncertainty's own unit) and a `value_uncertainty_m` not smaller
+  than the series' range (its largest less its smallest cap mean over the
+  window), which leave the fit meaningless (the message asks whether the
+  unit is right); and a series that constrains no decay (a fitted rate not
+  positive, or below 1e-2 of the window's inverse span). Each is the
+  run's error (exit status 1), not naming the member.
 
 ### Output
 
-In the `output` directory:
+In `kernels.output`:
 
 - `measurements.txt`: under a header of `#` lines (program and version,
-  creation time, config, and the inputs as read, `ice`, `sea_level` and
-  `ice_change`, as `sea-level`'s metadata give them), one row per
-  measurement:
-  `name type value_si`, the forward value in the SI unit of the table
-  above; a `decay_time` row adds `tau_kyr amplitude_m offset_m` from the fit.
-- `<name>_ice_kernels.nc`: the ice-history kernels, a surface file on the
-  run's Gauss–Legendre grid. Its time axis is every time node (seconds
-  relative to the present), and its instants are the measurement's own
-  nodes. Each field is a density per square metre of surface, in the
-  measurement's SI unit per unit of the perturbation, so that
-  dJ = integral of K delta dS, summed over the nodes, intervals or instants
-  for the fields that have them:
+  creation time, config, the state's inputs as read, `ice` and
+  `sea_level`, or `ocean none`, and the forcing's terms, `ice_change`,
+  `load`, `tide` and `seismic`, as `solve`'s metadata give them), one row
+  per measurement: `name type value_si`, the forward value in the SI unit
+  of the table above; a `decay_time` row adds `tau amplitude_m offset_m`
+  from the fit, tau in kyr in a dated run and in the run's unit in one
+  counting forwards (the header names it).
+- The kernel files of each measurement (The kernels, above). The surface
+  files are on the run's Gauss–Legendre grid; through time their time
+  axis is every node, in seconds relative to the present (negative in
+  the past) in a dated run and on the run's own clock in one counting
+  forwards, with the nodes listed (`dates_kyr_bp`, or `times` with
+  `time_unit`) as `solve`'s surface file lists them, and the instants of
+  `instantaneous_dual` are the measurement's own nodes.
 
-  | Field | Support | Meaning |
-  | --- | --- | --- |
-  | `thickness_dual` | node | dJ per metre of grounded ice thickness at each node |
-  | `rate_dual` | interval | dJ per metre per second of ice thickness rate on each interval |
-  | `instantaneous_dual` | instant | the delta amplitude at each measurement instant |
-  | `thickness_baseline_dual` | static | dJ per metre of the initial ice thickness |
-  | `initial_sea_level_dual` | static | dJ per metre of the initial sea level |
-
-- `kernel1d`: `<name>_viscosity_kernel.txt`, the radial viscosity kernel of
-  each Maxwell branch: under a header, columns `r_m` and `K_branch_<b>`, in
-  SI, a density per unit volume as the 3D kernels are: dJ = integral of
-  K delta eta dV = 4 pi integral of K(r) delta eta(r) r^2 dr, eta in
-  Pa s (neither the r^2 nor the 4 pi is in K). The
-  rows are the radial mesh's nodes, element by element, so the radius of a
-  shared element edge appears twice.
-- `kernel`: `<name>_viscosity_kernels.nc`, the 3D log-viscosity kernels as
-  a planetmodel model file: a field `K_ln_eta_<b>` per branch, a density
-  per unit volume in SI, so that dJ = integral of K delta(ln eta) dV. It is
-  written on the angular grid of the run's 3D coupling at the viscous
-  elements' nodes, one part per contiguous run of viscous elements, with the
-  model's density alongside.
-
-Summary: `ice <ice>, <sea level>; ice change <change>; wrote <n>
-measurement(s) of kernels to <output>`, the inputs as read as in
-`sea-level`'s summary.
+Summary: `<what the config was taken to mean>; <the inputs as read>;
+wrote <n> measurement(s) of kernels to <output> (<parameters>; <method>
+adjoint)`, the first two as in `solve`'s summary, then, with
+`trajectory.directory`, `; the forward run recorded to the trajectory
+store <directory> (<size>)` or `; the forward run read back from the
+trajectory store <directory> (<size>)`.
 
 ### Examples
 
@@ -2065,73 +2403,142 @@ measurement(s) of kernels to <output>`, the inputs as read as in
 {
   "problem": "quasi_static",
   "model": {"deck": "earth.deck"},
-  "lmax": 32,
+  "discretisation": {"lmax": 32},
   "times": {"start_kyr_bp": 20.0, "nodes": 41},
   "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
   "ocean": {"at": "start",
             "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
-  "measurements": [
-    {"type": "relative_sea_level_point", "name": "fremantle",
-     "latitude": -32.05, "longitude": 115.74}
-  ],
-  "output": "kernels"
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "measurements": [
+      {"type": "relative_sea_level_point", "name": "fremantle",
+       "latitude": -32.05, "longitude": 115.74}
+    ],
+    "output": "kernels"
+  }
 }
 ```
+
+The ice and viscosity kernels of a sea level at Fremantle at the
+present, on a radial Earth.
 
 ```json
 {
   "problem": "quasi_static",
   "model": {"deck": "earth.deck"},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "times": {"start_kyr_bp": 20.0, "end_kyr_bp": 0.0, "nodes": 41},
   "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
   "ocean": {"at": "start",
             "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "rotation": "full",
   "moments": "hydrostatic",
-  "record_stride": 6,
-  "adjoint": "discrete",
-  "measurements": [
-    {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
-     "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 6.0},
-    {"type": "displacement_point", "name": "uplift_hudson",
-     "latitude": 60.0, "longitude": -85.0},
-    {"type": "potential_cap", "name": "geoid_canada", "latitude": 60.0,
-     "longitude": -90.0, "width_deg": 10.0},
-    {"type": "potential_point", "name": "geoid_point", "latitude": 60.0,
-     "longitude": -90.0},
-    {"type": "displacement_cap", "name": "uplift_fennoscandia",
-     "latitude": 64.0, "longitude": 20.0, "width_deg": 5.0},
-    {"type": "stokes_coefficient", "name": "c20", "degree": 2, "order": 0},
-    {"type": "rotation", "name": "lod", "component": "z"},
-    {"type": "decay_time", "name": "rebound", "latitude": 60.0,
-     "longitude": -85.0, "width_deg": 3.0, "window_start_kyr_bp": 8.0,
-     "window_end_kyr_bp": 0.0, "time_uncertainty_kyr": 0.0,
-     "value_uncertainty_m": 0.5}
-  ],
-  "output": "out/kernels_1d"
+  "output": {"surface": "out/run.nc"},
+  "trajectory": {"directory": "out/trajectory", "record_stride": 6},
+  "kernels": {
+    "method": "discrete",
+    "parameters": ["ice", "viscosity"],
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
+       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 6.0},
+      {"type": "displacement_point", "name": "uplift_hudson",
+       "latitude": 60.0, "longitude": -85.0},
+      {"type": "displacement_vector_point", "name": "east_hudson",
+       "latitude": 55.0, "longitude": -80.0, "direction": {"east": 1}},
+      {"type": "potential_cap", "name": "geoid_canada", "latitude": 60.0,
+       "longitude": -90.0, "width_deg": 10.0},
+      {"type": "stokes_coefficient", "name": "c20", "degree": 2, "order": 0},
+      {"type": "rotation", "name": "lod", "component": "z"},
+      {"type": "decay_time", "name": "rebound", "latitude": 60.0,
+       "longitude": -85.0, "width_deg": 3.0, "window_start_kyr_bp": 8.0,
+       "window_end_kyr_bp": 0.0, "time_uncertainty_kyr": 0.0,
+       "value_uncertainty_m": 0.5}
+    ],
+    "output": "out/kernels_1d"
+  }
 }
 ```
+
+One config for both commands: `sl3d solve` writes `out/run.nc`,
+recording every sixth node's state into `out/trajectory`, and leaves the
+`kernels` block alone; `sl3d kernel` then writes the kernels by the
+discrete adjoint from that store, without running the forward problem
+(run alone, it records the store itself).
 
 ```json
 {
   "problem": "quasi_static",
   "model": {"deck": "prem8.elastic.deck", "format": "elastic",
             "viscosity": {"file": "s40rts_viscosity.nc"}},
-  "lmax": 64,
+  "discretisation": {"lmax": 64},
   "times": {"start_kyr_bp": 20.0, "end_kyr_bp": 0.0, "nodes": 81},
   "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
   "ocean": {"at": "start",
             "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
   "solver": {"step_rtol": 1e-9, "step_max_iterations": 60},
-  "record_stride": 9,
-  "trajectory": {"directory": "/scratch/trajectory"},
-  "measurements": [
-    {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
-     "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 10.0}
-  ],
-  "output": "out/kernels_3d"
+  "trajectory": {"directory": "/scratch/trajectory", "record_stride": 9},
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
+       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 10.0}
+    ],
+    "output": "out/kernels_3d"
+  }
 }
 ```
 
-The first two are `kernel1d` configs; the third needs `kernel`.
+A 3D run under a lateral viscosity, its recording on disk: the first
+`sl3d kernel` runs the forward problem and records it, every ninth state
+to `/scratch/trajectory` (each rank's to its own `rank_RRRR`), and a
+second config of other measurements sweeps from the same store.
+
+```json
+{
+  "problem": "static",
+  "model": {"deck": "prem8.elastic.deck", "format": "elastic"},
+  "discretisation": {"lmax": 32},
+  "forcing": {"load": [{"disk": {"latitude": 60, "longitude": 275,
+                                 "radius_deg": 8, "amplitude_kg_m2": 1.0e5}}]},
+  "rotation": "none",
+  "kernels": {
+    "parameters": ["load", "moduli"],
+    "measurements": [
+      {"type": "displacement_cap", "name": "uplift", "latitude": 60,
+       "longitude": 275, "width_deg": 2}
+    ],
+    "output": "out/static_moduli"
+  }
+}
+```
+
+The static kernels of an uplift under a load on a body without an ocean,
+in the load and in the moduli.
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "prem8.gia.deck"},
+  "discretisation": {"lmax": 32},
+  "times": {"unit": "yr", "at": [0, 1, 5, 10, 20, 50, 100]},
+  "forcing": {"seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5,
+      "depth_km": 25.0, "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+      "length_km": 600.0, "width_km": 150.0, "moment_nm": 2.0e22,
+      "patches_along_strike": 6, "patches_down_dip": 2}}]},
+  "rotation": "none",
+  "kernels": {
+    "method": "discrete",
+    "parameters": ["moment", "viscosity"],
+    "measurements": [
+      {"type": "displacement_vector_point", "name": "gps_east",
+       "latitude": -23.0, "longitude": 290.0, "direction": {"east": 1},
+       "time": 20}
+    ],
+    "output": "out/postseismic"
+  }
+}
+```
+
+The moment and viscosity kernels of a GPS station's eastward
+displacement 20 years after a thrust, on a body without an ocean and on
+the run's own clock in years.

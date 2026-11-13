@@ -5,13 +5,14 @@
  * @brief The processes a run of sl3d spans: one, or, built with
  * SL3DPP_WITH_MPI and started under mpiexec, the ranks of MPI_COMM_WORLD.
  *
- * On several ranks the commands with a 3D run (sea-level, kernel,
- * response) distribute it over radius, one radial segment per rank
- * balanced on the transform work (docs/radial-partitioning.md): every rank
+ * On several ranks the commands with a 3D run (solve, kernel) distribute
+ * it over radius, one radial segment per rank balanced on the transform
+ * work (docs/radial-partitioning.md): every rank
  * reads the config and the inputs, steps its own memory nodes, and solves
  * the sea level equation alike; rank 0 alone writes the outputs and
  * prints. Each rank checkpoints its own state into its own subdirectory of
- * the checkpoint directory. A 1-D run of those commands is the first
+ * the checkpoint directory, and records its own states into its own
+ * subdirectory of a trajectory store. A 1-D run of those commands is the first
  * rank's alone; the other commands refuse several ranks. The MPI calls
  * live in Ranks.cpp, under SL3DPP_HAVE_MPI.
  */
@@ -70,9 +71,9 @@ class RanksOverride {
     int lmax, const std::vector<int>& transform_degrees, std::size_t cache_mb,
     const Rheology& rheology, const std::vector<char>& active_elements = {});
 
-/// This rank's own subdirectory of a directory of per-run scratch (the
-/// checkpoints, the spilled trajectory): rank_RRRR on several ranks, the
-/// directory itself on one.
+/// This rank's own subdirectory of the checkpoint directory: rank_RRRR on
+/// several ranks, the directory itself on one. (The trajectory store lays
+/// out its own, io::TrajectoryStore::RankDirectoryName.)
 [[nodiscard]] std::filesystem::path RankDirectory(
     const std::filesystem::path& directory);
 

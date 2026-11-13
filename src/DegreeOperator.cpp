@@ -22,32 +22,54 @@ double Stratification(double r, double drho, double g) {
 }  // namespace
 
 DegreeOperator::DegreeOperator(const Material& material, int l, Options options)
-    : material_(&material), l_(l), gravitating_(options.gravitating) {
+    : material_(&material),
+      l_(l),
+      gravitating_(options.gravitating),
+      pinFraction_(options.pin_fraction) {
   if (l < 0) {
     throw std::invalid_argument("degree must be non-negative");
   }
   const auto& mesh = material.Mesh();
+  firstElement_ =
+      l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   if (!gravitating_) {
+    const auto base = SolidBase();
+    if (l > 0) firstElement_ = std::max(firstElement_, base);
     if (l == 1) {
-      throw std::invalid_argument(
-          "the non-gravitating problem excludes degree 1: a surface "
-          "traction there has a net force against the rigid translations");
-    }
-    for (int e = 0; e < mesh.ElementCount(); ++e) {
-      if (material.IsFluid(e)) {
+      if (!(pinFraction_ >= 0.0 && pinFraction_ < 1.0)) {
+        throw std::invalid_argument(std::format(
+            "the pin fraction must lie in [0, 1), not {}", pinFraction_));
+      }
+      if (options.combine) {
         throw std::invalid_argument(
-            "the non-gravitating problem takes a solid model: a fluid "
-            "region has no restoring force without gravity");
+            "the non-gravitating degree 1 is not distributed: its frame of "
+            "the centre of mass is an integral over the whole system");
       }
     }
   }
-  firstElement_ =
-      l > 0 ? mesh.StartElement(l, options.truncation, options.eps) : 0;
   const auto ncomp = gravitating_ ? 3 : (l == 0 ? 1 : 2);
   kd_ = ncomp * (mesh.NGll() - 1) + ncomp - 1;
   BuildDofMap();
   Assemble(options.point_shear);
   Factorise(options);
+}
+
+int DegreeOperator::SolidBase() const {
+  const auto& mesh = material_->Mesh();
+  auto regions = 0;
+  auto base = 0;
+  for (int e = 0; e < mesh.ElementCount(); ++e) {
+    if (!material_->IsFluid(e)) continue;
+    if (e == 0 || !material_->IsFluid(e - 1)) ++regions;
+    base = e + 1;
+  }
+  if (regions > 1) {
+    throw std::invalid_argument(std::format(
+        "the non-gravitating problem takes one fluid region at most, a core "
+        "below the solid (the system stops at its top); the model has {}",
+        regions));
+  }
+  return base;
 }
 
 // -- numbering ----------------------------------------------------------------
@@ -95,13 +117,37 @@ void DegreeOperator::BuildDofMap() {
     --ndof_;
   };
 
-  if (l_ == 1) {
+  if (l_ == 1 && gravitating_) {
     // The centre-of-mass frame: no surface potential dof.
     drop(static_cast<std::size_t>(nglob - 1) * 3 + 2);
   }
   if (l_ == 0 && mesh.Left(firstElement_) == 0.0) {
     // U(0) = 0 at a centre.
     drop(static_cast<std::size_t>(g0) * 3 + 0);
+  }
+
+  if (!gravitating_ && l_ == 1) {
+    // The gauge: the U dof of the node a fraction of the way down from the
+    // surface. And the frame's row, int rho (U + 2 V) r^2 dr by the nodes'
+    // quadrature over the solved elements.
+    const auto count = nglob - g0;
+    const auto below = static_cast<int>(
+        std::floor(pinFraction_ * static_cast<double>(count - 1)));
+    pinned_.push_back(Dof(nglob - 1 - below, Component::U));
+    centreOfMass_.assign(ndof_, 0.0);
+    const auto rho = material_->Rho();
+    const auto w = mesh.Weights();
+    for (int e = firstElement_; e < mesh.ElementCount(); ++e) {
+      const auto jac = mesh.Jacobian(e);
+      for (auto q = 0; q < n; ++q) {
+        const auto r = mesh.Radius(e, q);
+        const auto weight =
+            w[q] * jac * rho[static_cast<std::size_t>(e) * n + q] * r * r;
+        const auto gn = mesh.GlobalIndex(e, q);
+        centreOfMass_[Dof(gn, Component::U)] += weight;
+        centreOfMass_[Dof(gn, Component::V)] += 2.0 * weight;
+      }
+    }
   }
 }
 
@@ -741,7 +787,12 @@ void DegreeOperator::Factorise(const Options& options) {
     scale_[j] = 1.0 / std::sqrt(std::abs(d) > 0.0 ? std::abs(d) : 1.0);
   }
 
+  // The gauge: a pinned dof's row and column are the identity's.
+  auto pinned = [&](int i) {
+    return std::ranges::find(pinned_, i) != pinned_.end();
+  };
   auto scaled = [&](int i, int j) {
+    if (!pinned_.empty() && (pinned(i) || pinned(j))) return i == j ? 1.0 : 0.0;
     return band_[static_cast<std::size_t>(j) * ldab + (kd + i - j)] *
            scale_[i] * scale_[j];
   };
@@ -821,6 +872,7 @@ PendingSolve DegreeOperator::BeginSolve(std::span<const double> b, int nrhs,
   for (auto k = 0; k < nrhs; ++k) {
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
+    for (const auto p : pinned_) x[static_cast<std::size_t>(k) * n + p] = 0.0;
   }
   if (substructure_) {
     substructure_->Condense(x, nrhs, rhs, pending.separators,
@@ -844,7 +896,43 @@ std::vector<double> DegreeOperator::FinishSolve(PendingSolve&& pending) const {
     for (auto j = 0; j < n; ++j)
       x[static_cast<std::size_t>(k) * n + j] *= scale_[j];
   }
+  ToCentreOfMass(x, pending.nrhs);
   return x;
+}
+
+void DegreeOperator::ToCentreOfMass(std::span<double> x, int nrhs) const {
+  if (centreOfMass_.empty()) return;
+  const auto n = static_cast<std::size_t>(ndof_);
+  // the translation's own row value, int rho 3 r^2 dr
+  auto norm = 0.0;
+  for (const auto c : centreOfMass_) norm += c;
+  for (auto k = 0; k < nrhs; ++k) {
+    auto column = x.subspan(static_cast<std::size_t>(k) * n, n);
+    auto moment = 0.0;
+    for (auto d = std::size_t{0}; d < n; ++d) {
+      moment += centreOfMass_[d] * column[d];
+    }
+    const auto shift = moment / norm;
+    for (auto d = std::size_t{0}; d < n; ++d) column[d] -= shift;
+  }
+}
+
+std::vector<double> DegreeOperator::RigidTranslation() const {
+  if (centreOfMass_.empty()) {
+    throw std::invalid_argument(
+        "the rigid translation is the null vector of the non-gravitating "
+        "degree 1 alone");
+  }
+  return std::vector<double>(ndof_, 1.0);
+}
+
+std::span<const double> DegreeOperator::CentreOfMassRow() const {
+  if (centreOfMass_.empty()) {
+    throw std::invalid_argument(
+        "the frame of the centre of mass is imposed on the non-gravitating "
+        "degree 1 alone");
+  }
+  return centreOfMass_;
 }
 
 bool DegreeOperator::Holds(int dof) const {

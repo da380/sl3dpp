@@ -1,7 +1,7 @@
 {
   "problem": "static",
   "model": {"deck": "../data/prem8.elastic.deck", "format": "elastic"},
-  "lmax": 128,
+  "discretisation": {"lmax": 128},
   "forcing": {
     "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc",
                                   "date_kyr_bp": 0.0}}]

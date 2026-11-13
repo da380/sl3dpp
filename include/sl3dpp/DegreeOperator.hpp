@@ -39,13 +39,34 @@
  * over radial segments (docs/radial-partitioning.md).
  *
  * With `gravitating = false` the same discretisation solves the
- * non-gravitating problem of the cross-code benchmark hierarchy: the
- * gravity and potential terms are dropped, the unknowns are U and V alone
- * (U alone at l = 0), and the natural forcings are the unit tractions. It
- * takes a solid model -- a fluid region has no restoring force without
- * gravity -- and excludes degree 1, where a surface traction has a net
- * force against the rigid translations. This mirrors pyslfp's
- * `DegreeSystem(..., gravitating=False)` exactly.
+ * non-gravitating problem: the gravity and potential terms are dropped,
+ * the unknowns are U and V alone (U alone at l = 0), and the natural
+ * surface forcings are the unit tractions. On a solid model this is
+ * pyslfp's `DegreeSystem(..., gravitating=False)` exactly. A fluid region
+ * carries no degree-l pressure above degree zero without gravity (its
+ * pressure is uniform), so above degree zero the system stops at the top
+ * of the outermost fluid region, the solid above it traction-free there,
+ * and what lies below is not solved; at degree zero the fluid keeps its
+ * bulk modulus, a mu = 0 elastic medium, as with gravity. A model with
+ * more than one fluid region is refused.
+ *
+ * Degree 1 without gravity has one null vector, the rigid translation
+ * U = V = 1 (RigidTranslation): no strain, so no stress. The gauge is
+ * fixed as the toroidal operator's is (ToroidalOperator.hpp): one U dof
+ * is pinned to zero in the factorisation (the surface node's by default,
+ * `pin_fraction`), which solves the full system when the right-hand side
+ * exerts no net force (is orthogonal to the translation; an interior
+ * source's force is, a surface traction's at degree 1 is not), and the
+ * solution is then moved to the frame of the centre of mass: the
+ * translation is subtracted that makes the density-weighted mean
+ * displacement vanish,
+ *
+ *   int rho (U + 2 V) r^2 dr = 0
+ *
+ * over the solved region (the integral of rho u over the body's volume
+ * for the degree-1 field U Y r_hat + V grad_1 Y). The answer does not
+ * depend on the pinned dof. A distributed degree-1 solve without gravity
+ * is refused (the frame's integral is a sum over the whole system).
  */
 
 #include <functional>
@@ -86,8 +107,13 @@ class DegreeOperator {
     /// construction only.
     const PointShear* point_shear = nullptr;
     /// false drops the gravity and potential terms and the phi dofs: the
-    /// non-gravitating problem, on a solid model, l != 1 (see above).
+    /// non-gravitating problem (see above).
     bool gravitating = true;
+    /// Without gravity at l = 1, the gauge: where the pinned U dof sits,
+    /// as a fraction of the way down from the surface node through the
+    /// solved region's nodes (0 = the surface). Below 1. The answer, in
+    /// the frame of the centre of mass, does not depend on it.
+    double pin_fraction = 0.0;
     /// Radial cuts: elements (increasing, each inside the mesh) at whose
     /// bottom node the mesh is cut into segments, the system then solved
     /// by substructuring with the cut nodes' dofs as the separators. The
@@ -107,8 +133,10 @@ class DegreeOperator {
 
   /// Assemble and factorise the degree-l system. The material is
   /// borrowed and must outlive the operator. Throws std::invalid_argument
-  /// for a negative degree and std::runtime_error when the factorisation
-  /// fails outright (Cholesky and LU both).
+  /// for a negative degree, without gravity for a model with more than one
+  /// fluid region, a pin fraction outside [0, 1) and a distributed
+  /// degree 1, and std::runtime_error when the factorisation fails
+  /// outright (Cholesky and LU both).
   DegreeOperator(const Material& material, int l, Options options);
   DegreeOperator(const Material& material, int l)
       : DegreeOperator(material, l, Options{}) {}
@@ -116,6 +144,7 @@ class DegreeOperator {
   [[nodiscard]] int Degree() const { return l_; }
   [[nodiscard]] int FirstElement() const { return firstElement_; }
   [[nodiscard]] int DofCount() const { return ndof_; }
+  [[nodiscard]] bool Gravitating() const { return gravitating_; }
 
   /// The global dof of a component at a global node, -1 where absent.
   [[nodiscard]] int Dof(int node, Component component) const {
@@ -163,7 +192,10 @@ class DegreeOperator {
   // ------------------------------------------------------------------
 
   /// x with A x = b for `nrhs` right-hand sides stored column-major in
-  /// `b` (DofCount() rows each); the result has the same layout.
+  /// `b` (DofCount() rows each); the result has the same layout. Without
+  /// gravity at l = 1 in the pinned gauge, then in the frame of the centre
+  /// of mass, which needs b free of net force (orthogonal to
+  /// RigidTranslation) to solve A x = b.
   /// Distributed (Options::segments), only this process's segments' rows
   /// and the cut nodes' are read (the cut nodes' as `rhs` says: whole on
   /// every process, or in shares that the solve sums), and only those are
@@ -244,6 +276,17 @@ class DegreeOperator {
   /// fallback is in use (in some segment, when substructured).
   [[nodiscard]] bool UsedCholesky() const { return !choleskyFailed_; }
 
+  /// Without gravity at l = 1, the rigid translation, U = V = 1 on every
+  /// dof: the null vector of the system. Refused otherwise.
+  [[nodiscard]] std::vector<double> RigidTranslation() const;
+  /// Without gravity at l = 1, the row whose product with a solution is
+  /// int rho (U + 2 V) r^2 dr over the solved region by the nodes'
+  /// quadrature: zero in the frame of the centre of mass. Refused
+  /// otherwise.
+  [[nodiscard]] std::span<const double> CentreOfMassRow() const;
+  /// The pinned dofs (one without gravity at l = 1; none otherwise).
+  [[nodiscard]] std::span<const int> PinnedDofs() const { return pinned_; }
+
   /// The radial segments the solve runs over: 1 for the direct solve.
   [[nodiscard]] int SegmentCount() const;
 
@@ -304,14 +347,25 @@ class DegreeOperator {
   };
   [[nodiscard]] std::vector<Interface> Interfaces() const;
 
+  /// Without gravity: the element above the outermost fluid region (0
+  /// on a solid model), the base of the system above degree zero.
+  [[nodiscard]] int SolidBase() const;
+  /// Moves solutions to the frame of the centre of mass (without gravity
+  /// at l = 1; nothing otherwise).
+  void ToCentreOfMass(std::span<double> x, int nrhs) const;
+
   const Material* material_;
   int l_;
   bool gravitating_ = true;
+  double pinFraction_ = 0.0;
   int firstElement_ = 0;
   int kd_ = 0;
   int ndof_ = 0;
   std::vector<int> dof_;      // (node, component) row-major, -1 absent
   std::vector<double> band_;  // upper band, column-major (kd + 1) x ndof
+  // Without gravity at l = 1: the pinned dof and the frame's row.
+  std::vector<int> pinned_;
+  std::vector<double> centreOfMass_;
 
   // The factorisation: the symmetric diagonal scaling s, then the Cholesky
   // band or the LU band with its pivots, or with cuts the substructured

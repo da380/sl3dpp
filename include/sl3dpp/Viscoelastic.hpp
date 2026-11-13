@@ -141,6 +141,14 @@ class ViscoelasticOperator {
       [[nodiscard]] bool Empty() const { return shear.empty() && bulk.empty(); }
     };
     PointModuli moduli{};
+    /// false: the problem without gravity (DegreeOperator::Options::
+    /// gravitating), every system of the displacement alone, above degree
+    /// zero stopping at the top of the outermost fluid region, and at
+    /// degree 1 in the frame of the centre of mass. The steps are then
+    /// forced through AddForce alone (interior sources): a load channel
+    /// (the weight of a surface mass) and a tide channel are refused, and
+    /// so are the Love numbers of the sea level equation.
+    bool gravitating = true;
   };
 
   /// The rheology is copied into immutable shared storage, so the
@@ -164,6 +172,8 @@ class ViscoelasticOperator {
     return nodalMaterial_ ? *nodalMaterial_ : rheology_->BaseMaterial();
   }
   [[nodiscard]] int LMax() const { return lmax_; }
+  /// Whether the systems carry gravity (Options::gravitating).
+  [[nodiscard]] bool Gravitating() const { return options_.gravitating; }
   /// The unrelaxed spheroidal system of a degree: its dof map, and the
   /// solve of a force on it (a point source's, PointSource.hpp).
   [[nodiscard]] const DegreeOperator& UnrelaxedSystem(int l) const;
@@ -256,7 +266,7 @@ class ViscoelasticOperator {
 
   /// The Love numbers of the step's effective solid (SI, as
   /// ComputeLoveNumbers), cached per (scheme, dt); and the unrelaxed
-  /// solid's, cached once.
+  /// solid's, cached once. Refused without gravity.
   [[nodiscard]] const LoveNumbers& EffectiveLoveNumbers(Scheme scheme,
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;

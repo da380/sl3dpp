@@ -220,7 +220,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     if (const auto found = rebuilt.find(node); found != rebuilt.end()) {
       return found->second;
     }
-    rebuilt.clear();
+    // what the rebuild does not reach goes, but the state just below the
+    // node: the step being transposed holds it (its start state), and a
+    // rebuild through it assigns the same state in place
+    std::erase_if(rebuilt,
+                  [node](const auto& entry) { return entry.first + 1 != node; });
     if (trajectory->Kept(node)) {
       return rebuilt[node] = trajectory->fetch(node);
     }

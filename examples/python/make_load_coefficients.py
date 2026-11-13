@@ -1,6 +1,6 @@
-"""Writes a load's coefficient table for a `coefficients` load term of the
-sl3d program's `response` command, from a surface mass density held as a
-field of a planetmodel surface file.
+"""Writes a load's coefficient table for a `coefficients` load term of an
+sl3d config, from a surface mass density held as a field of a planetmodel
+surface file.
 
 The field (`--name`, default `load`, in kg m^-2) is read on its own grid
 (any grid of a kind planetmodel's harmonics transform: Gauss-Legendre,
@@ -10,7 +10,7 @@ coefficients c (planetmodel.harmonics: pyshtools' "ortho" normalisation,
 no Condon-Shortley phase, c[0] the cosine and c[1] the sine harmonics) are
 turned into the coefficients of the table's harmonics, the exchange
 table's complex orthonormal ones with the Condon-Shortley phase
-(docs/sl3d-configs.md, response, The forcing block):
+(docs/sl3d-configs.md, The forcing block):
 
     f_l0 = c[0, l, 0],    f_lm = (-1)^m (c[0, l, m] - i c[1, l, m]) / sqrt 2,
 
@@ -22,7 +22,7 @@ This is a LOAD's table. An exchange table that sl3d writes holds the
 response, the coefficients of the surface displacement U and potential
 Phi, in the same harmonics; those are not a load, and feeding them back as
 one means nothing. A load field written by an sl3d run (the `load` field
-of a `response` surface file, at a node) or by make_load_field.py is.
+of its surface file, at a node) or by make_load_field.py is.
 
 Run from build/examples, e.g. after make_load_field.py --shape cap
 --lmax 32 has written data/load_cap.nc on the run's own grid:
@@ -30,13 +30,13 @@ Run from build/examples, e.g. after make_load_field.py --shape cap
     poetry run python make_load_coefficients.py data/load_cap.nc
         [--name load] [--index N] [--lmax 32] [--out data/load_cap_lm.txt]
 
-It writes data/<stem>_lm.txt by default. A `response` config's forcing
-takes it as {"coefficients": {"file": "../data/load_cap_lm.txt"}}; the
+It writes data/<stem>_lm.txt by default. A config's forcing takes it
+as {"coefficients": {"file": "../data/load_cap_lm.txt"}}; the
 table of a field on the run's own Gauss-Legendre grid, analysed to the
 run's lmax, is the run's own expansion of that field, so the
 `coefficients` term reproduces the `field` term (and the `cap` term the
-field samples) to rounding: response_load_coefficients.json against
-response_load_field.json and response_load_cap.json.
+field samples) to rounding: no_ocean_load_coefficients.json against
+no_ocean_load_field.json and no_ocean_load_cap.json.
 """
 from __future__ import annotations
 

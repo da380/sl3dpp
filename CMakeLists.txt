@@ -183,6 +183,7 @@ add_library(sl3dpp STATIC
   src/io/FieldHistory.cpp
   src/io/ModelViscosity.cpp
   src/io/ModelModuli.cpp
+  src/io/TrajectoryStore.cpp
   src/LoveNumbers.cpp
   src/Material.cpp
   src/Measurements.cpp

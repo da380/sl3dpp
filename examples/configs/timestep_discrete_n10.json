@@ -1,7 +1,7 @@
 {
   "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "lmax": 16,
+  "discretisation": {"lmax": 16},
   "times": {"start_kyr_bp": 16.0, "end_kyr_bp": 6.0, "nodes": 11},
   "forcing": {
     "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]
@@ -13,12 +13,15 @@
   },
   "rotation": "none",
   "solver": {"scheme": "exponential_trapezoid"},
-  "adjoint": "discrete",
-  "measurements": [
-    {"type": "relative_sea_level_cap", "name": "hudson_bay_10ka",
-     "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 10.0},
-    {"type": "relative_sea_level_cap", "name": "hudson_bay_6ka",
-     "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 6.0}
-  ],
-  "output": "out/timestep_discrete_n10"
+  "kernels": {
+    "method": "discrete",
+    "parameters": ["ice", "viscosity"],
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_10ka",
+       "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 10.0},
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_6ka",
+       "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 6.0}
+    ],
+    "output": "out/timestep_discrete_n10"
+  }
 }

@@ -924,7 +924,7 @@ ToroidalViscoelastic::StepTransposedSecond(Dual& dual, Dual& ddual, double dt,
   for (auto k = std::size_t{0}; k < K; ++k) {
     fractions.push_back(op.BranchFractionAtPoints(k));
   }
-  const auto meshPoints = op.pointItau_[0].size();
+  const auto meshPoints = op.UnrelaxedShearAtPoints().size();
   const bool shear = second.mu != nullptr;
   // the step in h = dt itau of a branch at a point, and delta mu there
   auto dhAt = [&](std::size_t k, std::size_t full) {

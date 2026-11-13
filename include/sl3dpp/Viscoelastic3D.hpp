@@ -304,18 +304,21 @@ class Viscoelastic3D {
   };
 
   /// The quasi-static solutions consistent with (m, t): the unrelaxed
-  /// reference systems forced by the loads and the memory force of m.
-  /// (The unrelaxed operator is laterally uniform — viscosity enters only
-  /// through the stepping — so no iteration is needed here.)
+  /// systems forced by the loads and the memory force of m. Without
+  /// lateral moduli the unrelaxed operator is laterally uniform (viscosity
+  /// enters only through the stepping), and the reference solves give
+  /// them with no iteration; under lateral moduli it varies laterally, and
+  /// they are the preconditioned conjugate-gradient solve's
+  /// (LastElasticSolve): on a rheology without branches, the static
+  /// problem on the lateral moduli.
   [[nodiscard]] Solutions SolveElastic(const State& state,
                                        const LoadCallable3D& load = {},
                                        const LoadCallable3D& tide = {}) const;
 
   /// The strain consistent with (m, t) under the given loads: one
-  /// elastic solve. The unrelaxed operator is laterally uniform, so no
-  /// iteration, and a step's end strain satisfies unrelaxed equilibrium
-  /// with its new memory, so this regenerates the strain of a state
-  /// recorded with its internal variables only.
+  /// elastic solve (SolveElastic's). A step's end strain satisfies
+  /// unrelaxed equilibrium with its new memory, so this regenerates the
+  /// strain of a state recorded with its internal variables only.
   [[nodiscard]] GridCoupling::TensorField ElasticStrain(
       const State& state, const LoadCallable3D& load = {},
       const LoadCallable3D& tide = {}) const;

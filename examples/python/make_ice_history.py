@@ -9,7 +9,7 @@ metres on the data set's grid, to data/ice7g.nc (data/ice6g.nc,
 data/ice5g.nc). The file holds the present day too, so it is both the
 state, the ice (`ocean.ice`) and the sea level as topography
 (`ocean.topography`) at one date, and the ice history, a `thickness` term
-of the ice change (`forcing.ice_change`), of a `sea-level` config:
+of the ice change (`forcing.ice_change`), of an sl3d config:
 configs/*_ice7g.json read data/ice7g.nc. pyslfp keeps
 the data in ~/.pyslfp_data (or $PYSLFP_DATA); if they are not there the
 script says what it would download and stops, unless --download is given.
@@ -34,7 +34,7 @@ Run from build/examples:
         [--lon -85] [--radius-deg 15] [--peak-m 3000]
         [--out data/synthetic_disk.nc]
 
-then a `sea-level` config through time ("problem": "quasi_static", with
+then a config through time ("problem": "quasi_static", with
 "times": {"start_kyr_bp": 26, "nodes": 27}) takes the file for its state
 and its ice history, "ocean": {"at": "start", "topography": {"file":
 "../data/synthetic_disk.nc"}, "ice": {"file": "../data/synthetic_disk.nc"}}

@@ -5,693 +5,154 @@
 [![Licence: BSD-3-Clause](https://img.shields.io/badge/licence-BSD--3--Clause-blue)](https://github.com/da380/sl3dpp/blob/main/LICENSE)
 [![C++23](https://img.shields.io/badge/C%2B%2B-23-blue)](https://en.cppreference.com/w/cpp/23)
 
-sl3dpp models glacial isostatic adjustment (GIA) and sea-level change on a
-self-gravitating, rotating, compressible viscoelastic Earth, spherically
-symmetric (1D) or with laterally varying viscosity (3D), forward and
-adjoint. It comes as a program, `sl3d`, which runs models from JSON configs
-without any C++, and as the C++23 library behind it, for codes that need
-more. It succeeds the Fortran codes sl3d and gia1d (both in
+sl3dpp models glacial isostatic adjustment (GIA), sea-level change and the
+deformation of a self-gravitating, rotating, compressible viscoelastic
+Earth, spherically symmetric (1D) or laterally heterogeneous (3D), forward
+and adjoint. It comes as a program, `sl3d`, which runs models from JSON
+configs without any C++, and as the C++23 library behind it, for codes
+that need more. It succeeds the Fortran codes sl3d and gia1d (both in
 [da380/sl3d](https://github.com/da380/sl3d)), written by Ophelia Crawford
 and David Al-Attar with contributions from Andrew Lloyd and Frank Syvret.
 
 Development partially funded by the grants:
 - NE/V010433/1, NSFGEO-NERC: Adjoint tomography
 of mantle viscosity using deglacial sea level observations;
-- NE/X013804/1: Next Generation Modelling of Glacial Isostatic Adjustment. 
+- NE/X013804/1: Next Generation Modelling of Glacial Isostatic Adjustment.
 
 ## What it computes
 
-- **Elastic response.** Load and tidal Love numbers of transversely isotropic
-  radial models, from per-degree spheroidal and toroidal systems; elastic
-  sea-level fingerprints, of a radial Earth or of one with laterally
-  varying elastic moduli, and the elastic sea level problem under any mix
-  of ice change, surface loads and seismic sources, with frozen or
-  migrating shorelines.
-- **The sea-level equation.** The generalised sea-level equation, with
-  displacement and potential response channels, the tangential
-  displacement beside the radial, frozen or migrating
-  shorelines, exact mass conservation, rotational feedback (none, axial, or
-  full: polar wander and length-of-day change), and its exact adjoint.
-- **1D viscoelastic evolution.** Generalised Maxwell (Prony) rheologies,
-  stepped implicitly: exponential trapezoid (second order, the default) or
-  backward Euler, with exponential Euler and an adaptive step controller
-  also available. Step sizes are not limited by the shortest Maxwell time. A
-  coupled driver runs an ice history through the sea-level equation, with
-  frozen or migrating shorelines.
-- **The initial sea level.** Calibrated so that a run reaches a given final
-  (present-day) sea level: in one linear step under frozen shorelines, or
-  iteratively under migrating ones, by the classical update or the adjoint
-  gradient.
-- **3D viscoelastic evolution.** Viscosity varying laterally as
-  η(r, θ, φ) = η̄(r) exp(δ(r, θ, φ)) about a radial reference. The lateral
-  term is applied pseudospectrally with dealiased generalised spherical
-  harmonic transforms ([GSHTrans](https://github.com/da380/GSHTrans)), and
-  each implicit step solves a fixed point about the reference (Picard,
-  Anderson-accelerated where it converges slowly). A coupled driver runs an
-  ice history through the sea-level equation, with frozen or migrating
-  shorelines.
-- **Sensitivity kernels.** Kernels of sea-level, displacement, potential and
-  rotation measurements with respect to the ice history (as load duals,
-  densities in time, and rate kernels) and to viscosity (the inverse
-  relaxation time of each branch, and in 3D the log-viscosity field), by the
-  continuous adjoint or the exact discrete transpose (1D and 3D). The
-  forward run can be recorded at any stride; the reverse sweep rebuilds the
-  states in between.
-- **Tangent-linear runs.** The derivative of a run's responses along a
-  direction in the loads, the ice thickness, the initial sea level and the
-  viscosity (in 3D a laterally varying one), and the second-order run
-  along two directions, 1D and 3D.
-- **Second-order adjoints.** The Hessian's action on a direction
-  (Hessian-vector products), as the derivatives of the kernels, 1D and 3D.
-- **Material derivatives and kernels.** Derivatives and kernels with
-  respect to the bulk and shear moduli κ and μ, 1D and 3D: the static
-  Love numbers' derivatives and kernels, tangent-linear runs of the
-  evolutions along the moduli, and the evolutions' κ and μ kernels.
-- **The lateral Born response.** The first-order response of the static
-  elastic problem to laterally varying δμ and δκ, with the kernels of a
-  surface measurement (`ElasticPerturbation3D`).
-- **Distribution over radius.** Optionally, the 3D evolution and its
-  continuous adjoint run over MPI ranks, one contiguous radial segment
-  each, with OpenMP threads inside
+- **Two problems.** The static problem, one elastic solve at an instant
+  (a sea-level fingerprint, a co-seismic response), and the quasi-static
+  problem, stepped through time on generalised Maxwell (Prony) rheologies
+  by implicit schemes whose step is not limited by the Maxwell times.
+- **1D or 3D.** A radial model, isotropic or transversely isotropic (with
+  its Love numbers), or one with a lateral viscosity η = η̄(r) exp(δ(r, θ, φ)),
+  lateral bulk and shear moduli, or both, applied pseudospectrally with
+  [GSHTrans](https://github.com/da380/GSHTrans)'s dealiased transforms; a
+  3D step, and the static 3D solve, is closed by an Anderson-accelerated
+  fixed point or by conjugate gradients, about the radial reference.
+- **With an ocean or without.** The generalised sea-level equation from a
+  state (the sea level and the ice at one instant), mass conserving, with
+  frozen or migrating shorelines and the initial sea level calibrated
+  against a present-day one; or the solid body's response alone.
+- **Forcings, in any mix.** An ice change, surface loads, a prescribed tide
+  and seismic sources (moment tensors, planar faults), with rotational
+  feedback none, axial or full; with `"gravity": "none"`, the radial
+  forward problem without self-gravitation.
+- **Derivatives.** Adjoint kernels of sea-level, displacement, potential
+  and rotation measurements, continuous or exactly discrete, 1D and 3D,
+  in the ice history, surface loads, a tide, the initial sea level, the
+  viscosity (in 3D the log-viscosity field), the moduli κ and μ and the
+  sources' moment tensors; tangent-linear runs and second-order adjoints
+  (Hessian-vector products). None is taken in the density
+  ([docs/adjoints.md](docs/adjoints.md) §13l).
+- **At scale.** OpenMP threads; a trajectory store on disk, from which the
+  reverse sweeps run without the forward problem; checkpoints; and,
+  optionally, the 3D runs over MPI ranks, split over radius: the step and
+  its lateral solves, the static problem on lateral moduli, both
+  adjoints, the tangent-linear runs and the material kernels
   ([docs/radial-partitioning.md](docs/radial-partitioning.md)).
 
 ## Getting started
 
-### Requirements
-
 A C++23 compiler (GCC 13+ or Clang 18+), CMake 3.24+, pkg-config, OpenMP,
-FFTW3 in all three precisions (double, single and long double), BLAS and
-LAPACK, and netCDF-C. On Debian or Ubuntu 24.04, for example:
+FFTW3 (all three precisions), BLAS, LAPACK and netCDF-C; on Debian or
+Ubuntu 24.04:
 
 ```
 sudo apt install g++ cmake pkg-config libfftw3-dev libopenblas-dev liblapack-dev libnetcdf-dev
-```
-
-The first configure downloads the sibling libraries from GitHub, so it needs
-network access. The examples' plotting and the ICE-7G download use Python
-3.12+ through [poetry](https://python-poetry.org).
-
-### Build
-
-```
 cmake -S . -B build
 cmake --build build -j
 ```
 
-This builds the `sl3d` program (`build/apps/sl3d`), the library, the
-examples and the tests (`ctest --test-dir build` runs them); the options are
-under *Building in detail*, below.
-
-### Run a first model
-
-The build sets up a config for every `sl3d` command, on a synthetic Earth it
-writes itself, so nothing needs downloading:
+The first configure downloads the sibling libraries from GitHub
+([docs/building.md](docs/building.md) has the options and the MPI build).
+The build makes `build/apps/sl3d`, the library, the examples and the tests
+(`ctest --test-dir build`), and a config for every `sl3d` command on a
+synthetic Earth it writes itself:
 
 ```
 cd build/examples/configs
-../../apps/sl3d sea-level sea_level_fingerprint.json   # one command
-./run_all.sh                                           # every command in turn
+../../apps/sl3d solve sea_level_fingerprint.json   # one config
+./run_all.sh                                       # every config in turn
 ```
 
-Each config's outputs land in `out/<config>/` (`<config>` being its file name
-without `.json`). The configs there are yours to edit — the build
-copies them only when they are missing and never overwrites them — so change
-the degree, the dates, the ice change or the measurements and run again. To
-draw the outputs, and to run on the real ice history (ICE-7G, through
-[pyslfp](https://github.com/da380/pyslfp)), go up to `build/examples`: the
-build puts the examples' poetry file (`pyproject.toml`) and Python scripts
-there, and the scripts read the outputs relative to it, so poetry runs from
-there — not from `build` or the repository root:
-
-```
-cd ..                                     # from build/examples/configs up to build/examples
-poetry install --no-root                  # the examples' Python environment
-poetry run python plot_app.py             # figures, in figures/sl3d/<config>/
-poetry run python get_ice7g.py            # writes data/ice7g.nc (about 24 MB the first time)
-(cd configs && ./run_all.sh)              # now also runs the *_ice7g.json configs
-```
-
-[examples/configs/README.md](examples/configs/README.md) says what each
-config does.
+Each config's outputs land in `out/<config>/`, and the copies there are
+yours to edit. Plotting them and running on ICE-7G take the examples'
+poetry environment ([examples/README.md](examples/README.md)).
 
 ## The sl3d program
 
-`build/apps/sl3d` (installed by `cmake --install`) runs the library's
-common capabilities from JSON configs:
-
 ```
 sl3d love-numbers run.json     # the SI Love-number table of a radial model
-sl3d response run.json         # the response to a prescribed load and
-                               #   tide, no ocean: the static problem's
-                               #   elastic response, or the quasi-static
-                               #   problem's viscoelastic response through
-                               #   time; 1D, or 3D under lateral moduli
-                               #   (or viscosity) with the radial model's
-                               #   beside it
-sl3d sea-level run.json        # the sea level equation under an ice
-                               #   change, surface loads, a tide and
-                               #   seismic sources, shorelines frozen or
-                               #   migrating: the static problem's elastic
-                               #   solve at one date (an ice change's
-                               #   fingerprint, a fault's co-seismic sea
-                               #   level), or the quasi-static problem's
-                               #   GIA through time, restartable; without
-                               #   an ocean block, response's problems
-                               #   with rotational feedback; 1D, or 3D
-                               #   under lateral moduli (the static
-                               #   problem too) or a lateral viscosity
-sl3d kernel1d run.json         # adjoint kernels of configured measurements
-                               #   of a radial sea-level run through time
-sl3d kernel run.json           # their 3D counterpart, a lateral viscosity
-                               #   ("trajectory": {"directory": ...} spills
-                               #    the recorded states to disk for large lmax)
+sl3d solve run.json            # the static or the quasi-static problem
+sl3d kernel run.json           # adjoint kernels of the config's measurements
 ```
 
-Every config member is documented in the configuration reference,
-[docs/sl3d-configs.md](docs/sl3d-configs.md).
-
-### Configs
-
-Configs are strict JSON read with planetmodel's reader: an unknown or
-misspelt member is refused naming the file, the member and the fault,
-and relative paths resolve against the config's directory. A config is
-made of blocks (`model`, `times`, `forcing`, `ocean`, `solver`,
-`output`, ...), each read by the same code for every command that takes
-it, under a required `problem`: `"static"` solves at one instant,
-`"quasi_static"` steps through the nodes of a `times` block, and the
-`model` block's files make a run 1D or 3D. Files are read as file
-inputs, `{"file", "format", "variable"}`. A run with an ocean takes a
-state, the sea level and the ice on the body at one instant (the `ocean`
-block), and a forcing: an ice change, a sum of terms
-(`forcing.ice_change`: the history of a thickness file, a file of
-thickness change, or a Gaussian cap), surface loads (`forcing.load`), a
-tide (`forcing.tide`) and seismic sources (`forcing.seismic`), in any
-mix; without an `ocean` block the body has no ocean, and the forcing is
-the loads, the tide and the sources. The state and the ice
-change come from planetmodel surface files, such as one holding
-`ice_thickness` and `topography` (pyslfp's `export_ice_history` writes
-one from ICE-5G/6G/7G), and a static solve comes back as a surface file
-of SI fields with the angular-velocity perturbation in its metadata. For
-example:
+A config is strict JSON (an unknown member is refused, naming the file,
+the member and the fault) made of blocks, `discretisation`, `model`,
+`times`, `forcing`, `ocean`, `solver`, `checkpoint`, `trajectory`,
+`output` and `kernels`, under a required `problem`. The elastic
+fingerprint of a Greenland melt on ICE-7G's present day, for one:
 
 ```json
 {
-  "problem": "static",
-  "model": {"deck": "earth.deck"},
-  "lmax": 256,
-  "forcing": {
-    "ice_change": [{"cap_fraction": {"latitude": 72, "longitude": 320,
-                                     "width_deg": 16, "fraction": -0.1}}]
-  },
-  "ocean": {"date_kyr_bp": 0.0,
-            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
-  "rotation": "full",
-  "output": {"surface": "fingerprint.nc"}
+  "problem": "static", "model": {"deck": "earth.deck"},
+  "discretisation": {"lmax": 256},
+  "forcing": {"ice_change": [{"cap_fraction": {"latitude": 72, "longitude": 320,
+                                               "width_deg": 16, "fraction": -0.1}}]},
+  "ocean": {"date_kyr_bp": 0.0, "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
+  "rotation": "full", "output": {"surface": "fingerprint.nc"}
 }
 ```
 
-run by `sl3d sea-level`; with `"shorelines": "migrating"` in the `ocean`
-block its shorelines follow flotation, and with `"problem":
-"quasi_static"`, a `times` block, the state at an end of the window
-(`"at": "start"` or `"end"`) and an ice history as a `thickness` term of
-the ice change, the same command runs GIA through time.
-
-### Inputs
-
-- **Earth models** are tabulated decks: planetmodel's Maxwell format (with
-  a viscosity column, which a radial run through time uses; `"gia"` names
-  the same format), MINEOS, or a six-column elastic table.
-- **Present-day states and ice histories** are planetmodel surface files
-  holding the ice thickness and the sea level or the topography
-  (`ice_thickness` and `topography` by default). pyslfp's `export_ice_history`
-  writes them from ICE-5G, ICE-6G or ICE-7G (`get_ice7g.py` in the examples
-  does so), and any code can write one with planetmodel.
-- **3D viscosity**, for a run through time of `sea-level`, `kernel` or
-  `response` (`model.viscosity`), is a planetmodel model file holding a
-  `viscosity` field, as planetmodel's conversion of a tomography model
-  writes it; lateral elastic moduli (`model.moduli`) are a model file's
-  `mu` and `kappa`.
-- **Loads and tides**, for `response` and `sea-level`, are sums of
-  terms: Gaussian caps, uniform disks (expanded exactly), fields of
-  planetmodel surface files and tables of spherical-harmonic
-  coefficients, and tidal potential coefficients; through time each term
-  may carry a piecewise-linear amplitude history, and a surface file's
-  field may have a time axis. `response`'s lateral moduli are a
-  planetmodel model file's `mu` and `kappa`.
-
-### Outputs
-
-`love-numbers` writes a plain-text table; `sea-level` writes a
-planetmodel surface file of SI fields (static for the static problem, a
-slice per time node through time), with the angular velocity in its
-metadata; `kernel1d` and `kernel` write a directory per run: the ice-history kernels of each measurement as surface files, its
-viscosity kernels (a table in 1D, a planetmodel model file in 3D), and the
-measured values; `response` writes the surface response as a surface file
-(with a slice per time node when viscoelastic) and, on request, the
-surface coefficients as cross-code exchange tables (one per node when
-viscoelastic) and, elastic, the response inside the body as a planetmodel
-model file (its lateral moduli come from a model file's `mu` and `kappa`,
-as planetmodel's conversion of a tomography model writes them). Every output records the program, its version and the
-config that made it, and planetmodel's Python readers read the surface and
-model files (see below).
-
-### Long runs
-
-- A `checkpoint` block makes a `sea-level` run through time write its
-  state as it goes and resume from it when rerun; with `max_walltime_min`
-  it stops cleanly before a batch system's time limit, so a chain of jobs
-  running one config completes the run.
-- `kernel` can spill the recorded forward states to disk (`trajectory`),
-  the lever on memory at large degree.
-- *Running*, below, has the threads and memory a run needs.
-
-`-DSL3DPP_BUILD_APPS=OFF` leaves the program out of a build.
+With `"shorelines": "migrating"` in `ocean` the shorelines follow
+flotation; `"quasi_static"` with a `times` block, the state at an end of
+the window (`ocean.at`) and an ice history runs GIA through time; without
+`ocean` the body has none; a lateral `model.viscosity` or `model.moduli`
+file makes the run 3D; a `kernels` block serves `sl3d kernel`. Outputs,
+planetmodel files and plain tables, record the program, its version and
+the config. Every member is in [docs/sl3d-configs.md](docs/sl3d-configs.md),
+and threads, memory, MPI and long runs in [docs/running.md](docs/running.md).
 
 ## Working with planetmodel and pyslfp
 
-sl3dpp reads and writes the file formats of
-[planetmodel](https://github.com/da380/planetmodel), and its formulation is
-[pyslfp](https://github.com/da380/pyslfp)'s, so the three work as one
-toolchain: models and data prepared in Python, run by `sl3d` or the
-library, and the results read back in Python. Both are on PyPI
-(`pip install "planetmodel[netcdf]" pyslfp`); the examples' poetry
-environment has them.
+sl3dpp reads and writes [planetmodel](https://github.com/da380/planetmodel)'s
+files and its formulation is pyslfp's, so the three are one toolchain
+(`pip install "planetmodel[netcdf]" pyslfp`). planetmodel writes decks
+(`deck.write_deck`), 3D models from tomography (`conversion`,
+`modelfile.write_model`) and field histories (`surfacefile.write_surface`),
+pyslfp's `ice.export_ice_history` writes ICE-5G, 6G or 7G, and
+`surfacefile.read_surface` and `modelfile.read_model` read the outputs.
+sl3dpp is tested against pyslfp (`tests/data`); their internal units
+differ, so exchange quantities in SI, through files.
 
-- **Preparing inputs in Python.**
-  - *Earth models:* planetmodel builds radial models and writes them as
-    decks (`planetmodel.deck.write_deck`).
-  - *3D viscosity:* planetmodel builds laterally varying models — from a
-    seismic tomography model through its conversion laws
-    (`planetmodel.conversion`), say — and writes them as model files
-    (`planetmodel.modelfile.write_model`), which `sl3d sea-level` and
-    `io::ModelViscosity` read.
-  - *Ice histories and present-day states:* pyslfp's `export_ice_history`
-    (in `pyslfp.ice`) writes ICE-5G, ICE-6G or ICE-7G as surface files, and
-    `planetmodel.surfacefile.write_surface` writes any field history of
-    one's own (a synthetic load, say).
-- **Reading the outputs in Python.** Every `sl3d` output is a planetmodel
-  file or a plain table: `planetmodel.surfacefile.read_surface` reads the
-  `sea-level` and `response` outputs as histories in time, and
-  `planetmodel.modelfile.read_model` the 3D kernels, for analysis and
-  plotting (`examples/python/plot_app.py` does both).
-- **In C++.** Linking `sl3dpp::sl3dpp` brings planetmodel's headers with it,
-  so a code can read and write the same files beside the library
-  (`<planetmodel/surfacefile.hpp>`, `<planetmodel/modelfile.hpp>`,
-  `<planetmodel/deck.hpp>`). The library's `io/` classes connect them to its
-  own types: `io::FieldHistory` serves a surface file's fields on the solver
-  grid at any time, `io::ModelViscosity` turns a model file's viscosity into
-  the radial reference and the lateral perturbation, `io::WriteKernels`
-  writes 3D kernels as a model file, and `Deck::Read` reads decks.
-  `SeaLevelFromTopography` builds a state's sea level from an ICE-xG
-  topography and ice thickness. `examples/MakeSyntheticEarth.cpp` writes a
-  surface file, and `examples/Common.hpp` reads one.
-- **pyslfp as the reference.** sl3dpp's Love numbers, fingerprints, 1D
-  evolution and kernels are tested against pyslfp (`tests/data`). Exchange
-  quantities between the two in SI, through files: their internal units
-  differ.
+## Examples and the library
 
-## Running
-
-### Threads and where they run
-
-sl3dpp is threaded with OpenMP throughout, and how the threads are placed
-matters as much as how many there are. `lscpu` (on Linux) gives a
-machine's layout: its sockets, cores per socket, threads per core and NUMA
-nodes.
-
-- **One thread per physical core.** OpenMP starts one thread per logical
-  CPU by default, which on a machine with simultaneous multithreading
-  (hyperthreading: two logical CPUs to a core) is two threads per core. The
-  two share the core's floating-point units, so for sl3dpp the second
-  gains little and adds to every synchronisation. Set `OMP_NUM_THREADS` to
-  the number of physical cores, or fewer.
-- **Pin the threads.** Unpinned threads are moved between cores by the
-  operating system, and on a machine with several sockets (NUMA nodes)
-  away from the memory they first touched, which then crosses between
-  sockets on every access. Pinning keeps each thread on one core:
-
-  ```
-  export OMP_NUM_THREADS=<physical cores> OMP_PLACES=cores OMP_PROC_BIND=close
-  ```
-
-  On a two-socket node this made an 8-thread 3D run 2.7 times faster. The
-  variables apply to every OpenMP program started from that shell, so set
-  them per run, or in a job script, where other codes want other settings.
-- **One NUMA node per run.** `close` puts threads on neighbouring cores,
-  filling one socket before the next; `spread` divides them between the
-  sockets. sl3dpp's large arrays live in the memory of whichever socket
-  first touched them, so threads on another socket reach across for them,
-  and at present a 3D run is fastest on the cores of one NUMA node (`lscpu`
-  lists them; usually one socket). On a two-socket node with 32 cores per
-  socket, a 3D step at lmax 128 ran 1.4 times faster on one socket's 32
-  cores (`close`) than on all 64, and `close` beat `spread` at 16 and 32
-  threads. To use a whole node, run one job per NUMA node, each with its
-  memory kept there too (when the job fits in that node's memory):
-
-  ```
-  export OMP_NUM_THREADS=<cores per NUMA node> OMP_PLACES=cores OMP_PROC_BIND=close
-  numactl --cpunodebind=0 --membind=0 sl3d sea-level first.json &
-  numactl --cpunodebind=1 --membind=1 sl3d sea-level second.json &
-  ```
-
-  Built with `SL3DPP_WITH_MPI`, `sl3d sea-level`, `kernel` and `response` can
-  instead
-  spread one run over the node, one MPI rank per socket with its threads
-  inside ([docs/sl3d-configs.md](docs/sl3d-configs.md), "Over MPI
-  ranks"). Measured with `distributed_step` at lmax 128 on 32 of the
-  node's cores, each rank pinned to its own cores: the response phase of a
-  pass is 1.4 times faster with two ranks of 16 threads than with one
-  process of 32, and 2.2 times faster with eight ranks of four, the
-  forward transform scaling with each rank's share of the nodes rather
-  than with the threads inside a rank.
-- **Small problems want fewer threads.** The parallel loops run over
-  degrees (lmax + 1 of them), latitude rows and radial nodes, and below a
-  degree of a few dozen there is too little work to share among the cores
-  of a large node: more threads then make a run slower, not faster.
-- **Cutting the transforms with depth.** `Viscoelastic3D::Options::
-  transform_degrees` (sl3d's `solver.transform_degrees`) transforms each
-  memory node only to the degrees its solution carries there under the
-  degree truncation. At lmax 128, the list 32, 48, ..., 112 made a step
-  1.5 times faster and cut its peak memory from 34 to 24 GB, with the
-  surface response unchanged to round-off under a smooth viscosity
-  pattern; a deep viscosity rougher than the solution there would want
-  the listed degrees higher. Below about lmax 30 every mantle node needs
-  lmax and nothing is cut.
-- **Measuring.** `step_timing` (built with `-DSL3DPP_BUILD_BENCHMARKS=ON`)
-  times each phase of a 3D step and reports the peak memory. Run it at the
-  production degree over a few thread counts and both bindings, and take
-  the fastest per-pass time (it needs about 34 GB at lmax 128):
-
-  ```
-  for bind in close spread; do for threads in 16 32 64; do
-    OMP_NUM_THREADS=$threads OMP_PLACES=cores OMP_PROC_BIND=$bind \
-      build/benchmarks/step_timing tests/data/prem.simp.vm1 128 2 2 \
-      > step_${bind}_${threads}.txt
-  done; done
-  grep -H "per pass" step_*.txt
-  ```
-
-- **Reproducibility.** Runs are bitwise reproducible, and threaded runs
-  reproduce one-thread runs bitwise: `step_timing`'s state fingerprint is
-  the same at 1, 4, 16 and 32 threads, with and without Anderson mixing.
-  This holds for the default loop kernel; with `matrix_kernel` the sums are
-  the BLAS's, whose grouping may depend on its thread count.
-- **BLAS.** Any BLAS works on any number of cores, OpenBLAS's pthread and
-  OpenMP builds alike, with no environment variables to set: the library's
-  threaded loops make no BLAS calls (the per-degree banded solves are its
-  own).
-
-### Memory
-
-- **Size.** In 3D each relaxing branch holds its internal variables on a
-  grid at every radial memory node: one such tensor is 0.7 GB at lmax 64,
-  4 GB at 128, 21 GB at 256 and 98 GB at 512, and a step holds several.
-  Viscosity kernels need the forward states: recording every `n`-th of `N`
-  time nodes holds about `N/n + n` of them during the sweep, fewest near
-  `n = √N`.
-- **Huge pages.** Fresh memory is faulted in one 4 KB page at a time by the
-  allocating thread. Where transparent huge pages are on request only
-  (`/sys/kernel/mm/transparent_hugepage/enabled` reads `[madvise]`), glibc
-  2.35+ can request them:
-
-  ```
-  GLIBC_TUNABLES=glibc.malloc.hugetlb=1 OMP_NUM_THREADS=8 ./ExampleLateralViscosity
-  ```
-
-  The 3D step reuses its large arrays from step to step, so they are
-  faulted in once per run: at lmax 64 on 8 threads huge pages make the 3D
-  run about 1.5% faster, with unchanged results.
-- **Memory points.** The internal variables live at the Gauss points of each
-  radial element by default; `memory_points = MemoryPointSet::Gll` places
-  them at the GLL nodes, as the Fortran codes and pyslfp do, for direct
-  comparison.
-
-## Examples
-
-The examples are built into `build/examples` and run from there, which
-keeps their inputs in `data/`, their outputs in `output/` (and the configs'
-in `configs/out/`) and their figures in `figures/`. They need no data: the
-build writes a synthetic Earth (`data/synthetic_earth.nc`, a toy planet over
-a glacial cycle from 21 ka) for them, and each also runs on ICE-7G
-(`--state data/ice7g.nc`, or the `*_ice7g.json` configs).
-
-- **The `sl3d` configs** in `examples/configs`, at least one per command
-  (for `sea-level`, the static problem, a fingerprint in 1D and 3D, one
-  under migrating shorelines and a co-seismic one, and runs through time
-  in 1D and 3D),
-  as in *Run a first model*, above.
-- **Seven C++ drivers** of the library, each with a plotting script:
-
-| Driver | What it shows |
-| --- | --- |
-| `ExampleLoveNumbers` | Load and tidal Love numbers of a radial model |
-| `ExampleFingerprint` | The elastic sea-level fingerprint of a Greenland melt |
-| `ExampleEvolution` | 1D GIA under a West Antarctic melt and hold |
-| `ExampleLateralViscosity` | A 3D run with lateral viscosity against its radial twin |
-| `ExampleModelViscosity` | The deglaciation on a 3D viscosity read from a planetmodel model file |
-| `ExampleIceKernels` | Ice-history and viscosity kernels of a tide gauge near the melting Greenland ice (1D) |
-| `ExampleViscosityKernels3D` | 3D log-viscosity kernels of a sea-level and a decay-time measurement, written as a model file |
-
-See [examples/README.md](examples/README.md) for the inputs, the Python
-environment, the ICE-7G route, the run times and the outputs.
-
-## The library
-
-Each `sl3d` command is a few calls into the library, which offers more: any
-rheology, measurement or load history a code can build, the operators and
-solvers on their own, and the adjoints of all of them.
-
-### Overview
-
-| Header | Contents |
-| --- | --- |
-| `Deck.hpp` | Tabulated radial models: planetmodel decks (`GiaFormat`), mineos (`MineosFormat`), custom column layouts, and the legacy sl3d/gia1d `prem.simp.vm1` format (`Deck::ReadLegacySl3d`) |
-| `EarthModel.hpp`, `Scales.hpp` | The splined radial model, its layering and gravity, and non-dimensionalisation |
-| `RadialMesh.hpp`, `Material.hpp` | The spectral-element radial mesh (GLL, graded so that each degree uses a subset of it), and the material on its nodes, with its directions of variation (`MaterialDirection`, `Variation`) |
-| `MemoryPoints.hpp` | Where the internal variables live in each element (Gauss or GLL points), and the shear term integrated there |
-| `Rheology.hpp` | Relaxing shear branches: a Maxwell body from a viscosity profile, a model's own viscosity column, or general branches |
-| `DegreeOperator.hpp`, `ToroidalOperator.hpp`, `LoveNumbers.hpp` | Per-degree spheroidal and toroidal systems; Love numbers |
-| `SurfaceGrid.hpp`, `ShConventions.hpp`, `Geography.hpp` | The Gauss–Legendre surface grid and its transforms; spherical-harmonic conventions; geographic coordinates |
-| `Fingerprint.hpp` | Elastic sea-level fingerprints, SI in and out |
-| `SeaLevel.hpp` | The sea-level solver (linear, generalised, nonlinear) and its adjoint |
-| `Viscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps; the coupled 1D evolution, frozen or migrating shorelines |
-| `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
-| `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` | The 3D operator and its time steps, the grid coupling, and the coupled 3D evolution, frozen or migrating shorelines |
-| `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D, and the second-order adjoints (`SecondOrderKernels`) |
-| `TangentLinear.hpp`, `TangentLinear3D.hpp` | Tangent-linear runs of the coupled evolutions, 1D and 3D, and the second-order runs |
-| `ElasticPerturbation3D.hpp` | The first-order (Born) response of the static elastic problem to lateral perturbations of the moduli, and its kernels |
-| `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, rotation components) and the decay time of a site's series as a fitted, kernel-ready datum |
-| `Collectives.hpp`, `Distributed.hpp` | Radial distribution: the collectives a distributed run needs, as callbacks, and their MPI form (with `SL3DPP_WITH_MPI`) |
-| `io/` | The planetmodel file boundary: `io::FieldHistory` (surface files), `io::ModelViscosity` (3D viscosity from a model file), `io::WriteKernels` (3D kernels as a model file) |
-
-### Using the library
-
-A 1D run, from a planetmodel GIA deck to sea-level histories:
-
-```cpp
-#include "sl3dpp/Deck.hpp"
-#include "sl3dpp/EarthModel.hpp"
-#include "sl3dpp/Evolution.hpp"
-#include "sl3dpp/Material.hpp"
-#include "sl3dpp/RadialMesh.hpp"
-#include "sl3dpp/Rheology.hpp"
-#include "sl3dpp/SeaLevel.hpp"
-#include "sl3dpp/Viscoelastic.hpp"
-
-using namespace sl3dpp;
-
-// The Earth model: elastic structure and viscosity from the deck (SI).
-const auto deck = Deck::Read("earth.deck", GiaFormat()).value();
-const auto model = EarthModel::FromDeck(deck).value();
-const auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
-const auto material = Material::Create(model, mesh).value();
-const auto rheology = Rheology::FromModel(material, model).value();
-
-// The viscoelastic operator and the sea-level solver.
-const auto op = ViscoelasticOperator(rheology, lmax);
-const auto solver = GRDSolver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
-                                   SeaLevelParameters{});
-// The present-day ice thickness and sea level, on solver.Grid().
-const auto state = solver.MakeState(iceThickness, seaLevel);
-
-// The evolution under an ice-load history directLoad(t), sampled at `times`.
-auto evolution = Evolution(op, solver, state, {});
-const auto snapshots = evolution.Run(times, directLoad);
-// Each snapshot: sea-level change, displacement, potential, angular velocity.
-```
-
-The operator and solver are borrowed by the evolution and must outlive it.
-The other entry points follow the same pattern:
-
-- **Fingerprints.** `Fingerprint(lmax, ComputeLoveNumbers(material, lmax))`,
-  then `SetState(iceThickness, seaLevel)` and `SolveForIceChange(change)`,
-  all in SI. On laterally varying elastic moduli,
-  `Evolution3D(op, solver, state).Instantaneous(load)`, `op` a
-  `Viscoelastic3D` with `Options::moduli` set, in the solver's units.
-  Under any forcing, frozen or migrating, the static problem is a run of
-  one node, `Run({t0}, forcing)` or `RunMigrating({t0}, ice, forcing)` of
-  either evolution, as `sl3d sea-level` solves it.
-- **3D.** `Viscoelastic3D(rheology, lmax, delta)`, with `delta(r, theta, phi)`
-  the log-viscosity perturbation, driven by `Evolution3D` as above.
-- **Kernels.** Run the evolution with `{.record_stride = n}`, build a
-  `ForwardTrajectory` (or `ForwardTrajectory3D`) from the snapshots, and call
-  `AdjointSolver(evolution).FirstOrderKernels(times, measurements, &trajectory)`
-  (`AdjointSolver3D` in 3D), with `measurements` the duals of the observed
-  quantities, keyed by time node.
-
-Model construction returns `std::expected`; solver failures are reported in
-the returned diagnostics or thrown.
-
-### Units and conventions
-
-- Decks are read in SI, and every internal component works in
-  non-dimensional units. `Fingerprint` and `LoveNumbers` are SI at their
-  interface. The time-dependent drivers (`Evolution`,
-  `Evolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
-  times, loads and fields in the sea-level solver's units: convert with
-  `solver.SolverScales()`.
-- Spherical harmonics are complex, fully normalised, with the Condon–Shortley
-  phase (GSHTrans's convention); `ShConventions.hpp` converts to and from real
-  coefficients.
-- Fields live on the solver's Gauss–Legendre grid, colatitude-major.
-- Details, including sign conventions, are in
-  [docs/design.md](docs/design.md) (§2, §4, §9).
-
-### Using it from CMake
-
-`cmake --install build --prefix <prefix>` installs the library, its headers,
-the `sl3d` program and a CMake package, with the sibling libraries' own
-packages beside it. A code then links the one target either way:
-
-```cmake
-find_package(sl3dpp REQUIRED)      # an installed copy, on CMAKE_PREFIX_PATH
-# or
-include(FetchContent)
-FetchContent_Declare(sl3dpp
-  GIT_REPOSITORY https://github.com/da380/sl3dpp.git
-  GIT_TAG        <release tag or commit>)
-FetchContent_MakeAvailable(sl3dpp)
-
-target_link_libraries(my_code PRIVATE sl3dpp::sl3dpp)
-```
-
-The target carries the C++23 requirement and its dependencies, planetmodel
-among them, so a code can read and write planetmodel files beside it.
-
-## Building in detail
-
-```
-cmake -S . -B build
-cmake --build build -j
-ctest --test-dir build
-```
-
-The build type defaults to `Release`. The build produces the static library
-`build/libsl3dpp.a`, the tests in `build/tests`, the example drivers in
-`build/examples` (run them from there), and, when enabled, the benchmarks in
-`build/benchmarks`. Nothing is written into the source tree.
-
-| CMake option | Default | Effect |
-| --- | --- | --- |
-| `CMAKE_BUILD_TYPE` | `Release` | The standard CMake build types |
-| `SL3DPP_BUILD_TESTS` | on at top level | The test suite |
-| `SL3DPP_BUILD_APPS` | on at top level | The `sl3d` program |
-| `SL3DPP_BUILD_EXAMPLES` | on at top level | The example drivers |
-| `SL3DPP_BUILD_BENCHMARKS` | `OFF` | `step_timing`, `fortran_gate`, `substructure_timing` and the cross-code exchange writers |
-| `SL3DPP_BUILD_DOCS` | `OFF` | The `sl3dpp_docs` target: the API reference, with Doxygen, in `build/docs/html` |
-| `SL3DPP_INSTALL` | `ON` | The install rules and the CMake package |
-| `SL3DPP_WITH_MPI` | `OFF` | The MPI-distributed parts (`Distributed.hpp`: the 3D step and adjoint over radial segments, one per rank; `sl3d sea-level`, `kernel` and `response` under `mpiexec`), their tests (run under `mpiexec`) and the `distributed_solves` and `distributed_step` benchmarks; defines `SL3DPP_HAVE_MPI` for the library and its users |
-
-"At top level" means when sl3dpp is the project being built rather than a
-dependency of another, which then gets only the library.
-
-With `SL3DPP_WITH_MPI`, CMake's FindMPI picks the MPI; with several
-installed, name one by its compiler wrapper,
-`-DMPI_CXX_COMPILER=/path/to/mpicxx`. An MPI whose library directory also
-holds netCDF, HDF5 or zlib under the system's names (a PETSc install that
-downloaded them, say) would shadow the system's at run time: point FindMPI
-at the MPI library alone instead, with
-`-DMPI_CXX_SKIP_MPICXX=ON -DMPI_CXX_INCLUDE_PATH=<dir of mpi.h>
--DMPI_CXX_LIB_NAMES=mpi -DMPI_mpi_LIBRARY=<path of libmpi.so>
--DMPIEXEC_EXECUTABLE=<its mpiexec>`, where the two directories hold the MPI
-headers and library and nothing else (symbolic links will do).
-
-To build against local checkouts of the sibling libraries rather than the
-downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each (the comment at the
-top of `CMakeLists.txt` lists them).
-
-The sibling libraries (GSHTrans, GaussQuad, Interpolation, FFTWpp,
-NumericConcepts and planetmodel) and, for the tests, GoogleTest are
-downloaded from GitHub when the build is first configured, unless an
-installed copy is found. Each sibling is pinned to a commit
-(`SL3DPP_<NAME>_PIN` in `CMakeLists.txt`), so a commit of sl3dpp always
-builds against the same sources, and an existing build tree follows the pins
-when they move; `scripts/bump_dependencies.py` moves them, and CI builds
-against the libraries' current `main` weekly. One build tree can override a
-pin, as `-DSL3DPP_GSHTRANS_TAG=main`, say; an empty value returns it to the
-pin.
-
-## Tests and benchmarks
-
-`ctest --test-dir build` runs the unit and comparison tests, including
-fixtures generated from pyslfp and the Fortran sl3d (`tests/data`); each test
-runs on one thread.
-
-With `-DSL3DPP_BUILD_BENCHMARKS=ON`:
-
-- `step_timing <deck> <lmax> [steps] [repeats] [loop|matrix] [gauss|gll]
-  [degrees]` times each phase of a 3D step and reports the peak memory;
-  `steps` 0 times the phases alone (the quick comparison), and `degrees`
-  (such as `32,48,64`) cuts the transforms with depth.
-- `fortran_gate` compares a 3D lateral-viscosity run with the Fortran sl3d;
-  `scripts/run_fortran_gate.sh` builds both codes and runs the comparison.
-- `traction_numbers <deck> <lmax> <out.txt> [nongrav|grav]` writes the E1
-  traction numbers of a deck as a cross-code exchange file, for the
-  benchmark harness in AdGIA's `benchmarks/elastic/nongrav/`.
-- `love_numbers <deck> <lmax> <out.txt>` writes the E2 conventional Love
-  numbers (load primed, geodetic tidal) the same way, for
-  `benchmarks/elastic/grav/`.
-- `love_histories <deck> <lmax> <taus> <out.txt> [steps] [dtmax]` writes
-  Maxwell load Love-number histories under a Heaviside load (taus in
-  seconds per layer, `inf` elastic), for the V1 tier in
-  `benchmarks/viscoelastic/love/`.
-- `substructure_timing <deck> <lmax> [repeats] [parts...]` times the degree
-  solves substructured over radial segments against the direct ones, and
-  `mpiexec -n <ranks> distributed_solves <deck> <lmax>` (with
-  `SL3DPP_WITH_MPI`) the same solves distributed over ranks
-  ([docs/radial-partitioning.md](docs/radial-partitioning.md)).
-- `mpiexec -n <ranks> distributed_step <deck> <lmax> [repeats] [degrees]`
-  (with `SL3DPP_WITH_MPI`) times the phases of the 3D step distributed
-  over ranks, one radial segment each, with OpenMP threads inside: run it
-  as ranks x threads over a node (`OMP_NUM_THREADS=4 mpiexec -n 2
-  -bind-to core:4 ...` with MPICH).
+Eight C++ drivers of the library, each with a plotting script, and the
+`sl3d` configs run in `build/examples` on the synthetic Earths the build
+writes, or on ICE-7G ([examples/README.md](examples/README.md),
+[examples/configs/README.md](examples/configs/README.md)). Each `sl3d`
+command is a few calls into the library, which offers more: the operators
+and solvers on their own, any rheology, measurement or forcing a code can
+build, and the derivatives of all of them. [docs/library.md](docs/library.md)
+has its headers, a first program, and its units and conventions.
 
 ## Documentation
 
-The API reference and these pages are published at
-<https://da380.github.io/sl3dpp/>, built from `main` by Doxygen
-(`-DSL3DPP_BUILD_DOCS=ON`, target `sl3dpp_docs`, builds them locally).
+Published, with the API reference, at <https://da380.github.io/sl3dpp/>.
 
-- [docs/sl3d-configs.md](docs/sl3d-configs.md): the `sl3d` program's
-  configs, command by command.
-- [docs/design.md](docs/design.md): what sl3dpp is built on and how it
-  works: formulation, discretisation, the adjoints, units, the comparison
-  rules for cross-code work, validation and known limitations.
-- [docs/lateral-coupling.md](https://github.com/da380/sl3dpp/blob/main/docs/lateral-coupling.md):
-  the 3D coupling: the algebra of the pseudospectral lateral term, the
-  toroidal operator, the within-step convergence over a contrast ladder
-  and the gate against the Fortran sl3d.
-- [docs/adjoints.md](https://github.com/da380/sl3dpp/blob/main/docs/adjoints.md):
-  the discrete and continuous adjoints and kernels, 1D and 3D, the
-  discrete 3D transpose, the tangent-linear runs, the second-order
-  adjoints and the material derivatives and kernels, with their gates.
-- [docs/radial-partitioning.md](docs/radial-partitioning.md): the 3D
-  problem split over radial segments: the substructured degree solves and
-  their distributed form, the transforms cut with depth, the balance of
-  the cuts and the communication, and the step, adjoint and `sl3d` over
-  MPI ranks.
-- [docs/conventions.md](docs/conventions.md): code style and testing
-  conventions.
+- [docs/sl3d-configs.md](docs/sl3d-configs.md): the `sl3d` configs, command by command.
+- [docs/running.md](docs/running.md): threads, memory, MPI ranks and long runs.
+- [docs/building.md](docs/building.md): dependencies, options, tests, benchmarks, CMake use.
+- [docs/library.md](docs/library.md): the library's headers and how to use them.
+- [docs/design.md](docs/design.md): formulation, discretisation, units, validation, limitations.
+- [docs/adjoints.md](docs/adjoints.md): the adjoints, tangent-linear runs and material kernels.
+- [docs/lateral-coupling.md](docs/lateral-coupling.md): the 3D lateral coupling and its gates.
+- [docs/radial-partitioning.md](docs/radial-partitioning.md): the 3D problem over radial segments and MPI ranks.
+- [docs/trajectory-store.md](docs/trajectory-store.md): the trajectory store's on-disk format.
+- [docs/conventions.md](docs/conventions.md): code style and testing conventions.
+- [examples/README.md](examples/README.md), [examples/configs/README.md](examples/configs/README.md): the examples.
 
 ## Licence
 

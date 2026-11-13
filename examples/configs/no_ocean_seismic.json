@@ -1,8 +1,8 @@
 {
   "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck"},
-  "lmax": 64,
-  "times": {"at_kyr": [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0]},
+  "discretisation": {"lmax": 64},
+  "times": {"unit": "kyr", "at": [0.0, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0]},
   "forcing": {
     "seismic": [{"fault": {"latitude": 38.3, "longitude": 142.4, "depth_km": 25.0,
                            "strike_deg": 200.0, "dip_deg": 12.0, "rake_deg": 90.0,
@@ -10,5 +10,6 @@
                            "moment_nm": 4.0e22,
                            "patches_along_strike": 8, "patches_down_dip": 3}}]
   },
-  "output": {"surface": "out/response_seismic/response_seismic.nc"}
+  "rotation": "none",
+  "output": {"surface": "out/no_ocean_seismic/no_ocean_seismic.nc"}
 }

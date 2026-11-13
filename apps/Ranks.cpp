@@ -73,7 +73,9 @@ Viscoelastic3D::Options OperatorOptions(int lmax,
   options.collectives = ranks.collectives;
   return options;
 #else
+  static_cast<void>(lmax);
   static_cast<void>(rheology);
+  static_cast<void>(active_elements);
   throw std::logic_error("several ranks without MPI");
 #endif
 }

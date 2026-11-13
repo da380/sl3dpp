@@ -2,9 +2,10 @@
 
 /**
  * @file Blocks.hpp
- * @brief The config blocks of the commands made of blocks (`response`,
- * `sea-level`, `kernel1d`, `kernel`), each read by one reader here:
- * `problem` (static, or quasi-static through time), `model` (the deck,
+ * @brief The config blocks of the commands made of blocks (`solve`,
+ * `kernel`), each read by one reader here:
+ * `problem` (static, or quasi-static through time), `discretisation`
+ * (the truncation degree, which `love-numbers` reads too), `model` (the deck,
  * its format, the lateral moduli and the 3D viscosity), `times` (the time
  * nodes of a run stepped through time), `ocean` (the state, the sea level
  * and the ice on the body at one instant, the shorelines and the initial
@@ -45,6 +46,18 @@ enum class Problem { Static, QuasiStatic };
 /// quasi-static problem requires one.
 [[nodiscard]] Problem ReadProblem(const Json& top);
 
+/// The `discretisation` block: the degree the run's spherical harmonic
+/// expansions are truncated at, which sets its grid and its radial mesh.
+struct DiscretisationBlock {
+  int lmax = 0;
+};
+
+/// Reads the required top-level `discretisation` block, of `lmax` alone
+/// (required, an integer of at least `least`). A top-level `lmax` is
+/// refused, naming the block it belongs in.
+[[nodiscard]] DiscretisationBlock ReadDiscretisationBlock(const Json& top,
+                                                          int least);
+
 /// The deck formats a config may name: planetmodel's GIA and MINEOS
 /// tables, and the library's six-column elastic table (rho, vpv, vsv,
 /// vph, vsh, eta; no header), the test and example decks' format.
@@ -80,29 +93,7 @@ struct ModelBlock {
 [[nodiscard]] ModelBlock ReadModelBlock(const Json& block,
                                         const std::filesystem::path& directory);
 
-/// `response`'s `times` block: the time nodes of a run stepped through
-/// time, in kyr on the run's own clock, counted forwards.
-struct TimesBlock {
-  /// The nodes in kyr on the run's own clock, strictly increasing, the
-  /// first the start.
-  std::vector<double> nodes_kyr;
-  /// The step from each node to the next, one fewer than the nodes: for
-  /// evenly spaced nodes the one spacing (end - start) / (nodes - 1) every
-  /// time, so that equal steps are equal to the bit; the differences of
-  /// the nodes given otherwise.
-  std::vector<double> steps_kyr;
-};
-
-/// Reads `response`'s `times` block: `start_kyr` (default 0) with
-/// `end_kyr` (later than the start) and `nodes` (at least two, evenly
-/// spaced, both ends included); or instead an explicit list `at_kyr`,
-/// strictly increasing, of at least two entries, its first the start;
-/// exactly one of the two. `sea-level`'s dates (`start_kyr_bp`,
-/// `end_kyr_bp`) are refused, naming this form.
-[[nodiscard]] TimesBlock ReadTimesBlock(const Json& block);
-
-/// The two forms of `sea-level`'s `times` block (and the kernel
-/// commands'), chosen by the members present.
+/// The two forms of the `times` block, chosen by the members present.
 enum class Calendar {
   /// Dates in kyr before present, on the calendar the files with a time
   /// axis share: `start_kyr_bp`, `end_kyr_bp` and `nodes`, or `at_kyr_bp`.
@@ -112,8 +103,8 @@ enum class Calendar {
   Forwards
 };
 
-/// `sea-level`'s `times` block: the nodes of a run through time, the
-/// window from the first to the last.
+/// The `times` block: the nodes of a run through time, the window from the
+/// first to the last.
 struct Window {
   Calendar calendar = Calendar::Dated;
   /// The unit the nodes are given in, and the terms' times beside them:
@@ -141,10 +132,8 @@ struct Window {
   /// Each node's time since the first, in units of `scale` seconds (the
   /// solver's time unit). Dated: the window's span in seconds times n over
   /// (nodes - 1) for evenly spaced nodes, the difference of their places
-  /// on the axis for listed ones, each over `scale`. Forwards: as
-  /// `response` counts its nodes, the node less the first, in the run's
-  /// unit, times the unit over `scale`, so that a run in kyr on
-  /// `response`'s nodes steps through `response`'s times to the bit. A
+  /// on the axis for listed ones, each over `scale`. Forwards: the node
+  /// less the first, in the run's unit, times the unit over `scale`. A
   /// step's response moves with the last bit of its length (by up to about
   /// 1e-12 relative under a one-ulp change of a node), so runs whose times
   /// are formed otherwise (another unit, dates for times) agree to that.
@@ -154,7 +143,7 @@ struct Window {
   [[nodiscard]] std::string Label(double axis) const;
 };
 
-/// Reads `sea-level`'s `times` block. Dated: `start_kyr_bp` (required),
+/// Reads the `times` block. Dated: `start_kyr_bp` (required),
 /// `end_kyr_bp` (default 0, below the start) and `nodes` (at least two,
 /// evenly spaced, both ends included), or `at_kyr_bp`, the dates
 /// themselves, at least two, strictly decreasing. Forwards: `unit`
@@ -162,8 +151,8 @@ struct Window {
 /// (later than the start) and `nodes`, or `at`, the times themselves, at
 /// least two, strictly increasing. Exactly one way of giving the nodes in
 /// either form; members of the two forms together are refused, naming
-/// both, and so are `response`'s names (`start_kyr`, `end_kyr`,
-/// `at_kyr`), naming the forwards form with its `unit`.
+/// both, and so are times in kyr without a unit (`start_kyr`, `end_kyr`,
+/// `at_kyr`), naming the forwards form's members with its `unit`.
 [[nodiscard]] Window ReadWindow(const Json& block);
 
 /// The end of a run's window an input belongs to.
@@ -246,31 +235,17 @@ struct OceanBlock {
                                         Problem problem,
                                         Calendar calendar = Calendar::Dated);
 
-/// Whose `solver` block: the members and the defaults differ.
-enum class SolverOf {
-  /// `response`'s: no sea level equation (no `rtol`); the 3D closure to
-  /// 1e-10 within 200 iterations by default.
-  Response,
-  /// `sea-level`'s and the kernel commands': `rtol` for the sea level
-  /// solves; the 3D closure to 1e-9 within 60 iterations by default.
-  SeaLevel
-};
-
 /// The `solver` block: the sea level solves' tolerance, the 3D closure's
 /// tolerance, budget and transforms, and the time step.
 struct SolverBlock {
   /// The relative tolerance of the sea level solves (and of the kernels'
-  /// adjoint sea level solves): the commands with an ocean alone.
+  /// adjoint sea level solves).
   double rtol = 1e-9;
-  /// The relative tolerance and the iteration budget of the 3D closure.
-  /// `sea-level` and the kernel commands: each step's combined fixed
-  /// point over the strain, the ocean load and the rotation
-  /// (Evolution3D::Options::coupled_rtol, max_coupled_iterations;
-  /// under lateral moduli the start's zero-length step too, and the
-  /// static problem's one zero-length step). `response`:
-  /// each step's closure (the fixed point or the conjugate gradients) and
-  /// the unrelaxed solve under lateral moduli (an elastic response's one
-  /// solve, a viscoelastic run's first node).
+  /// The relative tolerance and the iteration budget of the 3D closure:
+  /// each step's combined fixed point over the strain, the ocean load and
+  /// the rotation (Evolution3D::Options::coupled_rtol,
+  /// max_coupled_iterations; under lateral moduli the start's zero-length
+  /// step too, and the static problem's one zero-length step).
   double step_rtol = 1e-9;
   int step_max_iterations = 60;
   /// The degrees the 3D coupling's transforms may be cut to with depth
@@ -287,14 +262,10 @@ struct SolverBlock {
       Viscoelastic3D::Options::StepSolver::FixedPoint;
 };
 
-/// A command's `solver` block with the block absent: its defaults.
-[[nodiscard]] SolverBlock SolverDefaults(SolverOf command);
-
 /// Reads a `solver` block of a run at `lmax`, each member optional:
-/// `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`,
-/// `scheme` and `step`, and, for a command with an ocean, `rtol`.
-[[nodiscard]] SolverBlock ReadSolverBlock(const Json& block, int lmax,
-                                          SolverOf command);
+/// `rtol`, `step_rtol`, `step_max_iterations`, `transform_degrees`,
+/// `cache_mb`, `scheme` and `step`.
+[[nodiscard]] SolverBlock ReadSolverBlock(const Json& block, int lmax);
 
 /// The `checkpoint` block of a run through time: every `every`-th node's
 /// recurrence and the history so far go to `directory`; a positive
@@ -329,6 +300,10 @@ struct OutputBlock {
 
 /// The `rotation` word: "none", "axial" or "full".
 [[nodiscard]] RotationalFeedback RotationOf(const Json& word);
+
+/// The `gravity` word: "full" (true) or "none" (false), whether the run
+/// carries gravity (ViscoelasticOperator::Options::gravitating).
+[[nodiscard]] bool GravityOf(const Json& word);
 
 /// The `moments` word: "input" (false) or "hydrostatic" (true), whether
 /// the moments of inertia difference is set from the model's own

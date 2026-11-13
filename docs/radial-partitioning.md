@@ -272,13 +272,18 @@ rank its segment.
   (docs/adjoints.md §17): the discrete transpose sums
   the ranks' partial contractions for the load duals and places the
   surface duals on their holding rank.
-- **The `sl3d` program** runs `sea-level`, `kernel` and `response` under
-  `mpiexec`, a 1D run of these commands on the first rank alone.
+- **The `sl3d` program** runs `solve` and `kernel` under `mpiexec`: the
+  static problem on lateral moduli (the stepper on a branchless rheology,
+  adjoints.md §13m) and the 3D runs through time, and their kernels; a 1D
+  run of these commands is the first rank's alone, the other ranks
+  returning at once.
   - Rank 0 writes the outputs.
   - Each rank checkpoints its own segment into its own subdirectory. A
     run resumes from the newest node every rank has, over the same rank
-    count only.
-  - The viscosity kernels are gathered to rank 0 for writing.
+    count only; where the ranks have none in common, their checkpoints
+    are removed and the run starts over.
+  - The 3D kernels (viscosity and moduli) are gathered to rank 0 for
+    writing.
   - A failure on any rank aborts the job.
 
 One process with the threads inside it is the intended shape: on a

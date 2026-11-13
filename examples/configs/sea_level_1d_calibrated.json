@@ -1,7 +1,7 @@
 {
   "problem": "quasi_static",
   "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "lmax": 32,
+  "discretisation": {"lmax": 32},
   "times": {"start_kyr_bp": 21.0, "end_kyr_bp": 0.0, "nodes": 43},
   "forcing": {
     "ice_change": [{"thickness": {"file": "../data/synthetic_earth.nc"}}]

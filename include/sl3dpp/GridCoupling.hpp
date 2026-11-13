@@ -156,6 +156,8 @@ class GridCoupling {
   /// lmax block's otherwise (GridOf for a node's own).
   [[nodiscard]] const SurfaceGrid& Grid() const { return grid_; }
   [[nodiscard]] int LMax() const { return lmax_; }
+  /// The options as given (an element range's end of -1 as given too).
+  [[nodiscard]] const Options& GetOptions() const { return options_; }
 
   // -- the node blocks
   // -------------------------------------------------

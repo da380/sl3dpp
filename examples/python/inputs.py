@@ -150,7 +150,7 @@ def write_state(path, grid, ice_thickness, topography, *, title: str):
 
 def write_load(path, grid, load, *, times_kyr=None, title: str):
     """A surface mass density (kg m^-2) for a `field` load term of `sl3d
-    response`, named `load`: static, (nlat, nlon), or with `times_kyr` a
+    solve`, named `load`: static, (nlat, nlon), or with `times_kyr` a
     node field linear in time, (ntime, nlat, nlon), on a time axis in
     kiloyears."""
     if times_kyr is None:

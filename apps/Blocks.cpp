@@ -31,6 +31,26 @@ Problem ReadProblem(const Json& top) {
   return problem;
 }
 
+DiscretisationBlock ReadDiscretisationBlock(const Json& top, int least) {
+  if (Has(top, "lmax")) {
+    Fail(top.At("lmax"),
+         "is not a top-level member: it belongs in `discretisation.lmax`");
+  }
+  if (!Has(top, "discretisation")) {
+    Fail(top,
+         "has no `discretisation` block, which gives the degree of the run, "
+         "`lmax`");
+  }
+  const auto& block = top.At("discretisation");
+  if (!block.IsObject()) {
+    Fail(block, "is not a block: `discretisation` is an object of `lmax`");
+  }
+  Allow(block, {"lmax"});
+  const auto out = DiscretisationBlock{.lmax = Integer(block, "lmax")};
+  if (out.lmax < least) Fail(block.At("lmax"), "is not a degree");
+  return out;
+}
+
 DeckFormat FormatOf(ModelFormat format) {
   switch (format) {
     case ModelFormat::Gia:
@@ -92,13 +112,13 @@ double Finite(const Json& item) {
   return value;
 }
 
-/// The two forms of `sea-level`'s times, as a refusal names them.
+/// The two forms of the times, as a refusal names them.
 constexpr auto kWindowForms = std::string_view{
     "dates before present (`start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
     "`at_kyr_bp`) or times counted forwards on the run's own clock (`unit` "
     "with `start`, `end` and `nodes`, or `at`)"};
 
-/// The dated form of `sea-level`'s times.
+/// The dated form of the times.
 Window ReadDates(const Json& block) {
   Allow(block, {"start_kyr_bp", "end_kyr_bp", "nodes", "at_kyr_bp"});
   auto out = Window{};
@@ -144,7 +164,7 @@ Window ReadDates(const Json& block) {
   return out;
 }
 
-/// The forwards form of `sea-level`'s times, on the run's own clock.
+/// The forwards form of the times, on the run's own clock.
 Window ReadForwards(const Json& block) {
   Allow(block, {"unit", "start", "end", "nodes", "at"});
   if (!Has(block, "unit")) {
@@ -244,14 +264,20 @@ Window ReadWindow(const Json& block) {
                             "as {}",
                             kWindowForms));
   }
-  for (const auto* name : {"start_kyr", "end_kyr", "at_kyr"}) {
+  // times in kyr on a run's own clock without a unit, each named with the
+  // member the forwards form gives it
+  for (const auto& [name, wanted] : {std::pair{"start_kyr", "start"},
+                                     std::pair{"end_kyr", "end"},
+                                     std::pair{"at_kyr", "at"}}) {
     if (Has(block, name)) {
       Fail(block.At(name),
-           "counts forwards on a run's own clock in kyr, the form of "
-           "`response`'s times; this command counts forwards with a `unit` "
-           "for its times (`start`, `end` and `nodes`, or `at`; `unit` "
-           "\"kyr\", \"yr\" or \"day\"), or gives dates before present "
-           "(`start_kyr_bp`, `end_kyr_bp` and `nodes`, or `at_kyr_bp`)");
+           std::format("counts forwards on a run's own clock in kyr without "
+                       "its unit: times on the run's clock are `{}` with "
+                       "`unit` (\"kyr\", \"yr\" or \"day\"; `start`, "
+                       "`end` and `nodes`, or `at`), and dates before present "
+                       "are `start_kyr_bp`, `end_kyr_bp` and `nodes`, or "
+                       "`at_kyr_bp`",
+                       wanted));
     }
   }
   const auto first = [&block](std::initializer_list<const char*> names) {
@@ -272,74 +298,6 @@ Window ReadWindow(const Json& block) {
   if (!dated.empty()) return ReadDates(block);
   if (!forwards.empty()) return ReadForwards(block);
   Fail(block, std::format("gives no window: the nodes are {}", kWindowForms));
-}
-
-TimesBlock ReadTimesBlock(const Json& block) {
-  for (const auto* name : {"start_kyr_bp", "end_kyr_bp"}) {
-    if (Has(block, name)) {
-      Fail(block.At(name),
-           "is a date before present, the form of `sea-level`'s times; "
-           "`response`'s times count forwards on the run's own clock: "
-           "`start_kyr`, `end_kyr` and `nodes`, or `at_kyr`");
-    }
-  }
-  Allow(block, {"start_kyr", "end_kyr", "nodes", "at_kyr"});
-  const auto even = Has(block, "end_kyr") || Has(block, "nodes");
-  const auto listed = Has(block, "at_kyr");
-  if (even && listed) {
-    Fail(block,
-         "gives the nodes twice: either `end_kyr` and `nodes` (evenly "
-         "spaced from `start_kyr`) or `at_kyr` (the nodes listed)");
-  }
-  if (!even && !listed) {
-    Fail(block,
-         "gives no nodes: either `end_kyr` and `nodes` (evenly spaced from "
-         "`start_kyr`) or `at_kyr` (the nodes listed)");
-  }
-  auto out = TimesBlock{};
-  if (listed) {
-    if (Has(block, "start_kyr")) {
-      Fail(block.At("start_kyr"),
-           "is given by `at_kyr`, whose first entry is the start");
-    }
-    const auto& at = block.At("at_kyr");
-    for (const auto& item : at.AsArray()) {
-      const auto value = Finite(item);
-      if (!out.nodes_kyr.empty() && !(value > out.nodes_kyr.back())) {
-        Fail(item,
-             "is not later than the node before it: the nodes are "
-             "strictly increasing");
-      }
-      out.nodes_kyr.push_back(value);
-    }
-    if (out.nodes_kyr.size() < 2) Fail(at, "is fewer than two nodes");
-    for (auto n = std::size_t{1}; n < out.nodes_kyr.size(); ++n) {
-      out.steps_kyr.push_back(out.nodes_kyr[n] - out.nodes_kyr[n - 1]);
-    }
-    return out;
-  }
-  for (const auto& [name, other] :
-       {std::pair{"end_kyr", "nodes"}, std::pair{"nodes", "end_kyr"}}) {
-    if (!Has(block, name)) {
-      Fail(block, std::format("gives `{}` without `{}`: evenly spaced nodes "
-                              "need both",
-                              other, name));
-    }
-  }
-  const auto start =
-      Has(block, "start_kyr") ? Finite(block.At("start_kyr")) : 0.0;
-  const auto end = Finite(block.At("end_kyr"));
-  const auto nodes = Integer(block, "nodes");
-  if (!(end > start)) {
-    Fail(block.At("end_kyr"), "is not later than start_kyr");
-  }
-  if (nodes < 2) Fail(block.At("nodes"), "is fewer than two nodes");
-  const auto spacing = (end - start) / (nodes - 1);
-  for (auto n = 0; n < nodes; ++n) {
-    out.nodes_kyr.push_back(n + 1 == nodes ? end : start + n * spacing);
-  }
-  out.steps_kyr.assign(static_cast<std::size_t>(nodes - 1), spacing);
-  return out;
 }
 
 std::string_view SeaLevelSource::Member() const {
@@ -503,35 +461,13 @@ OceanBlock ReadOceanBlock(const Json& block,
   return out;
 }
 
-SolverBlock SolverDefaults(SolverOf command) {
+SolverBlock ReadSolverBlock(const Json& block, int lmax) {
+  Allow(block, {"rtol", "step_rtol", "step_max_iterations",
+                "transform_degrees", "cache_mb", "scheme", "step"});
   auto out = SolverBlock{};
-  if (command == SolverOf::Response) {
-    out.step_rtol = 1e-10;
-    out.step_max_iterations = 200;
-  }
-  return out;
-}
-
-SolverBlock ReadSolverBlock(const Json& block, int lmax, SolverOf command) {
-  const auto ocean = command == SolverOf::SeaLevel;
-  if (!ocean && Has(block, "rtol")) {
-    Fail(block.At("rtol"),
-         "is the sea level solves' tolerance, which `response` (no ocean) "
-         "does not have; its 3D solves' tolerance is `step_rtol`");
-  }
-  if (ocean) {
-    Allow(block, {"rtol", "step_rtol", "step_max_iterations",
-                  "transform_degrees", "cache_mb", "scheme", "step"});
-  } else {
-    Allow(block, {"step_rtol", "step_max_iterations", "transform_degrees",
-                  "cache_mb", "scheme", "step"});
-  }
-  auto out = SolverDefaults(command);
-  if (ocean) {
-    out.rtol = Number(block, "rtol", out.rtol);
-    if (!(out.rtol > 0.0)) {
-      Fail(block.At("rtol"), "is not a positive tolerance");
-    }
+  out.rtol = Number(block, "rtol", out.rtol);
+  if (!(out.rtol > 0.0)) {
+    Fail(block.At("rtol"), "is not a positive tolerance");
   }
   out.step_rtol = Number(block, "step_rtol", out.step_rtol);
   if (!(out.step_rtol > 0.0)) {
@@ -613,6 +549,10 @@ RotationalFeedback RotationOf(const Json& word) {
   return Choice<RotationalFeedback>(word, {{"none", RotationalFeedback::None},
                                            {"axial", RotationalFeedback::Axial},
                                            {"full", RotationalFeedback::Full}});
+}
+
+bool GravityOf(const Json& word) {
+  return Choice<bool>(word, {{"full", true}, {"none", false}});
 }
 
 bool HydrostaticMomentsOf(const Json& word) {

@@ -6,6 +6,7 @@
 #include <format>
 #include <optional>
 #include <stdexcept>
+#include <string_view>
 #include <tuple>
 
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -83,6 +84,17 @@ void CheckTimes(std::span<const double> times) {
   }
 }
 
+/// The refusal of what a run without gravity cannot take.
+void RefuseWithoutGravity(const ViscoelasticOperator& op,
+                          std::string_view what) {
+  if (!op.Gravitating()) {
+    throw std::invalid_argument(std::format(
+        "{} is refused without gravity: the run is the solid body under "
+        "interior sources alone",
+        what));
+  }
+}
+
 }  // namespace
 
 void Evolution::SetBackgroundState(GRDSolver::State state) {
@@ -100,6 +112,7 @@ std::vector<Evolution::Snapshot> Evolution::Run(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   CheckTimes(times);
+  RefuseWithoutGravity(*op_, "a surface load (its weight)");
   return March(times, &directLoad, nullptr, nullptr, false);
 }
 
@@ -107,6 +120,7 @@ std::vector<Evolution::Snapshot> Evolution::Run(std::span<const double> times,
                                                 const Forcing& forcing) {
   CheckTimes(times);
   if (options_.factor_sources) return MarchFactored(times, forcing);
+  if (!op_->Gravitating()) return MarchWithoutGravity(times, forcing, false);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, false,
                &forcing);
@@ -122,6 +136,7 @@ std::vector<Evolution::Snapshot> Evolution::Resume(
         "a run under interior sources is resumed from a checkpoint of "
         "such a run, which holds the strain and the toroidal state");
   }
+  if (!op_->Gravitating()) return MarchWithoutGravity(times, forcing, true);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, true,
                &forcing);
@@ -131,6 +146,7 @@ std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
   CheckTimes(times);
+  RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
   return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
@@ -148,6 +164,7 @@ std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   CheckTimes(times);
+  RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
   CheckMigratingForcing(forcing);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                &iceThickness, nullptr, false, &forcing);
@@ -157,6 +174,7 @@ std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
+  RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
   CheckMigratingForcing(forcing);
   Restore(from, times);
   if ((forcing.sources || forcing.stressGluts) &&
@@ -188,6 +206,7 @@ void Evolution::Restore(const Checkpoint& from,
 std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
+  RefuseWithoutGravity(*op_, "a surface load (its weight)");
   Restore(from, times);
   return March(times, &directLoad, nullptr, nullptr, true);
 }
@@ -195,6 +214,7 @@ std::vector<Evolution::Snapshot> Evolution::Resume(
 std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness) {
+  RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
   Restore(from, times);
   return March(times, nullptr, &iceThickness, nullptr, true);
 }
@@ -472,6 +492,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
   }
 
   auto snapshots = std::vector<Snapshot>{};
+  auto recorded = std::size_t{0};
   auto record = [&](double t, GRDSolver::Response& r, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
@@ -504,10 +525,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
       snapshot.tideCoefficients = psi_;
     }
     snapshots.push_back(std::move(snapshot));
-    if (options_.on_snapshot) {
-      options_.on_snapshot(snapshots.size() - (resumed ? 0 : 1),
-                           snapshots.back());
-    }
+    const auto node = ++recorded - (resumed ? 0 : 1);
+    if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
+    if (!options_.keep_snapshots) snapshots.pop_back();
   };
   if (!resumed) {
     record(times[0], response, stride > 0);
@@ -893,13 +913,169 @@ std::vector<Evolution::Snapshot> Evolution::MarchFactored(
     }
     Snapshot snapshot;
     snapshot.t = times[n];
-    snapshot.relativeSeaLevelChange = grid.Synthesise(slc);
+    if (op.Gravitating()) {
+      // without gravity there is no potential and no equipotential
+      snapshot.relativeSeaLevelChange = grid.Synthesise(slc);
+      snapshot.potential = grid.Synthesise(Phi);
+    }
     snapshot.displacement = grid.Synthesise(U);
-    snapshot.potential = grid.Synthesise(Phi);
     snapshot.tangentialPotential = grid.Synthesise(V);
     snapshot.toroidalPotential = grid.Synthesise(W);
     snapshots.push_back(std::move(snapshot));
     if (options_.on_snapshot) options_.on_snapshot(n, snapshots.back());
+    if (!options_.keep_snapshots) snapshots.pop_back();
+  }
+  return snapshots;
+}
+
+std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
+    std::span<const double> times, const Forcing& forcing, bool resumed) {
+  const auto& op = *op_;
+  const auto& solver = *solver_;
+  const auto& grid = solver.Grid();
+  if (state_.oceanArea > 0.0) {
+    throw std::invalid_argument(
+        "a body with an ocean is refused without gravity: there is no sea "
+        "level equation (GRDSolver::NoOceanState)");
+  }
+  if (options_.rotation != RotationalFeedback::None) {
+    throw std::invalid_argument(
+        "the rotational feedback is refused without gravity (it reads the "
+        "inertia's change from the degree-2 potential): RotationalFeedback::"
+        "None");
+  }
+  if (forcing.directLoad || forcing.directLoadOutsideWaterBudget) {
+    RefuseWithoutGravity(op, "a surface load (its weight)");
+  }
+  if (forcing.solidSurfaceChange) {
+    RefuseWithoutGravity(op, "a layer on the solid surface (its weight)");
+  }
+  if (forcing.tide) RefuseWithoutGravity(op, "a tide");
+  const auto stride = options_.record_stride;
+  const auto lastNode = times.size() - 1;
+  const bool sourced = forcing.sources || forcing.stressGluts;
+  if (sourced && stride > 1) {
+    throw std::invalid_argument(
+        "a run under interior sources is recorded at every node "
+        "(record_stride 1): the states between could not be rebuilt "
+        "without the sources' forces");
+  }
+
+  const ToroidalViscoelastic toroidal(op);
+  auto tstate = ToroidalViscoelastic::State{};
+  if (!resumed) {
+    vstate_ = op.ZeroState([](int l) { return 2 * (l + 1); });
+    vstate_.t = times[0] * toMatTime_;
+    sigma_ = grid.ZeroCoefficients();
+    psi_ = grid.ZeroCoefficients();
+    tstate = toroidal.ZeroState();
+    tstate.t = vstate_.t;
+  } else if (restoredToroidal_) {
+    tstate = *restoredToroidal_;
+  } else {
+    tstate = toroidal.ZeroState();
+    tstate.t = vstate_.t;
+  }
+  auto nodeForces = RadialSourceForces{};
+  auto forcesAt = [&](double t) {
+    if (!sourced) return RadialSourceForces{};
+    return detail::ForcesOfSources(
+        op, toroidal, solver.SolverScales(), toNdLength_,
+        forcing.sources ? forcing.sources(t) : std::vector<PointSource>{},
+        forcing.stressGluts ? forcing.stressGluts(t)
+                            : std::vector<StressGlut>{});
+  };
+
+  auto spheroidal = std::map<int, std::vector<double>>{};
+  auto twist = ToroidalViscoelastic::Fields{};
+  auto snapshots = std::vector<Snapshot>{};
+  auto recorded = std::size_t{0};
+  auto record = [&](double t, bool keepState) {
+    Snapshot snapshot;
+    snapshot.t = t;
+    snapshot.displacement = grid.Synthesise(
+        Coefficients(op.Surface(spheroidal, Component::U), toNdLength_));
+    snapshot.tangentialPotential = grid.Synthesise(
+        Coefficients(op.Surface(spheroidal, Component::V), toNdLength_));
+    if (sourced) {
+      snapshot.toroidalPotential =
+          grid.Synthesise(Coefficients(toroidal.Surface(twist), toNdLength_));
+    }
+    if (keepState && (options_.record_strain || sourced)) {
+      snapshot.internalState = vstate_;
+      if (sourced) {
+        snapshot.toroidalState = tstate;
+        snapshot.sourceForces = nodeForces;
+      }
+    } else if (keepState) {
+      ViscoelasticState kept;
+      kept.t = vstate_.t;
+      kept.m = vstate_.m;
+      kept.columns = vstate_.columns;
+      snapshot.internalState = std::move(kept);
+    }
+    if (stride > 0) {
+      snapshot.loadCoefficients = sigma_;
+      snapshot.tideCoefficients = psi_;
+    }
+    snapshots.push_back(std::move(snapshot));
+    const auto node = ++recorded - (resumed ? 0 : 1);
+    if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
+    if (!options_.keep_snapshots) snapshots.pop_back();
+  };
+  auto checkpoint = [&](std::size_t node) {
+    const auto every = options_.checkpoint_stride;
+    if (every <= 0 || !options_.on_checkpoint) return;
+    if (node % static_cast<std::size_t>(every) != 0 && node != lastNode) {
+      return;
+    }
+    auto out = Checkpoint{.t = times[node],
+                          .m = vstate_.m,
+                          .strain = vstate_.strain,
+                          .loadCoefficients = sigma_,
+                          .tideCoefficients = psi_,
+                          .toroidal = tstate};
+    options_.on_checkpoint(node, out);
+  };
+
+  if (!resumed) {
+    // The start: the unrelaxed response to the sources there, with no
+    // memory before it.
+    nodeForces = forcesAt(times[0]);
+    spheroidal = op.SolveElastic(vstate_);
+    for (const auto& [l, f] : nodeForces.spheroidal) {
+      const auto x = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+      auto& to = spheroidal.at(l);
+      for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += x[i];
+    }
+    vstate_.strain = op.Strain(spheroidal);
+    if (sourced) {
+      twist = toroidal.SolveElastic(tstate, nodeForces.toroidal);
+      toroidal.SetStrain(tstate, twist);
+    }
+    record(times[0], stride > 0);
+    checkpoint(0);
+  } else {
+    op.PrimeStrain(vstate_);
+  }
+
+  for (auto node = std::size_t{1}; node < times.size(); ++node) {
+    const auto dt = (times[node] - times[node - 1]) * toMatTime_;
+    auto step = op.StartStep(vstate_, dt, options_.scheme);
+    nodeForces = forcesAt(times[node]);
+    step.AddForce(nodeForces.spheroidal);
+    auto finished = step.Finish();
+    vstate_ = std::move(finished.first);
+    spheroidal = std::move(finished.second);
+    if (sourced) {
+      auto stepped =
+          toroidal.Step(tstate, dt, options_.scheme, nodeForces.toroidal);
+      tstate = std::move(stepped.first);
+      twist = std::move(stepped.second);
+    }
+    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
+    record(times[node], keep);
+    checkpoint(node);
   }
   return snapshots;
 }

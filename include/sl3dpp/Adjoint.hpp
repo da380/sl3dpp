@@ -98,8 +98,9 @@ struct Measurement {
   /// u_t = grad_1 V - r x grad_1 W: the toroidal part of a displacement
   /// measurement's weight. A radial model under a surface load and a
   /// tide has no toroidal displacement, and its sweeps pass over this
-  /// dual; lateral structure makes one, which the discrete 3D sweep
-  /// carries and the continuous one refuses.
+  /// dual; interior sources and lateral structure make one, which every
+  /// sweep carries, discrete and continuous (the radial ones through the
+  /// toroidal systems of a source-driven run).
   std::vector<double> toroidalPotentialDual;
   std::array<double, 3> angularVelocityDual{0.0, 0.0, 0.0};
 };
@@ -120,7 +121,10 @@ struct Measurement {
  * factor rho_i (1 - C), with the initial-thickness `baseline` folded
  * into node 0 (valid when the forward load was rho_i (1 - C)(I_n - I_0));
  * about a migrating trajectory the grounding factor is the node's own
- * rho_i (1 - C_n), the baseline keeping the initial C. `initialSeaLevel`
+ * rho_i (1 - C_n), the baseline keeping the initial C. About a migrating
+ * run whose start is solved under an ice change from a background held
+ * fixed, the kernel of the first node's ice is thickness[0] - baseline
+ * (TangentPerturbation::iceThickness). `initialSeaLevel`
  * is the dual of the initial sea level, rho_w sum_n (C_n - C_0)
  * directLoadKernels[n] (the initial sea level enters each node's load through the
  * shorelines that moved): identically zero under frozen shorelines.
@@ -140,12 +144,13 @@ struct Kernels {
   std::vector<double> times;
   std::vector<std::vector<double>> directLoadKernels;
   /// The kernels of the two other properties of a surface load, per
-  /// time node, formed by the discrete sweeps (empty otherwise): with
-  /// respect to a direct load OUTSIDE THE WATER BUDGET (the load kernel
-  /// less the uniform term of the water's conservation), and to the
-  /// height of a LAYER ON THE SOLID SURFACE (Evolution::Forcing), each
-  /// paired as the load kernel is. The kernel in a sediment layer's
-  /// thickness is its density times the first plus the second.
+  /// time node, formed by every sweep, discrete and continuous (the
+  /// continuous ones to the commute error): with respect to a direct
+  /// load OUTSIDE THE WATER BUDGET (the load kernel less the uniform term
+  /// of the water's conservation), and to the height of a LAYER ON THE
+  /// SOLID SURFACE (Evolution::Forcing), each paired as the load kernel
+  /// is. The kernel in a sediment layer's thickness is its density times
+  /// the first plus the second.
   std::vector<std::vector<double>> directLoadOutsideWaterBudgetKernels;
   std::vector<std::vector<double>> solidSurfaceChangeKernels;
   /// The TIDE kernels, the discrete view alone: `tideKernels[n]` is the
@@ -154,8 +159,9 @@ struct Kernels {
   /// pairing of real fields (the surface integral of the two synthesised
   /// fields over the solver's sphere, divided by its radius squared);
   /// the degree-0 entry is zero. Formed by the discrete sweeps, and by
-  /// the radial model's continuous sweep when Options::tide_kernels asks
-  /// (to the commute error); empty otherwise.
+  /// the continuous ones, radial and 3D, when Options::tide_kernels asks
+  /// (to the commute error; the continuous 3D sweep on one process);
+  /// empty otherwise.
   std::vector<std::vector<std::complex<double>>> tideKernels;
   /// The MOMENT kernels, the discrete view alone: `momentKernels[n][p]`
   /// is the dual of a point stress glut's moment tensor at time node n
@@ -163,9 +169,9 @@ struct Kernels {
   ///   delta J = sum_n sum_p momentKernels[n][p] : delta M_p(t_n),
   /// in the solver's units. It is the strain there of the sweep's dual
   /// displacement, spheroidal and toroidal: a stress glut works on the
-  /// strain, so its kernel is the adjoint strain. Formed by the radial
-  /// model's sweeps when points are given (the continuous one to the
-  /// commute error); empty otherwise.
+  /// strain, so its kernel is the adjoint strain. Formed by every sweep,
+  /// radial and 3D, when points are given (the continuous ones to the
+  /// commute error, the 3D ones on one process); empty otherwise.
   std::vector<std::vector<SphericalTensor>> momentKernels;
   std::vector<std::vector<double>> thickness;
   std::vector<double> baseline;
@@ -231,8 +237,8 @@ struct KernelDerivatives {
   /// potential. Formed where the sweep forms the tide kernels.
   std::vector<std::vector<std::complex<double>>> tideKernels;
   /// The derivatives along v of the kernels of a load outside the water
-  /// budget and of a layer on the solid surface, formed by the discrete
-  /// sweeps.
+  /// budget and of a layer on the solid surface, formed by every
+  /// second-order sweep.
   std::vector<std::vector<double>> directLoadOutsideWaterBudgetKernels;
   std::vector<std::vector<double>> solidSurfaceChangeKernels;
   std::vector<std::vector<double>> thickness;
@@ -245,8 +251,8 @@ struct KernelDerivatives {
   std::vector<double> muKernel;
   /// The derivatives along v of the moment kernels (Kernels::
   /// momentKernels), in their layout: the source rows of the Hessian's
-  /// action on v. Formed by the discrete 3D sweep when Options::
-  /// moment_points gives points; empty otherwise.
+  /// action on v. Formed by every second-order sweep, radial and 3D,
+  /// when Options::moment_points gives points; empty otherwise.
   std::vector<std::vector<SphericalTensor>> momentKernels;
 };
 
@@ -307,6 +313,7 @@ class AdjointSolver {
     std::function<void(std::size_t node)> on_node{};
   };
 
+  /// Refused for an evolution without gravity (Evolution.hpp).
   explicit AdjointSolver(const Evolution& evolution, Options options);
   explicit AdjointSolver(const Evolution& evolution)
       : AdjointSolver(evolution, Options{}) {}

@@ -165,9 +165,11 @@ void ToVolumeDensity(const GridCoupling& coupling, std::vector<double>& kernel);
 
 /// A perturbation of the moduli over the coupling's grid values
 /// (material units): delta kappa(x) and delta mu(x) at the memory nodes,
-/// which is where the 3D operator's lateral structure lives (an elastic
-/// region to be perturbed laterally takes a branch of negligible
-/// inverse relaxation time, so that it carries memory nodes). The branch
+/// which is where the 3D operator's lateral structure lives: its viscous
+/// elements and those where its own lateral moduli are not zero
+/// (Viscoelastic3D::ActiveElementsFor); an elastic region beyond them to
+/// be perturbed laterally takes a branch of negligible inverse
+/// relaxation time, so that it carries memory nodes. The branch
 /// moduli follow as fixed fractions of the unrelaxed modulus and the
 /// relaxation times are held; compose with a log-viscosity direction for
 /// a viscosity held instead. Either field may be empty.
@@ -314,8 +316,7 @@ class AdjointSolver3D {
    * first-order sweep. With
    * Options::material_kernels the material kernels and their
    * derivatives along v are formed too, and v may have a direction in
-   * the moduli (`material`; docs/adjoints.md §15) — Discrete only
-   * for now.
+   * the moduli (`material`; docs/adjoints.md §15), by either method.
    *
    * @param tangent v's tangent-linear run about the forward run, recorded
    * at every node (TangentLinearSolver3D::Options::record), by the SAME

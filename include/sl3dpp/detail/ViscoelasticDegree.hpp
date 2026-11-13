@@ -74,6 +74,7 @@ struct ViscoelasticOperator::Degree {
                {.eps = options.eps,
                 .truncation = options.truncation,
                 .point_shear = elasticShear,
+                .gravitating = options.gravitating,
                 .cuts = options.radial_cuts}),
         points(&memoryPoints) {
     const auto& mesh = rheology.BaseMaterial().Mesh();

@@ -78,7 +78,12 @@ std::vector<std::vector<double>> OceanFunctionsOf(
 
 AdjointSolver::AdjointSolver(const Evolution& evolution,
                              Options options)
-    : evolution_(&evolution), options_(options) {}
+    : evolution_(&evolution), options_(options) {
+  if (!evolution.op_->Gravitating()) {
+    throw std::invalid_argument(
+        "the adjoint sweeps are not built for the problem without gravity");
+  }
+}
 
 Kernels AdjointSolver::FirstOrderKernels(
     std::span<const double> times,
@@ -230,7 +235,7 @@ Kernels AdjointSolver::DiscreteSweep(
           return ev.Columns(c, ev.toMatPotential_);
         });
     // Accumulated at the memory points, mapped to the nodes at the end.
-    const auto meshSize = op.pointItau_[0].size();
+    const auto meshSize = op.UnrelaxedShearAtPoints().size();
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
 
@@ -551,7 +556,7 @@ Kernels AdjointSolver::DiscreteSweep(
                             ev.Columns(trajectory->tides[0], ev.toMatPotential_)),
             0);
       }
-      factor.assign(fractions[0].size(), 1.0);
+      factor.assign(op.UnrelaxedShearAtPoints().size(), 1.0);
       for (auto k = std::size_t{0}; k < K; ++k) {
         const auto& w = weights[k];
         for (auto i = std::size_t{0}; i < factor.size(); ++i) {
@@ -795,7 +800,7 @@ Kernels AdjointSolver::DiscreteSweep(
       // The start's dual solution: the transposed unrelaxed solve under
       // the start duals and the start's response duals, paired with the
       // base start solution (every weight one, no memory).
-      const auto ones = std::vector<double>(fractions[0].size(), 1.0);
+      const auto ones = std::vector<double>(op.UnrelaxedShearAtPoints().size(), 1.0);
       for (auto l = 0; l <= lmax; ++l) {
         const auto& deg = op.Deg(l);
         const auto ncols = 2 * (l + 1);
@@ -1214,7 +1219,7 @@ Kernels AdjointSolver::ContinuousSweep(
           return ev.Columns(c, ev.toMatPotential_);
         });
     // Accumulated at the memory points, mapped to the nodes at the end.
-    const auto meshSize = op.pointItau_[0].size();
+    const auto meshSize = op.UnrelaxedShearAtPoints().size();
     itauKernel.assign(K, std::vector<double>(meshSize, 0.0));
   }
   // The self-adjoint channel mapping poses the adjoint in the sea level

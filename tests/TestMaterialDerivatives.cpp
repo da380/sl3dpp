@@ -97,8 +97,8 @@ TEST(MaterialDerivatives, VariationOperatorIsTheDerivativeOfTheSystem) {
   const auto material = MakeMaterial();
   const auto d = SmoothDirection(material, true, true);
   const auto dm = material.Variation(d);
-  // The gravitating problem alone: the model has a fluid core, which the
-  // non-gravitating problem refuses (its path is a subset of this one).
+  // The gravitating problem alone (the non-gravitating path is a subset
+  // of this one).
   for (const bool gravitating : {true}) {
     for (auto l = 0; l <= kLmax; ++l) {
       DegreeOperator op(material, l, {.gravitating = gravitating});

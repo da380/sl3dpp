@@ -18,14 +18,15 @@
 
 namespace sl3dpp::app {
 
-std::vector<std::string_view> SeaLevelRunMemberNames() {
-  return {"problem", "model",    "lmax",    "times", "forcing",
-          "ocean",   "rotation", "moments", "solver"};
+std::vector<std::string_view> RunMemberNames() {
+  return {"problem", "discretisation", "model",   "times",  "forcing",
+          "ocean",   "rotation",       "moments", "solver", "gravity"};
 }
 
 void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed) {
   // the members a block holds, by the block they belong in
   constexpr auto kInBlocks = std::array{
+      std::pair{std::string_view{"lmax"}, "`discretisation.lmax`"},
       std::pair{std::string_view{"model_format"}, "`model.format`"},
       std::pair{std::string_view{"viscosity"}, "`model.viscosity`"},
       std::pair{std::string_view{"state"},
@@ -49,7 +50,13 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed) {
       std::pair{std::string_view{"shorelines"}, "`ocean.shorelines`"},
       std::pair{std::string_view{"calibration"}, "`ocean.calibration`"},
       std::pair{std::string_view{"calibrate_initial_sea_level"},
-                "`ocean.calibration`"}};
+                "`ocean.calibration`"},
+      std::pair{std::string_view{"adjoint"}, "`kernels.method`"},
+      std::pair{std::string_view{"measurements"}, "`kernels.measurements`"},
+      std::pair{std::string_view{"record_stride"},
+                "`trajectory.record_stride`"},
+      std::pair{std::string_view{"parameters"}, "`kernels.parameters`"},
+      std::pair{std::string_view{"method"}, "`kernels.method`"}};
   for (const auto& [key, value] : top.AsObject()) {
     if (std::ranges::find(allowed, key) != allowed.end()) continue;
     for (const auto& [name, block] : kInBlocks) {
@@ -62,9 +69,8 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed) {
   Allow(top, allowed);
 }
 
-SeaLevelRun ReadSeaLevelRun(const Json& top,
-                            const std::filesystem::path& directory) {
-  auto out = SeaLevelRun{};
+Run ReadRun(const Json& top, const std::filesystem::path& directory) {
+  auto out = Run{};
   out.problem = ReadProblem(top);
   const auto timed = out.problem == Problem::QuasiStatic;
   const auto& model = top.At("model");
@@ -82,8 +88,7 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
          "quasi-static problem needs: give a \"maxwell\" deck with a "
          "viscosity, or a `model.viscosity` file");
   }
-  out.lmax = Integer(top, "lmax");
-  if (out.lmax < 1) Fail(top.At("lmax"), "is not a degree");
+  out.lmax = ReadDiscretisationBlock(top, 1).lmax;
   // the terms' times are given as the window's are: dates in a dated run,
   // times on the run's own clock in its unit in one counting forwards
   auto clock = std::optional<TermClock>{};
@@ -99,18 +104,52 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
   }
   // the state is optional: without an `ocean` block the body has none
   const auto ocean = Has(top, "ocean");
+  // without gravity there is no sea level, and so no state
+  if (Has(top, "gravity")) out.gravitating = GravityOf(top.At("gravity"));
+  if (!out.gravitating && ocean) {
+    Fail(top.At("ocean"),
+         "is the state of the sea level equation, which a run without "
+         "gravity (`gravity`: \"none\") does not have: drop the block, the "
+         "body then having no ocean");
+  }
   out.forcing =
-      ReadSeaLevelForcing(top.At("forcing"), directory, out.lmax, clock, ocean);
+      ReadForcing(top.At("forcing"), directory, out.lmax, clock, ocean);
   if (ocean) {
     out.ocean = ReadOceanBlock(
         top.At("ocean"), directory, out.problem,
         timed ? out.times->calendar : Calendar::Dated);
+  }
+  if (!out.gravitating) {
+    // the forcing of a run without gravity: seismic sources alone
+    const auto& forcing = top.At("forcing");
+    if (!out.forcing.tide.empty()) {
+      Fail(forcing.At("tide"),
+           "is a tide, an external potential, which a run without gravity "
+           "(`gravity`: \"none\") does not take");
+    }
+    if (!out.forcing.load.empty()) {
+      Fail(forcing.At("load"),
+           "is a surface load, which acts by its weight under gravity: a run "
+           "without gravity (`gravity`: \"none\") is forced by seismic "
+           "sources alone");
+    }
   }
   if (out.Migrating() && !out.forcing.tide.empty()) {
     Fail(top.At("forcing").At("tide"),
          "is a prescribed tide, which a run under migrating shorelines "
          "(`ocean.shorelines`: \"migrating\") does not take: give frozen "
          "shorelines for a tide");
+  }
+  // the calibration's runs are under the ice alone
+  if (out.Calibrating() && out.forcing.BesideTheIce()) {
+    const auto& forcing = top.At("forcing");
+    Fail(forcing.At(!out.forcing.load.empty()
+                        ? "load"
+                        : (!out.forcing.tide.empty() ? "tide" : "seismic")),
+         "is a forcing beside the ice, which a calibrated initial sea "
+         "level does not take: the calibration's runs are under the ice "
+         "alone. Give the state at the window's start (`ocean.at`: "
+         "\"start\")");
   }
   // the terms of the ice change held to the state's instant (an ice
   // change has an ocean)
@@ -136,9 +175,28 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
                            : "a cap of ice change"));
     }
   }
+  // without gravity the rotational feedback is none, and only none: the
+  // inertia's change is read from the degree-2 potential, which a run
+  // without gravity has not
+  if (!out.gravitating) out.rotation = RotationalFeedback::None;
   if (Has(top, "rotation")) out.rotation = RotationOf(top.At("rotation"));
+  if (!out.gravitating && out.rotation != RotationalFeedback::None) {
+    Fail(top.At("rotation"),
+         std::format("is \"{}\", a rotational feedback, which a run without "
+                     "gravity (`gravity`: \"none\") does not take: the "
+                     "inertia's change is read from the degree-2 potential, "
+                     "which it has not; give \"none\" (the default without "
+                     "gravity)",
+                     NameOf(out.rotation)));
+  }
   if (Has(top, "moments")) {
     out.hydrostatic_moments = HydrostaticMomentsOf(top.At("moments"));
+    if (!out.gravitating && out.hydrostatic_moments) {
+      Fail(top.At("moments"),
+           "sets the moments of inertia from the model's hydrostatic fluid "
+           "limit for the rotational feedback, which a run without gravity "
+           "(`gravity`: \"none\") does not have");
+    }
   }
   if (Has(top, "solver")) {
     const auto& solver = top.At("solver");
@@ -163,7 +221,7 @@ SeaLevelRun ReadSeaLevelRun(const Json& top,
         }
       }
     }
-    out.solver = ReadSolverBlock(solver, out.lmax, SolverOf::SeaLevel);
+    out.solver = ReadSolverBlock(solver, out.lmax);
   }
   return out;
 }
@@ -196,7 +254,7 @@ std::string BuiltEarth::Dimension() const {
   return "1-D";
 }
 
-BuiltEarth BuildEarth(const SeaLevelRun& run, const Json& top) {
+BuiltEarth BuildEarth(const Run& run, const Json& top) {
   const auto& modelMember = top.At("model");
   const auto& deckMember = modelMember.At("deck");
   const auto deck = Deck::Read(run.model.deck, FormatOf(run.model.format));
@@ -251,7 +309,7 @@ Rheology RheologyOf(const BuiltEarth& earth, const Json& top) {
   return std::move(*rheology);
 }
 
-Viscoelastic3D::Options OperatorOptionsOf(const SeaLevelRun& run,
+Viscoelastic3D::Options OperatorOptionsOf(const Run& run,
                                           const BuiltEarth& earth,
                                           const Rheology& rheology) {
   const auto& solver = run.solver;
@@ -287,7 +345,7 @@ std::function<double(double, double, double)> DeltaOf(const BuiltEarth& earth) {
   return [](double, double, double) { return 0.0; };
 }
 
-SeaLevelParameters ParametersOf(const SeaLevelRun& run,
+SeaLevelParameters ParametersOf(const Run& run,
                                 const Material& material) {
   auto parameters = SeaLevelParameters{};
   if (run.hydrostatic_moments) {
@@ -297,7 +355,7 @@ SeaLevelParameters ParametersOf(const SeaLevelRun& run,
   return parameters;
 }
 
-const Json& SeaLevelMember(const SeaLevelRun& run, const Json& top) {
+const Json& SeaLevelMember(const Run& run, const Json& top) {
   return top.At("ocean").At(run.ocean->seaLevel.Member());
 }
 
@@ -336,7 +394,7 @@ std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
   return thickness;
 }
 
-RunIce::RunIce(const SeaLevelRun& run, const Json& top, InputFiles& files,
+RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
                double stateTime)
     : grid_(&files.Grid()) {
   const auto& member = IceMember(top);
@@ -519,7 +577,7 @@ void RunIce::CheckHeld(std::span<const double> times,
                    window ? ", " + window->Label(when) : std::string{}));
 }
 
-std::string DescribeIceChange(const SeaLevelRun& run,
+std::string DescribeIceChange(const Run& run,
                               std::string_view separator) {
   auto out = std::string{};
   for (const auto& term : run.forcing.ice_change) {
@@ -529,7 +587,7 @@ std::string DescribeIceChange(const SeaLevelRun& run,
   return out;
 }
 
-void CheckStateDate(const SeaLevelRun& run, const Json& top,
+void CheckStateDate(const Run& run, const Json& top,
                     InputFiles& files) {
   const auto& ocean = top.At("ocean");
   // the state's members, the first file with a time axis named
@@ -553,7 +611,7 @@ void CheckStateDate(const SeaLevelRun& run, const Json& top,
   }
 }
 
-LandMask ReadLand(const SeaLevelRun& run, const Json& top, InputFiles& files,
+LandMask ReadLand(const Run& run, const Json& top, InputFiles& files,
                   double time) {
   if (!run.ocean->land) return {};
   const auto& input = *run.ocean->land;
@@ -579,7 +637,7 @@ LandMask ReadLand(const SeaLevelRun& run, const Json& top, InputFiles& files,
   return out;
 }
 
-std::vector<double> SeaLevelFrom(const SeaLevelRun& run, const Json& top,
+std::vector<double> SeaLevelFrom(const Run& run, const Json& top,
                                  const io::FieldHistory& file,
                                  std::span<const double> ice, double time,
                                  const SeaLevelParameters& parameters) {
@@ -608,7 +666,7 @@ namespace {
 /// the end of its window the state belongs to, from a file with a time
 /// axis; in one counting forwards the state's date; any date from a static
 /// file.
-std::string WindowSlice(const SeaLevelRun& run, const io::FieldHistory& file,
+std::string WindowSlice(const Run& run, const io::FieldHistory& file,
                         WindowEnd end) {
   const auto& window = *run.times;
   const auto timeAxis = file.Span().has_value();
@@ -628,7 +686,7 @@ std::string WindowSlice(const SeaLevelRun& run, const io::FieldHistory& file,
 /// where the state is read: its end values are held beyond its span,
 /// which would make a file ending early the calibration's target
 /// silently. `member` is the input's. A dated run's alone.
-void CheckReachesEnd(const SeaLevelRun& run, const io::FieldHistory& file,
+void CheckReachesEnd(const Run& run, const io::FieldHistory& file,
                      const Json& member) {
   const auto end_kyr_bp = run.times->End();
   const auto end_si = -end_kyr_bp * KYR;
@@ -648,7 +706,7 @@ void CheckReachesEnd(const SeaLevelRun& run, const io::FieldHistory& file,
 /// time: a dated run's end of the window `ocean.at` names (the calendar's
 /// axis is the window's), or the state's date in one counting forwards (a
 /// state of files without a time axis at any date: the present's).
-double StateTime(const SeaLevelRun& run) {
+double StateTime(const Run& run) {
   const auto& window = *run.times;
   if (!window.Dated()) return -run.ocean->date_kyr_bp.value_or(0.0) * KYR;
   return run.ocean->at == WindowEnd::Start ? window.Axis(0)
@@ -657,7 +715,7 @@ double StateTime(const SeaLevelRun& run) {
 
 /// The state's sea level at its instant, SI, a topography converted with
 /// the state's ice.
-std::vector<double> StateSeaLevel(const SeaLevelRun& run, const Json& top,
+std::vector<double> StateSeaLevel(const Run& run, const Json& top,
                                   const SeaLevelParameters& parameters,
                                   const io::FieldHistory& sea,
                                   const RunIce& ice) {
@@ -682,7 +740,7 @@ std::vector<double> ChangeFromStart(const RunIce& ice, bool stateAtStart,
 
 }  // namespace
 
-Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
+Loaded LoadWorld(const Run& run, const Json& top,
                  const GRDSolver& solver) {
   if (!run.ocean) {
     auto out = Loaded{};
@@ -758,7 +816,7 @@ Loaded LoadWorld(const SeaLevelRun& run, const Json& top,
           changeAtStart};
 }
 
-std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
+std::vector<double> FinalSeaLevelOf(const Run& run, const Json& top,
                                     const GRDSolver& solver,
                                     const Loaded& world) {
   auto sea = StateSeaLevel(run, top, solver.Parameters(), *world.seaLevel,
@@ -768,16 +826,16 @@ std::vector<double> FinalSeaLevelOf(const SeaLevelRun& run, const Json& top,
   return sea;
 }
 
-std::string WhenOf(const SeaLevelRun& run, const Scales& scales, double t) {
+std::string WhenOf(const Run& run, const Scales& scales, double t) {
   const auto& window = *run.times;
   return window.Label(window.Axis(0) + t * scales.Time());
 }
 
-std::vector<double> MakeTimes(const SeaLevelRun& run, const Scales& scales) {
+std::vector<double> MakeTimes(const Run& run, const Scales& scales) {
   return run.times->Times(scales.Time());
 }
 
-SolverClock SolverClockOf(const SeaLevelRun& run, const Scales& scales) {
+SolverClock SolverClockOf(const Run& run, const Scales& scales) {
   if (!run.times || run.times->Dated()) {
     return {.zero = 0.0, .rate = scales.Time() / KYR};
   }
@@ -786,7 +844,7 @@ SolverClock SolverClockOf(const SeaLevelRun& run, const Scales& scales) {
 }
 
 std::function<std::vector<double>(double)> IceLoadOf(
-    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world) {
+    const Run& run, const GRDSolver& solver, const Loaded& world) {
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   const auto& scales = solver.SolverScales();
@@ -809,7 +867,7 @@ std::function<std::vector<double>(double)> IceLoadOf(
 }
 
 std::function<std::vector<double>(double)> IceThicknessOf(
-    const SeaLevelRun& run, const GRDSolver& solver, const Loaded& world) {
+    const Run& run, const GRDSolver& solver, const Loaded& world) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto time = scales.Time();
@@ -828,7 +886,7 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   };
 }
 
-IceHistory HistoryOf(const SeaLevelRun& run, const GRDSolver& solver,
+IceHistory HistoryOf(const Run& run, const GRDSolver& solver,
                      const Loaded& world) {
   return run.ocean->shorelines == Shorelines::Frozen
              ? IceHistory::Frozen(IceLoadOf(run, solver, world))
@@ -837,7 +895,7 @@ IceHistory HistoryOf(const SeaLevelRun& run, const GRDSolver& solver,
 
 namespace {
 
-CalibrationOptions CalibrationOptionsOf(const SeaLevelRun& run) {
+CalibrationOptions CalibrationOptionsOf(const Run& run) {
   auto options = CalibrationOptions{};
   options.method = run.ocean->calibration_method;
   options.iterations = run.ocean->calibration_iterations;
@@ -850,7 +908,7 @@ CalibrationOptions CalibrationOptionsOf(const SeaLevelRun& run) {
 }
 
 template <class Calibration>
-CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
+CalibrationSummary Adopt(const Run& run, const Json& top,
                          const GRDSolver& solver, Loaded& world,
                          Calibration calibration) {
   for (const auto& snapshot : calibration.snapshots) {
@@ -880,7 +938,7 @@ CalibrationSummary Adopt(const SeaLevelRun& run, const Json& top,
 
 }  // namespace
 
-void StartFromIceHistory(const SeaLevelRun& run, const GRDSolver& solver,
+void StartFromIceHistory(const Run& run, const GRDSolver& solver,
                          Loaded& world, std::span<const double> seaLevelGuess) {
   const auto length = solver.SolverScales().Length();
   world.ice0 = run.ocean->at == WindowEnd::Start
@@ -899,7 +957,7 @@ namespace {
 
 /// The calibration's start, pyslfp's construction: the run's ice at the
 /// window's start under the target sea level, as the guess.
-std::vector<double> PrepareCalibration(const SeaLevelRun& run, const Json& top,
+std::vector<double> PrepareCalibration(const Run& run, const Json& top,
                                        const GRDSolver& solver,
                                        Loaded& world) {
   auto target = FinalSeaLevelOf(run, top, solver, world);
@@ -909,7 +967,7 @@ std::vector<double> PrepareCalibration(const SeaLevelRun& run, const Json& top,
 
 }  // namespace
 
-CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
+CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
                                   const GRDSolver& solver, Loaded& world,
                                   Evolution& evolution,
                                   std::span<const double> times) {
@@ -921,7 +979,7 @@ CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
                                target, CalibrationOptionsOf(run)));
 }
 
-CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
+CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
                                   const GRDSolver& solver, Loaded& world,
                                   Evolution3D& evolution,
                                   std::span<const double> times) {
@@ -931,6 +989,351 @@ CalibrationSummary CalibrateWorld(const SeaLevelRun& run, const Json& top,
       run, top, solver, world,
       CalibrateInitialSeaLevel(evolution, times, HistoryOf(run, solver, world),
                                target, CalibrationOptionsOf(run)));
+}
+
+template <class EvolutionForcing>
+EvolutionForcing ForcingOf(
+    const Run& run, const GRDSolver& solver,
+    const std::function<std::vector<double>(double)>& iceLoad,
+    std::shared_ptr<const SurfaceLoads> loads) {
+  const auto& scales = solver.SolverScales();
+  const auto length = scales.Length();
+  const auto clock = SolverClockOf(run, scales);
+  const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  const auto ice = static_cast<bool>(iceLoad);
+  auto forcing = EvolutionForcing{};
+  if (loads) {
+    // a node's loads are built once, whichever is asked first
+    struct Built {
+      std::optional<double> t;
+      SurfaceLoads::Node node;
+    };
+    const auto built = std::make_shared<Built>();
+    const auto at = [built, loads,
+                     clock](double t) -> const SurfaceLoads::Node& {
+      if (!built->t || *built->t != t) {
+        built->node = loads->At(clock.At(t));
+        built->t = t;
+      }
+      return built->node;
+    };
+    auto any = [&](auto member) {
+      return std::ranges::any_of(run.forcing.load, member);
+    };
+    const auto inside =
+        any([](const SurfaceLoadTerm& term) { return term.water_budget; });
+    const auto outside =
+        any([](const SurfaceLoadTerm& term) { return !term.water_budget; });
+    const auto layered = any(
+        [](const SurfaceLoadTerm& term) { return term.moves_solid_surface; });
+    if (inside || ice) {
+      forcing.directLoad = [at, iceLoad, ice, inside, toLoad](double t) {
+        auto out = ice ? iceLoad(t) : std::vector<double>{};
+        if (!inside) return out;
+        const auto& given = at(t).inside;
+        if (out.empty()) out.assign(given.size(), 0.0);
+        for (auto i = std::size_t{0}; i < out.size(); ++i) {
+          out[i] += given[i] / toLoad;
+        }
+        return out;
+      };
+    }
+    if (outside) {
+      forcing.directLoadOutsideWaterBudget = [at, toLoad](double t) {
+        auto out = at(t).outside;
+        for (auto& v : out) v /= toLoad;
+        return out;
+      };
+    }
+    if (layered) {
+      forcing.solidSurfaceChange = [at, length](double t) {
+        auto out = at(t).layer;
+        for (auto& v : out) v /= length;
+        return out;
+      };
+    }
+  } else if (ice) {
+    forcing.directLoad = iceLoad;
+  }
+  if (!run.forcing.tide.empty()) {
+    const auto toPotential = scales.Factor(PotentialDimensions);
+    forcing.tide = [tide = run.forcing.tide, grid = &solver.Grid(), clock,
+                    toPotential](double t) {
+      auto out = TideAt(tide, *grid, clock.At(t));
+      for (auto& c : out) c /= toPotential;
+      return out;
+    };
+  }
+  if (!run.forcing.seismic.empty()) {
+    const auto surfaceRadius = solver.Radius() * length;
+    const auto energy =
+        scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+    forcing.sources = [seismic = run.forcing.seismic, surfaceRadius, clock,
+                       length, energy](double t) {
+      auto sources = SeismicSourcesAt(seismic, clock.At(t), surfaceRadius);
+      for (auto& source : sources) {
+        source.at.radius /= length;
+        for (auto* c : {&source.moment.rr, &source.moment.tt,
+                        &source.moment.pp, &source.moment.rt,
+                        &source.moment.rp, &source.moment.tp}) {
+          *c /= energy;
+        }
+      }
+      return sources;
+    };
+  }
+  return forcing;
+}
+
+template Evolution::Forcing ForcingOf<Evolution::Forcing>(
+    const Run&, const GRDSolver&,
+    const std::function<std::vector<double>(double)>&,
+    std::shared_ptr<const SurfaceLoads>);
+template Evolution3D::Forcing ForcingOf<Evolution3D::Forcing>(
+    const Run&, const GRDSolver&,
+    const std::function<std::vector<double>(double)>&,
+    std::shared_ptr<const SurfaceLoads>);
+
+template <class EvolutionForcing>
+Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
+                                const GRDSolver& solver, const Loaded& world) {
+  const auto migrating = run.Migrating();
+  auto out = Drive<EvolutionForcing>{};
+  // the ice's grounded load under frozen shorelines; a body without an
+  // ocean has no ice
+  if (run.ocean && !migrating) out.directLoad = IceLoadOf(run, solver, world);
+  if (migrating) out.thickness = IceThicknessOf(run, solver, world);
+  // The forcing beside the ice: the surface loads by their properties, the
+  // tide and the seismic sources. Under frozen shorelines the ice's load
+  // joins the loads in the water budget; under migrating ones the ice is
+  // given as its thickness, and a change present at the window's start is
+  // taken through the forcing's entries (with nothing beside the ice, an
+  // empty forcing), so that the start is solved. A run without an ocean
+  // is forced beside the ice alone.
+  out.forced = run.forcing.BesideTheIce() ||
+               (migrating && world.ChangedAtStart());
+  if (!run.forcing.load.empty()) {
+    out.loads = std::make_shared<const SurfaceLoads>(run.forcing,
+                                                     solver.Grid(),
+                                                     top.At("forcing"));
+  }
+  if (out.forced) {
+    out.forcing =
+        ForcingOf<EvolutionForcing>(run, solver, out.directLoad, out.loads);
+  }
+  return out;
+}
+
+template Drive<Evolution::Forcing> DriveOf<Evolution::Forcing>(
+    const Run&, const Json&, const GRDSolver&, const Loaded&);
+template Drive<Evolution3D::Forcing> DriveOf<Evolution3D::Forcing>(
+    const Run&, const Json&, const GRDSolver&, const Loaded&);
+
+template <class EvolutionT>
+std::vector<typename EvolutionT::Snapshot> RunDriven(
+    EvolutionT& evolution, std::span<const double> times,
+    const Drive<typename EvolutionT::Forcing>& drive, bool migrating) {
+  if (migrating && drive.forced) {
+    return evolution.RunMigrating(times, drive.thickness, drive.forcing);
+  }
+  if (drive.forced) return evolution.Run(times, drive.forcing);
+  if (migrating) return evolution.RunMigrating(times, drive.thickness);
+  return evolution.Run(times, drive.directLoad);
+}
+
+template <class EvolutionT>
+std::vector<typename EvolutionT::Snapshot> ResumeDriven(
+    EvolutionT& evolution, const typename EvolutionT::Checkpoint& from,
+    std::span<const double> remaining,
+    const Drive<typename EvolutionT::Forcing>& drive, bool migrating) {
+  if (migrating && drive.forced) {
+    return evolution.ResumeMigrating(from, remaining, drive.thickness,
+                                     drive.forcing);
+  }
+  if (drive.forced) return evolution.Resume(from, remaining, drive.forcing);
+  if (migrating) {
+    return evolution.ResumeMigrating(from, remaining, drive.thickness);
+  }
+  return evolution.Resume(from, remaining, drive.directLoad);
+}
+
+template std::vector<Evolution::Snapshot> RunDriven<Evolution>(
+    Evolution&, std::span<const double>, const Drive<Evolution::Forcing>&,
+    bool);
+template std::vector<Evolution3D::Snapshot> RunDriven<Evolution3D>(
+    Evolution3D&, std::span<const double>, const Drive<Evolution3D::Forcing>&,
+    bool);
+template std::vector<Evolution::Snapshot> ResumeDriven<Evolution>(
+    Evolution&, const Evolution::Checkpoint&, std::span<const double>,
+    const Drive<Evolution::Forcing>&, bool);
+template std::vector<Evolution3D::Snapshot> ResumeDriven<Evolution3D>(
+    Evolution3D&, const Evolution3D::Checkpoint&, std::span<const double>,
+    const Drive<Evolution3D::Forcing>&, bool);
+
+void Check1D(const Evolution::Snapshot& snapshot, std::string_view when) {
+  if (!snapshot.converged) {
+    throw std::runtime_error(std::format(
+        "the sea level solve did not converge at {} (shoreline cells "
+        "flipping back and forth defeat the migrating solve's "
+        "tolerance); loosen solver.rtol",
+        when));
+  }
+}
+
+void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when) {
+  if (!snapshot.converged) {
+    throw std::runtime_error(std::format(
+        "the coupled fixed point or its sea level solve did not "
+        "converge at {} (residual {:.3g} after {} iterations; under "
+        "migrating shorelines, cells flipping back and forth can "
+        "defeat the tolerances); raise solver.step_max_iterations, or "
+        "loosen solver.step_rtol or solver.rtol",
+        when, snapshot.coupledResidual, snapshot.coupledIterations));
+  }
+}
+
+StaticWorld LoadStaticWorld(const Run& run, const Json& top,
+                            const GRDSolver& solver) {
+  if (!run.ocean) {
+    auto out = StaticWorld{};
+    out.background = solver.NoOceanState();
+    return out;
+  }
+  const auto& source = run.ocean->seaLevel;
+  const auto length = solver.SolverScales().Length();
+  auto files = InputFiles(solver.Grid());
+  CheckStateDate(run, top, files);
+  const auto sea = files.Open(source.input, SeaLevelMember(run, top));
+  const auto iceFile = files.Open(run.ocean->ice, IceMember(top));
+  // a state without a time axis is read at any date: the present's
+  const auto date = run.ocean->date_kyr_bp;
+  const auto time = -date.value_or(0.0) * KYR;
+  const RunIce ice(run, top, files, time);
+  ice.CheckHeld(std::span(&time, 1), nullptr);
+  // the state's ice, and its sea level: given, or by the flotation
+  // construction with the solver's own densities from the topography and
+  // the state's ice
+  auto iceNd = ice.State();
+  auto seaNd = SeaLevelFrom(run, top, *sea, iceNd, time, solver.Parameters());
+  for (auto& v : iceNd) v /= length;
+  for (auto& v : seaNd) v /= length;
+  const auto land = ReadLand(run, top, files, time);
+  auto out = StaticWorld{};
+  out.background =
+      solver.MakeState(std::move(iceNd), std::move(seaNd), land.held);
+  out.change = ice.ChangeAt(time);
+  const auto slice = [&date](const io::FieldHistory& file) {
+    return file.Span() ? std::format("{:g} kyr BP", date.value_or(0.0))
+                       : std::string{"static"};
+  };
+  out.iceRead = DescribeInput(run.ocean->ice, slice(*iceFile));
+  out.seaLevelRead = std::format("{} {}", source.Quantity(),
+                                 DescribeInput(source.input, slice(*sea)));
+  if (!land.read.empty()) out.seaLevelRead += ", " + land.read;
+  return out;
+}
+
+std::shared_ptr<const SurfaceLoads> StaticLoadsOf(const Run& run,
+                                                  const Json& top,
+                                                  const SurfaceGrid& grid) {
+  if (run.forcing.load.empty()) return nullptr;
+  return std::make_shared<const SurfaceLoads>(run.forcing, grid,
+                                              top.At("forcing"), false);
+}
+
+template <class EvolutionT>
+std::vector<typename EvolutionT::Snapshot> SolveStatic(
+    const Run& run, const GRDSolver& solver, const StaticWorld& world,
+    std::shared_ptr<const SurfaceLoads> loads, EvolutionT& evolution) {
+  const auto length = solver.SolverScales().Length();
+  const auto& background = world.background;
+  const auto& change = world.change;
+  const auto migrating = run.Migrating();
+  auto iceLoad = std::function<std::vector<double>(double)>{};
+  if (run.ocean && !migrating) {
+    auto load = std::vector<double>(change.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = solver.IceDensity() * (1.0 - background.oceanFunction[i]) *
+                change[i] / length;
+    }
+    iceLoad = [load = std::move(load)](double) { return load; };
+  }
+  const auto forcing = ForcingOf<typename EvolutionT::Forcing>(
+      run, solver, iceLoad, std::move(loads));
+  const auto one = std::vector<double>{0.0};
+  if (migrating) {
+    auto thickness = background.iceThickness;
+    for (auto i = std::size_t{0}; i < thickness.size(); ++i) {
+      thickness[i] += change[i] / length;
+    }
+    return evolution.RunMigrating(
+        one, [thickness = std::move(thickness)](double) { return thickness; },
+        forcing);
+  }
+  return evolution.Run(one, forcing);
+}
+
+template std::vector<Evolution::Snapshot> SolveStatic<Evolution>(
+    const Run&, const GRDSolver&, const StaticWorld&,
+    std::shared_ptr<const SurfaceLoads>, Evolution&);
+template std::vector<Evolution3D::Snapshot> SolveStatic<Evolution3D>(
+    const Run&, const GRDSolver&, const StaticWorld&,
+    std::shared_ptr<const SurfaceLoads>, Evolution3D&);
+
+Rheology ElasticRheologyOf(const BuiltEarth& earth, const Json& top) {
+  auto elastic = Rheology::Create(earth.material, {});
+  if (!elastic) Fail(top.At("model").At("deck"), elastic.error().message);
+  return std::move(*elastic);
+}
+
+std::string Meaning(const Run& run, const BuiltEarth& earth) {
+  auto out = earth.Dimension();
+  if (!run.times) {
+    // the static problem at its one instant, in the place of the window
+    out += ", elastic, static";
+    out += run.ocean ? std::format(", shorelines {}",
+                                   NameOf(run.ocean->shorelines))
+                     : std::string{", no ocean"};
+  } else {
+    const auto& window = *run.times;
+    out += window.Dated()
+               ? std::format(", viscoelastic, {} nodes {} to {} kyr BP",
+                             window.Size(), window.Start(), window.End())
+               : std::format(", viscoelastic, {} nodes {} to {} {} on the "
+                             "run's clock",
+                             window.Size(), window.Start(), window.End(),
+                             window.unit.name);
+    if (!run.ocean) {
+      out += ", no ocean";
+    } else {
+      out += std::format(", shorelines {}", NameOf(run.ocean->shorelines));
+      if (run.Calibrating()) out += ", initial sea level calibrated";
+    }
+  }
+  if (!run.gravitating) out += ", no gravity";
+  out += std::format(", rotation {}", NameOf(run.rotation));
+  if (run.hydrostatic_moments) out += ", moments hydrostatic";
+  return out;
+}
+
+std::string WithInputs(std::string_view meaning, const Run& run,
+                       std::string_view iceRead, std::string_view seaLevelRead,
+                       std::span<const std::string> inputs) {
+  auto out = run.ocean ? std::format("{}; ice {}, {}", meaning, iceRead,
+                                     seaLevelRead)
+                       : std::string{meaning};
+  if (const auto change = DescribeIceChange(run, " + "); !change.empty()) {
+    out += "; ice change " + change;
+  }
+  if (const auto beside = Summary(run.forcing); !beside.empty()) {
+    out += "; " + beside;
+  }
+  for (const auto& read : inputs) out += "; " + read;
+  return out;
+}
+
+std::vector<std::string> InputsOf(const SurfaceLoads* loads) {
+  return loads != nullptr ? loads->Inputs() : std::vector<std::string>{};
 }
 
 }  // namespace sl3dpp::app

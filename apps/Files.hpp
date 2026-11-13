@@ -36,9 +36,8 @@ enum class FileFormat { PlanetmodelSurface };
 
 /// A file input: the file, its type, the variable read from it and,
 /// where its member gives one, the date it is read at (kyr before present
-/// for `sea-level`'s terms, `date_kyr_bp`; kyr on the file's own axis for
-/// `response`'s `field` term, `date_kyr`; a time in the term's unit on
-/// the file's own axis for `sea-level`'s static `field` term, `date`).
+/// for a term's `date_kyr_bp`; a time in the term's unit on the file's own
+/// axis for a static `field` term's `date`).
 struct FileInput {
   std::filesystem::path file;
   FileFormat format = FileFormat::PlanetmodelSurface;

@@ -581,11 +581,6 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
         "(record_stride 1): the states between could not be rebuilt "
         "without the sources' forces");
   }
-  if (sourced_ && options_.record_stride > 0 && options_.on_state) {
-    throw std::invalid_argument(
-        "a recorded run under interior sources keeps its states on the "
-        "snapshots, with their strains");
-  }
   Coupled coupled(*this, migrating);
   auto& response = coupled.response;
   auto& ocean = coupled.ocean;
@@ -670,6 +665,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   PrimeForRecording();
 
   auto snapshots = std::vector<Snapshot>{};
+  auto recorded = std::size_t{0};
   auto record = [&](double t, GRDSolver::Response& r,
                     const Viscoelastic3D::StepInfo& info, bool converged,
                     bool keepState) {
@@ -680,8 +676,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     auto kept = std::optional<Viscoelastic3D::State>{};
     if (options_.on_state) std::swap(kept, snapshot.internalState);
     snapshots.push_back(std::move(snapshot));
-    const auto node = snapshots.size() - (resumed ? 0 : 1);
+    const auto node = ++recorded - (resumed ? 0 : 1);
     if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
+    if (!options_.keep_snapshots) snapshots.pop_back();
     if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
   if (!resumed) {

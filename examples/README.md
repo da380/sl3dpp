@@ -40,7 +40,7 @@ Every input is in `build/examples/data/`.
   the PREM-like deck's density and moduli with a lateral perturbation of
   the upper mantle — a stiff craton under the Canadian shield, a soft
   ridge under the eastern Pacific — in the form planetmodel's conversion
-  of a tomography model writes, for `ExampleStatic3D` and `response.json`.
+  of a tomography model writes, for `ExampleStatic3D` and `no_ocean.json`.
 - **The synthetic Earth**, `synthetic_earth.nc`, which the build writes
   (`MakeSyntheticEarth`): a planetmodel surface file of `ice_thickness` and
   `topography` on a 1° grid over a toy glacial cycle — smooth continents on
@@ -54,7 +54,7 @@ Every input is in `build/examples/data/`.
   it.
 - **The toy planet**, `planet.gia.deck` and `planet.elastic.deck`, which
   `make_planet_deck.py` writes (below), for the configs
-  `response_tide_planet.json` and `response_tide_planet_relax.json`.
+  `no_ocean_tide_planet.json` and `no_ocean_tide_planet_relax.json`.
 - The PREM-like deck `prem8.elastic.deck` and, for the 3D model-file
   example and configs, `viscosity_log.nc`, a planetmodel model file of a
   3D viscosity on the same body (both copied from `tests/data`), and
@@ -76,12 +76,12 @@ uses it; `inputs.py` holds what they share.
 | Script | Writes (by default) | Read by |
 | --- | --- | --- |
 | `make_earth_deck.py` | `earth_custom.gia.deck`, `earth_custom.elastic.deck`: PREM without its ocean, an elastic lithosphere (100 km), Maxwell upper and lower mantles (5e20 and 5e21 Pa s), isotropic where they relax | `model.deck` |
-| `make_planet_deck.py` | `planet.gia.deck`, `planet.elastic.deck`: a three-layer toy Mars (fluid core, Maxwell mantle, elastic lid); prints its mass and surface gravity | `model.deck`; `response_tide_planet*.json` |
-| `make_lateral_model.py` | `<deck>_<field>_<kind>.nc`: a 3D viscosity or lateral moduli on a deck's own body, an analytic pattern, S40RTS or a Gaussian random field; from S40RTS the viscosity by sl3d's conversion chain (optionally renormalised to the deck's mean, with a lid), the moduli from the shear speed and a scaled P speed (`--vp-scaling`) | `model.viscosity.file`, `model.moduli.file` |
+| `make_planet_deck.py` | `planet.gia.deck`, `planet.elastic.deck`: a three-layer toy Mars (fluid core, Maxwell mantle, elastic lid); prints its mass and surface gravity | `model.deck`; `no_ocean_tide_planet*.json` |
+| `make_lateral_model.py` | `<deck>_<field>_<kind>.nc` (`s40rts` in place of the `tomography` kind, as `earth_custom_viscosity_s40rts.nc`): a 3D viscosity or lateral moduli on a deck's own body, an analytic pattern, S40RTS or a Gaussian random field; from S40RTS the viscosity by sl3d's conversion chain (optionally renormalised to the deck's mean, with a lid), the moduli from the shear speed and a scaled P speed (`--vp-scaling`) | `model.viscosity.file`, `model.moduli.file` |
 | `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice` and `ocean.topography` (the state), a `thickness` term of `forcing.ice_change` (the history) |
-| `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term of `response` (a static one, of `sea-level` too) |
-| `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term of `response` |
-| `make_tide_history.py` | `configs/response_tide_oscillating.json`: a `response` config of a sinusoidal degree-2 tide at a chosen period | `sl3d response` |
+| `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term (`forcing.load`) |
+| `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term (`forcing.load`) |
+| `make_tide_history.py` | `configs/no_ocean_tide_oscillating.json`: a config of a sinusoidal degree-2 tide at a chosen period on a body without an ocean | `sl3d solve` |
 
 A data set a script needs that is not on disk yet (S40RTS for
 planetmodel, ICE-xG for pyslfp) is downloaded only with `--download`;
@@ -101,8 +101,8 @@ writing a config from scratch:
 
 ```sh
 cd build/examples/configs
-../../apps/sl3d sea-level sea_level_fingerprint.json   # one command
-./run_all.sh                                           # every config in turn
+../../apps/sl3d solve sea_level_fingerprint.json   # one config
+./run_all.sh                                       # every config in turn
 ```
 
 Each config's outputs land in `configs/out/<config>/` (`<config>` is the
@@ -118,17 +118,17 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | `sea_level_1d` | `sea_level.png`: the 1D run and `sea_level_3d`'s together |
 | `sea_level_1d_ice7g` | `sea_level.png` |
 | `sea_level_1d_calibrated`, `sea_level_3d_calibrated`, `sea_level_1d_ice7g_calibrated` | `calibration.png` |
-| `kernel1d` | `kernels.png` |
+| `kernel1d` | `kernels.png`: its ice kernels and radial viscosity kernels |
 | `kernel` | `viscosity_kernels.png` |
-| `response`, `response_viscoelastic`, `response1d_disk` | `displacement.png` |
-| `response1d_tide` | `love_numbers.png` |
-| `response_tide_3d` | `body_tide.png`: the radial model's tidal displacement, the 3D minus radial difference and the difference's spectrum by degree |
-| `response_tide_oscillating` | `oscillating.png`: the potential and the response through the run, and the Love numbers' amplitudes and lags at its period and those of `response_tide_oscillating_short` and `_long` |
-| `response_tide_planet` | `body_tide.png`: the toy planet's tidal displacement and potential, with its h2 and k2 |
-| `response_tide_planet_relax` | `love_numbers.png`: the toy planet's h2 and k2 through time, beside the Earth's |
-| `sea_level_fingerprint_melt` (with `response_melt`) | `ocean.png`: one cap of ice laid on bare land through `response` and through `sea-level`, the displacement each way, its difference (the ocean's load) and the sea-level change |
-| `response_cap_weak` (with `response_cap_strong`) | `relaxation.png`: the lateral viscosity with the two caps, and the displacement at each cap's centre through time, 3D and radial model |
-| `response_load_field` (with `response_load_cap`, `response_load_coefficients`) | `agreement.png`: the forcing on the run's clock and the file's axis, the three runs' displacement, and their agreement |
+| `no_ocean`, `no_ocean_viscoelastic`, `no_ocean_1d_disk` | `displacement.png` |
+| `no_ocean_1d_tide` | `love_numbers.png` |
+| `no_ocean_tide_3d` | `body_tide.png`: the radial model's tidal displacement, the 3D minus radial difference and the difference's spectrum by degree |
+| `no_ocean_tide_oscillating` | `oscillating.png`: the potential and the response through the run, and the Love numbers' amplitudes and lags at its period and those of `no_ocean_tide_oscillating_short` and `_long` |
+| `no_ocean_tide_planet` | `body_tide.png`: the toy planet's tidal displacement and potential, with its h2 and k2 |
+| `no_ocean_tide_planet_relax` | `love_numbers.png`: the toy planet's h2 and k2 through time, beside the Earth's |
+| `sea_level_fingerprint_ice_cap` (with `no_ocean_ice_cap`) | `ocean.png`: one cap of ice laid on bare land without an ocean and with one, the displacement each way, its difference (the ocean's load) and the sea-level change |
+| `no_ocean_cap_weak` (with `no_ocean_cap_strong`) | `relaxation.png`: the lateral viscosity with the two caps, and the displacement at each cap's centre through time, 3D and radial model |
+| `no_ocean_load_field` (with `no_ocean_load_cap`, `no_ocean_load_coefficients`) | `agreement.png`: the forcing on the run's clock and the file's axis, the three runs' displacement, and their agreement |
 | `timestep_study` (the `timestep_*` configs) | `accuracy.png`: the error against the step of the sea level by both schemes and of the viscosity kernels by both adjoints, and the kernels at 1 kyr steps |
 | `sea_level_fingerprint_3d_ice7g` | `fingerprint.png`: the fingerprint on PREM with S40RTS's moduli, over the ocean and near Greenland, and its 3D minus radial difference |
 | `sea_level_3d_ice7g` (with `sea_level_1d_ice7g_custom`) | `sea_level.png`: the sea-level change since 26 ka in 3D and 3D minus radial, and relative sea-level histories at three sites, 3D and radial |
@@ -138,8 +138,8 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 alone has run), so it has no folder of its own. The static problem's
 `sea_level_static_migrating` (the synthetic deglaciation under migrating
 shorelines) and `sea_level_static_coseismic` (a fault alone) have no
-figures, nor has `sea_level_no_ocean` (`response_load_cap`'s run as a
-`sea-level` run without an ocean); their surface files hold the fields
+figures, nor has `sea_level_no_ocean` (`no_ocean_load_cap`'s run, its
+times dates before present); their surface files hold the fields
 `examples/configs/README.md` names.
 
 The tide figures show three things. On the synthetic 3D Earth the lunar
@@ -154,10 +154,11 @@ planet's elastic Love numbers are h2 = 0.339 and k2 = 0.182, and a held
 tide relaxes several times more slowly on it than on the Earth.
 
 **The configs in `build/examples/configs` are yours to edit.** The build copies
-them there only when they are missing and never overwrites them, so change
-the degree, the dates, the ice change or the measurements and run again;
-delete a file (or the whole directory) and reconfigure to get the original
-back. [configs/README.md](configs/README.md) says what each config does, and every
+a config there when its copy is missing, and again when its source has
+changed and its copy has not been edited (an edited copy is kept, the
+configure step saying so), so change the degree, the dates, the ice
+change or the measurements and run again; delete a file (or the whole
+directory) and reconfigure to get the original back. [configs/README.md](configs/README.md) says what each config does, and every
 member is documented in the configuration reference
 ([docs/sl3d-configs.md](../docs/sl3d-configs.md)). One thing to know:
 `sea_level_1d.json` writes checkpoints into `out/sea_level_1d/checkpoints`,
@@ -178,7 +179,7 @@ drivers' own defaults.
 ## Everything runs in the build tree
 
 At configure time CMake copies the inputs into `build/examples/data`, the
-configs into `build/examples/configs` (once), and the Python scripts and
+configs into `build/examples/configs` (above), and the Python scripts and
 the poetry file into `build/examples`, and the build writes the synthetic
 Earths into `data/`. Everything is run from `build/examples` (the configs
 from `configs/`), and every path is relative to it:
@@ -186,8 +187,9 @@ from `configs/`), and every path is relative to it:
 ```
 build/examples/
   Example*, Make*         the drivers and the synthetic-Earth writers
-  *.py, pyproject.toml    the plotting scripts, get_ice7g.py, the make_*.py
-                          input scripts, the poetry file
+  *.py, pyproject.toml    the plotting scripts and plotutil.py, the loading
+                          and mapping they share; get_ice7g.py, the make_*.py
+                          input scripts and timestep_study.py; the poetry file
   data/                   every input: the decks, viscosity_log.nc,
                           synthetic_earth.nc, synthetic_moduli.nc, ice7g.nc
                           and what the make_*.py scripts write
@@ -236,7 +238,7 @@ poetry run python plot_app.py
 cd build/examples                         # from the repository root
 poetry run python get_ice7g.py            # writes data/ice7g.nc
 ./ExampleFingerprint --state data/ice7g.nc    # any driver
-(cd configs && ./run_all.sh)              # now runs the *_ice7g.json configs too
+(cd configs && ./run_all.sh)              # every config, the *_ice7g.json ones among them
 ```
 
 With ICE-7G there, the custom PREM deck and its S40RTS files make the
@@ -253,7 +255,7 @@ poetry run python make_lateral_model.py --field viscosity --kind tomography \
 ```
 
 and the load given as a file and as a table (configs/README.md,
-`response_load_field.json`) needs
+`no_ocean_load_field.json`) needs
 
 ```sh
 poetry run python make_load_field.py --shape cap --lmax 32 --width-deg 5
@@ -276,7 +278,8 @@ Notes:
 - The drivers run **threaded by default** (OpenMP), on every core unless
   told otherwise: set `OMP_NUM_THREADS=N` to choose, or 1 for a serial run.
   For the 3D drivers, `GLIBC_TUNABLES=glibc.malloc.hugetlb=1` also asks for
-  huge pages for their large tensors (see the top-level README, Running).
+  huge pages for their large tensors ([docs/running.md](../docs/running.md),
+  Memory).
 - The Python environment holds pyslfp (for ICE-7G), planetmodel (to read
   the `sl3d` outputs and the synthetic Earth) and matplotlib with cartopy
   for the maps. Maps of a run on the synthetic Earth draw its own

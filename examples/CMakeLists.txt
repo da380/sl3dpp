@@ -145,16 +145,57 @@ foreach(python_file IN LISTS SL3DPP_EXAMPLE_PYTHON)
   configure_file(${python_file} ${python_name} COPYONLY)
 endforeach()
 
-# The sl3d configs, copied into build/examples/configs when they are not there
-# yet, and never overwritten: they are there to be edited and experimented
-# with. Deleting one (or the directory) and reconfiguring restores the
-# original. Their relative paths resolve against that directory, so they
+# The sl3d configs, copied into build/examples/configs to be edited and
+# experimented with there. A config is copied when its copy is
+# missing, and again when its source has changed and its copy has not been
+# edited: the source as last copied is kept under CMakeFiles/sl3dpp_configs,
+# and a copy that differs from it is an edited one, kept, the configure step
+# saying so. A copy made before that record was kept is set aside there
+# (replaced/) and copied again. Deleting one (or the directory) and
+# reconfiguring restores the original; a changed source makes the build
+# reconfigure. Their relative paths resolve against that directory, so they
 # reach the inputs as ../data/ and write into out/<config>/.
 file(GLOB SL3DPP_EXAMPLE_CONFIGS LIST_DIRECTORIES false CONFIGURE_DEPENDS
      ${CMAKE_CURRENT_SOURCE_DIR}/configs/*)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+             ${SL3DPP_EXAMPLE_CONFIGS})
+set(copies ${CMAKE_CURRENT_BINARY_DIR}/configs)
+set(copied ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/sl3dpp_configs)
+file(MAKE_DIRECTORY ${copies} ${copied})
 foreach(config_file IN LISTS SL3DPP_EXAMPLE_CONFIGS)
   get_filename_component(config_name ${config_file} NAME)
-  if(NOT EXISTS ${CMAKE_CURRENT_BINARY_DIR}/configs/${config_name})
-    file(COPY ${config_file} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}/configs)
+  set(copy ${copies}/${config_name})
+  set(record ${copied}/${config_name})
+  if(NOT EXISTS ${copy})
+    file(COPY ${config_file} DESTINATION ${copies})
+    file(COPY ${config_file} DESTINATION ${copied})
+    continue()
+  endif()
+  file(SHA256 ${config_file} source_hash)
+  file(SHA256 ${copy} copy_hash)
+  set(record_hash "")
+  if(EXISTS ${record})
+    file(SHA256 ${record} record_hash)
+  endif()
+  if(copy_hash STREQUAL source_hash)
+    if(NOT record_hash STREQUAL source_hash)
+      file(COPY ${config_file} DESTINATION ${copied})
+    endif()
+  elseif(record_hash STREQUAL "")
+    # copied before the record was kept: set aside, and copied again
+    file(MAKE_DIRECTORY ${copied}/replaced)
+    file(RENAME ${copy} ${copied}/replaced/${config_name})
+    file(COPY ${config_file} DESTINATION ${copies})
+    file(COPY ${config_file} DESTINATION ${copied})
+    message(STATUS "examples/configs/${config_name}: copied again from its "
+                   "source; the copy it replaces is in ${copied}/replaced")
+  elseif(copy_hash STREQUAL record_hash)
+    # unedited, its source changed: copied again
+    file(COPY ${config_file} DESTINATION ${copies})
+    file(COPY ${config_file} DESTINATION ${copied})
+  elseif(NOT source_hash STREQUAL record_hash)
+    message(STATUS "examples/configs/${config_name}: its source has changed "
+                   "and this copy was edited, so it is kept; delete it and "
+                   "reconfigure for the source's")
   endif()
 endforeach()

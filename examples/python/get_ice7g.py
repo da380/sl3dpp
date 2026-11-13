@@ -10,7 +10,7 @@ synthetic Earth takes too, so anything run on data/synthetic_earth.nc
 runs on data/ice7g.nc:
 
     ExampleFingerprint --state data/ice7g.nc
-    sl3d sea-level configs/sea_level_fingerprint_ice7g.json
+    sl3d solve configs/sea_level_fingerprint_ice7g.json
 
 Run from build/examples, in the examples' environment:
 

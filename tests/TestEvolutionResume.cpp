@@ -1,7 +1,8 @@
 // Checkpointed evolution: a run hands out its recurrence at the asked
 // stride, and a fresh evolution resumed from a mid-run checkpoint
 // reproduces the uninterrupted history node for node, bitwise on one
-// thread, which checks the checkpoint bookkeeping.
+// thread, which checks the checkpoint bookkeeping; a run keeping no
+// snapshots hands out the same ones and returns none.
 
 #include <gtest/gtest.h>
 
@@ -124,6 +125,34 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
     EXPECT_EQ(a.displacement, b.displacement) << "node " << 4 + k;
     EXPECT_EQ(a.potential, b.potential) << "node " << 4 + k;
     EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 4 + k;
+  }
+
+  // keeping no snapshots, the run hands every one out and returns none, and
+  // so does a resumed run, its nodes counted from the checkpoint's
+  for (const auto resuming : {false, true}) {
+    auto handed = std::map<std::size_t, Evolution::Snapshot>{};
+    auto streaming = Evolution::Options{};
+    streaming.keep_snapshots = false;
+    streaming.on_snapshot = [&](std::size_t node,
+                                const Evolution::Snapshot& snapshot) {
+      handed.emplace(node, snapshot);
+    };
+    Evolution streamed(op, scene.solver, scene.state, streaming);
+    const auto returned =
+        resuming ? streamed.Resume(
+                       checkpoints.at(3),
+                       std::vector<double>(times.begin() + 3, times.end()),
+                       directLoad)
+                 : streamed.Run(times, directLoad);
+    EXPECT_TRUE(returned.empty());
+    const auto first = resuming ? std::size_t{4} : std::size_t{0};
+    ASSERT_EQ(handed.size(), times.size() - first);
+    for (auto n = first; n < times.size(); ++n) {
+      const auto at = resuming ? n - 3 : n;
+      ASSERT_TRUE(handed.contains(at)) << "node " << n;
+      EXPECT_EQ(handed.at(at).displacement, full[n].displacement)
+          << "node " << n;
+    }
   }
 
   // a resumed grid must start at the checkpoint's own node

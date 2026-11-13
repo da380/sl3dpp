@@ -5,6 +5,7 @@
 #include <format>
 #include <numbers>
 #include <stdexcept>
+#include <string_view>
 
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
@@ -405,14 +406,29 @@ const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
                              .point_shear = flavour.pointShear.points != nullptr
                                                 ? &flavour.pointShear
                                                 : nullptr,
+                             .gravitating = options_.gravitating,
                              .cuts = options_.radial_cuts}))
             .first;
   }
   return found->second;
 }
 
+namespace {
+/// The refusal of what only the problem with gravity has.
+void RequireGravity(const ViscoelasticOperator& op, std::string_view what) {
+  if (!op.Gravitating()) {
+    throw std::invalid_argument(std::format(
+        "{} needs gravity: the operator solves the problem without it, "
+        "forced by interior sources alone (ViscoelasticStep::AddForce)",
+        what));
+  }
+}
+}  // namespace
+
 const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
                                                                int l) const {
+  RequireGravity(*this,
+                 "a load channel (a surface mass's weight) or a tide channel");
   auto& deg = Deg(l);
   auto& cache = flavour == nullptr ? unrelaxedUnits_ : flavour->units;
   auto found = cache.find(l);
@@ -429,6 +445,7 @@ const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
 
 const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
     Flavour* flavour, int l) const {
+  RequireGravity(*this, "a surface load's split responses");
   auto& deg = Deg(l);
   auto& cache =
       flavour == nullptr ? unrelaxedSplitUnits_ : flavour->splitUnits;
@@ -1037,6 +1054,7 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
 
 const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                                               double dt) const {
+  RequireGravity(*this, "the Love numbers of the sea level equation");
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {
@@ -1065,6 +1083,7 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
 }
 
 const LoveNumbers& ViscoelasticOperator::ElasticLoveNumbers() const {
+  RequireGravity(*this, "the Love numbers of the sea level equation");
   const auto key = std::pair(-1, 0.0);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {

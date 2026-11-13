@@ -130,7 +130,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
   auto ditauPoints = std::vector<std::vector<double>>{};
   if (itau.empty()) {
     ditauPoints.assign(op.GetRheology().BranchCount(),
-                       std::vector<double>(op.pointItau_[0].size(), 0.0));
+                       std::vector<double>(op.UnrelaxedShearAtPoints().size(), 0.0));
   } else {
     ditauPoints = op.ItauPerturbationAtPoints(itau);
   }
@@ -217,7 +217,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       [&ev](const std::vector<Complex>& c) {
         return ev.Columns(c, ev.toMatPotential_);
       });
-  const auto meshSize = op.pointItau_[0].size();
+  const auto meshSize = op.UnrelaxedShearAtPoints().size();
   auto itauKernel = std::vector<std::vector<double>>(
       K, std::vector<double>(meshSize, 0.0));
   auto dItauKernel = itauKernel;
@@ -1382,7 +1382,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
     dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
   }
   auto cursor = TrajectoryCursor(op, trajectory, dts, scheme, loadsOf, tidesOf);
-  const auto meshSize = op.pointItau_[0].size();
+  const auto meshSize = op.UnrelaxedShearAtPoints().size();
   auto itauKernel = std::vector<std::vector<double>>(
       K, std::vector<double>(meshSize, 0.0));
   auto dItauKernel = itauKernel;

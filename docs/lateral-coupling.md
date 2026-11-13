@@ -14,7 +14,8 @@ fields; the within-step lateral iteration; the 3D model reader
 (`io::ModelViscosity`, over planetmodel's model file). Gates: the
 zero-lateral limit against the 1D stepper at machine precision; the old
 sl3d (`visco_test`, `sea_level_3d`) in the explicit/weak-contrast limit;
-Δt self-convergence; AdGIA on a common model — the headline benchmark.
+Δt self-convergence. A comparison with AdGIA on a common laterally
+heterogeneous model is not run.
 
 ## 2. The canonical components and the degree ↔ spin maps
 
@@ -343,7 +344,7 @@ c. **Lateral weights and the within-step iteration** (§5). GATES: Δt
    in the weak-contrast limit (§5b; tolerances set by its explicit
    stepping and lack of dealiasing); contraction diagnostics over a
    contrast ladder (§5a, the research measurements).
-d. **AdGIA on a common model** — run from AdGIA's benchmark suite.
+d. **AdGIA on a common model**: not run.
 
 ## 8. Choices
 

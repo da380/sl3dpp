@@ -1,0 +1,14 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 4},
+  "times": {"unit": "kyr", "at": [0.0, 0.05, 0.1, 0.2, 0.35, 0.5, 0.75, 1.0, 1.5, 2.0,
+                                  3.0, 5.0, 7.5, 10.0, 15.0, 20.0, 30.0, 50.0, 75.0,
+                                  100.0, 150.0, 200.0, 300.0, 500.0]},
+  "forcing": {
+    "tide": [{"degree": 2, "order": 0, "amplitude_m2_s2": 1.0}]
+  },
+  "rotation": "none",
+  "output": {"surface": "out/no_ocean_1d_tide/no_ocean_1d_tide.nc",
+             "exchange": "out/no_ocean_1d_tide/no_ocean_1d_tide_{node}.txt"}
+}

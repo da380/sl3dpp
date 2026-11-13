@@ -8,10 +8,12 @@ add_library(sl3d_app STATIC
   Blocks.cpp
   Forcing.cpp
   Common.cpp
-  SeaLevelCommand.cpp
+  RunHash.cpp
+  Trajectory.cpp
+  Outputs.cpp
+  SolveCommand.cpp
   KernelCommand.cpp
   LoveNumbersCommand.cpp
-  ResponseCommand.cpp
   Ranks.cpp)
 target_include_directories(sl3d_app PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_libraries(sl3d_app PUBLIC sl3dpp::sl3dpp)

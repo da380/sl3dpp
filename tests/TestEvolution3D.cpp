@@ -749,6 +749,28 @@ TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
     EXPECT_EQ(a.angularVelocity, b.angularVelocity) << "node " << 2 + k;
     EXPECT_EQ(a.coupledIterations, b.coupledIterations) << "node " << 2 + k;
   }
+
+  // keeping no snapshots, the resumed run hands the same ones out, counted
+  // from the checkpoint's node, and returns none
+  auto handed = std::map<std::size_t, Evolution3D::Snapshot>{};
+  auto streaming = Evolution3D::Options{};
+  streaming.keep_snapshots = false;
+  streaming.on_snapshot = [&](std::size_t node,
+                              const Evolution3D::Snapshot& snapshot) {
+    handed.emplace(node, snapshot);
+  };
+  Evolution3D streamed(op, setup.solver, setup.state, streaming);
+  EXPECT_TRUE(streamed
+                  .Resume(checkpoints.at(1),
+                          std::vector<double>(times.begin() + 1, times.end()),
+                          directLoad)
+                  .empty());
+  ASSERT_EQ(handed.size(), tail.size());
+  for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+    ASSERT_TRUE(handed.contains(k + 1)) << "node " << k + 1;
+    EXPECT_EQ(handed.at(k + 1).displacement, tail[k].displacement)
+        << "node " << 2 + k;
+  }
 }
 
 TEST(Lateral, AResumedRunUnderInteriorSourcesIsTheUninterruptedOne) {

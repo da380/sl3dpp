@@ -17,10 +17,10 @@ Each step size N (the number of steps over the window) is four configs,
 written into configs/ beside the other example configs, each writing into
 out/<config>/ as they do:
 
-    timestep_et_n<N>.json, timestep_be_n<N>.json      sl3d sea-level, the
+    timestep_et_n<N>.json, timestep_be_n<N>.json      sl3d solve, the
         exponential trapezoid (second order) and backward Euler (first)
     timestep_discrete_n<N>.json, timestep_continuous_n<N>.json
-        sl3d kernel1d, the exponential trapezoid, the discrete adjoint (the
+        sl3d kernel, the exponential trapezoid, the discrete adjoint (the
         exact gradient of the time-stepped model) and the continuous one
 
 and the reference is the finest step's timestep_et_n<N>.json and
@@ -73,15 +73,15 @@ def step_kyr(steps: int) -> float:
 
 
 def config(kind: str, steps: int) -> dict:
-    """The config of one run: kind "et" or "be" (sea-level, by that
-    scheme) or "discrete" or "continuous" (kernel1d, by that adjoint)."""
+    """The config of one run: kind "et" or "be" (solve, by that
+    scheme) or "discrete" or "continuous" (kernel, by that adjoint)."""
     name = f"timestep_{kind}_n{steps}"
     if (START - MID) * steps % (START - END):
         raise ValueError(f"{steps} steps put no node at {MID:g} ka")
     out = {
         "problem": "quasi_static",
         "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-        "lmax": 16,
+        "discretisation": {"lmax": 16},
         "times": {"start_kyr_bp": START, "end_kyr_bp": END,
                   "nodes": steps + 1},
         "forcing": {"ice_change": [
@@ -95,12 +95,14 @@ def config(kind: str, steps: int) -> dict:
     if kind in SCHEMES:
         out["output"] = {"surface": f"out/{name}/{name}.nc"}
     else:
-        out["adjoint"] = kind
-        out["measurements"] = [
-            {"type": "relative_sea_level_cap", "name": measurement, **SITE,
-             "date_kyr_bp": date}
-            for measurement, date in MEASUREMENTS.items()]
-        out["output"] = f"out/{name}"
+        out["kernels"] = {
+            "method": kind,
+            "parameters": ["ice", "viscosity"],
+            "measurements": [
+                {"type": "relative_sea_level_cap", "name": measurement,
+                 **SITE, "date_kyr_bp": date}
+                for measurement, date in MEASUREMENTS.items()],
+            "output": f"out/{name}"}
     return out
 
 
@@ -111,8 +113,9 @@ def members(value: dict) -> list[str]:
 
 def write(kind: str, steps: int) -> Path:
     """Writes a run's config into configs/, in the examples' layout: a
-    block that would run past 78 columns has a member to a line, and a
-    measurement its type and name on one line and the rest on the next."""
+    block that would run past 78 columns has a member to a line, and in the
+    kernels block a measurement its type and name on one line and the rest
+    on the next."""
     c = config(kind, steps)
     path = CONFIGS / f"timestep_{kind}_n{steps}.json"
     lines = ["{"]
@@ -120,13 +123,17 @@ def write(kind: str, steps: int) -> Path:
     for k, (key, value) in enumerate(items):
         comma = "," if k < len(items) - 1 else ""
         text = f'  "{key}": {json.dumps(value)}{comma}'
-        if key == "measurements":
+        if key == "kernels":
             rows = []
-            for m in value:
+            for m in value["measurements"]:
                 parts = members(m)
-                rows.append("    {" + ", ".join(parts[:2]) + ",\n     "
+                rows.append("      {" + ", ".join(parts[:2]) + ",\n       "
                             + ", ".join(parts[2:]) + "}")
-            text = f'  "{key}": [\n' + ",\n".join(rows) + f"\n  ]{comma}"
+            text = (f'  "{key}": {{\n'
+                    f'    "method": {json.dumps(value["method"])},\n'
+                    f'    "parameters": {json.dumps(value["parameters"])},\n'
+                    '    "measurements": [\n' + ",\n".join(rows) + "\n    ],\n"
+                    f'    "output": {json.dumps(value["output"])}\n  }}{comma}')
         elif isinstance(value, dict) and len(text) > 78:
             text = (f'  "{key}": {{\n    ' + ",\n    ".join(members(value))
                     + f"\n  }}{comma}")
@@ -137,7 +144,7 @@ def write(kind: str, steps: int) -> Path:
 
 def family(short: bool) -> list[tuple[str, int]]:
     """The runs of the study, (kind, steps): every kind at each step, and
-    the reference's sea-level and discrete-kernel runs."""
+    the reference's solve and discrete-kernel runs."""
     steps, reference = ((SHORT_STEPS, SHORT_REFERENCE) if short
                         else (STEPS, REFERENCE))
     runs = [(kind, n) for n in steps
@@ -174,7 +181,7 @@ def runs_present() -> dict[str, dict[int, Path]]:
 
 
 def sea_level_at(directory: Path):
-    """A sea-level run's sea-level change at the measurement dates, and the
+    """A solve run's sea-level change at the measurement dates, and the
     grid's area weights."""
     from planetmodel.surfacefile import read_surface_file
 
@@ -193,13 +200,13 @@ def sea_level_at(directory: Path):
 
 
 def kernel(directory: Path, measurement: str):
-    """A kernel1d run's radial viscosity kernel: radius and K(r)."""
+    """A kernel run's radial viscosity kernel: radius and K(r)."""
     data = np.loadtxt(directory / f"{measurement}_viscosity_kernel.txt")
     return data[:, 0], data[:, 1]
 
 
 def values(directory: Path) -> dict[str, float]:
-    """A kernel1d run's measured values, by name."""
+    """A kernel run's measured values, by name."""
     out = {}
     for line in (directory / "measurements.txt").read_text().splitlines():
         if line.strip() and not line.startswith("#"):
@@ -318,7 +325,7 @@ def main() -> None:
         print(f"wrote {path}")
         if args.write_only:
             continue
-        command = "sea-level" if kind in SCHEMES else "kernel1d"
+        command = "solve" if kind in SCHEMES else "kernel"
         subprocess.run([sl3d, command, path.name], cwd=CONFIGS, env=env,
                        check=True)
     if not args.write_only:

@@ -127,11 +127,6 @@ ComplexTensor ModeStrain(int l, int m, const DegreeNodeValues& values, double r,
   return out;
 }
 
-Complex Contract(const SphericalTensor& M, const ComplexTensor& e) {
-  return M.rr * e.rr + M.tt * e.tt + M.pp * e.pp +
-         2.0 * (M.rt * e.rt + M.rp * e.rp + M.tp * e.tp);
-}
-
 /// The six unit modes of a degree at a radial node j of the element: the
 /// unknown U, V or W one at that node, whose value and r d_r derivative
 /// at the point are the node's Lagrange value and r times its derivative.
@@ -460,7 +455,7 @@ UnitSourceForces UnitForces(
         return std::pair{A, theta};
       };
       if (reachesS) {
-        for (const auto [which, component] :
+        for (const auto& [which, component] :
              {std::pair{0, Component::U}, std::pair{1, Component::V}}) {
           const auto dof = sph.Dof(global, component);
           if (dof < 0) continue;
