@@ -119,26 +119,12 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
         top.At("ocean"), directory, out.problem,
         timed ? out.times->calendar : Calendar::Dated);
   }
-  if (!out.gravitating) {
-    // the forcing of a run without gravity: seismic sources alone
-    const auto& forcing = top.At("forcing");
-    if (!out.forcing.tide.empty()) {
-      Fail(forcing.At("tide"),
-           "is a tide, an external potential, which a run without gravity "
-           "(`gravity`: \"none\") does not take");
-    }
-    if (!out.forcing.load.empty()) {
-      Fail(forcing.At("load"),
-           "is a surface load, which acts by its weight under gravity: a run "
-           "without gravity (`gravity`: \"none\") is forced by seismic "
-           "sources alone");
-    }
-  }
-  if (out.Migrating() && !out.forcing.tide.empty()) {
+  if (!out.gravitating && !out.forcing.tide.empty()) {
+    // the forcing of a run without gravity: surface loads (their weight)
+    // and seismic sources
     Fail(top.At("forcing").At("tide"),
-         "is a prescribed tide, which a run under migrating shorelines "
-         "(`ocean.shorelines`: \"migrating\") does not take: give frozen "
-         "shorelines for a tide");
+         "is a tide, an external potential, which a run without gravity "
+         "(`gravity`: \"none\") does not take");
   }
   // the calibration's runs are under the ice alone
   if (out.Calibrating() && out.forcing.BesideTheIce()) {
@@ -1048,6 +1034,41 @@ CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
                                target, CalibrationOptionsOf(run)));
 }
 
+namespace {
+
+/// Without gravity, the refusal of surface loads with a degree-1 part at
+/// one of `times` (the terms' clock), naming `forcing.load` and, through
+/// `label`, the time: a net force on the body, which nothing balances.
+/// The part is measured as the evolution measures it (DegreeOneShare
+/// against kDegreeOneTolerance), on the loads applied, every term summed.
+void RefuseDegreeOneLoads(const Json& top, const SurfaceLoads& loads,
+                          const SurfaceGrid& grid,
+                          std::span<const double> times,
+                          const std::function<std::string(std::size_t)>& label) {
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    const auto node = loads.At(times[n]);
+    auto total = std::vector<double>(grid.FieldSize(), 0.0);
+    for (const auto* part : {&node.inside, &node.outside}) {
+      for (auto i = std::size_t{0}; i < part->size(); ++i) {
+        total[i] += (*part)[i];
+      }
+    }
+    const auto share = DegreeOneShare(grid.Expand(total), grid.LMax());
+    if (share > kDegreeOneTolerance) {
+      Fail(top.At("forcing").At("load"),
+           std::format(
+               "has a degree-1 part ({:.3g} of the loads' size{}), a net "
+               "force on the body, which nothing balances in a run without "
+               "gravity (`gravity`: \"none\"): give loads with no degree-1 "
+               "part between them (a pair of antipodal caps or disks, a "
+               "zonal degree-2 pattern, a coefficient table without l = 1)",
+               share, label ? " at " + label(n) : std::string{}));
+    }
+  }
+}
+
+}  // namespace
+
 template <class EvolutionForcing>
 EvolutionForcing ForcingOf(
     const Run& run, const GRDSolver& solver,
@@ -1180,6 +1201,13 @@ Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
     auto times = MakeTimes(run, scales);
     for (auto& t : times) t = clock.At(t);
     out.loads->CheckCovers(times);
+    if (!run.gravitating) {
+      const auto& window = *run.times;
+      RefuseDegreeOneLoads(top, *out.loads, solver.Grid(), times,
+                           [&window](std::size_t n) {
+                             return window.Label(window.Axis(n));
+                           });
+    }
   }
   if (out.forced) {
     out.forcing =
@@ -1307,8 +1335,13 @@ std::shared_ptr<const SurfaceLoads> StaticLoadsOf(const Run& run,
                                                   const Json& top,
                                                   const SurfaceGrid& grid) {
   if (run.forcing.load.empty()) return nullptr;
-  return std::make_shared<const SurfaceLoads>(run.forcing, grid,
-                                              top.At("forcing"), false);
+  auto out = std::make_shared<const SurfaceLoads>(run.forcing, grid,
+                                                  top.At("forcing"), false);
+  if (!run.gravitating) {
+    const auto instant = std::vector<double>{0.0};
+    RefuseDegreeOneLoads(top, *out, grid, instant, {});
+  }
+  return out;
 }
 
 template <class EvolutionT>

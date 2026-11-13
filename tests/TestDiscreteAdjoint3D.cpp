@@ -311,7 +311,7 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
       1.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
   auto smoothTide = [&](double amplitude) {
     auto out = grid.Expand(scene.Smooth(rng, amplitude * potential));
-    out[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(out);  // a tide is degree 2 and up
     return out;
   };
   auto loads = std::vector<std::vector<double>>{};
@@ -377,6 +377,13 @@ TEST(DiscreteAdjoint3D, ATideAndTheTangentialDisplacementInThePair) {
                                         .coupled_rtol = 1e-12});
     const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     ASSERT_EQ(kernels.ice.tideKernels.size(), times.size());
+    // a tide is degree 2 and up: the kernels' entries below are zero
+    for (const auto& k : kernels.ice.tideKernels) {
+      for (const auto i : {SurfaceGrid::Index(0, 0), SurfaceGrid::Index(1, 0),
+                           SurfaceGrid::Index(1, 1)}) {
+        EXPECT_EQ(k[i], Complex{}) << label;
+      }
+    }
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
                                               .coupled_rtol = 1e-12});
@@ -1909,7 +1916,7 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepFormsTideKernels) {
   const auto span = 10.0 * scene.Kyr();
   const auto potential = 1.0 / sle.Factor(PotentialDimensions);
   auto tide0 = grid.Expand(scene.Smooth(rng, potential));
-  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide0);  // a tide is degree 2 and up
   const auto gSea = scene.Smooth(rng, 1.0);
   const auto gU = scene.Smooth(rng, 0.5);
   auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {

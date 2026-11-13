@@ -27,6 +27,7 @@ sl3dpp_add_example(ExampleModelViscosity)
 sl3dpp_add_example(ExampleIceKernels)
 sl3dpp_add_example(ExampleViscosityKernels3D)
 sl3dpp_add_example(ExampleStatic3D)
+sl3dpp_add_example(ExampleSeismic)
 
 set(SL3DPP_EXAMPLE_DATA ${CMAKE_CURRENT_BINARY_DIR}/data)
 file(MAKE_DIRECTORY ${SL3DPP_EXAMPLE_DATA})
@@ -90,7 +91,8 @@ set(SL3DPP_EXAMPLE_RUNS
   "ExampleModelViscosity model_viscosity --lmax 8"
   "ExampleIceKernels ice_kernels --lmax 16"
   "ExampleViscosityKernels3D viscosity_kernels_3d --lmax 8"
-  "ExampleStatic3D static_3d --lmax 8")
+  "ExampleStatic3D static_3d --lmax 8"
+  "ExampleSeismic seismic --lmax 32")
 set(SL3DPP_EXAMPLE_STAMPS)
 set(stamps ${CMAKE_CURRENT_BINARY_DIR}/CMakeFiles/sl3dpp_example_runs)
 file(MAKE_DIRECTORY ${stamps})
@@ -128,6 +130,7 @@ if(SL3DPP_POETRY)
     COMMAND ${SL3DPP_POETRY} run python plot_kernels.py
     COMMAND ${SL3DPP_POETRY} run python plot_kernels_3d.py
     COMMAND ${SL3DPP_POETRY} run python plot_static_3d.py
+    COMMAND ${SL3DPP_POETRY} run python plot_seismic.py
     WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
     DEPENDS sl3dpp_example_outputs
     COMMENT "Drawing the examples' figures into figures/library (poetry)")

@@ -62,7 +62,11 @@
 namespace sl3dpp {
 
 /// A load channel: columns of a degree's coefficient forcing at a time,
-/// or std::nullopt where the channel is silent at that degree.
+/// or std::nullopt where the channel is silent at that degree. A tide
+/// channel's degree-1 columns must vanish (a tide is taken relative to
+/// the centre of mass, SeaLevel.hpp's kLowestTideDegree), and are
+/// refused otherwise; its degree 0 carries the spherical mean of a
+/// centrifugal change.
 using LoadCallable =
     std::function<std::optional<std::vector<double>>(int l, double t)>;
 
@@ -145,9 +149,14 @@ class ViscoelasticOperator {
     /// gravitating), every system of the displacement alone, above degree
     /// zero stopping at the top of the outermost fluid region, and at
     /// degree 1 in the frame of the centre of mass. The steps are then
-    /// forced through AddForce alone (interior sources): a load channel
-    /// (the weight of a surface mass) and a tide channel are refused, and
-    /// so are the Love numbers of the sea level equation.
+    /// forced by the load channel and through AddForce (interior sources).
+    /// The load channel is a surface mass's weight, the normal traction
+    /// g sigma pressing on the surface, g the material's surface gravity
+    /// (DegreeOperator::Load on the system without the potential, the
+    /// forcing of the non-gravitating traction numbers times g); its
+    /// degree-1 columns must vanish (a degree-1 traction exerts a net
+    /// force, which nothing balances). A tide channel is refused, and so
+    /// are the Love numbers of the sea level equation.
     bool gravitating = true;
   };
 

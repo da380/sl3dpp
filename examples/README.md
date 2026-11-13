@@ -1,6 +1,6 @@
 # sl3dpp examples
 
-Eight small drivers, one per capability of the library, each paired with a
+Nine small drivers, one per capability of the library, each paired with a
 Python plotting script, and an example config for every command of the
 `sl3d` program:
 
@@ -14,6 +14,7 @@ Python plotting script, and an example config for every command of the
 | `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
 | `ExampleViscosityKernels3D` | 3D adjoint kernels: the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 31 s | `plot_kernels_3d.py` |
 | `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
+| `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean, the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13) | lmax 64, 16 s on two threads | `plot_seismic.py` |
 
 The defaults keep each run under a minute on 8 threads, the times shown;
 the largest peak memory is 11 GB, for `ExampleIceKernels`. The
@@ -26,7 +27,8 @@ sized for a laptop; CI runs each at a small one) and the Earth's state.
 Each driver writes into its own `output/library/<example>/`, and its
 plotting script draws `figures/library/<example>.png`, where `<example>` is
 `love_numbers`, `fingerprint`, `evolution`, `lateral_viscosity`,
-`model_viscosity`, `ice_kernels`, `viscosity_kernels_3d` or `static_3d`.
+`model_viscosity`, `ice_kernels`, `viscosity_kernels_3d`, `static_3d` or
+`seismic`.
 The table is `<example>.txt`; `ExampleViscosityKernels3D` also writes the
 kernels as a model file, `viscosity_kernels.nc`, and `ExampleStatic3D` the
 response inside the body, `static_3d_volume.nc`.
@@ -132,15 +134,35 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | `timestep_study` (the `timestep_*` configs) | `accuracy.png`: the error against the step of the sea level by both schemes and of the viscosity kernels by both adjoints, and the kernels at 1 kyr steps |
 | `sea_level_fingerprint_3d_ice7g` | `fingerprint.png`: the fingerprint on PREM with S40RTS's moduli, over the ocean and near Greenland, and its 3D minus radial difference |
 | `sea_level_3d_ice7g` (with `sea_level_1d_ice7g_custom`) | `sea_level.png`: the sea-level change since 26 ka in 3D and 3D minus radial, and relative sea-level histories at three sites, 3D and radial |
+| `sea_level_static_coseismic` | `coseismic.png`: maps centred on the fault of the vertical displacement, the horizontal displacement (its size, and arrows) and the relative sea-level change over the ocean, the fault's surface projection drawn, and all of them along a profile across the fault |
+| `sea_level_postseismic`, `postseismic_no_gravity`, `no_ocean_seismic` | `postseismic.png`: maps centred on the source of the vertical displacement at the event and of its change since then at two later nodes, of the sea-level change (without an ocean, the horizontal motion) since the event at the last, and the vertical displacement and the sea level (without an ocean, the horizontal displacement up dip) through time at three places, the co-seismic step included |
+| `kernel_postseismic` | `kernels.png`: each measurement's kernels in the moment tensors of the fault's patches (the six components at each patch, held from the onset), their contraction with the fault's own mechanism (the derivative per unit of each patch's slip, summing to the measurement with the fault's moment), and the radial viscosity kernels |
+| `no_gravity_load` (with `no_ocean_load_cap`) | `gravity.png`: the displacement at the cap's centre through time without gravity (the cap and its antipode) and with it (the cap alone), against distance from the cap at three times, and the map without gravity |
+| `sea_level_tide_migrating` | `sea_level.png`: the relative sea-level change since 21 ka at four dates over each date's own ocean, the shorelines the run moved, and the tide's equilibrium surface |
 
 `sea_level_3d`'s run is drawn against the 1D one in
 `figures/sl3d/sea_level_1d/sea_level.png` (in `sea_level_3d/` when it
 alone has run), so it has no folder of its own. The static problem's
 `sea_level_static_migrating` (the synthetic deglaciation under migrating
-shorelines) and `sea_level_static_coseismic` (a fault alone) have no
-figures, nor has `sea_level_no_ocean` (`no_ocean_load_cap`'s run, its
-times dates before present); their surface files hold the fields
-`examples/configs/README.md` names.
+shorelines) has no figure, nor has `sea_level_no_ocean`
+(`no_ocean_load_cap`'s run, its times dates before present); their
+surface files hold the fields `examples/configs/README.md` names.
+`postseismic_no_gravity` is drawn on its own, not against
+`sea_level_postseismic`: its source is a point at the fault's centroid,
+the other's the fault's 36 patches, and only the second has an ocean.
+
+The seismic figures show the fields at the configs' degree, lmax 64,
+whose truncation of a source shallower than it resolves rings, 360/64
+degrees apart, around the source. The thrust off the synthetic South
+America lifts the sea floor by up to 0.36 m and moves it 2.0 m towards
+the trench, the sea level falling by the uplift over the ocean; over the
+next 500 years the mantle's relaxation takes back nearly a third of the
+uplift over the fault (0.34 m to 0.24 m at the centroid). Without gravity the
+point thrust at the same centroid lifts the surface there by 0.29 m
+(0.31 m at its peak), and by 0.16 m after 500 years. A GPS station's eastward motion 20 years on,
+-0.44 m, is most sensitive to slip on the fault's shallow southern
+patches, and the moment kernels contracted with the fault's own
+mechanism and moment give back each measurement's value.
 
 The tide figures show three things. On the synthetic 3D Earth the lunar
 body tide is the radial model's to 2e-4: a bulge of 0.21 m, which the
@@ -219,6 +241,7 @@ cd build/examples
 ./ExampleIceKernels
 ./ExampleViscosityKernels3D
 ./ExampleStatic3D
+./ExampleSeismic
 
 # 3. One-off: create the Python environment HERE (not in the source).
 poetry install --no-root

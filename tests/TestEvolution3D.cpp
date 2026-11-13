@@ -327,7 +327,7 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
   // source. With no lateral perturbation the 3D loop is the 1D loop,
   // through a melting that moves the shorelines. Under lateral viscosity,
   // where the forcing is too small to move a shoreline, the run is the
-  // frozen run under the same forcing.
+  // frozen run under the same forcing, a prescribed tide beside it.
   auto setup = Setup::Make();
   const auto& sle = setup.solver.SolverScales();
   const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
@@ -475,7 +475,14 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
   // -- lateral viscosity, no shoreline moving: the frozen run
   {
     const auto still = [&](double) { return state.iceThickness; };
-    const auto forcing = forcingOf(1e-3, 1e-3, 1e-2);
+    auto forcing = forcingOf(1e-3, 1e-3, 1e-2);
+    forcing.tide = [&](double t) {
+      auto psi = grid.ZeroCoefficients();
+      const auto a = 1e-2 / sle.Factor(PotentialDimensions);
+      psi[SurfaceGrid::Index(2, 1)] = a * std::complex<double>(0.4, -0.3 * t / kyr);
+      psi[SurfaceGrid::Index(3, 2)] = a * std::complex<double>(0.2, 0.5);
+      return psi;
+    };
     Viscoelastic3D lateral(
         setup.rheology, kLmax, [](double, double theta, double phi) {
           return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
@@ -490,10 +497,6 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
       ASSERT_EQ(snapshot.oceanFunction, state.oceanFunction);
     }
     compare(moving, frozen, 1e-7, "lateral viscosity");
-    auto tidal = Evolution3D::Forcing{
-        .tide = [&](double) { return grid.ZeroCoefficients(); }};
-    EXPECT_THROW((void)evolution.RunMigrating(times, still, tidal),
-                 std::invalid_argument);
   }
 }
 

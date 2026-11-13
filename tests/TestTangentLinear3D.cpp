@@ -334,7 +334,7 @@ TEST(TangentLinear3D, ATideAndTheTangentialDisplacementAreCarried) {
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     deltas.push_back(scene.Smooth(rng, 10.0 * scene.Sigma()));
     tides.push_back(grid.Expand(scene.Smooth(rng, potential)));
-    tides.back()[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(tides.back());  // a tide is degree 2 and up
   }
   auto nodeOf = [&](double t) {
     for (auto n = std::size_t{0}; n < times.size(); ++n) {

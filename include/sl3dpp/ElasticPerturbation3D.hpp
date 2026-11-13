@@ -103,7 +103,9 @@ class ElasticPerturbation3D {
   /// surface): per degree DegreeOperator::Tide(power) times the
   /// coefficient, the power defaulting to the degree (the harmonic body
   /// tide); a power of 2 at degree 0 is the spherical mean of a
-  /// centrifugal change. Spheroidal.
+  /// centrifugal change. A degree-1 part is refused (a tide is taken
+  /// relative to the centre of mass, SeaLevel.hpp's kLowestTideDegree).
+  /// Spheroidal.
   [[nodiscard]] Forces TideForces(std::span<const Complex> amplitudes,
                                   int power = -1) const;
   /// The forces of a surface dual (what SolveSurfaceDual solves): the

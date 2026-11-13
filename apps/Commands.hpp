@@ -103,7 +103,8 @@ struct SolveInput {
 /// Reads the members of a solve config beside its run, relative paths
 /// against `directory`, held to the run: `checkpoint` and `restart`
 /// (refused in the static problem, and a checkpoint under seismic
-/// sources) and `output` (its members held to the problem; required
+/// sources) and `output` (its members held to the problem, the volume
+/// file refused under seismic sources and without gravity; required
 /// where `outputRequired`, and otherwise read only where given).
 [[nodiscard]] SolveInput ReadSolveMembers(
     const Json& top, Run run, const std::filesystem::path& directory,

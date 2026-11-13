@@ -59,9 +59,10 @@ struct Run {
   std::optional<OceanBlock> ocean;
   RotationalFeedback rotation = RotationalFeedback::Full;
   /// Whether the run carries gravity, `gravity` ("full", the default, or
-  /// "none"): without it the body has no ocean, no tide, no surface load
-  /// and no rotational feedback, and is forced by seismic sources alone on
-  /// a radial model (ViscoelasticOperator::Options::gravitating).
+  /// "none"): without it the body has no ocean, no tide and no rotational
+  /// feedback, and is forced on a radial model by surface loads, by their
+  /// weight, and seismic sources (ViscoelasticOperator::Options::
+  /// gravitating), loads with a degree-1 part refused.
   bool gravitating = true;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
@@ -98,13 +99,14 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// the static problem a `thickness` term of the ice change without the
 /// state's date is refused, and with the state at the window's end a
 /// `change` term or a cap. The `ocean` block is optional: without it the
-/// body has no ocean, and an ice change is refused. A tide is refused
-/// under migrating shorelines, and a forcing beside the ice (a load, a
-/// tide, a seismic source) with a calibrated initial sea level, whose
-/// calibration runs under the ice alone. Without gravity (`gravity`:
-/// "none") the `ocean` block, a tide, a surface load, a rotational
-/// feedback other than "none" (the default then) and hydrostatic moments
-/// are refused, each naming its member.
+/// body has no ocean, and an ice change is refused. A forcing beside the
+/// ice (a load, a tide, a seismic source) is refused with a calibrated
+/// initial sea level, whose calibration runs under the ice alone. Without
+/// gravity (`gravity`:
+/// "none") the `ocean` block, a tide, a rotational feedback other than
+/// "none" (the default then) and hydrostatic moments are refused, each
+/// naming its member; surface loads with a degree-1 part are refused when
+/// the loads are built (DriveOf, StaticLoadsOf).
 [[nodiscard]] Run ReadRun(const Json& top,
                           const std::filesystem::path& directory);
 
@@ -505,6 +507,9 @@ struct Drive {
 
 /// The drive of a run through time on its world (Drive), the surface
 /// loads read onto the solver's grid against the config's `forcing`.
+/// Without gravity, loads with a degree-1 part at a node are refused,
+/// naming `forcing.load` and the node: a net force, which nothing
+/// balances (DegreeOneShare).
 template <class EvolutionForcing>
 [[nodiscard]] Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
                                               const GRDSolver& solver,
@@ -548,7 +553,9 @@ struct StaticWorld {
                                           const GRDSolver& solver);
 
 /// The static problem's surface loads on a grid (SurfaceLoads, each term
-/// read once, a `field` file at its date), or null without any.
+/// read once, a `field` file at its date), or null without any. Without
+/// gravity, loads with a degree-1 part are refused, as DriveOf refuses
+/// them.
 [[nodiscard]] std::shared_ptr<const SurfaceLoads> StaticLoadsOf(
     const Run& run, const Json& top, const SurfaceGrid& grid);
 
@@ -559,8 +566,9 @@ struct StaticWorld {
 /// entering as its grounded load on the state's ocean function, rho_ice (1
 /// - C) dI, in the water budget; under migrating shorelines the nonlinear
 /// one, the ice the state's plus the change, whose flotation, with the sea
-/// level's, places the shorelines. The surface loads, the tide and the
-/// seismic sources join either (ForcingOf). Without an ocean, the linear
+/// level's, places the shorelines (the tide's potential among what moves
+/// the sea level). The surface loads, the tide and the seismic sources
+/// join either (ForcingOf). Without an ocean, the linear
 /// equation on a body without one under the forcing beside the ice alone:
 /// the solid body's response.
 template <class EvolutionT>

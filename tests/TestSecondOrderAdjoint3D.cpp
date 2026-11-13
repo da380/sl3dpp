@@ -1760,9 +1760,9 @@ TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
   const auto span = 10.0 * scene.Kyr();
   const auto potential = 1.0 / sle.Factor(PotentialDimensions);
   auto tide0 = grid.Expand(scene.Smooth(rng, potential));
-  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide0);  // a tide is degree 2 and up
   auto tide1 = grid.Expand(scene.Smooth(rng, potential));
-  tide1[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide1);
   const auto gSea = scene.Smooth(rng, 1.0);
   const auto gU = scene.Smooth(rng, 0.5);
   const auto loadPattern = scene.MeltLoad(-0.1);

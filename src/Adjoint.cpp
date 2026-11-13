@@ -398,7 +398,7 @@ Kernels AdjointSolver::DiscreteSweep(
                           const std::vector<Complex>& psiDual) {
     auto kernel = adj.tideDual;
     for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
-    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(kernel);
     return kernel;
   };
   // The dual of a step's memory surface values, on the surface rows of
@@ -1660,7 +1660,7 @@ Kernels AdjointSolver::ContinuousSweep(
   out.momentKernels = std::move(momentKernels);
   out.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.solidSurfaceChangeKernels = std::move(layerKernels);
-  for (auto& kernel : tideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+  for (auto& kernel : tideKernels) ZeroBelowTideDegrees(kernel);
   out.tideKernels = std::move(tideKernels);
   // the kernels as densities per unit volume: the weights divided out
   {

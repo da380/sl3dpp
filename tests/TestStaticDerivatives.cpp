@@ -366,7 +366,7 @@ TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernels) {
   const auto load = setup.Smooth(rng, 100.0 * setup.Sigma());
   auto tide = grid.Expand(setup.Smooth(
       rng, 1.0 / setup.solver.SolverScales().Factor(PotentialDimensions)));
-  tide[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide);  // a tide is degree 2 and up
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[0].displacementDual = setup.Smooth(rng, 0.5);
   measurements[0].tangentialPotentialDual = setup.Smooth(rng, 0.6);
@@ -484,7 +484,7 @@ TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernelsUnderLateralModuli
     const auto& sle = solver.SolverScales();
     const auto load = smooth(100.0 / sle.Factor(Dimensions{.mass = 1, .length = -2}));
     auto tide = grid.Expand(smooth(1.0 / sle.Factor(PotentialDimensions)));
-    tide[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(tide);  // a tide is degree 2 and up
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[0].displacementDual = smooth(0.5);
     measurements[0].tangentialPotentialDual = smooth(0.6);

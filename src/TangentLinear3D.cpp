@@ -828,10 +828,6 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
     throw std::invalid_argument("the tangent-linear run needs a direction");
   }
   if (!direction.tide.empty()) {
-    if (migrating) {
-      throw std::invalid_argument(
-          "a migrating run takes no prescribed tide: none to perturb");
-    }
     const auto coefSize = solver.Grid().CoefficientSize();
     if (direction.tide.size() != nodes) {
       throw std::invalid_argument("tide must give one entry per time node");
@@ -841,6 +837,7 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
         throw std::invalid_argument(
             "tide must be coefficient vectors of the solver's grid");
       }
+      RequireTideDegrees(c, "a tide direction");
     }
   }
   CheckPerNode(direction.directLoad, nodes, fieldSize, "directLoad");

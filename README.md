@@ -38,7 +38,8 @@ of mantle viscosity using deglacial sea level observations;
 - **Forcings, in any mix.** An ice change, surface loads, a prescribed tide
   and seismic sources (moment tensors, planar faults), with rotational
   feedback none, axial or full; with `"gravity": "none"`, the radial
-  forward problem without self-gravitation.
+  forward problem without self-gravitation, under surface loads (their
+  weight, a normal traction; no degree-1 part) and seismic sources.
 - **Derivatives.** Adjoint kernels of sea-level, displacement, potential
   and rotation measurements, continuous or exactly discrete, 1D and 3D,
   in the ice history, surface loads, a tide, the initial sea level, the
@@ -129,7 +130,7 @@ differ, so exchange quantities in SI, through files.
 
 ## Examples and the library
 
-Eight C++ drivers of the library, each with a plotting script, and the
+Nine C++ drivers of the library, each with a plotting script, and the
 `sl3d` configs run in `build/examples` on the synthetic Earths the build
 writes, or on ICE-7G ([examples/README.md](examples/README.md),
 [examples/configs/README.md](examples/configs/README.md)). Each `sl3d`

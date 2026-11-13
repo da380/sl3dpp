@@ -419,16 +419,59 @@ void RequireGravity(const ViscoelasticOperator& op, std::string_view what) {
   if (!op.Gravitating()) {
     throw std::invalid_argument(std::format(
         "{} needs gravity: the operator solves the problem without it, "
-        "forced by interior sources alone (ViscoelasticStep::AddForce)",
+        "forced by the load channel (a surface mass's weight) and interior "
+        "sources (ViscoelasticStep::AddForce)",
         what));
   }
+}
+
+/// Without gravity the tide channel is refused: an external potential
+/// acts through the potential, which the problem has not.
+void RefuseTideWithoutGravity(const ViscoelasticOperator& op,
+                              const LoadCallable& tide) {
+  if (tide && !op.Gravitating()) {
+    throw std::invalid_argument(
+        "a tide channel (an external potential) needs gravity: the operator "
+        "solves the problem without it");
+  }
+}
+
+/// The load channel's columns at a degree and time (FetchColumns).
+/// Without gravity its degree-1 columns must vanish: a degree-1 traction
+/// exerts a net force on the body, which nothing balances.
+std::optional<std::vector<double>> LoadColumns(const ViscoelasticOperator& op,
+                                               const LoadCallable& load, int l,
+                                               double t, int ncols) {
+  auto columns = FetchColumns(load, l, t, ncols);
+  if (columns && l == 1 && !op.Gravitating() &&
+      std::ranges::any_of(*columns, [](double v) { return v != 0.0; })) {
+    throw std::invalid_argument(
+        "a degree-1 load exerts a net force on the body, which nothing "
+        "balances without gravity: the load channel's degree-1 columns must "
+        "vanish");
+  }
+  return columns;
+}
+
+/// The tide channel's columns at a degree and time (FetchColumns). Its
+/// degree-1 columns must vanish: a tide is taken relative to the centre
+/// of mass (kLowestTideDegree), the channel's degree 0 the spherical
+/// mean of a centrifugal change.
+std::optional<std::vector<double>> TideColumns(const LoadCallable& tide, int l,
+                                               double t, int ncols) {
+  auto columns = FetchColumns(tide, l, t, ncols);
+  if (columns && l == 1 &&
+      std::ranges::any_of(*columns, [](double v) { return v != 0.0; })) {
+    throw std::invalid_argument(
+        "a tide channel has no degree-1 part: tides are taken relative to "
+        "the centre of mass, its degree-1 columns must vanish");
+  }
+  return columns;
 }
 }  // namespace
 
 const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
                                                                int l) const {
-  RequireGravity(*this,
-                 "a load channel (a surface mass's weight) or a tide channel");
   auto& deg = Deg(l);
   auto& cache = flavour == nullptr ? unrelaxedUnits_ : flavour->units;
   auto found = cache.find(l);
@@ -436,9 +479,22 @@ const std::vector<double>& ViscoelasticOperator::UnitResponses(Flavour* flavour,
     const auto& system =
         flavour == nullptr ? deg.system : EffectiveSystem(*flavour, l);
     auto rhs = std::vector<double>(static_cast<std::size_t>(deg.ndof) * 2, 0.0);
-    std::ranges::copy(deg.loadVec, rhs.begin());
-    std::ranges::copy(deg.tideVec, rhs.begin() + deg.ndof);
-    found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    if (options_.gravitating) {
+      std::ranges::copy(deg.loadVec, rhs.begin());
+      std::ranges::copy(deg.tideVec, rhs.begin() + deg.ndof);
+      found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    } else if (l == 1) {
+      // without gravity the degree-1 load is refused (LoadColumns) and
+      // there is no tide: no response to solve
+      found = cache.emplace(l, std::move(rhs)).first;
+    } else {
+      // without gravity the load's weight alone, the normal traction g
+      // pressing on the surface per unit surface density, -g a^2 on U(a)
+      // (DegreeOperator::Load on the system without the potential); no
+      // tide
+      std::ranges::copy(deg.loadVec, rhs.begin());
+      found = cache.emplace(l, system.Solve(rhs, 2)).first;
+    }
   }
   return found->second;
 }
@@ -471,12 +527,13 @@ void ViscoelasticOperator::AddChannels(std::vector<double>& x, int l,
                                        const LoadCallable& tide,
                                        int ncols) const {
   if (!load && !tide) return;
+  RefuseTideWithoutGravity(*this, tide);
   const auto& deg = Deg(l);
   const auto& units = UnitResponses(flavour, l);
-  if (auto columns = FetchColumns(load, l, t, ncols)) {
+  if (auto columns = LoadColumns(*this, load, l, t, ncols)) {
     AddColumns(x, units, 0, deg.ndof, *columns, ncols);
   }
-  if (auto columns = FetchColumns(tide, l, t, ncols)) {
+  if (auto columns = TideColumns(tide, l, t, ncols)) {
     AddColumns(x, units, 1, deg.ndof, *columns, ncols);
   }
 }
@@ -526,6 +583,7 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
     std::optional<std::vector<double>> load, tide;
     std::vector<double> x;
   };
+  RefuseTideWithoutGravity(*this, tide);
   const auto K = rheology_->BranchCount();
   auto tasks = std::vector<Task>{};
   for (const auto& [l, m] : state.m) {
@@ -537,8 +595,8 @@ std::map<int, std::vector<double>> ViscoelasticOperator::SolveElastic(
         ColumnsOf(state, l, m.size(), K * 3 * task.deg->ne * task.deg->np);
     if (load || tide) {
       task.units = &UnitResponses(nullptr, l);
-      task.load = FetchColumns(load, l, state.t, task.ncols);
-      task.tide = FetchColumns(tide, l, state.t, task.ncols);
+      task.load = LoadColumns(*this, load, l, state.t, task.ncols);
+      task.tide = TideColumns(tide, l, state.t, task.ncols);
     }
     tasks.push_back(std::move(task));
   }
@@ -817,6 +875,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     std::optional<std::vector<double>> load, tide;
     std::vector<double> x, d1, mNew;
   };
+  RefuseTideWithoutGravity(op, tide);
   auto tasks = std::vector<Task>{};
   for (const auto& [l, mem] : mem_) {
     Task task;
@@ -826,8 +885,8 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     task.ncols = ncols_.at(l);
     if (load || tide) {
       task.units = &op.UnitResponses(&flavour, l);
-      task.load = FetchColumns(load, l, t_, task.ncols);
-      task.tide = FetchColumns(tide, l, t_, task.ncols);
+      task.load = LoadColumns(op, load, l, t_, task.ncols);
+      task.tide = TideColumns(tide, l, t_, task.ncols);
     }
     tasks.push_back(std::move(task));
   }

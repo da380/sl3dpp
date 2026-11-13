@@ -80,6 +80,30 @@ double InverseOceanArea(double oceanArea) {
 
 }  // namespace
 
+void RequireTideDegrees(std::span<const std::complex<double>> coefficients,
+                        std::string_view what) {
+  for (auto l = 0; l < kLowestTideDegree; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      if (i < coefficients.size() && coefficients[i] != 0.0) {
+        throw std::invalid_argument(std::format(
+            "{} has no degree-{} part: tides are taken relative to the "
+            "centre of mass, degree {} and up",
+            what, l, kLowestTideDegree));
+      }
+    }
+  }
+}
+
+void ZeroBelowTideDegrees(std::span<std::complex<double>> coefficients) {
+  for (auto l = 0; l < kLowestTideDegree; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto i = SurfaceGrid::Index(l, m);
+      if (i < coefficients.size()) coefficients[i] = 0.0;
+    }
+  }
+}
+
 std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
     const SeaLevelParameters& parameters) {
@@ -396,10 +420,7 @@ GRDSolver::Response GRDSolver::SolveGeneralised(
   const bool tidal =
       !forcing.tide.empty() &&
       MaxAbs(std::span<const std::complex<double>>(forcing.tide)) > 0.0;
-  if (tidal && forcing.tide[SurfaceGrid::Index(0, 0)] != 0.0) {
-    throw std::invalid_argument(
-        "a prescribed tidal potential has no degree-0 part");
-  }
+  RequireTideDegrees(forcing.tide);
 
   // The static (load-independent) coefficient terms.
   // The tangential potential answers the same forcings and feeds nothing
@@ -915,8 +936,9 @@ GRDSolver::AdjointResponse GRDSolver::SolveAdjoint(
     AddBlock(out.potentialResponseDual, stash.dsPhi2);
   }
   // The prescribed tide entered the two response channels by the tidal
-  // numbers, and the sea level change by its own potential.
-  for (auto l = 1; l <= grid_.LMax(); ++l) {
+  // numbers, and the sea level change by its own potential; it has no
+  // part below kLowestTideDegree, nor has its dual.
+  for (auto l = kLowestTideDegree; l <= grid_.LMax(); ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
       out.tideDual[i] = ht_[l] * out.displacementResponseDual[i] +
@@ -966,10 +988,19 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
         "the land held is not a mask on the solver's grid");
   }
 
+  if (!forcing.tide.empty() && forcing.tide.size() != coefSize) {
+    throw std::invalid_argument(
+        "tide is not a coefficient vector of the grid");
+  }
+  const bool tidal =
+      !forcing.tide.empty() &&
+      MaxAbs(std::span<const std::complex<double>>(forcing.tide)) > 0.0;
+  RequireTideDegrees(forcing.tide);
+
   std::vector<std::complex<double>> staticDisp, staticGrav, staticSlc;
   std::optional<Block2> staticDisp2, staticGrav2;
   if (!forcing.displacementResponse.empty() ||
-      !forcing.potentialResponse.empty()) {
+      !forcing.potentialResponse.empty() || tidal) {
     staticDisp.assign(coefSize, 0.0);
     staticGrav.assign(coefSize, 0.0);
     if (!forcing.displacementResponse.empty()) {
@@ -978,13 +1009,30 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
     if (!forcing.potentialResponse.empty()) {
       staticGrav = forcing.potentialResponse;
     }
+    if (tidal) {
+      // The body's answer to the prescribed potential, as in the linear
+      // solve; the potential's own place in the sea level change follows.
+      for (auto l = 1; l <= grid_.LMax(); ++l) {
+        for (auto m = 0; m <= l; ++m) {
+          const auto i = SurfaceGrid::Index(l, m);
+          staticDisp[i] += ht_[l] * forcing.tide[i];
+          staticGrav[i] += kt_[l] * forcing.tide[i];
+        }
+      }
+    }
     staticSlc.resize(coefSize);
     for (auto i = std::size_t{0}; i < coefSize; ++i) {
       staticSlc[i] = -(staticDisp[i] + staticGrav[i] / g_);
     }
+    if (tidal) {
+      for (auto i = std::size_t{0}; i < coefSize; ++i) {
+        staticSlc[i] -= forcing.tide[i] / g_;
+      }
+    }
     staticDisp2 = BlockOf(staticDisp);
     staticGrav2 = BlockOf(staticGrav);
   }
+  const Block2 tide2 = tidal ? BlockOf(forcing.tide) : Block2{};
   // A layer on the solid surface: its thickness is in the sea level
   // change alone, with the static terms, and so in the flotation.
   const bool layered = !forcing.solidSurfaceChange.empty();
@@ -1080,9 +1128,12 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
                            staticGrav2, 0.0, 0.0, forcing.inertiaMomentChange,
                            std::array<double, 3>{0.0, 0.0, 0.0}, transverse);
       omega = lastRotation->omega;
-      SetBlock(slcLm, -1.0 * (lastRotation->disp2 +
-                              (1.0 / g_) * (lastRotation->grav2 +
-                                            lastRotation->centrifugal) +
+      // the degree-2 block anew: the rotation's, and the tide's own
+      // potential there
+      const auto potential2 =
+          tidal ? lastRotation->grav2 + lastRotation->centrifugal + tide2
+                : lastRotation->grav2 + lastRotation->centrifugal;
+      SetBlock(slcLm, -1.0 * (lastRotation->disp2 + (1.0 / g_) * potential2 +
                               layer2));
       slcLm[SurfaceGrid::Index(0, 0)] -=
           (hc_ + (kc_ + 1.0) / g_) * lastRotation->centrifugal0;
@@ -1171,6 +1222,14 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
   if (!forcing.tangentialResponse.empty()) {
     for (auto i = std::size_t{0}; i < coefSize; ++i) {
       tanLm[i] += forcing.tangentialResponse[i];
+    }
+  }
+  if (tidal) {
+    for (auto l = 1; l <= grid_.LMax(); ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto i = SurfaceGrid::Index(l, m);
+        tanLm[i] += lt_[l] * forcing.tide[i];
+      }
     }
   }
   if (rotational && lastRotation) {

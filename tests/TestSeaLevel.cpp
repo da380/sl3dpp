@@ -263,7 +263,7 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
       return 2.0 * Cap(theta, phi, 2.6, 1.0, 0.9) /
              solver.SolverScales().Factor(PotentialDimensions);
     }));
-    forcing.tide[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(forcing.tide);  // a tide is degree 2 and up
 
     GRDSolver::Options options{.rtol = 1e-13, .max_iterations = 400};
     const auto response = solver.SolveGeneralised(state, forcing, options);
@@ -293,6 +293,11 @@ TEST(GRDSolver, AdjointDotProductIdentity) {
     }
     const auto adjoint = solver.SolveAdjoint(state, duals, options);
     ASSERT_TRUE(adjoint.converged);
+    // the tide dual is zero below degree 2, as a tide is
+    for (const auto i : {SurfaceGrid::Index(0, 0), SurfaceGrid::Index(1, 0),
+                         SurfaceGrid::Index(1, 1)}) {
+      EXPECT_EQ(adjoint.tideDual[i], std::complex<double>{});
+    }
 
     auto surface = [&](std::span<const double> f, std::span<const double> g) {
       auto fg = std::vector<double>(f.size());

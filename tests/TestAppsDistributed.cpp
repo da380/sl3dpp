@@ -1,5 +1,6 @@
 // sl3d's 3D runs over MPI ranks (apps/Ranks.hpp), built with
-// SL3DPP_WITH_MPI and run under mpiexec: solve's 3-D run, its fingerprint
+// SL3DPP_WITH_MPI and run under mpiexec: solve's 3-D run (a migrating one
+// under a tide among them), its fingerprint
 // on lateral moduli, its static problem there without an ocean and the
 // volume file it writes, its viscoelastic run without an ocean, and
 // kernel's 3-D runs (through time
@@ -218,6 +219,62 @@ TEST_F(AppsOverRanks, CalibratedMigratingSolveMatchesOneProcess) {
               distributed.variables.at(name).values)
         << name;
   }
+}
+
+TEST_F(AppsOverRanks, MigratingSolveUnderATideMatchesOneProcess) {
+  // A tide beside the marine history's ice under migrating shorelines:
+  // the run over the ranks (each solving the nonlinear sea level equation,
+  // rank 0's loads, potentials and ocean function shared) matches the
+  // one-process run, its ocean functions to the bit; stopped at every
+  // checkpoint, it resumes as uninterrupted.
+  if (Rank() == 0) test::WriteToyHistory(dir_ / "marine.nc", 0.0, true);
+  Barrier();
+  auto body = Body();
+  for (auto at = body.find("history.nc"); at != std::string::npos;
+       at = body.find("history.nc", at + 1)) {
+    body.replace(at, std::string_view{"history.nc"}.size(), "marine.nc");
+  }
+  body.replace(body.find(R"("at": "start")"), std::string_view{R"("at": "start")"}.size(),
+               R"("shorelines": "migrating", "at": "start")");
+  const auto term = std::string{R"([{"thickness": {"file": "marine.nc"}}])"};
+  body.replace(body.find(term), term.size(),
+               term + R"(, "tide": [{"degree": 2, "order": 1,
+                   "amplitude_m2_s2": 60, "imaginary_m2_s2": -20,
+                   "history_kyr_bp": [[2, 0], [0, 1]]}])");
+  const auto one = Write("one.json", "{" + body + R"(,
+      "output": {"surface": "out/one.nc"}})");
+  const auto over = Write("over.json", "{" + body + R"(,
+      "output": {"surface": "out/over.nc"}})");
+  const auto pieces = Write("pieces.json", "{" + body + R"(,
+      "checkpoint": {"directory": "ckpt", "every": 1,
+                     "max_walltime_min": 1e-9},
+      "output": {"surface": "out/pieces.nc"}})");
+  OneProcess([&] { static_cast<void>(app::RunSolve(one)); });
+  const auto summary = app::RunSolve(over);
+  EXPECT_NE(summary.find("shorelines migrating"), std::string::npos) << summary;
+  EXPECT_NE(summary.find("tide (1 coefficient)"), std::string::npos) << summary;
+  for (auto attempts = 0; attempts < 8; ++attempts) {
+    if (app::RunSolve(pieces).find("wrote") != std::string::npos) break;
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  const auto resumed = pm::ReadSurfaceFile(dir_ / "out" / "pieces.nc");
+  for (const auto* name :
+       {"relative_sea_level_change", "displacement", "potential"}) {
+    EXPECT_LT(Relative(distributed.variables.at(name).values,
+                       reference.variables.at(name).values),
+              1e-10)
+        << name;
+    EXPECT_EQ(resumed.variables.at(name).values,
+              distributed.variables.at(name).values)
+        << name;
+  }
+  EXPECT_EQ(distributed.variables.at("ocean_function").values,
+            reference.variables.at("ocean_function").values);
+  EXPECT_EQ(resumed.variables.at("ocean_function").values,
+            distributed.variables.at("ocean_function").values);
 }
 
 TEST_F(AppsOverRanks, KernelMatchesOneProcessAndSpillsPerRank) {

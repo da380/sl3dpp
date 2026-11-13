@@ -360,7 +360,9 @@ TEST(Distributed, TheLateralStepMatchesTheOneProcessStep) {
 TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
   // The coupled evolution, every rank solving the sea level equation
   // (rank 0's loads shared): frozen shorelines under a melting load and
-  // migrating ones under a thinning ice sheet.
+  // migrating ones under a thinning ice sheet, alone and with a tide
+  // beside it, whose coefficients the steps saw are rank 0's on every
+  // rank.
   constexpr auto lmax = 8;
   const auto body = Body::Make(lmax);
   const auto share =
@@ -395,12 +397,28 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
     for (auto& v : out) v *= 1.0 - 0.3 * t / times.back();
     return out;
   };
+  const auto tide = [&](double t) {
+    auto psi = solver.Grid().ZeroCoefficients();
+    const auto a = 40.0 / solver.SolverScales().Factor(PotentialDimensions);
+    psi[SurfaceGrid::Index(2, 1)] = a * std::complex<double>(0.5, -0.2) *
+                                    (t / times.back());
+    psi[SurfaceGrid::Index(3, 3)] = a * std::complex<double>(0.1, 0.3);
+    return psi;
+  };
   const auto options = Viscoelastic3D::Options{
       .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
-  const auto evolutionOptions = Evolution3D::Options{
-      .rtol = 1e-12, .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
-  for (const auto migrating : {false, true}) {
-    auto run = [&](Evolution3D& evolution) {
+  const auto evolutionOptions =
+      Evolution3D::Options{.rtol = 1e-12,
+                           .max_coupled_iterations = 100,
+                           .coupled_rtol = 1e-11,
+                           .record_stride = 1};
+  for (const auto [migrating, tidal] :
+       {std::pair{false, false}, std::pair{true, false}, std::pair{true, true}}) {
+    auto run = [&, migrating, tidal](Evolution3D& evolution) {
+      if (tidal) {
+        return evolution.RunMigrating(times, thickness,
+                                      Evolution3D::Forcing{.tide = tide});
+      }
       return migrating ? evolution.RunMigrating(times, thickness)
                        : evolution.Run(times, directLoad);
     };
@@ -422,10 +440,15 @@ TEST(Distributed, TheEvolutionMatchesTheOneProcessRun) {
       if (migrating) {
         EXPECT_EQ(got[n].oceanFunction, want[n].oceanFunction) << n;
       }
+      // the coefficients the steps saw: rank 0's on every rank
+      auto first = got[n].tideCoefficients;
+      MPI_Bcast(first.data(), static_cast<int>(2 * first.size()), MPI_DOUBLE, 0,
+                MPI_COMM_WORLD);
+      EXPECT_EQ(got[n].tideCoefficients, first) << n;
     }
     // measured 6e-16 to 5e-15 on two to four ranks
     EXPECT_LT(MaxOverRanks(worst), 1e-12)
-        << (migrating ? "migrating" : "frozen");
+        << (migrating ? "migrating" : "frozen") << (tidal ? ", tide" : "");
   }
 }
 

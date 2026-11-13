@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <complex>
 #include <format>
 #include <optional>
@@ -90,12 +91,27 @@ void RefuseWithoutGravity(const ViscoelasticOperator& op,
   if (!op.Gravitating()) {
     throw std::invalid_argument(std::format(
         "{} is refused without gravity: the run is the solid body under "
-        "interior sources alone",
+        "surface loads (their weight) and interior sources",
         what));
   }
 }
 
 }  // namespace
+
+double DegreeOneShare(std::span<const std::complex<double>> coefficients,
+                      int lmax) {
+  auto all = 0.0, one = 0.0;
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      // an order m > 0 stands for its conjugate at -m too
+      const auto power = (m == 0 ? 1.0 : 2.0) *
+                         std::norm(coefficients[SurfaceGrid::Index(l, m)]);
+      all += power;
+      if (l == 1) one += power;
+    }
+  }
+  return all > 0.0 ? std::sqrt(one / all) : 0.0;
+}
 
 void Evolution::SetBackgroundState(GRDSolver::State state) {
   const auto fieldSize = solver_->Grid().FieldSize();
@@ -112,7 +128,10 @@ std::vector<Evolution::Snapshot> Evolution::Run(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
   CheckTimes(times);
-  RefuseWithoutGravity(*op_, "a surface load (its weight)");
+  if (!op_->Gravitating()) {
+    return MarchWithoutGravity(times, Forcing{.directLoad = directLoad},
+                               false);
+  }
   return March(times, &directLoad, nullptr, nullptr, false);
 }
 
@@ -150,24 +169,15 @@ std::vector<Evolution::Snapshot> Evolution::RunMigrating(
   return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
-namespace {
-void CheckMigratingForcing(const Evolution::Forcing& forcing) {
-  if (forcing.tide) {
-    throw std::invalid_argument(
-        "a prescribed tide is not taken under migrating shorelines");
-  }
-}
-}  // namespace
-
 std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   CheckTimes(times);
   RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
-  CheckMigratingForcing(forcing);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               &iceThickness, nullptr, false, &forcing);
+               &iceThickness, forcing.tide ? &forcing.tide : nullptr, false,
+               &forcing);
 }
 
 std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
@@ -175,7 +185,6 @@ std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
-  CheckMigratingForcing(forcing);
   Restore(from, times);
   if ((forcing.sources || forcing.stressGluts) &&
       (!from.toroidal.has_value() || from.strain.empty())) {
@@ -184,7 +193,8 @@ std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
         "such a run, which holds the strain and the toroidal state");
   }
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               &iceThickness, nullptr, true, &forcing);
+               &iceThickness, forcing.tide ? &forcing.tide : nullptr, true,
+               &forcing);
 }
 
 void Evolution::Restore(const Checkpoint& from,
@@ -206,8 +216,10 @@ void Evolution::Restore(const Checkpoint& from,
 std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& directLoad) {
-  RefuseWithoutGravity(*op_, "a surface load (its weight)");
   Restore(from, times);
+  if (!op_->Gravitating()) {
+    return MarchWithoutGravity(times, Forcing{.directLoad = directLoad}, true);
+  }
   return March(times, &directLoad, nullptr, nullptr, true);
 }
 
@@ -232,6 +244,17 @@ std::vector<Evolution::Snapshot> Evolution::March(
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
   const bool migrating = iceThickness != nullptr;
+  // the prescribed tide, refused at any node where it has a part below
+  // degree 2 (RequireTideDegrees)
+  auto checkedTide = std::function<std::vector<std::complex<double>>(double)>{};
+  if (tide != nullptr) {
+    checkedTide = [tide](double t) {
+      auto given = (*tide)(t);
+      RequireTideDegrees(given);
+      return given;
+    };
+    tide = &checkedTide;
+  }
 
   if (migrating && !resumed) {
     // The shorelines follow flotation from the first node, so the
@@ -432,12 +455,13 @@ std::vector<Evolution::Snapshot> Evolution::March(
       for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += d[i];
     }
   };
-  // The forcing beside the ice of a migrating node: the loads and the
-  // layer, changes from the background.
+  // The forcing beside the ice of a migrating node: the loads, the layer
+  // and the tide, changes from the background.
   auto movingLoadsAt = [&](double t, GRDSolver::NonlinearForcing& moving) {
     if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
     moving.directLoadOutsideWaterBudget = outsideAt(t);
     moving.solidSurfaceChange = layerAt(t);
+    if (tide != nullptr) moving.tide = (*tide)(t);
     // a land mask that changes in time: the node's own
     if (options_.land_held) moving.forcedLand = options_.land_held(t);
   };
@@ -954,13 +978,53 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
         "inertia's change from the degree-2 potential): RotationalFeedback::"
         "None");
   }
-  if (forcing.directLoad || forcing.directLoadOutsideWaterBudget) {
-    RefuseWithoutGravity(op, "a surface load (its weight)");
-  }
-  if (forcing.solidSurfaceChange) {
-    RefuseWithoutGravity(op, "a layer on the solid surface (its weight)");
-  }
   if (forcing.tide) RefuseWithoutGravity(op, "a tide");
+  const auto fieldSize = grid.FieldSize();
+  // The surface loads act by their weight, a normal traction (the load
+  // channel of the operator without gravity): the loads inside and outside
+  // the water budget alike, as on a body without an ocean with gravity. A
+  // layer's height enters the sea level change alone, which is not formed
+  // without gravity; its weight is the direct load beside it.
+  const bool loaded =
+      forcing.directLoad || forcing.directLoadOutsideWaterBudget;
+  // The loads' coefficients at a node, solver units, refused where they
+  // have a degree-1 part (a net force, which nothing balances without
+  // gravity) and with a part at rounding taken as none.
+  auto loadAt = [&](double t) {
+    auto total = std::vector<double>(fieldSize, 0.0);
+    for (const auto* given :
+         {&forcing.directLoad, &forcing.directLoadOutsideWaterBudget}) {
+      if (!*given) continue;
+      const auto field = (*given)(t);
+      if (field.empty()) continue;
+      if (field.size() != fieldSize) {
+        throw std::invalid_argument("a direct load lives on the solver's grid");
+      }
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) total[i] += field[i];
+    }
+    if (forcing.solidSurfaceChange) {
+      const auto layer = forcing.solidSurfaceChange(t);
+      if (!layer.empty() && layer.size() != fieldSize) {
+        throw std::invalid_argument(
+            "a layer's height lives on the solver's grid");
+      }
+    }
+    auto coefficients = grid.Expand(total);
+    const auto share = DegreeOneShare(coefficients, grid.LMax());
+    if (share > kDegreeOneTolerance) {
+      throw std::invalid_argument(std::format(
+          "a surface load with a degree-1 part ({:.3g} of its size at t = "
+          "{:.6g}) exerts a net force on the body, which nothing balances "
+          "without gravity: the load must have no degree-1 part",
+          share, t));
+    }
+    for (auto m = 0; m <= 1; ++m) coefficients[SurfaceGrid::Index(1, m)] = 0.0;
+    return coefficients;
+  };
+  // the operator's load channel under coefficients (none without loads)
+  auto channel = [&](const std::vector<std::complex<double>>& sigma) {
+    return loaded ? Columns(sigma, toMatDensity_) : LoadCallable{};
+  };
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
   // every stride-th node of the whole run is kept, and the last
@@ -991,6 +1055,11 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   } else {
     tstate = toroidal.ZeroState();
     tstate.t = vstate_.t;
+  }
+  if (resumed && loaded && sigma_.size() != grid.ZeroCoefficients().size()) {
+    throw std::invalid_argument(
+        "a run under surface loads is resumed from a checkpoint holding the "
+        "loads' coefficients at its node");
   }
   auto nodeForces = RadialSourceForces{};
   auto forcesAt = [&](double t) {
@@ -1055,10 +1124,11 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   };
 
   if (!resumed) {
-    // The start: the unrelaxed response to the sources there, with no
-    // memory before it.
+    // The start: the unrelaxed response to the loads and the sources
+    // there, with no memory before it.
     nodeForces = forcesAt(times[0]);
-    spheroidal = op.SolveElastic(vstate_);
+    if (loaded) sigma_ = loadAt(times[0]);
+    spheroidal = op.SolveElastic(vstate_, channel(sigma_));
     for (const auto& [l, f] : nodeForces.spheroidal) {
       const auto x = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
       auto& to = spheroidal.at(l);
@@ -1072,15 +1142,16 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
     record(times[0], kept(0));
     checkpoint(0);
   } else {
-    op.PrimeStrain(vstate_);
+    op.PrimeStrain(vstate_, channel(sigma_));
   }
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
-    auto step = op.StartStep(vstate_, dt, options_.scheme);
+    auto step = op.StartStep(vstate_, dt, options_.scheme, channel(sigma_));
     nodeForces = forcesAt(times[node]);
     step.AddForce(nodeForces.spheroidal);
-    auto finished = step.Finish();
+    if (loaded) sigma_ = loadAt(times[node]);
+    auto finished = step.Finish(channel(sigma_));
     vstate_ = std::move(finished.first);
     spheroidal = std::move(finished.second);
     if (sourced) {

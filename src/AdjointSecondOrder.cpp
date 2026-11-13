@@ -326,14 +326,15 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   };
   // The tide kernel of a node, and its derivative from the derivative
   // duals: the adjoint solve's tide dual with the dual of the step's
-  // tide coefficients, no degree 0 (as the first-order sweep forms it).
+  // tide coefficients, nothing below degree 2 (as the first-order sweep
+  // forms it).
   auto tideKernels = std::vector<std::vector<Complex>>(times.size());
   auto dTideKernels = std::vector<std::vector<Complex>>(times.size());
   auto tideKernelOf = [](const GRDSolver::AdjointResponse& adj,
                          const std::vector<Complex>& psiDual) {
     auto kernel = adj.tideDual;
     for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
-    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(kernel);
     return kernel;
   };
   // The contraction of a degree's dual vector with the unit responses:
@@ -1885,7 +1886,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::ContinuousSecondOrder(
   kernels.momentKernels = std::move(momentKernels);
   derivatives.momentKernels = std::move(dMomentKernels);
   for (auto* set : {&tideKernels, &dTideKernels}) {
-    for (auto& kernel : *set) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    for (auto& kernel : *set) ZeroBelowTideDegrees(kernel);
   }
   kernels.tideKernels = std::move(tideKernels);
   derivatives.tideKernels = std::move(dTideKernels);

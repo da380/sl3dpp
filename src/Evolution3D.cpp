@@ -122,33 +122,24 @@ std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
   return March(times, nullptr, &iceThickness, nullptr, false);
 }
 
-namespace {
-void CheckMigratingForcing(const Evolution3D::Forcing& forcing) {
-  if (forcing.tide) {
-    throw std::invalid_argument(
-        "a prescribed tide is not taken under migrating shorelines");
-  }
-}
-}  // namespace
-
 std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
     std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   CheckTimes(times);
-  CheckMigratingForcing(forcing);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               &iceThickness, nullptr, false, &forcing);
+               &iceThickness, forcing.tide ? &forcing.tide : nullptr, false,
+               &forcing);
 }
 
 std::vector<Evolution3D::Snapshot> Evolution3D::ResumeMigrating(
     const Checkpoint& from, std::span<const double> times,
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
-  CheckMigratingForcing(forcing);
   Restore(from, times);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
-               &iceThickness, nullptr, true, &forcing);
+               &iceThickness, forcing.tide ? &forcing.tide : nullptr, true,
+               &forcing);
 }
 
 void Evolution3D::Restore(const Checkpoint& from,
@@ -518,7 +509,10 @@ Evolution3D::Snapshot Evolution3D::Instantaneous(const Forcing& forcing,
   sourced_ = static_cast<bool>(forcing.sources) ||
              static_cast<bool>(forcing.stressGluts);
   Coupled coupled(*this, false);
-  if (forcing.tide) coupled.tide = forcing.tide(t);
+  if (forcing.tide) {
+    coupled.tide = forcing.tide(t);
+    RequireTideDegrees(coupled.tide);
+  }
   if (forcing.directLoadOutsideWaterBudget) {
     coupled.outsideGrid = forcing.directLoadOutsideWaterBudget(t);
   }
@@ -594,7 +588,10 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
                                  : std::vector<double>(fieldSize, 0.0);
   };
   auto setTide = [&](double t) {
-    if (tide != nullptr) coupled.tide = (*tide)(t);
+    if (tide != nullptr) {
+      coupled.tide = (*tide)(t);
+      RequireTideDegrees(coupled.tide);
+    }
     if (interior != nullptr && interior->directLoadOutsideWaterBudget) {
       coupled.outsideGrid = interior->directLoadOutsideWaterBudget(t);
     }
@@ -632,7 +629,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   };
 
   // The forcing beside the ice of a migrating node, changes from the
-  // background: the loads, the layer and the sources.
+  // background: the loads, the layer, the tide and the sources.
   auto setMoving = [&](double t) {
     auto& moving = coupled.moving;
     moving = GRDSolver::NonlinearForcing{};
@@ -644,6 +641,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
     moving.directLoadOutsideWaterBudget = coupled.outsideGrid;
     moving.solidSurfaceChange = coupled.layerGrid;
+    moving.tide = coupled.tide;
   };
 
   auto startInfo = Viscoelastic3D::StepInfo{};

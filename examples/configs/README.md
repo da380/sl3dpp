@@ -50,7 +50,8 @@ with its `unit` on the file's own axis.
 
 The `no_ocean*` configs have no `ocean` block, so the body has no ocean,
 and give `"rotation": "none"`, so the response is the solid body's alone
-(`postseismic_no_gravity.json` is such a response without gravity too);
+(`postseismic_no_gravity.json` and `no_gravity_load.json` are such
+responses without gravity too);
 those on lateral structure set `solver.step_rtol` 1e-10 and
 `step_max_iterations` 200, tighter than the defaults (1e-9, 60).
 
@@ -102,8 +103,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   much there, and elsewhere the surface sinks by up to 5 cm; the ocean's
   water is conserved, the sea level change integrating to 2e-17 of its
   magnitude over the ocean. The file holds the tangential and toroidal
-  potentials (the horizontal motion) beside the rest. About 1 s and
-  0.5 GB on four threads.
+  potentials (the horizontal motion) beside the rest, which the figure
+  (`coseismic.png`) synthesises into the horizontal displacement. About
+  1 s and 0.5 GB on four threads.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
   relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
@@ -117,8 +119,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `time_unit`). The first node is the co-seismic answer of
   `sea_level_static_coseismic.json` to 1.4e-6 m (0.360 m of uplift over
   the fault); the mantle's relaxation brings the uplift down to 0.34 m
-  after a century and 0.27 m after five. About 7 s and 1.5 GB on four
-  threads.
+  after a century and 0.27 m after five; the figure (`postseismic.png`)
+  draws the relaxation in maps and at three places. About 7 s and 1.5 GB
+  on four threads.
 - **`postseismic_no_gravity.json`** — the problem without gravity
   (`"gravity": "none"`): a point thrust at that fault's centroid (25 km
   deep, dipping 18° east, 2e22 N m) relaxing on the same nine nodes in
@@ -130,8 +133,10 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   and no sea level change) and exchange tables of the displacement at the
   first and last nodes, `out/postseismic_no_gravity/postseismic_no_gravity_{node}.txt`.
   The uplift over the source is 0.31 m at the event and 0.19 m after 500
-  years, against 0.29 m and 0.17 m for the same run with gravity. About
-  2 s on four threads.
+  years, against 0.29 m and 0.17 m for the same run with gravity. The
+  figure (`postseismic.png`) is `sea_level_postseismic`'s without the
+  ocean, drawn on its own: the two runs' sources differ. About 2 s on
+  four threads.
 - **`sea_level_1d.json`** — the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a
@@ -154,6 +159,20 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc`, which also holds
   the calibrated `initial_sea_level` and the `ocean_function` at every node.
   The marine margins of the synthetic ice sheets flood as they melt.
+- **`sea_level_tide_migrating.json`** — that deglaciation with migrating
+  shorelines from the state at 21 ka (`"at": "start"`) under a degree-2
+  zonal tidal potential beside the ice (`forcing.tide`), switched on over
+  the window to 30 m^2 s^-2 by the present (its `history_kyr_bp`), at lmax
+  32 in kiloyear steps: `out/sea_level_tide_migrating/sea_level_tide_migrating.nc`.
+  The tide enters each node's nonlinear sea level solve as it enters the
+  linear one, its potential moving the sea surface and so the flotation
+  that places the shorelines. Its equilibrium surface, -psi / g, falls by
+  nearly 3 m from pole to equator, but by the present the body has relaxed
+  nearly to the fluid response, which follows the equipotential: the
+  tide changes the relative sea level by -0.27 to +0.12 m, and moves no
+  shoreline of the synthetic Earth's steep coasts; the shorelines the
+  figure (`sea_level.png`) shows moved are the deglaciation's. About 1 s
+  on two threads.
 - **`sea_level_3d.json`** — the same deglaciation with the laterally varying
   viscosity of `../data/viscosity_log.nc` (a planetmodel model file on the
   same body, a zero-mean log perturbation about 1e21 Pa s), at lmax 16 in
@@ -207,7 +226,10 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   forward run in memory, the same to rounding (about 1e-14 relative; two
   processes may plan their FFTs differently, and the tests hold the two
   bitwise within one process). `run_all.sh` removes a former store first,
-  its inputs being the build's to rewrite.
+  its inputs being the build's to rewrite. The figure (`kernels.png`)
+  draws the moment kernels per patch, held from the onset, and their
+  contraction with the fault's own mechanism, which gives back each
+  measurement's value with the fault's moment.
 - **`no_ocean.json`** — the instantaneous elastic response of the
   synthetic 3D elastic Earth (`../data/synthetic_moduli.nc`, written by the
   build: the PREM-like moduli with a stiff craton and a soft ridge in the
@@ -240,7 +262,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   co-seismic response and the later ones the relaxation, to 2 kyr at lmax
   64. `out/no_ocean_seismic/no_ocean_seismic.nc` holds the radial
   displacement, the tangential potential V, the toroidal potential W and
-  the potential at every node. About 5 s on two threads.
+  the potential at every node, which the figure (`postseismic.png`)
+  draws as `sea_level_postseismic`'s without an ocean. About 5 s on two
+  threads.
 - **`no_ocean_1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
   mass of about 2 km of ice, held for 10 kyr and removed over the next half,
   on the radial viscoelastic Earth of `../data/prem8.gia.deck` (no lateral
@@ -377,6 +401,24 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   rounding of the two clocks' node times, and its `load` at every node to
   2e-15; its relative sea level change is -(u + phi / g), the height of an
   equipotential above the surface. About 1 s.
+- **`no_gravity_load.json`** — surface loads in the problem without
+  gravity (`"gravity": "none"`), where a load acts by its weight, a normal
+  traction g sigma, and must have no degree-1 part (its net force would
+  be unbalanced): `no_ocean_load_cap.json`'s cap and its antipode (60° S,
+  95° E), with the same history, on the radial Maxwell deck at lmax 32,
+  without an ocean, a potential or a rotational feedback, the degree
+  systems taking the displacement alone and stopping at the core-mantle
+  boundary: `out/no_gravity_load/no_gravity_load.nc` (the displacement,
+  the tangential potential and the loads applied; no potential and no sea
+  level change) and exchange tables of the displacement at 3, 7 and
+  12 kyr, `out/no_gravity_load/no_gravity_load_{node}.txt`. The pair's
+  degree-1 part is 4e-16 of its size; a single cap is refused, naming
+  `forcing.load`. Without buoyancy the surface under each cap sinks 203 m
+  once the load is on and 1018 m by 7 kyr (125 m and 327 m with gravity),
+  and after the load is gone it springs back by its elastic part alone,
+  792 m down at 12 kyr against 60 m with gravity, as the figure
+  (`gravity.png`) draws against `no_ocean_load_cap`. Under 1 s on four
+  threads.
 - **The time-step study**, `timestep_{et,be}_n<N>.json` (solve) and
   `timestep_{discrete,continuous}_n<N>.json` (kernel) — one problem at
   several step sizes: the synthetic deglaciation from 16 to 6 ka on the

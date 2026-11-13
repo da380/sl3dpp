@@ -502,7 +502,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
                           const std::vector<Complex>& psiDual) {
     auto kernel = adj.tideDual;
     for (auto i = std::size_t{0}; i < kernel.size(); ++i) kernel[i] += psiDual[i];
-    kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(kernel);
     return kernel;
   };
   const auto zeroState = op.ZeroState();

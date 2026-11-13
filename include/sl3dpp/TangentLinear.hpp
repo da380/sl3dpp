@@ -69,9 +69,11 @@ struct TangentPerturbation {
   /// shorelines are.
   std::vector<std::vector<double>> directLoadOutsideWaterBudget;
   std::vector<std::vector<double>> solidSurfaceChange;
-  /// Per time node, a perturbation of the prescribed tidal potential a
-  /// frozen run was driven by, its coefficients on the surface (no
-  /// degree-0 part); refused about a migrating trajectory.
+  /// Per time node, a perturbation of the prescribed tidal potential the
+  /// run was driven by, its coefficients on the surface (degree 2 and
+  /// up, kLowestTideDegree: a part below is refused), frozen or migrating: about a migrating trajectory the
+  /// shorelines are held, the tide's potential moving the sea level
+  /// over each node's ocean function.
   std::vector<std::vector<std::complex<double>>> tide;
   /// Per time node, a perturbation of the interior sources acting there
   /// (Evolution::Forcing::sources and stressGluts: each node's point

@@ -182,18 +182,23 @@ def _show_region(ax, extent):
 
 
 def plot_field(ax, example: Example, name: str, *, cmap="RdBu_r",
-               symmetric=True, title=None, limit=None):
+               symmetric=True, title=None, limit=None, shading="auto"):
     """The field as a filled map; returns the mesh for a colorbar. A
     symmetric scale runs to the field's largest magnitude, or to `limit`
-    when given (one scale across several panels)."""
+    when given (one scale across several panels). A field over a region
+    (longitudes not spanning the globe) is drawn as it is. `shading` is
+    pcolormesh's: "gouraud" interpolates between the points, for a
+    regional map of a coarse grid."""
     field = example.fields[name]
     lons, lats = example.lons, example.lats
-    # close the longitude seam for a tidy global plot
-    field = np.column_stack([field, field[:, 0]])
-    lons = np.append(lons, lons[0] + 360.0)
-    kwargs = {"cmap": cmap, "shading": "auto"}
+    spacing = abs(lons[1] - lons[0]) if lons.size > 1 else 360.0
+    if lons[-1] - lons[0] + 1.5 * spacing >= 360.0:
+        # close the longitude seam for a tidy global plot
+        field = np.column_stack([field, field[:, 0]])
+        lons = np.append(lons, lons[0] + 360.0)
+    kwargs = {"cmap": cmap, "shading": shading}
     if symmetric:
-        top = limit if limit is not None else np.max(np.abs(field))
+        top = limit if limit is not None else np.nanmax(np.abs(field))
         kwargs["vmin"], kwargs["vmax"] = -top, top
     if HAVE_CARTOPY:
         kwargs["transform"] = ccrs.PlateCarree()
@@ -213,3 +218,61 @@ def mark_sites(ax, latlons, colors=None):
         ax.plot(lon, lat, "o", markersize=5, markerfacecolor=color,
                 markeredgecolor="white", markeredgewidth=0.8, zorder=5,
                 **kwargs)
+
+
+def destination(lat: float, lon: float, azimuth: float,
+                distance_km: float) -> tuple[float, float]:
+    """The point a great-circle distance from (lat, lon) along an azimuth
+    (degrees clockwise from north) on a sphere of the Earth's mean radius,
+    the other way for a negative distance; its longitude in [0, 360)."""
+    phi, lam = np.deg2rad(lat), np.deg2rad(lon)
+    a, d = np.deg2rad(azimuth), distance_km / 6371.0
+    phi2 = np.arcsin(np.sin(phi) * np.cos(d)
+                     + np.cos(phi) * np.sin(d) * np.cos(a))
+    lam2 = lam + np.arctan2(np.sin(a) * np.sin(d) * np.cos(phi),
+                            np.cos(d) - np.sin(phi) * np.sin(phi2))
+    return float(np.rad2deg(phi2)), float(np.rad2deg(lam2)) % 360.0
+
+
+def mark_fault(ax, lat: float, lon: float, strike: float, dip: float,
+               length_km: float, width_km: float) -> None:
+    """A planar fault on a map made by map_axes, given by its centroid,
+    strike, dip and size (degrees, km): the surface projection of its
+    plane, its up-dip edge heavy (a fault dips to the right of its
+    strike)."""
+    half_length = 0.5 * length_km
+    half_across = 0.5 * width_km * np.cos(np.deg2rad(dip))
+    corners = []
+    for along, across in ((-1, -1), (1, -1), (1, 1), (-1, 1), (-1, -1)):
+        middle = destination(lat, lon, strike, along * half_length)
+        corners.append(destination(*middle, strike + 90.0, across * half_across))
+    lats, lons = np.array(corners).T
+    kwargs = {"transform": ccrs.PlateCarree()} if HAVE_CARTOPY else {}
+    ax.plot(lons, lats, color="k", lw=0.9, zorder=6, **kwargs)
+    ax.plot(lons[:2], lats[:2], color="k", lw=2.6, zorder=6, **kwargs)
+
+
+def arrows(ax, example: Example, extent, east: str = "east",
+           north: str = "north", spacing: float = 1.6) -> None:
+    """A horizontal displacement, the example's fields `east` and `north`
+    (m), as arrows about `spacing` degrees apart over a map region (west,
+    east, south, north in degrees), the largest a third of an inch long,
+    those under a twentieth of it left out, with a key."""
+    west, east_edge, south, north_edge = extent
+    lats, lons = example.lats, example.lons
+    step = max(1, int(round(spacing / abs(lats[1] - lats[0]))))
+    rows = np.where((lats >= south) & (lats <= north_edge))[0][::step]
+    cols = np.where(((lons - west) % 360.0) <= (east_edge - west))[0][::step]
+    u = example.fields[east][np.ix_(rows, cols)]
+    v = example.fields[north][np.ix_(rows, cols)]
+    size = np.hypot(u, v)
+    largest = float(np.max(size))
+    shown = size >= 0.05 * largest
+    at_lons, at_lats = np.meshgrid(lons[cols], lats[rows])
+    key = float(f"{largest / 2.0:.0e}")  # a round length near half the largest
+    kwargs = {"transform": ccrs.PlateCarree()} if HAVE_CARTOPY else {}
+    quiver = ax.quiver(at_lons[shown], at_lats[shown], u[shown], v[shown],
+                       color="k", scale=3.0 * largest, scale_units="inches",
+                       width=0.004, zorder=5, **kwargs)
+    ax.quiverkey(quiver, 0.08, 0.05, key, f"{key:g} m", labelpos="E",
+                 coordinates="axes", fontproperties={"size": 8})

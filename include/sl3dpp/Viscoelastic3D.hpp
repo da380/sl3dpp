@@ -79,7 +79,8 @@ class Viscoelastic3D {
   using Complex = std::complex<double>;
   /// A load channel: the complex m >= 0 columns (l + 1, index m; the
   /// field is real, so m < 0 is implied) at a time, or std::nullopt
-  /// where silent.
+  /// where silent. A tide channel's degree-1 columns must vanish, as
+  /// LoadCallable's (Viscoelastic.hpp), and are refused otherwise.
   using LoadCallable3D =
       std::function<std::optional<std::vector<Complex>>(int l, double t)>;
 

@@ -1624,7 +1624,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   out.ice.momentKernels = std::move(momentKernels);
   out.ice.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.ice.solidSurfaceChangeKernels = std::move(layerKernels);
-  for (auto& kernel : tideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+  for (auto& kernel : tideKernels) ZeroBelowTideDegrees(kernel);
   out.ice.tideKernels = std::move(tideKernels);
   auto spherical = [&](const std::vector<std::vector<double>>& kernel) {
     auto reduced = std::vector<std::vector<double>>(
@@ -1662,7 +1662,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         std::move(dDensityLoad), {}, oceanFunctions, rhoW);
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
-    for (auto& kernel : dTideKernels) kernel[SurfaceGrid::Index(0, 0)] = 0.0;
+    for (auto& kernel : dTideKernels) ZeroBelowTideDegrees(kernel);
     derivatives.ice.tideKernels = std::move(dTideKernels);
     derivatives.ice.thickness = std::move(views.thickness);
     derivatives.ice.initialSeaLevel = std::move(views.initialSeaLevel);

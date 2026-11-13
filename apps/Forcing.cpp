@@ -350,7 +350,9 @@ TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
   term.history = std::move(history);
   term.degree = Integer(item, "degree");
   if (term.degree < 2 || term.degree > lmax) {
-    Fail(item.At("degree"), "is not a tidal degree within [2, lmax]");
+    Fail(item.At("degree"),
+         "is not a tidal degree within [2, lmax] (a tide is taken relative "
+         "to the centre of mass: no degree 0 or 1)");
   }
   term.order = Integer(item, "order", 0);
   if (term.order < 0 || term.order > term.degree) {

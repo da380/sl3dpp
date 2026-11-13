@@ -134,6 +134,24 @@ void AdvanceMemory(GridCoupling::TensorField& m,
   });
 }
 
+// The tide channel's columns at a degree and time. Its degree-1 columns
+// must vanish: a tide is taken relative to the centre of mass
+// (kLowestTideDegree), the channel's degree 0 the spherical mean of a
+// centrifugal change.
+std::optional<std::vector<std::complex<double>>> TideColumns(
+    const Viscoelastic3D::LoadCallable3D& tide, int l, double t) {
+  auto columns = tide(l, t);
+  if (columns && l == 1 &&
+      std::ranges::any_of(*columns, [](const std::complex<double>& v) {
+        return v != 0.0;
+      })) {
+    throw std::invalid_argument(
+        "a tide channel has no degree-1 part: tides are taken relative to "
+        "the centre of mass, its degree-1 columns must vanish");
+  }
+  return columns;
+}
+
 }  // namespace
 
 struct Viscoelastic3D::Flavour {
@@ -693,7 +711,7 @@ void Viscoelastic3D::AddChannelForces(
       }
     };
     if (load) add(load(l, t), system.Load());
-    if (tide) add(tide(l, t), system.Tide(l == 0 ? 2 : -1));
+    if (tide) add(TideColumns(tide, l, t), system.Tide(l == 0 ? 2 : -1));
   }
 }
 
@@ -936,7 +954,7 @@ void Viscoelastic3D::AddUnitChannels(
       }
     };
     if (load) add(load(l, t), 0);
-    if (tide) add(tide(l, t), 1);
+    if (tide) add(TideColumns(tide, l, t), 1);
   }
 }
 

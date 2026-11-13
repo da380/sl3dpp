@@ -996,7 +996,7 @@ flag should a curvature come out non-positive (the operator pair then
 not definite, the iteration continued on magnitudes).
 
 The forcing is any `Forces` pair: `LoadForces` (a surface mass load),
-`TideForces` (an external potential of every degree and order through
+`TideForces` (an external potential of every degree from 2 through
 `DegreeOperator::Tide(power)` — the static body tide of a laterally
 heterogeneous body; `sl3d solve` solves that problem by the stepper,
 §13k),
@@ -1016,7 +1016,8 @@ spheroidal, 3.9 toroidal), the first-order check against §13b; an
 angle-uniform 10% shift of an isotropic reference (the Voigt average of
 PREM — the shifted material must keep the reference's anisotropy, so the
 reference is made isotropic) equals the exact 1D solve on the shifted
-material at 1e-9 at every degree and order of a load and of a tide,
+material at 1e-9 at every degree and order of a load and of a tide
+(every degree from 2),
 with no toroidal motion; the kernels under a lateral background (10% in
 μ and κ) paired with a lateral direction equal the central difference of
 a surface potential measurement through the full solve at 1e-5 (the
@@ -1624,16 +1625,30 @@ a small static problem run at benchmark size on one process.
 
 ## 18. The tide and the tangential displacement
 
-**The forcing.** A frozen run is driven by a direct load f_n and a
+**The forcing.** A run is driven by a direct load f_n and a
 prescribed tidal potential psi_n at each node (`Evolution::Forcing`),
-with an ocean or without one (a state whose ocean function vanishes).
-The run is linear in both, so the tangent-linear run along (delta f,
-delta psi) is the run under them as its forcing
-(`TangentPerturbation::tide`, `TangentPerturbation3D::tide`). The tide
-enters a node twice: the sea level solve, where the body answers it
-through the tidal Love numbers and the potential itself moves the
-equipotentials, and the radial steps, whose tide channel carries
-psi_n beside the centrifugal potential of the rotation.
+with an ocean or without one (a state whose ocean function vanishes),
+under frozen shorelines or migrating ones. A tide is taken relative to
+the centre of mass, so psi_n is degree 2 and up (`kLowestTideDegree`):
+a degree-0 potential exerts no force and a degree-1 one moves the whole
+body without deforming it, and every entry (the sea level solves, the
+evolutions, the operators' tide channels, the tangent-linear
+directions, `ElasticPerturbation3D::TideForces`) refuses a part below
+degree 2. A frozen run is linear in
+both, so the tangent-linear run along (delta f, delta psi) is the run
+under them as its forcing (`TangentPerturbation::tide`,
+`TangentPerturbation3D::tide`). The tide enters a node twice: the sea
+level solve, where the body answers it through the tidal Love numbers
+and the potential itself moves the equipotentials, and the radial
+steps, whose tide channel carries psi_n beside the centrifugal
+potential of the rotation. A migrating run takes the tide in the same
+two places, its nonlinear solve moving the shorelines by the sea
+surface the tide shifts (`GRDSolver::NonlinearForcing::tide`). Under
+the sharp flotation rule its derivative along the tide is the frozen
+one about the run's own ocean functions C_n, each node's sea level
+solve over C_n: no new term, and so every class below takes the tide
+about a migrating run as it takes a load, by the ocean functions it is
+given.
 
 **The tide kernels.** The discrete sweeps transpose both entries:
 with tau_n the sea level adjoint's tide dual at node n and
@@ -1643,10 +1658,12 @@ centrifugal exit already reads),
     tideKernels[n] = tau_n + psi-dagger_n,
     delta J = sum_n <tideKernels[n], delta psi_n>,
 
-in the L2 coefficient pairing of real fields. Without rotational
-feedback psi-dagger_n still carries the steps' dependence on the tide;
-the feedback adds nothing of its own, the centrifugal potential being
-a function of the response. The kernels in the Earth's parameters need
+in the L2 coefficient pairing of real fields, its entries below degree
+2 zero: the kernel is the dual over the tides admitted, as tau_n is
+(`AdjointResponse::tideDual`). Without rotational feedback psi-dagger_n
+still carries the steps' dependence on the tide; the feedback adds
+nothing of its own, the centrifugal potential being a function of the
+response. The kernels in the Earth's parameters need
 no change: the recorded trajectory holds the potential the steps saw,
 the tide included.
 
@@ -1739,10 +1756,23 @@ strain alone. Under lateral moduli both tractions' forces join the
 instantaneous fixed point's (`OpenStep::AddToroidalForce` for the
 toroidal one). The rotational feedback needs no term of its own.
 
-**What takes them.** The tangent-linear runs, 1D and 3D, take the tide
-and return V, and in 3D W. Every sweep, discrete and continuous, 1D and
-3D, takes a displacement measurement in full. The discrete first-order
-sweeps form the tide kernels; the continuous ones do not.
+**What takes them.** The tangent-linear runs, 1D and 3D, take the tide,
+about a frozen or a migrating run, and return V, and in 3D W. Every
+sweep, discrete and continuous, 1D and 3D, takes a displacement
+measurement in full. The discrete sweeps form the tide kernels, first
+and second order, about either run; the continuous ones when
+`Options::tide_kernels` asks (in 3D on one process).
+`TestMigratingDerivatives` holds the tide about a forced migrating run
+(the marine cap's, loads, a layer and a source beside it): the tangent
+along a tide of every degree from 2 against central differences of
+runs that flip no cell (1e-7), the discrete tide kernels and the other
+kernels about that run as the tangents' transposes (1e-8), the
+second-order sweep symmetric and equal to the second-order run with the
+tide in its directions, the tide kernels' derivative along the
+relaxation times (in 3D the log viscosity) against central differences
+of the first-order tide kernels (Richardson to 1e-6), and the
+continuous tide kernels and their derivatives converging to the
+discrete as the steps are halved, 1D and 3D.
 
 ## 19. Interior sources as parameters
 
@@ -1997,8 +2027,7 @@ the lateral moduli are non-zero.
 
 **What is formed on one process.** The 3D moment kernels of both
 sweeps and the continuous sweep's tide kernels are formed on one
-process (the discrete sweep's tide kernels are distributed). A migrating
-run takes no tide.
+process (the discrete sweep's tide kernels are distributed).
 
 ## 20. Unequal steps, solved starts and forced trajectories
 

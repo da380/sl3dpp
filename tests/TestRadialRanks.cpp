@@ -859,10 +859,11 @@ TEST(RadialRanks, LateralModuliStepsMatchTheOneProcessSteps) {
     result.U = op.Surface(solutions, Component::U);
     result.phi = op.Surface(solutions, Component::Phi);
     // the static problem: a branchless rheology's elastic solve under a
-    // load and a tidal potential (the 3D body tide over the ranks)
+    // load and a tidal potential (the 3D body tide over the ranks), no
+    // degree-1 part (a tide is taken relative to the centre of mass)
     const auto tide = [](int l, double) {
       auto c = LoadColumns(l);
-      for (auto& v : c) v *= 0.3 * (l + 1);
+      for (auto& v : c) v *= l == 1 ? 0.0 : 0.3 * (l + 1);
       return c;
     };
     const auto x = stat.SolveElastic(stat.ZeroState(), load, tide);

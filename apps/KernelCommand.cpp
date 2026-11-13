@@ -315,14 +315,14 @@ MeasurementSpec ReadSpec(const Json& item, std::size_t index, const Run& run) {
 
 /// The words of the kernels a run gives, in the order of KernelParameter,
 /// as a refusal lists them: the ice's with an ocean, the load's, the
-/// tide's but under migrating shorelines, the moment tensors' under
-/// seismic sources, the viscosity's through time and the moduli's.
+/// tide's, the moment tensors' under seismic sources, the viscosity's
+/// through time and the moduli's.
 std::string ParametersOf(const Run& run) {
   using enum KernelParameter;
   auto taken = std::vector<KernelParameter>{};
   if (run.ocean) taken.push_back(Ice);
   taken.push_back(Load);
-  if (!run.Migrating()) taken.push_back(Tide);
+  taken.push_back(Tide);
   if (!run.forcing.seismic.empty()) taken.push_back(Moment);
   if (run.times) taken.push_back(Viscosity);
   taken.push_back(Moduli);
@@ -371,14 +371,6 @@ std::vector<KernelParameter> ReadParameters(const Json& block, const Run& run) {
                "`ocean` block) has none of");
         }
         break;
-      case Tide:
-        if (run.Migrating()) {
-          Fail(item,
-               "is the kernels in a tidal potential, which a run under "
-               "migrating shorelines (`ocean.shorelines`: \"migrating\") "
-               "does not give: its runs take no tide");
-        }
-        break;
       case Moment:
         if (run.forcing.seismic.empty()) {
           Fail(item,
@@ -394,6 +386,7 @@ std::vector<KernelParameter> ReadParameters(const Json& block, const Run& run) {
         }
         break;
       case Load:
+      case Tide:
       case Moduli:
         break;
     }

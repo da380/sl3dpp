@@ -316,7 +316,7 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
       1.0 / setup.solver.SolverScales().Factor(PotentialDimensions);
   auto smoothTide = [&](double amplitude) {
     auto out = grid.Expand(setup.Smooth(rng, amplitude * potential));
-    out[SurfaceGrid::Index(0, 0)] = 0.0;
+    ZeroBelowTideDegrees(out);  // a tide is degree 2 and up
     return out;
   };
   auto times = std::vector<double>{};
@@ -358,6 +358,16 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     auto product = std::vector<double>(fa.size());
     for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
     return grid.Integrate(product);
+  };
+  // a tide is degree 2 and up: a tide kernel's entries below are zero
+  auto zeroBelowTwo = [](const std::vector<std::vector<Complex>>& kernels) {
+    for (const auto& k : kernels) {
+      for (const auto i : {SurfaceGrid::Index(0, 0), SurfaceGrid::Index(1, 0),
+                           SurfaceGrid::Index(1, 1)}) {
+        if (k[i] != Complex{}) return false;
+      }
+    }
+    return true;
   };
   auto measurements = FullMeasurements(setup, rng, times.size() - 1);
   for (auto& [node, m] : measurements) {
@@ -425,6 +435,7 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     const auto kernels =
         adjoint.FirstOrderKernels(times, *measured, &trajectory);
     ASSERT_EQ(kernels.tideKernels.size(), times.size());
+    EXPECT_TRUE(zeroBelowTwo(kernels.tideKernels)) << label;
     TangentPerturbation loadOnly, tideOnly;
     loadOnly.directLoad = deltas;
     tideOnly.tide = tideDeltas;
@@ -489,6 +500,7 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
         times, *measured, runItau, ditau, trajectory);
     ASSERT_EQ(alongI.directLoadKernels.size(), times.size());
     ASSERT_EQ(alongI.tideKernels.size(), times.size());
+    EXPECT_TRUE(zeroBelowTwo(alongI.tideKernels)) << label;
     ASSERT_EQ(alongI.directLoadOutsideWaterBudgetKernels.size(), times.size());
     ASSERT_EQ(alongI.solidSurfaceChangeKernels.size(), times.size());
     auto loadRows = 0.0, tideRows = 0.0, firstTide = 0.0;
@@ -970,7 +982,7 @@ TEST(TangentLinear, TheContinuousSweepFormsTideAndMomentKernels) {
   std::mt19937 fields(17);
   const auto potential = 1.0 / sle.Factor(PotentialDimensions);
   auto tide0 = grid.Expand(setup.Smooth(fields, potential));
-  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide0);  // a tide is degree 2 and up
   const auto gSea = setup.Smooth(fields, 1.0);
   const auto gU = setup.Smooth(fields, 0.5);
   const auto gV = setup.Smooth(fields, 0.6);
@@ -1337,9 +1349,9 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
   std::mt19937 fields(23);
   const auto potential = 1.0 / sle.Factor(PotentialDimensions);
   auto tide0 = grid.Expand(setup.Smooth(fields, potential));
-  tide0[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide0);  // a tide is degree 2 and up
   auto tide1 = grid.Expand(setup.Smooth(fields, potential));
-  tide1[SurfaceGrid::Index(0, 0)] = 0.0;
+  ZeroBelowTideDegrees(tide1);
   const auto gSea = setup.Smooth(fields, 1.0);
   const auto gU = setup.Smooth(fields, 0.5);
   const auto gV = setup.Smooth(fields, 0.6);
@@ -1495,9 +1507,9 @@ TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
   // A migrating run under the forcings beside the ice: a load inside the
   // water budget, one outside it, a layer on the solid surface and a
   // point source, all present at the first node, so that the start is
-  // solved. Where the forcing is too small to move a shoreline the run
-  // is the frozen run under the same forcing, node for node, the
-  // toroidal potential with it; and a prescribed tide is refused.
+  // solved, and a prescribed tide beside them. Where the forcing is too
+  // small to move a shoreline the run is the frozen run under the same
+  // forcing, node for node, the toroidal potential with it.
   auto setup = Scene::Make(1e21);
   const auto& sle = setup.solver.SolverScales();
   const auto& grid = setup.solver.Grid();
@@ -1526,10 +1538,20 @@ TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
              .longitude = 4.0},
       .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
                  .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  const auto potential = 1e-2 / sle.Factor(PotentialDimensions);
   auto forcing = Evolution::Forcing{
       .directLoad = history(load0, 0.4),
       .directLoadOutsideWaterBudget = history(other0, 0.7),
       .solidSurfaceChange = history(layer0, 0.2),
+      .tide =
+          [&](double t) {
+            auto psi = grid.ZeroCoefficients();
+            const auto s = t / times.back();
+            psi[SurfaceGrid::Index(2, 0)] = potential * (0.5 + s);
+            psi[SurfaceGrid::Index(3, 1)] =
+                potential * std::complex<double>(0.3, -0.4 * s);
+            return psi;
+          },
       .sources = [&](double t) {
         auto at = source;
         const auto shape = 0.3 + t / times.back();
@@ -1588,12 +1610,6 @@ TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
     }
   }
 
-  ViscoelasticOperator op(setup.rheology, kLmax);
-  Evolution evolution(op, setup.solver, state, {.rtol = 1e-12});
-  auto tidal = Evolution::Forcing{
-      .tide = [&](double) { return grid.ZeroCoefficients(); }};
-  EXPECT_THROW((void)evolution.RunMigrating(times, ice, tidal),
-               std::invalid_argument);
 }
 
 TEST(TangentLinear, TheContinuousSweepAboutASourceDrivenRun) {

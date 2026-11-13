@@ -158,7 +158,10 @@ struct Kernels {
   /// delta J = sum_n <tideKernels[n], delta psi_n> in the L2 coefficient
   /// pairing of real fields (the surface integral of the two synthesised
   /// fields over the solver's sphere, divided by its radius squared);
-  /// the degree-0 entry is zero. Formed by the discrete sweeps, and by
+  /// the entries below degree 2 are zero, a tide being degree 2 and up
+  /// (kLowestTideDegree): the kernel is the dual over the tides admitted,
+  /// and pairs with no degree-0 or degree-1 part. Formed by the discrete
+  /// sweeps, and by
   /// the continuous ones, radial and 3D, when Options::tide_kernels asks
   /// (to the commute error; the continuous 3D sweep on one process);
   /// empty otherwise.
@@ -234,7 +237,8 @@ struct KernelDerivatives {
   std::vector<std::vector<double>> directLoadKernels;
   /// The derivatives along v of the tide kernels (Kernels::tideKernels),
   /// per time node, in their pairing: the rows for a prescribed tidal
-  /// potential. Formed where the sweep forms the tide kernels.
+  /// potential, zero below degree 2 as the kernels are. Formed where the
+  /// sweep forms the tide kernels.
   std::vector<std::vector<std::complex<double>>> tideKernels;
   /// The derivatives along v of the kernels of a load outside the water
   /// budget and of a layer on the solid surface, formed by every

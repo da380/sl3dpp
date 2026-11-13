@@ -10,7 +10,7 @@ sl3d <command> <config.json>
 | Command | What it computes | Writes |
 | --- | --- | --- |
 | `love-numbers` | the SI Love numbers of a radial model | a plain-text table |
-| `solve` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, elastic or viscoelastic, with the rotational feedback as asked; without gravity, a radial body's response to seismic sources alone; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
+| `solve` | the sea level equation, from a state (the sea level and the ice at one instant) under any mix of an ice change, surface loads, a tide and seismic sources, with frozen or migrating shorelines: in the static problem the solve at the state's date on the elastic Earth (the elastic fingerprint of an ice change, the co-seismic sea level change of a fault), in the quasi-static problem the run through time from the state at an end of the window, its nodes dates before present or times on the run's own clock; without a state, the response of a body without an ocean to the loads, the tide and the sources, elastic or viscoelastic, with the rotational feedback as asked; without gravity, a radial body's response to surface loads, by their weight, and seismic sources; 1D or 3D as the model's moduli (and, through time, viscosity) make it | a surface file (of histories, in the quasi-static problem), and optionally coefficient tables and, static, a model file |
 | `kernel` | adjoint sensitivity kernels of configured measurements of the problems `solve` solves, read from the same config with a `kernels` block: in the ice history, surface loads, a tide, the moment tensors of seismic sources, the viscosity and the elastic moduli; 1D or 3D as `solve`'s run | a directory of kernel files |
 
 ## Running sl3d
@@ -612,7 +612,8 @@ must not. `exchange_nodes` needs `output.exchange`, and an index past the
 last node is refused. `output.volume` is refused in the quasi-static
 problem and under seismic sources (the response inside the body is solved
 from the static solve's loads and potentials, which do not hold the
-sources' forces). On lateral moduli over several MPI ranks each rank forms
+sources' forces), and without gravity (it is solved by the systems with
+gravity). On lateral moduli over several MPI ranks each rank forms
 the response inside the body over its own radial segment, and the first
 rank gathers the parts and writes the file.
 
@@ -839,7 +840,8 @@ migrating shorelines. The state is optional: without one the body has
 no ocean, and the run is the response of the solid body, with its
 rotational feedback as asked, to the loads, the tide and the sources
 (Without an ocean, below); without gravity, a radial body's response
-to seismic sources alone (Without gravity, below). The config is made of
+to surface loads, by their weight, and seismic sources (Without gravity,
+below). The config is made of
 blocks (The blocks, above): `model`, `times`, `forcing`, `ocean`,
 `solver`, `checkpoint`, `trajectory`, `output` and `discretisation`,
 with `problem`, `gravity`, `rotation`, `moments` and `restart` beside
@@ -892,7 +894,7 @@ is refused in the static problem.
 | `ocean` | object | absent | the state, its instant, the shorelines and, in the quasi-static problem, the initial sea level's calibration (The ocean block, above); absent, the body has no ocean (Without an ocean, below) |
 | `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above); without gravity `"none"`, its default then |
 | `moments` | word | `"input"` | the moments of inertia (Rotation and moments, above) |
-| `gravity` | word | `"full"` | `"full"`, the problem with self-gravitation, or `"none"`, the problem without gravity: a radial body under seismic sources alone, with no ocean, tide, surface load or rotational feedback (Without gravity, below) |
+| `gravity` | word | `"full"` | `"full"`, the problem with self-gravitation, or `"none"`, the problem without gravity: a radial body under surface loads, acting by their weight, and seismic sources, with no ocean, tide or rotational feedback, and loads without a degree-1 part (Without gravity, below) |
 | `solver` | object | absent | the solves (The solver block, above): in the static problem, `rtol` alone on a radial Earth, and the 3D step's members too on lateral moduli |
 | `checkpoint` | object | absent | the quasi-static problem alone: the checkpoints (Checkpoints and restarts, below) |
 | `restart` | boolean | `true` | the quasi-static problem alone: whether to resume from a checkpoint (Checkpoints and restarts, below) |
@@ -922,13 +924,13 @@ conserved. Without an ocean there is no ice to change, and
 | `forcing.ice_change[k].cap_thickness` | object | one of the four | a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds). Refused with the state at the window's end |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt). Refused with the state at the window's end |
 | `forcing.ice_change[k].history_kyr_bp`, `forcing.ice_change[k].history` | list of pairs | absent | the quasi-static problem, beside a cap: the cap's amplitude history, as a surface load's (below), dated in a dated run and on the run's clock in one counting forwards; without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
-| `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below |
+| `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below; without gravity the loads summed must have no degree-1 part (Without gravity, below) |
 | `forcing.load[k].water_budget` | true or false | required with an ocean; `false` without one | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water. Without an ocean there is no water to exchange, and it has no effect |
-| `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more |
+| `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more; without gravity, which forms no sea level change, the layer acts by its weight alone, as any load |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
 | `forcing.load[k].history_kyr_bp` | list of pairs | absent | a dated run: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing) |
 | `forcing.load[k].history` | list of pairs | absent | a run counting forwards: the term's amplitude history, pairs `[time, factor]` on the run's clock in its unit, the times strictly increasing |
-| `forcing.tide` | list | absent | the tide: coefficients of an external potential (below), summed. Refused under migrating shorelines |
+| `forcing.tide` | list | absent | the tide: coefficients of an external potential (below), summed |
 | `forcing.seismic` | list | absent | seismic sources (below) |
 
 The ice at a time is the state's ice plus the terms' changes summed
@@ -1016,7 +1018,10 @@ and a table's synthesised from their coefficients.
 
 **Tide coefficients.** Each element of `forcing.tide` is one coefficient
 of the external potential, in the harmonics of the coefficient tables;
-coefficients of the same degree and order add.
+coefficients of the same degree and order add. A tide is taken relative
+to the centre of mass, so its degrees are 2 and up: a degree-0 potential
+exerts no force, and a degree-1 one is a uniform field that moves the
+whole body and deforms none of it.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -1032,8 +1037,11 @@ rotation, and the potential moves the equipotentials, so it is in the
 relative sea level change and not in the `potential` written, which is
 the body's own perturbation. The ocean's load and the rotational
 feedback answer the body's deformation under it as they answer any
-other. A tide is refused under migrating shorelines, whose runs take
-none.
+other. Under migrating shorelines the tide enters the nonlinear sea
+level equation as it enters the linear one: its potential moves the sea
+surface, and so the flotation that places the shorelines, a tide large
+against the depth of a shelf flooding or draining it; the fields mean
+what they mean under frozen shorelines.
 
 **Seismic sources.** Each element of `forcing.seismic` is a source inside
 the body: an object holding exactly one of `point` and `fault`, and, in
@@ -1198,9 +1206,10 @@ unrelaxed body:
   grounding on the ocean displaces it and melting marine ice floods, and
   a layer laid on the solid surface moves them as the sea level does.
 
-The surface loads join the solve by their properties, the tide (under
-frozen shorelines) through the body's tidal Love numbers, and the seismic
-sources force the solid body, its spheroidal and toroidal response,
+The surface loads join the solve by their properties, the tide through
+the body's tidal Love numbers and its own potential in the sea level
+change (under migrating shorelines, in the flotation too), and the
+seismic sources force the solid body, its spheroidal and toroidal response,
 within the same equation: with an ocean and a fault alone the sea level
 equation is still solved, the ocean's water conserved (under frozen
 shorelines the sea level change integrates to zero over the state's
@@ -1626,27 +1635,60 @@ full rotational feedback (Rotation and moments, above).
 ### Without gravity
 
 `"gravity": "none"` is the problem without gravity: the solid body's
-response to seismic sources with no self-gravitation, no potential and no
-buoyancy, the systems of the radial operator taking the displacement
-alone (docs/design.md §3a). Much post-seismic work is done so; its solves
-are quicker, and reach higher degrees. The default, `"full"`, is the
-problem with gravity, every other section's; giving it changes nothing.
+response to surface loads and seismic sources with no self-gravitation,
+no potential and no buoyancy, the systems of the radial operator taking
+the displacement alone (docs/design.md §3a). Much post-seismic work is
+done so; its solves are quicker, and reach higher degrees. The default,
+`"full"`, is the problem with gravity, every other section's; giving it
+changes nothing.
 
 - **What it takes.** A radial model (a deck, with a radial viscosity or
   moduli file if any) in either problem: the static problem is the
   elastic response, a run through time the viscoelastic one, on the
-  run's own clock or dated, under `forcing.seismic` alone.
+  run's own clock or dated, under `forcing.load` and `forcing.seismic`,
+  either or both.
+- **Loads.** A load is a mass per unit area sigma, as with gravity, in
+  every form (`cap`, `disk`, `field`, `coefficients`, with histories).
+  Leaving gravity out drops the self-gravitation of the deformation and
+  the potential, not the weight of what sits on the surface: a load acts
+  as the normal traction g sigma pressing on the surface, g the deck's
+  reference surface gravity (the exchange tables' `surface_gravity`,
+  and `love-numbers`' `surface_gravity_m_s2`), so the static response to a load of degree l is
+  the non-gravitating traction numbers times g sigma, g h_u sigma and g
+  l_u sigma. At degree 0 the load is a uniform pressure, and the body
+  compresses. A load's `water_budget` has no ocean to change and no
+  effect, as without an ocean with gravity; a layer that moves the solid
+  surface (`moves_solid_surface`, with its `density_kg_m3`) acts by its
+  weight alone, its thickness entering only the relative sea level
+  change, which is not formed (it is written, `solid_surface_change`, as
+  without an ocean).
+- **Degree 1.** A load with a degree-1 part exerts a net force on the
+  body, which nothing balances without gravity (with gravity the load's
+  own attraction of the body does): the loads applied, every term summed,
+  must have no degree-1 part. The part is the norm of the loads'
+  degree-1 coefficients over that of all of them; above 1e-10 at a node
+  (or, static, at the problem's instant) the run is refused, naming
+  `forcing.load` and the node, and a part at or below it, rounding, is
+  taken as none. A cap or a disk alone has one, and is refused; loads
+  without one are, for instance, a pair of antipodal caps or disks of the
+  same amplitude and history (caps are sampled on the grid: a pair as
+  wide as the grid's spacing or wider has its part at rounding, while a
+  much narrower pair can alias a part above the tolerance), a zonal
+  degree-2 pattern, or a coefficient table without l = 1 (or with its
+  rows zero).
 - **What it refuses**, each naming its member: the `ocean` block (there
   is no sea level without gravity), `forcing.tide` (an external
-  potential), `forcing.load` (a surface load acts by its weight) and so
-  every forcing but the seismic sources (`forcing.ice_change` needs an
-  ocean); a `rotation` other than `"none"`, which is the default without
-  gravity (the rotational feedback reads the inertia's change from the
-  degree-2 potential, which is absent); `"moments": "hydrostatic"`; a
-  model file that varies laterally (a 3D run without gravity is not
-  built: `model.moduli.file` or `model.viscosity.file`); the `trajectory`
-  and `kernels` blocks, and `kernel` itself, at `gravity` (no kernels);
-  and, as under any seismic sources, `checkpoint` and `output.volume`.
+  potential) and `forcing.ice_change` (it needs an ocean); loads with a
+  degree-1 part (above); a `rotation` other than `"none"`, which is the
+  default without gravity (the rotational feedback reads the inertia's
+  change from the degree-2 potential, which is absent);
+  `"moments": "hydrostatic"`; a model file that varies laterally (a 3D
+  run without gravity is not built: `model.moduli.file` or
+  `model.viscosity.file`); the `trajectory` and `kernels` blocks, and
+  `kernel` itself, at `gravity` (no kernels); `output.volume` (the
+  response inside the body is solved by the systems with gravity); and,
+  as under any seismic sources, `checkpoint`. A run under loads alone is
+  checkpointed and resumed as any other.
 - **The body.** A fluid core has no degree-l pressure without gravity
   above degree zero: there the systems stop at the core-mantle boundary,
   the mantle's base traction-free, and the core (with an inner core
@@ -1655,15 +1697,20 @@ problem with gravity, every other section's; giving it changes nothing.
   is kept, in the frame of the centre of mass of the solved region (the
   density-weighted mean displacement zero), the frame the potential sets
   with gravity.
-- **The outputs.** The surface file holds `displacement`,
-  `tangential_potential` and `toroidal_potential`; there is no
+- **The outputs.** The surface file holds `displacement` and
+  `tangential_potential`, `toroidal_potential` under seismic sources, and
+  under loads the loads applied as without an ocean with gravity (`load`,
+  `load_in_water_budget`, `load_outside_water_budget`,
+  `solid_surface_change`, each where a term has it); there is no
   `potential` and no `relative_sea_level_change` (an equipotential's
   height has no meaning without gravity). Its metadata add `gravity`,
   `none` (absent with gravity, as `ocean` is with an ocean), beside
-  `ocean`, `none`, and `rotation`, `none`. An exchange table holds the
-  displacement's coefficients alone (`columns l m U_re U_im`), its heading
-  saying `no ocean, no gravity`. The summary reads `no ocean, no gravity`
-  where it would give the shorelines (Summary, below).
+  `ocean`, `none`, `rotation`, `none`, and the loads (`load`) as with
+  gravity. An exchange table holds the displacement's coefficients alone
+  (`columns l m U_re U_im`), its heading saying `no ocean, no gravity`
+  and its scalars and `forcing` lines those of any run. The summary
+  reads `no ocean, no gravity` where it would give the shorelines
+  (Summary, below).
 - **The hash.** A run without gravity is another run to the hashes of
   the checkpoints and the trajectory store; `"gravity": "full"`, or no
   member, hashes as every run with gravity does.
@@ -1697,6 +1744,42 @@ The uplift over the source is 0.31 m at the event and 0.19 m after 500
 years, against 0.29 m and 0.17 m for the same run with gravity (`"gravity":
 "full"`, no ocean, `"rotation": "none"`); about 2.2 s on four threads
 against 3.0 s with gravity.
+
+`examples/configs/no_gravity_load.json` is a run under loads: the Hudson
+Bay cap of `no_ocean_load_cap.json` and its antipode, the same cap at
+60° S, 95° E, both loaded from 2 to 3 kyr on the run's clock, held to
+7 kyr and removed by 7.5 kyr, on the radial Maxwell deck at lmax 32, with
+exchange tables at 3, 7 and 12 kyr:
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 32},
+  "times": {"unit": "kyr", "start": 0.0, "end": 12.0, "nodes": 49},
+  "forcing": {
+    "load": [{"cap": {"latitude": 60.0, "longitude": -85.0, "width_deg": 5.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history": [[2.0, 0.0], [3.0, 1.0], [7.0, 1.0], [7.5, 0.0]]},
+             {"cap": {"latitude": -60.0, "longitude": 95.0, "width_deg": 5.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history": [[2.0, 0.0], [3.0, 1.0], [7.0, 1.0], [7.5, 0.0]]}]
+  },
+  "gravity": "none",
+  "output": {"surface": "out/no_gravity_load/no_gravity_load.nc",
+             "exchange": "out/no_gravity_load/no_gravity_load_{node}.txt",
+             "exchange_nodes": [12, 28, 48]}
+}
+```
+
+The pair's degree-1 part is 4e-16 of its size. Under each cap the
+surface sinks 203 m once the load is on (3 kyr) and 1018 m by 7 kyr,
+against 125 m and 327 m for the same run with gravity (`"gravity":
+"full"`, `"rotation": "none"`): without buoyancy nothing holds the load
+up but the lithosphere, and the mantle flows on. Once the load is gone the
+surface springs back by its elastic part alone and stays down, 792 m at
+12 kyr against 60 m with gravity. About 0.7 s on four threads against
+1.1 s with gravity.
 
 ### Checkpoints and restarts
 
@@ -1832,11 +1915,12 @@ What the config was taken to mean, the inputs as read, then the files:
   <surface>[ and <k> exchange table[s]]` through time (counting forwards
   as above; ending as above);
 - without gravity, `, no gravity` follows `no ocean`: `<model>, elastic,
-  static, no ocean, no gravity, rotation none; seismic (<n> source[s]);
+  static, no ocean, no gravity, rotation none; <forcing>[; <field>...];
   wrote <surface>[ and <exchange>]` and `<model>, viscoelastic, <n> nodes
   <start> to <end> <unit> on the run's clock, no ocean, no gravity,
-  rotation none; seismic (<n> source[s]); wrote <surface>[ and <k>
-  exchange table[s]]` (dated, `<n> nodes <start> to <end> kyr BP`).
+  rotation none; <forcing>[; <field>...]; wrote <surface>[ and <k>
+  exchange table[s]]` (dated, `<n> nodes <start> to <end> kyr BP`), the
+  forcing loads and seismic sources.
 
 `<ice>` and `<sea level>` are the metadata's `ice` and `sea_level`
 (above): the state's file, variable and slice read. `<change>` is the
@@ -1859,6 +1943,7 @@ are radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
 `examples/configs/sea_level_3d_calibrated.json`,
 `examples/configs/sea_level_postseismic.json`,
 `examples/configs/postseismic_no_gravity.json`,
+`examples/configs/no_gravity_load.json`,
 `examples/configs/sea_level_no_ocean.json`,
 `examples/configs/no_ocean.json` and
 `examples/configs/no_ocean_viscoelastic.json` print
@@ -1871,6 +1956,7 @@ sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/
 sl3d solve: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc (352 fixed-point iterations over 42 steps) in 13.98 s
 sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 7.12 s
 sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, no ocean, no gravity, rotation none; seismic (1 source); wrote out/postseismic_no_gravity/postseismic_no_gravity.nc and 2 exchange tables in 2.23 s
+sl3d solve: 1-D, viscoelastic, 49 nodes 0 to 12 kyr on the run's clock, no ocean, no gravity, rotation none; load (2 terms); wrote out/no_gravity_load/no_gravity_load.nc and 3 exchange tables in 0.67 s
 sl3d solve: 1-D, viscoelastic, 49 nodes 12 to 0 kyr BP, no ocean, rotation none; load (1 term); wrote out/sea_level_no_ocean/sea_level_no_ocean.nc in 1.06 s
 sl3d solve: 3-D (lateral moduli), elastic, static, no ocean, rotation none; load (1 term) + tide (1 coefficient); wrote out/no_ocean/no_ocean.nc and out/no_ocean/no_ocean.txt and out/no_ocean/no_ocean_volume.nc (8 fixed-point iterations, residual 4.51e-11) in 1.45 s
 sl3d solve: 3-D (lateral viscosity, lateral moduli), viscoelastic, 25 nodes 0 to 12 kyr on the run's clock, no ocean, rotation none; load (1 term) + tide (1 coefficient); wrote out/no_ocean_viscoelastic/no_ocean_viscoelastic.nc and 4 exchange tables (302 fixed-point iterations over 24 steps) in 4.39 s
@@ -2212,7 +2298,7 @@ kernel's, and is refused here, the error naming `"moment"`.
 | --- | --- | --- | --- |
 | `"ice"` | in the ice history: the ice thickness at each node, its rates, the state's ice and the initial sea level | with an ocean | `<name>_ice_kernels.nc` |
 | `"load"` | in a surface load at each node: in the water budget, outside it, and the height of a layer on the solid surface | always; without an ocean the one load kernel | `<name>_load_kernels.nc` |
-| `"tide"` | in the coefficients of a tidal potential at each node | under frozen shorelines (migrating runs take no tide) | `<name>_tide_kernels.txt` |
+| `"tide"` | in the coefficients of a tidal potential at each node | always: with an ocean or without, under frozen or migrating shorelines (about a migrating run, its own shorelines held) | `<name>_tide_kernels.txt` |
 | `"moment"` | in the point moment tensors of the run's seismic sources at each node, at every point source and every patch of a fault | with `forcing.seismic` | `<name>_moment_kernels.txt` |
 | `"viscosity"` | in the viscosity | through time | 1D `<name>_viscosity_kernel.txt`, 3D `<name>_viscosity_kernels.nc` |
 | `"moduli"` | in the bulk modulus kappa and the unrelaxed shear modulus mu | always | 1D `<name>_moduli_kernel.txt`, 3D `<name>_moduli_kernels.nc` |
@@ -2297,9 +2383,11 @@ real potential), in J's unit per m^2 s^-2. A term's coefficient at a
 node is its value times its history's factor there, so the derivative
 with respect to a term's member is the sum over the nodes of the factor
 times the row's entry. The imaginary part is zero at m = 0, and so is its
-column. `<time>` is the node's date (`date_kyr_bp`) in a dated run, its
-time on the run's clock (`time_<unit>`) in one counting forwards, and 0
-(`instant`) in the static problem; the moment table's likewise.
+column. A tide has no degree 0 or 1 (Tide coefficients, above), so the
+table has no rows there. `<time>` is the node's date (`date_kyr_bp`) in a
+dated run, its time on the run's clock (`time_<unit>`) in one counting
+forwards, and 0 (`instant`) in the static problem; the moment table's
+likewise.
 
 **The seismic sources.** `<name>_moment_kernels.txt` lists the run's
 source points under its header (`# point p term patch latitude_deg

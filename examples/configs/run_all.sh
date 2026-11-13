@@ -54,6 +54,7 @@ run solve postseismic_no_gravity.json
 rm -rf out/sea_level_1d/checkpoints
 run solve sea_level_1d.json
 run solve sea_level_1d_calibrated.json
+run solve sea_level_tide_migrating.json
 run solve sea_level_3d.json
 run solve sea_level_3d_calibrated.json
 run kernel kernel1d.json
@@ -71,6 +72,7 @@ run solve no_ocean_cap_weak.json
 run solve no_ocean_cap_strong.json
 run solve no_ocean_load_cap.json
 run solve sea_level_no_ocean.json
+run solve no_gravity_load.json
 for n in 10 20 40; do  # the time-step study's short family
   run solve timestep_et_n$n.json
   run solve timestep_be_n$n.json

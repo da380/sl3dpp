@@ -25,16 +25,31 @@
  *
  * On an operator without gravity (ViscoelasticOperator::Options::
  * gravitating = false) there is no sea level equation, no potential and
- * no rotational feedback: a run is the solid body stepped under interior
- * sources alone (Forcing::sources and stressGluts), on a background
- * without an ocean (GRDSolver::NoOceanState) and with RotationalFeedback::
- * None. The snapshots carry the displacement, the tangential and the
- * toroidal potentials; the sea level change and the potential are left
- * empty. A load (the weight of a surface mass), a layer on the solid
- * surface, a tide, an ocean, the rotational feedback and the migrating
- * runs are refused, and the solver serves for its grid and its scales
- * alone (its Love numbers are not read). The derivative solvers
- * (AdjointSolver, TangentLinearSolver) refuse such an evolution.
+ * no rotational feedback: a run is the solid body stepped under surface
+ * loads and interior sources (Forcing::directLoad,
+ * directLoadOutsideWaterBudget, sources and stressGluts; the direct load
+ * of Run and Resume), on a background without an ocean (GRDSolver::
+ * NoOceanState) and with RotationalFeedback::None. A load is a mass per
+ * unit area sigma acting by its weight, the normal traction g sigma
+ * pressing on the surface with g the material's surface gravity (the load
+ * channel of the operator without gravity): the static response to a load
+ * is the non-gravitating traction numbers (ComputeTractionNumbers) times
+ * g sigma, degree by degree. Leaving gravity out drops the
+ * self-gravitation of the perturbation and the potential, not the weight
+ * of what sits on the surface. The loads inside and outside the water
+ * budget act alike, as on a body without an ocean with gravity; a layer's
+ * height (Forcing::solidSurfaceChange) enters the sea level change alone,
+ * which is not formed, and changes nothing, its weight being the direct
+ * load beside it. A load with a degree-1 part exerts a net force on the
+ * body, which nothing balances without gravity: a node whose load has a
+ * degree-1 part above kDegreeOneTolerance of its size (DegreeOneShare) is
+ * refused, and a part at or below it, rounding, is taken as none. The
+ * snapshots carry the displacement, the tangential and the toroidal
+ * potentials; the sea level change and the potential are left empty. A
+ * tide, an ocean, the rotational feedback and the migrating runs are
+ * refused, and the solver serves for its grid and its scales alone (its
+ * Love numbers are not read). The derivative solvers (AdjointSolver,
+ * TangentLinearSolver) refuse such an evolution.
  */
 
 #include <array>
@@ -42,6 +57,7 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "sl3dpp/PointSource.hpp"
@@ -50,6 +66,18 @@
 #include "sl3dpp/Viscoelastic.hpp"
 
 namespace sl3dpp {
+
+/// The size of a surface load's degree-1 part against the load's: the
+/// norm of its degree-1 coefficients over the norm of all of them, each
+/// order m > 0 counted with its conjugate at -m (the ratio of the two
+/// fields' norms on the sphere); zero for a load of none. Coefficients in
+/// SurfaceGrid's layout, degrees 0 to lmax.
+[[nodiscard]] double DegreeOneShare(
+    std::span<const std::complex<double>> coefficients, int lmax);
+
+/// The largest DegreeOneShare a run without gravity takes as rounding: a
+/// load's degree-1 part above it is a net force on the body, refused.
+inline constexpr double kDegreeOneTolerance = 1e-10;
 
 class Evolution {
  public:
@@ -191,8 +219,8 @@ class Evolution {
   /// What drives a run, each term a function of time in the solver's
   /// units and any of them absent: the direct load, a grid field (the
   /// given part of the surface load, whatever its source), and a
-  /// prescribed tidal potential, its coefficients on the surface (no
-  /// degree-0 part). The body answers both; with an ocean the sea level
+  /// prescribed tidal potential, its coefficients on the surface
+  /// (degree 2 and up, kLowestTideDegree). The body answers both; with an ocean the sea level
   /// equation closes each node under them, and the rotational feedback
   /// asked for acts with or without one.
   struct Forcing {
@@ -209,6 +237,11 @@ class Evolution {
     /// level falls by it and the water it displaces goes elsewhere. The
     /// layer's mass is a direct load beside it.
     std::function<std::vector<double>(double)> solidSurfaceChange{};
+    /// The prescribed tidal potential at time t, its coefficients on the
+    /// surface, solver units (GRDSolver::GeneralisedForcing::tide): taken
+    /// with frozen shorelines and with migrating ones alike. A value with
+    /// a nonzero coefficient below degree 2 is refused (RequireTideDegrees)
+    /// at the node that reads it.
     std::function<std::vector<std::complex<double>>(double)> tide{};
     /// The point stress gluts acting at time t (PointSource.hpp) and the
     /// stress gluts on shells (StressGlut), in the solver's units, as
@@ -270,14 +303,20 @@ class Evolution {
 
   /// A migrating run under further forcing beside the ice: the direct
   /// loads inside and outside the water budget, a layer on the solid
-  /// surface (which moves the shorelines as the sea level does) and
-  /// interior sources, all changes from the background state. The start
-  /// is then solved, by the nonlinear equation on the unrelaxed body,
-  /// so a forcing present at times[0] acts there, and so does an ice
-  /// thickness there other than the background's (the background's ocean
-  /// function must still be flotation's). With one time the run is that
-  /// solve alone: the static problem with its shorelines migrating. A
-  /// prescribed tide is refused.
+  /// surface (which moves the shorelines as the sea level does), a
+  /// prescribed tide and interior sources, all changes from the
+  /// background state. The tide enters each node's nonlinear solve as it
+  /// enters the linear one of `Run` (GRDSolver::NonlinearForcing::tide):
+  /// the body answers it through the tidal Love numbers, its potential is
+  /// in the sea level change and so in the flotation that places the
+  /// shorelines, and the radial steps see it beside the centrifugal
+  /// potential; the snapshots' potential, sea level change and tide
+  /// coefficients mean what `Run`'s do. The start is then solved, by the
+  /// nonlinear equation on the unrelaxed body, so a forcing present at
+  /// times[0] acts there, and so does an ice thickness there other than
+  /// the background's (the background's ocean function must still be
+  /// flotation's). With one time the run is that solve alone: the static
+  /// problem with its shorelines migrating.
   [[nodiscard]] std::vector<Snapshot> RunMigrating(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness,
@@ -337,7 +376,8 @@ class Evolution {
       std::span<const double> times, const Forcing& forcing);
 
   /// The run on an operator without gravity: the solid body stepped under
-  /// the interior sources, no sea level solve; `resumed` as March's.
+  /// the surface loads and the interior sources, no sea level solve;
+  /// `resumed` as March's.
   [[nodiscard]] std::vector<Snapshot> MarchWithoutGravity(
       std::span<const double> times, const Forcing& forcing, bool resumed);
 

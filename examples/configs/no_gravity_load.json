@@ -1,0 +1,18 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 32},
+  "times": {"unit": "kyr", "start": 0.0, "end": 12.0, "nodes": 49},
+  "forcing": {
+    "load": [{"cap": {"latitude": 60.0, "longitude": -85.0, "width_deg": 5.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history": [[2.0, 0.0], [3.0, 1.0], [7.0, 1.0], [7.5, 0.0]]},
+             {"cap": {"latitude": -60.0, "longitude": 95.0, "width_deg": 5.0,
+                      "amplitude_kg_m2": 1.834e6},
+              "history": [[2.0, 0.0], [3.0, 1.0], [7.0, 1.0], [7.5, 0.0]]}]
+  },
+  "gravity": "none",
+  "output": {"surface": "out/no_gravity_load/no_gravity_load.nc",
+             "exchange": "out/no_gravity_load/no_gravity_load_{node}.txt",
+             "exchange_nodes": [12, 28, 48]}
+}

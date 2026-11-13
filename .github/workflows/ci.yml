@@ -189,7 +189,8 @@ jobs:
                      "ExampleModelViscosity --lmax 8" \
                      "ExampleIceKernels --lmax 16" \
                      "ExampleViscosityKernels3D --lmax 8" \
-                     "ExampleStatic3D --lmax 8"; do
+                     "ExampleStatic3D --lmax 8" \
+                     "ExampleSeismic --lmax 32"; do
             echo "::group::$run"
             ./$run
             echo "::endgroup::"

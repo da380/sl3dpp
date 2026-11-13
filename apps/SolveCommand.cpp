@@ -1842,6 +1842,12 @@ SolveInput ReadSolveMembers(const Json& top, Run run,
          "response inside the body is solved from the static solve's loads "
          "and potentials alone; drop the member or the sources");
   }
+  if (!out.output.volume.empty() && !out.run.gravitating) {
+    Fail(output.At("volume"),
+         "is not written without gravity (`gravity`: \"none\"): the response "
+         "inside the body is solved by the systems with gravity, and their "
+         "counterpart without it is not built; drop the member");
+  }
   return out;
 }
 

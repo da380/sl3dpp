@@ -179,8 +179,8 @@ class Evolution3D {
 
   /// What drives a run, as Evolution::Forcing: the direct load, a grid
   /// field, and a prescribed tidal potential, its coefficients on the
-  /// surface (no degree-0 part), each a function of time in the solver's
-  /// units and either absent.
+  /// surface (degree 2 and up, kLowestTideDegree), each a function of
+  /// time in the solver's units and either absent.
   struct Forcing {
     /// The direct load at time t that enters the water budget; one
     /// outside it; and the height of a layer laid on the solid surface:
@@ -188,6 +188,9 @@ class Evolution3D {
     std::function<std::vector<double>(double)> directLoad{};
     std::function<std::vector<double>(double)> directLoadOutsideWaterBudget{};
     std::function<std::vector<double>(double)> solidSurfaceChange{};
+    /// The prescribed tidal potential at time t, as Evolution::Forcing's:
+    /// taken with frozen shorelines and with migrating ones alike, and
+    /// refused at a node where it has a part below degree 2.
     std::function<std::vector<std::complex<double>>(double)> tide{};
     /// The point stress gluts acting at time t (PointSource.hpp), in the
     /// solver's units: the radius a length, the moment a stress times a
@@ -241,12 +244,14 @@ class Evolution3D {
 
   /// A migrating run under further forcing beside the ice, as
   /// Evolution's: the direct loads inside and outside the water budget,
-  /// a layer on the solid surface and interior sources, changes from the
+  /// a layer on the solid surface, a prescribed tide (in every pass's
+  /// nonlinear solve and beside the centrifugal potential in the steps,
+  /// as `Run` takes it) and interior sources, changes from the
   /// background state. The start is then solved (the nonlinear equation
   /// on the unrelaxed body; under lateral moduli or sources, inside the
   /// combined fixed point of a zero-length step), and the ice at times[0]
   /// may differ from the background's. With one time the run is that
-  /// solve alone. A prescribed tide is refused.
+  /// solve alone.
   [[nodiscard]] std::vector<Snapshot> RunMigrating(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& iceThickness,

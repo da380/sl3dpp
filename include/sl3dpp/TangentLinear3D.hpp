@@ -61,8 +61,10 @@ struct TangentPerturbation3D {
   /// (Evolution3D::Forcing).
   std::vector<std::vector<double>> directLoadOutsideWaterBudget;
   std::vector<std::vector<double>> solidSurfaceChange;
-  /// Per node, a perturbation of the prescribed tidal potential of a
-  /// frozen run, its coefficients on the surface (no degree-0 part).
+  /// Per node, a perturbation of the prescribed tidal potential of the
+  /// run, its coefficients on the surface (degree 2 and up,
+  /// kLowestTideDegree: a part below is refused), frozen or migrating
+  /// (the shorelines of a migrating one held).
   std::vector<std::vector<std::complex<double>>> tide;
   /// Per node, a perturbation of the interior sources acting there
   /// (Evolution3D::Forcing::sources and stressGluts, solver units); the

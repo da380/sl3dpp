@@ -365,6 +365,12 @@ ElasticPerturbation3D::Forces ElasticPerturbation3D::TideForces(
   if (amplitudes.size() != grid.CoefficientSize()) {
     throw std::invalid_argument("a tidal potential lives on the lmax grid");
   }
+  if (lmax_ >= 1 && (amplitudes[SurfaceGrid::Index(1, 0)] != 0.0 ||
+                     amplitudes[SurfaceGrid::Index(1, 1)] != 0.0)) {
+    throw std::invalid_argument(
+        "a tidal potential has no degree-1 part: tides are taken relative "
+        "to the centre of mass");
+  }
   Forces out;
   for (auto l = 0; l <= lmax_; ++l) {
     const auto& op = Spheroidal(l);

@@ -2,16 +2,19 @@
 // solved: a run whose ice at the first node is not the background state's
 // (the start's nonlinear solve moves the shorelines there), and a run
 // forced beside the ice by loads, a layer on the solid surface and a point
-// source. The tangent-linear runs against central differences of
-// migrating runs that flip no cell, the discrete sweeps as their
-// transposes, the continuous sweeps converging to the discrete ones, the
-// second-order sweeps symmetric and equal to the second-order runs, and
-// the kernels in the moduli — 1D and, under lateral viscosity, 3D.
+// source, and a run with a prescribed tide beside those. The
+// tangent-linear runs against central differences of migrating runs that
+// flip no cell, the discrete sweeps as their transposes, the continuous
+// sweeps converging to the discrete ones, the second-order sweeps
+// symmetric and equal to the second-order runs, and the kernels in the
+// moduli and in the tide — 1D and, under lateral viscosity, 3D.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <complex>
 #include <format>
 #include <functional>
 #include <iostream>
@@ -1628,4 +1631,620 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     EXPECT_LT(coarse[q], q == kHessian ? 0.5 : 0.2) << names[q];
     EXPECT_GT(coarse[q] / fine[q], 2.0) << names[q];
   }
+}
+
+// -- a tide about a migrating run ---------------------------------------------
+
+namespace {
+
+using Coefficients = std::vector<std::complex<double>>;
+
+/// Per node, smooth random tide coefficients of a real potential of the
+/// given amplitude (m^2 s^-2), every degree from 2 (a tide is taken
+/// relative to the centre of mass), none below.
+template <class S>
+std::vector<Coefficients> TidesOf(const S& scene, std::mt19937& rng, std::size_t nodes,
+                                  double amplitude) {
+  const auto& grid = scene.solver.Grid();
+  const auto potential = 1.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
+  auto out = std::vector<Coefficients>{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    auto c = grid.Expand(scene.Smooth(rng, amplitude * potential));
+    ZeroBelowTideDegrees(c);
+    out.push_back(std::move(c));
+  }
+  return out;
+}
+
+/// A per-node tide history as the forward driver's callable, moved by eps
+/// times a per-node direction (empty: none).
+std::function<Coefficients(double)> TideField(std::vector<double> times,
+                                              std::vector<Coefficients> base,
+                                              std::vector<Coefficients> direction = {},
+                                              double eps = 0.0) {
+  return [times = std::move(times), base = std::move(base),
+          direction = std::move(direction), eps](double t) {
+    const auto n = NodeOf(times, t);
+    auto out = base[n];
+    if (!direction.empty()) {
+      for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += eps * direction[n][i];
+    }
+    return out;
+  };
+}
+
+/// The pairing of tide kernels with a per-node tide direction: the
+/// unit-sphere integral of the two synthesised fields, summed over the
+/// nodes (Kernels::tideKernels).
+double TidePairing(const SurfaceGrid& grid, const std::vector<Coefficients>& kernels,
+                   const std::vector<Coefficients>& direction) {
+  auto out = 0.0;
+  for (auto n = std::size_t{0}; n < direction.size(); ++n) {
+    const auto a = grid.Synthesise(kernels[n]);
+    const auto b = grid.Synthesise(direction[n]);
+    auto product = std::vector<double>(a.size());
+    for (auto i = std::size_t{0}; i < a.size(); ++i) product[i] = a[i] * b[i];
+    out += grid.Integrate(product);
+  }
+  return out;
+}
+
+/// A coefficient vector as its real and imaginary parts, interleaved.
+std::vector<double> AsReal(const Coefficients& c) {
+  auto out = std::vector<double>{};
+  for (const auto v : c) {
+    out.push_back(v.real());
+    out.push_back(v.imag());
+  }
+  return out;
+}
+
+/// The L2 distance of two per-node tide kernels in that pairing, relative
+/// to the second's.
+double TideDistance(const SurfaceGrid& grid, const std::vector<Coefficients>& x,
+                    const std::vector<Coefficients>& y) {
+  auto e = x;
+  for (auto n = std::size_t{0}; n < e.size(); ++n) {
+    for (auto i = std::size_t{0}; i < e[n].size(); ++i) e[n][i] -= y[n][i];
+  }
+  return std::sqrt(TidePairing(grid, e, e) / TidePairing(grid, y, y));
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
+  // About the forced migrating run of the marine cap with a tide of a few
+  // metres beside its loads, layer and source, the derivative classes
+  // take the tide, a direction of every degree from 2:
+  //  (a) the tangent along it is the derivative of the migrating run:
+  //      central differences of runs that flip no cell, the run linear in
+  //      the tide while none flips (1e-7, both methods);
+  //  (b) the discrete sweep's tide kernels pair with it (1e-8), and about
+  //      this run its kernels in a load and in the relaxation times pair
+  //      with their tangents (1e-8), the tangent along the relaxation
+  //      times the derivative of the run (Richardson to 1e-6);
+  //  (c) the discrete second-order sweep along u (the tide, the
+  //      relaxation times) and w (a load, other relaxation times, the
+  //      moduli), the tide kernels' derivatives in the pairings, gives
+  //      <H u, w> = <H w, u>, equal to the second-order run's
+  //      <g, F''[u, w]>; and the tide kernels' derivative along the
+  //      relaxation times is the central difference of the first-order
+  //      tide kernels about runs with the relaxation times moved
+  //      (Richardson to 1e-6).
+  auto setup = Scene::Make(1e21);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& grid = setup.solver.Grid();
+  const auto cap = MarineCap::Make(setup, 5);
+  const auto& times = cap.times;
+  const auto nodes = times.size();
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  std::mt19937 rng(211);
+  const auto surface = setup.material.Radius() * setup.model.ModelScales().Length() /
+                       setup.solver.SolverScales().Length();
+  const auto base =
+      BaseForcing(times, setup.Smooth(rng, 2e4 * setup.Sigma()),
+                  setup.Smooth(rng, 1e4 * setup.Sigma()),
+                  setup.Smooth(rng, 400.0 * setup.Metre()),
+                  SourceAt(setup.solver, surface, 1e21));
+  const auto tides = TidesOf(setup, rng, nodes, 20.0);
+  const auto deltaTide = TidesOf(setup, rng, nodes, 0.5);
+  auto ice = std::vector<std::vector<double>>{};
+  for (const auto t : times) ice.push_back(cap.Thickness(t));
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
+  measurements[1].displacementDual = setup.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
+  measurements[nodes - 1].angularVelocityDual = {0.2, -0.4, 0.8};
+  const Evolution::Options options{
+      .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
+  auto forcingOf = [&](const std::vector<Coefficients>& direction, double eps) {
+    auto out = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
+    out.tide = TideField(times, tides, direction, eps);
+    return out;
+  };
+  Evolution evolution(op, setup.solver, state, options);
+  const auto run = evolution.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+  const auto oceans = OceanFunctionsOf(run);
+  ASSERT_NE(oceans.front(), state.oceanFunction);
+  ASSERT_NE(oceans.back(), oceans.front());
+  const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+  // the steps saw the tide
+  ASSERT_GT(MaxDiff(AsReal(trajectory.tides[2]),
+                    AsReal(setup.solver.CentrifugalCoefficients(run[2].angularVelocity))),
+            0.0);
+  auto objective = [&](const ViscoelasticOperator& at,
+                       const std::vector<Coefficients>& direction, double eps) {
+    Evolution trial(at, setup.solver, state, options);
+    const auto snaps =
+        trial.RunMigrating(times, Field(times, ice), forcingOf(direction, eps));
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      EXPECT_TRUE(snaps[n].converged) << "node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+    }
+    return Objective(setup, snaps, measurements);
+  };
+  const auto kernels = AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                                 .rtol = 1e-12,
+                                                 .material_kernels = true})
+                           .FirstOrderKernels(times, measurements, &trajectory, oceans);
+  ASSERT_EQ(kernels.tideKernels.size(), nodes);
+
+  // (a) and (b): the tide, and a load, about the run with a tide
+  const auto fdTide = 0.5 * (objective(op, deltaTide, 1.0) - objective(op, deltaTide, -1.0));
+  ASSERT_NE(fdTide, 0.0);
+  auto deltaLoad = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    deltaLoad.push_back(setup.Smooth(rng, 10.0 * setup.Sigma()));
+  }
+  const auto tideKernel = TidePairing(grid, kernels.tideKernels, deltaTide);
+  const auto loadKernel = NodePairing(setup, kernels.directLoadKernels, deltaLoad);
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto label = std::string(method == AdjointMethod::Discrete ? "discrete" : "continuous");
+    TangentLinearSolver tangent(evolution, {.method = method, .rtol = 1e-12});
+    const auto alongTide = Objective(
+        setup, tangent.Run(times, TangentPerturbation{.tide = deltaTide}, &trajectory, oceans),
+        measurements);
+    const auto alongLoad = Objective(
+        setup,
+        tangent.Run(times, TangentPerturbation{.directLoad = deltaLoad}, &trajectory, oceans),
+        measurements);
+    std::cout << std::format(
+        "[tide, 1D, {}] tide: differences {:.2e}, discrete kernel {:.2e}; load: discrete "
+        "kernel {:.2e}\n",
+        label, Gap(alongTide, fdTide), Gap(tideKernel, alongTide), Gap(loadKernel, alongLoad));
+    EXPECT_NEAR(alongTide, fdTide, 1e-7 * std::abs(fdTide)) << label;
+    EXPECT_NEAR(tideKernel, alongTide, 1e-8 * std::abs(alongTide)) << label;
+    EXPECT_NEAR(loadKernel, alongLoad, 1e-8 * std::abs(alongLoad)) << label;
+  }
+  const auto none = std::vector<Coefficients>{};
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto alongItau = Objective(
+      setup,
+      TangentLinearSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+          .Run(times, TangentPerturbation{.itau = ditau}, &trajectory, oceans),
+      measurements);
+  const auto fdItau = Difference(
+      [&](double e) { return objective(MovedItau(setup, e, ditau), none, 0.0); }, 0.004,
+      alongItau);
+  const auto itauKernel = VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]);
+  std::cout << std::format(
+      "[tide, 1D] itau: Richardson gap {:.2e}; discrete kernel {:.2e}\n",
+      Gap(fdItau.richardson, alongItau), Gap(itauKernel, alongItau));
+  EXPECT_NEAR(fdItau.richardson, alongItau, 1e-6 * std::abs(alongItau));
+  EXPECT_NEAR(itauKernel, alongItau, 1e-8 * std::abs(alongItau));
+
+  // (c) second order
+  std::mt19937 local(223);
+  TangentPerturbation u, w;
+  u.tide = TidesOf(setup, local, nodes, 0.5);
+  u.itau = ditau;
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    w.directLoad.push_back(setup.Smooth(local, 10.0 * setup.Sigma()));
+  }
+  w.itau = setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+  w.material = PointDirection(op, setup.material, [](double r) { return 1.0 - 0.5 * r; });
+  TangentLinearSolver tangent(
+      evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+  const auto runU = tangent.Run(times, u, &trajectory, oceans);
+  const auto runW = tangent.Run(times, w, &trajectory, oceans);
+  AdjointSolver adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                    .rtol = 1e-12,
+                                    .material_kernels = true});
+  const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
+      times, measurements, runU, u.itau, trajectory, oceans, u.material);
+  const auto [kernelsW, alongW] = adjoint.SecondOrderKernels(
+      times, measurements, runW, w.itau, trajectory, oceans, w.material);
+  ASSERT_EQ(alongU.tideKernels.size(), nodes);
+  ASSERT_EQ(alongW.tideKernels.size(), nodes);
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    EXPECT_LE(MaxDiff(AsReal(kernelsU.tideKernels[n]), AsReal(kernels.tideKernels[n])),
+              1e-12 * MaxAbs(AsReal(kernels.tideKernels[n])))
+        << "node " << n;
+  }
+  const auto uw = PairingOf(setup, op, alongU, w);
+  const auto wu = PairingOf(setup, op, alongW, u) + TidePairing(grid, alongW.tideKernels, u.tide);
+  SecondOrderDirection direction;
+  direction.itauU = u.itau;
+  direction.itauV = w.itau;
+  direction.materialV = w.material;
+  const auto forward = Objective(
+      setup, tangent.RunSecondOrder(times, runU, runW, direction, &trajectory, oceans),
+      measurements);
+  std::cout << std::format(
+      "[tide, 1D] Hessian: symmetry gap {:.2e}, against the second-order run {:.2e}\n",
+      Gap(wu, uw), Gap(uw, forward));
+  ASSERT_NE(forward, 0.0);
+  EXPECT_NEAR(uw, wu, 1e-9 * std::abs(uw));
+  EXPECT_NEAR(uw, forward, 1e-9 * std::abs(forward));
+  // the tide kernels' derivative along the relaxation times
+  const auto alongItauOnly =
+      adjoint
+          .SecondOrderKernels(
+              times, measurements,
+              tangent.Run(times, TangentPerturbation{.itau = ditau}, &trajectory, oceans),
+              ditau, trajectory, oceans)
+          .second;
+  const auto predicted = TidePairing(grid, alongItauOnly.tideKernels, deltaTide);
+  const auto fdKernel = Difference(
+      [&](double e) {
+        const auto moved = MovedItau(setup, e, ditau);
+        Evolution trial(moved, setup.solver, state, options);
+        const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+        for (auto n = std::size_t{0}; n < nodes; ++n) {
+          EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+        }
+        const auto path = ForwardTrajectory::FromSnapshots(snaps);
+        const auto k = AdjointSolver(trial, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+                           .FirstOrderKernels(times, measurements, &path, OceanFunctionsOf(snaps));
+        return TidePairing(grid, k.tideKernels, deltaTide);
+      },
+      0.004, predicted);
+  std::cout << std::format("[tide, 1D] tide kernels' derivative: Richardson gap {:.2e}\n",
+                           Gap(fdKernel.richardson, predicted));
+  ASSERT_NE(predicted, 0.0);
+  EXPECT_NEAR(fdKernel.richardson, predicted, 1e-6 * std::abs(predicted));
+}
+
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
+  // About the forced migrating run with a tide (1e22 Pa s mantle), at 5
+  // and 9 nodes over the 10 kyr: the continuous sweep's tide kernels, and
+  // the continuous second-order sweep's derivatives of them along the
+  // relaxation times and a tide, tend to the discrete sweeps' as the
+  // steps are halved.
+  auto setup = Scene::Make(1e22);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& grid = setup.solver.Grid();
+  std::mt19937 rng(227);
+  const auto surface = setup.material.Radius() * setup.model.ModelScales().Length() /
+                       setup.solver.SolverScales().Length();
+  const auto inside = setup.Smooth(rng, 2e4 * setup.Sigma());
+  const auto outside = setup.Smooth(rng, 1e4 * setup.Sigma());
+  const auto layer = setup.Smooth(rng, 400.0 * setup.Metre());
+  const auto source = SourceAt(setup.solver, surface, 1e21);
+  const auto tide = TidesOf(setup, rng, 1, 20.0).front();
+  const auto deltaTide = TidesOf(setup, rng, 1, 0.5).front();
+  const auto g0 = setup.Smooth(rng, 0.4);
+  const auto gMid = setup.Smooth(rng, 0.7);
+  const auto gEnd = setup.Smooth(rng, 1.0);
+  const auto ditau = setup.DeltaItau(0.1);
+  auto gapsAt = [&](int nodes) {
+    const auto cap = MarineCap::Make(setup, nodes);
+    const auto& times = cap.times;
+    const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+    const auto base = BaseForcing(times, inside, outside, layer, source);
+    // the tide ramped up through the run, and the direction held
+    auto tides = std::vector<Coefficients>{}, held = std::vector<Coefficients>{};
+    for (const auto t : times) {
+      auto c = tide;
+      for (auto& v : c) v *= 0.5 + t / times.back();
+      tides.push_back(std::move(c));
+      held.push_back(deltaTide);
+    }
+    auto ice = std::vector<std::vector<double>>{};
+    for (const auto t : times) ice.push_back(cap.Thickness(t));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[0].relativeSeaLevelDual = g0;
+    measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
+    measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
+    Evolution evolution(op, setup.solver, state,
+                        {.rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
+    auto forcing = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
+    forcing.tide = TideField(times, tides);
+    const auto run = evolution.RunMigrating(times, Field(times, ice), forcing);
+    const auto oceans = OceanFunctionsOf(run);
+    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+    TangentPerturbation u;
+    u.itau = ditau;
+    u.tide = held;
+    auto kernels = std::map<AdjointMethod, Kernels>{};
+    auto derivatives = std::map<AdjointMethod, KernelDerivatives>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      AdjointSolver adjoint(evolution, {.method = method,
+                                        .rtol = 1e-12,
+                                        .tide_kernels = true});
+      kernels[method] = adjoint.FirstOrderKernels(times, measurements, &trajectory, oceans);
+      const auto runU =
+          TangentLinearSolver(evolution, {.method = method, .rtol = 1e-12, .record = true})
+              .Run(times, u, &trajectory, oceans);
+      derivatives[method] =
+          adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory, oceans)
+              .second;
+    }
+    return std::pair{TideDistance(grid, kernels[AdjointMethod::Continuous].tideKernels,
+                                  kernels[AdjointMethod::Discrete].tideKernels),
+                     TideDistance(grid, derivatives[AdjointMethod::Continuous].tideKernels,
+                                  derivatives[AdjointMethod::Discrete].tideKernels)};
+  };
+  const auto coarse = gapsAt(5);
+  const auto fine = gapsAt(9);
+  std::cout << std::format(
+      "[tide, 1D continuous] kernels {:.2e} {:.2e}; their derivatives {:.2e} {:.2e}\n",
+      coarse.first, fine.first, coarse.second, fine.second);
+  EXPECT_LT(coarse.first, 0.2);
+  EXPECT_GT(coarse.first / fine.first, 2.0);
+  EXPECT_LT(coarse.second, 0.2);
+  EXPECT_GT(coarse.second / fine.second, 2.0);
+}
+
+TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
+  // The 1D tide gate under lateral viscosity, four nodes over 10 kyr, the
+  // wide marine cap melting to 55% under the loads, the layer, the source
+  // and a tide: the 3D tangent along a tide direction is the derivative of
+  // the migrating 3D run (central differences flipping no cell, 1e-7),
+  // the discrete 3D sweep's tide kernels and its kernels in the log
+  // viscosity pair with their tangents (1e-8), the tangent along the log
+  // viscosity the derivative of the run (Richardson to 1e-6); the discrete
+  // 3D second-order sweep along u (a tide, the log viscosity) and w (a
+  // load, another log viscosity) is symmetric and equal to the
+  // second-order run, and the tide kernels' derivative along the log
+  // viscosity is the central difference of the first-order tide kernels
+  // (Richardson to 1e-6).
+  auto scene = Scene3D::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  const auto [ice0, sea0] = scene.MarineCapState(6000.0, 50.0);
+  const auto state = scene.solver.MakeState(ice0, sea0);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 3; ++n) times.push_back(10.0 * n / 3.0 * scene.Kyr());
+  const auto nodes = times.size();
+  std::mt19937 rng(229);
+  const auto base = BaseForcing(times, scene.Smooth(rng, 2e4 * scene.Sigma()),
+                                scene.Smooth(rng, 1e4 * scene.Sigma()),
+                                scene.Smooth(rng, 400.0 * scene.Metre()),
+                                SourceAt(scene.solver, scene.solver.Radius(), 1e21));
+  const auto tides = TidesOf(scene, rng, nodes, 20.0);
+  const auto deltaTide = TidesOf(scene, rng, nodes, 0.5);
+  const auto ice = Thinning3D(ice0, times, 1.0, 0.55);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual = scene.Smooth(rng, 0.4);
+  measurements[1].displacementDual = scene.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
+  const Evolution3D::Options options{.rtol = 1e-12,
+                                     .coupled_rtol = 1e-12,
+                                     .max_nonlinear_iterations = 200,
+                                     .record_stride = 1};
+  Viscoelastic3D op(scene.rheology, Scene3D::kLmax3, LateralDelta);
+  const auto& coupling = op.Coupling();
+  auto forcingOf = [&](const std::vector<Coefficients>& direction, double eps) {
+    auto out = ForcingOf<Evolution3D::Forcing>(times, base, nullptr, 0.0);
+    out.tide = TideField(times, tides, direction, eps);
+    return out;
+  };
+  Evolution3D evolution(op, scene.solver, state, options);
+  const auto run = evolution.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+  const auto oceans = OceanFunctionsOf(run);
+  ASSERT_NE(oceans.front(), state.oceanFunction);
+  ASSERT_NE(oceans.back(), oceans.front());
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
+  auto objective = [&](const Viscoelastic3D& at, const std::vector<Coefficients>& direction,
+                       double eps) {
+    Evolution3D trial(at, scene.solver, state, options);
+    const auto snaps =
+        trial.RunMigrating(times, Field(times, ice), forcingOf(direction, eps));
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      EXPECT_TRUE(snaps[n].converged) << "node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+    }
+    return Objective3D(scene, snaps, measurements);
+  };
+  AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12});
+  const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory, oceans);
+  ASSERT_EQ(kernels.ice.tideKernels.size(), nodes);
+  TangentLinearSolver3D tangent(
+      evolution,
+      {.method = AdjointMethod::Discrete, .rtol = 1e-12, .coupled_rtol = 1e-12, .record = true});
+  const auto alongTide = Objective3D(
+      scene, tangent.Run(times, TangentPerturbation3D{.tide = deltaTide}, &trajectory, oceans),
+      measurements);
+  const auto fdTide = 0.5 * (objective(op, deltaTide, 1.0) - objective(op, deltaTide, -1.0));
+  const auto tideKernel = TidePairing(grid, kernels.ice.tideKernels, deltaTide);
+  const auto pattern = OnCoupling(coupling, kPattern);
+  const auto alongViscosity = Objective3D(
+      scene,
+      tangent.Run(times, TangentPerturbation3D{.logViscosity = pattern}, &trajectory, oceans),
+      measurements);
+  const auto none = std::vector<Coefficients>{};
+  auto movedViscosity = [&](double e) {
+    return std::make_unique<Viscoelastic3D>(
+        scene.rheology, Scene3D::kLmax3, [=](double r, double theta, double phi) {
+          return LateralDelta(r, theta, phi) + e * kPattern(theta, phi);
+        });
+  };
+  const auto fdViscosity = Difference(
+      [&](double e) { return objective(*movedViscosity(e), none, 0.0); }, 0.004,
+      alongViscosity);
+  const auto viscosityKernel =
+      VolumePairing(coupling, kernels.logViscosityKernel3D[0], pattern);
+  std::cout << std::format(
+      "[tide, 3D] tide: differences {:.2e}, discrete kernel {:.2e}; log viscosity: "
+      "Richardson gap {:.2e}, discrete kernel {:.2e}\n",
+      Gap(alongTide, fdTide), Gap(tideKernel, alongTide),
+      Gap(fdViscosity.richardson, alongViscosity), Gap(viscosityKernel, alongViscosity));
+  ASSERT_NE(fdTide, 0.0);
+  EXPECT_NEAR(alongTide, fdTide, 1e-7 * std::abs(fdTide));
+  EXPECT_NEAR(tideKernel, alongTide, 1e-8 * std::abs(alongTide));
+  EXPECT_NEAR(fdViscosity.richardson, alongViscosity, 1e-6 * std::abs(alongViscosity));
+  EXPECT_NEAR(viscosityKernel, alongViscosity, 1e-8 * std::abs(alongViscosity));
+
+  // second order
+  std::mt19937 local(233);
+  const auto patternW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  TangentPerturbation3D u, w;
+  u.tide = TidesOf(scene, local, nodes, 0.5);
+  u.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, pattern);
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    w.directLoad.push_back(scene.Smooth(local, 10.0 * scene.Sigma()));
+  }
+  w.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, patternW));
+  const auto runU = tangent.Run(times, u, &trajectory, oceans);
+  const auto runW = tangent.Run(times, w, &trajectory, oceans);
+  const auto [kernelsU, alongU] =
+      adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory, oceans);
+  const auto [kernelsW, alongW] =
+      adjoint.SecondOrderKernels(times, measurements, runW, w.itau, trajectory, oceans);
+  ASSERT_EQ(alongW.ice.tideKernels.size(), nodes);
+  const auto uw = PairingOf3D(scene, coupling, alongU, w);
+  const auto wu = PairingOf3D(scene, coupling, alongW, u) +
+                  TidePairing(grid, alongW.ice.tideKernels, u.tide);
+  SecondOrderDirection3D direction;
+  direction.itauU = u.itau;
+  direction.itauV = w.itau;
+  direction.itauUV = TangentLinearSolver3D::SecondVariationOfLogViscosity(
+      op, pattern, OnCoupling(coupling, patternW));
+  const auto forward = Objective3D(
+      scene, tangent.RunSecondOrder(times, runU, runW, direction, &trajectory, oceans),
+      measurements);
+  auto uvTerm = 0.0;
+  for (auto b = std::size_t{0}; b < direction.itauUV.size(); ++b) {
+    uvTerm += VolumePairing(coupling, kernels.itauKernel3D[b], direction.itauUV[b]);
+  }
+  std::cout << std::format(
+      "[tide, 3D] Hessian: symmetry gap {:.2e}, against the second-order run {:.2e}\n",
+      Gap(wu, uw), Gap(uw + uvTerm, forward));
+  ASSERT_NE(forward, 0.0);
+  EXPECT_NEAR(uw, wu, 1e-8 * std::abs(uw));
+  EXPECT_NEAR(uw + uvTerm, forward, 1e-8 * std::abs(forward));
+  // the tide kernels' derivative along the log viscosity
+  const auto itau = TangentLinearSolver3D::ItauOfLogViscosity(op, pattern);
+  const auto alongViscosityOnly =
+      adjoint
+          .SecondOrderKernels(
+              times, measurements,
+              tangent.Run(times, TangentPerturbation3D{.logViscosity = pattern}, &trajectory,
+                          oceans),
+              itau, trajectory, oceans)
+          .second;
+  const auto predicted = TidePairing(grid, alongViscosityOnly.ice.tideKernels, deltaTide);
+  const auto fdKernel = Difference(
+      [&](double e) {
+        const auto moved = movedViscosity(e);
+        Evolution3D trial(*moved, scene.solver, state, options);
+        const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+        for (auto n = std::size_t{0}; n < nodes; ++n) {
+          EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+        }
+        const auto path = ForwardTrajectory3D::FromSnapshots(snaps);
+        const auto k = AdjointSolver3D(trial, {.method = AdjointMethod::Discrete,
+                                               .rtol = 1e-12,
+                                               .coupled_rtol = 1e-12})
+                           .FirstOrderKernels(times, measurements, &path, OceanFunctionsOf(snaps));
+        return TidePairing(grid, k.ice.tideKernels, deltaTide);
+      },
+      0.004, predicted);
+  std::cout << std::format("[tide, 3D] tide kernels' derivative: Richardson gap {:.2e}\n",
+                           Gap(fdKernel.richardson, predicted));
+  ASSERT_NE(predicted, 0.0);
+  EXPECT_NEAR(fdKernel.richardson, predicted, 1e-6 * std::abs(predicted));
+}
+
+TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
+  // The 1D continuous tide gate under lateral viscosity (1e22 Pa s
+  // mantle), at 4 and 7 nodes over the 10 kyr, on one process: the
+  // continuous 3D sweep's tide kernels, and the continuous 3D second-order
+  // sweep's derivatives of them along the log viscosity and a tide, tend
+  // to the discrete 3D sweeps' as the steps are halved.
+  auto scene = Scene3D::Make(1e22);
+  const auto& grid = scene.solver.Grid();
+  const auto [ice0, sea0] = scene.MarineCapState(6000.0, 50.0);
+  const auto state = scene.solver.MakeState(ice0, sea0);
+  std::mt19937 rng(239);
+  const auto inside = scene.Smooth(rng, 2e4 * scene.Sigma());
+  const auto outside = scene.Smooth(rng, 1e4 * scene.Sigma());
+  const auto layer = scene.Smooth(rng, 400.0 * scene.Metre());
+  const auto source = SourceAt(scene.solver, scene.solver.Radius(), 1e21);
+  const auto tide = TidesOf(scene, rng, 1, 20.0).front();
+  const auto deltaTide = TidesOf(scene, rng, 1, 0.5).front();
+  const auto g0 = scene.Smooth(rng, 0.4);
+  const auto gEnd = scene.Smooth(rng, 1.0);
+  const auto gDisp = scene.Smooth(rng, 0.7);
+  Viscoelastic3D op(scene.rheology, Scene3D::kLmax3, LateralDelta);
+  const auto pattern = OnCoupling(op.Coupling(), kPattern);
+  auto gapsAt = [&](int nodes) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n < nodes; ++n) times.push_back(10.0 * n / (nodes - 1) * scene.Kyr());
+    const auto base = BaseForcing(times, inside, outside, layer, source);
+    auto tides = std::vector<Coefficients>{}, held = std::vector<Coefficients>{};
+    for (const auto t : times) {
+      auto c = tide;
+      for (auto& v : c) v *= 0.5 + t / times.back();
+      tides.push_back(std::move(c));
+      held.push_back(deltaTide);
+    }
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[0].relativeSeaLevelDual = g0;
+    measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
+    measurements[times.size() - 1].displacementDual = gDisp;
+    Evolution3D evolution(op, scene.solver, state,
+                          {.rtol = 1e-12,
+                           .coupled_rtol = 1e-12,
+                           .max_nonlinear_iterations = 200,
+                           .record_stride = 1});
+    auto forcing = ForcingOf<Evolution3D::Forcing>(times, base, nullptr, 0.0);
+    forcing.tide = TideField(times, tides);
+    const auto run = evolution.RunMigrating(
+        times, Field(times, Thinning3D(ice0, times, 1.0, 0.55)), forcing);
+    const auto oceans = OceanFunctionsOf(run);
+    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
+    TangentPerturbation3D u;
+    u.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, pattern);
+    u.tide = held;
+    auto kernels = std::map<AdjointMethod, Kernels3D>{};
+    auto derivatives = std::map<AdjointMethod, KernelDerivatives3D>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      AdjointSolver3D adjoint(evolution, {.method = method,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12,
+                                          .tide_kernels = true});
+      kernels[method] = adjoint.FirstOrderKernels(times, measurements, &trajectory, oceans);
+      const auto runU = TangentLinearSolver3D(evolution, {.method = method,
+                                                          .rtol = 1e-12,
+                                                          .coupled_rtol = 1e-12,
+                                                          .record = true})
+                            .Run(times, u, &trajectory, oceans);
+      derivatives[method] =
+          adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory, oceans)
+              .second;
+    }
+    return std::pair{
+        TideDistance(grid, kernels[AdjointMethod::Continuous].ice.tideKernels,
+                     kernels[AdjointMethod::Discrete].ice.tideKernels),
+        TideDistance(grid, derivatives[AdjointMethod::Continuous].ice.tideKernels,
+                     derivatives[AdjointMethod::Discrete].ice.tideKernels)};
+  };
+  const auto coarse = gapsAt(4);
+  const auto fine = gapsAt(7);
+  std::cout << std::format(
+      "[tide, 3D continuous] kernels {:.2e} {:.2e}; their derivatives {:.2e} {:.2e}\n",
+      coarse.first, fine.first, coarse.second, fine.second);
+  EXPECT_LT(coarse.first, 0.2);
+  EXPECT_GT(coarse.first / fine.first, 2.0);
+  EXPECT_LT(coarse.second, 0.5);
+  EXPECT_GT(coarse.second / fine.second, 2.0);
 }

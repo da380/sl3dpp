@@ -39,6 +39,7 @@
 #include <complex>
 #include <optional>
 #include <span>
+#include <string_view>
 #include <vector>
 
 #include "sl3dpp/LoveNumbers.hpp"
@@ -88,6 +89,26 @@ struct SeaLevelParameters {
 [[nodiscard]] std::vector<double> SeaLevelFromTopography(
     std::span<const double> topography, std::span<const double> iceThickness,
     const SeaLevelParameters& parameters = {});
+
+/// The lowest degree of a prescribed tidal potential. Tides are taken
+/// relative to the centre of mass: a degree-0 potential exerts no force,
+/// and a degree-1 potential is a uniform field that accelerates the
+/// whole body and deforms none of it (its tidal response is zero in that
+/// frame). Every route by which a tide enters the library (the sea level
+/// solves, the evolutions, the operators' tide channels, the
+/// tangent-linear directions) refuses a nonzero coefficient below this
+/// degree, and every tide kernel and tide dual is zero there.
+inline constexpr int kLowestTideDegree = 2;
+
+/// Throws std::invalid_argument, naming the vector `what`, when a
+/// coefficient vector in SurfaceGrid's layout has a nonzero coefficient
+/// below kLowestTideDegree; entries past its end are not read.
+void RequireTideDegrees(std::span<const std::complex<double>> coefficients,
+                        std::string_view what = "a prescribed tidal potential");
+
+/// Zeroes a coefficient vector's entries below kLowestTideDegree (a tide
+/// kernel's, a tide dual's); entries past its end are not touched.
+void ZeroBelowTideDegrees(std::span<std::complex<double>> coefficients);
 
 /// Which parts of the rotational feedback are solved. The transverse fixed
 /// point requires moments of inertia sustaining more oblateness than the
@@ -273,8 +294,8 @@ class GRDSolver {
     /// does to the centrifugal potential of the rotation, and the
     /// potential itself moves the equipotentials (it is in the relative
     /// sea level change, and not in the potential returned, which is the
-    /// body's own perturbation). Degrees from 1 up; a degree-0 part is
-    /// refused.
+    /// body's own perturbation). Degrees from 2 up (kLowestTideDegree); a
+    /// degree-0 or degree-1 part is refused.
     std::vector<std::complex<double>> tide;
     /// An override of the state's ocean function (linearising about a
     /// migrating-shoreline trajectory, or a smooth benchmark C).
@@ -367,7 +388,7 @@ class GRDSolver {
     /// Empty when no toroidal dual was given.
     std::vector<std::complex<double>> toroidalResponseDual;
     /// The dual of the prescribed tidal potential's coefficients, paired
-    /// as the response channels' are.
+    /// as the response channels' are; zero below kLowestTideDegree.
     std::vector<std::complex<double>> tideDual;
     double inertiaMomentDual = 0.0;
     int iterations = 0;
@@ -388,9 +409,9 @@ class GRDSolver {
 
   /// The forcings of the nonlinear solve, all non-dimensional and all
   /// changes from the state given; an empty vector is an absent channel.
-  /// The surface loads have the properties they have in the linear solve
-  /// (GeneralisedForcing), and the ice one more: it enters the flotation
-  /// condition that places the shorelines.
+  /// The surface loads and the tide have the properties they have in the
+  /// linear solve (GeneralisedForcing), and the ice one more: it enters
+  /// the flotation condition that places the shorelines.
   struct NonlinearForcing {
     /// The change of ice thickness. Its grounded part is a direct load
     /// inside the water budget, on the ocean function the solve finds.
@@ -413,6 +434,14 @@ class GRDSolver {
     std::vector<std::complex<double>> tangentialResponse;
     std::vector<std::complex<double>> toroidalResponse;
     double inertiaMomentChange = 0.0;
+    /// A prescribed tidal potential, its coefficients on the surface, as
+    /// GeneralisedForcing::tide: the body answers it through the tidal
+    /// Love numbers, and the potential itself moves the equipotentials,
+    /// so it is in the sea level change, and so in the flotation that
+    /// places the shorelines, and not in the potential returned. Degrees
+    /// from 2 up (kLowestTideDegree); a degree-0 or degree-1 part is
+    /// refused.
+    std::vector<std::complex<double>> tide;
     RotationalFeedback rotation = RotationalFeedback::Full;
     /// The points held at C = 0 whatever the flotation at this solve, in
     /// the place of the state's `forcedLand` (empty: none held); absent,
