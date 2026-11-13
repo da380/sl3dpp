@@ -604,6 +604,8 @@ static problem.
 | `output.exchange` | path | absent | the surface coefficients as a cross-code exchange table; in the quasi-static problem one table per node, the path holding `{node}` (solve, Exchange tables and the volume file) |
 | `output.exchange_nodes` | array of integers | every node | the quasi-static problem alone: the indices (from 0) of the nodes whose tables are written |
 | `output.volume` | path | absent | the static problem alone: the response inside the body as a planetmodel model file (likewise) |
+| `output.fields` | array of words | none | optional fields the surface file adds beside those it always holds: `"horizontal_displacement"` writes `displacement_east` and `displacement_north` (solve, Optional and smoothed fields) |
+| `output.smoothing` | object | absent | `{"kind": "gaussian", "width_deg": s}`, both required: every field of the response written again smoothed over a Gaussian cap of width s degrees, as `<field>_smoothed` beside the raw one (likewise) |
 
 In the quasi-static problem `output.exchange` must hold the literal
 `{node}`, which is replaced by the node's index zero-padded to the width
@@ -616,6 +618,16 @@ sources' forces), and without gravity (it is solved by the systems with
 gravity). On lateral moduli over several MPI ranks each rank forms
 the response inside the body over its own radial segment, and the first
 rank gathers the parts and writes the file.
+
+`output.fields` is a list of words, each the name of a set of optional
+fields; a word it does not know is refused, naming the words it takes
+(`"horizontal_displacement"`, the one there is), and so is a word listed
+twice. `output.smoothing` is an object of `kind` (`"gaussian"`, the one
+built; any other is refused naming it) and `width_deg` (a positive
+angle), both required. Neither member changes the run, its checkpoints,
+its trajectory store or any field written without them; both apply in
+either problem, under every forcing, with an ocean or without one and
+without gravity.
 
 `kernel` checks an `output` block as `solve` does and writes none of it;
 its files go into `kernels.output` (kernel, below).
@@ -1089,10 +1101,11 @@ the point values of the displacement and the sea level are therefore not
 converged at any degree a global run reaches, and they ring at the
 truncation wavelength; the patches of a fault, being point sources, are
 resolved one by one where `lmax` passes a / (their spacing). Averages
-over caps wider than the truncation wavelength are converged (the
-measurements' caps, and the 2° means the examples' figures draw:
-`examples/configs/README.md`, "Convergence in lmax of the seismic
-examples", has the numbers). The forcing serves the global and regional
+over caps wider than the truncation wavelength are converged: the
+measurements' caps, and the smoothed fields of `output.smoothing`
+(Optional and smoothed fields, below), the 2° means the examples'
+figures draw (`examples/configs/README.md`, "Convergence in lmax of the
+seismic examples", has the numbers). The forcing serves the global and regional
 response to an earthquake: the sea level change, the long-wavelength
 displacement and potential, the post-seismic relaxation and their
 kernels. Co-seismic deformation at kilometre scale about a finite fault
@@ -1256,6 +1269,8 @@ Gauss–Legendre grid:
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
 | `ocean_function` | 1 | with an ocean: the state's ocean function |
 | `ocean_function_final` | 1 | migrating shorelines alone: the ocean function the solve reaches |
+| `displacement_east`, `displacement_north` | m | with `output.fields` `"horizontal_displacement"`: the tangential displacement's components to the east and to the north (Optional and smoothed fields, below) |
+| `<field>_smoothed` | the field's | with `output.smoothing`: each field of the response smoothed (likewise) |
 
 Its metadata record the config and deck paths (and the moduli file's,
 where given), the state's inputs as read, `ice` (`<file>:<variable>
@@ -1449,7 +1464,9 @@ forwards. Its fields are SI node fields with linear time interpolation:
 | `toroidal_potential` | m | under seismic sources, and in a 3D run: the potential W of the toroidal displacement (minus the radial unit vector crossed with its surface gradient), in the frame of no net rotation of the surface, as the static problem's; zero at a node that has none (a 3D run's start on the radial unrelaxed body) |
 | `potential` | m^2 s^-2 | the gravitational potential perturbation at the surface |
 | `initial_sea_level` | m | with an ocean, static: the initial sea level the run started from (the sea level at a node is this plus `relative_sea_level_change` there) |
-| `ocean_function` | 1 | migrating shorelines alone: the ocean function at each node |
+| `ocean_function` | 1 | with an ocean: under migrating shorelines the ocean function at each node; under frozen ones the state's, a static field, which the run holds at every node |
+| `displacement_east`, `displacement_north` | m | with `output.fields` `"horizontal_displacement"`: the tangential displacement's components to the east and to the north at each node (Optional and smoothed fields, below) |
+| `<field>_smoothed` | the field's | with `output.smoothing`: each field of the response smoothed at each node (likewise) |
 | `load` | kg m^-2 | with a surface load: every load applied at each node, summed as given (each term's field times its factor there) |
 | `load_in_water_budget`, `load_outside_water_budget`, `solid_surface_change` | kg m^-2, kg m^-2, m | with a load of each kind: the loads applied at each node by their properties, as the static problem's (The static problem, above) |
 | `relative_sea_level_change_radial_model`, `displacement_radial_model`, `potential_radial_model` | m, m, m^2 s^-2 | a 3D run: the radial reference model's, under the same forcing (below) |
@@ -1492,8 +1509,8 @@ first node of a run without lateral moduli; in a 3D run, the radial
 reference model's angular velocity perturbation at each node,
 `omega_x_radial_model_rad_s`, `omega_y_radial_model_rad_s` and
 `omega_z_radial_model_rad_s`. Without an ocean the shorelines, the
-initial sea level and the state's inputs are left out, and `ocean` is
-`none`.
+initial sea level, the ocean function and the state's inputs are left
+out, and `ocean` is `none`.
 
 A 3D run writes the radial reference model beside it, as the static
 problem on lateral moduli does: the radial Maxwell body the 3D
@@ -1504,6 +1521,97 @@ shorelines and rotation, with its own calibration where the run
 calibrates. It is run on the first rank alone once the 3D run is done,
 and is not checkpointed: a resumed run runs it whole. Its cost is a 1D
 run's.
+
+### Optional and smoothed fields
+
+Beside the fields every surface file holds, `output.fields` adds
+optional ones and `output.smoothing` smoothed copies of the response
+(The output block, above), in the static problem's file and in a run
+through time's, each field with the support, time interpolation and unit
+of the field it is made from.
+
+**The horizontal displacement.** The surface displacement is u = U r +
+grad_1 V - r x grad_1 W: U the radial displacement (`displacement`), V
+and W the potentials of the tangential part (`tangential_potential`,
+`toroidal_potential`, W zero where the file has none), grad_1 the
+gradient on the unit sphere and r the radial unit vector. With
+`"fields": ["horizontal_displacement"]` the file holds the tangential
+part's components along the geographic unit vectors at each grid point,
+to the east (increasing longitude) as `displacement_east` and to the
+north (increasing latitude) as `displacement_north`, in m: in colatitude
+theta and longitude phi, east = (1 / sin theta) d_phi V - d_theta W and
+north = -d_theta V - (1 / sin theta) d_phi W. They are synthesised from
+the expansions of V and W to lmax through the spin-weighted harmonics of
+upper index ±1 (the library's `DisplacementField`), exactly, not
+differenced on the grid. The Gauss–Legendre grid has no point at a pole,
+where east and north are undefined, so every point has both. W is in the
+frame of no net rotation of the surface (a rigid rotation of the body
+costs no strain and is undetermined), and so is the horizontal
+displacement; a run without a toroidal part (a radial Earth under loads,
+a tide or an ice change) moves the surface by grad_1 V alone, curl-free.
+The metadata state the convention (`horizontal_displacement`).
+
+**Smoothing.** With `"smoothing": {"kind": "gaussian", "width_deg": s}`,
+each field of the response the file holds (`relative_sea_level_change`,
+`displacement`, `tangential_potential`, `toroidal_potential`,
+`potential`, and in a 3D run `relative_sea_level_change_radial_model`,
+`displacement_radial_model` and `potential_radial_model`), and the east
+and north components where asked, is written again smoothed, as
+`<field>_smoothed`. The smoothing is the convolution over the sphere with
+the Gaussian cap of the cap measurements (kernel, Measurements, below),
+
+    w(d) = exp(-d^2 / (2 s^2)),  d the great-circle distance,
+
+normalised to unit integral over the sphere and cut off nowhere, s its
+standard deviation in angle: the weight falls to e^-1/2 at d = s, and its
+full width at half maximum is 2 sqrt(2 ln 2) s, about 2.355 s. A smoothed
+field's value at a point is the field's mean over the cap about that
+point. By Funk and Hecke the convolution of a field of degree at most
+lmax is its expansion with degree l weighted by
+
+    lambda_l = int_0^pi w(d) P_l(cos d) sin d dd / int_0^pi w(d) sin d dd
+
+(lambda_0 = 1), synthesised: one expansion and one synthesis a field a
+node, exact, the integrals taken by Gauss–Legendre quadrature to
+rounding (the library's `CapMeanWeights`). The east and north components
+are smoothed as a vector: they are the components of the displacement of
+the smoothed potentials, grad_1 of the smoothed V less r x grad_1 of the
+smoothed W. The metadata record `smoothing_kind` (`gaussian`),
+`smoothing_width_deg` (s as given), `smoothing_degree_weights` (lambda_l
+for l = 0 to lmax) and the definition (`smoothing`).
+
+A cap measurement of `kernel` of the same width (`relative_sea_level_cap`,
+`displacement_cap`, `potential_cap`) reads the same mean about its
+centre, by the grid's quadrature of the cap sampled at the grid's points
+rather than by the degree weights. The two agree to rounding where the
+grid resolves the cap: s above about 490° / (lmax + 2.5) (14° at lmax
+32, 5° at lmax 96), so that lambda_l is below rounding by degree lmax +
+2, and below about 20°, past which the weight at the antipode is above
+rounding and its kink there resolved by no grid. Otherwise they differ by
+the quadrature's error, the smoothed field being the exact mean: at the
+seismic examples' 2° and lmax 96 the smoothed fields are the cap means
+of a fine quadrature of the band-limited fields to 1e-14, and the
+measurement's reading departs from them by up to 1.3e-4 of the largest
+mean. The smoothed east and north components are not the cap means of
+the east and north components, which a `displacement_vector_cap`
+measurement reads: it takes the east and the north at each point of the
+cap, and they turn across it; at 2° over the seismic examples' fault the
+two differ by up to 5e-4 of the largest horizontal mean.
+
+The fields of the state and of the forcing are not smoothed: the
+initial sea level, the ocean functions (a smoothed ocean function is not
+an ocean function), the ice change and the loads applied are the run's
+inputs as applied, sampled at the grid's points, and not its response.
+With an ocean, `relative_sea_level_change_smoothed` is the sea-level
+change smoothed over the whole sphere, land included, as the field is
+defined there: it is not a mean over the ocean's points alone.
+
+Smoothing serves fields whose point values are not converged in lmax:
+the response to a seismic source shallower than the truncation
+wavelength (What the seismic forcing resolves, above), whose means over
+caps wider than that wavelength are converged; the seismic example
+configs smooth over 2°. A field resolved at lmax, a deglaciation's sea
+level or a load's response, needs none.
 
 ### Exchange tables and the volume file
 
@@ -1761,7 +1869,9 @@ on the run's clock in years, with exchange tables at the first and last:
   "rotation": "none",
   "output": {"surface": "out/no_gravity_postseismic/no_gravity_postseismic.nc",
              "exchange": "out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt",
-             "exchange_nodes": [0, 22]}
+             "exchange_nodes": [0, 22],
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }
 ```
 
@@ -2173,7 +2283,9 @@ viscosity of `s40rts_viscosity.nc`.
             "ice": {"file": "../data/synthetic_earth.nc"}},
   "rotation": "full",
   "moments": "hydrostatic",
-  "output": {"surface": "out/sea_level_postseismic/sea_level_postseismic.nc"}
+  "output": {"surface": "out/sea_level_postseismic/sea_level_postseismic.nc",
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }
 ```
 
@@ -2196,8 +2308,11 @@ Averaged over a Gaussian cap of 2° over the fault (the field's point
 values are not converged in lmax for a fault this shallow, its 2°
 means are), the uplift of 0.150 m at the event grows by 6 mm in the
 first year and to 0.319 m at a century as the asthenosphere and the
-upper mantle relax, and falls back to 0.233 m by 300 years. About 46 s
-and 4.0 GB on four threads.
+upper mantle relax, and falls back to 0.233 m by 300 years. The file
+holds those means at every node, each field of the response smoothed
+over 2° (`output.smoothing`), and the horizontal displacement's east and
+north components, raw and smoothed (`output.fields`). About 46 s and
+4.0 GB on four threads.
 
 Without an ocean and without rotational feedback, the response of the
 solid body:
@@ -2520,7 +2635,9 @@ refused then, naming the member.
   required where listed.
 - A cap is Gaussian in great-circle distance d from its centre, weighted
   exp(-d^2 / (2 w^2)) with w = `width_deg` and normalised to unit area
-  integral, so it reads a weighted mean. A point value is the band-limited
+  integral, so it reads a weighted mean: the mean `solve`'s
+  `output.smoothing` of that width writes about every point (solve,
+  Optional and smoothed fields). A point value is the band-limited
   value at `lmax` (the grid's reproducing kernel); a narrow cap is often the
   steadier datum.
 - `displacement_vector_cap`, `displacement_vector_point`: `direction` is an

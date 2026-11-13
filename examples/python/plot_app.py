@@ -901,48 +901,6 @@ def at_point(values, grid, lat: float, lon: float) -> np.ndarray:
                       np.deg2rad(lon % 360.0))
 
 
-def cap_filter(lmax: int, width_deg: float = 2.0) -> np.ndarray:
-    """The degree weights of a mean over a Gaussian cap of the given width,
-    exp(-d^2 / 2 w^2) in the distance d, degrees 0 to lmax: by Funk and
-    Hecke the cap mean of a field about a point is its expansion with
-    degree l weighted by the cap's mean of P_l(cos d), synthesised there
-    (the library's CapMeanDual, exact rather than sampled)."""
-    width = np.deg2rad(width_deg)
-    reach = min(np.pi, 12.0 * width)
-    x, w = np.polynomial.legendre.leggauss(400)
-    d = 0.5 * reach * (x + 1.0)
-    weight = 0.5 * reach * w * np.exp(-0.5 * (d / width) ** 2) * np.sin(d)
-    c = np.cos(d)
-    out = np.empty(lmax + 1)
-    before, current = np.ones_like(c), c
-    out[0] = 1.0
-    for l in range(1, lmax + 1):
-        out[l] = np.sum(weight * current) / np.sum(weight)
-        before, current = current, ((2 * l + 1) * c * current
-                                    - l * before) / (l + 1)
-    return out
-
-
-def expansion(values, grid, width_deg: float | None = None) -> np.ndarray:
-    """A field's expansion from its values on the grid, (..., nlat, nlon);
-    with `width_deg`, that of its mean over a Gaussian cap of that width
-    about every point (cap_filter's weights by degree)."""
-    coefficients = analyse_grid(np.asarray(values), grid)
-    if width_deg is None:
-        return coefficients
-    weights = cap_filter(coefficients.shape[1] - 1, width_deg)
-    return coefficients * weights.reshape(
-        (1, -1) + (1,) * (coefficients.ndim - 2))
-
-
-def cap_mean(values, grid, lat: float, lon: float,
-             width_deg: float = 2.0) -> np.ndarray:
-    """A field's mean over a Gaussian cap of the given width about a
-    place (cap_filter): values (..., nlat, nlon) give (...)."""
-    return synthesise(expansion(values, grid, width_deg),
-                      np.deg2rad(90.0 - lat), np.deg2rad(lon % 360.0))
-
-
 def refined(grid, fields: dict, nlat: int = 360) -> Example:
     """Band-limited fields on the run's grid resampled onto an
     equiangular grid of nlat x 2 nlat by their expansions, for smooth maps
@@ -1462,53 +1420,122 @@ def region_limit(ex: Example, names, extent) -> float:
                for n in names)
 
 
-def tangential(V, W, grid, theta, phi, width_deg: float | None = None):
+def tangential(V, W, grid, theta, phi):
     """The tangential surface displacement, east and north, at points
     (colatitudes and longitudes in radians, broadcast together), from a
     run's tangential and toroidal potentials (m) on its grid, u_t = grad_1
-    V - r x grad_1 W (W None: none); with `width_deg`, of the potentials'
-    Gaussian cap means (expansion). Fields with a node axis first give
-    that axis first."""
-    v_theta, v_phi = synthesise_gradient(expansion(V, grid, width_deg),
+    V - r x grad_1 W (W None: none), by their expansions' gradients. Fields
+    with a node axis first give that axis first."""
+    v_theta, v_phi = synthesise_gradient(analyse_grid(np.asarray(V), grid),
                                          theta, phi)
     s = np.sin(theta)
     u_theta, u_phi = v_theta, v_phi / s
     if W is not None:
-        w_theta, w_phi = synthesise_gradient(expansion(W, grid, width_deg),
-                                             theta, phi)
+        w_theta, w_phi = synthesise_gradient(
+            analyse_grid(np.asarray(W), grid), theta, phi)
         u_theta = u_theta + w_phi / s
         u_phi = u_phi - w_theta
     return u_phi, -u_theta
 
 
 def ocean_of(file):
-    """A run's ocean on its grid: its ocean function (a migrating run's at
-    its first node), or, for a run through time under frozen shorelines,
-    which writes none, where its initial sea level is positive (the ocean
-    wherever no ice is grounded below sea level); None without an
-    ocean."""
-    if "ocean_function" in file.variables:
-        values = np.asarray(file.variables["ocean_function"].values)
-        return (values if values.ndim == 2 else values[0]) > 0.5
-    if "initial_sea_level" in file.variables:
-        return np.asarray(file.variables["initial_sea_level"].values) > 0.0
-    return None
+    """A run's ocean on its grid: its ocean function (the state's under
+    frozen shorelines, a migrating run's at its first node); None without
+    an ocean."""
+    if "ocean_function" not in file.variables:
+        return None
+    values = np.asarray(file.variables["ocean_function"].values)
+    return (values if values.ndim == 2 else values[0]) > 0.5
 
 
-def motion(file, extent, index=None, since=None, spacing: float = 0.1,
-           width_deg: float | None = None) -> Example:
-    """A seismic run's surface motion over a map region (west, east, south,
-    north) at a node (index None: a static file), less that at node
-    `since` where given, on a lattice `spacing` degrees apart by the
-    fields' expansions (with `width_deg`, their Gaussian cap means about
-    every point: expansion): the vertical displacement `up`, the
-    horizontal `east`, `north` and its size `horizontal`, and, with an
-    ocean, the relative sea-level change `sea` over the ocean (NaN on
-    land), all in m."""
+def stored(file, name: str, smoothed: bool = True) -> np.ndarray:
+    """A field of a seismic run's file as stored: the smoothed one sl3d
+    writes beside it (`<name>_smoothed`, the config's `output.smoothing`)
+    or, with `smoothed` false, the field itself."""
+    if not smoothed:
+        return np.asarray(file.variables[name].values)
+    key = f"{name}_smoothed"
+    if key not in file.variables:
+        raise KeyError(f"{key}: the seismic figures draw the smoothed fields, "
+                       "which the config's `output.smoothing` asks for")
+    return np.asarray(file.variables[key].values)
+
+
+def smoothing_width(file) -> float:
+    """The width (degrees) of the Gaussian cap a run's fields are smoothed
+    over, its file's `smoothing_width_deg`."""
+    return float(np.ravel(file.meta["smoothing_width_deg"])[0])
+
+
+def means(width: float) -> str:
+    """The figures' words for the smoothed fields."""
+    return (f"{width:g}° Gaussian means (the fields averaged over a cap of "
+            f"{width:g}° about each point: sl3d's output.smoothing)")
+
+
+def check_components(file) -> float:
+    """The largest difference, over the largest size, of a seismic run's
+    east and north components as its file holds them (`displacement_east`,
+    `displacement_north`, raw and smoothed, at its first and last nodes)
+    from their synthesis here from the file's potentials; printed, and an
+    error past 1e-10."""
+    grid = file.grid
+    theta, phi = np.meshgrid(np.asarray(grid.colatitudes),
+                             np.asarray(grid.longitudes), indexing="ij")
+    worst = 0.0
+    for smoothed in (False, True):
+        V = stored(file, "tangential_potential", smoothed)
+        W = (stored(file, "toroidal_potential", smoothed)
+             if "toroidal_potential" in file.variables else None)
+        east = stored(file, "displacement_east", smoothed)
+        north = stored(file, "displacement_north", smoothed)
+        picks = [0, -1] if V.ndim == 3 else [None]
+        for n in picks:
+            at = (lambda x: x) if n is None else (lambda x: x[n])
+            e, nn = tangential(at(V), None if W is None else at(W), grid,
+                               theta, phi)
+            size = max(np.max(np.abs(at(east))), np.max(np.abs(at(north))))
+            worst = max(worst, np.max(np.abs(e - at(east))) / size,
+                        np.max(np.abs(nn - at(north))) / size)
+    print(f"  the file's east and north components against their synthesis "
+          f"from its potentials: {worst:.1e} of their size")
+    if worst > 1e-10:
+        raise RuntimeError("the file's east and north components are not its "
+                           "potentials' displacement")
+    return worst
+
+
+def grid_motion(file, index=None, since=None) -> Example:
+    """A seismic run's smoothed horizontal displacement on its own grid, as
+    its file holds it (`displacement_east_smoothed`,
+    `displacement_north_smoothed`): `east` and `north` at a node (index
+    None: a static file), less those at node `since` where given, m."""
     grid = file.grid
 
     def node(name):
-        values = np.asarray(file.variables[name].values)
+        values = stored(file, name)
+        if index is None:
+            return values
+        return values[index] - (values[since] if since is not None else 0.0)
+
+    return Example.from_fields(grid.colatitudes, grid.longitudes, {
+        "east": node("displacement_east"), "north": node("displacement_north")})
+
+
+def motion(file, extent, index=None, since=None,
+           spacing: float = 0.1) -> Example:
+    """A seismic run's smoothed surface motion over a map region (west,
+    east, south, north) at a node (index None: a static file), less that
+    at node `since` where given, on a lattice `spacing` degrees apart by
+    the expansions of the file's smoothed fields (stored): the vertical
+    displacement `up`, the horizontal `east`, `north` (the displacement of
+    the smoothed potentials) and its size `horizontal`, and, with an ocean,
+    the relative sea-level change `sea` over the ocean (NaN on land), all
+    in m."""
+    grid = file.grid
+
+    def node(name):
+        values = stored(file, name)
         if index is None:
             return values
         return values[index] - (values[since] if since is not None else 0.0)
@@ -1522,18 +1549,18 @@ def motion(file, extent, index=None, since=None, spacing: float = 0.1,
     colatitudes, longitudes = np.deg2rad(90.0 - lats), np.deg2rad(lons)
     theta, phi = np.meshgrid(colatitudes, longitudes, indexing="ij")
 
-    def at(values, width=width_deg):
-        return synthesise(expansion(values, grid, width), theta, phi)
+    def at(values):
+        return synthesise(analyse_grid(values, grid), theta, phi)
 
     toroidal = (node("toroidal_potential")
                 if "toroidal_potential" in file.variables else None)
     east_, north_ = tangential(node("tangential_potential"), toroidal, grid,
-                               theta, phi, width_deg)
+                               theta, phi)
     fields = {"up": at(node("displacement")), "east": east_,
               "north": north_, "horizontal": np.hypot(east_, north_)}
     ocean = ocean_of(file)
     if ocean is not None and "relative_sea_level_change" in file.variables:
-        wet = at(ocean.astype(float), None) > 0.5
+        wet = at(ocean.astype(float)) > 0.5
         fields["sea"] = np.where(wet, at(node("relative_sea_level_change")),
                                  np.nan)
     return Example.from_fields(colatitudes, longitudes, fields)
@@ -1552,18 +1579,19 @@ def regional_map(fig, rows, cols, index, source, extent):
 
 
 def profile(file, source: dict, index=None, reach_km: float = 900.0,
-            count: int = 241, width_deg: float | None = None):
+            count: int = 241, smoothed: bool = True):
     """The motion along the great circle through a source across its
     strike, from `reach_km` up dip to `reach_km` down dip, at a node (index
-    None: a static file), the fields' point values or, with `width_deg`,
-    their Gaussian cap means (expansion): the distances (km, positive down
-    dip), the vertical displacement, the horizontal displacement up dip
-    (towards a thrust's trench) and along strike, and the relative
-    sea-level change where the ocean is (NaN elsewhere), m."""
+    None: a static file), by the expansions of the file's smoothed fields
+    or, with `smoothed` false, of its raw ones, whose point values these
+    are (stored): the distances (km, positive down dip), the vertical
+    displacement, the horizontal displacement up dip (towards a thrust's
+    trench) and along strike, and the relative sea-level change where the
+    ocean is (NaN elsewhere), m."""
     grid = file.grid
 
     def node(name):
-        values = np.asarray(file.variables[name].values)
+        values = stored(file, name, smoothed)
         return values if index is None else values[index]
 
     dip = source.get("strike_deg", 0.0) + 90.0
@@ -1571,12 +1599,11 @@ def profile(file, source: dict, index=None, reach_km: float = 900.0,
     lat, lon = np.array([destination(source["latitude"], source["longitude"],
                                      dip, d) for d in distance]).T
     theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon)
-    up = synthesise(expansion(node("displacement"), grid, width_deg), theta,
-                    phi)
+    up = synthesise(analyse_grid(node("displacement"), grid), theta, phi)
     toroidal = (node("toroidal_potential")
                 if "toroidal_potential" in file.variables else None)
     east, north = tangential(node("tangential_potential"), toroidal, grid,
-                             theta, phi, width_deg)
+                             theta, phi)
     # the profile's own direction at each point, down dip
     ahead = np.r_[1:count, count - 1]
     behind = np.r_[0, 0:count - 1]
@@ -1587,8 +1614,8 @@ def profile(file, source: dict, index=None, reach_km: float = 900.0,
     sea = np.full(count, np.nan)
     ocean = ocean_of(file)
     if ocean is not None and "relative_sea_level_change" in file.variables:
-        values = synthesise(expansion(node("relative_sea_level_change"),
-                                      grid, width_deg), theta, phi)
+        values = synthesise(analyse_grid(node("relative_sea_level_change"),
+                                         grid), theta, phi)
         wet = np.array([ocean[nearest(grid, a, b)] for a, b in zip(lat, lon)])
         sea = np.where(wet, values, np.nan)
     return distance, up, -down_dip, along_strike, sea
@@ -1600,15 +1627,13 @@ def node_times(file):
     return np.asarray(file.time) / TIME_UNITS[unit], unit
 
 
-# The width of the Gaussian caps the seismic figures average over. The
-# fields of a fault a few kilometres deep, laid out as point sources 50 km
-# apart, are not converged in lmax at any degree these runs reach: the
-# truncation rings about the source, and finer degrees resolve the point
-# sources one by one. Their means over 2° caps are converged by lmax 96
-# (to a few tenths of a per cent of lmax 128; configs/README.md).
-MEAN_DEG = 2.0
-MEANS = (f"{MEAN_DEG:g}° Gaussian means (the fields averaged over a cap of "
-         f"{MEAN_DEG:g}° about each point)")
+# The seismic figures draw the fields the runs write smoothed over a
+# Gaussian cap (the configs' `output.smoothing`, 2°). The fields of a fault
+# a few kilometres deep, laid out as point sources 50 km apart, are not
+# converged in lmax at any degree these runs reach: the truncation rings
+# about the source, and finer degrees resolve the point sources one by
+# one. Their means over 2° caps are converged by lmax 96 (to a few tenths
+# of a per cent of lmax 128; configs/README.md).
 
 
 def coseismic(name: str, title: str) -> None:
@@ -1625,8 +1650,10 @@ def coseismic(name: str, title: str) -> None:
         return
     kind, source = seismic_source(name)
     file = read_surface_file(path)
+    check_components(file)
+    width = smoothing_width(file)
     extent = source_extent(source)
-    ex = motion(file, extent, width_deg=MEAN_DEG)
+    ex = motion(file, extent)
     lmax = file.grid.lmax
 
     fig = plt.figure(figsize=(13, 9.5))
@@ -1643,13 +1670,12 @@ def coseismic(name: str, title: str) -> None:
                           title=label, limit=limit)
         if not symmetric:
             mesh.set_clim(0.0, region_limit(ex, [field], extent))
-            arrows(ax, ex, extent)
+            arrows(ax, grid_motion(file), extent)
         mark_source(ax, kind, source)
         fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
 
-    distance, up, updip, strike, sea = profile(file, source,
-                                               width_deg=MEAN_DEG)
-    _, up_point, _, _, _ = profile(file, source)
+    distance, up, updip, strike, sea = profile(file, source)
+    _, up_point, _, _, _ = profile(file, source, smoothed=False)
     ax = fig.add_subplot(2, 2, 4)
     ax.plot(distance, up_point, color="C3", lw=0.7, alpha=0.6,
             label="vertical, point values (not converged in lmax)")
@@ -1668,13 +1694,14 @@ def coseismic(name: str, title: str) -> None:
                   f"positive down dip, to azimuth "
                   f"{(source['strike_deg'] + 90.0) % 360.0:g}°)")
     ax.set_ylabel("m")
-    ax.set_title(f"along a profile across the fault: {MEAN_DEG:g}° means "
+    ax.set_title(f"along a profile across the fault: {width:g}° means "
                  f"(thick), and the\npoint values, whose ripples, 360/{lmax} "
                  f"degrees apart, are the truncation", fontsize=10)
     ax.legend(fontsize=7)
     fig.suptitle(f"{title}, lmax {lmax}\nmaps centred on the fault, "
                  "meridians and parallels 5° apart, the fault's surface "
-                 f"projection drawn, its up-dip edge heavy;\nmaps {MEANS}",
+                 f"projection drawn, its up-dip edge heavy;\nmaps "
+                 f"{means(width)}",
                  fontsize=10)
     fig.tight_layout()
     save(fig, name, "coseismic")
@@ -1703,37 +1730,30 @@ def years_text(t: float) -> str:
     return f"{t:.2g}" if t < 100.0 else f"{t:.0f}"
 
 
-def site_series(file, source: dict, sites, width_deg: float = 2.0):
-    """A seismic run's series at places, each a mean over a Gaussian cap
-    of the given width (cap_mean): per place the vertical displacement and,
-    with an ocean, the relative sea-level change, or without one the
-    horizontal displacement up dip, the cap mean of the potentials'
-    horizontal gradient there; m."""
+def site_series(file, source: dict, sites):
+    """A seismic run's series at places, each the smoothed field there (a
+    mean over the file's Gaussian cap: stored), by its expansion: per place
+    the vertical displacement and, with an ocean, the relative sea-level
+    change, or without one the horizontal displacement up dip, the
+    displacement of the smoothed potentials there; m."""
     grid = file.grid
-    up = np.asarray(file.variables["displacement"].values)
     wet = ("relative_sea_level_change" in file.variables
            and ocean_of(file) is not None)
-    V = np.asarray(file.variables["tangential_potential"].values)
-    W = (np.asarray(file.variables["toroidal_potential"].values)
+    W = (stored(file, "toroidal_potential")
          if "toroidal_potential" in file.variables else None)
-    weights = cap_filter(grid.lmax, width_deg)
-
-    def filtered(values):
-        c = analyse_grid(values, grid)
-        return c * weights.reshape((1, -1) + (1,) * (c.ndim - 2))
-
-    cV = filtered(V)
-    cW = filtered(W) if W is not None else None
+    cU = analyse_grid(stored(file, "displacement"), grid)
+    cS = (analyse_grid(stored(file, "relative_sea_level_change"), grid)
+          if wet else None)
+    cV = analyse_grid(stored(file, "tangential_potential"), grid)
+    cW = analyse_grid(W, grid) if W is not None else None
     dip = np.deg2rad(source.get("strike_deg", 0.0) + 90.0)
     out = []
     for _, (lat, lon) in sites:
-        vertical = cap_mean(up, grid, lat, lon, width_deg)
+        theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon % 360.0)
+        vertical = synthesise(cU, theta, phi)
         if wet:
-            other = cap_mean(
-                np.asarray(file.variables["relative_sea_level_change"].values),
-                grid, lat, lon, width_deg)
+            other = synthesise(cS, theta, phi)
         else:
-            theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon % 360.0)
             v_theta, v_phi = synthesise_gradient(cV, theta, phi)
             u_theta, u_phi = v_theta, v_phi / np.sin(theta)
             if cW is not None:
@@ -1782,10 +1802,11 @@ def postseismic(name: str, title: str) -> None:
     last = len(times) - 1
     middle = int(np.argmin(np.abs(np.log(np.maximum(times, 1e-30))
                                   - np.log(2.0 * bands[0][2]))))
+    check_components(file)
+    width = smoothing_width(file)
     extent = source_extent(source)
-    event = motion(file, extent, 0, width_deg=MEAN_DEG)
-    later = {n: motion(file, extent, n, since=0, width_deg=MEAN_DEG)
-             for n in (middle, last)}
+    event = motion(file, extent, 0)
+    later = {n: motion(file, extent, n, since=0) for n in (middle, last)}
 
     fig = plt.figure(figsize=(16, 10))
     spec = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 1.25])
@@ -1820,7 +1841,7 @@ def postseismic(name: str, title: str) -> None:
                           title="horizontal motion since the event, at "
                                 f"{times[last]:g} {unit} (m)")
         mesh.set_clim(0.0, region_limit(later[last], ["horizontal"], extent))
-        arrows(ax, later[last], extent)
+        arrows(ax, grid_motion(file, last, since=0), extent)
     mark_source(ax, kind, source)
     mark_sites(ax, [site for _, site in sites], colors=["C0", "C1", "C2"])
     fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
@@ -1850,7 +1871,8 @@ def postseismic(name: str, title: str) -> None:
                     "after)\n" + "\n".join(keys), fontsize=8)
     fig.suptitle(f"{title}, lmax {file.grid.lmax}\nmaps centred on the "
                  "source, meridians and parallels 5° apart, the places of the "
-                 f"time series marked; maps and series {MEANS}", fontsize=10)
+                 f"time series marked; maps and series {means(width)}",
+                 fontsize=10)
     fig.tight_layout()
     save(fig, name, "postseismic")
 
@@ -1872,6 +1894,10 @@ def postseismic_gravity() -> None:
         return
     kind, source = seismic_source(names["without"])
     files = {k: read_surface_file(p) for k, p in paths.items()}
+    widths = {smoothing_width(f) for f in files.values()}
+    if len(widths) != 1:
+        raise ValueError(f"the pair is smoothed over caps of {widths} degrees")
+    width = widths.pop()
     times, unit = node_times(files["without"])
     bands = relaxation_bands(names["without"])
     sites = source_sites(source)
@@ -1905,8 +1931,7 @@ def postseismic_gravity() -> None:
     last = len(times) - 1
     for n, color in ((0, "0.4"), (last, "C3")):
         for key, file in files.items():
-            distance, up, _, _, _ = profile(file, source, index=n,
-                                            width_deg=MEAN_DEG)
+            distance, up, _, _, _ = profile(file, source, index=n)
             ax.plot(distance, up, color=color, ls=styles[key],
                     label=f"{times[n]:g} {unit}, {key} gravity")
     half = 0.5 * source["width_km"] * np.cos(np.deg2rad(source["dip_deg"]))
@@ -1923,7 +1948,8 @@ def postseismic_gravity() -> None:
                  "sea_level_postseismic with gravity (no_ocean_postseismic) "
                  "and without it (no_gravity_postseismic), on "
                  f"{deck_of(names['without']).name}, lmax "
-                 f"{files['with'].grid.lmax}\nseries and profiles {MEANS}\n"
+                 f"{files['with'].grid.lmax}\nseries and profiles "
+                 f"{means(width)}\n"
                  + "; ".join(keys), fontsize=10)
     fig.tight_layout()
     save(fig, GRAVITY_PAIRS, "postseismic")

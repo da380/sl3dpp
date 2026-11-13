@@ -15,5 +15,7 @@
     "ice": {"file": "../data/synthetic_earth.nc"}
   },
   "rotation": "full",
-  "output": {"surface": "out/sea_level_static_coseismic/sea_level_static_coseismic.nc"}
+  "output": {"surface": "out/sea_level_static_coseismic/sea_level_static_coseismic.nc",
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }

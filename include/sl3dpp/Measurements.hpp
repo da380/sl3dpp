@@ -55,6 +55,22 @@ namespace sl3dpp {
                                               GeographicPoint site,
                                               double width);
 
+/// The degree weights of the mean over CapMeanDual's cap taken about
+/// every point, lambda_l for l = 0 to lmax. By Funk and Hecke the mean of
+/// a field of degree at most lmax over the cap about any point is the
+/// field's expansion with degree l weighted by
+///   lambda_l = int_0^pi w(d) P_l(cos d) sin d dd
+///              / int_0^pi w(d) sin d dd,  w(d) = exp(-d^2 / (2 width^2)),
+/// synthesised there: the field convolved over the sphere with the cap
+/// normalised to unit integral (lambda_0 = 1). The integrals are taken by
+/// Gauss-Legendre quadrature in d over [0, min(pi, 12 width)], past which
+/// w is below e^-72 of its peak, on lmax + 128 nodes: exact to rounding.
+/// CapMeanDual reads the same mean by the grid's quadrature of the cap
+/// sampled at its points, which equals this to rounding where the grid
+/// resolves the cap (lambda_l below rounding by degree lmax + 2) and
+/// otherwise differs from it by that quadrature's aliasing.
+[[nodiscard]] std::vector<double> CapMeanWeights(int lmax, double width);
+
 /// The band-limited point evaluation at `site`: the grid's reproducing
 /// kernel sum_l (2l + 1) P_l(cos gamma) / (4 pi a^2) over the grid's
 /// band. Paired with a band-limited field it reads its value at the

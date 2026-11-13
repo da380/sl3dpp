@@ -576,9 +576,12 @@ std::vector<SurfaceLoads::Node> LoadsAtNodes(const Run& run,
 /// terms (AddForcingCounts), each node's closure (`step_iterations`,
 /// `solve_iterations`, `step_residual`, zero in 1-D) and, in a 3-D run,
 /// the radial reference model's history under the same forcing
-/// (`reference`; null otherwise). Without an ocean the fields and
-/// metadata of the state (the initial sea level, the state's inputs, the
-/// shorelines) are left out, and `ocean` says there is none.
+/// (`reference`; null otherwise); the ocean function, under migrating
+/// shorelines each node's, under frozen ones the state's, a static field;
+/// and the fields `output` asks for (AddAskedFields). Without an ocean the
+/// fields and metadata of the state (the initial sea level, the ocean
+/// function, the state's inputs, the shorelines) are left out, and `ocean`
+/// says there is none.
 void WriteHistoryFile(const SolveInput& input,
                       const std::filesystem::path& config,
                       const SurfaceGrid& grid, const Reached& reached,
@@ -769,6 +772,20 @@ void WriteHistoryFile(const SolveInput& input,
   if (run.Migrating()) {
     put("ocean_function", gather(history, &Node::oceanFunction), std::nullopt,
         "the ocean function at each node, following flotation");
+  } else if (run.ocean) {
+    // frozen shorelines: the state's, which the run holds at every node
+    auto options = pm::SurfaceFieldOptions{};
+    options.support = "static";
+    options.meaning =
+        "the ocean function of the state the run started from, which frozen "
+        "shorelines hold at every node";
+    file.variables.emplace(
+        "ocean_function",
+        pm::SurfaceField("ocean_function",
+                         std::vector<double>(
+                             world.background.oceanFunction.begin(),
+                             world.background.oceanFunction.end()),
+                         options));
   }
   if (reference != nullptr) {
     auto radialOmega = std::array<std::vector<double>, 3>{};
@@ -794,6 +811,7 @@ void WriteHistoryFile(const SolveInput& input,
         "the radial reference model's potential perturbation at the surface "
         "under the same forcing");
   }
+  AddAskedFields(file, input.output, grid);
   CreateParent(input.output.surface);
   pm::WriteSurfaceFile(input.output.surface, file);
 }
@@ -1483,19 +1501,20 @@ planetmodel::SurfaceFile StaticFile(const std::filesystem::path& config,
   return file;
 }
 
-/// Writes a static problem's surface file and the members of `output`
-/// beside it, the exchange table and the volume file (`volume`, its
-/// fields; empty without one), and returns `wrote <surface>[ and
-/// <exchange>][ and <volume>]`.
+/// Writes a static problem's surface file, with the fields `output` asks
+/// for added (AddAskedFields), and the members of `output` beside it, the
+/// exchange table and the volume file (`volume`, its fields; empty without
+/// one), and returns `wrote <surface>[ and <exchange>][ and <volume>]`.
 std::string WriteStatic(const std::filesystem::path& config,
                         const SolveInput& input, const BuiltEarth& earth,
-                        const planetmodel::SurfaceFile& file,
+                        planetmodel::SurfaceFile file,
                         const SurfaceGrid& grid, const StaticAnswer& answer,
                         const StaticWorld& world, bool lateral,
                         const ElasticPerturbation3D* reference,
                         const VolumeFields& volume) {
   const auto& run = input.run;
   const auto& output = input.output;
+  AddAskedFields(file, output, grid);
   CreateParent(output.surface);
   planetmodel::WriteSurfaceFile(output.surface, file);
   auto wrote = std::format("wrote {}", output.surface.string());
@@ -1545,7 +1564,7 @@ std::string RunStatic1D(const std::filesystem::path& config,
     volume = RadialVolume(earth, *reference, radial.answer);
   }
   const auto wrote =
-      WriteStatic(config, input, earth, file, radial.solver->Grid(),
+      WriteStatic(config, input, earth, std::move(file), radial.solver->Grid(),
                   radial.answer, radial.world, false, reference.get(), volume);
   return std::format("{}; {}{}",
                      WithInputs(meaning, run, radial.world.iceRead,
@@ -1688,8 +1707,9 @@ std::string RunStatic3D(const std::filesystem::path& config,
             pm::Dimensions{.length = 2, .time = -2},
             "the radial model's potential perturbation at the surface under "
             "the same forcing");
-  const auto wrote = WriteStatic(config, input, earth, file, grid, answer,
-                                 world, true, reference.get(), volume);
+  const auto wrote =
+      WriteStatic(config, input, earth, std::move(file), grid, answer, world,
+                  true, reference.get(), volume);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(loads.get()));
   const auto stored = note.empty() ? std::string{} : "; " + note;

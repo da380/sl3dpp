@@ -141,38 +141,6 @@ struct BranchRange {
   double mostFraction = 0.0;
 };
 
-/// The degree weights of a mean over a Gaussian cap of angular width w
-/// (radians), exp(-d^2 / 2 w^2) in the distance d, degrees 0 to lmax: by
-/// Funk and Hecke the cap mean of a field about every point is its
-/// expansion with degree l weighted by the cap's mean of P_l(cos d), here
-/// by Simpson's rule in d out to 12 w.
-std::vector<double> CapWeights(int lmax, double width) {
-  const auto reach = std::min(std::numbers::pi, 12.0 * width);
-  constexpr auto intervals = 4000;
-  const auto h = reach / intervals;
-  auto sums = std::vector<double>(static_cast<std::size_t>(lmax) + 1, 0.0);
-  for (auto i = 0; i <= intervals; ++i) {
-    const auto d = i * h;
-    const auto simpson = (i == 0 || i == intervals) ? 1.0 : (i % 2 ? 4.0 : 2.0);
-    const auto weight =
-        simpson * std::exp(-0.5 * (d / width) * (d / width)) * std::sin(d);
-    const auto x = std::cos(d);
-    auto before = 1.0, current = x;
-    sums[0] += weight;
-    for (auto l = 1; l <= lmax; ++l) {
-      sums[static_cast<std::size_t>(l)] += weight * current;
-      const auto next =
-          ((2.0 * l + 1.0) * x * current - l * before) / (l + 1.0);
-      before = current;
-      current = next;
-    }
-  }
-  for (auto l = lmax; l >= 0; --l) {
-    sums[static_cast<std::size_t>(l)] /= sums[0];
-  }
-  return sums;
-}
-
 BranchRange RangeOf(const Rheology& rheology, std::size_t branch,
                     std::span<const std::size_t> layers, double timeScale) {
   const auto& mesh = rheology.BaseMaterial().Mesh();
@@ -393,8 +361,11 @@ int main(int argc, char** argv) {
   // lmax at any degree a run like this reaches (the truncation rings about
   // the source, and finer degrees resolve the point sources one by one),
   // while their 2 degree means are (to a few per cent at lmax 64, a few
-  // tenths of one at lmax 96).
-  const auto weights = CapWeights(lmax, capWidth);
+  // tenths of one at lmax 96). By Funk and Hecke the mean about every
+  // point is the expansion with each degree weighted by the cap's mean of
+  // P_l (CapMeanWeights, the cap of CapMeanDual and of sl3d's
+  // `output.smoothing`), synthesised.
+  const auto weights = CapMeanWeights(lmax, capWidth);
   auto meanOf = [&](const std::vector<double>& field) {
     auto coefficients = grid.Expand(field);
     for (auto l = 0; l <= lmax; ++l) {

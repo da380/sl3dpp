@@ -370,6 +370,82 @@ TEST(MeasurementDuals, CoefficientDualReadsTheRealPair) {
                std::invalid_argument);
 }
 
+TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
+  // A field of every degree weighted by CapMeanWeights and synthesised is
+  // its cap mean about every point: read at grid points and between them
+  // (the band-limited point dual), it is CapMeanDual's pairing there, to
+  // rounding, on a grid that resolves the cap (its weights below rounding
+  // by degree lmax + 2). On a grid that does not, the two differ by the
+  // cap's quadrature.
+  constexpr auto lmax = 24;
+  const auto grid = SurfaceGrid(lmax);
+  const auto width = 20.0 * std::numbers::pi / 180.0;
+  const auto weights = CapMeanWeights(lmax, width);
+  ASSERT_EQ(weights.size(), std::size_t{lmax + 1});
+  EXPECT_EQ(weights[0], 1.0);
+  for (auto l = 1; l <= lmax; ++l) {
+    EXPECT_GT(weights[l], 0.0);
+    EXPECT_LT(weights[l], weights[l - 1]);
+  }
+  EXPECT_LT(CapMeanWeights(lmax + 2, width).back(), 1e-14);
+  auto coefficients = grid.ZeroCoefficients();
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto k = static_cast<double>(SurfaceGrid::Index(l, m));
+      coefficients[SurfaceGrid::Index(l, m)] = {
+          std::sin(1.7 * k + 0.3), m == 0 ? 0.0 : std::cos(2.3 * k - 0.1)};
+    }
+  }
+  const auto field = grid.Synthesise(coefficients);
+  auto weighted = coefficients;
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) weighted[SurfaceGrid::Index(l, m)] *= weights[l];
+  }
+  const auto smoothed = grid.Synthesise(weighted);
+  const auto scale = *std::ranges::max_element(
+      smoothed, {}, [](double v) { return std::abs(v); });
+  const auto a = 6.371e6;
+  const auto nphi = grid.Longitudes().size();
+  auto sites = std::vector<std::pair<GeographicPoint, std::size_t>>{};
+  for (const auto [it, ip] : {std::pair{0, 0}, std::pair{7, 11}, std::pair{12, 30},
+                              std::pair{24, 48}}) {
+    sites.emplace_back(
+        GeographicPoint::FromSpherical(grid.CoLatitudes()[it],
+                                       grid.Longitudes()[ip]),
+        static_cast<std::size_t>(it) * nphi + ip);
+  }
+  for (const auto site : {GeographicPoint{-32.05, 115.74},
+                          GeographicPoint{71.3, 203.1}}) {
+    sites.emplace_back(site, grid.FieldSize());
+  }
+  for (const auto& [site, at] : sites) {
+    const auto measured =
+        PairedValue(grid, a, CapMeanDual(grid, a, site, width), field);
+    const auto value = at < grid.FieldSize()
+                           ? smoothed[at]
+                           : PairedValue(grid, a, PointDual(grid, a, site),
+                                         smoothed);
+    EXPECT_NEAR(value, measured, 1e-13 * std::abs(scale))
+        << site.latitude << " " << site.longitude;
+  }
+  // a cap the grid does not resolve: the sampled cap's quadrature differs
+  const auto narrow = 2.0 * std::numbers::pi / 180.0;
+  const auto narrowWeights = CapMeanWeights(lmax, narrow);
+  auto blurred = coefficients;
+  for (auto l = 0; l <= lmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      blurred[SurfaceGrid::Index(l, m)] *= narrowWeights[l];
+    }
+  }
+  const auto site = sites.back().first;
+  const auto gap = std::abs(
+      PairedValue(grid, a, PointDual(grid, a, site), grid.Synthesise(blurred)) -
+      PairedValue(grid, a, CapMeanDual(grid, a, site, narrow), field));
+  EXPECT_GT(gap, 1e-6 * std::abs(scale));
+  EXPECT_THROW(static_cast<void>(CapMeanWeights(lmax, 0.0)),
+               std::invalid_argument);
+}
+
 TEST(Measurements, CarryTheirDuals) {
   auto dual = std::vector<double>{1.0, 2.0};
   const auto sea = FieldMeasurement(FieldChannel::SeaLevel, dual);

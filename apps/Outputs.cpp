@@ -114,6 +114,200 @@ void CheckOutputMembers(const Json& output, const OutputBlock& block,
   }
 }
 
+SurfaceGrid VectorGridOf(const SurfaceGrid& grid) {
+  if (grid.NMax() >= 1) return grid;
+  const SurfaceGrid vector(grid.LMax(), {.nmax = 1});
+  if (!std::ranges::equal(vector.CoLatitudes(), grid.CoLatitudes()) ||
+      !std::ranges::equal(vector.Longitudes(), grid.Longitudes())) {
+    throw std::logic_error(
+        "the grid of upper index 1 has other points than the run's");
+  }
+  return vector;
+}
+
+SurfaceVectorField HorizontalOf(const SurfaceGrid& grid,
+                                std::span<const double> V,
+                                std::span<const double> W) {
+  return DisplacementField(VectorGridOf(grid), {}, V, W);
+}
+
+std::vector<double> SmoothedOf(const SurfaceGrid& grid,
+                               std::span<const double> field,
+                               std::span<const double> weights) {
+  auto coefficients = grid.Expand(field);
+  for (auto l = 0; l <= grid.LMax(); ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      coefficients[SurfaceGrid::Index(l, m)] *=
+          weights[static_cast<std::size_t>(l)];
+    }
+  }
+  return grid.Synthesise(coefficients);
+}
+
+namespace {
+
+/// A field made from another, `from`: its support, time interpolation and
+/// dimensions, under its own name, values and meaning.
+planetmodel::FileVariable MadeFrom(const planetmodel::FileVariable& from,
+                                   std::string name, std::vector<double> values,
+                                   std::string meaning) {
+  auto out = from;
+  out.name = std::move(name);
+  out.values = std::move(values);
+  out.attributes["long_name"] = std::move(meaning);
+  return out;
+}
+
+/// A field's meaning, its `long_name`.
+std::string MeaningOf(const planetmodel::FileVariable& field) {
+  return field.Text("long_name").value_or(field.name);
+}
+
+/// Applies `f` to each node's slice of a field (a static field's one) and
+/// lays the results end to end.
+template <class F>
+std::vector<double> EachSlice(const planetmodel::FileVariable& field,
+                              std::size_t size, F&& f) {
+  auto out = std::vector<double>{};
+  out.reserve(field.values.size());
+  for (auto at = std::size_t{0}; at < field.values.size(); at += size) {
+    const auto made = f(std::span(field.values).subspan(at, size));
+    out.insert(out.end(), made.begin(), made.end());
+  }
+  return out;
+}
+
+/// The east and north components of the displacement of the potentials
+/// V and W (null: none), node by node, laid end to end.
+std::pair<std::vector<double>, std::vector<double>> HorizontalFields(
+    const SurfaceGrid& grid, const planetmodel::FileVariable& V,
+    const planetmodel::FileVariable* W) {
+  const auto size = grid.FieldSize();
+  const auto vector = VectorGridOf(grid);
+  auto east = std::vector<double>{}, north = std::vector<double>{};
+  for (auto at = std::size_t{0}; at < V.values.size(); at += size) {
+    const auto u = HorizontalOf(
+        vector, std::span(V.values).subspan(at, size),
+        W == nullptr ? std::span<const double>{}
+                     : std::span<const double>(W->values).subspan(at, size));
+    east.insert(east.end(), u.east.begin(), u.east.end());
+    north.insert(north.end(), u.north.begin(), u.north.end());
+  }
+  return {std::move(east), std::move(north)};
+}
+
+/// The meanings of the east and north components.
+constexpr auto kEastMeaning = std::string_view{
+    "the tangential displacement's component to the east, along the "
+    "geographic east unit vector at each point (horizontal_displacement)"};
+constexpr auto kNorthMeaning = std::string_view{
+    "the tangential displacement's component to the north, along the "
+    "geographic north unit vector at each point (horizontal_displacement)"};
+
+}  // namespace
+
+void AddAskedFields(planetmodel::SurfaceFile& file, const OutputBlock& output,
+                    const SurfaceGrid& grid) {
+  const auto horizontal = output.Asks(OptionalField::HorizontalDisplacement);
+  if (!horizontal && !output.smoothing) return;
+  const auto size = grid.FieldSize();
+  auto& variables = file.variables;
+  const auto* toroidal = variables.contains("toroidal_potential")
+                             ? &variables.at("toroidal_potential")
+                             : nullptr;
+  auto added = std::vector<planetmodel::FileVariable>{};
+  if (horizontal) {
+    const auto& V = variables.at("tangential_potential");
+    auto [east, north] = HorizontalFields(grid, V, toroidal);
+    added.push_back(MadeFrom(V, "displacement_east", std::move(east),
+                             std::string{kEastMeaning}));
+    added.push_back(MadeFrom(V, "displacement_north", std::move(north),
+                             std::string{kNorthMeaning}));
+    file.meta.emplace(
+        "horizontal_displacement",
+        std::string{
+            "displacement_east and displacement_north are the components of "
+            "the tangential surface displacement u_t = grad_1 V - r x grad_1 "
+            "W (V the tangential_potential, W the toroidal_potential, zero "
+            "where the file has none, grad_1 the gradient on the unit "
+            "sphere, r the radial unit vector) along the geographic east and "
+            "north unit vectors at each grid point, synthesised from the "
+            "potentials' expansions to lmax; in the frame of no net rotation "
+            "of the surface, as W is; the Gauss-Legendre grid has no point "
+            "at a pole, where east and north are undefined"});
+  }
+  if (const auto& smoothing = output.smoothing) {
+    const auto weights = CapMeanWeights(grid.LMax(), smoothing->Width());
+    const auto smooth = [&](std::span<const double> field) {
+      return SmoothedOf(grid, field, weights);
+    };
+    for (const auto name : kSmoothedFields) {
+      const auto found = variables.find(std::string{name});
+      if (found == variables.end()) continue;
+      const auto& field = found->second;
+      added.push_back(MadeFrom(
+          field, std::string{name} + std::string{kSmoothedSuffix},
+          EachSlice(field, size, smooth),
+          MeaningOf(field) + ", smoothed (smoothing)"));
+    }
+    if (horizontal) {
+      // the vector smoothed as its potentials are: the components of the
+      // smoothed potentials' displacement
+      const auto find = [&added](std::string_view name) {
+        return &*std::ranges::find(added, name, &planetmodel::FileVariable::name);
+      };
+      const auto* V = find("tangential_potential_smoothed");
+      const auto* W = toroidal == nullptr ? nullptr
+                                          : find("toroidal_potential_smoothed");
+      auto [east, north] = HorizontalFields(grid, *V, W);
+      const auto& like = variables.at("tangential_potential");
+      auto eastField =
+          MadeFrom(like, "displacement_east_smoothed", std::move(east),
+                   std::string{kEastMeaning} +
+                       ", of the smoothed potentials: the vector smoothed "
+                       "(smoothing)");
+      auto northField =
+          MadeFrom(like, "displacement_north_smoothed", std::move(north),
+                   std::string{kNorthMeaning} +
+                       ", of the smoothed potentials: the vector smoothed "
+                       "(smoothing)");
+      added.push_back(std::move(eastField));
+      added.push_back(std::move(northField));
+    }
+    file.meta.emplace("smoothing_kind", std::string{"gaussian"});
+    file.meta.emplace("smoothing_width_deg",
+                      std::vector<double>{smoothing->width_deg});
+    file.meta.emplace("smoothing_degree_weights", weights);
+    file.meta.emplace(
+        "smoothing",
+        std::string{
+            "each <field>_smoothed is <field> convolved over the sphere with "
+            "the Gaussian cap w(d) = exp(-d^2 / (2 s^2)), d the great-circle "
+            "distance and s = smoothing_width_deg (the cap's standard "
+            "deviation), normalised to unit integral: the value at a point "
+            "is the field's mean over the cap about it, the mean a cap "
+            "measurement of width s reads there (by the grid's quadrature, "
+            "equal to this to rounding where the grid resolves the cap); the "
+            "field's expansion to lmax with degree l weighted by "
+            "smoothing_degree_weights[l] = int_0^pi w(d) P_l(cos d) sin d dd "
+            "/ int_0^pi w(d) sin d dd, synthesised. The response's fields "
+            "are smoothed, the state's and the forcing's (the initial sea "
+            "level, the ocean functions, the ice change, the loads applied) "
+            "are not; relative_sea_level_change_smoothed is the field "
+            "smoothed over the whole sphere, land included, not a mean over "
+            "the ocean; displacement_east_smoothed and "
+            "displacement_north_smoothed are the components of the smoothed "
+            "potentials' displacement, the vector smoothed alike"});
+  }
+  for (auto& field : added) {
+    const auto name = field.name;
+    if (!variables.emplace(name, std::move(field)).second) {
+      throw std::logic_error(
+          std::format("the surface file already holds {}", name));
+    }
+  }
+}
+
 std::string SharedScalars(double radius, double gravity, int lmax, bool lateral,
                           const Forcing& forcing) {
   auto out = std::format("radius {:.17g}\n", radius);

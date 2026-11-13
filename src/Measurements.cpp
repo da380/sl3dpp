@@ -6,6 +6,7 @@ void dgesv_(const int* n, const int* nrhs, double* a, const int* lda,
             int* ipiv, double* b, const int* ldb, int* info);
 }
 
+#include <GaussQuad/All>
 #include <algorithm>
 #include <cmath>
 #include <format>
@@ -218,6 +219,34 @@ std::vector<double> CapMeanDual(const SurfaceGrid& grid, double a,
   const auto norm = a * a * grid.Integrate(dual);
   for (auto& v : dual) v /= norm;
   return dual;
+}
+
+std::vector<double> CapMeanWeights(int lmax, double width) {
+  if (!(width > 0.0) || !std::isfinite(width)) {
+    throw std::invalid_argument("a cap's width is a positive angle in radians");
+  }
+  if (lmax < 0) throw std::invalid_argument("a degree is not negative");
+  const auto reach = std::min(std::numbers::pi, 12.0 * width);
+  const auto rule = GaussQuad::GaussLegendreQuadrature1D<double>(lmax + 128);
+  auto sums = std::vector<double>(static_cast<std::size_t>(lmax) + 1, 0.0);
+  for (auto k = std::size_t{0}; k < rule.Points().size(); ++k) {
+    const auto d = 0.5 * reach * (rule.Points()[k] + 1.0);
+    const auto weight = 0.5 * reach * rule.Weights()[k] *
+                        std::exp(-0.5 * (d / width) * (d / width)) *
+                        std::sin(d);
+    // P_l(cos d) by the upward recurrence
+    const auto x = std::cos(d);
+    auto before = 1.0, current = x;
+    sums[0] += weight;
+    for (auto l = 1; l <= lmax; ++l) {
+      sums[static_cast<std::size_t>(l)] += weight * current;
+      const auto next = ((2.0 * l + 1.0) * x * current - l * before) / (l + 1.0);
+      before = std::exchange(current, next);
+    }
+  }
+  const auto total = sums[0];
+  for (auto& s : sums) s /= total;
+  return sums;
 }
 
 std::vector<double> PointDual(const SurfaceGrid& grid, double a,

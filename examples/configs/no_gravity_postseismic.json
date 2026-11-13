@@ -16,5 +16,7 @@
   "rotation": "none",
   "output": {"surface": "out/no_gravity_postseismic/no_gravity_postseismic.nc",
              "exchange": "out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt",
-             "exchange_nodes": [0, 22]}
+             "exchange_nodes": [0, 22],
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }

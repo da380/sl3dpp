@@ -12,5 +12,7 @@
                            "patches_along_strike": 8, "patches_down_dip": 3}}]
   },
   "rotation": "none",
-  "output": {"surface": "out/no_ocean_seismic/no_ocean_seismic.nc"}
+  "output": {"surface": "out/no_ocean_seismic/no_ocean_seismic.nc",
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }

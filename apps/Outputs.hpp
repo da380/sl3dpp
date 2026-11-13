@@ -3,7 +3,8 @@
 /**
  * @file Outputs.hpp
  * @brief The outputs of `solve` beside its surface file's fields: the
- * members of the `output` block held to the problem, the exchange tables
+ * members of the `output` block held to the problem, the optional and
+ * smoothed fields the block adds to the surface file, the exchange tables
  * of surface coefficients (the cross-code benchmark files,
  * machine-independent text another code reads) with their provenance
  * header, named scalars and, through time, a table per node, the metadata
@@ -13,6 +14,7 @@
  * the radial reference's coupling).
  */
 
+#include <array>
 #include <complex>
 #include <cstddef>
 #include <filesystem>
@@ -30,6 +32,7 @@
 #include "Input.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/ElasticPerturbation3D.hpp"
+#include "sl3dpp/Measurements.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
@@ -73,6 +76,62 @@ inline constexpr auto kNodeField = std::string_view{"{node}"};
 void CheckOutputMembers(const Json& output, const OutputBlock& block,
                         std::optional<std::size_t> nodes, std::string_view run,
                         std::string_view volumeRefusal);
+
+/// The fields of a surface file that `output.smoothing` writes smoothed
+/// beside themselves, where the file holds them: the response, each field
+/// a spherical harmonic expansion to lmax (the displacement's east and
+/// north components, smoothed as a vector, besides). The state's and the
+/// forcing's fields (the initial sea level, the ocean functions, the ice
+/// change, the loads applied) are not smoothed.
+inline constexpr auto kSmoothedFields = std::array<std::string_view, 8>{
+    "relative_sea_level_change",
+    "displacement",
+    "tangential_potential",
+    "toroidal_potential",
+    "potential",
+    "relative_sea_level_change_radial_model",
+    "displacement_radial_model",
+    "potential_radial_model"};
+
+/// The suffix of a smoothed field's name.
+inline constexpr auto kSmoothedSuffix = std::string_view{"_smoothed"};
+
+/// The grid itself where it carries upper index 1 (SurfaceGrid::Options::
+/// nmax), the vector fields' transforms; otherwise a grid of the same
+/// points that does.
+[[nodiscard]] SurfaceGrid VectorGridOf(const SurfaceGrid& grid);
+
+/// The tangential displacement's components to the east and to the north
+/// on the grid, from its potentials V and W (the toroidal one in the frame
+/// of no net rotation of the surface; empty where there is none): the
+/// library's DisplacementField on VectorGridOf(grid).
+[[nodiscard]] SurfaceVectorField HorizontalOf(const SurfaceGrid& grid,
+                                              std::span<const double> V,
+                                              std::span<const double> W);
+
+/// A field smoothed: its expansion on the grid with degree l weighted by
+/// `weights[l]` (CapMeanWeights), synthesised.
+[[nodiscard]] std::vector<double> SmoothedOf(const SurfaceGrid& grid,
+                                             std::span<const double> field,
+                                             std::span<const double> weights);
+
+/// Adds what `output.fields` and `output.smoothing` ask for to a surface
+/// file on the run's grid, every node of a node field (the file's static
+/// fields, a static problem's, as one): with `horizontal_displacement`,
+/// `displacement_east` and `displacement_north` (HorizontalOf, of the
+/// file's `tangential_potential` and `toroidal_potential`) and the
+/// convention in the metadata (`horizontal_displacement`); with
+/// `smoothing`, each field of kSmoothedFields the file holds smoothed
+/// (SmoothedOf, the weights CapMeanWeights's at the smoothing's width)
+/// under its name and kSmoothedSuffix, the east and north components too
+/// where asked (HorizontalOf of the smoothed potentials), and the
+/// smoothing's kind, width, definition and degree weights in the metadata
+/// (`smoothing_kind`, `smoothing_width_deg`, `smoothing`,
+/// `smoothing_degree_weights`). Each added field takes the support, time
+/// interpolation and dimensions of the field it is made from. The fields
+/// already there are left as they are.
+void AddAskedFields(planetmodel::SurfaceFile& file, const OutputBlock& output,
+                    const SurfaceGrid& grid);
 
 /// The named scalars an exchange table starts with, a line each: the
 /// body's radius (m) and surface gravity (m s^-2), lmax, whether the model

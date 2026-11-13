@@ -107,10 +107,13 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   sea level falling by the uplift; the ocean's water is conserved, the
   sea level change integrating to 1e-17 of its magnitude over the ocean.
   The file holds the tangential and toroidal potentials (the horizontal
-  motion) beside the rest, which the figure (`coseismic.png`) synthesises
-  into the horizontal displacement, and draws as 2° means, with the
-  point values along a profile across the fault for their ripples. About
-  2.5 s and 1.2 GB on four threads.
+  motion) beside the rest, and, as the config's `output` asks, the
+  horizontal displacement's east and north components
+  (`"fields": ["horizontal_displacement"]`) and every field of the
+  response smoothed over a 2° Gaussian cap (`"smoothing": {"kind":
+  "gaussian", "width_deg": 2}`, as `<field>_smoothed`), which the figure
+  (`coseismic.png`) draws, with the point values along a profile across
+  the fault for their ripples. About 2.5 s and 1.2 GB on four threads.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
   relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
@@ -133,7 +136,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   the coast, it rises from 0.052 m to 0.209 m at 140 years and is 0.189 m
   at 300; 1000 km up dip it goes from +1 mm to -27 mm at 140 years and
   -22 mm at 300. The relative sea level follows minus the uplift. The
-  figure (`postseismic.png`) draws the relaxation as 2° means, in maps
+  file holds the east and north components and every field smoothed over
+  2° at every node, as `sea_level_static_coseismic.json`'s, and the
+  figure (`postseismic.png`) draws the relaxation as those 2° means, in maps
   and at three places on a time axis linear about the event and
   logarithmic after it, the deck's Maxwell times marked. On nodes three
   times as close the means move by at most 3.2 mm, 1.8% of their change
@@ -142,7 +147,8 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   without rotational feedback, on the same Earth, nodes and lmax: the
   solid body's response, `out/no_ocean_postseismic/no_ocean_postseismic.nc`
   (the displacement, the tangential, toroidal and gravitational
-  potentials), and the twin with gravity of the next. In 2° means over
+  potentials, the east and north components, and each smoothed over 2°),
+  and the twin with gravity of the next. In 2° means over
   the fault the uplift is 0.147 m at the event, 0.299 m at its peak (75
   years) and 0.200 m at 300 years; the horizontal motion up dip there
   0.851 m at the event and 0.701 m at 300 years, and 250 km down dip it
@@ -153,8 +159,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   degree systems taking the displacement alone and stopping at the
   core-mantle boundary:
   `out/no_gravity_postseismic/no_gravity_postseismic.nc` (the
-  displacement and the tangential and toroidal potentials; no potential
-  and no sea level change) and exchange tables of the displacement at the
+  displacement, the tangential and toroidal potentials and the east and
+  north components, each smoothed over 2° too; no potential and no sea
+  level change) and exchange tables of the displacement at the
   first and last nodes, `out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt`.
   Against its twin with gravity, `no_ocean_postseismic.json`, in 2° means
   over the fault: 0.153 m of uplift at the event against 0.147 m, 0.356 m
@@ -297,8 +304,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   co-seismic response and the later ones the relaxation, on the 23 nodes
   of `sea_level_postseismic.json` to 300 years at lmax 96.
   `out/no_ocean_seismic/no_ocean_seismic.nc` holds the radial
-  displacement, the tangential potential V, the toroidal potential W and
-  the potential at every node, which the figure (`postseismic.png`)
+  displacement, the tangential potential V, the toroidal potential W, the
+  potential and the east and north components at every node, each
+  smoothed over 2° too, which the figure (`postseismic.png`)
   draws as `sea_level_postseismic`'s without an ocean: in 2° means the
   uplift over the fault, 0.171 m at the event, peaks at 0.393 m at 75
   years and is 0.240 m at 300, and 1000 km up dip the surface moves 0.49
@@ -546,8 +554,10 @@ point values near the fault are not converged at any degree these runs
 reach, and their converged limit would be the point sources' own
 fields, not a smooth fault's. The truncation at lmax rings about the
 source, 360/lmax degrees apart. Means over Gaussian caps of 2° (the
-field averaged over a cap of 2° about each point) are converged, and
-the seismic configs' figures draw those, saying so; the configs run at
+field averaged over a cap of 2° about each point) are converged: the
+seismic configs write those beside the raw fields (`output.smoothing`,
+docs/sl3d-configs.md, Optional and smoothed fields), and their figures
+draw them, saying so; the configs run at
 lmax 96, where the means are within a few tenths of a per cent of lmax
 128 and 256. On the post-seismic deck with an ocean, along a profile
 across the fault through its centroid, the co-seismic field (the static

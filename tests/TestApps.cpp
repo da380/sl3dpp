@@ -30,6 +30,7 @@
 #include <map>
 #include <memory>
 #include <numbers>
+#include <optional>
 #include <planetmodel/error.hpp>
 #include <planetmodel/grid.hpp>
 #include <planetmodel/json.hpp>
@@ -46,6 +47,7 @@
 #include "AppFixtures.hpp"
 #include "Commands.hpp"
 #include "Common.hpp"
+#include "Outputs.hpp"
 #include "Ranks.hpp"
 #include "RunHash.hpp"
 #include "sl3dpp/Evolution.hpp"
@@ -5015,7 +5017,9 @@ TEST_F(AppsTest, SolveCalibratesTheInitialSeaLevel) {
       << summary;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "frozen.nc");
   EXPECT_LT(worstOf(reference), 1e-9);
-  EXPECT_FALSE(reference.variables.contains("ocean_function"));
+  // frozen shorelines hold the state's ocean function: one static field
+  EXPECT_EQ(reference.variables.at("ocean_function").values.size(),
+            grid.FieldSize());
   // without the calibration block, its defaults
   const auto defaults = Write(
       "defaults.json",
@@ -6991,8 +6995,8 @@ TEST_F(AppsTest, SolveRefusesWhatItsOutputsCannotDo) {
   // problem and refused naming the member: in the static problem a table
   // per node (`{node}`) and `exchange_nodes`; through time an exchange
   // path without `{node}`, `exchange_nodes` without `exchange` or past the
-  // last node, and the volume file; and the volume file under seismic
-  // sources.
+  // last node, and the volume file; the volume file under seismic
+  // sources; and optional fields or a smoothing the block cannot say.
   static_cast<void>(Deck());
   const auto read = [](const fs::path& path) {
     return app::ReadSolveInput(path);
@@ -7033,6 +7037,306 @@ TEST_F(AppsTest, SolveRefusesWhatItsOutputsCannotDo) {
                      "rake_deg": 90, "moment_nm": 1e21}}]})",
                 R"({"surface": "o.nc", "volume": "v.nc"})"),
           "output.volume", "is not written under seismic sources");
+  // the optional fields and the smoothing: a list of known words, none
+  // twice; a block of a known kind and a positive width, both required
+  refused(read, still(cap, R"({"surface": "o.nc",
+                               "fields": "horizontal_displacement"})"),
+          "output.fields", "is not a list");
+  refused(read, still(cap, R"({"surface": "o.nc", "fields": ["east"]})"),
+          "output.fields[0]",
+          "is \"east\", which is none of \"horizontal_displacement\"");
+  refused(read, still(cap, R"({"surface": "o.nc",
+                               "fields": ["horizontal_displacement",
+                                          "horizontal_displacement"]})"),
+          "output.fields[1]", "is listed twice");
+  refused(read, still(cap, R"({"surface": "o.nc", "smoothing": 2})"),
+          "output.smoothing", "is not a block");
+  refused(read, still(cap, R"({"surface": "o.nc",
+                               "smoothing": {"kind": "boxcar", "width_deg": 2}})"),
+          "output.smoothing.kind",
+          "is \"boxcar\", which is none of \"gaussian\"");
+  refused(read, still(cap, R"({"surface": "o.nc", "smoothing": {"width_deg": 2}})"),
+          "output.smoothing", "has no member \"kind\"");
+  refused(read, still(cap, R"({"surface": "o.nc",
+                               "smoothing": {"kind": "gaussian"}})"),
+          "output.smoothing", "has no member \"width_deg\"");
+  refused(read, timed(R"({"surface": "o.nc",
+                          "smoothing": {"kind": "gaussian", "width_deg": 0}})"),
+          "output.smoothing.width_deg", "is not a positive angle");
+  refused(read, timed(R"({"surface": "o.nc",
+                          "smoothing": {"kind": "gaussian", "width_deg": 2,
+                                        "fwhm_deg": 4}})"),
+          "output.smoothing.fwhm_deg", "is not a recognised member");
+}
+
+TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
+  // `output.fields` and `output.smoothing` add to the surface file and
+  // change nothing already in it. On a radial ball under a surface load,
+  // which has no toroidal part: the east and north components are the
+  // surface gradient of V, curl-free with divergence -l (l + 1) V_lm
+  // degree by degree (their spin-weighted expansions); each smoothed field
+  // read at grid points and between them is the cap mean the library's
+  // measurement of that width reads there, to rounding where the grid
+  // resolves the cap; the smoothed east and north components are the
+  // gradient of the smoothed V; the metadata state the convention, the
+  // kind, the width and the degree weights. Through time under a point
+  // source, which has a toroidal part, every node's components are the
+  // library's displacement field of V and W, and its smoothed fields are
+  // its cap means. With an ocean under frozen shorelines a run through
+  // time writes the state's ocean function, one static field, which is a
+  // migrating run's first node.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  constexpr auto kLmax = 32;
+  constexpr auto kWidthDeg = 20.0;  // resolved at lmax 32
+  const auto plain = std::string{R"("surface": "out/plain.nc")"};
+  const auto asked = std::format(
+      R"("surface": "out/asked.nc", "fields": ["horizontal_displacement"],
+         "smoothing": {{"kind": "gaussian", "width_deg": {}}})",
+      kWidthDeg);
+  const auto still = [&](const std::string& name, const std::string& output) {
+    static_cast<void>(app::RunSolve(Write(
+        name + ".json",
+        std::format(R"({{"problem": "static", "model": {{"deck": "ball.deck"}},
+            "discretisation": {{"lmax": {}}}, "forcing": {{"load": [{}]}},
+            "rotation": "none", "output": {{{}}}}})",
+                    kLmax, kCap, output))));
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto bare = still("plain", plain);
+  const auto file = still("asked", asked);
+  // the fields already there, as they were
+  for (const auto& [name, field] : bare.variables) {
+    ASSERT_TRUE(file.variables.contains(name)) << name;
+    EXPECT_EQ(file.variables.at(name).values, field.values) << name;
+    for (const auto& [key, value] : field.attributes) {
+      if (key == "_FillValue") continue;  // not a number, unequal to itself
+      EXPECT_EQ(file.variables.at(name).attributes.at(key), value)
+          << name << " " << key;
+    }
+  }
+  for (const auto& [key, value] : bare.meta) {
+    ASSERT_TRUE(file.meta.contains(key)) << key;
+    if (key != "config") EXPECT_EQ(file.meta.at(key), value) << key;
+  }
+  for (const auto* name :
+       {"displacement_east", "displacement_north", "displacement_smoothed",
+        "tangential_potential_smoothed", "potential_smoothed",
+        "relative_sea_level_change_smoothed", "displacement_east_smoothed",
+        "displacement_north_smoothed"}) {
+    ASSERT_TRUE(file.variables.contains(name)) << name;
+    EXPECT_EQ(file.variables.at(name).Text("time_support"), "static") << name;
+  }
+  // the loads applied and the ocean function are not smoothed; a ball
+  // without seismic sources has no toroidal potential
+  for (const auto* name : {"load_smoothed", "load_in_water_budget_smoothed",
+                           "toroidal_potential_smoothed", "ocean_function"}) {
+    EXPECT_FALSE(file.variables.contains(name)) << name;
+  }
+  EXPECT_EQ(std::get<std::string>(file.meta.at("smoothing_kind")), "gaussian");
+  EXPECT_EQ(std::get<std::vector<double>>(file.meta.at("smoothing_width_deg")),
+            std::vector<double>{kWidthDeg});
+  const auto weights =
+      CapMeanWeights(kLmax, kWidthDeg * std::numbers::pi / 180.0);
+  EXPECT_EQ(
+      std::get<std::vector<double>>(file.meta.at("smoothing_degree_weights")),
+      weights);
+  for (const auto* key : {"smoothing", "horizontal_displacement"}) {
+    EXPECT_NE(std::get<std::string>(file.meta.at(key)).find("east"),
+              std::string::npos)
+        << key;
+  }
+
+  const SurfaceGrid grid(kLmax, {.nmax = 1});
+  const auto& V = file.variables.at("tangential_potential").values;
+  const auto& Vs = file.variables.at("tangential_potential_smoothed").values;
+  // the components' potentials from their spin-weighted expansions:
+  // u^(+-)_lm = sqrt(l (l + 1) / 2) (a +- i b)_lm, u = grad_1 a - r x grad_1 b
+  const auto potentials = [&](const std::vector<double>& east,
+                              const std::vector<double>& north) {
+    auto plus = std::vector<Complex>(grid.FieldSize());
+    auto minus = std::vector<Complex>(grid.FieldSize());
+    constexpr Complex i(0.0, 1.0);
+    for (auto k = std::size_t{0}; k < grid.FieldSize(); ++k) {
+      const auto theta = -north[k];
+      const auto phi = east[k];
+      plus[k] = -(theta - i * phi) / std::numbers::sqrt2;
+      minus[k] = (theta + i * phi) / std::numbers::sqrt2;
+    }
+    const auto p = grid.ExpandSpin(1, plus);
+    const auto q = grid.ExpandSpin(-1, minus);
+    auto a = grid.ZeroCoefficients(), b = grid.ZeroCoefficients();
+    for (auto l = 1; l <= kLmax; ++l) {
+      const auto omega = std::sqrt(0.5 * l * (l + 1.0));
+      for (auto m = 0; m <= l; ++m) {
+        const auto pk = p[SurfaceGrid::SpinIndex(1, l, m)];
+        const auto qk = q[SurfaceGrid::SpinIndex(-1, l, m)];
+        a[SurfaceGrid::Index(l, m)] = (pk + qk) / (2.0 * omega);
+        b[SurfaceGrid::Index(l, m)] = (pk - qk) / (2.0 * i * omega);
+      }
+    }
+    return std::pair{a, b};
+  };
+  for (const auto& [east, north, potential] :
+       {std::tuple{"displacement_east", "displacement_north", &V},
+        std::tuple{"displacement_east_smoothed", "displacement_north_smoothed",
+                   &Vs}}) {
+    const auto [a, b] = potentials(file.variables.at(east).values,
+                                   file.variables.at(north).values);
+    const auto want = grid.Expand(*potential);
+    auto divergence = 0.0, curl = 0.0, size = 0.0;
+    for (auto l = 1; l <= kLmax; ++l) {
+      const auto ll = l * (l + 1.0);
+      for (auto m = 0; m <= l; ++m) {
+        const auto k = SurfaceGrid::Index(l, m);
+        size = std::max(size, ll * std::abs(want[k]));
+        divergence = std::max(divergence, ll * std::abs(a[k] - want[k]));
+        curl = std::max(curl, ll * std::abs(b[k]));
+      }
+    }
+    EXPECT_GT(size, 0.0) << east;
+    EXPECT_LT(divergence, 1e-12 * size) << east;
+    EXPECT_LT(curl, 1e-12 * size) << east;
+  }
+
+  // the smoothed fields are the cap means at grid points and between them
+  // (a grid point's index, or none for a point between them)
+  const auto nphi = grid.Longitudes().size();
+  auto sites = std::vector<std::pair<GeographicPoint, std::optional<std::size_t>>>{};
+  for (const auto [it, ip] : {std::pair{3, 5}, std::pair{10, 40},
+                              std::pair{20, 17}, std::pair{30, 60}}) {
+    sites.emplace_back(GeographicPoint::FromSpherical(grid.CoLatitudes()[it],
+                                                      grid.Longitudes()[ip]),
+                       static_cast<std::size_t>(it) * nphi + ip);
+  }
+  sites.emplace_back(GeographicPoint{55.0, -80.0}, std::nullopt);
+  sites.emplace_back(GeographicPoint{-32.05, 115.74}, std::nullopt);
+  for (const auto* name : {"displacement", "tangential_potential", "potential",
+                           "relative_sea_level_change"}) {
+    const auto smoothed = std::string{name} + "_smoothed";
+    const auto& values = file.variables.at(smoothed).values;
+    const auto scale =
+        std::ranges::max(values, {}, [](double v) { return std::abs(v); });
+    for (const auto& [site, at] : sites) {
+      const auto mean = CapMeanOf(file, name, 0, site, kWidthDeg, kLmax);
+      const auto value =
+          at ? values[*at] : PointValueOf(file, smoothed, 0, site, kLmax);
+      EXPECT_NEAR(value, mean, 1e-12 * std::abs(scale))
+          << smoothed << " at " << site.latitude << ", " << site.longitude;
+    }
+  }
+
+  // through time under a point source: a toroidal part, every node
+  const auto timed = [&](const std::string& name, const std::string& output) {
+    static_cast<void>(app::RunSolve(Write(
+        name + ".json",
+        std::format(R"({{"problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+            "discretisation": {{"lmax": 24}},
+            "times": {{"unit": "kyr", "at": [0, 0.4, 1.0]}},
+            "forcing": {{"seismic": [{{"point": {{"latitude": 30,
+                "longitude": 40, "depth_km": 300, "strike_deg": 20,
+                "dip_deg": 60, "rake_deg": 30, "moment_nm": 1e21}}}}]}},
+            "rotation": "none", "output": {{{}}}}})",
+                    output))));
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto quiet = timed("plain_run", R"("surface": "out/plain_run.nc")");
+  const auto run = timed(
+      "asked_run",
+      R"("surface": "out/asked_run.nc", "fields": ["horizontal_displacement"],
+         "smoothing": {"kind": "gaussian", "width_deg": 20})");
+  for (const auto& [name, field] : quiet.variables) {
+    EXPECT_EQ(run.variables.at(name).values, field.values) << name;
+  }
+  ASSERT_TRUE(run.variables.contains("toroidal_potential_smoothed"));
+  const SurfaceGrid small(24, {.nmax = 1});
+  const auto nodes = run.time->size();
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    const auto u =
+        DisplacementField(small, {}, Slice(run, "tangential_potential", n),
+                          Slice(run, "toroidal_potential", n));
+    EXPECT_LT(Departure(Slice(run, "displacement_east", n), u.east), 1e-14) << n;
+    EXPECT_LT(Departure(Slice(run, "displacement_north", n), u.north), 1e-14)
+        << n;
+    const auto us = DisplacementField(
+        small, {}, Slice(run, "tangential_potential_smoothed", n),
+        Slice(run, "toroidal_potential_smoothed", n));
+    EXPECT_LT(Departure(Slice(run, "displacement_east_smoothed", n), us.east),
+              1e-14)
+        << n;
+    EXPECT_LT(Departure(Slice(run, "displacement_north_smoothed", n), us.north),
+              1e-14)
+        << n;
+    for (const auto* name : {"displacement", "toroidal_potential"}) {
+      const auto site = GeographicPoint{25.0, 50.0};
+      const auto value = PointValueOf(run, std::string{name} + "_smoothed", n,
+                                      site, 24);
+      const auto mean = CapMeanOf(run, name, n, site, 20.0, 24);
+      const auto scale = std::ranges::max(Slice(run, name, n), {}, [](double v) {
+        return std::abs(v);
+      });
+      EXPECT_NEAR(value, mean, 1e-12 * std::abs(scale)) << name << " node " << n;
+    }
+  }
+
+  // with an ocean under frozen shorelines, the state's ocean function, one
+  // static field whatever the members: a migrating run's first node, which
+  // is the state itself
+  WriteToyHistory(dir_ / "history.nc");
+  const auto ocean = [&](const std::string& name, const std::string& members) {
+    static_cast<void>(app::RunSolve(Write(
+        name + ".json",
+        "{" + std::string{kBall} + ", " + Window(3, "history.nc", "", members) +
+            R"(, "rotation": "none", "output": {"surface": "out/)" + name +
+            R"(.nc"}})")));
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto frozen = ocean("frozen", "");
+  const auto moving = ocean("moving", R"("shorelines": "migrating")");
+  const auto& held = frozen.variables.at("ocean_function");
+  EXPECT_EQ(held.Text("time_support"), "static");
+  EXPECT_NE(held.Text("long_name")->find("frozen shorelines hold"),
+            std::string::npos);
+  EXPECT_EQ(held.values, Slice(moving, "ocean_function", 0));
+  EXPECT_EQ(moving.variables.at("ocean_function").Text("time_support"), "node");
+}
+
+TEST_F(AppsTest, HorizontalDisplacementOfOneHarmonicIsItsGradient) {
+  // The east and north components of the potentials V = Re Y_32 and, apart,
+  // W = Re Y_32 (up to a constant, sin^2 cos(theta) cos(2 phi)) against
+  // their gradients in closed form: V's grad_1 V, east (1 / sin) d_phi V,
+  // north -d_theta V; W's -r x grad_1 W, east -d_theta W, north
+  // -(1 / sin) d_phi W.
+  const SurfaceGrid grid(12);
+  const auto f = [](double theta, double phi) {
+    return std::sin(theta) * std::sin(theta) * std::cos(theta) *
+           std::cos(2.0 * phi);
+  };
+  const auto dTheta = [](double theta, double phi) {
+    const auto s = std::sin(theta), c = std::cos(theta);
+    return (2.0 * s * c * c - s * s * s) * std::cos(2.0 * phi);
+  };
+  const auto dPhiOverSin = [](double theta, double phi) {
+    return -2.0 * std::sin(theta) * std::cos(theta) * std::sin(2.0 * phi);
+  };
+  const auto field = grid.FromFunction(f);
+  const auto spheroidal = app::HorizontalOf(grid, field, {});
+  const auto toroidal = app::HorizontalOf(grid, {}, field);
+  const auto nphi = grid.Longitudes().size();
+  auto worst = 0.0;
+  for (auto it = std::size_t{0}; it < grid.CoLatitudes().size(); ++it) {
+    for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
+      const auto theta = grid.CoLatitudes()[it];
+      const auto phi = grid.Longitudes()[ip];
+      const auto k = it * nphi + ip;
+      worst = std::max(
+          {worst, std::abs(spheroidal.east[k] - dPhiOverSin(theta, phi)),
+           std::abs(spheroidal.north[k] + dTheta(theta, phi)),
+           std::abs(toroidal.east[k] + dTheta(theta, phi)),
+           std::abs(toroidal.north[k] + dPhiOverSin(theta, phi))});
+    }
+  }
+  EXPECT_LT(worst, 1e-13);
 }
 
 TEST_F(AppsTest, SolveRefusesWhatAnOceanOrATideCannotDo) {

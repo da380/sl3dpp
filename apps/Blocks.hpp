@@ -20,8 +20,11 @@
  * directory.
  */
 
+#include <algorithm>
 #include <cstddef>
 #include <filesystem>
+#include <numbers>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -284,7 +287,36 @@ struct CheckpointBlock {
 [[nodiscard]] CheckpointBlock ReadCheckpointBlock(
     const Json& block, const std::filesystem::path& directory);
 
-/// The `output` block: the files a run writes.
+/// A field of the surface file written only where `output.fields` names
+/// it, beside those always written.
+enum class OptionalField {
+  /// `horizontal_displacement`: the tangential displacement's components
+  /// to the east and to the north, `displacement_east` and
+  /// `displacement_north`.
+  HorizontalDisplacement
+};
+
+/// The words of `output.fields`, as a refusal lists them.
+inline constexpr auto kOptionalFields =
+    std::string_view{"\"horizontal_displacement\""};
+
+/// The smoothing of `output.smoothing`: its kind (`gaussian`, the one
+/// built) and its width in degrees as given (`width_deg`, the Gaussian
+/// cap's standard deviation in great-circle distance, as a cap
+/// measurement's).
+struct Smoothing {
+  enum class Kind { Gaussian };
+  Kind kind = Kind::Gaussian;
+  double width_deg = 0.0;
+
+  /// The width in radians, converted as a cap measurement's is.
+  [[nodiscard]] double Width() const {
+    return width_deg * std::numbers::pi / 180.0;
+  }
+};
+
+/// The `output` block: the files a run writes, and what its surface file
+/// holds beside the fields always written.
 struct OutputBlock {
   std::filesystem::path surface;   ///< the surface file, required
   std::filesystem::path exchange;  ///< the coefficient table; empty for none
@@ -292,11 +324,23 @@ struct OutputBlock {
   /// The node indices whose exchange tables a run through time writes;
   /// empty for every node.
   std::vector<int> exchange_nodes;
+  /// The optional fields added to the surface file, in the config's order.
+  std::vector<OptionalField> fields;
+  /// The smoothing whose fields are added beside the raw ones; none
+  /// without the member.
+  std::optional<Smoothing> smoothing;
+
+  /// Whether `fields` names the field.
+  [[nodiscard]] bool Asks(OptionalField field) const {
+    return std::ranges::find(fields, field) != fields.end();
+  }
 };
 
 /// Reads an `output` block, relative paths against `directory`:
-/// `surface` (required), `exchange`, `volume` and `exchange_nodes` (a list
-/// of non-negative integers).
+/// `surface` (required), `exchange`, `volume`, `exchange_nodes` (a list
+/// of non-negative integers), `fields` (a list of the words of
+/// kOptionalFields, none twice) and `smoothing` (an object of `kind`,
+/// "gaussian", and `width_deg`, a positive angle, both required).
 [[nodiscard]] OutputBlock ReadOutputBlock(
     const Json& block, const std::filesystem::path& directory);
 

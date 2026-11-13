@@ -13,5 +13,7 @@
                  "onset": 0.0}]
   },
   "rotation": "none",
-  "output": {"surface": "out/no_ocean_postseismic/no_ocean_postseismic.nc"}
+  "output": {"surface": "out/no_ocean_postseismic/no_ocean_postseismic.nc",
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }

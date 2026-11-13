@@ -526,7 +526,8 @@ OutputBlock ReadOutputBlock(const Json& block,
          "is not a block: `output` is an object, the surface file its "
          "`surface`");
   }
-  Allow(block, {"surface", "exchange", "volume", "exchange_nodes"});
+  Allow(block, {"surface", "exchange", "volume", "exchange_nodes", "fields",
+                "smoothing"});
   auto out = OutputBlock{};
   out.surface = PathOf(block, "surface", directory);
   if (Has(block, "exchange")) {
@@ -541,6 +542,40 @@ OutputBlock ReadOutputBlock(const Json& block,
       }
       out.exchange_nodes.push_back(static_cast<int>(value));
     }
+  }
+  if (Has(block, "fields")) {
+    const auto& listed = block.At("fields");
+    if (!listed.IsArray()) {
+      Fail(listed,
+           std::format("is not a list: `output.fields` lists the optional "
+                       "fields the surface file adds, of {}",
+                       kOptionalFields));
+    }
+    for (const auto& item : listed.AsArray()) {
+      const auto field = Choice<OptionalField>(
+          item, {{"horizontal_displacement",
+                  OptionalField::HorizontalDisplacement}});
+      if (out.Asks(field)) Fail(item, "is listed twice");
+      out.fields.push_back(field);
+    }
+  }
+  if (Has(block, "smoothing")) {
+    const auto& smoothing = block.At("smoothing");
+    if (!smoothing.IsObject()) {
+      Fail(smoothing,
+           "is not a block: `output.smoothing` is an object of `kind` and "
+           "`width_deg`, as {\"kind\": \"gaussian\", \"width_deg\": 2}");
+    }
+    Allow(smoothing, {"kind", "width_deg"});
+    auto read = Smoothing{};
+    read.kind = Choice<Smoothing::Kind>(smoothing.At("kind"),
+                                        {{"gaussian", Smoothing::Kind::Gaussian}});
+    const auto width = Number(smoothing, "width_deg");
+    if (!(width > 0.0) || !std::isfinite(width)) {
+      Fail(smoothing.At("width_deg"), "is not a positive angle in degrees");
+    }
+    read.width_deg = width;
+    out.smoothing = read;
   }
   return out;
 }

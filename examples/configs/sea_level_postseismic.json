@@ -20,5 +20,7 @@
   },
   "rotation": "full",
   "moments": "hydrostatic",
-  "output": {"surface": "out/sea_level_postseismic/sea_level_postseismic.nc"}
+  "output": {"surface": "out/sea_level_postseismic/sea_level_postseismic.nc",
+             "fields": ["horizontal_displacement"],
+             "smoothing": {"kind": "gaussian", "width_deg": 2.0}}
 }
