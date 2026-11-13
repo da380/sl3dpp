@@ -176,9 +176,11 @@ struct InitialSeaLevelCalibration {
  * `finalSeaLevel` at the last node, and adopts the calibrated state.
  *
  * The evolution's background state supplies the starting guess (its sea
- * level), the ice thickness at the first node and the forced land. Under
- * frozen shorelines its ocean function is kept as the prescribed one and
- * one run gives the answer; under migrating shorelines each iterate's
+ * level), the ice thickness at the first node and the forced land there (a
+ * land that changes in time is the evolution's Options::land_held at the
+ * later nodes of every run). Under frozen shorelines its ocean function
+ * is kept as the prescribed one and one run gives the answer; under
+ * migrating shorelines each iterate's
  * state takes the flotation ocean function of the guess, and the
  * iteration stops at the tolerance, returning the last state it ran with
  * that run (`converged` false if the iterations ran out first). On return

@@ -2,7 +2,9 @@
 // stride, and a fresh evolution resumed from a mid-run checkpoint
 // reproduces the uninterrupted history node for node, bitwise on one
 // thread, which checks the checkpoint bookkeeping; a run keeping no
-// snapshots hands out the same ones and returns none.
+// snapshots hands out the same ones and returns none; a resumed run given
+// its checkpoint's node as the record offset keeps the uninterrupted
+// run's states.
 
 #include <gtest/gtest.h>
 
@@ -152,6 +154,36 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
       ASSERT_TRUE(handed.contains(at)) << "node " << n;
       EXPECT_EQ(handed.at(at).displacement, full[n].displacement)
           << "node " << n;
+    }
+  }
+
+  // recording at a stride the checkpoint's node does not divide: with
+  // the record offset at that node the resumed run keeps the states the
+  // uninterrupted one keeps, every second node of the whole run and the
+  // last, and they are its states
+  {
+    auto recording = Evolution::Options{};
+    recording.record_stride = 2;
+    Evolution recorded(op, scene.solver, scene.state, recording);
+    const auto kept = recorded.Run(times, directLoad);
+    recording.record_offset = 3;
+    Evolution continued(op, scene.solver, scene.state, recording);
+    const auto rest = continued.Resume(
+        checkpoints.at(3), std::vector<double>(times.begin() + 3, times.end()),
+        directLoad);
+    ASSERT_EQ(rest.size(), times.size() - 4);
+    for (auto k = std::size_t{0}; k < rest.size(); ++k) {
+      const auto n = 4 + k;
+      const auto& want = kept[n];
+      const auto& got = rest[k];
+      EXPECT_EQ(got.internalState.has_value(), n % 2 == 0 || n == 8)
+          << "node " << n;
+      ASSERT_EQ(got.internalState.has_value(), want.internalState.has_value())
+          << "node " << n;
+      if (want.internalState) {
+        EXPECT_EQ(got.internalState->m, want.internalState->m) << "node " << n;
+      }
+      EXPECT_EQ(got.loadCoefficients, want.loadCoefficients) << "node " << n;
     }
   }
 

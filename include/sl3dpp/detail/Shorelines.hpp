@@ -30,4 +30,12 @@ void CheckMigratingStart(const GRDSolver& solver,
                          std::span<const double> startIce,
                          bool startSolved = false);
 
+/// Refuses a migrating run whose land held at its first node (`startLand`,
+/// the mask of a land that changes in time there; empty: none held) is not
+/// its background's, whose ocean function holds the land of the first
+/// node: a point is held where its mask is nonzero.
+void CheckLandAtStart(const GRDSolver& solver,
+                      const GRDSolver::State& background,
+                      std::span<const char> startLand);
+
 }  // namespace sl3dpp::detail

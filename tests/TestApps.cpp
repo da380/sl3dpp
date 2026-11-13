@@ -1944,9 +1944,11 @@ TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
   // present, read from `time_origin` 2 (kyr, the run's unit), likewise;
   // and on a 1-degree grid read by the cubic rule, to the resampling's
   // error (about 3e-8, as the static field term's). Past the file's last
-  // date its last field is held. A history on a field term multiplies it.
-  // The static problem reads the file at its `date` on the file's own
-  // axis: the cap at 2 kyr, half of it at 1 kyr, and its summary says so.
+  // date its last field is held where the term says so (`"outside_span":
+  // "hold"`), and the read is refused where it does not. A history on a
+  // field term multiplies it. The static problem reads the file at its
+  // `date` on the file's own axis: the cap at 2 kyr, half of it at 1 kyr,
+  // and its summary says so.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   constexpr auto kLmax = 8;
@@ -2014,13 +2016,27 @@ TEST_F(AppsTest, ViscoelasticResponseReadsAFieldOnATimeAxis) {
   const auto cap = run("cap", R"({"cap": {"latitude": 60, "longitude": -85,
       "width_deg": 20, "amplitude_kg_m2": 1.0e6},
       "history": [[0, 0], [2, 1]]})");
-  const auto own = run("own", R"({"field": {"file": "ramp.nc"}})");
-  const auto shifted = run(
-      "shifted", R"({"field": {"file": "ramp_bp.nc", "time_origin": 2}})");
-  const auto resampled = run(
-      "resampled", R"({"field": {"file": "fine.nc", "variable": "sigma"}})");
-  const auto doubled = run(
-      "doubled", R"({"field": {"file": "ramp.nc"}, "history": [[0, 2]]})");
+  const auto own = run(
+      "own", R"({"field": {"file": "ramp.nc", "outside_span": "hold"}})");
+  const auto shifted = run("shifted", R"({"field": {"file": "ramp_bp.nc",
+      "time_origin": 2, "outside_span": "hold"}})");
+  const auto resampled = run("resampled", R"({"field": {"file": "fine.nc",
+      "variable": "sigma", "outside_span": "hold"}})");
+  const auto doubled = run("doubled", R"({"field": {"file": "ramp.nc",
+      "outside_span": "hold"}, "history": [[0, 2]]})");
+  // without the member the nodes past the file's last date are refused,
+  // before the run
+  ExpectRefused(app::RunSolve,
+                Write("past.json",
+                      std::format(R"({{"problem": "quasi_static", {},
+                        "times": {{"unit": "kyr", "end": 3, "nodes": 7}},
+                        "forcing": {{"load": [{{"field": {{"file":
+                        "ramp.nc"}}}}]}}, "rotation": "none",
+                        "output": {{"surface": "out/past.nc"}}}})",
+                                  kBall)),
+                "forcing.load[0].field.file",
+                "spans 0 to 2 kyr on the file's own axis, which leaves out "
+                "2.5 kyr on the file's own axis");
   auto worst = 0.0;
   for (const auto* name :
        {"load", "displacement", "tangential_potential", "potential"}) {
@@ -4332,6 +4348,224 @@ void WriteToyNodes(const fs::path& path, const std::string& name,
   pm::WriteSurfaceFile(path, file);
 }
 
+TEST_F(AppsTest, SolveHoldsALandThatChangesInTime) {
+  // `ocean.land` on a time axis is read at every node's date under
+  // migrating shorelines: a band of the toy world's southern ocean held as
+  // land at the first two nodes and a narrower one after (`shrinking`)
+  // gives, at each node, an ocean function that holds that node's land,
+  // the band's edges released to the ocean by flotation from the third
+  // node, 1-D and 3-D, from the state at the window's start and through a
+  // calibration (the state at its end). A land on a time axis that does
+  // not change (`steady`) gives the run of the same land without one, to
+  // the bit. Under frozen shorelines the land is the state's instant's
+  // alone, the window's start or its end, each the run of that instant's
+  // land without a time axis, to the bit. The kernels about a migrating
+  // run under the changing land are its derivatives: a cap of ice at the
+  // first node alone, which flips no cell, moves the measurements by the
+  // kernels' prediction (the run being linear in it there).
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  const auto wide = [](double theta) { return theta > 1.9 && theta < 2.5; };
+  const auto narrow = [](double theta) {
+    return theta > 2.05 && theta < 2.35;
+  };
+  WriteToyNodes(dir_ / "shrinking.nc", "land",
+                [&](std::size_t k, double theta) {
+                  return (k <= 1 ? wide(theta) : narrow(theta)) ? 1.0 : 0.0;
+                });
+  WriteToyNodes(dir_ / "steady.nc", "land", [&](std::size_t, double theta) {
+    return wide(theta) ? 1.0 : 0.0;
+  });
+  // the two masks without a time axis: the first two nodes' and the rest's
+  const auto still = [&](const std::string& name,
+                         const std::function<bool(double)>& band) {
+    const auto grid = pm::Equiangular(19, 36);
+    auto held = std::vector<double>{};
+    for (const auto theta : grid.Colatitudes()) {
+      for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+        held.push_back(band(theta) ? 1.0 : 0.0);
+      }
+    }
+    auto file = pm::SurfaceFile{};
+    file.grid = grid;
+    file.source = "sl3dpp tests";
+    file.variables.emplace("land", pm::SurfaceField("land", held, {}));
+    pm::WriteSurfaceFile(dir_ / name, file);
+  };
+  still("wide.nc", wide);
+  still("narrow.nc", narrow);
+  // the masks on the run's grid, as the run cuts them
+  const auto maskOf = [&](const std::string& name) {
+    const auto file = io::FieldHistory::Read(dir_ / name, SurfaceGrid(8));
+    EXPECT_TRUE(file) << file.error().message;
+    auto out = std::vector<char>{};
+    for (const auto v : file->Values("land", 0.0)) out.push_back(v > 0.5);
+    return out;
+  };
+  const auto early = maskOf("wide.nc");
+  const auto late = maskOf("narrow.nc");
+  auto released = std::size_t{0};
+  for (auto i = std::size_t{0}; i < early.size(); ++i) {
+    if (early[i] && !late[i]) ++released;
+  }
+  ASSERT_GT(released, 0u);
+
+  const auto config = [&](const std::string& name, const std::string& model,
+                          int nodes, const std::string& ocean,
+                          const std::string& land, const std::string& at) {
+    return Write(name + ".json",
+                 std::format(R"({{{}, {}, "rotation": "full"{},
+                   "output": {{"surface": "out/{}.nc"}}}})",
+                             model,
+                             Window(nodes, "history.nc", "",
+                                    ocean + R"(, "land": {"file": ")" + land +
+                                        R"("})",
+                                    at),
+                             model == kBall ? R"(, "moments": "hydrostatic")"
+                                            : "",
+                             name));
+  };
+  // every node's ocean function holds its land: the first two nodes' the
+  // wide band's, the rest the narrow one's, the band's edges ocean there
+  const auto expectHeld = [&](const std::string& name, std::size_t nodes,
+                              std::size_t firstLate) {
+    const auto out = Output(name);
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      const auto ocean = Slice(out, "ocean_function", n);
+      const auto& held = n < firstLate ? early : late;
+      auto edges = 0.0;
+      for (auto i = std::size_t{0}; i < ocean.size(); ++i) {
+        if (held[i]) EXPECT_EQ(ocean[i], 0.0) << name << " node " << n;
+        if (early[i] && !late[i]) edges = std::max(edges, ocean[i]);
+      }
+      EXPECT_EQ(edges, n < firstLate ? 0.0 : 1.0) << name << " node " << n;
+    }
+  };
+  const auto migrating = std::string{R"("shorelines": "migrating")"};
+  const auto summary = app::RunSolve(
+      config("shrinking", kBall, 5, migrating, "shrinking.nc", "start"));
+  EXPECT_NE(summary.find(std::format(", land {}:land (each node's date)",
+                                     (dir_ / "shrinking.nc").string())),
+            std::string::npos)
+      << summary;
+  expectHeld("shrinking", 5, 2);
+  // (the water the released edges take depends on the initial sea level
+  // there, which slows the calibration's fixed point)
+  static_cast<void>(app::RunSolve(
+      config("calibrated", kBall, 5,
+             R"("shorelines": "migrating",
+                "calibration": {"rtol": 1e-8, "iterations": 40})",
+             "shrinking.nc", "end")));
+  expectHeld("calibrated", 5, 2);
+  // 3-D, its nodes at 2, 4/3, 2/3 and 0 kyr BP: the land held at 4/3 is
+  // two thirds of the way to the wide band, at 2/3 none
+  static_cast<void>(app::RunSolve(
+      config("shrinking3d", Prem8(), 4, migrating, "shrinking.nc", "start")));
+  expectHeld("shrinking3d", 4, 2);
+
+  // a land on a time axis that does not change: the run without one
+  const auto same = [&](const std::string& got, const std::string& want) {
+    const auto a = Output(got);
+    const auto b = Output(want);
+    for (const auto* name : {"relative_sea_level_change", "displacement",
+                             "potential", "initial_sea_level"}) {
+      EXPECT_EQ(a.variables.at(name).values, b.variables.at(name).values)
+          << got << " " << name;
+    }
+    if (b.variables.contains("ocean_function")) {
+      EXPECT_EQ(a.variables.at("ocean_function").values,
+                b.variables.at("ocean_function").values)
+          << got;
+    }
+  };
+  for (const auto& [model, nodes, label] :
+       {std::tuple{std::string{kBall}, 5, std::string{"1d"}},
+        std::tuple{Prem8(), 4, std::string{"3d"}}}) {
+    static_cast<void>(app::RunSolve(config("steady" + label, model, nodes,
+                                           migrating, "steady.nc", "start")));
+    static_cast<void>(app::RunSolve(
+        config("wide" + label, model, nodes, migrating, "wide.nc", "start")));
+    same("steady" + label, "wide" + label);
+  }
+  // frozen shorelines: the state's instant's land alone
+  const auto frozen = std::string{R"("shorelines": "frozen")"};
+  static_cast<void>(app::RunSolve(
+      config("frozen_start", kBall, 5, frozen, "shrinking.nc", "start")));
+  static_cast<void>(app::RunSolve(
+      config("frozen_wide", kBall, 5, frozen, "wide.nc", "start")));
+  same("frozen_start", "frozen_wide");
+  static_cast<void>(app::RunSolve(config("frozen_end", kBall, 5,
+                                         Calibrated("frozen"), "shrinking.nc",
+                                         "end")));
+  static_cast<void>(app::RunSolve(config(
+      "frozen_narrow", kBall, 5, Calibrated("frozen"), "narrow.nc", "end")));
+  same("frozen_end", "frozen_narrow");
+
+  // the kernels about the migrating run under the changing land
+  constexpr auto kHeld = R"({"cap_thickness": {"latitude": 50, "longitude": 0,
+      "width_deg": 8, "thickness_m": 200}})";
+  constexpr auto kFirst = R"({"cap_thickness": {"latitude": 45, "longitude": 30,
+      "width_deg": 6, "thickness_m": 10}, "history_kyr_bp": [[2, 1], [1.5, 0]]})";
+  const auto kerneled = [&](const std::string& name, const std::string& terms) {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}},
+                                  {}]}},
+      "ocean": {{"at": "start", "shorelines": "migrating",
+                "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}},
+                "land": {{"file": "shrinking.nc"}}}},
+      "rotation": "full", "moments": "hydrostatic",
+      "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"method": "discrete", "parameters": ["ice"],
+        "measurements": [
+          {{"type": "relative_sea_level_cap", "name": "site",
+            "latitude": -30, "longitude": 10, "width_deg": 25}},
+          {{"type": "displacement_point", "name": "uplift", "latitude": 55,
+            "longitude": 10, "date_kyr_bp": 1}}],
+        "output": "out/{}_kernels"}}}})",
+                                             kBall, terms, name, name));
+  };
+  const auto base = kerneled("land_kernels", kHeld);
+  static_cast<void>(app::RunKernel(base));
+  static_cast<void>(app::RunSolve(base));
+  static_cast<void>(app::RunSolve(
+      kerneled("land_bumped", std::string{kHeld} + ", " + kFirst)));
+  const auto plain = Output("land_kernels");
+  const auto bumped = Output("land_bumped");
+  EXPECT_EQ(plain.variables.at("ocean_function").values,
+            bumped.variables.at("ocean_function").values)
+      << "a cell flipped";
+  const auto rad = std::numbers::pi / 180.0;
+  const auto grid = SurfaceGrid(8);
+  auto deltas = std::vector<std::vector<double>>(5, grid.ZeroField());
+  deltas[0] = app::CapField(grid, {45.0, 30.0}, 6.0 * rad, 10.0);
+  for (const auto& [name, measured] :
+       {std::pair{std::string{"site"},
+                  CapMeanOf(bumped, "relative_sea_level_change", 4,
+                            {-30.0, 10.0}, 25.0) -
+                      CapMeanOf(plain, "relative_sea_level_change", 4,
+                                {-30.0, 10.0}, 25.0)},
+        std::pair{std::string{"uplift"},
+                  PointValueOf(bumped, "displacement", 2, {55.0, 10.0}) -
+                      PointValueOf(plain, "displacement", 2, {55.0, 10.0})}}) {
+    const auto kernels =
+        pm::ReadSurfaceFile(dir_ / "out" / "land_kernels_kernels" /
+                            (name + "_ice_kernels.nc"));
+    const auto predicted = NodePairing(kernels, "thickness_dual", deltas);
+    std::cout << std::format(
+        "[a land changing in time, {}] kernel against solve's difference "
+        "{:.3e}\n",
+        name, Gap(predicted, measured));
+    RecordProperty(name + "_gap",
+                   std::format("{:.3e}", Gap(predicted, measured)));
+    EXPECT_LT(Gap(predicted, measured), 1e-6) << name;
+  }
+}
+
 TEST_F(AppsTest, KernelsOfACalibratedRunAgainstTheRunsOfItsIce) {
   // A calibrated run (the state at the window's end, `"at": "end"`) of the
   // toy history whose polar ice floats off as it thins, under frozen and
@@ -4841,7 +5075,10 @@ TEST_F(AppsTest, SolveCalibratesTheInitialSeaLevel) {
     static_cast<void>(app::RunSolve(future));
     ADD_FAILURE() << "a target outside the state file was accepted";
   } catch (const planetmodel::Error& error) {
-    EXPECT_NE(std::string{error.what()}.find("leaves out the window's end"),
+    EXPECT_NE(std::string{error.what()}.find(
+                  "ocean.topography.file: spans 2 to 0 kyr BP, which leaves "
+                  "out -0.5 kyr BP, the window's end, where the state is "
+                  "read, the calibration's target"),
               std::string::npos)
         << error.what();
   }
@@ -7946,7 +8183,8 @@ TEST_F(AppsTest, SolveReadsAFieldOnItsOwnClockAndOnItsOwnAxis) {
   // forwards, on the run's clock at t - `time_origin` in the run's unit:
   // the file's axis counted back from the present, a cap ramped up over
   // the two kyr to the present, read from a time origin of 2 kyr at uneven
-  // nodes, is the cap term under the matching history ramped up over the
+  // nodes (the file's last field held past it, `"outside_span": "hold"`),
+  // is the cap term under the matching history ramped up over the
   // run's first two kyr, to rounding, and the same in years from 2000 yr
   // agrees with it to the rounding of its node times (about 4e-12;
   // SolveOnItsOwnClockIsTheLibrarysRunThroughTime); the summary lists the
@@ -7994,7 +8232,8 @@ TEST_F(AppsTest, SolveReadsAFieldOnItsOwnClockAndOnItsOwnAxis) {
       "problem": "quasi_static",
       "times": {{"unit": "{}", "at": {}}},
       "forcing": {{"load": [{{"field": {{"file": "ramp_bp.nc",
-                                         "time_origin": {:.17g}}}}}]}},
+                                         "time_origin": {:.17g},
+                                         "outside_span": "hold"}}}}]}},
       "rotation": "none", "output": {{"surface": "out/{}.nc"}}}})",
                     kBall, unit, ListOf(at), 2.0 * scale, name)));
   };
@@ -8074,7 +8313,8 @@ TEST_F(AppsTest, SolveReadsADatedFieldAtEachNodesDate) {
   // each node's date on the calendar's axis by the file's own time rule:
   // a cap of water in the budget on the file's dates (none at 2.5 kyr BP,
   // the cap at 1.5, four tenths of it from 0.25 to the present, linear
-  // between them), written on the run's own grid, is the cap term under
+  // between them; the file's last date held to the present, `"outside_span":
+  // "hold"`), written on the run's own grid, is the cap term under
   // the history of the same dates, to rounding, beside the toy state's
   // ice history under frozen and under migrating shorelines; the summary
   // and the outputs' metadata say the file is read by date.
@@ -8129,7 +8369,8 @@ TEST_F(AppsTest, SolveReadsADatedFieldAtEachNodesDate) {
   constexpr auto kCap = R"("cap": {"latitude": -20, "longitude": 100,
       "width_deg": 25, "amplitude_kg_m2": 3000},
       "history_kyr_bp": [[2.5, 0], [1.5, 1], [0.25, 0.4]])";
-  constexpr auto kField = R"("field": {"file": "water.nc"})";
+  constexpr auto kField =
+      R"("field": {"file": "water.nc", "outside_span": "hold"})";
   for (const auto* shorelines : {"frozen", "migrating"}) {
     const auto label = std::string{shorelines};
     static_cast<void>(app::RunSolve(config(label + "_cap", kCap, label)));
@@ -8284,53 +8525,188 @@ TEST_F(AppsTest, SolveTakesListedNodesDatedOrOnItsOwnClock) {
   RecordProperty("dated_departure", std::format("{:.3e}", worst));
 }
 
-TEST_F(AppsTest, SolveHoldsAStatesFilesBeyondTheirSpanButAtACalibratedEnd) {
-  // A state read outside its files' time span (the toy history's, 2 to 0
-  // kyr BP): their end values are held at the static problem's date and at
-  // a dated run's start, the run going ahead on them, and refused at the
-  // window's end of a calibrating run (`"at": "end"`), the calibration's
-  // target. A characterisation of the reads as they stand.
+TEST_F(AppsTest, ReadsOutsideAFilesSpanAreRefusedUnlessHeld) {
+  // Every read of a field on a time axis outside its file's span (the toy
+  // history's, 2 to 0 kyr BP) is refused, naming the member, the file's
+  // span, the date asked and the read: the static problem's state at its
+  // date, a dated run's state at its start, a thickness term at the
+  // state's instant, a calibrated run's state at its end. Each input that says
+  // `"outside_span": "hold"` holds its file's first or last stored values
+  // instead, as without the member the runs did: the static problem's
+  // state at 3.5 kyr BP is its state at 2 kyr BP, to the bit. A date
+  // within 1e-9 of the span (of its length or its ends' magnitudes) is the
+  // end itself: a file whose first date is 1e-12 short of the window's
+  // start is read there without the member, and one 1e-6 short is
+  // refused; a file of the same dates in years runs as the one in seconds,
+  // to the bit. `outside_span` is refused on a static field, where it does
+  // nothing, and enters neither hash: a run's checkpoints resume under the
+  // member.
+  namespace pm = planetmodel;
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
-  const auto fingerprint = [&](const std::string& name, double date) {
+  constexpr auto kHold = R"(, "outside_span": "hold")";
+  const auto fingerprint = [&](const std::string& name, double date,
+                               const std::string& topography,
+                               const std::string& ice) {
     return Write(name + ".json", std::format(R"({{
     "problem": "static", {},
     "forcing": {{"ice_change": [{{"cap_fraction": {{"latitude": 90,
                 "longitude": 0, "width_deg": 15, "fraction": -0.1}}}}]}},
-    "ocean": {{"date_kyr_bp": {}, "topography": {{"file": "history.nc"}},
-              "ice": {{"file": "history.nc"}}}},
+    "ocean": {{"date_kyr_bp": {}, "topography": {{"file": "history.nc"{}}},
+              "ice": {{"file": "history.nc"{}}}}},
     "rotation": "none",
     "output": {{"surface": "out/{}.nc"}}}})",
-                                             kBall, date, name));
+                                             kBall, date, topography, ice,
+                                             name));
   };
-  static_cast<void>(app::RunSolve(fingerprint("oldest", 2.0)));
-  static_cast<void>(app::RunSolve(fingerprint("older", 3.5)));
+  static_cast<void>(app::RunSolve(fingerprint("oldest", 2.0, "", "")));
+  ExpectRefused(app::RunSolve, fingerprint("older", 3.5, "", ""),
+                "ocean.topography.file",
+                std::format("spans 2 to 0 kyr BP, which leaves out 3.5 kyr "
+                            "BP, the state's date, `ocean.date_kyr_bp`, where "
+                            "the state is read: give a file that covers it, "
+                            "or \"outside_span\": \"hold\""));
+  // each input holds its own ends
+  ExpectRefused(app::RunSolve, fingerprint("older", 3.5, kHold, ""),
+                "ocean.ice.file", "which leaves out 3.5 kyr BP");
+  static_cast<void>(app::RunSolve(fingerprint("older", 3.5, kHold, kHold)));
   for (const auto* name : {"relative_sea_level_change", "ocean_function"}) {
     EXPECT_EQ(Output("older").variables.at(name).values,
               Output("oldest").variables.at(name).values)
         << name;
   }
+
   const auto window = [&](const std::string& name, const std::string& times,
-                          const std::string& at) {
+                          const std::string& at, const std::string& state,
+                          const std::string& term,
+                          const std::string& file = "history.nc") {
     return Write(name + ".json", std::format(R"({{
     "problem": "quasi_static", {}, "times": {{{}}},
-    "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}]}},
-    "ocean": {{"at": "{}", "topography": {{"file": "history.nc"}},
-              "ice": {{"file": "history.nc"}}}},
+    "forcing": {{"ice_change": [{{"thickness": {{"file": "{}"{}}}}}]}},
+    "ocean": {{"at": "{}", "topography": {{"file": "{}"{}}},
+              "ice": {{"file": "{}"{}}}}},
     "rotation": "none",
     "output": {{"surface": "out/{}.nc"}}}})",
-                                             kBall, times, at, name));
+                                             kBall, times, file, term, at, file,
+                                             state, file, state, name));
   };
-  const auto early = app::RunSolve(window(
-      "early", R"("start_kyr_bp": 3.0, "end_kyr_bp": 0.0, "nodes": 4)",
-      "start"));
+  constexpr auto kEarly = R"("start_kyr_bp": 3.0, "end_kyr_bp": 0.0, "nodes": 4)";
+  ExpectRefused(app::RunSolve, window("early", kEarly, "start", "", ""),
+                "ocean.topography.file",
+                "spans 2 to 0 kyr BP, which leaves out 3 kyr BP, the window's "
+                "start, where the state is read");
+  ExpectRefused(app::RunSolve, window("early", kEarly, "start", kHold, ""),
+                "forcing.ice_change[0].thickness.file",
+                "spans 2 to 0 kyr BP, which leaves out 3 kyr BP, the "
+                "state's instant, from which its change is measured");
+  const auto early =
+      app::RunSolve(window("early", kEarly, "start", kHold, kHold));
   EXPECT_NE(early.find("(the window's start, 3 kyr BP)"), std::string::npos)
       << early;
+  constexpr auto kLate = R"("start_kyr_bp": 2.0, "end_kyr_bp": -0.5, "nodes": 3)";
+  ExpectRefused(app::RunSolve, window("late", kLate, "end", "", ""),
+                "ocean.topography.file",
+                "spans 2 to 0 kyr BP, which leaves out -0.5 kyr BP, the "
+                "window's end, where the state is read, the calibration's "
+                "target");
+  // held, the calibration's target is the file's last state
+  const auto late = app::RunSolve(window("late", kLate, "end", kHold, kHold));
+  EXPECT_NE(late.find("initial sea level calibrated"), std::string::npos)
+      << late;
+
+  // the span's tolerance: the toy history's first date moved later by a
+  // relative 1e-12 of the window's start, and by 1e-6; and its dates in
+  // years
+  const auto moved = [&](const std::string& name, double shift,
+                         double unit) {
+    auto time = std::vector<double>{-2.0 * app::KYR * (1.0 - shift),
+                                    -1.0 * app::KYR, 0.0};
+    for (auto& t : time) t /= unit;
+    sl3dpp::test::WriteToyHistoryOn(dir_ / name, time, unit);
+  };
+  moved("near.nc", 1e-12, 1.0);
+  moved("far.nc", 1e-6, 1.0);
+  moved("years.nc", 0.0, app::KYR / 1000.0);
+  constexpr auto kEven = R"("start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5)";
+  static_cast<void>(
+      app::RunSolve(window("near", kEven, "start", "", "", "near.nc")));
+  ExpectRefused(app::RunSolve, window("far", kEven, "start", "", "", "far.nc"),
+                "ocean.topography.file",
+                "which leaves out 2 kyr BP, the window's start");
+  static_cast<void>(
+      app::RunSolve(window("seconds", kEven, "start", "", "")));
+  static_cast<void>(
+      app::RunSolve(window("years", kEven, "start", "", "", "years.nc")));
+  for (const auto* name : {"relative_sea_level_change", "displacement"}) {
+    EXPECT_EQ(Output("years").variables.at(name).values,
+              Output("seconds").variables.at(name).values)
+        << name;
+  }
+
+  // the member on a static field does nothing, and is refused
+  sl3dpp::test::WriteToyLand(dir_ / "land.nc");
   ExpectRefused(
       app::RunSolve,
-      window("late", R"("start_kyr_bp": 2.0, "end_kyr_bp": -0.5, "nodes": 3)",
-             "end"),
-      "ocean.topography.file", "leaves out the window's end");
+      Write("static_land.json",
+            std::format(R"({{"problem": "quasi_static", {}, "times": {{{}}},
+              "forcing": {{"ice_change": [{{"thickness": {{"file":
+                "history.nc"}}}}]}},
+              "ocean": {{"at": "start", "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}},
+                "land": {{"file": "land.nc", "outside_span": "hold"}}}},
+              "rotation": "none", "output": {{"surface": "out/l.nc"}}}})",
+                        kBall, kEven)),
+      "ocean.land.outside_span",
+      std::format("{} has no time axis", (dir_ / "land.nc").string()));
+  sl3dpp::test::WriteToyHistoryOn(
+      dir_ / "with_land.nc", {-2.0 * app::KYR, -1.0 * app::KYR, 0.0}, 1.0,
+      true);
+  ExpectRefused(
+      app::RunSolve,
+      Write("static_field.json",
+            std::format(R"({{"problem": "quasi_static", {}, "times": {{{}}},
+              "forcing": {{"ice_change": [{{"thickness": {{"file":
+                "history.nc"}}}}]}},
+              "ocean": {{"at": "start", "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}},
+                "land": {{"file": "with_land.nc", "outside_span": "refuse"}}}},
+              "rotation": "none", "output": {{"surface": "out/l.nc"}}}})",
+                        kBall, kEven)),
+      "ocean.land.outside_span",
+      std::format("\"land\" of {} is static",
+                  (dir_ / "with_land.nc").string()));
+
+  // neither hash takes the member: a run stopped at its wall-time limit
+  // resumes with it
+  const auto hashesOf = [&](const fs::path& path) {
+    const auto input = app::ReadSolveInput(path);
+    auto hash = app::Fnv1a{};
+    app::AddRunMembers(hash, input.run);
+    return std::pair{hash.Value(), app::TrajectoryHashOf(input.run)};
+  };
+  const auto stopping = [&](const std::string& name, const std::string& hold,
+                            const std::string& limit) {
+    return Write(name + ".json", std::format(R"({{
+    "problem": "quasi_static", {}, "times": {{{}}},
+    "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"{}}}}}]}},
+    "ocean": {{"at": "start", "topography": {{"file": "history.nc"{}}},
+              "ice": {{"file": "history.nc"{}}}}},
+    "rotation": "none",
+    "checkpoint": {{"directory": "ckpt", "every": 1{}}},
+    "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, kEven, hold, hold, hold,
+                                             limit, name));
+  };
+  constexpr auto kLimit = R"(, "max_walltime_min": 1e-9)";
+  EXPECT_EQ(hashesOf(stopping("plain", "", kLimit)),
+            hashesOf(stopping("held", kHold, "")));
+  const auto stopped = app::RunSolve(stopping("plain", "", kLimit));
+  EXPECT_NE(stopped.find("at the wall-time limit"), std::string::npos)
+      << stopped;
+  const auto resumed = app::RunSolve(stopping("held", kHold, ""));
+  EXPECT_NE(resumed.find(", resumed"), std::string::npos) << resumed;
+  EXPECT_EQ(Output("held").variables.at("relative_sea_level_change").values,
+            Output("seconds").variables.at("relative_sea_level_change").values);
 }
 
 TEST_F(AppsTest, SolveOnItsOwnClockReadsItsStateAtItsDate) {
@@ -9809,7 +10185,7 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
   static_cast<void>(app::RunSolve(base));
   static_cast<void>(app::RunSolve(config("stiff", "stiff.nc")));
   static_cast<void>(app::RunSolve(config("soft", "soft.nc")));
-  static_cast<void>(app::RunSolve(config("raised", "moduli.nc", 4e20)));
+  static_cast<void>(app::RunSolve(config("raised", "moduli.nc", 1.03e22)));
   const auto read = [&](const std::string& name) {
     return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
   };
@@ -9842,7 +10218,7 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
         SurfacePairing(loads, loads.variables.at("load_dual").values, applied) +
         bySource;
     const auto raisedBy = valueOf(raised, label) - value;
-    EXPECT_LT(Gap(D[6] * 1e20, raisedBy), 1e-8) << label;
+    EXPECT_LT(Gap(D[6] * 1e22, raisedBy), 1e-8) << label;
     const auto moduli = pm::ReadModelFile(out / (label + "_moduli_kernels.nc"));
     const auto predicted = std::get<std::vector<double>>(
                                moduli.Meta().at("lateral_moduli_pairing"))
@@ -9858,7 +10234,7 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
         "[static, lateral moduli, {}] load and moment kernels {:.3e} from the "
         "value; moment {:.3e} from solve's difference; moduli {:.3e} from "
         "solve's differences\n",
-        label, Gap(paired, value), Gap(D[6] * 1e20, raisedBy),
+        label, Gap(paired, value), Gap(D[6] * 1e22, raisedBy),
         Gap(predicted, measured));
     RecordProperty(label + "_load_gap", std::format("{:.3e}", Gap(paired, value)));
     RecordProperty(label + "_moduli_gap",
@@ -10706,11 +11082,11 @@ TEST_F(AppsTest, TheTrajectoryStoreIsTheRunsOwn) {
   // A store is read and recorded by its own run alone: `solve` leaves a
   // complete store of its run as it is; a store of another run (another
   // config), one recorded at another stride, and a directory holding what
-  // no store writes are refused, nothing in them removed; a run resuming
-  // from a checkpoint is refused a store it would record (its nodes before
-  // the checkpoint are not run again), while one starting over records it;
-  // an incomplete store of the run (a run stopped at the wall-time limit)
-  // is replaced by the next recording.
+  // no store writes are refused, nothing in them removed; an incomplete
+  // store of the run (a run stopped at the wall-time limit) is recorded
+  // whole by `kernel`, which a resumption then finds complete and leaves
+  // as it is, as a run starting over does (a resumption continuing the
+  // store is ARecordingRunResumesItsStore's).
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   const auto config = [&](const std::string& name, const std::string& rtol,
@@ -10760,8 +11136,8 @@ TEST_F(AppsTest, TheTrajectoryStoreIsTheRunsOwn) {
                 "holds what a trajectory store does not write");
   EXPECT_TRUE(fs::exists(dir_ / "cluttered" / "notes.txt"));
   // stopped at the wall-time limit after a checkpoint, the store is left
-  // incomplete; the resumption is refused it, and a kernel run of the same
-  // run records it whole
+  // incomplete; a kernel run of the same run records it whole, and the
+  // resumption finds it complete
   const auto checkpointed =
       R"(, "checkpoint": {"directory": "ckpt", "every": 1,
                           "max_walltime_min": 1e-9})";
@@ -10769,23 +11145,25 @@ TEST_F(AppsTest, TheTrajectoryStoreIsTheRunsOwn) {
       config("stopped", "1e-10", R"("directory": "partial")", checkpointed));
   EXPECT_NE(stopped.find("at the wall-time limit"), std::string::npos)
       << stopped;
-  EXPECT_NE(stopped.find(std::format("the trajectory store {} left incomplete",
+  EXPECT_NE(stopped.find(std::format("the trajectory store {} left incomplete "
+                                     "at node 0, the resumption recording on "
+                                     "from there",
                                      (dir_ / "partial").string())),
             std::string::npos)
       << stopped;
   EXPECT_FALSE(io::TrajectoryStore::ManifestOf(dir_ / "partial").complete);
-  ExpectRefused(
-      app::RunSolve,
-      config("stopped", "1e-10", R"("directory": "partial")", checkpointed),
-      "trajectory.directory",
-      "names a trajectory store this run would record, and the run resumes "
-      "from the checkpoint of node ");
   const auto recorded = app::RunKernel(
       config("stopped", "1e-10", R"("directory": "partial")", checkpointed));
   EXPECT_NE(recorded.find("; the forward run recorded to the trajectory store "),
             std::string::npos)
       << recorded;
   EXPECT_TRUE(io::TrajectoryStore::ManifestOf(dir_ / "partial").complete);
+  const auto onwards = app::RunSolve(config(
+      "stopped", "1e-10", R"("directory": "partial")",
+      R"(, "checkpoint": {"directory": "ckpt", "every": 1})"));
+  EXPECT_NE(onwards.find(", resumed"), std::string::npos) << onwards;
+  EXPECT_NE(onwards.find("holds this run complete"), std::string::npos)
+      << onwards;
   // starting over records it too, a complete store of the run being left
   // as it is
   const auto over = app::RunSolve(
@@ -10793,6 +11171,164 @@ TEST_F(AppsTest, TheTrajectoryStoreIsTheRunsOwn) {
              R"(, "checkpoint": {"directory": "ckpt", "every": 1},
                   "restart": false)"));
   EXPECT_NE(over.find("holds this run complete"), std::string::npos) << over;
+}
+
+/// Expects two directories to hold the same files, byte for byte.
+void ExpectSameFiles(const fs::path& got, const fs::path& want) {
+  const auto listed = [](const fs::path& root) {
+    auto out = std::map<fs::path, std::string>{};
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+      if (!entry.is_regular_file()) continue;
+      auto in = std::ifstream(entry.path(), std::ios::binary);
+      out.emplace(fs::relative(entry.path(), root),
+                  std::string(std::istreambuf_iterator<char>(in), {}));
+    }
+    return out;
+  };
+  const auto a = listed(got);
+  const auto b = listed(want);
+  EXPECT_EQ(a.size(), b.size()) << got << " against " << want;
+  for (const auto& [name, bytes] : b) {
+    const auto found = a.find(name);
+    ASSERT_NE(found, a.end()) << name;
+    EXPECT_TRUE(found->second == bytes) << name;
+  }
+}
+
+TEST_F(AppsTest, ARecordingRunResumesItsStore) {
+  // A run recording into the trajectory store and stopped at the
+  // wall-time limit after every node's checkpoint (one invocation a node)
+  // continues its incomplete store from the checkpoint it resumes from:
+  // the store it finishes is, file by file and byte by byte, the
+  // uninterrupted run's, at a record stride the resumptions' nodes do not
+  // all divide (the kept nodes count from the run's first), 1-D and 3-D,
+  // frozen and migrating (calibrated, its start read back), and `kernel`
+  // sweeps from it bitwise the kernels of the uninterrupted store; the
+  // runs' outputs are the uninterrupted run's. A record the stopped run
+  // left past its checkpoint, or half written, is replaced. A resumption
+  // whose store lacks a record before its checkpoint is refused with the
+  // ways on, nothing removed, and so is one that would begin a store at
+  // its checkpoint.
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  constexpr auto kKernels = R"("parameters": ["ice", "viscosity"],
+      "measurements": [{"type": "relative_sea_level_cap", "name": "site",
+        "latitude": -30, "longitude": 10, "width_deg": 25}])";
+  const auto config = [&](const std::string& name, const std::string& body,
+                          const std::string& store,
+                          const std::string& checkpoint) {
+    return Write(name + ".json",
+                 std::format(R"({{{}, "trajectory": {{"record_stride": 2,
+                   "directory": "{}"}}{}, "output": {{"surface": "out/{}.nc"}},
+                   "kernels": {{{}, "output": "out/k_{}"}}}})",
+                             body, store, checkpoint, name, kKernels, name));
+  };
+  constexpr auto kStopping = R"(, "checkpoint": {{"directory": "ckpt_{}",
+      "every": 1, "max_walltime_min": 1e-9}})";
+  // runs a config until it finishes, the store checked incomplete at each
+  // stop, the first at node `first`; the summaries
+  const auto pieces = [&](const fs::path& path, const fs::path& store,
+                          int first) {
+    auto summaries = std::vector<std::string>{};
+    for (auto attempt = 0; attempt < 10; ++attempt) {
+      summaries.push_back(app::RunSolve(path));
+      const auto& summary = summaries.back();
+      if (summary.find("; wrote ") != std::string::npos) break;
+      EXPECT_NE(summary.find(std::format(
+                    "; the trajectory store {} left incomplete at node {}, ",
+                    store.string(), first + attempt)),
+                std::string::npos)
+          << summary;
+      EXPECT_FALSE(io::TrajectoryStore::ManifestOf(store).complete);
+    }
+    return summaries;
+  };
+  const auto cases = std::vector<std::pair<std::string, std::string>>{
+      {"frozen1d", std::string{kBall} + ", " + Window(5) +
+                       R"(, "rotation": "full", "moments": "hydrostatic")"},
+      {"migrating1d",
+       std::string{kBall} + ", " +
+           Window(5, "history.nc", "", Calibrated("migrating"), "end") +
+           R"(, "rotation": "full", "moments": "hydrostatic")"},
+      {"frozen3d", Prem8() + ", " + Window(4) + R"(, "rotation": "full")"},
+      {"migrating3d",
+       Prem8() + ", " +
+           Window(4, "history.nc", "", R"("shorelines": "migrating")") +
+           R"(, "rotation": "full")"}};
+  for (const auto& [name, body] : cases) {
+    const auto whole = config(name + "_whole", body, "whole_" + name, "");
+    const auto parted =
+        config(name + "_parts", body, "parts_" + name,
+               std::format(kStopping, name));
+    static_cast<void>(app::RunSolve(whole));
+    const auto store = dir_ / ("parts_" + name);
+    auto summaries = std::vector<std::string>{};
+    if (name == "frozen1d") {
+      // stopped at node 0: a record past it and a half-written one, as a
+      // run killed after its checkpoint leaves them, are replaced
+      summaries.push_back(app::RunSolve(parted));
+      fs::copy_file(store / "node_000000.surface",
+                    store / "node_000003.surface");
+      fs::copy_file(store / "node_000000.surface",
+                    store / ".node_000001.surface.partial");
+      fs::copy_file(store / "rank_0000" / "node_000000.state",
+                    store / "rank_0000" / "node_000002.state");
+      const auto rest = pieces(parted, store, 1);
+      summaries.insert(summaries.end(), rest.begin(), rest.end());
+    } else {
+      summaries = pieces(parted, store, 0);
+    }
+    ASSERT_GE(summaries.size(), 3u) << name;
+    const auto& last = summaries.back();
+    EXPECT_NE(last.find(", resumed"), std::string::npos) << last;
+    EXPECT_NE(last.find(std::format("; recorded the trajectory to the store {} "
+                                    "(",
+                                    store.string())),
+              std::string::npos)
+        << last;
+    EXPECT_NE(last.find(std::format(", continuing it from node {}",
+                                    summaries.size() - 2)),
+              std::string::npos)
+        << last;
+    EXPECT_TRUE(io::TrajectoryStore::ManifestOf(store).complete);
+    ExpectSameFiles(store, dir_ / ("whole_" + name));
+    for (const auto* field : {"relative_sea_level_change", "displacement"}) {
+      EXPECT_EQ(Output(name + "_parts").variables.at(field).values,
+                Output(name + "_whole").variables.at(field).values)
+          << name << " " << field;
+    }
+    const auto swept = app::RunKernel(parted);
+    EXPECT_NE(swept.find("; the forward run read back from the trajectory "
+                         "store "),
+              std::string::npos)
+        << swept;
+    static_cast<void>(app::RunKernel(whole));
+    ExpectSameKernels(dir_ / "out" / ("k_" + name + "_parts"),
+                      dir_ / "out" / ("k_" + name + "_whole"));
+  }
+
+  // a store short of a record before the checkpoint: refused, the ways on
+  // named, nothing removed
+  const auto shortened = config("short", cases.front().second, "short",
+                                std::format(kStopping, "short"));
+  for (auto attempt = 0; attempt < 3; ++attempt) {
+    static_cast<void>(app::RunSolve(shortened));
+  }
+  fs::remove(dir_ / "short" / "node_000001.surface");
+  ExpectRefused(app::RunSolve, shortened, "trajectory.directory",
+                "holds this run's incomplete trajectory store without node "
+                "1's surface record whole");
+  ExpectRefused(app::RunSolve, shortened, "trajectory.directory",
+                "Set \"restart\": false to start the run over and record the "
+                "store whole (it is replaced), or drop `trajectory.directory` "
+                "to resume without recording");
+  EXPECT_TRUE(fs::exists(dir_ / "short" / "node_000002.surface"));
+  // a store a resumption would begin at its checkpoint: refused
+  const auto begun = config("begun", cases.front().second, "begun",
+                            std::format(kStopping, "short"));
+  ExpectRefused(app::RunSolve, begun, "trajectory.directory",
+                "holds no trajectory store, and the run resumes from the "
+                "checkpoint of node 2");
 }
 
 TEST_F(AppsTest, TheRunHashesTakeACapsNumbersWhole) {

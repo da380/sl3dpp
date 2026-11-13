@@ -83,9 +83,11 @@ nodes.
   and 32 threads, with and without Anderson mixing. This holds for the
   default loop kernel; with `matrix_kernel` the sums are the BLAS's, whose
   grouping may depend on its thread count. FFTW's measured plans are each
-  process's own, so where two processes' plans differ the last bits may
-  too, and a run over MPI ranks agrees with one process to round-off
-  (below), not bitwise.
+  process's own, chosen by timing, so where two processes' plans differ
+  the last bits may too: two runs of one config, even on one thread, agree
+  to about 1e-14 relative (sl3d's kernel tables and 3D runs among what
+  differs; many outputs come out bitwise the same), and a run over MPI
+  ranks agrees with one process to round-off (below), not bitwise.
 - **BLAS.** Any BLAS works on any number of cores, OpenBLAS's pthread and
   OpenMP builds alike, with no environment variables to set: the library's
   threaded loops make no BLAS calls (the per-degree banded solves are its
@@ -184,8 +186,15 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
   `solve` record its forward run into a store on disk, from which `kernel`
   sweeps for any number of measurements without running the forward
   problem again, the kept 3D states read back one at a time: the lever on
-  memory at large degree. A `kernel` run given an absent or empty
-  directory, or an incomplete store of its run, records the store there
-  itself. The block is in [sl3d-configs.md](sl3d-configs.md) ("The
-  trajectory block", with the store's size on disk), and the store's
-  format in [trajectory-store.md](trajectory-store.md).
+  memory at large degree. With a `checkpoint` block beside it, a run
+  stopped at the wall-time limit leaves its store incomplete to the node
+  it stopped at, and the job that resumes it continues the store from the
+  checkpoint's node: the chain of jobs that completes the run completes
+  the store, the uninterrupted run's file by file. A resumption whose
+  store lacks a record before its checkpoint, or has none, is refused
+  (`"restart": false` starts over and records it whole). A `kernel` run
+  given an absent or empty directory, or an incomplete store of its run,
+  records the store there itself. The block is in
+  [sl3d-configs.md](sl3d-configs.md) ("The trajectory block", with the
+  store's size on disk), and the store's format in
+  [trajectory-store.md](trajectory-store.md).

@@ -124,6 +124,22 @@ io::TrajectoryStore OpenTrajectory(const Json& top, const TrajectoryBlock& block
                [&] { return io::TrajectoryStore::Open(block.directory, run); });
 }
 
+io::TrajectoryStore ContinueTrajectory(
+    const Json& top, const TrajectoryBlock& block,
+    const io::TrajectoryStore::Description& run, std::size_t node) {
+  try {
+    return io::TrajectoryStore::Continue(block.directory, run, node);
+  } catch (const io::TrajectoryStoreError& error) {
+    Fail(top.At("trajectory").At("directory"),
+         std::format("{}; the run resumes from the checkpoint of node {} and "
+                     "would continue it. Set \"restart\": false to start the "
+                     "run over and record the store whole (it is replaced), "
+                     "or drop `trajectory.directory` to resume without "
+                     "recording (and remove the store if it is not wanted)",
+                     error.what(), node));
+  }
+}
+
 std::string SizeOf(std::uint64_t bytes) {
   const auto value = static_cast<double>(bytes);
   if (bytes < (std::uint64_t{1} << 10)) return std::format("{} B", bytes);

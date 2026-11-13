@@ -255,7 +255,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                "is the unit of the static problem's `date`; a run through "
                "time reads the file at each node's date");
         }
-        Allow(field, {"file", "format", "variable"});
+        AllowFileInput(field);
         term.field = ReadFileInput(field, directory, "load");
         term.before_present = true;
         // the file's time zero is the present: the window's start on the
@@ -269,8 +269,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
                "give `date` with its `unit` (\"unit\": \"kyr\"), or the "
                "date before present, `date_kyr_bp`");
         }
-        Allow(field,
-              {"file", "format", "variable", "date_kyr_bp", "date", "unit"});
+        AllowFileInput(field, {"date_kyr_bp", "date", "unit"});
         term.field = ReadFileInput(field, directory, "load");
         if (Has(field, "date")) {
           // the instant on the file's own axis
@@ -322,7 +321,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
              "forwards on its own clock, in its `unit` (`times.unit`): "
              "`time_origin`");
       }
-      Allow(field, {"file", "format", "variable", "time_origin"});
+      AllowFileInput(field, {"time_origin"});
       term.field = ReadFileInput(field, directory, "load");
       if (Has(field, "time_origin")) {
         const auto& origin = field.At("time_origin");
@@ -472,21 +471,36 @@ io::FieldHistory OpenFieldTerm(const LoadTerm& term, const SurfaceGrid& grid,
   return history;
 }
 
-/// A field term's values on the grid, SI, at an SI time of its file;
-/// `when` names the run's time in a fault, where it matters.
+/// How a refusal states a time of a field term's file: as a date before
+/// present where the term reads its file by date, on the file's own axis
+/// in the term's unit otherwise (AxisLabel).
+std::optional<TimeUnit> AxisUnitOf(const LoadTerm& term) {
+  return term.before_present ? std::nullopt : std::optional{term.unit};
+}
+
+/// Where a run through time reads a field term's file with a time axis, as
+/// a refusal states it.
+std::string_view NodeReadOf(const LoadTerm& term) {
+  return term.dated ? "a node's date, where the run reads it"
+                    : "a node's time less `time_origin`, where the run "
+                      "reads it";
+}
+
+/// A field term's values on the grid, SI, at an SI time of its file, read
+/// within its time span unless the term holds its ends (ReadValues,
+/// `where` the read); `field` is the term's `field` member, and `when`
+/// names the run's time in a fault, where it matters.
 std::vector<double> FieldValues(const io::FieldHistory& history,
-                                const LoadTerm& term, const Json& file,
-                                double time, std::string_view when = {}) {
-  auto values = std::vector<double>{};
-  try {
-    values = history.Values(term.field.variable, time);
-  } catch (const std::runtime_error& error) {
-    Fail(file, error.what());
-  }
+                                const LoadTerm& term, const Json& field,
+                                double time, std::string_view where,
+                                std::string_view when = {}) {
+  auto values = ReadValues(term.field, history, field, time, where,
+                           AxisUnitOf(term));
   if (!std::ranges::all_of(values, [](double v) { return std::isfinite(v); })) {
-    Fail(file, std::format("holds a field \"{}\" that is not finite "
-                           "everywhere on the run's grid{}",
-                           term.field.variable, when));
+    Fail(field.At("file"),
+         std::format("holds a field \"{}\" that is not finite everywhere on "
+                     "the run's grid{}",
+                     term.field.variable, when));
   }
   return values;
 }
@@ -531,7 +545,9 @@ TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
       const auto time = timed                 ? 0.0
                         : term.before_present ? -date * KYR
                                               : date * term.unit.seconds;
-      out.field = FieldValues(history, term, field.At("file"), time);
+      out.field = FieldValues(
+          history, term, field, time,
+          std::format("its date, `{}`, where it is read", term.date_member));
       out.coefficients = grid.Expand(out.field);
       break;
     }
@@ -769,6 +785,20 @@ TimedLoads::TimedLoads(std::vector<LoadTerm> terms, const SurfaceGrid& grid,
   }
 }
 
+void TimedLoads::CheckCovers(std::span<const double> times) const {
+  for (auto k = std::size_t{0}; k < terms_.size(); ++k) {
+    const auto& term = terms_[k];
+    const auto& pattern = patterns_[k];
+    if (!pattern.history) continue;
+    const auto& field = block_->At("load").At(k).At("field");
+    for (const auto t : times) {
+      static_cast<void>(CoveredTime(term.field, *pattern.history, field,
+                                    (t - term.time_origin) * term.unit.seconds,
+                                    NodeReadOf(term), AxisUnitOf(term)));
+    }
+  }
+}
+
 BuiltLoads TimedLoads::At(double t) const {
   const auto& grid = *grid_;
   auto out = BuiltLoads{.terms = {}, .load = grid.ZeroField()};
@@ -779,8 +809,9 @@ BuiltLoads TimedLoads::At(double t) const {
     auto coefficients = std::vector<Complex>{};
     if (pattern.history) {
       field = FieldValues(*pattern.history, term,
-                          block_->At("load").At(k).At("field").At("file"),
+                          block_->At("load").At(k).At("field"),
                           (t - term.time_origin) * term.unit.seconds,
+                          NodeReadOf(term),
                           std::format(" at {:g} {}", t, term.unit.name));
       coefficients = grid.Expand(field);
     } else {
@@ -977,13 +1008,13 @@ IceChangeTerm ReadIceChangeTerm(const Json& item,
                       : "dates the file, as the static problem reads it; a "
                         "run through time reads it at each node's date");
       }
-      Allow(file, {"file", "format", "variable"});
+      AllowFileInput(file);
       // a dated run reads the file at each node's date; one counting
       // forwards holds its one field
       term.dated = !forwards;
       term.held = forwards;
     } else {
-      Allow(file, {"file", "format", "variable", "date_kyr_bp"});
+      AllowFileInput(file, {"date_kyr_bp"});
       term.file.date = ReadDate(file, "date_kyr_bp");
       if (thickness && !term.file.date) {
         Fail(file,
@@ -1222,6 +1253,10 @@ SurfaceLoads::SurfaceLoads(const Forcing& forcing, const SurfaceGrid& grid,
     : terms_(forcing.load),
       grid_(&grid),
       timed_(TermsOf(forcing), grid, block, timed) {}
+
+void SurfaceLoads::CheckCovers(std::span<const double> times) const {
+  timed_.CheckCovers(times);
+}
 
 SurfaceLoads::Node SurfaceLoads::At(double t) const {
   const auto& grid = *grid_;

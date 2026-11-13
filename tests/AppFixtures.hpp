@@ -80,6 +80,52 @@ inline void WriteToyHistory(const std::filesystem::path& path,
   pm::WriteSurfaceFile(path, file);
 }
 
+/// The toy history (WriteToyHistory's ice and topography, without a bump
+/// or the marine basin) on a time axis of its own: `time`, its three
+/// dates' places in stored units of `timeScale` seconds (the file's time
+/// scale), and, with `land`, WriteToyLand's field beside them as a static
+/// field.
+inline void WriteToyHistoryOn(const std::filesystem::path& path,
+                              const std::vector<double>& time,
+                              double timeScale = 1.0, bool land = false) {
+  namespace pm = planetmodel;
+  const auto grid = pm::Equiangular(19, 36);
+  const auto fractions = std::vector<double>{1.0, 0.7, 0.7};
+  auto ice = std::vector<double>{};
+  auto topo = std::vector<double>{};
+  auto held = std::vector<double>{};
+  for (const auto fraction : fractions) {
+    for (const auto theta : grid.Colatitudes()) {
+      for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+        topo.push_back(3000.0 * std::cos(theta));
+        ice.push_back(theta < 0.45 ? fraction * 1500.0 *
+                                         std::exp(-std::pow(theta / 0.3, 2))
+                                   : 0.0);
+      }
+    }
+  }
+  for (const auto theta : grid.Colatitudes()) {
+    for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+      held.push_back(theta > 1.9 && theta < 2.5 ? 1.0 : 0.0);
+    }
+  }
+  auto file = pm::SurfaceFile{};
+  file.grid = grid;
+  file.source = "sl3dpp tests";
+  file.scales = pm::Scales(pm::units::ScaleValues{.time = timeScale});
+  file.time = time;
+  auto options = pm::SurfaceFieldOptions{};
+  options.support = "node";
+  options.time_interpolation = "linear";
+  options.dimensions = pm::units::LENGTH;
+  file.variables.emplace("ice_thickness",
+                         pm::SurfaceField("ice_thickness", ice, options));
+  file.variables.emplace("topography",
+                         pm::SurfaceField("topography", topo, options));
+  if (land) file.variables.emplace("land", pm::SurfaceField("land", held, {}));
+  pm::WriteSurfaceFile(path, file);
+}
+
 /// The toy history's ice thickness CHANGE from its first date (2 kyr BP),
 /// `scale` times (WriteToyHistory's ice, without a bump or the marine
 /// basin), as a file of one variable, `name`: on the history's own time

@@ -26,8 +26,14 @@ sl3d <command> <config.json>
   on standard error as `sl3d <command>: <message>`, and 2 for a usage
   error (a wrong number of arguments or an unknown command).
 - The library runs threaded with OpenMP on every core by default; set
-  `OMP_NUM_THREADS` to choose the thread count. One-thread runs are bitwise
-  reproducible; threaded runs agree to round-off. Placing the threads, the
+  `OMP_NUM_THREADS` to choose the thread count. Two runs of one config
+  agree to rounding, about 1e-14 relative, threaded or not: many outputs
+  come out bitwise the same (the forward run of
+  `examples/configs/kernel_postseismic.json`, say), while others need not
+  (its kernel tables, the lmax-64 3D ICE-7G fingerprint), each process
+  planning its FFTs by timing them (FFTW's measured plans), which may
+  round differently from run to run. Within one process the runs are
+  bitwise reproducible, which the tests check. Placing the threads, the
   memory a run needs and long runs are in [running.md](running.md).
 
 ### Over MPI ranks
@@ -179,21 +185,22 @@ A member read from a file is a file input, an object of
 | `file` | path | required | the file |
 | `format` | word | `"planetmodel_surface"` | the file's type: `"planetmodel_surface"`, a planetmodel surface file, is the only one |
 | `variable` | string | the member's own quantity | the variable read: `ice_thickness` for `ocean.ice` and a `thickness` term, `ice_thickness_change` for a `change` term, `sea_level` for `ocean.sea_level`, `topography` for `ocean.topography`, `land` for `ocean.land`, `load` for a `field` load term |
+| `outside_span` | word | `"refuse"` | what a read of a field on a time axis at a date outside the file's span does: `"refuse"`, an error; `"hold"`, the field's first or last stored values held there. Refused on a static field (a file without a time axis, or a field of `static` support), which no read leaves |
 
 When the input is read is its member's business: the state's members
 (`ocean.sea_level` or `ocean.topography`, `ocean.ice`, `ocean.land`) at
 the `ocean` block's instant, `ocean.date_kyr_bp` in the static problem
 and in a run counting forwards, and an end of the window, `ocean.at`, in
-a dated run (the land there at the window's start, whichever end the
-state is at); a term of the ice change, and a `field` load term, at its
-own `date_kyr_bp` beside the file in the static problem (a `field` term
-at its `date` on the file's own axis instead, where it gives one) and at
-each node's date in a dated run; a `field` term on the run's clock, from
-its `time_origin`, in a run counting forwards (The state and the ice
-change, below; solve, The forcing block). A variable the file does not
-hold is refused, the error listing the variables the file does hold.
-Conversion from other sources (ICE-NG, other formats) happens outside
-sl3d, in pyslfp.
+a dated run (a land on a time axis there under frozen shorelines, and at
+every node's date under migrating ones); a term of the ice change, and a
+`field` load term, at its own `date_kyr_bp` beside the file in the static
+problem (a `field` term at its `date` on the file's own axis instead,
+where it gives one) and at each node's date in a dated run; a `field`
+term on the run's clock, from its `time_origin`, in a run counting
+forwards (The state and the ice change, below; solve, The forcing
+block). A variable the file does not hold is refused, the error listing
+the variables the file does hold. Conversion from other sources (ICE-NG,
+other formats) happens outside sl3d, in pyslfp.
 
 A planetmodel surface file (`planetmodel.surface/1`) holds named scalar
 fields on one angular grid, static or on a time axis. pyslfp's
@@ -211,13 +218,25 @@ named by all three.
 - Fields are resampled once onto the run's Gauss–Legendre grid at `lmax`,
   by each field's own lateral interpolation rule, and converted to SI by
   their declared dimensions (a field declaring none is used as it stands).
-- A field on a time axis is read at any date by the file's own rule: a
-  `node` field with linear time interpolation (what pyslfp writes) between
-  its stored dates. Outside the file's span the first or last stored values
-  are held, without a warning, so check that the file covers the dates
-  asked of it; the one read refused there is the state at a calibrated
-  run's end (`"at": "end"`), whose sea level's and ice's files must reach
-  the window's end. A static field is read at every date.
+- A field on a time axis is read at any date within the file's span by
+  the file's own rule: a `node` field with linear time interpolation (what
+  pyslfp writes) between its stored dates. A read at a date outside the
+  span is refused, every read alike (the state at its instant, the
+  calibration's target at a calibrated run's end among them, a term at a
+  node's date, the land), the error naming the member, the file's span,
+  the date asked, in kyr BP or, for a `field` term read on the run's own
+  clock or at its `date`, in its unit on the file's own axis, and the read;
+  with `"outside_span": "hold"` on the input the field's first or last
+  stored values are held there instead (at a calibrated run's end, the
+  calibration's target is then the file's last state). A date within
+  1e-9 of the span's ends (of the larger of its length and its ends'
+  magnitudes, the tolerance a measurement's date is located on the nodes
+  with) is read at the end itself, so that rounding (node dates formed
+  from the window, a file's axis stored in years or seconds) raises no
+  refusal: a run from 21 to 0 kyr BP reads a file spanning 21 to 0 kyr BP
+  whatever unit its axis is stored in. The runs through time hold their
+  files to their spans when they read them, before the first step. A
+  static field is read at every date.
 - Inputs naming one file (of one format) read and hold it once.
 - A value that is not a number (a surface file marks uncovered points
   so) is refused in the state and in the ice change: fill the file before
@@ -258,10 +277,18 @@ and the sources alone (solve, Without an ocean, below).
 - The ocean function is decided by flotation, so every depression below
   sea level is ocean, joined to the sea or not. `ocean.land`, optional,
   is a file input of a field that is one where the surface is held as
-  land whatever the flotation and zero elsewhere, the same at every date
-  (the landlocked depressions: the Caspian and the like); under migrating
-  shorelines those points stay land. pyslfp's `export_ice_history`
-  (4.2 or later) writes such a field, `land`, beside the ice thickness
+  land whatever the flotation and zero elsewhere (the landlocked
+  depressions: the Caspian and the like), cut at one half. A static field
+  is the same at every date: under migrating shorelines those points stay
+  land throughout. A field on a time axis is a land that changes in time:
+  under migrating shorelines in a dated run it is read at every node's
+  date, each node's ocean function holding that node's land (the run's
+  start, and a calibration's every run, the first node's); under frozen
+  shorelines the ocean function is the state's throughout, and the land
+  is read at the state's instant alone, the end of the window `ocean.at`
+  names; in the static problem and a run counting forwards at
+  `ocean.date_kyr_bp`. pyslfp's `export_ice_history` (4.2 or later)
+  writes such a field, `land`, as a static field beside the ice thickness
   and the topography, so one file may be named for all three.
 - A `thickness` term of the ice change is a file of ice THICKNESS, an ice
   history: its change is its value less its own value at the state's
@@ -524,9 +551,9 @@ against the state's, and a run counting forwards has no such history.
 | `ocean.sea_level` | file input | one of the two | a sea level, used as it stands (variable `sea_level` by default) |
 | `ocean.topography` | file input | one of the two | a topography, converted with the state's ice, `ocean.ice` (variable `topography` by default) |
 | `ocean.ice` | file input | required | the ice thickness on the body at the state's instant (variable `ice_thickness` by default) |
-| `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default). It is carried onto the run's grid and cut at one half. Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
+| `ocean.land` | file input | absent | a field that is one where the surface is held as land whatever the flotation and zero elsewhere (variable `land` by default). It is carried onto the run's grid and cut at one half. A static field holds the same land at every date; one on a time axis is read at every node's date under migrating shorelines in a dated run, at the state's instant (the end of the window `ocean.at` names) under frozen ones, and at `ocean.date_kyr_bp` in the static problem and a run counting forwards (The state and the ice change, above). Absent, the ocean function follows from flotation alone, and every depression below sea level is ocean |
 | `ocean.date_kyr_bp` | number | absent | the static problem and a run counting forwards: the state's date, kyr BP, at which every member's file with a time axis is read; required when any of the state's files (the sea level's, the ice's, the land's) has a time axis, refused when none has one; refused in a dated run |
-| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its sea level's and ice's files reaching that date; the land is read at the window's start); refused in the static problem |
+| `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its sea level's and ice's files reaching that date unless they hold their ends, `"outside_span": "hold"`; a land on a time axis is read there under frozen shorelines, and at every node's date under migrating ones); refused in the static problem |
 | `ocean.shorelines` | word | `"frozen"` | `"frozen"`, the state's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (the nonlinear equation; solve, The static problem and The run through time) |
 | `ocean.calibration` | object | absent | the quasi-static problem with `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the state is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
 | `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
@@ -641,11 +668,25 @@ are those of the same run without the block.
   another partition of the mesh; files no store writes; a store of
   another format. The message says to give another directory, or to
   remove that one.
-- A recording is a run's from its first node: a run that resumes from a
-  checkpoint (Checkpoints and restarts, below) is refused a store it would
-  record, with `"restart": false` (start over) or no
-  `trajectory.directory` as the ways on. A run stopped at the wall-time
-  limit thus leaves its store incomplete; `kernel` records it whole.
+- A run that resumes from the checkpoint of node k (Checkpoints and
+  restarts, below) continues the incomplete store its interrupted run
+  left: the store must be this run's, recorded at the same stride over
+  the same ranks, and hold whole every record the run wrote to node k
+  (the start, the surface record of every node to k, every rank's state
+  record of every kept node to k), which are kept; the records of later
+  nodes, and the partial files of an interrupted write, are removed, and
+  the run records on from node k + 1, the kept nodes counted from the
+  run's first. The store it completes is the uninterrupted run's, file by
+  file (bitwise within one process, which the tests check; across
+  processes to rounding, as any two runs). A store short of a record to
+  node k, or none at all, is refused, nothing in it removed (a store
+  begun at the checkpoint would lack the nodes before it, which are not
+  run again), and so is an incomplete store of another stride or layout:
+  `"restart": false` starts the run over and records the store whole, and
+  without `trajectory.directory` the run resumes without recording. A
+  run stopped at the wall-time limit thus leaves its store incomplete to
+  the node it stopped at, and the chain of jobs that completes the run
+  completes the store; `kernel` records an incomplete store whole.
 
 **kernel.** With `trajectory.directory`:
 
@@ -674,10 +715,10 @@ forward run's numbers and of the contents of the files the config names:
 the members `solve`'s checkpoints hash (Checkpoints and restarts, below),
 and the seismic sources, the static problem's dates of its terms and the
 file inputs' formats beside them. The `kernels`, `output`, `checkpoint`
-and `trajectory` blocks, `restart`, `solver.cache_mb` and the paths are
-left out, so that one store serves every kernel config of one run and a
-run directory can move; the stride and the ranks are checked beside the
-hash, each with its own message.
+and `trajectory` blocks, `restart`, `solver.cache_mb`, the file inputs'
+`outside_span` and the paths are left out, so that one store serves
+every kernel config of one run and a run directory can move; the stride
+and the ranks are checked beside the hash, each with its own message.
 
 **Solve once, kernel many.** One config, the run and its `trajectory`
 block, with a `kernels` block per batch of measurements (or one config
@@ -1061,10 +1102,12 @@ throughout. A `field` load's file is read
   from its date -D at the run's start by `"time_origin": D`.
 
 A file with a time axis is read by its own rule (a `node` field with
-linear time interpolation between its stored times, its first or last
-field held outside its span, without a warning) and expanded at each
-time; a static file is the same pattern at every node, and a history on
-a field term multiplies the field read. The forcing at a node is each
+linear time interpolation between its stored times) and expanded at
+each time, every node's time held to its span before the run steps (a
+time outside it refused, or, with `"outside_span": "hold"` on the
+`field` input, its first or last field held there: File inputs, above);
+a static file is the same pattern at every node, and a history on a
+field term multiplies the field read. The forcing at a node is each
 term's pattern at the node's time times its factor there: the forcing
 enters a run through time at its nodes alone, and a history's or a field
 file's variation between two nodes is not seen.
@@ -1191,7 +1234,10 @@ Its metadata record the config and deck paths (and the moduli file's,
 where given), the state's inputs as read, `ice` (`<file>:<variable>
 (<slice>)`) and `sea_level` (the same after its quantity, `topography`
 or `sea level`), the slice being the state's date, `<d> kyr BP`, or
-`static` for a file without a time axis; the ice change's terms,
+`static` for a file without a time axis (the land held follows the sea
+level's, `, land <file>:<variable> (<slice>)`, its slice the date for a
+field on a time axis and `held at every date` for a static one); the ice
+change's terms,
 `ice_change`, each described (`thickness <file>:<variable>, from the
 state's date to <d> kyr BP`, `change <file>:<variable>[, at <d> kyr BP]`,
 `cap at latitude <lat>, longitude <lon>, width <w> deg, <t> m of ice` or
@@ -1301,7 +1347,9 @@ The `ocean` block changes the start and the equation, as pyslfp's
   at every node instead of the linear one: the ocean function follows the
   flotation condition as the ice and sea level change, so melting marine
   ice floods and grounding ice displaces the ocean. The ice thickness at
-  each node is the background's plus the change since the start. Where a
+  each node is the background's plus the change since the start, and the
+  land held at each node is `ocean.land`'s there (read at the node's date
+  where it is on a time axis: The state and the ice change, above). Where a
   change is present at the start (a `change` file whose change is not
   zero there, a cap without a history), the run solves its start, the
   nonlinear equation on the unrelaxed body under the state's ice plus
@@ -1309,8 +1357,9 @@ The `ocean` block changes the start and the equation, as pyslfp's
   node is the state itself. In a 3D run the nonlinear solve runs in every
   pass of each step's combined fixed point. The kernels of such a run
   (`kernel`) linearise about the run's own shorelines, its start's
-  included, and their `initial_sea_level_dual` is not zero, as it is
-  under frozen shorelines.
+  included (each node's land held among what placed them, the land being
+  data and not a parameter), and their `initial_sea_level_dual` is not
+  zero, as it is under frozen shorelines.
 - `"at": "end"` makes the state the one the run reaches at
   `times.end_kyr_bp` (usually the present day), and calibrates the
   initial sea level against its sea level (`ocean.calibration`): the
@@ -1324,8 +1373,13 @@ The `ocean` block changes the start and the equation, as pyslfp's
   start, and the starting guess for the sea level is the target itself (a
   topography converted with the state's ice), so the state's sea level
   and ice files are read at the window's end alone, which must lie
-  within their time spans (the land held, `ocean.land`, is read at the
-  window's start, as in any dated run). Under frozen shorelines the
+  within their time spans unless the inputs hold their ends
+  (`"outside_span": "hold"`, the target then the files' last state).
+  The land held, `ocean.land`, on a time axis, is read at the window's
+  end under frozen shorelines, whose ocean function, the guess's, is the
+  state's throughout, and at every node's date under migrating ones,
+  each of the calibration's runs holding at each node that node's land
+  and the start the first node's. Under frozen shorelines the
   problem is linear and one run gives the answer exactly, the guess's
   shorelines kept; under migrating shorelines the calibration iterates,
   by the classical update or by steepest descent with the adjoint
@@ -1382,7 +1436,11 @@ state's inputs as read, `ice` (`<file>:<variable> (<slice>)`) and
 the window, `the window's start, <d> kyr BP` or `the window's end, <d>
 kyr BP`, or for a file without a time axis `static, at the window's
 start` or `... end` (counting forwards, the state's date, `<d> kyr BP`,
-or `static`); the ice change's terms, `ice_change`, each described
+or `static`), the land held following the sea level's, `, land
+<file>:<variable> (<slice>)`, its slice `held at every date` for a
+static field and for one on a time axis `each node's date` under
+migrating shorelines, the state's end of the window under frozen ones;
+the ice change's terms, `ice_change`, each described
 (`thickness <file>:<variable>, from the state's instant to each node's
 date`, `change <file>:<variable>, read by date` or, counting forwards,
 `..., held through the run`) and joined by `; `
@@ -1665,15 +1723,19 @@ and only the newest two are kept.
 
 When a run starts and finds a checkpoint in the directory, it resumes from
 the newest one, with the histories up to that node restored. A resumed run
-reproduces an uninterrupted one (bitwise, on one thread). Rerunning a
+reproduces an uninterrupted one: bitwise within one process (the tests),
+and to rounding as any two runs of one config (Running sl3d, above).
+Rerunning a
 finished run whose last checkpoint is at the final node just writes the
 output again.
 
 A checkpoint is bound to its run: it records a hash of the members that
 decide the computation (everything but `checkpoint`, `restart`,
-`solver.cache_mb` and `output`, the inputs' variables, the sea level's
-quantity, the state's end of the window, the ice change's terms, the
-surface loads and the tide's coefficients, every number whole, and
+`solver.cache_mb`, `output` and the file inputs' `outside_span`, which
+a run that runs computes alike either way; the inputs' variables, the
+sea level's quantity, the state's end of the window, the ice change's
+terms, the surface loads and the tide's coefficients, every number whole,
+and
 whether the body has an ocean among them, and a run's having no gravity
 (the member enters the hash only as `"none"`, so that a config with
 gravity hashes the same with or without it); the
@@ -1701,10 +1763,10 @@ A calibrating run also keeps its calibrated initial state in the directory
 (`initial_state.bin`, bound to the run by the same hash), and a resumption
 reads it back instead of calibrating again.
 
-A run that would record a trajectory store (`trajectory.directory`, The
-trajectory block, above) records it from its first node, so a resumption
-of it is refused: `"restart": false` starts it over, recording, and
-without `trajectory.directory` it resumes as any other. A store complete
+A run that records a trajectory store (`trajectory.directory`, The
+trajectory block, above) continues the store on resumption, from the
+checkpoint's node, its records to that node the interrupted run's: a
+chain of jobs completes the store with the run. A store complete
 already is left as it is, and does not stop a resumption.
 
 With `restart` set to `false` the run starts over: it first removes the
@@ -1754,11 +1816,13 @@ What the config was taken to mean, the inputs as read, then the files:
   checkpoint(s)` when a run starting over removed some (with `"restart":
   false`, or over MPI ranks that had no checkpoint in common);
 - with `trajectory.directory`, either summary ends in `; recorded the
-  trajectory to the store <directory> (<size>)`, or, where the directory
-  holds the run's complete store already, `; the trajectory store
-  <directory> holds this run complete (<size>), left as it is`; a run
-  stopped at the wall-time limit ends in `; the trajectory store
-  <directory> left incomplete (a resumption does not record)`;
+  trajectory to the store <directory> (<size>)` (a resumed run's in `,
+  continuing it from node <k>`, the checkpoint's node), or, where the
+  directory holds the run's complete store already, `; the trajectory
+  store <directory> holds this run complete (<size>), left as it is`; a
+  run stopped at the wall-time limit ends in `; the trajectory store
+  <directory> left incomplete at node <k>, the resumption recording on
+  from there`;
 - without an ocean, the state's words are left out: `<model>, elastic,
   no ocean, rotation <rotation>[, moments hydrostatic]; <forcing>[;
   <field>...]; wrote <surface>[ and <exchange>][ and <volume>]` in the
@@ -2082,8 +2146,10 @@ on that axis.
 
 A viscoelastic 3D run under a lateral viscosity and lateral moduli: a cap
 loaded linearly over 10 kyr and removed over the next 0.5 kyr, a load
-history read from a surface file on the run's clock, and a constant
-tide, over 20 kyr in half-kyr steps, with a table per node
+history read from a surface file on the run's clock (a file spanning the
+run's 20 kyr: one that ends earlier is refused at the nodes past its end
+unless the input holds its last field, `"outside_span": "hold"`), and a
+constant tide, over 20 kyr in half-kyr steps, with a table per node
 (`out/relax_00.txt` to `out/relax_40.txt`). Without `viscosity` and
 `moduli` (and the solver members of the 3D step) the same config runs
 the deck's radial Maxwell model in 1D.

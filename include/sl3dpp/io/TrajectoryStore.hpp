@@ -198,6 +198,25 @@ class TrajectoryStore {
   [[nodiscard]] static TrajectoryStore Record(
       const std::filesystem::path& directory, const Description& run);
 
+  /// Continues recording `run` into the incomplete store of this run in
+  /// `directory` from `node`, the node a resumed run's first call starts
+  /// from (its checkpoint's): the store must stand Incomplete (Survey) and
+  /// be recorded as described (the dimension, times, field size and kind,
+  /// the stride and the processes' layout, as a complete store is held to
+  /// them), and hold whole every record the run wrote to that node, the
+  /// start, the surface record of every node to `node` and every process's
+  /// state record of every kept node to it (each record's header the one
+  /// its name gives, its length its file's). Those records are kept as the
+  /// recording's own; the records of later nodes and every partial file
+  /// are removed. A store short of a record is refused
+  /// (TrajectoryStoreError::Incomplete) and one recorded otherwise as
+  /// Open refuses it, nothing removed. The recording then goes on from the
+  /// node after `node` (Attach), and Close completes it as Record's. The
+  /// manifest is written by Close alone. Collective.
+  [[nodiscard]] static TrajectoryStore Continue(
+      const std::filesystem::path& directory, const Description& run,
+      std::size_t node);
+
   /// Opens the complete store of `run` in `directory` for reading: it
   /// must stand Complete (Survey), and every record the manifest lists
   /// (the start and the surface records, and this process's states) must
@@ -239,7 +258,10 @@ class TrajectoryStore {
   /// Sets an evolution's options to record into the store: the record
   /// stride, on_snapshot (after any the caller set, which is kept) and, in
   /// 3D, on_state, so that a kept 3D state goes to disk rather than onto
-  /// its snapshot. The options' copies hold the store.
+  /// its snapshot. A store continued from node k (Continue) records a
+  /// resumed call, whose nodes count from k: the record offset is set to
+  /// k, and each node the evolution hands out is put at its node of the
+  /// whole run, k after its own. The options' copies hold the store.
   void Attach(Evolution::Options& options) const;
   void Attach(Evolution3D::Options& options) const;
 

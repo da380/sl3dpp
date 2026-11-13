@@ -30,7 +30,8 @@ writes a node field linear in time. The file's time axis is in
 kiloyears: a run counting forwards in kyr (`"times": {"unit": "kyr",
 ...}`) reads it at t - time_origin at its time t (`time_origin` the
 term's member, default 0), so with the default the file's time 0 is the
-run's start; outside the file's span its first or last field is held. A
+run's start; a time outside the file's span is refused, or, with
+"outside_span": "hold" on the term, its first or last field is held. A
 file whose axis counts from the present instead, negative in the past (an
 ice history, a dated run's output), is read from its date -D kyr at the
 run's start by "time_origin": D, or by date in a dated run.

@@ -119,6 +119,21 @@ class Evolution {
     /// coefficients are kept whenever the stride is set, so a reverse
     /// sweep can reconstruct the gaps by exact backward steps.
     int record_stride = 0;
+    /// The nodes of the whole run before a call's first, which the record
+    /// stride counts with the call's own: a resumed call (Resume,
+    /// ResumeMigrating) given its checkpoint's node keeps the states the
+    /// uninterrupted run keeps, every stride-th node of the whole run (and
+    /// the last). The nodes handed to on_snapshot stay the call's own.
+    std::size_t record_offset = 0;
+    /// Under migrating shorelines, the points held as land whatever the
+    /// flotation at time t (solver units), a mask on the solver's grid
+    /// (empty: none held), for a land mask that changes in time: each
+    /// node's nonlinear solve holds the mask at its time
+    /// (GRDSolver::NonlinearForcing::forcedLand). Its mask at a run's first
+    /// time must be the background state's. Absent, the background state's
+    /// at every node; a frozen run's ocean function is the background's
+    /// throughout and does not read it.
+    std::function<std::vector<char>(double)> land_held{};
     /// Whether a kept state also keeps its strain. By default (false)
     /// only the internal variables are kept, and an adjoint regenerates
     /// each node's strain by one elastic solve under its recorded loads;

@@ -958,6 +958,13 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
              "the direct load outside the water budget");
   checkField(forcing.solidSurfaceChange, "the solid surface change");
   checkField(forcing.dynamicSeaLevelChange, "the dynamic sea level change");
+  // the land held: the forcing's where it gives one, the state's otherwise
+  const auto& held =
+      forcing.forcedLand ? *forcing.forcedLand : state.forcedLand;
+  if (!held.empty() && held.size() != fieldSize) {
+    throw std::invalid_argument(
+        "the land held is not a mask on the solver's grid");
+  }
 
   std::vector<std::complex<double>> staticDisp, staticGrav, staticSlc;
   std::optional<Block2> staticDisp2, staticGrav2;
@@ -1109,7 +1116,7 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
       newSlc[i] = slcLocal[i] + eustaticShift;
       newChange[i] = rawChange[i] + eustaticShift;
       const double newBathy = initialBathy[i] + newChange[i];
-      const auto land = !state.forcedLand.empty() && state.forcedLand[i] != 0;
+      const auto land = !held.empty() && held[i] != 0;
       newOcean[i] =
           !land && waterDensity_ * newBathy - iceDensity_ * newIce[i] > 0.0
               ? 1.0
@@ -1182,7 +1189,7 @@ GRDSolver::NonlinearResponse GRDSolver::SolveNonlinear(
   }
   out.finalState.oceanFunction = std::move(currentOcean);
   out.finalState.oceanArea = IntegrateSurface(out.finalState.oceanFunction);
-  out.finalState.forcedLand = state.forcedLand;
+  out.finalState.forcedLand = held;
   out.response.relativeSeaLevelChange = std::move(slcData);
   out.response.displacement = grid_.Synthesise(dispLm);
   out.response.potential = grid_.Synthesise(potLm);

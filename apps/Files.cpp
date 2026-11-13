@@ -1,10 +1,14 @@
 #include "Files.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <format>
 #include <optional>
+#include <span>
+#include <stdexcept>
 #include <system_error>
 #include <utility>
+#include <vector>
 
 namespace sl3dpp::app {
 
@@ -25,7 +29,21 @@ FileInput ReadFileInput(const Json& object,
   }
   out.variable = String(object, "variable", variable);
   if (out.variable.empty()) Fail(object.At("variable"), "is empty");
+  if (Has(object, "outside_span")) {
+    out.outside = Choice<OutsideSpan>(
+        object.At("outside_span"),
+        {{"refuse", OutsideSpan::Refuse}, {"hold", OutsideSpan::Hold}});
+    out.outsideGiven = true;
+  }
   return out;
+}
+
+void AllowFileInput(const Json& object,
+                    std::initializer_list<std::string_view> extra) {
+  auto names = std::vector<std::string_view>(kFileInputMembers.begin(),
+                                             kFileInputMembers.end());
+  names.insert(names.end(), extra.begin(), extra.end());
+  Allow(object, std::span(names));
 }
 
 std::optional<double> ReadDate(const Json& object, std::string_view key) {
@@ -63,11 +81,76 @@ void CheckVariable(const FileInput& input, const io::FieldHistory& file,
                    held.empty() ? "none" : held));
 }
 
+bool OnTimeAxis(const FileInput& input, const io::FieldHistory& file) {
+  return file.Span().has_value() && !file.Static(input.variable);
+}
+
+void CheckOutsideSpan(const FileInput& input, const io::FieldHistory& file,
+                      const Json& object) {
+  if (!input.outsideGiven || OnTimeAxis(input, file)) return;
+  Fail(object.At("outside_span"),
+       std::format("says what a read outside its field's time span does, and "
+                   "{}: the same at every date, no read of it is outside a "
+                   "span. Drop it",
+                   file.Span() ? std::format("\"{}\" of {} is static",
+                                             input.variable,
+                                             input.file.string())
+                               : std::format("{} has no time axis",
+                                             input.file.string())));
+}
+
 io::FieldHistory OpenFileInput(const FileInput& input, const SurfaceGrid& grid,
                                const Json& object) {
   auto file = ReadFile(input, grid, object);
   CheckVariable(input, file, object);
+  CheckOutsideSpan(input, file, object);
   return file;
+}
+
+double SpanTolerance(std::pair<double, double> span) {
+  const auto [first, last] = span;
+  return 1e-9 * std::max({last - first, std::abs(first), std::abs(last)});
+}
+
+std::string AxisLabel(double time, const std::optional<TimeUnit>& unit) {
+  return unit ? std::format("{:g} {} on the file's own axis",
+                            time / unit->seconds, unit->name)
+              : std::format("{:g} kyr BP", 0.0 - time / KYR);
+}
+
+double CoveredTime(const FileInput& input, const io::FieldHistory& file,
+                   const Json& object, double time, std::string_view where,
+                   const std::optional<TimeUnit>& unit) {
+  if (!OnTimeAxis(input, file)) return time;
+  const auto span = *file.Span();
+  const auto tolerance = SpanTolerance(span);
+  if (time >= span.first - tolerance && time <= span.second + tolerance) {
+    return std::clamp(time, span.first, span.second);
+  }
+  if (input.outside == OutsideSpan::Hold) return time;
+  // the span from its earlier end: the oldest date first, or the file's
+  // axis forwards
+  Fail(object.At("file"),
+       std::format("spans {} to {}, which leaves out {}, {}: give a file "
+                   "that covers it, or \"outside_span\": \"hold\" on the "
+                   "input to hold the file's first or last stored values "
+                   "outside its span",
+                   unit ? std::format("{:g}", span.first / unit->seconds)
+                        : std::format("{:g}", 0.0 - span.first / KYR),
+                   AxisLabel(span.second, unit), AxisLabel(time, unit),
+                   where));
+}
+
+std::vector<double> ReadValues(const FileInput& input,
+                               const io::FieldHistory& file, const Json& object,
+                               double time, std::string_view where,
+                               const std::optional<TimeUnit>& unit) {
+  const auto at = CoveredTime(input, file, object, time, where, unit);
+  try {
+    return file.Values(input.variable, at);
+  } catch (const std::runtime_error& error) {
+    Fail(object.At("file"), error.what());
+  }
 }
 
 bool SameFile(const FileInput& a, const FileInput& b) {

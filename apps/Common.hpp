@@ -199,10 +199,11 @@ class InputFiles {
 /// and a cap is held through the run or scaled by its history's factor at
 /// the time asked. Times asked are SI seconds on the run's axis
 /// (Window::Axis: the calendar's in a dated run and the static problem,
-/// the run's own clock in one counting forwards). Every use of the ice
-/// goes through it: the state a run starts from, the frozen load, the
-/// migrating thickness, the calibration's start and the static problem's
-/// change.
+/// the run's own clock in one counting forwards); every file is read
+/// within its field's time span unless its input holds the span's ends
+/// (IceThicknessAt). Every use of the ice goes through it: the state a run
+/// starts from, the frozen load, the migrating thickness, the
+/// calibration's start and the static problem's change.
 class RunIce {
  public:
   /// Reads the state's ice at `stateTime` (SI seconds of the state's
@@ -251,9 +252,10 @@ class RunIce {
     /// The static problem's change, and a cap's, read or built once.
     std::vector<double> fixed;
   };
-  /// A file term's values at a time, those that are not numbers refused.
-  [[nodiscard]] std::vector<double> ValuesOf(const Term& term,
-                                             double time) const;
+  /// A file term's values at a time, read within its span (`where` the
+  /// read, IceThicknessAt), those that are not numbers refused.
+  [[nodiscard]] std::vector<double> ValuesOf(const Term& term, double time,
+                                             std::string_view where) const;
   /// A term's change at a time.
   [[nodiscard]] std::vector<double> TermAt(const Term& term,
                                            double time) const;
@@ -287,6 +289,12 @@ struct Loaded {
   /// there from the state's own, m (zero without one, and with the state
   /// at the window's end, whose run starts from the ice at the start).
   double changeAtStart = 0.0;
+  /// Under migrating shorelines in a dated run with a land field on a time
+  /// axis (`ocean.land`), the land held at each node's solver time: the
+  /// field read at the node's date and cut at one half, every node's read
+  /// with the world (the background holds the first's). Empty otherwise,
+  /// the background's land held at every node.
+  std::function<std::vector<char>(double)> landHeld;
 
   /// Whether a change is present at the window's start: one larger than
   /// the ice's tolerance (RunIce::Tolerance); never without an ocean.
@@ -296,15 +304,27 @@ struct Loaded {
 };
 
 /// The surface held as land whatever the flotation, `ocean.land`: its
-/// field read through `files` at `time` (SI; a field without a time axis
-/// is the same at every date) and cut at one half, with the input as
-/// read. Both empty without the member: flotation alone.
+/// field read through `files` at `time` (SI, held to the field's time
+/// span, `where` the read, ReadValues; a static field is the same at every
+/// date) and cut at one half, with the input as read, `slice` saying when
+/// for a field on a time axis (`held at every date` for a static one).
+/// Both empty without the member: flotation alone.
 struct LandMask {
   std::vector<char> held;
   std::string read;
 };
 [[nodiscard]] LandMask ReadLand(const Run& run, const Json& top,
-                                InputFiles& files, double time);
+                                InputFiles& files, double time,
+                                std::string_view where,
+                                std::string_view slice);
+
+/// Sets an evolution's land held at each node (Options::land_held) to the
+/// world's, where the land held changes in time (Loaded::landHeld); leaves
+/// it absent otherwise.
+template <class EvolutionOptions>
+void HoldLand(EvolutionOptions& options, const Loaded& world) {
+  if (world.landHeld) options.land_held = world.landHeld;
+}
 
 /// The `ocean` member holding the state's sea level input,
 /// `ocean.sea_level` or `ocean.topography`, the one holding its ice,
@@ -322,30 +342,47 @@ void CheckStateDate(const Run& run, const Json& top,
                     InputFiles& files);
 
 /// The sea level the state's sea level input gives at a time (SI seconds
-/// of the file's axis), SI: its variable as it stands, or, for
-/// `ocean.topography`, the sea level by flotation from it with the given
-/// ice thickness (SI), the state's. Values that are not numbers are
-/// refused at the input's member.
+/// of the file's axis, the state's instant, StateReadOf), SI, read within
+/// its field's time span unless the input holds the span's ends
+/// (ReadValues): its variable as it stands, or, for `ocean.topography`,
+/// the sea level by flotation from it with the given ice thickness (SI),
+/// the state's. Values that are not numbers are refused at the input's
+/// member.
 [[nodiscard]] std::vector<double> SeaLevelFrom(
     const Run& run, const Json& top, const io::FieldHistory& file,
     std::span<const double> ice, double time,
     const SeaLevelParameters& parameters);
 
-/// An ice field's variable at a time (SI seconds), SI: a thickness or a
-/// change of it; values that are not numbers are refused.
-[[nodiscard]] std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
-                                                 std::string_view variable,
-                                                 double time);
+/// An ice field's input at a time (SI seconds of its file's axis), SI,
+/// read within its field's time span (ReadValues, `where` the read): a
+/// thickness or a change of it. Values that are not numbers are refused,
+/// at the input's `file` as a read outside the span is.
+[[nodiscard]] std::vector<double> IceThicknessAt(const FileInput& input,
+                                                 const io::FieldHistory& file,
+                                                 const Json& member,
+                                                 double time,
+                                                 std::string_view where);
+
+/// Where the state's members are read, as a refusal of a read outside a
+/// file's span states it: the state's date in the static problem and a
+/// run counting forwards, the window's end `ocean.at` names in a dated
+/// run.
+[[nodiscard]] std::string StateReadOf(const Run& run);
 
 /// Reads the run through time's world: the state at the end of the window
-/// `ocean.at` names in a dated run (a state's file with a time axis that
-/// ends before the window's end is refused when the state is there), or
-/// at its date, `ocean.date_kyr_bp`, in a run counting forwards
-/// (CheckStateDate), the state then at the window's start; the run's ice,
+/// `ocean.at` names in a dated run, or at its date, `ocean.date_kyr_bp`,
+/// in a run counting forwards (CheckStateDate), the state then at the
+/// window's start, each file read within its field's time span unless its
+/// input holds the span's ends (the sea level's first); the run's ice,
 /// held at every node to what the state holds (RunIce::CheckHeld), with
-/// the change present at the window's start, and the background built
-/// from the ice at the window's start and the state's sea level. Without
-/// an ocean, the world of a body without one (Loaded), nothing read.
+/// the change present at the window's start; the land held (`ocean.land`):
+/// a field on a time axis under migrating shorelines in a dated run at
+/// every node's date (Loaded::landHeld, the background the first's), under
+/// frozen ones at the state's instant, in a run counting forwards at the
+/// state's date, and a static field once; and the background built from
+/// the ice at the window's start, the state's sea level and that land.
+/// Without an ocean, the world of a body without one (Loaded), nothing
+/// read.
 [[nodiscard]] Loaded LoadWorld(const Run& run, const Json& top,
                                const GRDSolver& solver);
 
@@ -495,7 +532,8 @@ void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when);
 
 /// The static problem's world on a run's grid: the state at its date
 /// (`ocean.ice` and `ocean.sea_level` or `ocean.topography`, each file
-/// with a time axis read at `ocean.date_kyr_bp`, and `ocean.land`), the
+/// with a time axis read at `ocean.date_kyr_bp` within its field's time
+/// span unless its input holds the span's ends, and `ocean.land`), the
 /// background state built from it in the solver's units, its ocean
 /// function flotation's, the ice change at the date (RunIce, held to what
 /// the state holds), SI, and the state's inputs as read. Without an ocean

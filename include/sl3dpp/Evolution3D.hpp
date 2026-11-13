@@ -125,6 +125,13 @@ class Evolution3D {
     /// rebuilds the states between by forward steps (ForwardTrajectory3D):
     /// a stride near sqrt(nodes) holds the fewest states.
     int record_stride = 0;
+    /// The nodes of the whole run before a call's first, which the record
+    /// stride counts, as Evolution::Options::record_offset.
+    std::size_t record_offset = 0;
+    /// Under migrating shorelines, the points held as land at time t, as
+    /// Evolution::Options::land_held: every pass of a node's combined
+    /// fixed point holds the mask at the node's time.
+    std::function<std::vector<char>(double)> land_held{};
     /// Whether a kept state also keeps its strain. By default (false)
     /// only the internal variables are kept, and an adjoint regenerates
     /// each node's strain by one elastic solve under its recorded loads;

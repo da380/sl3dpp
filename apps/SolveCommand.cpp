@@ -22,7 +22,8 @@
  * the loads applied) and restartable from disk checkpoints. Either
  * problem's run is recorded, with a `trajectory` block naming a directory,
  * into the trajectory store there (Trajectory.hpp), which `kernel` sweeps
- * from without running the forward problem again. The `model`
+ * from without running the forward problem again; a run resumed from a
+ * checkpoint continues the store its interrupted run left. The `model`
  * block alone decides between 1-D and 3-D. Beside the surface file either
  * problem writes exchange tables of surface coefficients (Outputs.hpp),
  * the displacement's and the potential's and, with an ocean, the sea level
@@ -456,11 +457,16 @@ struct Reached {
   std::string trajectory;
 };
 
-/// The summary's account of a trajectory store a run recorded, or found
+/// The summary's account of a trajectory store a run recorded (a resumed
+/// run continuing it from its checkpoint's node, `continued`), or found
 /// holding the run complete and left as it is.
-std::string RecordedNote(const io::TrajectoryStore& store) {
-  return std::format("recorded the trajectory to the store {} ({})",
-                     store.Directory().string(), SizeOf(store.Bytes()));
+std::string RecordedNote(const io::TrajectoryStore& store,
+                         std::optional<std::size_t> continued = {}) {
+  return std::format(
+      "recorded the trajectory to the store {} ({}){}",
+      store.Directory().string(), SizeOf(store.Bytes()),
+      continued ? std::format(", continuing it from node {}", *continued)
+                : std::string{});
 }
 std::string KeptNote(const io::TrajectoryStore& store) {
   return std::format(
@@ -471,29 +477,34 @@ std::string KeptNote(const io::TrajectoryStore& store) {
 /// A run's trajectory store at `trajectory.directory` for a run described
 /// as `run` (null: none): the store this run records into, where the
 /// directory is empty or holds an incomplete store of the run; nothing,
-/// with `note` saying so, where it holds the run complete. `resumed`, the
-/// node of the checkpoint a run resumes from, refuses a recording: the
-/// nodes before it are not run again.
+/// with `note` saying so, where it holds the run complete. A run that
+/// resumes from the checkpoint of node `resumed` continues the incomplete
+/// store of its interrupted run from that node (ContinueTrajectory),
+/// which must hold the run to it: a store it would begin there, the
+/// directory empty, is refused, its nodes before the checkpoint not run
+/// again.
 std::optional<io::TrajectoryStore> StoreToRecord(
     const Json& top, const TrajectoryBlock& block,
     const io::TrajectoryStore::Description* run,
     std::optional<std::size_t> resumed, std::string& note) {
   if (run == nullptr) return std::nullopt;
-  if (SurveyTrajectory(top, block, *run) ==
-      io::TrajectoryStore::Standing::Complete) {
+  const auto standing = SurveyTrajectory(top, block, *run);
+  if (standing == io::TrajectoryStore::Standing::Complete) {
     note = KeptNote(OpenTrajectory(top, block, *run));
     return std::nullopt;
   }
-  if (resumed) {
+  if (!resumed) return RecordTrajectory(top, block, *run);
+  if (standing == io::TrajectoryStore::Standing::Empty) {
     Fail(top.At("trajectory").At("directory"),
-         std::format("names a trajectory store this run would record, and the "
-                     "run resumes from the checkpoint of node {}: a recording "
-                     "is a run's from its first node; set \"restart\": false "
-                     "to start over and record it, or drop "
-                     "`trajectory.directory`",
+         std::format("holds no trajectory store, and the run resumes from "
+                     "the checkpoint of node {}: a store begun there would "
+                     "lack the nodes before it, which are not run again. Set "
+                     "\"restart\": false to start the run over and record "
+                     "it, or drop `trajectory.directory` to resume without "
+                     "recording",
                      *resumed));
   }
-  return RecordTrajectory(top, block, *run);
+  return ContinueTrajectory(top, block, *run, *resumed);
 }
 
 /// The closure of a run's steps as the outputs name it: `direct` in 1-D
@@ -897,6 +908,8 @@ Reached RunThrough(
   options.scheme = run.solver.scheme;
   options.rotation = run.rotation;
   options.rtol = run.solver.rtol;
+  // the land held at each node, where it changes in time
+  HoldLand(options, world);
 
   // The initial sea level: the state's at the start, or calibrated
   // against the state's at the end, by an evolution that streams nothing
@@ -922,7 +935,10 @@ Reached RunThrough(
           calibrated.runs, calibrated.before_m, calibrated.after_m);
     }
   }
-  if (store) store->PutStart(world.background);
+  // a continued store keeps its interrupted run's start
+  const auto continued =
+      store && resumed ? std::optional{resumed->node} : std::nullopt;
+  if (store && !continued) store->PutStart(world.background);
 
   const auto base_node = resumed ? resumed->node : std::size_t{0};
   // the evolution counts a resumed run's nodes from its checkpoint's
@@ -972,15 +988,15 @@ Reached RunThrough(
     out.stopped = at.node;
     if (store) {
       out.trajectory = std::format(
-          "the trajectory store {} left incomplete (a resumption does not "
-          "record)",
-          store->Directory().string());
+          "the trajectory store {} left incomplete at node {}, the "
+          "resumption recording on from there",
+          store->Directory().string(), at.node);
     }
     return out;
   }
   if (store) {
     store->Close();
-    out.trajectory = RecordedNote(*store);
+    out.trajectory = RecordedNote(*store, continued);
   }
 
   out.initialSeaLevel = world.background.seaLevel;

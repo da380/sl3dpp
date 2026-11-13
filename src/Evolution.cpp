@@ -238,6 +238,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // background must be the state there, flotation's own C included.
     detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]),
                                 interior != nullptr);
+    if (options_.land_held) {
+      detail::CheckLandAtStart(solver, state_, options_.land_held(times[0]));
+    }
   }
 
   if (options_.rotation == RotationalFeedback::Full && times.size() > 1) {
@@ -435,6 +438,14 @@ std::vector<Evolution::Snapshot> Evolution::March(
     if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
     moving.directLoadOutsideWaterBudget = outsideAt(t);
     moving.solidSurfaceChange = layerAt(t);
+    // a land mask that changes in time: the node's own
+    if (options_.land_held) moving.forcedLand = options_.land_held(t);
+  };
+  // every stride-th node of the whole run is kept, and the last
+  auto kept = [&](std::size_t node) {
+    if (stride <= 0) return false;
+    const auto every = static_cast<std::size_t>(stride);
+    return (options_.record_offset + node) % every == 0 || node == lastNode;
   };
 
   auto loadGrid = std::vector<double>{};
@@ -530,7 +541,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     if (!options_.keep_snapshots) snapshots.pop_back();
   };
   if (!resumed) {
-    record(times[0], response, stride > 0);
+    record(times[0], response, kept(0));
     checkpoint(0);
   }
 
@@ -603,8 +614,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     vstate_ = step.Finish(Columns(sigma_, toMatDensity_),
                           Columns(psi_, toMatPotential_))
                   .first;
-    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
-    record(times[node], response, keep);
+    record(times[node], response, kept(node));
     checkpoint(node);
   }
   return snapshots;
@@ -953,6 +963,12 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   if (forcing.tide) RefuseWithoutGravity(op, "a tide");
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
+  // every stride-th node of the whole run is kept, and the last
+  const auto kept = [&](std::size_t node) {
+    if (stride <= 0) return false;
+    const auto every = static_cast<std::size_t>(stride);
+    return (options_.record_offset + node) % every == 0 || node == lastNode;
+  };
   const bool sourced = forcing.sources || forcing.stressGluts;
   if (sourced && stride > 1) {
     throw std::invalid_argument(
@@ -1053,7 +1069,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       twist = toroidal.SolveElastic(tstate, nodeForces.toroidal);
       toroidal.SetStrain(tstate, twist);
     }
-    record(times[0], stride > 0);
+    record(times[0], kept(0));
     checkpoint(0);
   } else {
     op.PrimeStrain(vstate_);
@@ -1073,8 +1089,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       tstate = std::move(stepped.first);
       twist = std::move(stepped.second);
     }
-    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
-    record(times[node], keep);
+    record(times[node], kept(node));
     checkpoint(node);
   }
   return snapshots;

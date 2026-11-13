@@ -1731,6 +1731,7 @@ std::string Kernel1D(const std::filesystem::path& config,
   options.scheme = run.solver.scheme;
   options.rotation = run.rotation;
   options.rtol = run.solver.rtol;
+  HoldLand(options, world);
   if (forward.read) {
     world.background = forward.store->Start();
   } else if (run.Calibrating()) {
@@ -1791,6 +1792,7 @@ std::string Kernel3D(const std::filesystem::path& config,
   options.rtol = run.solver.rtol;
   options.coupled_rtol = run.solver.step_rtol;
   options.max_coupled_iterations = run.solver.step_max_iterations;
+  HoldLand(options, world);
   if (forward.read) {
     world.background = forward.store->Start();
   } else if (run.Calibrating()) {

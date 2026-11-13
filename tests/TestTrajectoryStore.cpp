@@ -8,7 +8,8 @@
 // incomplete recording, another run's hash, another stride, another
 // layout of the processes, another shape, a truncated record, a missing
 // one, and files no store writes. An interrupted recording is known as
-// one, and a new recording replaces it.
+// one, and a new recording replaces it, or the resumed run continues it
+// to the uninterrupted run's store.
 
 #include <gtest/gtest.h>
 
@@ -20,6 +21,7 @@
 #include <filesystem>
 #include <fstream>
 #include <functional>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <span>
@@ -762,6 +764,89 @@ TEST_F(TrajectoryStore, AnInterruptedRecordingIsKnownAndReplaced) {
   const auto store = Store::Open(directory, run);
   EXPECT_EQ(store.Snapshots1D().size(), 3u);
   EXPECT_GT(store.Bytes(), 0u);
+}
+
+TEST_F(TrajectoryStore, AnInterruptedRecordingIsContinuedFromItsCheckpoint) {
+  // A run stopped after the checkpoint of node 2 (of five, every second
+  // kept) leaves an incomplete store with its records to that node, and a
+  // record past it; the resumed run, its evolution attached to the store
+  // continued from node 2, records the rest, the records past the node
+  // replaced: the store is, file by file, the uninterrupted run's. A store
+  // short of a record to the node is refused as incomplete, nothing
+  // removed; an empty directory, or a store recorded at another stride,
+  // is refused too.
+  const auto scene = Scene::Make();
+  const ViscoelasticOperator op(scene.rheology, kLmax);
+  const auto run = Describe(scene, scene.Times(5), 2, 1);
+  const auto melt = scene.Melt(run.times.back());
+  RecordSmall(scene, dir_ / "whole", run);
+  // the interrupted run: its checkpoint at node 2, its records to node 3
+  const auto stopped = [&](const fs::path& directory) {
+    auto checkpoint = std::optional<Evolution::Checkpoint>{};
+    const auto store = Store::Record(directory, run);
+    store.PutStart(scene.state);
+    auto options = Evolution::Options{.rtol = 1e-10};
+    options.checkpoint_stride = 1;
+    options.on_checkpoint = [&](std::size_t node,
+                                const Evolution::Checkpoint& at) {
+      if (node == 2) checkpoint = at;
+    };
+    store.Attach(options);
+    Evolution evolution(op, scene.solver, scene.state, options);
+    static_cast<void>(evolution.Run(
+        std::vector<double>(run.times.begin(), run.times.begin() + 4), melt));
+    return *checkpoint;
+  };
+  const auto directory = dir_ / "parts";
+  const auto checkpoint = stopped(directory);
+  EXPECT_TRUE(fs::exists(directory / "node_000003.surface"));
+  std::ofstream(directory / ".node_000004.surface.partial") << "half";
+  {
+    const auto store = Store::Continue(directory, run, 2);
+    EXPECT_FALSE(fs::exists(directory / "node_000003.surface"));
+    EXPECT_FALSE(fs::exists(directory / ".node_000004.surface.partial"));
+    EXPECT_TRUE(fs::exists(directory / "node_000002.surface"));
+    auto options = Evolution::Options{.rtol = 1e-10};
+    store.Attach(options);
+    EXPECT_EQ(options.record_offset, 2u);
+    Evolution evolution(op, scene.solver, scene.state, options);
+    static_cast<void>(evolution.Resume(
+        checkpoint, std::vector<double>(run.times.begin() + 2, run.times.end()),
+        melt));
+    store.Close();
+  }
+  EXPECT_EQ(Store::Survey(directory, run), Store::Standing::Complete);
+  const auto bytes = [](const fs::path& root) {
+    auto out = std::map<fs::path, std::string>{};
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+      if (!entry.is_regular_file()) continue;
+      auto in = std::ifstream(entry.path(), std::ios::binary);
+      out.emplace(fs::relative(entry.path(), root),
+                  std::string(std::istreambuf_iterator<char>(in), {}));
+    }
+    return out;
+  };
+  EXPECT_TRUE(bytes(directory) == bytes(dir_ / "whole"));
+  // short of a record to the node: refused, nothing removed
+  const auto shorter = dir_ / "short";
+  static_cast<void>(stopped(shorter));
+  fs::remove(shorter / "rank_0000" / "node_000002.state");
+  EXPECT_EQ(KindOf([&] {
+              static_cast<void>(Store::Continue(shorter, run, 2));
+            }),
+            Kind::Incomplete);
+  EXPECT_TRUE(fs::exists(shorter / "node_000003.surface"));
+  // nothing to continue, or a store of another stride
+  EXPECT_EQ(KindOf([&] {
+              static_cast<void>(Store::Continue(dir_ / "none", run, 2));
+            }),
+            Kind::Missing);
+  auto strided = run;
+  strided.record_stride = 1;
+  EXPECT_EQ(KindOf([&] {
+              static_cast<void>(Store::Continue(shorter, strided, 2));
+            }),
+            Kind::Stride);
 }
 
 }  // namespace

@@ -89,8 +89,9 @@ struct SolveInput {
   Run run;
   CheckpointBlock checkpoint;  ///< no directory: no checkpoints
   /// The trajectory store the run is recorded into (no directory: none).
-  /// A run that resumes from a checkpoint is refused one it must record:
-  /// a recording is a run's from its first node.
+  /// A run that resumes from a checkpoint continues the incomplete store
+  /// its interrupted run left from the checkpoint's node, and is refused
+  /// one that does not hold the run to that node.
   TrajectoryBlock trajectory;
   /// Whether a run finding a checkpoint in the directory resumes from it.
   bool restart = true;

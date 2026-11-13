@@ -186,7 +186,9 @@ struct OceanBlock {
   FileInput ice;
   /// `ocean.land`, where given: a field that is one where the surface is
   /// held as land whatever the flotation and zero elsewhere (landlocked
-  /// depressions), the same at every date. Absent, flotation alone.
+  /// depressions), static or on a time axis (a land that changes in time,
+  /// read at every node's date under migrating shorelines in a dated run,
+  /// LoadWorld). Absent, flotation alone.
   std::optional<FileInput> land;
   /// The state's date, kyr before present (`ocean.date_kyr_bp`), at which
   /// every member's file with a time axis is read, in the static problem
@@ -216,8 +218,8 @@ struct OceanBlock {
 /// Reads an `ocean` block of a run of `problem` (through time, on the
 /// `calendar` of its times), relative paths against `directory`. It holds
 /// exactly one of `sea_level` and `topography` and, required, `ice`, each
-/// a file input (Files.hpp) of `file`, `format` and `variable` alone, and
-/// optionally `land`. The state's instant is the block's: in the static
+/// a file input (Files.hpp) of `file`, `format`, `variable` and
+/// `outside_span` alone, and optionally `land`, another. The state's instant is the block's: in the static
 /// problem `date_kyr_bp` (whether it is required is the files' business,
 /// checked once they are read, CheckStateDate); in the quasi-static
 /// problem `at` ("start" or "end", required), and in a run counting

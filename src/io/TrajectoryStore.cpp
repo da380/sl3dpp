@@ -647,6 +647,43 @@ std::string Listed(const std::vector<fs::path>& paths) {
   return out;
 }
 
+/// Refuses a store of this run's hash recorded otherwise than `run`
+/// describes: another dimension, other nodes, grid or kind, another
+/// stride, or another processes' layout, each as its own fault.
+void CheckDescribed(const TrajectoryStore::Manifest& m,
+                    const fs::path& directory, const Description& run,
+                    const std::vector<Part>& parts) {
+  if (m.dimension != run.dimension || m.times != run.times ||
+      m.field_size != run.field_size || m.migrating != run.migrating ||
+      m.sources != run.sources || m.tide != run.tide) {
+    Throw(Kind::Mismatch,
+          std::format("{} holds a store of this run's hash whose dimension, "
+                      "nodes, grid or forcing are not this run's",
+                      directory.string()));
+  }
+  if (m.record_stride != run.record_stride) {
+    Throw(Kind::Stride,
+          std::format("{} holds this run recorded at record stride {}, and "
+                      "this run's is {}: record it into another directory, "
+                      "or remove that one",
+                      directory.string(), m.record_stride, run.record_stride));
+  }
+  if (m.parts.size() != parts.size()) {
+    Throw(Kind::Layout,
+          std::format("{} holds this run recorded over {} process(es), and "
+                      "this run has {}: run over {}, or record into another "
+                      "directory",
+                      directory.string(), m.parts.size(), parts.size(),
+                      m.parts.size()));
+  }
+  if (m.parts != parts || m.cuts != run.cuts) {
+    Throw(Kind::Layout,
+          std::format("{} holds this run recorded over {} process(es) whose "
+                      "parts of the mesh are not this run's",
+                      directory.string(), m.parts.size()));
+  }
+}
+
 /// What Survey finds, with the manifest it read.
 struct Found {
   TrajectoryStore::Standing standing = TrajectoryStore::Standing::Empty;
@@ -694,35 +731,7 @@ Found Inspect(const fs::path& directory, const Description& run,
     out.standing = Standing::Incomplete;
     return out;
   }
-  if (m.dimension != run.dimension || m.times != run.times ||
-      m.field_size != run.field_size || m.migrating != run.migrating ||
-      m.sources != run.sources || m.tide != run.tide) {
-    Throw(Kind::Mismatch,
-          std::format("{} holds a store of this run's hash whose dimension, "
-                      "nodes, grid or forcing are not this run's",
-                      directory.string()));
-  }
-  if (m.record_stride != run.record_stride) {
-    Throw(Kind::Stride,
-          std::format("{} holds this run recorded at record stride {}, and "
-                      "this run's is {}: record it into another directory, "
-                      "or remove that one",
-                      directory.string(), m.record_stride, run.record_stride));
-  }
-  if (m.parts.size() != parts.size()) {
-    Throw(Kind::Layout,
-          std::format("{} holds this run recorded over {} process(es), and "
-                      "this run has {}: run over {}, or record into another "
-                      "directory",
-                      directory.string(), m.parts.size(), parts.size(),
-                      m.parts.size()));
-  }
-  if (m.parts != parts || m.cuts != run.cuts) {
-    Throw(Kind::Layout,
-          std::format("{} holds this run recorded over {} process(es) whose "
-                      "parts of the mesh are not this run's",
-                      directory.string(), m.parts.size()));
-  }
+  CheckDescribed(m, directory, run, parts);
   out.standing = Standing::Complete;
   return out;
 }
@@ -746,6 +755,9 @@ struct TrajectoryStore::Impl {
   std::uint64_t manifestBytes = 0;
   std::size_t statesRead = 0;
   std::size_t recordsWritten = 0;
+  /// The node a continued recording goes on from (Continue): the nodes an
+  /// attached evolution hands out are the whole run's less it.
+  std::size_t firstNode = 0;
 
   [[nodiscard]] bool First() const { return run.rank == 0; }
   [[nodiscard]] fs::path RankDirectory(int rank) const {
@@ -758,6 +770,38 @@ struct TrajectoryStore::Impl {
     return RankDirectory(run.rank) / NodeName(node, kStateSuffix);
   }
   [[nodiscard]] std::size_t Nodes() const { return manifest.times.size(); }
+
+  /// A recording's state as Record starts it: the manifest the run
+  /// describes, not complete, and nothing written.
+  static std::shared_ptr<Impl> Recording(
+      const std::filesystem::path& directory, const Description& run,
+      const std::vector<Part>& parts) {
+    auto impl = std::make_shared<Impl>();
+    impl->directory = directory;
+    impl->run = run;
+    impl->recording = true;
+    auto& m = impl->manifest;
+    m.hash = run.hash;
+    m.writer = std::format("sl3dpp {}", Version());
+    m.dimension = run.dimension;
+    m.times = run.times;
+    m.record_stride = run.record_stride;
+    for (auto n = std::size_t{0}; n < run.times.size(); ++n) {
+      m.kept.push_back(run.Kept(n));
+    }
+    m.migrating = run.migrating;
+    m.sources = run.sources;
+    m.tide = run.tide;
+    m.field_size = run.field_size;
+    m.cuts = run.cuts;
+    m.parts = parts;
+    const auto nodes = run.times.size();
+    m.surface_bytes.assign(nodes, 0);
+    impl->surfaceWritten.assign(nodes, false);
+    impl->stateWritten.assign(nodes, false);
+    impl->stateBytes.assign(nodes, 0);
+    return impl;
+  }
 
   void CheckNode(std::size_t node) const {
     if (node >= Nodes()) {
@@ -839,8 +883,11 @@ TrajectoryStore::Standing TrajectoryStore::Survey(
   return found.standing;
 }
 
-TrajectoryStore TrajectoryStore::Record(const std::filesystem::path& directory,
-                                        const Description& run) {
+namespace {
+
+/// Refuses a run no recording takes: a dimension other than 1 and 3, no
+/// node, a stride below one, or a stride above one under sources.
+void CheckRecordable(const Description& run) {
   CheckMachine();
   if (run.dimension != 1 && run.dimension != 3) {
     throw std::invalid_argument("a trajectory store's dimension is 1 or 3");
@@ -853,6 +900,13 @@ TrajectoryStore TrajectoryStore::Record(const std::filesystem::path& directory,
     throw std::invalid_argument(
         "a run under interior sources is recorded at every node");
   }
+}
+
+}  // namespace
+
+TrajectoryStore TrajectoryStore::Record(const std::filesystem::path& directory,
+                                        const Description& run) {
+  CheckRecordable(run);
   const auto parts = PartsOf(run);
   auto found = Found{};
   Agreed(run, [&] { found = Inspect(directory, run, parts); });
@@ -861,30 +915,8 @@ TrajectoryStore TrajectoryStore::Record(const std::filesystem::path& directory,
         "{} holds this run's complete trajectory store: open it for reading",
         directory.string()));
   }
-  auto impl = std::make_shared<Impl>();
-  impl->directory = directory;
-  impl->run = run;
-  impl->recording = true;
-  auto& m = impl->manifest;
-  m.hash = run.hash;
-  m.writer = std::format("sl3dpp {}", Version());
-  m.dimension = run.dimension;
-  m.times = run.times;
-  m.record_stride = run.record_stride;
-  for (auto n = std::size_t{0}; n < run.times.size(); ++n) {
-    m.kept.push_back(run.Kept(n));
-  }
-  m.migrating = run.migrating;
-  m.sources = run.sources;
-  m.tide = run.tide;
-  m.field_size = run.field_size;
-  m.cuts = run.cuts;
-  m.parts = parts;
-  const auto nodes = run.times.size();
-  m.surface_bytes.assign(nodes, 0);
-  impl->surfaceWritten.assign(nodes, false);
-  impl->stateWritten.assign(nodes, false);
-  impl->stateBytes.assign(nodes, 0);
+  auto impl = Impl::Recording(directory, run, parts);
+  const auto& m = impl->manifest;
   // every process has surveyed before the first changes anything
   Barrier(run);
   Agreed(run, [&] {
@@ -916,6 +948,124 @@ TrajectoryStore TrajectoryStore::Record(const std::filesystem::path& directory,
                         error.message()));
     }
   });
+  return TrajectoryStore(std::move(impl));
+}
+
+TrajectoryStore TrajectoryStore::Continue(
+    const std::filesystem::path& directory, const Description& run,
+    std::size_t node) {
+  CheckRecordable(run);
+  if (node >= run.times.size()) {
+    throw std::invalid_argument(std::format(
+        "node {} is off the recording's {} nodes", node, run.times.size()));
+  }
+  const auto parts = PartsOf(run);
+  auto found = Found{};
+  Agreed(run, [&] {
+    found = Inspect(directory, run, parts);
+    if (found.standing == Standing::Empty) {
+      Throw(Kind::Missing,
+            std::format("{} holds no trajectory store to continue from node "
+                        "{}",
+                        directory.string(), node));
+    }
+    if (found.standing == Standing::Incomplete) {
+      CheckDescribed(*found.manifest, directory, run, parts);
+    }
+  });
+  if (found.standing == Standing::Complete) {
+    throw std::logic_error(std::format(
+        "{} holds this run's complete trajectory store: open it for reading",
+        directory.string()));
+  }
+  auto impl = Impl::Recording(directory, run, parts);
+  impl->firstNode = node;
+  auto& s = *impl;
+  auto& m = s.manifest;
+  const auto rank = static_cast<std::uint64_t>(run.rank);
+  // every record of the nodes to `node`, whole: its size, or a refusal
+  // naming what the store lacks
+  Agreed(run, [&] {
+    const auto whole = [&](const fs::path& path, std::uint64_t kind,
+                           std::uint64_t at, std::uint64_t by,
+                           std::string_view what) {
+      try {
+        [[maybe_unused]] const auto record =
+            RecordReader(path, kind, at, by, std::nullopt);
+        auto error = std::error_code{};
+        const auto size = fs::file_size(path, error);
+        if (error) Throw(Kind::Io, std::format("cannot read {}", path.string()));
+        return static_cast<std::uint64_t>(size);
+      } catch (const TrajectoryStoreError& error) {
+        Throw(Kind::Incomplete,
+              std::format("{} holds this run's incomplete trajectory store "
+                          "without {} whole ({}), which a recording continued "
+                          "from node {} keeps",
+                          directory.string(), what, error.what(), node));
+      }
+    };
+    if (s.First()) {
+      m.start_bytes = whole(directory / kStartName, kStartKind, 0, 0,
+                            "the start record");
+    }
+    for (auto n = std::size_t{0}; n <= node; ++n) {
+      if (s.First()) {
+        m.surface_bytes[n] =
+            whole(s.SurfacePath(n), kSurfaceKind, n, 0,
+                  std::format("node {}'s surface record", n));
+      }
+      if (m.kept[n]) {
+        s.stateBytes[n] = whole(s.StatePath(n), kStateKind, n, rank,
+                                std::format("node {}'s state record", n));
+      }
+    }
+  });
+  // every process has checked before the first changes anything; then the
+  // records of later nodes, and every partial file, go: the first's, and
+  // each process's own states
+  Barrier(run);
+  Agreed(run, [&] {
+    const auto later = [node](const fs::path& path, std::string_view suffix) {
+      const auto name = path.filename().string();
+      if (name.starts_with('.')) return true;  // a partial file
+      if (!IsNodeName(name, suffix)) return false;
+      const auto digits = name.substr(5, name.size() - 5 - suffix.size());
+      return std::stoull(digits) > node;
+    };
+    auto doomed = std::vector<fs::path>{};
+    if (s.First()) {
+      for (const auto& entry : fs::directory_iterator(directory)) {
+        if (entry.is_regular_file() && later(entry.path(), kSurfaceSuffix)) {
+          doomed.push_back(entry.path());
+        }
+      }
+    }
+    const auto own = s.RankDirectory(run.rank);
+    auto error = std::error_code{};
+    if (fs::is_directory(own, error)) {
+      for (const auto& entry : fs::directory_iterator(own)) {
+        if (entry.is_regular_file() && later(entry.path(), kStateSuffix)) {
+          doomed.push_back(entry.path());
+        }
+      }
+    }
+    for (const auto& path : doomed) {
+      if (!fs::remove(path, error) && error) {
+        Throw(Kind::Io, std::format("cannot remove {}: {}", path.string(),
+                                    error.message()));
+      }
+    }
+    fs::create_directories(own, error);
+    if (error) {
+      Throw(Kind::Io, std::format("cannot create {}: {}", own.string(),
+                                  error.message()));
+    }
+  });
+  s.startWritten = true;
+  for (auto n = std::size_t{0}; n <= node; ++n) {
+    s.surfaceWritten[n] = true;
+    s.stateWritten[n] = m.kept[n];
+  }
   return TrajectoryStore(std::move(impl));
 }
 
@@ -1054,24 +1204,30 @@ void TrajectoryStore::PutState(std::size_t node,
 }
 
 void TrajectoryStore::Attach(Evolution::Options& options) const {
+  const auto first = impl_->firstNode;
   options.record_stride = impl_->run.record_stride;
-  options.on_snapshot = [store = *this, before = std::move(options.on_snapshot)](
+  options.record_offset = first;
+  options.on_snapshot = [store = *this, first,
+                         before = std::move(options.on_snapshot)](
                             std::size_t node, const Evolution::Snapshot& s) {
     if (before) before(node, s);
-    store.Put(node, s);
+    store.Put(first + node, s);
   };
 }
 
 void TrajectoryStore::Attach(Evolution3D::Options& options) const {
+  const auto first = impl_->firstNode;
   options.record_stride = impl_->run.record_stride;
-  options.on_snapshot = [store = *this, before = std::move(options.on_snapshot)](
+  options.record_offset = first;
+  options.on_snapshot = [store = *this, first,
+                         before = std::move(options.on_snapshot)](
                             std::size_t node, const Evolution3D::Snapshot& s) {
     if (before) before(node, s);
-    store.Put(node, s);
+    store.Put(first + node, s);
   };
-  options.on_state = [store = *this](std::size_t node,
-                                     Viscoelastic3D::State&& state) {
-    store.PutState(node, std::move(state));
+  options.on_state = [store = *this, first](std::size_t node,
+                                            Viscoelastic3D::State&& state) {
+    store.PutState(first + node, std::move(state));
   };
 }
 

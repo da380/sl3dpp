@@ -204,8 +204,10 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   (15 MB of them the internal variables) and 7 surface records of 104 kB,
   557 MiB in all. On four threads the solve takes 0.95 s recording (0.73
   s without), and the kernels 1.9 s from the store against 2.4 s with the
-  forward run in memory, bitwise the same. `run_all.sh` removes a former
-  store first, its inputs being the build's to rewrite.
+  forward run in memory, the same to rounding (about 1e-14 relative; two
+  processes may plan their FFTs differently, and the tests hold the two
+  bitwise within one process). `run_all.sh` removes a former store first,
+  its inputs being the build's to rewrite.
 - **`no_ocean.json`** — the instantaneous elastic response of the
   synthetic 3D elastic Earth (`../data/synthetic_moduli.nc`, written by the
   build: the PREM-like moduli with a stiff craton and a soft ridge in the
@@ -353,7 +355,8 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   at t - 2 kyr when the run's clock says t (in its unit, kyr), so the
   file's time 0 is the
   run's 2 kyr, and before it and after 7.5 kyr the file's first and last
-  (zero) loads are held. The coefficient table holds the LOAD's
+  (zero) loads are held, as `"outside_span": "hold"` asks (without it the
+  run's nodes outside the file's span are refused). The coefficient table holds the LOAD's
   coefficients in the exchange table's harmonics (an exchange table holds
   the response's U and Phi, which are not a load). The field file is
   sampled on the run's own Gauss–Legendre grid, so the run reads it

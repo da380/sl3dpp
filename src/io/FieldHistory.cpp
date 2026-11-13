@@ -181,6 +181,14 @@ std::optional<std::pair<double, double>> FieldHistory::Span() const {
   return impl_->span;
 }
 
+bool FieldHistory::Static(std::string_view name) const {
+  try {
+    return impl_->history.Support(name) == "static";
+  } catch (const pm::Error& error) {
+    throw std::runtime_error(error.what());
+  }
+}
+
 std::vector<double> FieldHistory::Values(std::string_view name,
                                          double time) const {
   try {

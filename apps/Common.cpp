@@ -371,6 +371,7 @@ std::shared_ptr<const io::FieldHistory> InputFiles::Open(const FileInput& input,
   for (const auto& [read, file] : read_) {
     if (SameFile(read, input)) {
       CheckVariable(input, *file, object);
+      CheckOutsideSpan(input, *file, object);
       return file;
     }
   }
@@ -380,30 +381,51 @@ std::shared_ptr<const io::FieldHistory> InputFiles::Open(const FileInput& input,
   return file;
 }
 
-std::vector<double> IceThicknessAt(const io::FieldHistory& ice,
-                                   std::string_view variable, double time) {
-  auto thickness = ice.Values(variable, time);
+std::vector<double> IceThicknessAt(const FileInput& input,
+                                   const io::FieldHistory& file,
+                                   const Json& member, double time,
+                                   std::string_view where) {
+  auto thickness = ReadValues(input, file, member, time, where);
   for (auto v : thickness) {
     if (!std::isfinite(v)) {
-      throw std::runtime_error(std::format(
-          "the ice's {} is not a number somewhere at {:g} kyr BP (a surface "
-          "file marks uncovered points so): fill it before the run",
-          variable, -time / KYR));
+      Fail(member.At("file"),
+           std::format("the ice's {} is not a number somewhere at {:g} kyr BP "
+                       "(a surface file marks uncovered points so): fill it "
+                       "before the run",
+                       input.variable, 0.0 - time / KYR));
     }
   }
   return thickness;
 }
+
+std::string StateReadOf(const Run& run) {
+  if (!run.times || !run.times->Dated()) {
+    return "the state's date, `ocean.date_kyr_bp`, where the state is read";
+  }
+  return run.ocean->at == WindowEnd::Start
+             ? "the window's start, where the state is read"
+             : "the window's end, where the state is read, the "
+               "calibration's target";
+}
+
+namespace {
+
+/// Where a term of the ice change is read, as a refusal states it: at
+/// each node's date in a dated run, at its own date in the static problem.
+std::string_view TermReadOf(const IceChangeTerm& term) {
+  return term.dated ? "a node's date, where the run reads it"
+                    : "its date, `date_kyr_bp`, where it is read";
+}
+
+}  // namespace
 
 RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
                double stateTime)
     : grid_(&files.Grid()) {
   const auto& member = IceMember(top);
   const auto state = files.Open(run.ocean->ice, member);
-  try {
-    state_ = IceThicknessAt(*state, run.ocean->ice.variable, stateTime);
-  } catch (const std::runtime_error& error) {
-    Fail(member.At("file"), error.what());
-  }
+  state_ = IceThicknessAt(run.ocean->ice, *state, member, stateTime,
+                          StateReadOf(run));
   if (run.forcing.ice_change.empty()) return;
   block_ = &IceChangeMember(top);
   for (auto k = std::size_t{0}; k < run.forcing.ice_change.size(); ++k) {
@@ -438,7 +460,11 @@ RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
         if (!term.dated && !term.held && !thickness) {
           CheckDate(term.file, *held.file, item, "date_kyr_bp");
         }
-        if (thickness) held.reference = ValuesOf(held, stateTime);
+        if (thickness) {
+          held.reference = ValuesOf(
+              held, stateTime,
+              "the state's instant, from which its change is measured");
+        }
         // the static problem's term is read once, at its own date (a file
         // without a time axis at any date: the present's), and so is a
         // held one
@@ -469,12 +495,9 @@ RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
   }
 }
 
-std::vector<double> RunIce::ValuesOf(const Term& term, double time) const {
-  try {
-    return IceThicknessAt(*term.file, term.term.file.variable, time);
-  } catch (const std::runtime_error& error) {
-    Fail(term.member->At("file"), error.what());
-  }
+std::vector<double> RunIce::ValuesOf(const Term& term, double time,
+                                     std::string_view where) const {
+  return IceThicknessAt(term.term.file, *term.file, *term.member, time, where);
 }
 
 std::vector<double> RunIce::TermAt(const Term& term, double time) const {
@@ -492,7 +515,7 @@ std::vector<double> RunIce::TermAt(const Term& term, double time) const {
     for (auto& v : out) v *= factor;
     return out;
   }
-  auto values = ValuesOf(term, time);
+  auto values = ValuesOf(term, time, TermReadOf(term.term));
   if (term.term.kind == IceChangeTerm::Kind::Thickness) {
     for (auto i = std::size_t{0}; i < values.size(); ++i) {
       values[i] -= term.reference[i];
@@ -521,9 +544,13 @@ std::vector<double> RunIce::ChangeSince(double time, double since) const {
   for (const auto& term : terms_) {
     // a cap: the same at every time, but for its history
     if (!term.file && term.term.history.Empty()) continue;
-    auto change = term.file ? ValuesOf(term, time) : TermAt(term, time);
+    auto change = term.file ? ValuesOf(term, time, TermReadOf(term.term))
+                            : TermAt(term, time);
     const auto before =
-        term.file ? ValuesOf(term, since) : TermAt(term, since);
+        term.file ? ValuesOf(term, since,
+                             "the window's start, from which the run's change "
+                             "is measured")
+                  : TermAt(term, since);
     for (auto i = std::size_t{0}; i < change.size(); ++i) {
       change[i] -= before[i];
     }
@@ -611,29 +638,44 @@ void CheckStateDate(const Run& run, const Json& top,
   }
 }
 
-LandMask ReadLand(const Run& run, const Json& top, InputFiles& files,
-                  double time) {
-  if (!run.ocean->land) return {};
-  const auto& input = *run.ocean->land;
-  const auto& member = top.At("ocean").At("land");
-  const auto file = files.Open(input, member);
-  auto values = std::vector<double>{};
-  try {
-    values = file->Values(input.variable, time);
-  } catch (const std::runtime_error& error) {
-    Fail(member.At("file"), error.what());
-  }
-  auto out = LandMask{};
-  out.held.reserve(values.size());
+namespace {
+
+/// The land held at SI time `time` of the land's file (ReadValues, `where`
+/// the read): its field cut at one half, a value that is not a number
+/// refused at `member`.
+std::vector<char> LandAt(const FileInput& input, const io::FieldHistory& file,
+                         const Json& member, double time,
+                         std::string_view where) {
+  const auto values = ReadValues(input, file, member, time, where);
+  auto out = std::vector<char>{};
+  out.reserve(values.size());
   for (auto v : values) {
     if (!std::isfinite(v)) {
       Fail(member,
            "gives a land field that is not a number somewhere (a surface "
            "file marks uncovered points so): fill it before the run");
     }
-    out.held.push_back(v > 0.5 ? 1 : 0);
+    out.push_back(v > 0.5 ? 1 : 0);
   }
-  out.read = std::format("land {}", DescribeInput(input, "held at every date"));
+  return out;
+}
+
+}  // namespace
+
+LandMask ReadLand(const Run& run, const Json& top, InputFiles& files,
+                  double time, std::string_view where,
+                  std::string_view slice) {
+  if (!run.ocean->land) return {};
+  const auto& input = *run.ocean->land;
+  const auto& member = top.At("ocean").At("land");
+  const auto file = files.Open(input, member);
+  auto out = LandMask{};
+  out.held = LandAt(input, *file, member, time, where);
+  out.read = std::format(
+      "land {}", DescribeInput(input, OnTimeAxis(input, *file)
+                                          ? slice
+                                          : std::string_view{"held at every "
+                                                             "date"}));
   return out;
 }
 
@@ -642,7 +684,8 @@ std::vector<double> SeaLevelFrom(const Run& run, const Json& top,
                                  std::span<const double> ice, double time,
                                  const SeaLevelParameters& parameters) {
   const auto& source = run.ocean->seaLevel;
-  auto sea = file.Values(source.input.variable, time);
+  auto sea = ReadValues(source.input, file, SeaLevelMember(run, top), time,
+                        StateReadOf(run));
   if (source.kind == SeaLevelSource::Kind::Topography) {
     sea = SeaLevelFromTopography(std::move(sea),
                                  std::vector<double>(ice.begin(), ice.end()),
@@ -654,7 +697,7 @@ std::vector<double> SeaLevelFrom(const Run& run, const Json& top,
            std::format("gives a sea level that is not a number somewhere at "
                        "{:g} kyr BP (a surface file marks uncovered points "
                        "so): fill it before the run",
-                       -time / KYR));
+                       0.0 - time / KYR));
     }
   }
   return sea;
@@ -682,26 +725,6 @@ std::string WindowSlice(const Run& run, const io::FieldHistory& file,
                   : std::format("static, at the window's {}", name);
 }
 
-/// Refuses a state's file whose time axis leaves out the window's end,
-/// where the state is read: its end values are held beyond its span,
-/// which would make a file ending early the calibration's target
-/// silently. `member` is the input's. A dated run's alone.
-void CheckReachesEnd(const Run& run, const io::FieldHistory& file,
-                     const Json& member) {
-  const auto end_kyr_bp = run.times->End();
-  const auto end_si = -end_kyr_bp * KYR;
-  if (const auto span = file.Span(); span.has_value()) {
-    const auto slack = 1e-9 * KYR;
-    if (end_si < span->first - slack || end_si > span->second + slack) {
-      Fail(member.At("file"),
-           std::format("spans {:g} to {:g} kyr BP, which leaves out the "
-                       "window's end ({:g} kyr BP), where the state is read, "
-                       "the calibration's target",
-                       -span->first / KYR, -span->second / KYR, end_kyr_bp));
-    }
-  }
-}
-
 /// The state's instant on its files' axes, SI seconds, in a run through
 /// time: a dated run's end of the window `ocean.at` names (the calendar's
 /// axis is the window's), or the state's date in one counting forwards (a
@@ -719,14 +742,7 @@ std::vector<double> StateSeaLevel(const Run& run, const Json& top,
                                   const SeaLevelParameters& parameters,
                                   const io::FieldHistory& sea,
                                   const RunIce& ice) {
-  const auto time = StateTime(run);
-  try {
-    return SeaLevelFrom(run, top, sea, ice.State(), time, parameters);
-  } catch (const std::runtime_error& error) {
-    Fail(SeaLevelMember(run, top).At("file"),
-         std::format("gives no sea level at the state's instant: {}",
-                     error.what()));
-  }
+  return SeaLevelFrom(run, top, sea, ice.State(), StateTime(run), parameters);
 }
 
 /// The ice's change from the ice the run starts from, SI, at SI time
@@ -764,10 +780,10 @@ Loaded LoadWorld(const Run& run, const Json& top,
   const auto& source = run.ocean->seaLevel;
   const auto sea = files.Open(source.input, SeaLevelMember(run, top));
   const auto iceFile = files.Open(run.ocean->ice, IceMember(top));
-  if (!atStart) {
-    CheckReachesEnd(run, *sea, SeaLevelMember(run, top));
-    CheckReachesEnd(run, *iceFile, IceMember(top));
-  }
+  // the state's sea level is held to its file's span first, as the block
+  // lists it (with the state at the window's end, the calibration's target)
+  static_cast<void>(CoveredTime(source.input, *sea, SeaLevelMember(run, top),
+                                state_si, StateReadOf(run)));
   auto ice = std::make_shared<const RunIce>(run, top, files, state_si);
   // the ice at every node the run steps: no change takes more than the
   // state holds
@@ -795,10 +811,50 @@ Loaded LoadWorld(const Run& run, const Json& top,
     ice_nd[i] = ice0[i] / length;
     sl_nd[i] /= length;
   }
-  // a land field with a time axis is read on the calendar: at the window's
-  // start in a dated run, at the state's date in one counting forwards
-  const auto land =
-      ReadLand(run, top, files, window.Dated() ? start_si : state_si);
+  // The land held. A land field on a time axis is read on the calendar:
+  // under migrating shorelines in a dated run at every node's date (the
+  // background takes the first's), the ocean function following both
+  // flotation and the land held at each node; under frozen ones at the
+  // state's instant, whose ocean function the run keeps throughout; in a
+  // run counting forwards at the state's date. A static field is the same
+  // at every date.
+  auto land = LandMask{};
+  auto landHeld = std::function<std::vector<char>(double)>{};
+  if (run.ocean->land) {
+    const auto& input = *run.ocean->land;
+    const auto& member = top.At("ocean").At("land");
+    const auto file = files.Open(input, member);
+    if (window.Dated() && run.Migrating() && OnTimeAxis(input, *file)) {
+      // every node's, read before the run: the run asks at its nodes alone
+      auto masks = std::make_shared<
+          std::vector<std::pair<double, std::vector<char>>>>();
+      for (const auto t : MakeTimes(run, scales)) {
+        masks->emplace_back(
+            t, LandAt(input, *file, member, start_si + t * scales.Time(),
+                      "a node's date, where the run reads it"));
+      }
+      land.held = masks->front().second;
+      land.read = std::format("land {}",
+                              DescribeInput(input, "each node's date"));
+      landHeld = [masks](double t) {
+        const auto found =
+            std::ranges::find(*masks, t, [](const auto& m) { return m.first; });
+        if (found == masks->end()) {
+          throw std::logic_error(
+              "the land held is asked at a time that is not a node of the run");
+        }
+        return found->second;
+      };
+    } else {
+      const auto migratingDated = window.Dated() && run.Migrating();
+      land = ReadLand(
+          run, top, files, migratingDated ? start_si : state_si,
+          migratingDated ? "the window's start, where the run starts"
+                         : StateReadOf(run),
+          WindowSlice(run, *file,
+                      migratingDated ? WindowEnd::Start : run.ocean->at));
+    }
+  }
   auto background =
       solver.MakeState(std::move(ice_nd), std::move(sl_nd), land.held);
   auto iceRead = DescribeInput(run.ocean->ice,
@@ -813,7 +869,8 @@ Loaded LoadWorld(const Run& run, const Json& top,
           std::move(background),
           std::move(iceRead),
           std::move(seaRead),
-          changeAtStart};
+          changeAtStart,
+          std::move(landHeld)};
 }
 
 std::vector<double> FinalSeaLevelOf(const Run& run, const Json& top,
@@ -1116,6 +1173,13 @@ Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
     out.loads = std::make_shared<const SurfaceLoads>(run.forcing,
                                                      solver.Grid(),
                                                      top.At("forcing"));
+    // a `field` file read through time is held to its span at every node
+    // before the run reads it there
+    const auto& scales = solver.SolverScales();
+    const auto clock = SolverClockOf(run, scales);
+    auto times = MakeTimes(run, scales);
+    for (auto& t : times) t = clock.At(t);
+    out.loads->CheckCovers(times);
   }
   if (out.forced) {
     out.forcing =
@@ -1208,6 +1272,10 @@ StaticWorld LoadStaticWorld(const Run& run, const Json& top,
   // a state without a time axis is read at any date: the present's
   const auto date = run.ocean->date_kyr_bp;
   const auto time = -date.value_or(0.0) * KYR;
+  // the state's sea level is held to its file's span first, as the block
+  // lists it
+  static_cast<void>(CoveredTime(source.input, *sea, SeaLevelMember(run, top),
+                                time, StateReadOf(run)));
   const RunIce ice(run, top, files, time);
   ice.CheckHeld(std::span(&time, 1), nullptr);
   // the state's ice, and its sea level: given, or by the flotation
@@ -1217,7 +1285,9 @@ StaticWorld LoadStaticWorld(const Run& run, const Json& top,
   auto seaNd = SeaLevelFrom(run, top, *sea, iceNd, time, solver.Parameters());
   for (auto& v : iceNd) v /= length;
   for (auto& v : seaNd) v /= length;
-  const auto land = ReadLand(run, top, files, time);
+  const auto land =
+      ReadLand(run, top, files, time, StateReadOf(run),
+               std::format("{:g} kyr BP", date.value_or(0.0)));
   auto out = StaticWorld{};
   out.background =
       solver.MakeState(std::move(iceNd), std::move(seaNd), land.held);

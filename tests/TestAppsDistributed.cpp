@@ -10,7 +10,9 @@
 // the uninterrupted one, the trajectory store in per-rank subdirectories
 // against the in-memory recording (recorded by kernel itself, or by solve
 // and swept by kernel without the forward run, a store over another count
-// of ranks refused), a 1-D run of solve, which is the first rank's alone,
+// of ranks refused), a recording run resumed from per-rank checkpoints
+// continuing its store to the uninterrupted one's, a 1-D run of solve,
+// which is the first rank's alone,
 // and what kernel refuses on several ranks. Rank 0 writes
 // the outputs and compares them; every rank's verdict is reduced to rank
 // 0, which alone prints.
@@ -24,6 +26,8 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iterator>
+#include <map>
 #include <planetmodel/error.hpp>
 #include <planetmodel/modelfile.hpp>
 #include <planetmodel/surfacefile.hpp>
@@ -394,6 +398,100 @@ TEST_F(AppsOverRanks, KernelSweepsWhatSolveRecordedOverTheRanks) {
       EXPECT_EQ(values(dir_ / ("out_" + label + "_stored") / "measurements.txt"),
                 values(dir_ / ("out_" + label + "_memory") / "measurements.txt"))
           << label;
+    }
+    Barrier();
+  }
+}
+
+TEST_F(AppsOverRanks, ResumedSolveContinuesItsStoreOverTheRanks) {
+  // A 3-D run over the ranks recording into the trajectory store, stopped
+  // by the wall-time limit after every node's checkpoint, continues its
+  // store from each checkpoint every rank holds: the store it finishes,
+  // every rank's states in its own subdirectory, is file by file and byte
+  // by byte the uninterrupted run's over the same ranks, at a record
+  // stride the resumptions' nodes do not all divide, under frozen and
+  // migrating shorelines, and kernel sweeps from it the uninterrupted
+  // store's kernels to the bit.
+  const auto measurement = std::string{R"(
+      "parameters": ["ice", "viscosity"],
+      "measurements": [
+        {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+         "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}])"};
+  auto migrating = Body(R"("shorelines": "migrating")");
+  migrating.replace(migrating.find(R"("at": "end")"),
+                    std::string_view{R"("at": "end")"}.size(),
+                    R"("at": "start")");
+  const auto bytes = [](const fs::path& root) {
+    auto out = std::map<fs::path, std::string>{};
+    for (const auto& entry : fs::recursive_directory_iterator(root)) {
+      if (!entry.is_regular_file()) continue;
+      auto in = std::ifstream(entry.path(), std::ios::binary);
+      out.emplace(fs::relative(entry.path(), root),
+                  std::string(std::istreambuf_iterator<char>(in), {}));
+    }
+    return out;
+  };
+  for (const auto& [label, body] :
+       {std::pair{std::string{"frozen"}, Body()},
+        std::pair{std::string{"migrating"}, migrating}}) {
+    const auto config = [&](const std::string& name,
+                            const std::string& checkpoint) {
+      return Write(name + ".json",
+                   "{" + body + R"(, "trajectory": {"record_stride": 2,
+                     "directory": "store_)" +
+                       name + R"("})" + checkpoint +
+                       R"(, "output": {"surface": "out/)" + name +
+                       R"(.nc"}, "kernels": {)" + measurement +
+                       R"(, "output": "out_)" + name + R"("}})");
+    };
+    const auto whole = config(label + "_whole", "");
+    const auto parts = config(label + "_parts", R"(, "checkpoint": {
+        "directory": "ckpt_)" + label + R"(", "every": 1,
+        "max_walltime_min": 1e-9})");
+    static_cast<void>(app::RunSolve(whole));
+    auto attempts = 0;
+    auto last = std::string{};
+    for (; attempts < 8; ++attempts) {
+      last = app::RunSolve(parts);
+      if (last.find("wrote") != std::string::npos) break;
+      EXPECT_NE(last.find(std::format("left incomplete at node {}", attempts)),
+                std::string::npos)
+          << last;
+    }
+    EXPECT_EQ(attempts, 3) << label;
+    EXPECT_NE(last.find(", continuing it from node 2"), std::string::npos)
+        << last;
+    static_cast<void>(app::RunKernel(parts));
+    static_cast<void>(app::RunKernel(whole));
+    Barrier();
+    if (Rank() == 0) {
+      const auto got = bytes(dir_ / ("store_" + label + "_parts"));
+      const auto want = bytes(dir_ / ("store_" + label + "_whole"));
+      EXPECT_EQ(got.size(), want.size()) << label;
+      for (const auto& [name, contents] : want) {
+        const auto found = got.find(name);
+        ASSERT_NE(found, got.end()) << label << " " << name;
+        EXPECT_TRUE(found->second == contents) << label << " " << name;
+      }
+      const auto a = pm::ReadSurfaceFile(dir_ / ("out_" + label + "_parts") /
+                                         "site_ice_kernels.nc");
+      const auto b = pm::ReadSurfaceFile(dir_ / ("out_" + label + "_whole") /
+                                         "site_ice_kernels.nc");
+      for (const auto& [name, variable] : b.variables) {
+        EXPECT_EQ(a.variables.at(name).values, variable.values)
+            << label << " " << name;
+      }
+      const auto k = pm::ReadModelFile(dir_ / ("out_" + label + "_parts") /
+                                       "site_viscosity_kernels.nc");
+      const auto m = pm::ReadModelFile(dir_ / ("out_" + label + "_whole") /
+                                       "site_viscosity_kernels.nc");
+      ASSERT_EQ(k.Parts().size(), m.Parts().size());
+      for (auto p = std::size_t{0}; p < m.Parts().size(); ++p) {
+        for (const auto& [name, variable] : m.Parts()[p].variables) {
+          EXPECT_EQ(k.Parts()[p].variables.at(name).values, variable.values)
+              << label << " " << name << " in part " << p;
+        }
+      }
     }
     Barrier();
   }

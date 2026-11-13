@@ -10,6 +10,7 @@
  * refusal named at `trajectory.directory`.
  */
 
+#include <cstddef>
 #include <cstdint>
 #include <filesystem>
 #include <span>
@@ -68,6 +69,16 @@ struct TrajectoryBlock {
 [[nodiscard]] io::TrajectoryStore OpenTrajectory(
     const Json& top, const TrajectoryBlock& block,
     const io::TrajectoryStore::Description& run);
+
+/// The incomplete store at `trajectory.directory` continued by the run
+/// resuming from the checkpoint of `node` (io::TrajectoryStore::Continue),
+/// its refusals (a store short of the run's records to the node, or
+/// recorded otherwise) named at the member with the ways on: `"restart":
+/// false` to start the run over and record it whole, or no
+/// `trajectory.directory` to resume without recording.
+[[nodiscard]] io::TrajectoryStore ContinueTrajectory(
+    const Json& top, const TrajectoryBlock& block,
+    const io::TrajectoryStore::Description& run, std::size_t node);
 
 /// A size on disk for a summary: bytes, KiB, MiB or GiB.
 [[nodiscard]] std::string SizeOf(std::uint64_t bytes);

@@ -232,11 +232,43 @@ cache left out because it does not change the numbers.
    every size. A recording that stops before this is recognised by its
    manifest's complete = 0.
 
+A recording stopped with its run (a run that checkpoints and stops at a
+wall-time limit) is continued by the resumed run from the node of the
+checkpoint it resumes from, k:
+
+1. Survey the directory as above: it must hold an incomplete store with
+   the run's hash, recorded as the run is described (the dimension,
+   times, field size, migrating, sources and tide flags, the stride and
+   the processes' layout, as a reader checks a complete store).
+2. Every process checks the records the run wrote to node k, each whole
+   (its header's tag, kind, node, rank and length those its name gives,
+   the length its file's): the first process the start and the surface
+   records of nodes 0 to k, each process its own state records of the
+   kept nodes among them. A store short of one is refused, nothing
+   removed: a recording begun at node k would lack the nodes before it.
+3. Every process has checked before any removes: the first removes the
+   surface records of the nodes after k and its partial files, each
+   process its own state records after k and its partial files. The
+   manifest is left as it stands, incomplete.
+4. The run records from node k + 1 on, the kept nodes those of the whole
+   run (every s-th from node 0, whatever k is), and completes the
+   manifest as above, the records to node k counted at their files'
+   sizes.
+
+A record is written whole before its node's checkpoint, so the records
+to k are there whenever the checkpoint of k is; no manifest field marks
+how far an incomplete recording reached, the records' presence and
+headers saying it. The store a continued recording completes is the
+uninterrupted run's, file by file.
+
 The library writes the records from the evolutions' own hooks:
 `Options::on_snapshot` hands it each node's snapshot (in 1D with its state
 where kept), and in 3D `Options::on_state` hands it each kept state
 instead of leaving it on the snapshot, so that the run holds no more than
-it does without a store.
+it does without a store. A continued recording (`TrajectoryStore::
+Continue`) sets the resumed evolution's `Options::record_offset` to k, so
+that its stride counts the whole run's nodes, and puts each node it is
+handed, the resumed call's own, at its node of the whole run.
 
 ## Reading
 
@@ -247,7 +279,7 @@ A reader checks, in this order, refusing each fault as its own:
 2. the manifest's tag, byte order and version;
 3. the hash equals the run's (another run's store, complete or not);
 4. complete = 1 (an incomplete store is refused for reading; a recorder
-   may replace it);
+   may replace it, or the resumed run continue it);
 5. the dimension, times (bitwise), field size and the migrating, sources
    and tide flags equal the run's;
 6. the stride equals the run's;

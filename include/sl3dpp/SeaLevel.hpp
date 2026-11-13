@@ -37,6 +37,7 @@
 
 #include <array>
 #include <complex>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -413,6 +414,11 @@ class GRDSolver {
     std::vector<std::complex<double>> toroidalResponse;
     double inertiaMomentChange = 0.0;
     RotationalFeedback rotation = RotationalFeedback::Full;
+    /// The points held at C = 0 whatever the flotation at this solve, in
+    /// the place of the state's `forcedLand` (empty: none held); absent,
+    /// the state's. A land mask that changes in time gives each solve its
+    /// own; the final state keeps the one the solve held.
+    std::optional<std::vector<char>> forcedLand;
   };
 
   struct NonlinearResponse {

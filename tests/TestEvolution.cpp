@@ -265,6 +265,81 @@ TEST(Evolution, ARunOfOneNodeIsHeldToNoFluidLimit) {
                std::invalid_argument);
 }
 
+TEST(Evolution, ALandHeldThatChangesInTimeHoldsEachNodesOwn) {
+  // Under migrating shorelines a land held that changes in time
+  // (Options::land_held) is each node's own: a ring of the state's ocean
+  // held as land from the second node on leaves the first node's ocean
+  // function the run's without it and holds the ring at every later node,
+  // the rest of the ocean still following flotation. The background's own
+  // land at every node is the run without the option, to the bit, and a
+  // land held at the first node other than the background's is refused.
+  auto setup = Setup::Make(true);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto& grid = setup.solver.Grid();
+  const auto kyr = 1000.0 * 3.15576e7 / setup.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, kyr, 2.0 * kyr, 3.0 * kyr};
+  const auto thickness = [&](double t) {
+    auto out = setup.state.iceThickness;
+    for (auto& v : out) v *= 1.0 - 0.1 * t / times.back();
+    return out;
+  };
+  // a ring of ocean
+  const auto& ocean = setup.state.oceanFunction;
+  auto ring = std::vector<char>(ocean.size(), 0);
+  const auto nphi = grid.Longitudes().size();
+  auto ringed = std::size_t{0};
+  for (auto i = std::size_t{0}; i < ocean.size(); ++i) {
+    const auto theta = grid.CoLatitudes()[i / nphi];
+    if (ocean[i] == 1.0 && theta > 1.8 && theta < 2.2) {
+      ring[i] = 1;
+      ++ringed;
+    }
+  }
+  ASSERT_GT(ringed, 0u);
+  const auto options = Evolution::Options{.rtol = 1e-12};
+  Evolution plain(op, setup.solver, setup.state, options);
+  const auto free = plain.RunMigrating(times, thickness);
+  auto held = options;
+  held.land_held = [&](double t) {
+    return t > 0.0 ? ring : std::vector<char>{};
+  };
+  Evolution holding(op, setup.solver, setup.state, held);
+  const auto moved = holding.RunMigrating(times, thickness);
+  ASSERT_EQ(moved.size(), times.size());
+  EXPECT_EQ(moved[0].oceanFunction, free[0].oceanFunction);
+  for (auto n = std::size_t{1}; n < times.size(); ++n) {
+    auto stillOcean = 0.0;
+    auto elsewhere = 0.0;
+    for (auto i = std::size_t{0}; i < ocean.size(); ++i) {
+      if (ring[i]) {
+        stillOcean = std::max(stillOcean, moved[n].oceanFunction[i]);
+      } else {
+        elsewhere = std::max(elsewhere, moved[n].oceanFunction[i]);
+      }
+    }
+    EXPECT_EQ(stillOcean, 0.0) << "node " << n;
+    EXPECT_EQ(elsewhere, 1.0) << "node " << n;
+    EXPECT_NE(moved[n].relativeSeaLevelChange, free[n].relativeSeaLevelChange)
+        << "node " << n;
+  }
+  // the background's own land at every node: the run without the option
+  auto own = options;
+  own.land_held = [&](double) { return setup.state.forcedLand; };
+  Evolution same(op, setup.solver, setup.state, own);
+  const auto again = same.RunMigrating(times, thickness);
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    EXPECT_EQ(again[n].relativeSeaLevelChange, free[n].relativeSeaLevelChange)
+        << "node " << n;
+    EXPECT_EQ(again[n].oceanFunction, free[n].oceanFunction) << "node " << n;
+  }
+  // a land at the first node that is not the background's
+  auto wrong = options;
+  wrong.land_held = [&](double) { return ring; };
+  Evolution refused(op, setup.solver, setup.state, wrong);
+  EXPECT_THROW(static_cast<void>(refused.RunMigrating(times, thickness)),
+               std::invalid_argument);
+}
+
 TEST(Evolution, ViscousMantleKeepsRelaxing) {
   auto setup = Setup::Make(true);
   ViscoelasticOperator op(setup.rheology, kLmax);

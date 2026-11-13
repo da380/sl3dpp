@@ -210,8 +210,9 @@ struct BuiltLoads {
 /// built once, but for a `field` term whose file has a time axis in a run
 /// through time: that file is read at each time asked, at file time
 /// (t - time_origin) in the term's unit, in seconds, by the file's own time
-/// rule (a `node` field interpolated between its nodes, its end values held
-/// outside its span), and expanded there.
+/// rule (a `node` field interpolated between its nodes), and expanded
+/// there. A time outside the field's span is refused, or, where the term
+/// says `"outside_span": "hold"`, its end values are held (ReadValues).
 class TimedLoads {
  public:
   /// Reads the terms' files onto `grid`. `block` is the config's `forcing`
@@ -228,6 +229,10 @@ class TimedLoads {
 
   /// The terms at time t of the terms' clock, SI, each times its factor.
   [[nodiscard]] BuiltLoads At(double t) const;
+
+  /// Refuses, as At would, a time of the terms' clock outside the span of
+  /// a `field` term's file read through time, before the run reads it.
+  void CheckCovers(std::span<const double> times) const;
 
   /// Each `field` term's input as read (DescribeField).
   [[nodiscard]] const std::vector<std::string>& Inputs() const {
@@ -481,6 +486,10 @@ class SurfaceLoads {
     std::vector<double> given;    ///< every term summed as given, kg m^-2
   };
   [[nodiscard]] Node At(double t) const;
+
+  /// Refuses a time outside the span of a `field` term's file read
+  /// through time (TimedLoads::CheckCovers).
+  void CheckCovers(std::span<const double> times) const;
 
   /// Each `field` term's input as read (DescribeField).
   [[nodiscard]] const std::vector<std::string>& Inputs() const {

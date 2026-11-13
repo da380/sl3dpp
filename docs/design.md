@@ -264,8 +264,9 @@ longer free, an unphysical effect.
   memory window: its elements from the first to the last with a relaxing
   node.
 - **Restart.** Both evolutions hand out checkpoints (`Checkpoint`,
-  `on_checkpoint`) and resume from them (`Resume`); a resumed run on one
-  thread is bitwise the uninterrupted one.
+  `on_checkpoint`) and resume from them (`Resume`); a resumed run is
+  bitwise the uninterrupted one within one process (across processes to
+  rounding, as any two runs: Reproducibility, below).
 
 ## 6. The 3D coupling
 
@@ -879,7 +880,10 @@ Beyond the fixtures:
   every thread of a degree loop at once fails on many-core nodes;
   [running.md](running.md) has the detail.
 - **Reproducibility.** Threaded runs reproduce one-thread runs bitwise
-  (loop kernel; measured on the 3D step at 1 to 32 threads).
+  (loop kernel; measured on the 3D step at 1 to 32 threads) within one
+  process. Each process plans its FFTs by timing them (FFTW's measured
+  plans), so two processes may round differently: two runs of one
+  program agree to about 1e-14 relative, not always bitwise.
 - **Distributed over radius (MPI, optional).** A production 3D problem
   (lmax 256) fits one large node, but a step is fastest on one socket, and
   larger problems want the memory of several nodes. With the CMake option

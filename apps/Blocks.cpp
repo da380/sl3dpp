@@ -396,10 +396,10 @@ OceanBlock ReadOceanBlock(const Json& block,
   }
   const auto& input = block.At(source.Member());
   source.input = ReadFileInput(input, directory, source.Member());
-  Allow(input, {"file", "format", "variable"});
+  AllowFileInput(input);
   const auto& ice = block.At("ice");
   out.ice = ReadFileInput(ice, directory, "ice_thickness");
-  Allow(ice, {"file", "format", "variable"});
+  AllowFileInput(ice);
   if (timed) {
     if (!Has(block, "at")) {
       Fail(block,
@@ -426,7 +426,7 @@ OceanBlock ReadOceanBlock(const Json& block,
   if (Has(block, "land")) {
     const auto& land = block.At("land");
     out.land = ReadFileInput(land, directory, "land");
-    Allow(land, {"file", "format", "variable"});
+    AllowFileInput(land);
   }
   if (Has(block, "shorelines")) {
     out.shorelines = Choice<Shorelines>(

@@ -560,6 +560,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     // background must be the state there, flotation's own C included.
     detail::CheckMigratingStart(solver, state_, (*iceThickness)(times[0]),
                                 interior != nullptr);
+    if (options_.land_held) {
+      detail::CheckLandAtStart(solver, state_, options_.land_held(times[0]));
+    }
   }
 
   // A run of one node takes no step: its elastic problem is closed on the
@@ -607,6 +610,12 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
+  // every stride-th node of the whole run is kept, and the last
+  const auto kept = [&](std::size_t node) {
+    if (stride <= 0) return false;
+    const auto every = static_cast<std::size_t>(stride);
+    return (options_.record_offset + node) % every == 0 || node == lastNode;
+  };
 
   auto checkpoint = [&](std::size_t node) {
     const auto every = options_.checkpoint_stride;
@@ -628,6 +637,8 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     auto& moving = coupled.moving;
     moving = GRDSolver::NonlinearForcing{};
     moving.rotation = options_.rotation;
+    // a land mask that changes in time: the node's own
+    if (options_.land_held) moving.forcedLand = options_.land_held(t);
     if (interior == nullptr) return;
     setTide(t);
     if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
@@ -682,7 +693,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     if (kept && options_.on_state) options_.on_state(node, std::move(*kept));
   };
   if (!resumed) {
-    record(times[0], response, startInfo, true, stride > 0);
+    record(times[0], response, startInfo, true, kept(0));
     checkpoint(0);
   }
 
@@ -716,8 +727,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     op.Recycle(
         std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
     step.reset();
-    const bool keep = stride > 0 && (node % stride == 0 || node == lastNode);
-    record(times[node], response, info, info.converged, keep);
+    record(times[node], response, info, info.converged, kept(node));
     checkpoint(node);
   }
   op.ReleaseScratch();

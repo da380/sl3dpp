@@ -34,4 +34,24 @@ void CheckMigratingStart(const GRDSolver& solver,
   }
 }
 
+void CheckLandAtStart(const GRDSolver& solver,
+                      const GRDSolver::State& background,
+                      std::span<const char> startLand) {
+  const auto fieldSize = solver.Grid().FieldSize();
+  if (!startLand.empty() && startLand.size() != fieldSize) {
+    throw std::invalid_argument(
+        "the land held is not a mask on the solver's grid");
+  }
+  const auto& held = background.forcedLand;
+  for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+    const auto given = !startLand.empty() && startLand[i] != 0;
+    const auto own = !held.empty() && held[i] != 0;
+    if (given != own) {
+      throw std::invalid_argument(
+          "the land held at the first node is not the background state's: "
+          "build the state with the land held at times[0]");
+    }
+  }
+}
+
 }  // namespace sl3dpp::detail

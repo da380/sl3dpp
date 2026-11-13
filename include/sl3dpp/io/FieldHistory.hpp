@@ -75,6 +75,12 @@ class FieldHistory {
   /// has no time axis.
   [[nodiscard]] std::optional<std::pair<double, double>> Span() const;
 
+  /// Whether a field is static, the same at every time: one of `static`
+  /// support, as every field of a file without a time axis is, beside
+  /// fields on the file's time axis in a file with one. Throws
+  /// std::runtime_error naming a field the file lacks.
+  [[nodiscard]] bool Static(std::string_view name) const;
+
   /// A field's SI values at an SI time, colatitude-major on the grid
   /// given at Read; a static field ignores the time.
   [[nodiscard]] std::vector<double> Values(std::string_view name,
