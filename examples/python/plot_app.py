@@ -3,7 +3,8 @@
 ICE-7G configs too), then `poetry run python plot_app.py` from
 build/examples. Each config's outputs, in configs/out/<config>/, are read
 with planetmodel's own readers, and its figures are written to
-figures/sl3d/<config>/:
+figures/sl3d/<config>/, those comparing a run with gravity and its twin
+without to figures/sl3d/with_and_without_gravity/:
 
     love_numbers/love_numbers.png
     sea_level_fingerprint/fingerprint.png
@@ -25,10 +26,14 @@ figures/sl3d/<config>/:
     timestep_study/accuracy.png                 (the timestep_* runs)
     sea_level_static_coseismic/coseismic.png
     sea_level_postseismic/postseismic.png
-    postseismic_no_gravity/postseismic.png
+    no_ocean_postseismic/postseismic.png
+    no_gravity_postseismic/postseismic.png
     no_ocean_seismic/postseismic.png
     kernel_postseismic/kernels.png
-    no_gravity_load/gravity.png                 (with no_ocean_load_cap)
+    with_and_without_gravity/postseismic.png    (no_gravity_postseismic
+                                                 against no_ocean_postseismic)
+    with_and_without_gravity/load.png           (no_gravity_load against
+                                                 no_ocean_load_cap)
     sea_level_tide_migrating/sea_level.png
 
 and, where the ICE-7G runs exist, sea_level_fingerprint_ice7g/fingerprint.png,
@@ -61,10 +66,11 @@ from planetmodel.harmonics import (analyse_grid, synthesise,
 from planetmodel.modelfile import read_model_file
 from planetmodel.surfacefile import read_surface_file
 
-from inputs import distance_deg
+from inputs import distance_deg, maxwell_times
 from plotutil import (DATA, HAVE_CARTOPY, Example, arrows, destination,
-                      map_axes, mark_fault, mark_sites, plot_field,
-                      save_figure, world_map)
+                      map_axes, mark_fault, mark_relaxation_times, mark_sites,
+                      plot_field, relaxation_axis, save_figure, stepped,
+                      world_map)
 
 if HAVE_CARTOPY:
     import cartopy.crs as ccrs
@@ -895,6 +901,48 @@ def at_point(values, grid, lat: float, lon: float) -> np.ndarray:
                       np.deg2rad(lon % 360.0))
 
 
+def cap_filter(lmax: int, width_deg: float = 2.0) -> np.ndarray:
+    """The degree weights of a mean over a Gaussian cap of the given width,
+    exp(-d^2 / 2 w^2) in the distance d, degrees 0 to lmax: by Funk and
+    Hecke the cap mean of a field about a point is its expansion with
+    degree l weighted by the cap's mean of P_l(cos d), synthesised there
+    (the library's CapMeanDual, exact rather than sampled)."""
+    width = np.deg2rad(width_deg)
+    reach = min(np.pi, 12.0 * width)
+    x, w = np.polynomial.legendre.leggauss(400)
+    d = 0.5 * reach * (x + 1.0)
+    weight = 0.5 * reach * w * np.exp(-0.5 * (d / width) ** 2) * np.sin(d)
+    c = np.cos(d)
+    out = np.empty(lmax + 1)
+    before, current = np.ones_like(c), c
+    out[0] = 1.0
+    for l in range(1, lmax + 1):
+        out[l] = np.sum(weight * current) / np.sum(weight)
+        before, current = current, ((2 * l + 1) * c * current
+                                    - l * before) / (l + 1)
+    return out
+
+
+def expansion(values, grid, width_deg: float | None = None) -> np.ndarray:
+    """A field's expansion from its values on the grid, (..., nlat, nlon);
+    with `width_deg`, that of its mean over a Gaussian cap of that width
+    about every point (cap_filter's weights by degree)."""
+    coefficients = analyse_grid(np.asarray(values), grid)
+    if width_deg is None:
+        return coefficients
+    weights = cap_filter(coefficients.shape[1] - 1, width_deg)
+    return coefficients * weights.reshape(
+        (1, -1) + (1,) * (coefficients.ndim - 2))
+
+
+def cap_mean(values, grid, lat: float, lon: float,
+             width_deg: float = 2.0) -> np.ndarray:
+    """A field's mean over a Gaussian cap of the given width about a
+    place (cap_filter): values (..., nlat, nlon) give (...)."""
+    return synthesise(expansion(values, grid, width_deg),
+                      np.deg2rad(90.0 - lat), np.deg2rad(lon % 360.0))
+
+
 def refined(grid, fields: dict, nlat: int = 360) -> Example:
     """Band-limited fields on the run's grid resampled onto an
     equiangular grid of nlat x 2 nlat by their expansions, for smooth maps
@@ -1414,17 +1462,20 @@ def region_limit(ex: Example, names, extent) -> float:
                for n in names)
 
 
-def tangential(V, W, grid, theta, phi):
+def tangential(V, W, grid, theta, phi, width_deg: float | None = None):
     """The tangential surface displacement, east and north, at points
     (colatitudes and longitudes in radians, broadcast together), from a
     run's tangential and toroidal potentials (m) on its grid, u_t = grad_1
-    V - r x grad_1 W (W None: none). Fields with a node axis first give
+    V - r x grad_1 W (W None: none); with `width_deg`, of the potentials'
+    Gaussian cap means (expansion). Fields with a node axis first give
     that axis first."""
-    v_theta, v_phi = synthesise_gradient(analyse_grid(V, grid), theta, phi)
+    v_theta, v_phi = synthesise_gradient(expansion(V, grid, width_deg),
+                                         theta, phi)
     s = np.sin(theta)
     u_theta, u_phi = v_theta, v_phi / s
     if W is not None:
-        w_theta, w_phi = synthesise_gradient(analyse_grid(W, grid), theta, phi)
+        w_theta, w_phi = synthesise_gradient(expansion(W, grid, width_deg),
+                                             theta, phi)
         u_theta = u_theta + w_phi / s
         u_phi = u_phi - w_theta
     return u_phi, -u_theta
@@ -1444,15 +1495,16 @@ def ocean_of(file):
     return None
 
 
-def motion(file, extent, index=None, since=None,
-           spacing: float = 0.1) -> Example:
+def motion(file, extent, index=None, since=None, spacing: float = 0.1,
+           width_deg: float | None = None) -> Example:
     """A seismic run's surface motion over a map region (west, east, south,
     north) at a node (index None: a static file), less that at node
     `since` where given, on a lattice `spacing` degrees apart by the
-    fields' expansions: the vertical displacement `up`, the horizontal
-    `east`, `north` and its size `horizontal`, and, with an ocean, the
-    relative sea-level change `sea` over the ocean (NaN on land), all in
-    m."""
+    fields' expansions (with `width_deg`, their Gaussian cap means about
+    every point: expansion): the vertical displacement `up`, the
+    horizontal `east`, `north` and its size `horizontal`, and, with an
+    ocean, the relative sea-level change `sea` over the ocean (NaN on
+    land), all in m."""
     grid = file.grid
 
     def node(name):
@@ -1470,18 +1522,18 @@ def motion(file, extent, index=None, since=None,
     colatitudes, longitudes = np.deg2rad(90.0 - lats), np.deg2rad(lons)
     theta, phi = np.meshgrid(colatitudes, longitudes, indexing="ij")
 
-    def at(values):
-        return synthesise(analyse_grid(values, grid), theta, phi)
+    def at(values, width=width_deg):
+        return synthesise(expansion(values, grid, width), theta, phi)
 
     toroidal = (node("toroidal_potential")
                 if "toroidal_potential" in file.variables else None)
     east_, north_ = tangential(node("tangential_potential"), toroidal, grid,
-                               theta, phi)
+                               theta, phi, width_deg)
     fields = {"up": at(node("displacement")), "east": east_,
               "north": north_, "horizontal": np.hypot(east_, north_)}
     ocean = ocean_of(file)
     if ocean is not None and "relative_sea_level_change" in file.variables:
-        wet = at(ocean.astype(float)) > 0.5
+        wet = at(ocean.astype(float), None) > 0.5
         fields["sea"] = np.where(wet, at(node("relative_sea_level_change")),
                                  np.nan)
     return Example.from_fields(colatitudes, longitudes, fields)
@@ -1500,13 +1552,14 @@ def regional_map(fig, rows, cols, index, source, extent):
 
 
 def profile(file, source: dict, index=None, reach_km: float = 900.0,
-            count: int = 241):
+            count: int = 241, width_deg: float | None = None):
     """The motion along the great circle through a source across its
     strike, from `reach_km` up dip to `reach_km` down dip, at a node (index
-    None: a static file): the distances (km, positive down dip), the
-    vertical displacement, the horizontal displacement up dip (towards a
-    thrust's trench) and along strike, and the relative sea-level change
-    where the ocean is (NaN elsewhere), m."""
+    None: a static file), the fields' point values or, with `width_deg`,
+    their Gaussian cap means (expansion): the distances (km, positive down
+    dip), the vertical displacement, the horizontal displacement up dip
+    (towards a thrust's trench) and along strike, and the relative
+    sea-level change where the ocean is (NaN elsewhere), m."""
     grid = file.grid
 
     def node(name):
@@ -1518,11 +1571,12 @@ def profile(file, source: dict, index=None, reach_km: float = 900.0,
     lat, lon = np.array([destination(source["latitude"], source["longitude"],
                                      dip, d) for d in distance]).T
     theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon)
-    up = synthesise(analyse_grid(node("displacement"), grid), theta, phi)
+    up = synthesise(expansion(node("displacement"), grid, width_deg), theta,
+                    phi)
     toroidal = (node("toroidal_potential")
                 if "toroidal_potential" in file.variables else None)
     east, north = tangential(node("tangential_potential"), toroidal, grid,
-                             theta, phi)
+                             theta, phi, width_deg)
     # the profile's own direction at each point, down dip
     ahead = np.r_[1:count, count - 1]
     behind = np.r_[0, 0:count - 1]
@@ -1533,8 +1587,8 @@ def profile(file, source: dict, index=None, reach_km: float = 900.0,
     sea = np.full(count, np.nan)
     ocean = ocean_of(file)
     if ocean is not None and "relative_sea_level_change" in file.variables:
-        values = synthesise(analyse_grid(node("relative_sea_level_change"),
-                                         grid), theta, phi)
+        values = synthesise(expansion(node("relative_sea_level_change"),
+                                      grid, width_deg), theta, phi)
         wet = np.array([ocean[nearest(grid, a, b)] for a, b in zip(lat, lon)])
         sea = np.where(wet, values, np.nan)
     return distance, up, -down_dip, along_strike, sea
@@ -1546,20 +1600,33 @@ def node_times(file):
     return np.asarray(file.time) / TIME_UNITS[unit], unit
 
 
+# The width of the Gaussian caps the seismic figures average over. The
+# fields of a fault a few kilometres deep, laid out as point sources 50 km
+# apart, are not converged in lmax at any degree these runs reach: the
+# truncation rings about the source, and finer degrees resolve the point
+# sources one by one. Their means over 2° caps are converged by lmax 96
+# (to a few tenths of a per cent of lmax 128; configs/README.md).
+MEAN_DEG = 2.0
+MEANS = (f"{MEAN_DEG:g}° Gaussian means (the fields averaged over a cap of "
+         f"{MEAN_DEG:g}° about each point)")
+
+
 def coseismic(name: str, title: str) -> None:
     """A fault's co-seismic response, the static problem: maps centred on
     the source of the vertical displacement, of the horizontal
     displacement (its size, and arrows) and, with an ocean, of the relative
-    sea-level change over the ocean, the fault's surface projection drawn
-    (its up-dip edge heavy); and every one along a profile across the
-    fault through its centroid."""
+    sea-level change over the ocean, each a 2° Gaussian mean, the fault's
+    surface projection drawn (its up-dip edge heavy); and every one along
+    a profile across the fault through its centroid, the 2° means and the
+    vertical displacement's point values, whose ripples are the
+    truncation."""
     path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
     kind, source = seismic_source(name)
     file = read_surface_file(path)
     extent = source_extent(source)
-    ex = motion(file, extent)
+    ex = motion(file, extent, width_deg=MEAN_DEG)
     lmax = file.grid.lmax
 
     fig = plt.figure(figsize=(13, 9.5))
@@ -1580,11 +1647,16 @@ def coseismic(name: str, title: str) -> None:
         mark_source(ax, kind, source)
         fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
 
-    distance, up, updip, strike, sea = profile(file, source)
+    distance, up, updip, strike, sea = profile(file, source,
+                                               width_deg=MEAN_DEG)
+    _, up_point, _, _, _ = profile(file, source)
     ax = fig.add_subplot(2, 2, 4)
-    ax.plot(distance, up, color="C3", label="vertical")
-    ax.plot(distance, updip, color="C0", label="horizontal, up dip")
-    ax.plot(distance, strike, color="C0", ls=":", label="horizontal, along strike")
+    ax.plot(distance, up_point, color="C3", lw=0.7, alpha=0.6,
+            label="vertical, point values (not converged in lmax)")
+    ax.plot(distance, up, color="C3", lw=2.0, label="vertical")
+    ax.plot(distance, updip, color="C0", lw=2.0, label="horizontal, up dip")
+    ax.plot(distance, strike, color="C0", ls=":",
+            label="horizontal, along strike")
     if np.any(np.isfinite(sea)):
         ax.plot(distance, sea, color="C2", lw=2.0, alpha=0.7,
                 label="relative sea level, over the ocean")
@@ -1596,50 +1668,129 @@ def coseismic(name: str, title: str) -> None:
                   f"positive down dip, to azimuth "
                   f"{(source['strike_deg'] + 90.0) % 360.0:g}°)")
     ax.set_ylabel("m")
-    ax.set_title("along a profile across the fault (the ripples, 360/"
-                 f"{lmax} degrees apart,\nare the response's truncation at "
-                 f"lmax {lmax})", fontsize=10)
-    ax.legend(fontsize=8)
-    fig.suptitle(title + "\nmaps centred on the fault, meridians and "
-                 "parallels 5° apart; the fault's surface projection drawn, its "
-                 "up-dip edge heavy", fontsize=11)
+    ax.set_title(f"along a profile across the fault: {MEAN_DEG:g}° means "
+                 f"(thick), and the\npoint values, whose ripples, 360/{lmax} "
+                 f"degrees apart, are the truncation", fontsize=10)
+    ax.legend(fontsize=7)
+    fig.suptitle(f"{title}, lmax {lmax}\nmaps centred on the fault, "
+                 "meridians and parallels 5° apart, the fault's surface "
+                 f"projection drawn, its up-dip edge heavy;\nmaps {MEANS}",
+                 fontsize=10)
     fig.tight_layout()
     save(fig, name, "coseismic")
 
 
-def step_series(times: np.ndarray, values: np.ndarray):
-    """A node series drawn from zero before the event: the co-seismic step
-    at the first node a vertical rise."""
-    lead = 0.04 * (times[-1] - times[0])
-    return (np.r_[times[0] - lead, times[0], times],
-            np.r_[0.0, 0.0, values])
+def deck_of(name: str) -> Path:
+    """A config's deck, its path as the config resolves it."""
+    model = json.loads((CONFIGS / f"{name}.json").read_text())["model"]
+    return CONFIGS / model["deck"]
+
+
+def relaxation_bands(name: str):
+    """The Maxwell times of a config's deck, its viscous layers of one
+    viscosity together (inputs.maxwell_times), as mark_relaxation_times's
+    bands keyed M1, M2, ... from the surface down."""
+    return [(f"M{k + 1}", f"{top:.0f}–{bottom:.0f} km, "
+             f"{eta:.0e} Pa s".replace("e+", "e") + ", Maxwell times "
+             f"{years_text(shortest)}–{years_text(longest)} yr",
+             shortest, longest, "band")
+            for k, (top, bottom, eta, shortest, longest)
+            in enumerate(maxwell_times(deck_of(name)))]
+
+
+def years_text(t: float) -> str:
+    """A time in years to two figures, without an exponent."""
+    return f"{t:.2g}" if t < 100.0 else f"{t:.0f}"
+
+
+def site_series(file, source: dict, sites, width_deg: float = 2.0):
+    """A seismic run's series at places, each a mean over a Gaussian cap
+    of the given width (cap_mean): per place the vertical displacement and,
+    with an ocean, the relative sea-level change, or without one the
+    horizontal displacement up dip, the cap mean of the potentials'
+    horizontal gradient there; m."""
+    grid = file.grid
+    up = np.asarray(file.variables["displacement"].values)
+    wet = ("relative_sea_level_change" in file.variables
+           and ocean_of(file) is not None)
+    V = np.asarray(file.variables["tangential_potential"].values)
+    W = (np.asarray(file.variables["toroidal_potential"].values)
+         if "toroidal_potential" in file.variables else None)
+    weights = cap_filter(grid.lmax, width_deg)
+
+    def filtered(values):
+        c = analyse_grid(values, grid)
+        return c * weights.reshape((1, -1) + (1,) * (c.ndim - 2))
+
+    cV = filtered(V)
+    cW = filtered(W) if W is not None else None
+    dip = np.deg2rad(source.get("strike_deg", 0.0) + 90.0)
+    out = []
+    for _, (lat, lon) in sites:
+        vertical = cap_mean(up, grid, lat, lon, width_deg)
+        if wet:
+            other = cap_mean(
+                np.asarray(file.variables["relative_sea_level_change"].values),
+                grid, lat, lon, width_deg)
+        else:
+            theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon % 360.0)
+            v_theta, v_phi = synthesise_gradient(cV, theta, phi)
+            u_theta, u_phi = v_theta, v_phi / np.sin(theta)
+            if cW is not None:
+                w_theta, w_phi = synthesise_gradient(cW, theta, phi)
+                u_theta = u_theta + w_phi / np.sin(theta)
+                u_phi = u_phi - w_theta
+            east, north = u_phi, -u_theta
+            other = -(east * np.sin(dip) + north * np.cos(dip))
+        out.append((vertical, other))
+    return out, wet
+
+
+def time_series_panel(ax, times, curves, bands, ylabel: str,
+                      label_bands: bool = True) -> list[str]:
+    """Node series from zero before the event on relaxation_axis, each
+    curve (values, color, linestyle, label), and the relaxation times'
+    bands marked; returns the bands' keys."""
+    for values, color, ls, label in curves:
+        ax.plot(*stepped(times, values), color=color, ls=ls, marker="o",
+                ms=2.5, markevery=slice(2, None), label=label)
+    relaxation_axis(ax, times)
+    ax.axhline(0.0, color="0.6", lw=0.5)
+    ax.set_ylabel(ylabel)
+    return mark_relaxation_times(ax, bands, label=label_bands)
 
 
 def postseismic(name: str, title: str) -> None:
     """A source's co-seismic and post-seismic response, a run through
     time: maps centred on the source of the vertical displacement at the
-    event and of its change since the event at two later nodes; with an
-    ocean, of the relative sea-level change since the event at the last
-    node over the ocean, and without one of the horizontal displacement's
+    event and of its change since the event at two later nodes (about
+    twice the deck's shortest Maxwell time, and the last); with an ocean,
+    of the relative sea-level change since the event at the last node
+    over the ocean, and without one of the horizontal displacement's
     change; and the vertical displacement and the sea level (without an
     ocean, the horizontal displacement up dip) through time at three
-    places, from zero before the event."""
+    places, 2° cap means, from zero before the event on a time axis
+    linear about the event and logarithmic after it, the deck's Maxwell
+    times marked."""
     path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
     kind, source = seismic_source(name)
     file = read_surface_file(path)
-    grid = file.grid
     times, unit = node_times(file)
+    bands = relaxation_bands(name)
     last = len(times) - 1
-    middle = int(np.argmin(np.abs(times - 0.2 * times[-1])))
+    middle = int(np.argmin(np.abs(np.log(np.maximum(times, 1e-30))
+                                  - np.log(2.0 * bands[0][2]))))
     extent = source_extent(source)
-    event = motion(file, extent, 0)
-    later = {n: motion(file, extent, n, since=0) for n in (middle, last)}
-    wet = "sea" in event.fields
+    event = motion(file, extent, 0, width_deg=MEAN_DEG)
+    later = {n: motion(file, extent, n, since=0, width_deg=MEAN_DEG)
+             for n in (middle, last)}
 
-    fig = plt.figure(figsize=(15, 9.5))
+    fig = plt.figure(figsize=(16, 10))
+    spec = fig.add_gridspec(2, 3, width_ratios=[1.0, 1.0, 1.25])
     ax = regional_map(fig, 2, 3, 1, source, extent)
+    ax.set_subplotspec(spec[0, 0])
     mesh = plot_field(ax, event, "up", title="vertical displacement at the "
                       f"event, {times[0]:g} {unit} (m)",
                       limit=region_limit(event, ["up"], extent))
@@ -1647,13 +1798,17 @@ def postseismic(name: str, title: str) -> None:
     fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
     for k, n in enumerate((middle, last)):
         ax = regional_map(fig, 2, 3, 2 + k, source, extent)
+        ax.set_subplotspec(spec[0, 1] if k == 0 else spec[1, 0])
         mesh = plot_field(ax, later[n], "up",
                           limit=region_limit(later[n], ["up"], extent),
                           title=f"its change from the event to {times[n]:g} "
                                 f"{unit} (m)")
         mark_source(ax, kind, source)
         fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
-    ax = regional_map(fig, 2, 3, 4, source, extent)
+    ax = regional_map(fig, 2, 3, 5, source, extent)
+    ax.set_subplotspec(spec[1, 1])
+    sites = source_sites(source)
+    series, wet = site_series(file, source, sites)
     if wet:
         mesh = plot_field(ax, later[last], "sea",
                           limit=region_limit(later[last], ["sea"], extent),
@@ -1667,50 +1822,111 @@ def postseismic(name: str, title: str) -> None:
         mesh.set_clim(0.0, region_limit(later[last], ["horizontal"], extent))
         arrows(ax, later[last], extent)
     mark_source(ax, kind, source)
-    sites = source_sites(source)
     mark_sites(ax, [site for _, site in sites], colors=["C0", "C1", "C2"])
     fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
 
-    up = np.asarray(file.variables["displacement"].values)
-    ax_u = fig.add_subplot(2, 3, 5)
-    ax_s = fig.add_subplot(2, 3, 6)
-    for k, (label, (lat, lon)) in enumerate(sites):
-        ax_u.plot(*step_series(times, at_point(up, grid, lat, lon)), "-",
-                  color=f"C{k}", marker="o", ms=3, markevery=slice(2, None),
-                  label=f"{label} ({lat:.1f}, {lon:.1f})")
-        if wet:
-            sea = np.asarray(file.variables["relative_sea_level_change"].values)
-            values = at_point(sea, grid, lat, lon)
-        else:
-            theta, phi = np.deg2rad(90.0 - lat), np.deg2rad(lon)
-            toroidal = (np.asarray(file.variables["toroidal_potential"].values)
-                        if "toroidal_potential" in file.variables else None)
-            east, north = tangential(
-                np.asarray(file.variables["tangential_potential"].values),
-                toroidal, grid, theta, phi)
-            dip = np.deg2rad(source.get("strike_deg", 0.0) + 90.0)
-            values = -(east * np.sin(dip) + north * np.cos(dip))
-        ax_s.plot(*step_series(times, values), "-", color=f"C{k}", marker="o",
-                  ms=3, markevery=slice(2, None), label=label)
-    for ax, ylabel in ((ax_u, "vertical displacement (m)"),
-                       (ax_s, "relative sea level (m)" if wet else
-                        "horizontal displacement up dip (m)")):
-        ax.axhline(0.0, color="0.6", lw=0.5)
-        ax.axvline(times[0], color="0.6", lw=0.5, ls=":")
-        ax.set_xlabel(f"time on the run's clock ({unit}; the event at "
-                      f"{times[0]:g})")
-        ax.set_ylabel(ylabel)
-    ax_u.set_title("at three places, the co-seismic step and the relaxation",
-                   fontsize=10)
-    ax_u.legend(fontsize=8)
+    cell = spec[:, 2].subgridspec(2, 1, hspace=0.12)
+    ax_u = fig.add_subplot(cell[0])
+    ax_s = fig.add_subplot(cell[1], sharex=ax_u)
+    keys = time_series_panel(
+        ax_u, times, [(up, f"C{k}", "-", f"{label} ({lat:.1f}, {lon:.1f})")
+                      for k, ((label, (lat, lon)), (up, _))
+                      in enumerate(zip(sites, series))],
+        bands, "vertical displacement (m)")
+    time_series_panel(
+        ax_s, times, [(other, f"C{k}", "-", label)
+                      for k, ((label, _), (_, other))
+                      in enumerate(zip(sites, series))],
+        bands, "relative sea level (m)" if wet else
+        "horizontal displacement up dip (m)", label_bands=False)
+    ax_u.set_title("at three places: the co-seismic step and the "
+                   "relaxation", fontsize=10, pad=14)
+    ax_u.legend(fontsize=8, loc="best")
+    ax_u.tick_params(labelbottom=False)
     ax_s.set_title("relative sea level there" if wet else
-                   "the horizontal displacement there", fontsize=10)
-    ax_s.legend(fontsize=8)
-    fig.suptitle(title + "; maps centred on the source, meridians and "
-                 "parallels 5° apart, the places of the time series marked",
-                 fontsize=11)
+                   "the horizontal displacement up dip there", fontsize=10)
+    ax_s.set_xlabel(f"time on the run's clock ({unit}; the event at "
+                    f"{times[0]:g}; linear to {times[1]:g}, logarithmic "
+                    "after)\n" + "\n".join(keys), fontsize=8)
+    fig.suptitle(f"{title}, lmax {file.grid.lmax}\nmaps centred on the "
+                 "source, meridians and parallels 5° apart, the places of the "
+                 f"time series marked; maps and series {MEANS}", fontsize=10)
     fig.tight_layout()
     save(fig, name, "postseismic")
+
+
+# The figures comparing a run with gravity and its twin without, in a
+# folder of their own rather than either run's.
+GRAVITY_PAIRS = "with_and_without_gravity"
+
+
+def postseismic_gravity() -> None:
+    """The same fault on the same Earth without an ocean, with gravity
+    (no_ocean_postseismic) and without it (no_gravity_postseismic): the
+    vertical and horizontal displacement through time at three places
+    and the vertical displacement across the fault at the event and at
+    the last node, both runs on each panel, all 2° Gaussian means."""
+    names = {"with": "no_ocean_postseismic", "without": "no_gravity_postseismic"}
+    paths = {k: OUT / n / f"{n}.nc" for k, n in names.items()}
+    if not all(p.exists() for p in paths.values()):
+        return
+    kind, source = seismic_source(names["without"])
+    files = {k: read_surface_file(p) for k, p in paths.items()}
+    times, unit = node_times(files["without"])
+    bands = relaxation_bands(names["without"])
+    sites = source_sites(source)
+    series = {k: site_series(f, source, sites)[0] for k, f in files.items()}
+    styles = {"with": "--", "without": "-"}
+
+    fig = plt.figure(figsize=(16, 6.6))
+    spec = fig.add_gridspec(1, 3)
+    keys = []
+    for col, (part, ylabel) in enumerate(
+            ((0, "vertical displacement (m)"),
+             (1, "horizontal displacement up dip (m)"))):
+        ax = fig.add_subplot(spec[0, col])
+        curves = [(series[key][k][part], f"C{k}", styles[key], None)
+                  for k in range(len(sites)) for key in ("without", "with")]
+        keys = time_series_panel(ax, times, curves, bands, ylabel)
+        ax.set_xlabel(f"years since the event (linear to {times[1]:g}, "
+                      "logarithmic after)", fontsize=8)
+        ax.set_title("vertical" if part == 0 else "horizontal up dip",
+                     fontsize=10, pad=14)
+        if part == 0:
+            ax.legend([plt.Line2D([], [], color=f"C{k}")
+                       for k in range(len(sites))]
+                      + [plt.Line2D([], [], color="0.3", ls=styles[key])
+                         for key in ("without", "with")],
+                      [label for label, _ in sites]
+                      + ["without gravity", "with gravity"], fontsize=8,
+                      loc="best")
+
+    ax = fig.add_subplot(spec[0, 2])
+    last = len(times) - 1
+    for n, color in ((0, "0.4"), (last, "C3")):
+        for key, file in files.items():
+            distance, up, _, _, _ = profile(file, source, index=n,
+                                            width_deg=MEAN_DEG)
+            ax.plot(distance, up, color=color, ls=styles[key],
+                    label=f"{times[n]:g} {unit}, {key} gravity")
+    half = 0.5 * source["width_km"] * np.cos(np.deg2rad(source["dip_deg"]))
+    ax.axvspan(-half, half, color="0.88", zorder=0)
+    ax.axhline(0.0, color="0.6", lw=0.5)
+    ax.set_xlabel("distance across the fault through its centroid (km, "
+                  "positive down dip;\nits surface projection shaded)",
+                  fontsize=8)
+    ax.set_ylabel("vertical displacement (m)")
+    ax.set_title(f"across the fault, at the event and at {times[last]:g} "
+                 f"{unit}", fontsize=10)
+    ax.legend(fontsize=8)
+    fig.suptitle("sl3d solve, without an ocean: the thrust of "
+                 "sea_level_postseismic with gravity (no_ocean_postseismic) "
+                 "and without it (no_gravity_postseismic), on "
+                 f"{deck_of(names['without']).name}, lmax "
+                 f"{files['with'].grid.lmax}\nseries and profiles {MEANS}\n"
+                 + "; ".join(keys), fontsize=10)
+    fig.tight_layout()
+    save(fig, GRAVITY_PAIRS, "postseismic")
 
 
 def double_couple(strike: float, dip: float, rake: float) -> np.ndarray:
@@ -1838,19 +2054,24 @@ def kernel_postseismic() -> None:
         ax.legend(fontsize=7)
 
     ax = fig.add_subplot(spec[:, 2])
+    deepest = 300.0  # km: the depth the kernels reach, at least this
     for stem, value in values.items():
         data = np.loadtxt(directory / f"{stem}_viscosity_kernel.txt")
         radius, kernel = data[:, 0], data[:, 1]
         scale = np.max(np.abs(kernel)) or 1.0
-        ax.plot(kernel / scale, (radius[-1] - radius) / 1e3,
-                label=f"{stem} (J = {value:.3g} m)")
-    ax.set_ylim(3000.0, 0.0)
+        depth = (radius[-1] - radius) / 1e3
+        ax.plot(kernel / scale, depth, label=f"{stem} (J = {value:.3g} m)")
+        deepest = max(deepest, depth[np.abs(kernel) > 0.01 * scale].max())
+    for top, bottom, *_ in maxwell_times(deck_of(name)):
+        ax.axhline(bottom, color="0.75", lw=0.6, ls=":")
+    ax.set_ylim(min(1.3 * deepest, 2900.0), 0.0)
     ax.axvline(0.0, color="0.7", linewidth=0.6)
     ax.set_xlabel("viscosity kernel K(r) per unit volume\n(dJ = $\\int$ K "
                   "d$\\eta$ dV), each scaled to its largest value")
     ax.set_ylabel("depth (km)")
-    ax.set_title("the radial viscosity kernels", fontsize=10)
-    ax.legend(fontsize=8)
+    ax.set_title("the radial viscosity kernels\n(dotted: the bases of the "
+                 "deck's viscous layers)", fontsize=10)
+    ax.legend(fontsize=8, loc="lower right")
     fig.suptitle("sl3d kernel: a GPS station's eastward and upward motion 20 "
                  "years after a thrust off the synthetic South America, and a "
                  "tide gauge's sea level a century after,\nby the discrete "
@@ -1945,7 +2166,7 @@ def no_gravity_load() -> None:
                  "gravity, on the radial Maxwell Earth (prem8, 1e21 Pa s, "
                  "lmax 32)", fontsize=11)
     fig.tight_layout()
-    save(fig, names["without"], "gravity")
+    save(fig, GRAVITY_PAIRS, "load")
 
 
 def sea_level_tide_migrating() -> None:
@@ -2068,21 +2289,24 @@ if __name__ == "__main__":
               "sl3d solve, the static problem: the co-seismic response of a "
               "thrust off the synthetic South America\n(600 by 150 km, "
               "dipping 18° east, 2e22 N m as 12 by 3 point sources), with an "
-              "ocean and full rotational feedback, on the elastic prem8 deck "
-              "(lmax 64)")
+              "ocean and full rotational feedback, on the elastic prem8 deck")
     postseismic("sea_level_postseismic",
                 "sl3d solve: that thrust's co-seismic and post-seismic "
-                "response with an ocean and full rotational feedback, on the "
-                "radial Maxwell Earth (prem8, 1e21 Pa s, lmax 64)")
-    postseismic("postseismic_no_gravity",
-                "sl3d solve, the problem without gravity: a point thrust at "
-                "that fault's centroid (2e22 N m), no ocean, on the radial "
-                "Maxwell Earth (prem8, 1e21 Pa s, lmax 64)")
+                "response with an ocean and full rotational feedback, on "
+                "prem8.postseismic.deck (a 50 km elastic lid over a Maxwell "
+                "mantle)")
+    postseismic("no_ocean_postseismic",
+                "sl3d solve, no ocean: that thrust's response without an "
+                "ocean or a rotational feedback, on prem8.postseismic.deck")
+    postseismic("no_gravity_postseismic",
+                "sl3d solve, the problem without gravity: that thrust, no "
+                "ocean, on prem8.postseismic.deck")
+    postseismic_gravity()
     postseismic("no_ocean_seismic",
                 "sl3d solve, no ocean: a thrust off north-east Japan (400 by "
                 "150 km, dipping 12° to the west-north-west, 4e22 N m as 8 by "
-                "3 point sources),\non the radial Maxwell Earth (prem8, "
-                "1e21 Pa s, lmax 64)")
+                "3 point sources),\non prem8.postseismic.deck (a 50 km "
+                "elastic lid over a Maxwell mantle)")
     kernel_postseismic()
     no_gravity_load()
     sea_level_tide_migrating()

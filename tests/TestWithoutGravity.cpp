@@ -2,7 +2,8 @@
 // non-gravitating operator against the closed form of the homogeneous
 // Maxwell sphere under a point source switched on at t = 0 and under a
 // surface load (its weight, a normal traction) held from t = 0 or ramped
-// up; a static load against the non-gravitating traction numbers times its
+// up, and of the homogeneous Burgers sphere under the point source (its
+// two Prony terms against the Burgers modulus); a static load against the non-gravitating traction numbers times its
 // weight; a body with a fluid core against its shell above the core; a
 // resumed run and the factored sources against the general run; loads and
 // sources together against the sum of their runs; and what a run without
@@ -226,10 +227,13 @@ long double Hyperbola(const std::function<Wide(Wide)>& F, long double t,
 }
 
 /// The closed form through time: per (l, m) the real and imaginary parts'
-/// Data, and the material.
+/// Data, and the material: its shear modulus in the Laplace variable,
+/// `shear` where given and the Maxwell modulus mu s / (s + itau)
+/// otherwise.
 struct Oracle {
   long double a = 0.0, kappa = 0.0, mu = 0.0, itau = 0.0;
   std::map<std::pair<int, int>, std::array<Data, 2>> data;
+  std::function<Wide(Wide)> shear;
 
   /// The elastic closed form, coefficient (U, V, W) of (l, m).
   [[nodiscard]] std::array<Complex, 3> Elastic(int l, int m) const {
@@ -254,8 +258,8 @@ struct Oracle {
       long double value[2];
       for (auto part = 0; part < 2; ++part) {
         const auto F = [&](Wide s) {
-          const auto maxwell = mu * s / (s + itau);
-          return ClosedForm(l, parts[part], a, kappa, maxwell)[c] / s;
+          const auto modulus = shear ? shear(s) : mu * s / (s + itau);
+          return ClosedForm(l, parts[part], a, kappa, modulus)[c] / s;
         };
         value[part] = hyperbola ? Hyperbola(F, t, nodes) : Talbot(F, t, nodes);
       }
@@ -432,7 +436,8 @@ Oracle MakeOracle(const Material& material, const PointSource& source,
   std::array<std::vector<Complex>, 3> E;
   for (auto i = 0; i < 3; ++i) E[i] = grid.Expand(unit[i]);
 
-  Oracle oracle{.a = a, .kappa = kappa, .mu = mu, .itau = itau, .data = {}};
+  Oracle oracle{
+      .a = a, .kappa = kappa, .mu = mu, .itau = itau, .data = {}, .shear = {}};
   for (auto l = 0; l <= kLmax; ++l) {
     for (auto m = 0; m <= l; ++m) {
       const auto i = SurfaceGrid::Index(l, m);
@@ -623,6 +628,155 @@ TEST(WithoutGravity, TheMaxwellSphereThroughTimeInClosedForm) {
     EXPECT_LT(gaps.back()[0], order == 2.0 ? 1e-8 : 2e-5);
     for (const auto& gap : gaps) EXPECT_LT(gap[1], 1e-9);
   }
+}
+
+TEST(WithoutGravity, TheBurgersSphereThroughTimeInClosedForm) {
+  // The homogeneous sphere as a Burgers body, a Maxwell element (mu, eta)
+  // in series with a Kelvin element (mu_K, eta_K), the post-seismic
+  // examples' ratios mu_K = mu and eta_K = eta / 10: its two Prony terms
+  // (Rheology::Burgers, BurgersPronyTerms) stepped through time against
+  // the correspondence principle at the Burgers modulus itself,
+  // 1 / mu(s) = 1 / mu + 1 / (eta s) + 1 / (mu_K + eta_K s). The toroidal
+  // response of the homogeneous body is the elastic one times mu / mu(s),
+  // W_el mu J(t) with J the Burgers creep function.
+  const auto body = Body::Make();
+  const auto& material = body.material;
+  const auto& mesh = material.Mesh();
+  const auto [kappas, mus] = material.Moduli().KappaMu();
+  const auto mu = mus.front();
+  const auto tau = 1.0;  // the Maxwell element's time eta / mu
+  const auto eta = mu * tau, muK = mu, etaK = 0.1 * eta;
+  auto viscosity = std::map<std::size_t, RadialValue>{};
+  auto kelvin = std::map<std::size_t, Rheology::Kelvin>{};
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto layer = static_cast<std::size_t>(mesh.LayerOf(e));
+    viscosity[layer] = eta;
+    kelvin[layer] = Rheology::Kelvin{.modulus_fraction = muK / mu,
+                                     .viscosity = etaK};
+  }
+  const auto rheology = Rheology::Burgers(material, viscosity, kelvin).value();
+  ASSERT_EQ(rheology.BranchCount(), 2u);
+  const ViscoelasticOperator op(rheology, kLmax,
+                                {.eps = 1e-12, .gravitating = false});
+  const auto solver = SolverOf(material);
+  const auto& sle = solver.SolverScales();
+  const auto& scales = material.ModelScales();
+  const auto length = scales.Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto moment = sle.Factor(energy) / scales.Factor(energy);
+  const auto time = sle.Time() / scales.Time();
+
+  const PointSource source{
+      .at = {.radius = 0.5 * material.Radius(), .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {
+          .rr = 0.9, .tt = -0.2, .pp = 0.5, .rt = 0.3, .rp = -0.7, .tp = 0.6}};
+  auto given = source;
+  given.at.radius *= length;
+  for (auto* c : {&given.moment.rr, &given.moment.tt, &given.moment.pp,
+                  &given.moment.rt, &given.moment.rp, &given.moment.tp}) {
+    *c /= moment;
+  }
+  auto oracle = MakeOracle(material, source, 1.0 / tau);
+  oracle.shear = [m = static_cast<long double>(mu),
+                  e = static_cast<long double>(eta),
+                  mk = static_cast<long double>(muK),
+                  ek = static_cast<long double>(etaK)](Wide s) {
+    return 1.0L / (1.0L / m + 1.0L / (e * s) + 1.0L / (mk + ek * s));
+  };
+  auto creep = [&](double t) {  // mu J(t)
+    return 1.0 + t / tau + mu / muK * (1.0 - std::exp(-t * muK / etaK));
+  };
+
+  // -- the oracle against itself and the creep function
+  const auto checks = std::vector<double>{0.125 * tau, 0.5 * tau, tau};
+  auto exact =
+      std::map<std::pair<int, int>, std::vector<std::array<Complex, 3>>>{};
+  auto scaleS = 0.0, scaleT = 0.0, contours = 0.0, toroidal = 0.0;
+  for (auto l = 0; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      const auto elastic = oracle.Elastic(l, m);
+      auto& series = exact[{l, m}];
+      series.push_back(elastic);
+      for (const auto t : checks) {
+        const auto talbot = oracle.At(l, m, t, false, 24);
+        const auto hyperbola = oracle.At(l, m, t, true, 32);
+        for (auto c = 0; c < 3; ++c) {
+          if (c < 2) {
+            scaleS = std::max(scaleS, std::abs(talbot[c]));
+          } else if (l >= 2) {
+            scaleT = std::max(scaleT, std::abs(talbot[c]));
+          }
+          contours = std::max(contours, std::abs(talbot[c] - hyperbola[c]));
+        }
+        if (l >= 2) {
+          toroidal = std::max(toroidal,
+                              std::abs(talbot[2] - elastic[2] * creep(t)));
+        }
+        series.push_back(talbot);
+      }
+    }
+  }
+  const auto scale = std::max(scaleS, scaleT);
+  RecordProperty("oracle_contours", std::format("{:.3e}", contours / scale));
+  RecordProperty("oracle_toroidal_creep",
+                 std::format("{:.3e}", toroidal / scaleT));
+  EXPECT_LT(contours, 1e-12 * scale);
+  EXPECT_LT(toroidal, 1e-11 * scaleT);
+
+  // -- the evolution without gravity against it, by the exponential
+  // trapezoid at three steps, the finest a sixth of the faster term's time
+  const SurfaceGrid& grid = solver.Grid();
+  const auto sources = [&](double) { return std::vector<PointSource>{given}; };
+  auto gaps = std::vector<std::array<double, 2>>{};
+  for (const auto steps : {32, 64, 128}) {
+    const auto dt = tau / steps;
+    auto times = std::vector<double>{};
+    for (auto n = 0; n <= steps; ++n) times.push_back(n * dt / time);
+    Evolution evolution(op, solver, solver.NoOceanState(),
+                        {.rotation = RotationalFeedback::None});
+    const auto snapshots =
+        evolution.Run(times, Evolution::Forcing{.sources = sources});
+    ASSERT_EQ(snapshots.size(), times.size());
+    auto worstS = 0.0, worstT = 0.0;
+    const auto compared = std::vector<int>{0, steps / 8, steps / 2, steps};
+    for (auto k = std::size_t{0}; k < compared.size(); ++k) {
+      const auto& snapshot = snapshots[compared[k]];
+      const auto U = grid.Expand(snapshot.displacement);
+      const auto V = grid.Expand(snapshot.tangentialPotential);
+      const auto W = grid.Expand(snapshot.toroidalPotential);
+      for (auto l = 0; l <= kLmax; ++l) {
+        for (auto m = 0; m <= l; ++m) {
+          const auto i = SurfaceGrid::Index(l, m);
+          const auto& want = exact.at({l, m})[k];
+          worstS = std::max({worstS, std::abs(U[i] / length - want[0]),
+                             std::abs(V[i] / length - want[1])});
+          if (l >= 2) {
+            worstT = std::max(worstT, std::abs(W[i] / length - want[2]));
+          }
+        }
+      }
+    }
+    gaps.push_back({worstS / scaleS, worstT / scaleT});
+    RecordProperty(std::format("trapezoid_dt_tau_over_{}_spheroidal", steps),
+                   std::format("{:.3e}", gaps.back()[0]));
+    RecordProperty(std::format("trapezoid_dt_tau_over_{}_toroidal", steps),
+                   std::format("{:.3e}", gaps.back()[1]));
+  }
+  for (auto k = std::size_t{1}; k < gaps.size(); ++k) {
+    for (auto c = 0; c < 2; ++c) {
+      const auto rate = std::log2(gaps[k - 1][c] / gaps[k][c]);
+      RecordProperty(std::format("trapezoid_rate_{}_{}", k,
+                                 c == 0 ? "spheroidal" : "toroidal"),
+                     std::format("{:.3f}", rate));
+      EXPECT_GT(rate, 1.75) << "step " << k << ", component " << c;
+      EXPECT_LT(rate, 2.25) << "step " << k << ", component " << c;
+    }
+  }
+  // the faster term's time is 0.049 tau: at a sixth of it the gap is
+  // 7e-5 of the response
+  EXPECT_LT(gaps.back()[0], 1e-4);
+  EXPECT_LT(gaps.back()[1], 1e-4);
 }
 
 namespace {

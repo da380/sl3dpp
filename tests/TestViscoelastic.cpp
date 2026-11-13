@@ -1,13 +1,19 @@
-// The viscoelastic stepper: weight algebra, rheology construction, the
-// elastic and long-term limits, measured order of accuracy, the exact
-// inverse step, and the effective-operator limits. The pyslfp comparison
-// lives in TestFixtures.
+// The viscoelastic stepper: weight algebra, rheology construction (the
+// Burgers body's Prony terms against its modulus and creep function among
+// it), the elastic and long-term limits, measured order of accuracy, the
+// exact inverse step, and the effective-operator limits. The pyslfp
+// comparison lives in TestFixtures.
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <complex>
 #include <filesystem>
+#include <format>
 #include <map>
+#include <stdexcept>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -143,6 +149,165 @@ TEST(Rheology, MaxwellConstructionAndLimits) {
     if (body.model.IsFluid(i)) onFluid.emplace(i, 1e21);
   }
   EXPECT_FALSE(Rheology::Maxwell(body.material, onFluid).has_value());
+}
+
+TEST(Rheology, BurgersPronyTermsAreTheBurgersBody) {
+  // The two Prony terms of a Burgers body against its own definitions:
+  // the modulus in the Laplace variable, the unrelaxed modulus and the
+  // steady viscosity, and the creep function. Under a unit stress held
+  // from t = 0 the Prony body's strain e, from 1 = sum_k mu_k (e - m_k)
+  // with dm_k/dt = itau_k (e - m_k), integrated by RK4, is the Burgers
+  // creep function J(t) = 1/mu + t/eta + (1 - exp(-t mu_K/eta_K)) / mu_K.
+  struct Body {
+    double mu, eta, muK, etaK;
+  };
+  const auto bodies = std::vector<Body>{
+      {1.0, 1.0, 1.0, 0.1},  // the post-seismic examples' asthenosphere
+      {1.0, 1.0, 0.5, 2.0},  // a Kelvin element slower than the Maxwell one
+      {6.6e10, 1.0e19, 6.6e10, 1.0e18},  // SI
+      {2.0, 3.0, 1.0e3, 1.0e-3},         // a stiff, quick Kelvin element
+      {1.0, 1.0, 1.0e-4, 1.0e-4},        // a soft one
+      {1.0, 1.0e6, 1.0, 1.0}};           // a near-rigid dashpot
+  auto laplace = 0.0;
+  for (const auto& [mu, eta, muK, etaK] : bodies) {
+    const auto terms = BurgersPronyTerms(mu, eta, muK, etaK);
+    const auto label = std::format("({}, {}, {}, {})", mu, eta, muK, etaK);
+    EXPECT_GT(terms[0].mu, 0.0) << label;
+    EXPECT_GT(terms[1].mu, 0.0) << label;
+    EXPECT_LT(terms[0].itau, terms[1].itau) << label;
+    EXPECT_NEAR(terms[0].mu + terms[1].mu, mu, 1e-14 * mu) << label;
+    EXPECT_NEAR(terms[0].mu / terms[0].itau + terms[1].mu / terms[1].itau, eta,
+                1e-13 * eta)
+        << label;
+    // 1 / M(s) = 1/mu + 1/(eta s) + 1/(mu_K + eta_K s) on the scale of
+    // the rates, real and complex
+    const auto scale = terms[1].itau;
+    for (const auto s :
+         {std::complex<double>(1e-3, 0.0), std::complex<double>(0.7, 0.0),
+          std::complex<double>(30.0, 0.0), std::complex<double>(0.2, 1.5),
+          std::complex<double>(-0.01, 4.0)}) {
+      const auto z = s * scale;
+      const auto prony = terms[0].mu * z / (z + terms[0].itau) +
+                         terms[1].mu * z / (z + terms[1].itau);
+      const auto burgers =
+          1.0 / (1.0 / mu + 1.0 / (eta * z) + 1.0 / (muK + etaK * z));
+      EXPECT_LT(std::abs(prony - burgers), 1e-13 * std::abs(burgers))
+          << label << " at s = " << z;
+      laplace =
+          std::max(laplace, std::abs(prony - burgers) / std::abs(burgers));
+    }
+  }
+  RecordProperty("laplace_relative", std::format("{:.3e}", laplace));
+  // the creep function, on the bodies whose rates a few thousand RK4
+  // steps resolve
+  auto creepGap = 0.0;
+  for (const auto& [mu, eta, muK, etaK] :
+       std::vector<Body>{bodies[0], bodies[1], bodies[2]}) {
+    const auto terms = BurgersPronyTerms(mu, eta, muK, etaK);
+    const auto h = 0.01 / terms[1].itau;
+    const auto end = 5.0 * std::max(eta / mu, etaK / muK);
+    auto strain = [&](const std::array<double, 2>& m) {
+      return (1.0 + terms[0].mu * m[0] + terms[1].mu * m[1]) /
+             (terms[0].mu + terms[1].mu);
+    };
+    auto rate = [&](const std::array<double, 2>& m) {
+      const auto e = strain(m);
+      return std::array<double, 2>{terms[0].itau * (e - m[0]),
+                                   terms[1].itau * (e - m[1])};
+    };
+    auto creep = [&](double t) {
+      return 1.0 / mu + t / eta + (1.0 - std::exp(-t * muK / etaK)) / muK;
+    };
+    auto m = std::array<double, 2>{};
+    auto worst = std::abs(strain(m) - creep(0.0));
+    const auto steps = static_cast<int>(std::ceil(end / h));
+    for (auto n = 0; n < steps; ++n) {
+      auto shifted = [&](const std::array<double, 2>& k, double f) {
+        return std::array<double, 2>{m[0] + f * h * k[0], m[1] + f * h * k[1]};
+      };
+      const auto k1 = rate(m);
+      const auto k2 = rate(shifted(k1, 0.5));
+      const auto k3 = rate(shifted(k2, 0.5));
+      const auto k4 = rate(shifted(k3, 1.0));
+      for (auto k = 0; k < 2; ++k) {
+        m[k] += h / 6.0 * (k1[k] + 2.0 * k2[k] + 2.0 * k3[k] + k4[k]);
+      }
+      worst = std::max(worst, std::abs(strain(m) - creep((n + 1) * h)));
+    }
+    EXPECT_LT(worst, 1e-9 * creep(steps * h))
+        << "creep of (" << mu << ", " << eta << ", " << muK << ", " << etaK
+        << ")";
+    creepGap = std::max(creepGap, worst / creep(steps * h));
+  }
+  RecordProperty("creep_relative", std::format("{:.3e}", creepGap));
+  EXPECT_THROW(static_cast<void>(BurgersPronyTerms(1.0, 0.0, 1.0, 1.0)),
+               std::invalid_argument);
+}
+
+TEST(Rheology, BurgersLayersAreTwoBranches) {
+  // Rheology::Burgers on the PREM-like body: a Maxwell lower mantle and a
+  // Burgers upper mantle (its Kelvin element of the unrelaxed modulus and
+  // a tenth of the steady viscosity), two branches whose moduli sum to
+  // the unrelaxed one and whose summed mu_k tau_k is the steady
+  // viscosity at every Burgers node, the Maxwell nodes as Maxwell's.
+  auto body = TestBody::Make(4);
+  const auto& scales = body.model.ModelScales();
+  const auto eta = 1e21 / scales.Factor(ViscosityDimensions);
+  const auto& mesh = body.material.Mesh();
+  const auto b = body.model.DimensionlessView().Boundaries();
+  auto viscosity = std::map<std::size_t, RadialValue>{};
+  auto kelvin = std::map<std::size_t, Rheology::Kelvin>{};
+  const auto d670 = 5.7011e6 / scales.Length();
+  for (auto i = std::size_t{0}; i < body.model.LayerCount(); ++i) {
+    if (body.model.IsFluid(i) || b[i] < 3.4799e6 / scales.Length() ||
+        b[i + 1] > 6.1511e6 / scales.Length()) {
+      continue;
+    }
+    viscosity[i] = eta;
+    if (b[i] >= d670 - 1e-6) {
+      kelvin[i] =
+          Rheology::Kelvin{.modulus_fraction = 1.0, .viscosity = 0.1 * eta};
+    }
+  }
+  ASSERT_FALSE(kelvin.empty());
+  const auto burgers =
+      Rheology::Burgers(body.material, viscosity, kelvin).value();
+  ASSERT_EQ(burgers.BranchCount(), 2u);
+  const auto& maxwell = body.rheology;
+  const auto mu = burgers.MuUnrelaxed();
+  auto burgersNodes = 0;
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    const auto isBurgers =
+        kelvin.contains(static_cast<std::size_t>(mesh.LayerOf(e)));
+    for (auto i = 0; i < mesh.NGll(); ++i) {
+      const auto node = static_cast<std::size_t>(e) * mesh.NGll() + i;
+      const auto& slow = burgers.BranchAt(0);
+      const auto& fast = burgers.BranchAt(1);
+      if (!isBurgers) {
+        EXPECT_EQ(slow.mu[node], maxwell.BranchAt(0).mu[node]);
+        EXPECT_EQ(slow.itau[node], maxwell.BranchAt(0).itau[node]);
+        EXPECT_EQ(fast.mu[node], 0.0);
+        continue;
+      }
+      ++burgersNodes;
+      EXPECT_NEAR(slow.mu[node] + fast.mu[node], mu[node], 1e-14 * mu[node]);
+      EXPECT_NEAR(
+          slow.mu[node] / slow.itau[node] + fast.mu[node] / fast.itau[node],
+          eta, 1e-13 * eta);
+      // the Maxwell time tau_M = eta / mu: the post-seismic examples'
+      // ratios, 0.475 mu at 2.05 tau_M and 0.525 mu at 0.0488 tau_M
+      const auto tauM = eta / mu[node];
+      EXPECT_NEAR(slow.mu[node] / mu[node], 0.4750, 5e-4);
+      EXPECT_NEAR(1.0 / (slow.itau[node] * tauM), 2.0510, 5e-4);
+      EXPECT_NEAR(1.0 / (fast.itau[node] * tauM), 0.04875, 5e-5);
+      EXPECT_NEAR(burgers.MuLongTerm()[node], 0.0, 1e-14 * mu[node]);
+    }
+  }
+  EXPECT_GT(burgersNodes, 0);
+  // a Kelvin element without a steady viscosity is refused
+  auto orphan = kelvin;
+  orphan[0] = Rheology::Kelvin{.modulus_fraction = 1.0, .viscosity = eta};
+  EXPECT_FALSE(Rheology::Burgers(body.material, viscosity, orphan).has_value());
 }
 
 TEST(Viscoelastic, ElasticAndLongTermLimits) {

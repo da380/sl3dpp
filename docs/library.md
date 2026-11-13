@@ -19,7 +19,7 @@ the API.
 | `EarthModel.hpp`, `Scales.hpp` | The splined radial model, its layering and gravity, and non-dimensionalisation |
 | `RadialMesh.hpp`, `Material.hpp` | The spectral-element radial mesh (GLL nodes, each degree acting on the elements above its truncation radius), and the material on its nodes, with its directions of variation (`MaterialDirection`, `Variation`) |
 | `MemoryPoints.hpp` | Where the internal variables live in each element (Gauss or GLL points), the shear term integrated there, and the volume pairing of a radial kernel with a perturbation (`VolumePairing`) |
-| `Rheology.hpp`, `StepWeights.hpp` | Relaxing shear branches: a Maxwell body from a viscosity profile, a model's own viscosity column, or general branches; the time schemes' step weights |
+| `Rheology.hpp`, `StepWeights.hpp` | Relaxing shear branches: a Maxwell body from a viscosity profile, a model's own viscosity column, or general branches; Burgers layers (a Kelvin element in series with the Maxwell one) as their two exact Prony terms (`Rheology::Burgers`, `BurgersPronyTerms`); the time schemes' step weights |
 | `DegreeOperator.hpp`, `ToroidalOperator.hpp`, `LoveNumbers.hpp` | Per-degree spheroidal and toroidal systems, with gravity or without; Love numbers, and their derivatives and kernels in κ and μ |
 | `SurfaceGrid.hpp`, `ShConventions.hpp`, `Geography.hpp` | The Gauss–Legendre surface grid and its transforms; spherical-harmonic conventions; geographic coordinates |
 | `Fingerprint.hpp` | Elastic sea-level fingerprints, SI in and out |

@@ -63,6 +63,39 @@ def write_decks(model, stem) -> tuple[Path, Path]:
     return wrote(gia), wrote(elastic)
 
 
+def maxwell_times(path):
+    """The Maxwell times of a Maxwell (GIA) deck's viscous layers, those of
+    one viscosity next to each other taken together, from the surface
+    down: (top depth km, bottom depth km, viscosity Pa s, shortest and
+    longest Maxwell time eta / mu over the knots in years), mu the Voigt
+    average shear modulus."""
+    data = np.genfromtxt(path, skip_header=2, comments="#")
+    r, rho, vpv, vsv, vph, vsh, eta, viscosity = data.T
+    big_a, big_c = rho * vph**2, rho * vpv**2
+    big_l, big_n = rho * vsv**2, rho * vsh**2
+    big_f = eta * (big_a - 2.0 * big_l)
+    mu = (big_a + big_c - 2.0 * big_f + 5.0 * big_n + 6.0 * big_l) / 15.0
+    tau = viscosity / mu / (KYR / 1.0e3)
+    surface = r[-1]
+    groups = []  # (bottom radius, top radius, viscosity, shortest, longest)
+    for knots in np.split(np.arange(r.size),
+                          np.flatnonzero(np.diff(r) == 0.0) + 1):
+        if not np.all(np.isfinite(viscosity[knots])):
+            continue
+        group = (r[knots[0]], r[knots[-1]], viscosity[knots[0]],
+                 tau[knots].min(), tau[knots].max())
+        if groups and groups[-1][2] == group[2] and groups[-1][1] == group[0]:
+            last = groups[-1]
+            group = (last[0], group[1], group[2], min(last[3], group[3]),
+                     max(last[4], group[4]))
+            groups[-1] = group
+        else:
+            groups.append(group)
+    return [((surface - hi) / 1e3, (surface - lo) / 1e3, float(v),
+             float(shortest), float(longest))
+            for lo, hi, v, shortest, longest in reversed(groups)]
+
+
 def read_deck_model(path):
     """A deck sl3d reads, as a planetmodel model, its format from its name:
     *.elastic.deck the six columns with no header, anything else the

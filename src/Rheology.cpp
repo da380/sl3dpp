@@ -1,9 +1,11 @@
 #include "sl3dpp/Rheology.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <format>
 #include <limits>
+#include <stdexcept>
 
 namespace sl3dpp {
 
@@ -15,6 +17,34 @@ double Evaluate(const RadialValue& value, double r) {
 }
 
 }  // namespace
+
+std::array<PronyTerm, 2> BurgersPronyTerms(double mu, double eta,
+                                           double kelvinModulus,
+                                           double kelvinViscosity) {
+  for (const auto v : {mu, eta, kelvinModulus, kelvinViscosity}) {
+    if (!std::isfinite(v) || !(v > 0.0)) {
+      throw std::invalid_argument(
+          "a Burgers body's moduli and viscosities are positive and finite");
+    }
+  }
+  const auto a = mu / eta;
+  const auto b = mu / kelvinViscosity;
+  const auto c = kelvinModulus / kelvinViscosity;
+  // the roots' gap, its square a sum of non-negative terms
+  const auto gap = std::sqrt((a - c) * (a - c) + b * b + 2.0 * b * (a + c));
+  const auto fast = 0.5 * (a + b + c + gap);
+  const auto slow = a * c / fast;  // the product of the roots is a c
+  // gap > |s| for s = b + c - a and for s = a + b - c (gap^2 - s^2 is
+  // 4 a b and 4 b c), so gap + s > 0 either way, formed without
+  // cancellation: 4 a b / (gap - s) or 4 b c / (gap - s) where s < 0
+  auto plus = [&](double s, double product) {
+    return s >= 0.0 ? gap + s : 4.0 * product / (gap - s);
+  };
+  const auto aboveSlow = c * 0.5 * plus(b + c - a, a * b) / fast;  // c - slow
+  const auto belowFast = 0.5 * plus(a + b - c, b * c);             // fast - c
+  return {PronyTerm{.mu = mu * aboveSlow / gap, .itau = slow},
+          PronyTerm{.mu = mu * belowFast / gap, .itau = fast}};
+}
 
 std::expected<Rheology, RheologyError> Rheology::Create(
     const Material& material, std::vector<Branch> branches) {
@@ -141,6 +171,54 @@ std::expected<Rheology, RheologyError> Rheology::Maxwell(
     }
   }
   return Maxwell(material, perLayer);
+}
+
+std::expected<Rheology, RheologyError> Rheology::Burgers(
+    const Material& material,
+    const std::map<std::size_t, RadialValue>& viscosity,
+    const std::map<std::size_t, Kelvin>& kelvin) {
+  for (const auto& entry : kelvin) {
+    if (!viscosity.contains(entry.first)) {
+      return std::unexpected(RheologyError{
+          std::format("layer {} has a Kelvin element but no steady viscosity",
+                      entry.first)});
+    }
+  }
+  auto maxwell = Maxwell(material, viscosity);
+  if (!maxwell) return std::unexpected(maxwell.error());
+  auto slow = maxwell->branches_.front();
+  Branch fast;
+  fast.mu.assign(slow.mu.size(), 0.0);
+  fast.itau.assign(slow.mu.size(), 0.0);
+  const auto& mu = maxwell->muUnrelaxed_;
+  const auto& mesh = material.Mesh();
+  const auto n = mesh.NGll();
+  for (const auto& [layer, element] : kelvin) {
+    const auto& steady = viscosity.at(layer);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (static_cast<std::size_t>(mesh.LayerOf(e)) != layer) continue;
+      for (auto i = 0; i < n; ++i) {
+        const auto node = static_cast<std::size_t>(e) * n + i;
+        const auto r = mesh.Radius(e, i);
+        const auto fraction = Evaluate(element.modulus_fraction, r);
+        const auto etaK = Evaluate(element.viscosity, r);
+        if (!(fraction > 0.0) || !(etaK > 0.0) || !std::isfinite(fraction) ||
+            !std::isfinite(etaK)) {
+          return std::unexpected(RheologyError{std::format(
+              "layer {}: a Kelvin element's modulus fraction and viscosity "
+              "must be positive and finite",
+              layer)});
+        }
+        const auto terms = BurgersPronyTerms(mu[node], Evaluate(steady, r),
+                                             fraction * mu[node], etaK);
+        slow.mu[node] = terms[0].mu;
+        slow.itau[node] = terms[0].itau;
+        fast.mu[node] = terms[1].mu;
+        fast.itau[node] = terms[1].itau;
+      }
+    }
+  }
+  return Create(material, {std::move(slow), std::move(fast)});
 }
 
 std::expected<Rheology, RheologyError> Rheology::FromModel(

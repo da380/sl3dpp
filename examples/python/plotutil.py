@@ -276,3 +276,54 @@ def arrows(ax, example: Example, extent, east: str = "east",
                        width=0.004, zorder=5, **kwargs)
     ax.quiverkey(quiver, 0.08, 0.05, key, f"{key:g} m", labelpos="E",
                  coordinates="axes", fontproperties={"size": 8})
+
+
+# --------------------------------------------------- relaxation through time
+def relaxation_axis(ax, times) -> None:
+    """A time axis for a relaxation from a co-seismic step at times[0]:
+    linear from a little before the event to the first node after it, and
+    logarithmic beyond (symlog), so that a decay over decades bends where a
+    linear axis would draw it as a line; ticks as plain numbers."""
+    import matplotlib.ticker
+
+    times = np.asarray(times, float)
+    first = float(np.min(times[times > times[0]]) - times[0])
+    ax.set_xscale("symlog", linthresh=first, linscale=0.5)
+    ax.set_xlim(times[0] - 0.7 * first, times[-1] * 1.25)
+    ax.xaxis.set_major_formatter(matplotlib.ticker.FuncFormatter(
+        lambda x, _: f"{x:g}"))
+
+
+def stepped(times, values):
+    """A node series drawn from zero before the event, on relaxation_axis:
+    the co-seismic step at times[0] a vertical rise."""
+    times = np.asarray(times, float)
+    first = float(np.min(times[times > times[0]]) - times[0])
+    return (np.r_[times[0] - 0.5 * first, times[0], times],
+            np.r_[0.0, 0.0, values])
+
+
+def mark_relaxation_times(ax, bands, label: bool = True) -> list[str]:
+    """Marks on a time axis each band of relaxation times, (key,
+    description, shortest, longest, style): style "band" a grey band over
+    [shortest, longest], "line" a dashed line at their geometric middle;
+    with `label`, each key above the axes at its band's middle. Returns
+    "key: description" for every band, those beyond the axis saying so."""
+    left, right = ax.get_xlim()
+    keys = []
+    for key, text, shortest, longest, style in bands:
+        if shortest > right:
+            keys.append(f"{key}: {text} (beyond the axis)")
+            continue
+        keys.append(f"{key}: {text}")
+        middle = np.sqrt(shortest * longest)
+        if style == "band":
+            ax.axvspan(shortest, min(longest, right), color="0.86", lw=0,
+                       zorder=0)
+        else:
+            ax.axvline(middle, color="0.55", lw=0.8, ls=(0, (4, 3)),
+                       zorder=0)
+        if label:
+            ax.text(middle, 1.01, key, ha="center", va="bottom", fontsize=7,
+                    color="0.3", transform=ax.get_xaxis_transform())
+    return keys

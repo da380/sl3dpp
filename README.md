@@ -24,7 +24,8 @@ of mantle viscosity using deglacial sea level observations;
 - **Two problems.** The static problem, one elastic solve at an instant
   (a sea-level fingerprint, a co-seismic response), and the quasi-static
   problem, stepped through time on generalised Maxwell (Prony) rheologies
-  by implicit schemes whose step is not limited by the Maxwell times.
+  (Maxwell and Burgers bodies among them) by implicit schemes whose step
+  is not limited by the Maxwell times.
 - **1D or 3D.** A radial model, isotropic or transversely isotropic (with
   its Love numbers), or one with a lateral viscosity η = η̄(r) exp(δ(r, θ, φ)),
   lateral bulk and shear moduli, or both, applied pseudospectrally with

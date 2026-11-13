@@ -34,7 +34,7 @@ file(MAKE_DIRECTORY ${SL3DPP_EXAMPLE_DATA})
 
 # The inputs, into data/: the PREM-like deck and a planetmodel model file of
 # a 3D viscosity on the same body (test fixtures), and the examples' own
-# (examples/data: the deck in planetmodel's GIA format).
+# (examples/data: the decks in planetmodel's GIA format).
 configure_file(${PROJECT_SOURCE_DIR}/tests/data/prem8.elastic.deck
                ${SL3DPP_EXAMPLE_DATA}/prem8.elastic.deck COPYONLY)
 configure_file(${PROJECT_SOURCE_DIR}/tests/data/viscosity_log.nc

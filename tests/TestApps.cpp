@@ -591,7 +591,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 56);
+  EXPECT_EQ(read, 57);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {

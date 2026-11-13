@@ -48,7 +48,8 @@ run solve sea_level_fingerprint_3d.json
 run solve sea_level_static_migrating.json
 run solve sea_level_static_coseismic.json
 run solve sea_level_postseismic.json
-run solve postseismic_no_gravity.json
+run solve no_ocean_postseismic.json
+run solve no_gravity_postseismic.json
 # the checkpoints of a former run_all.sh go first: the build may have
 # written the run's inputs since, which makes them another run's
 rm -rf out/sea_level_1d/checkpoints

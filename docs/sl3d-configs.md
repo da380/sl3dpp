@@ -755,8 +755,8 @@ states kept, the last always), the store holds about
 At L = 8 on the prem8 deck a 1D state is 346 kB and a 3D one (lateral
 viscosity) 2 MB; at L = 64 a 3D state is of order 100 MB, and a run of
 81 nodes at stride 9 about 1 GB. Under seismic sources at L = 32
-(examples/configs/kernel_postseismic.json, 1D, 7 nodes) each node's
-record is 83 MB, 557 MiB in all. The summaries give each store's size.
+(examples/configs/kernel_postseismic.json, 1D, 8 nodes) each node's
+record is 86 MB, 655 MiB in all. The summaries give each store's size.
 
 ## love-numbers
 
@@ -1079,6 +1079,24 @@ at the centres of equal patches, each with an equal share of the moment:
 A patch whose centre lies above the surface is left out, its share of
 the moment with it. One point source is band-limited by `lmax`; a fault
 of several patches is the way to a smoother source.
+
+**What the seismic forcing resolves.** sl3d is a global code: a source's
+field is carried to degree `lmax`, a wavelength of about 40 000 km /
+`lmax` at the surface (400 km at lmax 96), while a source at depth d
+puts structure into degrees up to about a / d (a the radius: some 600
+for a source 10 km deep). Within a few source depths of a shallow fault
+the point values of the displacement and the sea level are therefore not
+converged at any degree a global run reaches, and they ring at the
+truncation wavelength; the patches of a fault, being point sources, are
+resolved one by one where `lmax` passes a / (their spacing). Averages
+over caps wider than the truncation wavelength are converged (the
+measurements' caps, and the 2° means the examples' figures draw:
+`examples/configs/README.md`, "Convergence in lmax of the seismic
+examples", has the numbers). The forcing serves the global and regional
+response to an earthquake: the sea level change, the long-wavelength
+displacement and potential, the post-seismic relaxation and their
+kernels. Co-seismic deformation at kilometre scale about a finite fault
+is the work of a regional or half-space code, not of this one.
 
 **Times of the terms.** The terms' times take the form of the run's. In
 the static problem and a DATED run they are dates, kyr before present,
@@ -1715,35 +1733,49 @@ changes nothing.
   the checkpoints and the trajectory store; `"gravity": "full"`, or no
   member, hashes as every run with gravity does.
 
-`examples/configs/postseismic_no_gravity.json` is a run of this kind: a
-point thrust 25 km under the synthetic South America's west coast
-(22° S, 74.5° W, dipping 18°, 2e22 N m) on the radial Maxwell deck at
-lmax 64, its nodes the nine of `sea_level_postseismic.json` on the run's
-clock in years, with exchange tables at the first and last:
+`examples/configs/no_gravity_postseismic.json` is a run of this kind:
+the thrust of `sea_level_postseismic.json` under the synthetic South
+America's west coast (centred at 22° S, 74.5° W and 25 km deep, 600 by
+150 km, dipping 18°, 2e22 N m as 12 by 3 point sources) on the
+post-seismic Earth (`prem8.postseismic.deck`: a 50 km elastic lid over
+a 1e19 Pa s asthenosphere, a 1e20 Pa s upper mantle and a 1e22 Pa s
+lower mantle) at lmax 96, its nodes the 23 of `sea_level_postseismic.json`
+on the run's clock in years, with exchange tables at the first and last:
 
 ```json
 {
   "problem": "quasi_static",
-  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "discretisation": {"lmax": 64},
-  "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]},
+  "model": {"deck": "../data/prem8.postseismic.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 96},
+  "times": {"unit": "yr", "at": [0.0, 0.1, 0.3, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.5, 7.5, 10.0, 13.0, 17.0, 22.0, 30.0,
+                                 40.0, 55.0, 75.0, 100.0, 140.0, 200.0, 300.0]},
   "forcing": {
-    "seismic": [{"point": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+    "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
                            "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
-                           "moment_nm": 2.0e22},
+                           "length_km": 600.0, "width_km": 150.0,
+                           "moment_nm": 2.0e22,
+                           "patches_along_strike": 12, "patches_down_dip": 3},
                  "onset": 0.0}]
   },
   "gravity": "none",
-  "output": {"surface": "out/postseismic_no_gravity/postseismic_no_gravity.nc",
-             "exchange": "out/postseismic_no_gravity/postseismic_no_gravity_{node}.txt",
-             "exchange_nodes": [0, 8]}
+  "rotation": "none",
+  "output": {"surface": "out/no_gravity_postseismic/no_gravity_postseismic.nc",
+             "exchange": "out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt",
+             "exchange_nodes": [0, 22]}
 }
 ```
 
-The uplift over the source is 0.31 m at the event and 0.19 m after 500
-years, against 0.29 m and 0.17 m for the same run with gravity (`"gravity":
-"full"`, no ocean, `"rotation": "none"`); about 2.2 s on four threads
-against 3.0 s with gravity.
+`examples/configs/no_ocean_postseismic.json` is the same run with
+gravity: no `gravity` member (`"full"`), no ocean, `"rotation": "none"`.
+Averaged over a Gaussian cap of 2° over the fault (the fields of a
+fault this shallow are not converged in lmax point by point, their 2°
+means are), the uplift is 0.153 m at the event without gravity and
+0.147 m with it, 0.356 m at a century against 0.296 m, and 0.297 m at
+300 years against 0.200 m: without the self-gravitation and the
+buoyancy of the deformation only the elastic lid holds the relaxing
+surface down. The horizontal motion hardly differs (up dip over the
+fault, 0.851 m at the event either way and 0.700 m against 0.701 m at
+300 years). About 35 s on four threads against 47 s with gravity.
 
 `examples/configs/no_gravity_load.json` is a run under loads: the Hudson
 Bay cap of `no_ocean_load_cap.json` and its antipode, the same cap at
@@ -1942,7 +1974,7 @@ are radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
 `examples/configs/sea_level_static_coseismic.json`,
 `examples/configs/sea_level_3d_calibrated.json`,
 `examples/configs/sea_level_postseismic.json`,
-`examples/configs/postseismic_no_gravity.json`,
+`examples/configs/no_gravity_postseismic.json`,
 `examples/configs/no_gravity_load.json`,
 `examples/configs/sea_level_no_ocean.json`,
 `examples/configs/no_ocean.json` and
@@ -1952,10 +1984,10 @@ are radial)`, `3-D (lateral viscosity)`, `3-D (lateral moduli)` or `3-D
 sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint/sea_level_fingerprint.nc in 0.35 s
 sl3d solve: 3-D (lateral moduli), elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); ice change cap at latitude 72, longitude 318, width 8 deg, fraction -0.1 of the state's ice; wrote out/sea_level_fingerprint_3d/sea_level_fingerprint_3d.nc (6 fixed-point iterations, residual 9.88e-10) in 3.24 s
 sl3d solve: 1-D, elastic, static, shorelines migrating, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (21 kyr BP), topography ../data/synthetic_earth.nc:topography (21 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's date to 0 kyr BP; wrote out/sea_level_static_migrating/sea_level_static_migrating.nc in 0.36 s
-sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_static_coseismic/sea_level_static_coseismic.nc in 1.02 s
+sl3d solve: 1-D, elastic, static, shorelines frozen, rotation full; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_static_coseismic/sea_level_static_coseismic.nc in 2.53 s
 sl3d solve: 3-D (lateral viscosity), viscoelastic, 43 nodes 21 to 0 kyr BP, shorelines migrating, initial sea level calibrated, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (the window's end, 0 kyr BP), topography ../data/synthetic_earth.nc:topography (the window's end, 0 kyr BP); ice change thickness ../data/synthetic_earth.nc:ice_thickness, from the state's instant to each node's date; wrote out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc (352 fixed-point iterations over 42 steps) in 13.98 s
-sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 7.12 s
-sl3d solve: 1-D, viscoelastic, 9 nodes 0 to 500 yr on the run's clock, no ocean, no gravity, rotation none; seismic (1 source); wrote out/postseismic_no_gravity/postseismic_no_gravity.nc and 2 exchange tables in 2.23 s
+sl3d solve: 1-D, viscoelastic, 23 nodes 0 to 300 yr on the run's clock, shorelines frozen, rotation full, moments hydrostatic; ice ../data/synthetic_earth.nc:ice_thickness (0 kyr BP), topography ../data/synthetic_earth.nc:topography (0 kyr BP); seismic (1 source); wrote out/sea_level_postseismic/sea_level_postseismic.nc in 45.84 s
+sl3d solve: 1-D, viscoelastic, 23 nodes 0 to 300 yr on the run's clock, no ocean, no gravity, rotation none; seismic (1 source); wrote out/no_gravity_postseismic/no_gravity_postseismic.nc and 2 exchange tables in 35.05 s
 sl3d solve: 1-D, viscoelastic, 49 nodes 0 to 12 kyr on the run's clock, no ocean, no gravity, rotation none; load (2 terms); wrote out/no_gravity_load/no_gravity_load.nc and 3 exchange tables in 0.67 s
 sl3d solve: 1-D, viscoelastic, 49 nodes 12 to 0 kyr BP, no ocean, rotation none; load (1 term); wrote out/sea_level_no_ocean/sea_level_no_ocean.nc in 1.06 s
 sl3d solve: 3-D (lateral moduli), elastic, static, no ocean, rotation none; load (1 term) + tide (1 coefficient); wrote out/no_ocean/no_ocean.nc and out/no_ocean/no_ocean.txt and out/no_ocean/no_ocean_volume.nc (8 fixed-point iterations, residual 4.51e-11) in 1.45 s
@@ -2124,9 +2156,10 @@ viscosity of `s40rts_viscosity.nc`.
 ```json
 {
   "problem": "quasi_static",
-  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
-  "discretisation": {"lmax": 64},
-  "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0, 200.0, 500.0]},
+  "model": {"deck": "../data/prem8.postseismic.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 96},
+  "times": {"unit": "yr", "at": [0.0, 0.1, 0.3, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.5, 7.5, 10.0, 13.0, 17.0, 22.0, 30.0,
+                                 40.0, 55.0, 75.0, 100.0, 140.0, 200.0, 300.0]},
   "forcing": {
     "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
                            "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
@@ -2147,16 +2180,24 @@ viscosity of `s40rts_viscosity.nc`.
 A run counting forwards in years, `examples/configs/sea_level_postseismic.json`:
 the thrust of `sea_level_static_coseismic.json` off the synthetic South
 America, acting from the run's start (`onset` 0), and the ocean's answer
-to the mantle's relaxation over five centuries at unevenly spaced nodes,
-on the Maxwell deck. The state is the synthetic Earth's present day, a
-snapshot of its files at `date_kyr_bp` 0; the time axis of the output is
-the run's clock in seconds, its nodes in years in the metadata (`times`,
-`time_unit` `yr`). The first node is the co-seismic answer, the static
-example's to 1.4e-6 m (the deck's unrelaxed moduli and the hydrostatic
-moments against the elastic deck and the standard moments): the sea floor
-over the fault rises by 0.360 m; the relaxation brings that down to
-0.34 m after a century and 0.27 m after five. About 7 s and 1.5 GB on
-four threads.
+to the mantle's relaxation over three centuries at uneven nodes, dense
+early and each step after the first year a quarter to a third of the
+time elapsed, on the post-seismic Earth `prem8.postseismic.deck` (an
+elastic lid 50 km thick over Maxwell layers of 1e19 Pa s to 217 km
+depth, 1e20 Pa s to 667 km and 1e22 Pa s below, their Maxwell times
+4.7 to 4.8, 26 to 43 and 1080 to 2050 years). The state is the
+synthetic Earth's present day, a snapshot of its files at `date_kyr_bp`
+0; the time axis of the output is the run's clock in seconds, its nodes
+in years in the metadata (`times`, `time_unit` `yr`). The first node is
+the co-seismic answer, the static example's to 1.6 mm (the deck's
+viscous layers isotropic where the elastic deck's are transversely
+isotropic, and the hydrostatic moments against the standard ones).
+Averaged over a Gaussian cap of 2° over the fault (the field's point
+values are not converged in lmax for a fault this shallow, its 2°
+means are), the uplift of 0.150 m at the event grows by 6 mm in the
+first year and to 0.319 m at a century as the asthenosphere and the
+upper mantle relax, and falls back to 0.233 m by 300 years. About 46 s
+and 4.0 GB on four threads.
 
 Without an ocean and without rotational feedback, the response of the
 solid body:
@@ -2672,9 +2713,9 @@ in the load and in the moduli.
 ```json
 {
   "problem": "quasi_static",
-  "model": {"deck": "prem8.gia.deck"},
+  "model": {"deck": "prem8.postseismic.deck"},
   "discretisation": {"lmax": 32},
-  "times": {"unit": "yr", "at": [0, 1, 5, 10, 20, 50, 100]},
+  "times": {"unit": "yr", "at": [0, 2, 5, 10, 20, 40, 70, 100]},
   "forcing": {"seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5,
       "depth_km": 25.0, "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
       "length_km": 600.0, "width_km": 150.0, "moment_nm": 2.0e22,

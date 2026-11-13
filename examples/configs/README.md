@@ -17,7 +17,8 @@ reconfigure to restore the original. Run the configs from there, where
 their relative
 paths reach the examples' inputs in `../data/` (`synthetic_earth.nc` and
 `synthetic_moduli.nc`, written by the build, `prem8.elastic.deck`,
-`prem8.gia.deck` and `viscosity_log.nc`) and each config's outputs land in
+`prem8.gia.deck`, `prem8.postseismic.deck` and `viscosity_log.nc`) and
+each config's outputs land in
 `out/<config>/`, `<config>` being its file name without `.json`:
 
 ```sh
@@ -26,8 +27,9 @@ cd build/examples/configs
 ../../apps/sl3d solve sea_level_1d.json   # or one at a time
 ```
 
-The synthetic configs need no data and run in about a minute together on four
-threads (`OMP_NUM_THREADS=4`); CI runs them with `run_all.sh`. They are
+The synthetic configs need no data and run in about five minutes
+together on four threads (`OMP_NUM_THREADS=4`), three of them the
+seismic runs; CI runs them with `run_all.sh`. They are
 sized for that, so their degrees are low; raise `discretisation.lmax`
 and `times.nodes` for sharper results. `poetry run python plot_app.py`,
 from `build/examples`, draws each config's figures from `out/<config>/` into
@@ -50,7 +52,7 @@ with its `unit` on the file's own axis.
 
 The `no_ocean*` configs have no `ocean` block, so the body has no ocean,
 and give `"rotation": "none"`, so the response is the solid body's alone
-(`postseismic_no_gravity.json` and `no_gravity_load.json` are such
+(`no_gravity_postseismic.json` and `no_gravity_load.json` are such
 responses without gravity too);
 those on lateral structure set `solver.step_rtol` 1e-10 and
 `step_max_iterations` 200, tighter than the defaults (1e-9, 60).
@@ -97,46 +99,73 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   America's west coast (centred at 22° S, 74.5° W, 25 km deep), a 600 by
   150 km plane of scalar moment 2e22 N m dipping 18° east under the
   continent, laid out as 12 by 3 point sources, on the present day's
-  state at lmax 64 with full rotational feedback:
-  `out/sea_level_static_coseismic/sea_level_static_coseismic.nc`. The sea
-  floor rises by up to 0.36 m over the fault, the sea level falling by as
-  much there, and elsewhere the surface sinks by up to 5 cm; the ocean's
-  water is conserved, the sea level change integrating to 2e-17 of its
-  magnitude over the ocean. The file holds the tangential and toroidal
-  potentials (the horizontal motion) beside the rest, which the figure
-  (`coseismic.png`) synthesises into the horizontal displacement. About
-  1 s and 0.5 GB on four threads.
+  state at lmax 96 with full rotational feedback:
+  `out/sea_level_static_coseismic/sea_level_static_coseismic.nc`.
+  Averaged over Gaussian caps of 2°, the measure the seismic examples are
+  converged in (Convergence in lmax, below), the sea floor rises by up to
+  0.16 m over the fault and moves by up to 0.87 m towards the trench, the
+  sea level falling by the uplift; the ocean's water is conserved, the
+  sea level change integrating to 1e-17 of its magnitude over the ocean.
+  The file holds the tangential and toroidal potentials (the horizontal
+  motion) beside the rest, which the figure (`coseismic.png`) synthesises
+  into the horizontal displacement, and draws as 2° means, with the
+  point values along a profile across the fault for their ripples. About
+  2.5 s and 1.2 GB on four threads.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
   relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
-  nine uneven nodes from 0 to 500 yr) rather than in dates: the fault
+  23 uneven nodes from 0 to 300 yr, each step after the first year a
+  quarter to a third of the time elapsed) rather than in dates: the fault
   acts from the run's start (`"onset": 0`), the state is a snapshot of
   the synthetic Earth's files at the present day (`ocean.date_kyr_bp` 0,
-  `"at": "start"`), on the Maxwell deck `../data/prem8.gia.deck` at
-  lmax 64 with full rotational feedback and the hydrostatic moments:
+  `"at": "start"`), on the post-seismic Earth `../data/prem8.postseismic.deck`
+  (a 50 km elastic lid over a weak asthenosphere, below) at
+  lmax 96 with full rotational feedback and the hydrostatic moments:
   `out/sea_level_postseismic/sea_level_postseismic.nc`, its time axis the
   run's clock in seconds and its nodes in years in the metadata (`times`,
   `time_unit`). The first node is the co-seismic answer of
-  `sea_level_static_coseismic.json` to 1.4e-6 m (0.360 m of uplift over
-  the fault); the mantle's relaxation brings the uplift down to 0.34 m
-  after a century and 0.27 m after five; the figure (`postseismic.png`)
-  draws the relaxation in maps and at three places. About 7 s and 1.5 GB
-  on four threads.
-- **`postseismic_no_gravity.json`** — the problem without gravity
-  (`"gravity": "none"`): a point thrust at that fault's centroid (25 km
-  deep, dipping 18° east, 2e22 N m) relaxing on the same nine nodes in
-  years, on the radial Maxwell deck at lmax 64, without an ocean, a
-  potential or a rotational feedback, the degree systems taking the
-  displacement alone and stopping at the core-mantle boundary:
-  `out/postseismic_no_gravity/postseismic_no_gravity.nc` (the
+  `sea_level_static_coseismic.json` to 1.6 mm, and to 0.2 mm in 2° means
+  (this deck's viscous layers are isotropic, the elastic deck's
+  transversely isotropic between 24 and 220 km). Then the asthenosphere relaxes, and the upper mantle after it.
+  In 2° means the uplift over the fault, 0.150 m at the event, grows by
+  6 mm in the first year, to 0.205 m by 10 years and 0.319 m at a
+  century, and falls back to 0.233 m by 300 years; 250 km down dip, on
+  the coast, it rises from 0.052 m to 0.209 m at 140 years and is 0.189 m
+  at 300; 1000 km up dip it goes from +1 mm to -27 mm at 140 years and
+  -22 mm at 300. The relative sea level follows minus the uplift. The
+  figure (`postseismic.png`) draws the relaxation as 2° means, in maps
+  and at three places on a time axis linear about the event and
+  logarithmic after it, the deck's Maxwell times marked. On nodes three
+  times as close the means move by at most 3.2 mm, 1.8% of their change
+  (at lmax 64). About 46 s and 4.0 GB on four threads.
+- **`no_ocean_postseismic.json`** — that thrust without an ocean and
+  without rotational feedback, on the same Earth, nodes and lmax: the
+  solid body's response, `out/no_ocean_postseismic/no_ocean_postseismic.nc`
+  (the displacement, the tangential, toroidal and gravitational
+  potentials), and the twin with gravity of the next. In 2° means over
+  the fault the uplift is 0.147 m at the event, 0.299 m at its peak (75
+  years) and 0.200 m at 300 years; the horizontal motion up dip there
+  0.851 m at the event and 0.701 m at 300 years, and 250 km down dip it
+  grows from 0.631 m to 1.046 m. About 47 s on four threads.
+- **`no_gravity_postseismic.json`** — the problem without gravity
+  (`"gravity": "none"`): the same thrust on the same Earth, nodes and
+  lmax, without an ocean, a potential or a rotational feedback, the
+  degree systems taking the displacement alone and stopping at the
+  core-mantle boundary:
+  `out/no_gravity_postseismic/no_gravity_postseismic.nc` (the
   displacement and the tangential and toroidal potentials; no potential
   and no sea level change) and exchange tables of the displacement at the
-  first and last nodes, `out/postseismic_no_gravity/postseismic_no_gravity_{node}.txt`.
-  The uplift over the source is 0.31 m at the event and 0.19 m after 500
-  years, against 0.29 m and 0.17 m for the same run with gravity. The
-  figure (`postseismic.png`) is `sea_level_postseismic`'s without the
-  ocean, drawn on its own: the two runs' sources differ. About 2 s on
-  four threads.
+  first and last nodes, `out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt`.
+  Against its twin with gravity, `no_ocean_postseismic.json`, in 2° means
+  over the fault: 0.153 m of uplift at the event against 0.147 m, 0.356 m
+  at its peak (100 years) against 0.299 m, and 0.297 m at 300 years
+  against 0.200 m; 250 km down dip 0.238 m at 300 years against 0.170 m.
+  Without self-gravitation and buoyancy nothing but the elastic lid holds
+  the relaxing surface down, and the uplift grows the more; the
+  horizontal motion hardly differs (0.700 m up dip over the fault at 300
+  years against 0.701 m). The figure comparing the two,
+  `with_and_without_gravity/postseismic.png`, draws them on one panel.
+  About 35 s on four threads.
 - **`sea_level_1d.json`** — the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a
@@ -207,8 +236,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   kernels are of: `out/kernel_static_moduli/`. About 0.15 s.
 - **`kernel_postseismic.json`** (`sl3d solve`, then `sl3d kernel`) —
   `sea_level_postseismic`'s thrust off northern Chile (as 6 by 2 patches,
-  at lmax 32) on the run's own clock in years, from the event to a century
-  after it: the kernels, by the discrete adjoint, in the moment tensors of
+  at lmax 32) on the post-seismic Earth, on the run's own clock in years,
+  from the event to a century after it at eight nodes: the kernels, by the
+  discrete adjoint, in the moment tensors of
   the fault's patches at every node and in the viscosity, of a GPS
   station's eastward and upward displacement 20 years on and of a tide
   gauge's sea level a century on: `out/kernel_postseismic/`. The one config
@@ -219,13 +249,18 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   again; a kernel config of other measurements against the same store
   (the same blocks, another `kernels` block) would too. A run under
   seismic sources is recorded at every node, each state with its strain,
-  its toroidal state and the sources' forces: 7 state records of 83 MB
-  (15 MB of them the internal variables) and 7 surface records of 104 kB,
-  557 MiB in all. On four threads the solve takes 0.95 s recording (0.73
-  s without), and the kernels 1.9 s from the store against 2.4 s with the
-  forward run in memory, the same to rounding (about 1e-14 relative; two
-  processes may plan their FFTs differently, and the tests hold the two
-  bitwise within one process). `run_all.sh` removes a former store first,
+  its toroidal state and the sources' forces: 8 state records of 86 MB
+  and 8 surface records of 104 kB, 655 MiB in all, the nodes few to keep
+  the store small. On four threads the solve takes about 1 s without
+  recording and 1.2 to 2 s recording (the disk's), and the kernels 3 to
+  4 s, from the store or with the forward run in memory, the same to
+  rounding (about 1e-14 relative; two processes may plan their FFTs
+  differently, and the tests hold the two bitwise within one process).
+  The steps are long against the asthenosphere's Maxwell time: on 33
+  nodes the measurements move by 0.4 to 2.1% and the viscosity kernels
+  by 4% (the GPS station's) and 9% (the gauge's), a kernel carrying more
+  of the time step's error than the field it is of (the time-step study,
+  below). `run_all.sh` removes a former store first,
   its inputs being the build's to rewrite. The figure (`kernels.png`)
   draws the moment kernels per patch, held from the onset, and their
   contraction with the fault's own mechanism, which gives back each
@@ -256,14 +291,18 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   (`"problem": "quasi_static"` with a `times` block) is what makes the
   response viscoelastic; it takes about 5 s on four threads.
 - **`no_ocean_seismic.json`** — the co-seismic and post-seismic response
-  of the radial GIA deck to a thrust fault off north-east Japan (a 400 by
-  150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point
+  of the post-seismic Earth to a thrust fault off north-east Japan (a 400
+  by 150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point
   sources): `forcing.seismic` in a run through time, the first node the
-  co-seismic response and the later ones the relaxation, to 2 kyr at lmax
-  64. `out/no_ocean_seismic/no_ocean_seismic.nc` holds the radial
+  co-seismic response and the later ones the relaxation, on the 23 nodes
+  of `sea_level_postseismic.json` to 300 years at lmax 96.
+  `out/no_ocean_seismic/no_ocean_seismic.nc` holds the radial
   displacement, the tangential potential V, the toroidal potential W and
   the potential at every node, which the figure (`postseismic.png`)
-  draws as `sea_level_postseismic`'s without an ocean. About 5 s on two
+  draws as `sea_level_postseismic`'s without an ocean: in 2° means the
+  uplift over the fault, 0.171 m at the event, peaks at 0.393 m at 75
+  years and is 0.240 m at 300, and 1000 km up dip the surface moves 0.49
+  m towards the fault over the three centuries. About 38 s on four
   threads.
 - **`no_ocean_1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
   mass of about 2 km of ice, held for 10 kyr and removed over the next half,
@@ -417,7 +456,8 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   once the load is on and 1018 m by 7 kyr (125 m and 327 m with gravity),
   and after the load is gone it springs back by its elastic part alone,
   792 m down at 12 kyr against 60 m with gravity, as the figure
-  (`gravity.png`) draws against `no_ocean_load_cap`. Under 1 s on four
+  comparing it with `no_ocean_load_cap`,
+  `with_and_without_gravity/load.png`, draws. Under 1 s on four
   threads.
 - **The time-step study**, `timestep_{et,be}_n<N>.json` (solve) and
   `timestep_{discrete,continuous}_n<N>.json` (kernel) — one problem at
@@ -460,6 +500,96 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
 GIA format, with a Maxwell mantle of 1e21 Pa s (the solid layers between
 3480 and 6151 km) and `nan` elsewhere: the radial runs through time take
 their viscosity from this column.
+
+`../data/prem8.postseismic.deck`, the Earth of the post-seismic configs
+(`sea_level_postseismic`, `no_ocean_postseismic`,
+`no_gravity_postseismic`, `no_ocean_seismic`, `kernel_postseismic`) and
+of `ExampleSeismic`, is PREM without its ocean sampled as
+`prem8.elastic.deck` is (8 knots a layer), with a thin elastic lid over
+a weak asthenosphere: the lid elastic from the surface (6368 km) to 50
+km depth, a boundary inserted there inside PREM's lid, so that the
+faults' deep ends (48 km off South America, 41 km off Japan) lie inside
+it, the first 2 km above its base; a Maxwell asthenosphere of
+1e19 Pa s from there to PREM's 220 km discontinuity (6151 km, 217 km
+deep); an upper mantle of 1e20 Pa s to the 670 km discontinuity (667 km
+deep) and a lower mantle of 1e22 Pa s to the core. Its viscous layers
+are isotropic, PREM's moduli Voigt-averaged (sl3d refuses a transversely
+isotropic Maxwell layer), and the lid keeps PREM's. Their Maxwell times
+eta / mu, from the deck's own moduli: 4.7 to 4.8 years in the
+asthenosphere, 26 to 43 years in the upper mantle, 1080 to 2050 years in
+the lower mantle. `python make_postseismic_deck.py`, from
+`build/examples`, writes it from planetmodel's PREM and prints those
+times; its options make other lids and viscosities (`--out` keeps the
+original). The radial mesh pins every boundary of the deck and cuts each
+layer into elements no wider than 0.1 a / (lmax + 1), 6.6 km at lmax 96
+and 19 km at lmax 32, so the lid's mantle (28.6 km) and the
+asthenosphere's part above PREM's 80 km discontinuity (50 to 77 km deep)
+take five elements each at lmax 96 and two at lmax 32. A viscosity
+contrast of three decades needs no care in the step: the schemes are
+implicit, and the post-seismic configs step from 0.1 to 100 years,
+across the Maxwell times, at second order (above).
+
+### Convergence in lmax of the seismic examples
+
+sl3d is a global code, and these examples show what its seismic
+forcing resolves: the regional and global response (averages over caps
+wider than the truncation wavelength, about 40 000 km / lmax), not the
+field at kilometre scale about the fault, which is a regional or
+half-space code's work.
+
+The thrust off South America is a 600 by 150 km plane reaching from 2 to
+48 km depth, laid out as 12 by 3 point sources 50 km apart, the
+shallowest row at 9.5 km. A point source at depth d puts its surface
+field into degrees up to about a / d, some 670 for that row, and the
+point sources are resolved one by one from about lmax 400: the field's
+point values near the fault are not converged at any degree these runs
+reach, and their converged limit would be the point sources' own
+fields, not a smooth fault's. The truncation at lmax rings about the
+source, 360/lmax degrees apart. Means over Gaussian caps of 2° (the
+field averaged over a cap of 2° about each point) are converged, and
+the seismic configs' figures draw those, saying so; the configs run at
+lmax 96, where the means are within a few tenths of a per cent of lmax
+128 and 256. On the post-seismic deck with an ocean, along a profile
+across the fault through its centroid, the co-seismic field (the static
+problem; four threads):
+
+| lmax | peak uplift, point | peak horizontal, point | point uplift's ripple beyond 400 km | peak uplift, 2° mean | peak horizontal, 2° mean | time, memory |
+| --- | --- | --- | --- | --- | --- | --- |
+| 64 | 0.373 m | 1.96 m | 0.116 m (31% of its peak) | 153.3 mm | 852.9 mm | 1.1 s, 0.5 GB |
+| 96 | 0.585 m | 2.64 m | 0.226 m (39%) | 159.1 mm | 872.6 mm | 2.6 s, 1.2 GB |
+| 128 | 0.726 m | 2.83 m | 0.238 m (33%) | 159.1 mm | 872.6 mm | 4.6 s, 2.2 GB |
+| 256 | 1.335 m | 4.30 m | 0.100 m (7%) | 159.1 mm | 872.6 mm | 18.6 s, 9.4 GB |
+
+From one lmax to the next the point values move by 44%, 38% and 46% of
+their peak uplift (34%, 28% and 38% of the horizontal's), the 2° means
+by 4.0%, 0.20% and 0.04% (2.7%, 0.08% and 0.001%). Through time,
+`sea_level_postseismic`'s series at its three places and at the coast
+(the tide gauge of `ExampleSeismic`, 22° S, 72° W), the largest change
+over the run from one lmax to the next, against the series' largest
+value at lmax 128:
+
+| series | 48 to 64 | 64 to 96 | 96 to 128 |
+| --- | --- | --- | --- |
+| uplift over the fault, point | 164 mm (22%) | 247 mm (33%) | 175 mm (23%) |
+| uplift over the fault, 2° mean | 24 mm (7.6%) | 7.5 mm (2.3%) | 0.7 mm (0.2%) |
+| uplift 250 km down dip, point | 77 mm (10%) | 304 mm (39%) | 223 mm (29%) |
+| uplift 250 km down dip, 2° mean | 10 mm (4.9%) | 6.2 mm (3.0%) | 0.2 mm (0.1%) |
+| uplift 1000 km up dip, point | 47 mm (70%) | 79 mm (118%) | 35 mm (52%) |
+| uplift 1000 km up dip, 2° mean | 5.3 mm (20%) | 1.8 mm (6.6%) | 0.2 mm (0.6%) |
+| sea level at the coast, point | 80 mm (11%) | 309 mm (41%) | 192 mm (26%) |
+| sea level at the coast, 2° mean | 11 mm (5.5%) | 6.2 mm (3.1%) | 0.3 mm (0.1%) |
+
+That run takes 12 s and 0.9 GB at lmax 48, 22 s and 1.7 GB at 64, 46 s
+and 4.0 GB at 96 and 83 s and 7.3 GB at 128 on four threads: time and
+memory grow as lmax squared, held by the sources' forces, a radial
+vector over each degree's whole system for every order although a point
+source touches one element. lmax 256 would take about 27 GB through
+time (and the static problem about 38 GB at lmax 512). The trajectory
+store of `kernel_postseismic` grows as lmax cubed (655 MiB at lmax 32,
+about 5 GB at 64), so it stays at lmax 32, where its measurements, point
+values, are far from converged: it shows the workflow and the kernels'
+form, not converged sensitivities. `ExampleSeismic` runs at lmax 64 and
+draws 2° means too, within a few per cent of converged there.
 
 ## ICE-7G
 

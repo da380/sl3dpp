@@ -1,8 +1,8 @@
 {
   "problem": "quasi_static",
-  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "model": {"deck": "../data/prem8.postseismic.deck", "format": "maxwell"},
   "discretisation": {"lmax": 32},
-  "times": {"unit": "yr", "at": [0.0, 1.0, 5.0, 10.0, 20.0, 50.0, 100.0]},
+  "times": {"unit": "yr", "at": [0.0, 2.0, 5.0, 10.0, 20.0, 40.0, 70.0, 100.0]},
   "forcing": {
     "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
                            "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,

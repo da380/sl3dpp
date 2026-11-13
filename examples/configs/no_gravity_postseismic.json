@@ -1,0 +1,20 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.postseismic.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 96},
+  "times": {"unit": "yr", "at": [0.0, 0.1, 0.3, 0.7, 1.0, 1.5, 2.0, 3.0, 4.0, 5.5, 7.5, 10.0, 13.0, 17.0, 22.0, 30.0,
+                                 40.0, 55.0, 75.0, 100.0, 140.0, 200.0, 300.0]},
+  "forcing": {
+    "seismic": [{"fault": {"latitude": -22.0, "longitude": 285.5, "depth_km": 25.0,
+                           "strike_deg": 0.0, "dip_deg": 18.0, "rake_deg": 90.0,
+                           "length_km": 600.0, "width_km": 150.0,
+                           "moment_nm": 2.0e22,
+                           "patches_along_strike": 12, "patches_down_dip": 3},
+                 "onset": 0.0}]
+  },
+  "gravity": "none",
+  "rotation": "none",
+  "output": {"surface": "out/no_gravity_postseismic/no_gravity_postseismic.nc",
+             "exchange": "out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt",
+             "exchange_nodes": [0, 22]}
+}
