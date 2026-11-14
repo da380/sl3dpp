@@ -1,7 +1,8 @@
 // The viscoelastic stepper: weight algebra, rheology construction (the
-// Burgers body's Prony terms against its modulus and creep function among
-// it), the elastic and long-term limits, measured order of accuracy, the
-// exact inverse step, and the effective-operator limits. The pyslfp
+// Burgers body's Prony terms against its modulus and creep function, and
+// the bodies a model's fields state, planetmodel's prony and burgers decks
+// among them), the elastic and long-term limits, measured order of accuracy,
+// the exact inverse step, and the effective-operator limits. The pyslfp
 // comparison lives in TestFixtures.
 
 #include <gtest/gtest.h>
@@ -12,8 +13,12 @@
 #include <complex>
 #include <filesystem>
 #include <format>
+#include <fstream>
+#include <limits>
 #include <map>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -24,6 +29,10 @@
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
+
+#ifdef SL3DPP_PLANETMODEL_1_6
+#include <planetmodel/deck.hpp>
+#endif
 
 using namespace sl3dpp;
 
@@ -309,6 +318,217 @@ TEST(Rheology, BurgersLayersAreTwoBranches) {
   orphan[0] = Rheology::Kelvin{.modulus_fraction = 1.0, .viscosity = eta};
   EXPECT_FALSE(Rheology::Burgers(body.material, viscosity, orphan).has_value());
 }
+
+namespace {
+
+/// A homogeneous two-layer body (rho 5500, vp 10000, vs 5500: mu = 5500^3
+/// Pa), a relaxing interior to 6271 km under an elastic lid, two knots a
+/// layer: its columns, `interior` each the interior's value and NaN in the
+/// lid.
+std::pair<std::vector<double>,
+          std::vector<std::pair<std::string, std::vector<double>>>>
+LiddedColumns(const std::vector<std::pair<std::string, double>>& interior) {
+  constexpr auto nan = std::numeric_limits<double>::quiet_NaN();
+  auto columns = std::vector<std::pair<std::string, std::vector<double>>>{
+      {"rho", std::vector<double>(4, 5500.0)},
+      {"vpv", std::vector<double>(4, 10000.0)},
+      {"vsv", std::vector<double>(4, 5500.0)},
+      {"vph", std::vector<double>(4, 10000.0)},
+      {"vsh", std::vector<double>(4, 5500.0)},
+      {"eta", std::vector<double>(4, 1.0)}};
+  for (const auto& [name, value] : interior) {
+    columns.emplace_back(name, std::vector<double>{value, value, nan, nan});
+  }
+  return {{0.0, 6271e3, 6271e3, 6371e3}, std::move(columns)};
+}
+
+/// The material of a deck at lmax 4.
+Material MaterialOf(const EarthModel& model) {
+  return Material::Create(model, RadialMesh::Create(model, {.lmax = 4}).value())
+      .value();
+}
+
+}  // namespace
+
+TEST(Rheology, FromModelReadsTheBodiesItsFieldsState) {
+  // A model's own fields as planetmodel's viscoelastic decks state them: a
+  // prony layer's branches as written (mu_k = w_k mu, itau_k = 1 / tau_k),
+  // three of them summing to 0.9 keeping a relaxed modulus of 0.1 mu; a
+  // burgers layer's Burgers body (Rheology::Burgers of its columns, to
+  // rounding); strengths summing past one by a deck's rounding taken to sum to
+  // one, past it by more refused; and the bodies a layer cannot be.
+  const auto material = [](const auto& interior) {
+    auto [radius, columns] = LiddedColumns(interior);
+    auto model =
+        EarthModel::FromDeck(
+            Deck::Create(std::move(radius), std::move(columns)).value())
+            .value();
+    auto solid = MaterialOf(model);
+    return std::pair{std::move(model), std::move(solid)};
+  };
+  const auto strengths = std::array{0.5, 0.3, 0.1};
+  const auto times = std::array{1e8, 1e9, 1e10};
+  auto prony = std::vector<std::pair<std::string, double>>{};
+  for (auto k = std::size_t{0}; k < 3; ++k) {
+    prony.emplace_back(std::format("relaxation_strength_{}", k + 1),
+                       strengths[k]);
+    prony.emplace_back(std::format("relaxation_time_{}", k + 1), times[k]);
+  }
+  {
+    const auto [model, solid] = material(prony);
+    const auto rheology = Rheology::FromModel(solid, model).value();
+    ASSERT_EQ(rheology.BranchCount(), 3u);
+    const auto mu = rheology.MuUnrelaxed();
+    const auto timeScale = model.ModelScales().Time();
+    auto active = 0;
+    for (auto i = std::size_t{0}; i < mu.size(); ++i) {
+      if (!rheology.IsActive(i)) continue;
+      ++active;
+      for (auto k = std::size_t{0}; k < 3; ++k) {
+        EXPECT_NEAR(rheology.BranchAt(k).mu[i], strengths[k] * mu[i],
+                    1e-15 * mu[i]);
+        EXPECT_NEAR(rheology.BranchAt(k).itau[i] * times[k] / timeScale, 1.0,
+                    1e-14);
+      }
+      EXPECT_NEAR(rheology.MuLongTerm()[i], 0.1 * mu[i], 1e-14 * mu[i]);
+    }
+    EXPECT_GT(active, 0);
+    // a Kelvin element is no prony model's
+    EXPECT_FALSE(
+        Rheology::FromModel(
+            solid, model,
+            {{0, Rheology::Kelvin{.modulus_fraction = 1.0, .viscosity = 1.0}}})
+            .has_value());
+  }
+  {
+    // the burgers layer: Rheology::Burgers of the columns
+    const auto [model, solid] =
+        material(std::vector<std::pair<std::string, double>>{
+            {"viscosity", 1e21},
+            {"kelvin_viscosity", 1e20},
+            {"kelvin_modulus_fraction", 0.5}});
+    const auto rheology = Rheology::FromModel(solid, model).value();
+    const auto factor = model.ModelScales().Factor(ViscosityDimensions);
+    const auto twin =
+        Rheology::Burgers(solid, {{0, 1e21 / factor}},
+                          {{0, Rheology::Kelvin{.modulus_fraction = 0.5,
+                                                .viscosity = 1e20 / factor}}})
+            .value();
+    ASSERT_EQ(rheology.BranchCount(), 2u);
+    for (auto k = std::size_t{0}; k < 2; ++k) {
+      const auto& got = rheology.BranchAt(k);
+      const auto& want = twin.BranchAt(k);
+      ASSERT_EQ(got.mu.size(), want.mu.size());
+      for (auto i = std::size_t{0}; i < got.mu.size(); ++i) {
+        EXPECT_NEAR(got.mu[i], want.mu[i], 1e-14 * std::abs(want.mu[i])) << i;
+        EXPECT_NEAR(got.itau[i], want.itau[i], 1e-14 * std::abs(want.itau[i]))
+            << i;
+      }
+    }
+  }
+  {
+    // past one by a deck's rounding: taken to sum to one
+    const auto [model, solid] =
+        material(std::vector<std::pair<std::string, double>>{
+            {"relaxation_strength_1", 0.600000005},
+            {"relaxation_time_1", 1e8},
+            {"relaxation_strength_2", 0.400000005},
+            {"relaxation_time_2", 1e9}});
+    const auto rheology = Rheology::FromModel(solid, model).value();
+    const auto mu = rheology.MuUnrelaxed();
+    for (auto i = std::size_t{0}; i < mu.size(); ++i) {
+      if (!rheology.IsActive(i)) continue;
+      EXPECT_NEAR(rheology.BranchAt(0).mu[i] + rheology.BranchAt(1).mu[i],
+                  mu[i], 1e-15 * mu[i]);
+      EXPECT_NEAR(rheology.BranchAt(0).mu[i] / mu[i], 0.600000005 / 1.00000001,
+                  1e-15);
+    }
+  }
+  const auto refused =
+      [&](const std::vector<std::pair<std::string, double>>& columns,
+          const std::string& what) {
+        const auto [model, solid] = material(columns);
+        const auto rheology = Rheology::FromModel(solid, model);
+        ASSERT_FALSE(rheology.has_value()) << what;
+        EXPECT_NE(rheology.error().message.find(what), std::string::npos)
+            << rheology.error().message;
+      };
+  refused({{"relaxation_strength_1", 0.7},
+           {"relaxation_time_1", 1e8},
+           {"relaxation_strength_2", 0.4},
+           {"relaxation_time_2", 1e9}},
+          "sum to 1.1");
+  refused({{"viscosity", 1e21},
+           {"relaxation_strength_1", 1.0},
+           {"relaxation_time_1", 1e8}},
+          "beside a viscosity");
+  refused({{"viscosity", 1e21}, {"kelvin_viscosity", 1e20}},
+          "without `kelvin_modulus_fraction`");
+  refused({{"kelvin_viscosity", 1e20}, {"kelvin_modulus_fraction", 1.0}},
+          "a Kelvin element and no viscosity");
+  refused({{"relaxation_strength_1", 1.0}},
+          "strength or time without the other");
+}
+
+#ifdef SL3DPP_PLANETMODEL_1_6
+
+TEST(Rheology, PlanetmodelsDecksAreReadWithTheirChecks) {
+  // planetmodel's prony and burgers decks, written by its own writer, read
+  // by its readers (PronyFormat, BurgersFormat) and their rheologies by
+  // FromModel: a prony deck's three branches as written; a burgers deck's
+  // Burgers layer; and a deck whose header is not its format's refused,
+  // naming the line.
+  const auto dir =
+      std::filesystem::temp_directory_path() / "sl3dpp_test_rheology_decks";
+  std::filesystem::remove_all(dir);
+  std::filesystem::create_directories(dir);
+  auto [radius, columns] = LiddedColumns({{"relaxation_strength_1", 0.5},
+                                          {"relaxation_time_1", 1e8},
+                                          {"relaxation_strength_2", 0.3},
+                                          {"relaxation_time_2", 1e9},
+                                          {"relaxation_strength_3", 0.1},
+                                          {"relaxation_time_3", 1e10}});
+  planetmodel::WriteDeck(
+      dir / "three.prony.deck",
+      planetmodel::Deck(radius, columns,
+                        planetmodel::PronyHeader("three branches", 3)),
+      planetmodel::PRONY());
+  const auto deck = Deck::Read(dir / "three.prony.deck", PronyFormat()).value();
+  EXPECT_TRUE(deck.Has("relaxation_time_3"));
+  const auto model = EarthModel::FromDeck(deck).value();
+  const auto rheology = Rheology::FromModel(MaterialOf(model), model).value();
+  EXPECT_EQ(rheology.BranchCount(), 3u);
+  auto [bradius, bcolumns] = LiddedColumns({{"viscosity", 1e21},
+                                            {"kelvin_viscosity", 1e20},
+                                            {"kelvin_modulus_fraction", 0.5}});
+  planetmodel::WriteDeck(
+      dir / "lidded.burgers.deck",
+      planetmodel::Deck(bradius, bcolumns,
+                        planetmodel::BurgersHeader("lidded")),
+      planetmodel::BURGERS());
+  const auto burgersDeck =
+      Deck::Read(dir / "lidded.burgers.deck", BurgersFormat()).value();
+  const auto burgersModel = EarthModel::FromDeck(burgersDeck).value();
+  EXPECT_EQ(Rheology::FromModel(MaterialOf(burgersModel), burgersModel)
+                ->BranchCount(),
+            2u);
+  // a Maxwell deck is no burgers deck: its column line refused
+  {
+    auto out = std::ofstream(dir / "maxwell.deck");
+    out << "a maxwell deck\nr rho vpv vsv vph vsh eta viscosity\n"
+           "0 5500 10000 5500 10000 5500 1 1e21\n"
+           "6371000 5500 10000 5500 10000 5500 1 1e21\n";
+  }
+  const auto wrong = Deck::Read(dir / "maxwell.deck", BurgersFormat());
+  ASSERT_FALSE(wrong.has_value());
+  EXPECT_NE(wrong.error().message.find(
+                "a burgers deck's second line names its columns"),
+            std::string::npos)
+      << wrong.error().message;
+  std::filesystem::remove_all(dir);
+}
+
+#endif
 
 TEST(Viscoelastic, ElasticAndLongTermLimits) {
   auto body = TestBody::Make(4);

@@ -209,54 +209,80 @@ FaultSources FaultSourcesOf(const planetmodel::Fault& fault,
   }
   const auto byDepth = !same && *options.placement == FaultPlacement::Depth;
   const auto degrees = 180.0 / std::numbers::pi;
+  // the geometry once, every slice's slip at its points
+  const auto q =
+      fault.SliceQuadrature(static_cast<std::size_t>(options.cellsAlongStrike),
+                            static_cast<std::size_t>(options.cellsDownDip),
+                            static_cast<std::size_t>(options.points));
   auto out = FaultSources{};
-  out.slices.resize(fault.NSlices());
-  const auto& patches = fault.Patches();
-  for (auto k = std::size_t{0}; k < patches.size(); ++k) {
-    // the patch's points, placed, and the moduli there
-    const auto first = out.points.size();
-    auto moduli = std::vector<LoveModuli>{};
-    for (auto slice = std::size_t{0}; slice < fault.NSlices(); ++slice) {
-      const auto q = patches[k].Quadrature(
-          static_cast<std::size_t>(options.cellsAlongStrike),
-          static_cast<std::size_t>(options.cellsDownDip),
-          static_cast<std::size_t>(options.points), slice);
-      for (auto i = std::size_t{0}; i < q.Size(); ++i) {
-        if (slice == 0) {
-          const auto& x = q.points[i];
-          const auto stored = std::sqrt(Dot(x, x)) * length;
-          const auto radius = byDepth ? surface - (reference - stored) : stored;
-          const auto at = BodyPoint{
-              .radius = radius,
-              .colatitude = std::atan2(std::hypot(x[0], x[1]), x[2]),
-              .longitude = std::atan2(x[1], x[0])};
-          if (radius > surface) {
-            throw std::invalid_argument(std::format(
-                "patch {}'s quadrature point at (u, v) = ({:g}, {:g}), "
-                "latitude {:.6g}, longitude {:.6g}, lies {:.6g} m above the "
-                "model's surface (its depth {:.6g} m): a fault lies inside "
-                "the body",
-                k, q.u[i], q.v[i], 90.0 - at.colatitude * degrees,
-                at.longitude * degrees, radius - surface, surface - radius));
-          }
-          moduli.push_back(options.moduli(at));
-          if (!(moduli.back().L > 0.0 && moduli.back().N > 0.0)) {
-            throw std::invalid_argument(std::format(
-                "patch {}'s quadrature point at depth {:.6g} m lies where the "
-                "model has no shear modulus (a fluid), which holds no fault",
-                k, surface - radius));
-          }
-          out.points.push_back(at);
-          out.depths.push_back(surface - radius);
-          out.patch.push_back(k);
-        }
-        const auto& s = q.slip[i];
-        out.slices[slice].push_back(
-            SlipMoment(moduli[i], out.points[first + i],
-                       {s[0] * length, s[1] * length, s[2] * length},
-                       q.normals[i], q.weights[i] * length * length));
-      }
+  out.slices.resize(q.NSlices());
+  for (auto i = std::size_t{0}; i < q.Size(); ++i) {
+    // the point, placed, and the moduli there
+    const auto& x = q.points[i];
+    const auto stored = std::sqrt(Dot(x, x)) * length;
+    const auto radius = byDepth ? surface - (reference - stored) : stored;
+    const auto at =
+        BodyPoint{.radius = radius,
+                  .colatitude = std::atan2(std::hypot(x[0], x[1]), x[2]),
+                  .longitude = std::atan2(x[1], x[0])};
+    if (radius > surface) {
+      throw std::invalid_argument(std::format(
+          "patch {}'s quadrature point at (u, v) = ({:g}, {:g}), latitude "
+          "{:.6g}, longitude {:.6g}, lies {:.6g} m above the model's surface "
+          "(its depth {:.6g} m): a fault lies inside the body",
+          q.patch[i], q.u[i], q.v[i], 90.0 - at.colatitude * degrees,
+          at.longitude * degrees, radius - surface, surface - radius));
     }
+    const auto moduli = options.moduli(at);
+    if (!(moduli.L > 0.0 && moduli.N > 0.0)) {
+      throw std::invalid_argument(std::format(
+          "patch {}'s quadrature point at depth {:.6g} m lies where the "
+          "model has no shear modulus (a fluid), which holds no fault",
+          q.patch[i], surface - radius));
+    }
+    out.points.push_back(at);
+    out.depths.push_back(surface - radius);
+    out.patch.push_back(q.patch[i]);
+    for (auto slice = std::size_t{0}; slice < q.NSlices(); ++slice) {
+      const auto& s = q.slip[slice][i];
+      out.slices[slice].push_back(
+          SlipMoment(moduli, at, {s[0] * length, s[1] * length, s[2] * length},
+                     q.normals[i], q.weights[i] * length * length));
+    }
+  }
+  return out;
+}
+
+std::vector<SphericalTensor> FaultSources::MomentsAt(
+    const planetmodel::TimeRows& rows) const {
+  const auto [first, second] = rows;
+  if (first.first >= slices.size() || second.first >= slices.size()) {
+    throw std::invalid_argument(
+        std::format("the rows name slices {} and {} of a fault's {}",
+                    first.first, second.first, slices.size()));
+  }
+  auto scaled = [](double w, const SphericalTensor& M) {
+    return SphericalTensor{.rr = w * M.rr,
+                           .tt = w * M.tt,
+                           .pp = w * M.pp,
+                           .rt = w * M.rt,
+                           .rp = w * M.rp,
+                           .tp = w * M.tp};
+  };
+  auto out = std::vector<SphericalTensor>{};
+  out.reserve(points.size());
+  for (auto p = std::size_t{0}; p < points.size(); ++p) {
+    auto M = scaled(first.second, slices[first.first][p]);
+    if (second.second != 0.0) {
+      const auto S = scaled(second.second, slices[second.first][p]);
+      M = {.rr = M.rr + S.rr,
+           .tt = M.tt + S.tt,
+           .pp = M.pp + S.pp,
+           .rt = M.rt + S.rt,
+           .rp = M.rp + S.rp,
+           .tp = M.tp + S.tp};
+    }
+    out.push_back(M);
   }
   return out;
 }

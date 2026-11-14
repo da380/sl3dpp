@@ -1872,7 +1872,7 @@ std::string RunKernel(const std::filesystem::path& config) {
     if (earth.LateralModuli()) {
       return KernelStatic3D(config, input, top, earth, meaning);
     }
-    RefuseThreeDSolver(top, "the static problem on a radial Earth");
+    RefuseThreeDSolver(top, "the static problem on a radial Earth", lateral);
     // one process's run: on several ranks, the first rank's alone
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});

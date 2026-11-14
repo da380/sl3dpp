@@ -29,6 +29,7 @@ without to figures/sl3d/with_and_without_gravity/:
     sea_level_static_megathrust/coseismic.png   (with planetmodel's fault
                                                  module, after 1.5.1)
     sea_level_postseismic/postseismic.png
+    sea_level_postseismic_burgers/postseismic.png
     no_ocean_postseismic/postseismic.png
     no_gravity_postseismic/postseismic.png
     no_ocean_seismic/postseismic.png
@@ -2487,6 +2488,11 @@ if __name__ == "__main__":
                 "response with an ocean and full rotational feedback, on "
                 "prem8.postseismic.deck (a 50 km elastic lid over a Maxwell "
                 "mantle)")
+    postseismic("sea_level_postseismic_burgers",
+                "sl3d solve: that thrust's response on prem8.postseismic.deck "
+                "with a Burgers asthenosphere (`model.burgers`: a Kelvin "
+                "element of the unrelaxed modulus and 1e18 Pa s from 50 to "
+                "217 km)")
     postseismic("no_ocean_postseismic",
                 "sl3d solve, no ocean: that thrust's response without an "
                 "ocean or a rotational feedback, on prem8.postseismic.deck")

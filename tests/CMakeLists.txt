@@ -59,6 +59,8 @@ if(TARGET sl3d_app)
   target_link_libraries(TestApps PRIVATE sl3d_app)
   sl3dpp_add_test(TestAppsFaultFile)
   target_link_libraries(TestAppsFaultFile PRIVATE sl3d_app)
+  sl3dpp_add_test(TestAppsDecks)
+  target_link_libraries(TestAppsDecks PRIVATE sl3d_app)
 endif()
 # The program refuses the words that are not commands but name what one
 # runs, the message naming the command to run instead.

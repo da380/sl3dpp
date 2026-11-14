@@ -27,11 +27,13 @@
  * `planetmodel.fault/1`, read by `planetmodel::ReadFaultFile`): patches of
  * surface, each with the displacement s of its hanging wall relative to
  * its footwall. It holds no rigidity. `FaultSourcesOf` lays planetmodel's
- * quadrature over every patch (n_u by n_v equal cells of its parameter
- * square, Gauss-Legendre points in each) and puts a point source at each
- * point, its moment tensor the point's weight w (the area it stands for)
- * times the elastic tensor C there contracted with the slip and the unit
- * normal n (from the footwall into the hanging wall), SlipMoment:
+ * slice quadrature over every patch (`planetmodel::Fault::SliceQuadrature`:
+ * n_u by n_v equal cells of its parameter square, Gauss-Legendre points in
+ * each, the geometry formed once and the slip of every slice at its points)
+ * and puts a point source at each point, its moment tensor the point's
+ * weight w (the area it stands for) times the elastic tensor C there
+ * contracted with the slip and the unit normal n (from the footwall into
+ * the hanging wall), SlipMoment:
  *
  *   M = w C : (s n).
  *
@@ -49,11 +51,14 @@
  * gives mu w |s| (n u + u n), the planar fault's tensor of moment
  * mu w |s|. A plane of planetmodel's is the rectangle `PlanarFaultSources`
  * lays out, by the same strike, dip and rake, and its midpoint quadrature
- * on N by M cells puts its points at the patches' centres. The fault's
- * time axis is its caller's business: FaultSources holds the tensors of
- * each slice of the slip. The parts that read planetmodel's fault are
- * compiled where planetmodel's C++ library holds it (SL3DPP_HAVE_FAULT_FILE
- * defined).
+ * on N by M cells puts its points at the patches' centres. FaultSources
+ * holds the tensors of each slice of the slip; at a date the slices a
+ * planetmodel reading of it takes (`planetmodel::Fault::Rows`) are combined
+ * under their weights (FaultSources::MomentsAt), as planetmodel combines
+ * the slices' slip (`FaultSliceQuadrature::SlipOf`): the moment being
+ * linear in the slip, the moments of the slip at that date. The parts that
+ * read planetmodel's fault are compiled where planetmodel's C++ library
+ * holds it (SL3DPP_HAVE_FAULT_FILE defined).
  *
  * Lengths and the moment are in the caller's units (the evolution's
  * solver units, for Evolution3D::Forcing::sources); angles are degrees.
@@ -70,11 +75,16 @@
 #include "sl3dpp/Geography.hpp"
 #include "sl3dpp/PointSource.hpp"
 
-#if __has_include(<planetmodel/faultfile.hpp>)
+#if __has_include(<planetmodel/faultfile.hpp>) && \
+    defined(SL3DPP_PLANETMODEL_1_6)
 #include <planetmodel/fault.hpp>
-/// Defined where planetmodel's C++ library reads and evaluates the fault
-/// file (planetmodel.fault/1): FaultSourcesOf, and the sl3d program's
-/// `fault_file` term, are compiled then.
+#include <planetmodel/time.hpp>
+/// Defined where planetmodel's C++ library reads, evaluates and writes the
+/// fault file (planetmodel.fault/1) with the interfaces of its 1.6.0
+/// release, the slice quadrature and the date tolerance among them
+/// (SL3DPP_PLANETMODEL_1_6, which the build defines where they compile):
+/// FaultSourcesOf, and the sl3d program's `fault_file` term, are compiled
+/// then.
 #define SL3DPP_HAVE_FAULT_FILE 1
 #endif
 
@@ -167,9 +177,19 @@ struct FaultSources {
   std::vector<std::size_t> patch;  ///< the patch of each point
   /// slices[k][p]: slice k's moment tensor at point p, N m.
   std::vector<std::vector<SphericalTensor>> slices;
+
+  /// The moment tensors at every point under a date's rows (as
+  /// planetmodel::Fault::Rows gives them): the first row's weight times
+  /// its slice's tensor, plus the second's where its weight is not zero,
+  /// as planetmodel::FaultSliceQuadrature::SlipOf combines the slices'
+  /// slip. Refused (std::invalid_argument) for a row naming a slice the
+  /// sources lack.
+  [[nodiscard]] std::vector<SphericalTensor> MomentsAt(
+      const planetmodel::TimeRows& rows) const;
 };
 
-/// The point sources of a fault (file comment), every slice's. Refused
+/// The point sources of a fault (file comment), every slice's, on
+/// planetmodel's slice quadrature (the geometry formed once). Refused
 /// (std::invalid_argument, naming what): a fault in a Cartesian frame (the
 /// body is a sphere); a reference radius not the model's surface radius
 /// without a placement; a point above the model's surface, by its depth

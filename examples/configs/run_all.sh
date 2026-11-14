@@ -50,6 +50,7 @@ run solve sea_level_fingerprint_3d.json
 run solve sea_level_static_migrating.json
 run solve sea_level_static_coseismic.json
 run solve sea_level_postseismic.json
+run solve sea_level_postseismic_burgers.json
 run solve no_ocean_postseismic.json
 run solve no_gravity_postseismic.json
 run solve sea_level_1d.json

@@ -806,64 +806,50 @@ const FaultFileState& PlacedOf(const SeismicTerm& term) {
   return *term.fault;
 }
 
-/// The SI time of a fault file's axis that time t of the terms' clock
-/// reads, within SpanTolerance of an end taken as that end; empty where it
-/// lies beyond the span.
-std::optional<double> FileTimeOf(const SeismicTerm& term,
-                                 const planetmodel::Fault& fault, double t) {
-  const auto time = (t - term.time_origin) * term.unit.seconds;
-  const auto scale = fault.GetScales().Time();
-  const auto& axis = *fault.Time();
-  const auto span = std::pair{axis.front() * scale, axis.back() * scale};
-  const auto tolerance = SpanTolerance(span);
-  if (time >= span.first - tolerance && time <= span.second + tolerance) {
-    return std::clamp(time, span.first, span.second);
-  }
-  if (term.outside == OutsideSpan::Hold) return time;
-  return std::nullopt;
+/// The time on a fault file's own axis, in the file's time unit, that time
+/// t of the terms' clock reads: t - `time_origin` in the term's unit.
+double FileDateOf(const SeismicTerm& term, const planetmodel::Fault& fault,
+                  double t) {
+  return (t - term.time_origin) * term.unit.seconds / fault.GetScales().Time();
 }
 
-/// Each slice's weight at time t of the terms' clock: one for a static
-/// file, the file's own rule's at its time for a file on a time axis.
-std::vector<double> SliceWeights(const SeismicTerm& term, double t) {
+/// The slices a fault file term reads at time t of the terms' clock, with
+/// their weights (planetmodel::Fault::Rows): a static file's one slice; a
+/// file on a time axis's by its own rule at its time (FileDateOf), a time
+/// within the tolerance the program reads every file's time axis with
+/// (SpanTolerance, planetmodel's `time_rtol` being kAxisRtol) of a stored
+/// time read as that time, beyond the span held or refused as the term
+/// says. Throws planetmodel::Error where the file refuses the time.
+planetmodel::TimeRows RowsOf(const SeismicTerm& term, double t) {
   const auto& fault = PlacedOf(term).fault;
-  auto out = std::vector<double>(fault.NSlices(), 0.0);
   if (fault.Support() != planetmodel::TimeSupport::Node) {
-    out[0] = 1.0;
-    return out;
+    return fault.Rows(std::nullopt);
   }
-  const auto time = FileTimeOf(term, fault, t);
-  if (!time) {
-    throw std::runtime_error(std::format(
-        "{}: the run reads it at {:g} {} on the terms' clock, outside its "
-        "span",
-        term.file.string(), t, term.unit.name));
-  }
-  const auto [first, second] = fault.Rows(
-      *time / fault.GetScales().Time(), term.outside == OutsideSpan::Hold
-                                            ? planetmodel::Extrapolation::Hold
-                                            : planetmodel::Extrapolation::Refuse);
-  out[first.first] += first.second;
-  out[second.first] += second.second;
-  return out;
+  return fault.Rows(FileDateOf(term, fault, t),
+                    {.extrapolation = term.outside == OutsideSpan::Hold
+                                          ? planetmodel::Extrapolation::Hold
+                                          : planetmodel::Extrapolation::Refuse,
+                     .time_rtol = kAxisRtol});
 }
 
 /// A fault file term's sources at time t of the terms' clock: at each
-/// point the slices' tensors under their weights.
+/// point the slices' tensors under the weights the file's reading at that
+/// time gives them (FaultSources::MomentsAt).
 std::vector<PointSource> FileSourcesOf(const SeismicTerm& term, double t) {
   const auto& sources = PlacedOf(term).sources;
-  const auto weights = SliceWeights(term, t);
-  auto out = std::vector<PointSource>{};
-  for (auto p = std::size_t{0}; p < sources.points.size(); ++p) {
-    auto M = SphericalTensor{};
-    for (auto k = std::size_t{0}; k < weights.size(); ++k) {
-      if (weights[k] == 0.0) continue;
-      const auto& S = sources.slices[k][p];
-      const auto w = weights[k];
-      M = {.rr = M.rr + w * S.rr, .tt = M.tt + w * S.tt, .pp = M.pp + w * S.pp,
-           .rt = M.rt + w * S.rt, .rp = M.rp + w * S.rp, .tp = M.tp + w * S.tp};
+  const auto moments = [&] {
+    try {
+      return sources.MomentsAt(RowsOf(term, t));
+    } catch (const planetmodel::Error& error) {
+      throw std::runtime_error(
+          std::format("{}: the run reads it at {:g} {} on the terms' clock: {}",
+                      term.file.string(), t, term.unit.name, error.what()));
     }
-    out.push_back({.at = sources.points[p], .moment = M});
+  }();
+  auto out = std::vector<PointSource>{};
+  out.reserve(moments.size());
+  for (auto p = std::size_t{0}; p < moments.size(); ++p) {
+    out.push_back({.at = sources.points[p], .moment = moments[p]});
   }
   return out;
 }
@@ -907,14 +893,15 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
     static_cast<void>(surfaceRadius);
     static_cast<void>(moduli);
     static_cast<void>(times);
-    Fail(member,
-         std::format("is a fault file, which this build of sl3d does not read: "
-                     "it needs planetmodel's C++ library with the fault file "
-                     "(planetmodel.fault/1, <planetmodel/faultfile.hpp>: "
-                     "planetmodel after 1.5.1), and was built with planetmodel "
-                     "{}. Build sl3d against such a planetmodel "
-                     "(docs/building.md)",
-                     planetmodel::Version()));
+    Fail(
+        member,
+        std::format("is a fault file, which this build of sl3d does not read: "
+                    "it needs planetmodel's C++ library with the fault file "
+                    "(planetmodel.fault/1, <planetmodel/faultfile.hpp>) and "
+                    "its slice quadrature, planetmodel 1.6.0 or later, and was "
+                    "built with planetmodel {}. Build sl3d against such a "
+                    "planetmodel (docs/building.md)",
+                    planetmodel::Version()));
 #else
     term.fault = ReadFault(term, item);
     auto& state = *term.fault;
@@ -959,22 +946,22 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
                                       term.unit.name);
     };
     for (const auto t : times) {
-      const auto time = FileTimeOf(term, fault, t);
-      if (!time) {
-        Fail(member.At("file"),
-             std::format("spans {} to {}, which leaves out {}, {}: give a "
-                         "file that covers it, or \"outside_span\": \"hold\" "
-                         "to hold the file's first or last slip outside its "
-                         "span",
-                         label(axis.front() * scale), label(axis.back() * scale),
-                         label((t - term.time_origin) * term.unit.seconds),
-                         where));
-      }
       try {
-        static_cast<void>(SliceWeights(term, t));
-      } catch (const std::exception& error) {
+        static_cast<void>(RowsOf(term, t));
+      } catch (const planetmodel::Error& error) {
+        const auto date = FileDateOf(term, fault, t);
+        if (date < axis.front() || date > axis.back()) {
+          Fail(member.At("file"),
+               std::format("spans {} to {}, which leaves out {}, {}: give a "
+                           "file that covers it, or \"outside_span\": "
+                           "\"hold\" to hold the file's first or last slip "
+                           "outside its span",
+                           label(axis.front() * scale),
+                           label(axis.back() * scale), label(date * scale),
+                           where));
+        }
         Fail(member.At("file"),
-             std::format("is read at {}, {}: {}", label(*time), where,
+             std::format("is read at {}, {}: {}", label(date * scale), where,
                          error.what()));
       }
     }
@@ -1271,7 +1258,7 @@ std::string Describe(const SeismicTerm& term) {
       out += std::format(" ({} patch{}, ", patches, patches == 1 ? "" : "es");
       out += fault.Support() == planetmodel::TimeSupport::Node
                  ? std::format("slip at {} times, {})", fault.NSlices(),
-                               fault.TimeInterpolationName())
+                               fault.TimeInterpolation())
                  : std::string{"static)"};
     }
 #endif

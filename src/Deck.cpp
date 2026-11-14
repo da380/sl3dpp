@@ -6,6 +6,7 @@
 #include <fstream>
 #include <limits>
 #include <planetmodel/deck.hpp>
+#include <planetmodel/version.hpp>
 #include <utility>
 
 namespace sl3dpp {
@@ -32,6 +33,18 @@ DeckFormat MineosFormat() {
 
 DeckFormat GiaFormat() {
   return DeckFormat("gia", planetmodel::MAXWELL_COLUMNS, 2);
+}
+
+DeckFormat PronyFormat() {
+  auto format = DeckFormat::ByWidth("prony", {}, 2);
+  format.rules = DeckFormat::Rules::Prony;
+  return format;
+}
+
+DeckFormat BurgersFormat() {
+  auto format = DeckFormat::ByWidth("burgers", {}, 2);
+  format.rules = DeckFormat::Rules::Burgers;
+  return format;
 }
 
 std::expected<Deck, DeckError> Deck::Create(
@@ -69,8 +82,23 @@ std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
   try {
     // planetmodel's reader is the one parser: deck.py's
     // own semantics — blank lines and `#` comments skipped, `nan` and a
-    // leading `+` read as Python reads them.
-    const auto read = planetmodel::ReadDeck(path, Translated(format));
+    // leading `+` read as Python reads them. Its own formats bring their
+    // checks of the header and the values.
+    const auto planetmodelFormat = [&]() -> planetmodel::DeckFormat {
+      if (format.rules == DeckFormat::Rules::Columns) return Translated(format);
+#ifdef SL3DPP_PLANETMODEL_1_6
+      return format.rules == DeckFormat::Rules::Prony ? planetmodel::PRONY()
+                                                      : planetmodel::BURGERS();
+#else
+      throw planetmodel::Error(
+          path.string(), "",
+          std::format("is read as a {} deck, which planetmodel's C++ library "
+                      "reads from its 1.6.0 release on: this build's "
+                      "planetmodel, {}, reads none",
+                      format.name, planetmodel::Version()));
+#endif
+    }();
+    const auto read = planetmodel::ReadDeck(path, planetmodelFormat);
     auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};
     for (const auto& name : read.Names()) {
       columns.emplace_back(name, read.Column(name));

@@ -111,6 +111,13 @@ void CheckOutsideSpan(const FileInput& input, const io::FieldHistory& file,
                                              const SurfaceGrid& grid,
                                              const Json& object);
 
+/// The tolerance the program reads every file's time axis with, relative
+/// to the larger of the axis's span and its end times' magnitudes: the
+/// scale planetmodel's readings of a time axis take their `time_rtol` on
+/// (planetmodel::TimeRowsAt, planetmodel::Fault::Rows), which is handed
+/// this value.
+inline constexpr double kAxisRtol = 1e-9;
+
 /// The tolerance at the ends of a time span (SI seconds): 1e-9 of the
 /// larger of its length and its ends' magnitudes, the relative tolerance a
 /// measurement's date is located on the window's nodes with. A time within
@@ -118,6 +125,7 @@ void CheckOutsideSpan(const FileInput& input, const io::FieldHistory& file,
 /// formed from the window, a file's axis converted from its unit) raises
 /// no needless refusal.
 [[nodiscard]] double SpanTolerance(std::pair<double, double> span);
+
 
 /// A time of a file's axis (SI seconds) as a refusal states it: a date,
 /// `<d> kyr BP` (minus the time in kyr), without `unit`; with it, `<t>

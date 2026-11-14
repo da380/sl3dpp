@@ -15,9 +15,10 @@
  * what a config was taken to mean.
  */
 
-#include <memory>
 #include <filesystem>
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -119,6 +120,13 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 void RefuseThreeDSolver(const Json& top, std::string_view what,
                         bool transforms = false);
 
+/// Whether a config asks for lateral kernels (`kernels.lateral` true):
+/// the grids' members of the `solver` block (`transform_degrees`,
+/// `cache_mb`) then pass on a radial model, for the kernel sweep's grids,
+/// and `solve` reads them and leaves them unused, as it does the
+/// `kernels` block.
+[[nodiscard]] bool LateralKernelsAsked(const Json& top);
+
 /// The Earth of a run: the deck's model and material at lmax, and the
 /// viscosity and moduli files' contents where given.
 struct BuiltEarth {
@@ -126,6 +134,9 @@ struct BuiltEarth {
   Material material;
   std::optional<io::ModelViscosity> viscosity;
   std::optional<io::ModelModuli> moduli;
+  /// The Kelvin elements of `model.burgers` by layer (KelvinOf); empty
+  /// for the deck's own rheology.
+  std::map<std::size_t, Rheology::Kelvin> kelvin;
 
   /// Whether the viscosity file's viscosity, or the moduli file's moduli,
   /// vary laterally: either makes a run through time 3-D.
@@ -146,9 +157,19 @@ struct BuiltEarth {
   [[nodiscard]] std::string Dimension() const;
 };
 
-/// Builds the run's Earth: the deck's model and material at lmax, and the
-/// model files of `model.viscosity` and `model.moduli` read about their
-/// chosen references.
+/// The Kelvin elements of a run's `model.burgers` on its deck's model, by
+/// layer: each region's layers, the Kelvin viscosity in the model's units.
+/// A region is refused at its `depth_km` where an end does not lie on a
+/// boundary of the deck's layers (to 1e-9 of the surface radius), naming
+/// the layer it cuts and its depths, or lies beyond the deck, and where it
+/// covers a layer that is fluid or holds no viscosity, naming it.
+[[nodiscard]] std::map<std::size_t, Rheology::Kelvin> KelvinOf(
+    const Run& run, const EarthModel& model, const Json& top);
+
+/// Builds the run's Earth: the deck's model and material at lmax, the
+/// Kelvin elements of `model.burgers` (KelvinOf), and the model files of
+/// `model.viscosity` and `model.moduli` read about their chosen
+/// references.
 [[nodiscard]] BuiltEarth BuildEarth(const Run& run, const Json& top);
 
 /// The elastic moduli of a run's Earth at a point (radius in metres), SI:
@@ -165,8 +186,11 @@ struct BuiltEarth {
 /// nodes on the terms' clock. Nothing to do without one.
 void PlaceSeismicSources(Run& run, const BuiltEarth& earth, const Json& top);
 
-/// The Maxwell rheology of a run through time: the viscosity file's
-/// radial reference where given, the deck's viscosity column otherwise.
+/// The rheology of a run through time: the viscosity file's radial
+/// reference where given (a Maxwell body); otherwise the deck's own
+/// (Rheology::FromModel: a Maxwell deck's viscosity, a burgers deck's
+/// Maxwell and Burgers layers, a prony deck's branches), with the
+/// Burgers layers of `model.burgers` (BuiltEarth::kelvin).
 [[nodiscard]] Rheology RheologyOf(const BuiltEarth& earth, const Json& top);
 
 /// The options of a 3-D run's operator: the transforms, cache and rank

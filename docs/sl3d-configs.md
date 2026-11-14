@@ -139,17 +139,59 @@ repeated radius marks a layer boundary. `model.format` says which kind
 | `model.format` | Header lines | Columns after the radius |
 | --- | --- | --- |
 | `"maxwell"` (the default; `"gia"` names the same format) | 2 | `rho vpv vsv vph vsh eta viscosity`, planetmodel's Maxwell deck; viscosity `nan` in elastic and fluid layers |
+| `"prony"` | 2 (and planetmodel's naming lines) | `rho vpv vsv vph vsh eta`, then `relaxation_strength_k relaxation_time_k` for k = 1 to N: planetmodel's prony deck, a generalised Maxwell body (its format page, `docs/source/formats/prony_deck.rst`); `nan` in every branch column of an elastic or fluid layer |
+| `"burgers"` | 2 (and planetmodel's naming lines) | `rho vpv vsv vph vsh eta viscosity kelvin_viscosity kelvin_modulus_fraction`: planetmodel's burgers deck, each layer elastic, a Maxwell body (the viscosity alone) or a Burgers body (all three; `docs/source/formats/burgers_deck.rst`) |
 | `"mineos"` | 3 | `rho vpv vsv qkappa qmu vph vsh eta`, or `rho vp vs qkappa qmu` for an isotropic model |
 | `"elastic"` | 0 | `rho vpv vsv vph vsh eta`, the six-column elastic table of the test and example decks |
 
 All values are SI. Blank lines and lines starting with `#` in the table are
-skipped. The elastic structure always comes from the deck. The
-quasi-static problem (`solve`, `kernel`) takes the viscosity
-from the model file of `model.viscosity` when given, ignoring any
-viscosity column, and from the deck's `viscosity` column otherwise, which
-then needs a deck that has one (`"maxwell"`): each layer holding a
-viscosity is a Maxwell body, and a deck with no viscosity at all is
-refused. The static problem uses no viscosity.
+skipped. A prony or burgers deck is read by planetmodel's own reader of
+it, its column line and naming lines and its values held to planetmodel's
+checks (a prony deck's strengths in [0, 1] summing to at most one, its
+times positive; a burgers deck's layers one of its three bodies), and
+needs a build against planetmodel 1.6.0 or later, which reads them; an
+older one refuses the format at `model.deck`. The elastic structure always
+comes from the deck, a prony or burgers deck's elastic values being the
+unrelaxed ones. The quasi-static problem (`solve`, `kernel`) takes the
+viscosity from the model file of `model.viscosity` when given, ignoring
+any viscosity column, and from the deck otherwise, which then needs a
+deck that states a rheology (`"maxwell"`, `"prony"` or `"burgers"`): a
+Maxwell deck's layer holding a viscosity is a Maxwell body (and, where
+`model.burgers` names it, a Burgers body: The model block, below); a
+burgers deck's layers are its Maxwell and Burgers bodies, a Burgers
+body's Kelvin element the layer's `kelvin_viscosity` and
+`kelvin_modulus_fraction` times its unrelaxed shear modulus (two exact
+Prony branches, `BurgersPronyTerms`); a prony deck's layers are its
+branches, branch k's modulus the strength times the unrelaxed shear
+modulus and its relaxation time the deck's, a strength of 0 leaving it
+inactive there, any number of branches and a relaxed modulus (strengths
+summing below one) included; strengths summing past one by the rounding
+a prony deck allows (1e-8 a branch, the eight digits planetmodel writes)
+are taken to sum to one. A deck with no viscosity at all is refused. The
+static problem uses no viscosity.
+
+**Joining the knots.** Each column is a function of the radius on each
+layer through its knots: the elastic columns (and any other) by the
+library's cubic splines, not-a-knot as planetmodel's on a layer of four
+knots or more (natural on three, where planetmodel takes the parabola;
+two knots are a line under both), and the columns of planetmodel's
+viscoelastic decks as planetmodel joins them, by its kinds for them
+(`planetmodel::DeckLayers`), so that such a deck read here and by
+planetmodel is one body: a viscosity, a Kelvin element's viscosity
+and a Prony branch's relaxation time in their logarithm by straight
+lines (`log-linear`: geometric between knots, so positive, and following
+a viscosity that changes by orders of magnitude within a layer), a
+strength and a Kelvin modulus fraction by straight lines. A deck is a
+table dense enough in knots that the interpolation between them does not
+matter in practice: the kinds are a default for joining knots, not part
+of the model, and a column constant through a layer is that constant
+under any of them. A deck's elastic and viscous columns, joined thus,
+make one body whatever deck states it at the knots: a prony deck of one
+branch made from a Maxwell deck (its time the knots' viscosity over the
+shear modulus) is the Maxwell deck's body at the knots, and between them
+differs at second order in their spacing (the post-seismic deck of the
+examples, 8 knots a layer, moves a run to 1000 years by 1.6e-5 of its
+fields).
 
 The radial mesh is built for the run's degree, `discretisation.lmax`
 (The discretisation block, below), from the deck alone; there are no mesh
@@ -398,7 +440,7 @@ Which command takes which:
 | --- | --- | --- |
 | `problem` | `"static"` or `"quasi_static"`, required | as `solve` |
 | `model.deck`, `model.format` | yes | yes |
-| `model.viscosity` | quasi-static | as `solve` |
+| `model.viscosity`, `model.burgers` | quasi-static | as `solve` |
 | `model.moduli` | yes | yes |
 | `discretisation` | required: `lmax` | as `solve` |
 | `times` | quasi-static, required: dates before present, or times counted forwards in a `unit` | as `solve` |
@@ -407,7 +449,8 @@ Which command takes which:
 | `rotation`, `moments` | yes | yes |
 | `gravity` | `"full"` or `"none"`; `"none"` a radial run under seismic sources alone | `"full"` alone: `"none"` is refused |
 | `solver.rtol` | yes | yes (the adjoint solves' too) |
-| `solver.step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) |
+| `solver.step_rtol`, `step_max_iterations` | in a 3D run (the static problem's on lateral moduli too) | as `solve` (the reversed steps' too) |
+| `solver.transform_degrees`, `cache_mb` | in a 3D run (the static problem's on lateral moduli too); in a 1D run whose config asks for lateral kernels (`kernels.lateral` true), taken and not used | as `solve` (the reversed steps' too); in a 1D run, the lateral kernels' grids |
 | `solver.scheme` | quasi-static | as `solve` |
 | `solver.step` | in a 3D run (the static problem's on lateral moduli too) | as `solve` |
 | `checkpoint`, `restart` | quasi-static | checked as `solve` checks them, not used |
@@ -417,7 +460,8 @@ Which command takes which:
 
 "In a 3D run" means a run on a model the `model` block makes 3D (solve
 says when); a 1D run (the static problem on a radial Earth included)
-refuses the members of the 3D step.
+refuses the members of the 3D step, but for the grids' two where the
+config asks for lateral kernels.
 
 ### The discretisation block
 
@@ -441,7 +485,8 @@ belongs in `discretisation.lmax`").
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model.deck` | path | required | the deck (Earth models, above) |
-| `model.format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
+| `model.format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"prony"`, `"burgers"`, `"mineos"` or `"elastic"` |
+| `model.burgers` | list | absent | the quasi-static problem on a `"maxwell"` deck alone: regions of whole layers made Burgers bodies over their own viscosity (below); absent, the deck's Maxwell bodies |
 | `model.moduli.file` | path | absent | a planetmodel model file whose `mu` and `kappa` fields give the lateral moduli, either alone (the other modulus then radial; a file holding neither is refused); absent, the radial model alone |
 | `model.moduli.reference` | word | `"lateral_mean"` | `"lateral_mean"` (the perturbation about each field's lateral mean) or `"file_radial"` (about the file's own stored radial reference) |
 | `model.viscosity.file` | path | absent | the quasi-static problem alone: a planetmodel model file of the 3D viscosity (3D viscosity models, above); absent, the deck's own viscosity column |
@@ -459,15 +504,53 @@ scales the unrelaxed shear modulus and every Maxwell branch's modulus
 alike, the branch fractions and the relaxation times held
 (`Viscoelastic3D::Options::moduli`).
 
-The viscosity matters only to a run through time: `model.viscosity` is
-refused in the static problem. In the quasi-static problem the viscosity
-is the model file's
-when `model.viscosity` is given (its radial reference the Maxwell body,
-the deck's viscosity column, if any, unused), and the deck's own column
-otherwise: each layer holding a viscosity is a Maxwell body. A deck
-format with no viscosity column (`"elastic"`, `"mineos"`) is then refused
-at `model.format`, and a `"maxwell"` deck with no viscosity anywhere at
-`model.deck`.
+`model.burgers` makes layers of a Maxwell deck Burgers bodies: a Maxwell
+element of the layer's own viscosity (the deck's, the body's steady
+viscosity) and unrelaxed shear modulus in series with a Kelvin element.
+Each entry is a region:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `depth_km` | [top, bottom], km | required | the region's depths below the surface, 0 <= top < bottom; each end on a boundary of the deck's layers (to 1e-9 of the surface radius), every layer between holding a viscosity |
+| `kelvin_viscosity` | number > 0, Pa s | required | the Kelvin element's viscosity, absolute (not a fraction of the steady one) |
+| `kelvin_modulus_fraction` | number > 0 | required | the Kelvin element's shear modulus as a fraction of the layer's unrelaxed (Voigt) shear modulus, at every point |
+
+```json
+"model": {"deck": "prem8.postseismic.deck", "format": "maxwell",
+          "burgers": [{"depth_km": [50, 217], "kelvin_viscosity": 1e18,
+                       "kelvin_modulus_fraction": 1.0}]}
+```
+
+Each layer of a region is the body a burgers deck's Burgers layer of the
+same numbers is (Earth models, above): the two give one run to rounding.
+A region whose end cuts a layer, or that covers an elastic or a fluid
+layer, is refused, naming the layer and its depths, and so are regions
+that overlap, a region beyond the deck and one missing a member. A prony
+or burgers deck states its rheology, and refuses the member; a
+`"mineos"` or `"elastic"` deck has no viscosity to build on, and refuses
+it too. Beside a `model.viscosity` file it is refused: the file replaces
+the deck's viscosity, and over a lateral one the 3-D step scales every
+branch's relaxation time alike (`exp(-delta)`), which would keep the
+Kelvin element's viscosity in proportion to the steady one rather than
+absolute: a Burgers body over a viscosity file is not built. Under
+lateral moduli (`model.moduli`) a Burgers or prony body is perturbed as a
+Maxwell body is, its branch fractions and relaxation times held. The
+member enters the run's hash and, where given, the outputs' metadata
+(`burgers`).
+
+The viscosity matters only to a run through time: `model.viscosity` and
+`model.burgers` are refused in the static problem. A `model.viscosity`
+file beside a prony or burgers deck is refused: the deck states its
+rheology in its own columns, and the 3-D step's lateral viscosity scales
+every branch's relaxation time alike, which is not such a deck's body.
+In the quasi-static problem the viscosity is the model file's when
+`model.viscosity` is given (its radial reference the Maxwell body, the
+deck's viscosity column, if any, unused), and the deck's own otherwise:
+each layer holding a viscosity is a Maxwell body, or a Burgers body where
+`model.burgers` names it, and a prony or burgers deck's layers are the
+bodies it states (Earth models, above). A deck format with no viscosity
+(`"elastic"`, `"mineos"`) is then refused at `model.format`, and a deck
+with no viscosity or branches anywhere at `model.deck`.
 
 A model file whose fields are stored as functions of the radius alone is
 radial, and leaves a run 1D; a field stored on an angular grid varies
@@ -593,8 +676,12 @@ The members of the 3D step (`step`, `step_rtol`, `step_max_iterations`,
 static problem on a radial Earth, which takes
 `rtol` alone (without a `model.moduli` file they are refused when the
 config is read, with a radial one once the file is read); the static
-problem on lateral moduli takes them all. `scheme` is refused in the
-static problem.
+problem on lateral moduli takes them all. A radial config asking for
+lateral kernels (`kernels.lateral` true) takes the grids' two,
+`transform_degrees` and `cache_mb`, in either problem: `kernel` sweeps
+the lateral kernels on the grids they set, and `solve` leaves them
+unused, as it does the `kernels` block, its run the run without them.
+`scheme` is refused in the static problem.
 
 ### The output block
 
@@ -784,7 +871,7 @@ et al. 2024).
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `model` | path | required | the deck |
-| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"mineos"` or `"elastic"` |
+| `model_format` | word | `"maxwell"` | `"maxwell"` (or `"gia"`), `"prony"`, `"burgers"`, `"mineos"` or `"elastic"`: the deck's elastic values (a viscoelastic deck's unrelaxed ones) |
 | `discretisation` | object | required | `lmax`, the largest degree, an integer >= 0 (The discretisation block, above) |
 | `output` | path | required | the table to write |
 | `conventional_output` | path | absent | where to write the conventional dimensionless numbers too (below); not `output`'s file |
@@ -1099,7 +1186,8 @@ the moment with it. One point source is band-limited by `lmax`; a fault
 of several patches is the way to a smoother source.
 
 A `fault_file` is a fault given by its slip: a planetmodel fault file
-(`planetmodel.fault/1`, written by planetmodel's `write_fault`; its format
+(`planetmodel.fault/1`, written by planetmodel's `write_fault`, or its
+C++ `WriteFaultFile`; its format
 page is planetmodel's `docs/source/formats/fault_file.rst`), one or more
 patches of surface (planes and curved structured patches) with the slip of
 the hanging wall on each, in fault components on a grid of its own,
@@ -1115,7 +1203,7 @@ of a quadrature over every patch:
 | `time_origin` | number | 0 | a file on a time axis in a run counting forwards: the time of the run's clock, in its unit, at which the file's time zero falls. Refused in a dated run and on a static file |
 | `outside_span` | `"refuse"` or `"hold"` | `"refuse"` | a file on a time axis: what a node's time outside the file's span does, as for a file input (File inputs, above). Refused on a static file |
 
-The quadrature is planetmodel's (`Fault::Quadrature`): each patch cut into
+The quadrature is planetmodel's (`Fault::SliceQuadrature`): each patch cut into
 the cells given, with `points` by `points` Gauss–Legendre points in each, a
 point's weight w the area it stands for; the points are taken patch by
 patch, u slowest. At each point the file's slip s (the displacement of the
@@ -1192,15 +1280,29 @@ load's file is; in a dated run it is read by date, its axis the
 calendar's (the present at zero, the past negative), as a `field` load's
 file is, and `time_origin` is refused. A node's time outside the file's
 span is refused before the run, or, with `"outside_span": "hold"`, the
-file's first or last slip is held there; within 1e-9 of an end it is read
-at the end. At each time the slip is read by the file's own rule (`linear`
-between its times, `previous` from the latest not after the time, `none`
-at its stored times alone, any other time then refused): each slice of
-the slip is laid out as its own set of tensors, and the moment at a point
-is the sum of the slices' tensors weighted by their hat functions there
-(`linear`: one at the slice's own time, zero at the others and linear
-between; `previous`: one from its time to the next), which is the moment
-of the slip the file reads at that time, its size and direction both.
+file's first or last slip is held there. A time within the tolerance the
+program reads every file's time axis with (1e-9 of the larger of the
+span's length and its ends' magnitudes: File inputs, above) of one of the
+file's stored times is read as that time, under every rule, an end of the
+span included. planetmodel's reading of the file (`Fault::Rows`) takes
+that tolerance as its `time_rtol`, on the same scale, in place of its own
+default (`TIME_RTOL`, 1e-12): a run's times are formed by arithmetic (its
+clock converted to the file's unit, a date formed from the window's
+start), so that a run counting forwards in kyr, its zero 120 kyr from the
+file's, reaches a time stored at -999 yr as -998.99999999999511 yr, and
+reads it as that stored time.
+At each time the slip is read by the file's own
+rule (`linear` between its times, `previous` from the latest not after
+the time, `none` at its stored times alone, any other time then
+refused): each slice of the slip is laid out as its own set of tensors,
+on planetmodel's slice quadrature (`Fault::SliceQuadrature`: the points,
+normals and weights formed once, each slice's slip at them), and the
+moment at a point is the slices' tensors under the weights the reading
+gives them (`linear`: one at the slice's own time, zero at the others and
+linear between; `previous`: one from its time to the next), combined as
+planetmodel combines the slices' slip (`FaultSliceQuadrature::SlipOf`):
+the moment of the slip the file reads at that time, its size and
+direction both.
 
 **Cost.** Each quadrature point is a point source. Sources at one radius,
 to 1e-12 (rounding, never a move of a source), are formed together, at
@@ -1212,10 +1314,10 @@ strike otherwise do, are formed one by one. In a run through time the
 sources are formed at every node.
 
 **The build.** The term needs planetmodel's C++ library with the fault
-file (`<planetmodel/faultfile.hpp>`, in planetmodel after 1.5.1); a build
-of sl3d against an older planetmodel reads the config but refuses the
-term when it runs, naming the planetmodel it was built with
-(docs/building.md).
+file and its slice quadrature (`<planetmodel/faultfile.hpp>`, planetmodel
+1.6.0 or later); a build of sl3d against an older planetmodel reads the
+config but refuses the term when it runs, naming the planetmodel it was
+built with (docs/building.md).
 
 **What the seismic forcing resolves.** sl3d is a global code: a source's
 field is carried to degree `lmax`, a wavelength of about 40 000 km /
@@ -2705,10 +2807,23 @@ point's moment kernel (with its off-diagonal entries halved, each setting
 a pair), gathered onto the slip's own grid through the rule that reads
 the slip at the point.
 
-**The viscosity.** In 1D, `<name>_viscosity_kernel.txt`: columns `r_m`,
-`K_branch_<b>` per Maxwell branch and `W_m3`, the kernel in eta in SI,
-dJ = integral of K delta eta dV = sum over the rows of W_m3 K delta eta,
-eta in Pa s; the rows are the radial mesh's nodes, element by element (a
+**The viscosity.** The kernels are a branch's, each in the branch's own
+viscosity, its modulus times its relaxation time (mu_b tau_b; a Maxwell
+body's one branch, the viscosity itself), the branch's modulus held. A
+Maxwell deck has one branch; a Burgers body (a burgers deck's layer, a
+region of `model.burgers`) two, `K_branch_0` its slower term and
+`K_branch_1` its faster, the Maxwell layers' kernel in `K_branch_0`; a
+prony deck's are its branches in order. The kernels with respect to the
+parameters a burgers or prony deck states (the steady viscosity, the
+Kelvin element's viscosity and modulus fraction; the strengths and the
+times) are not built: they are the branches' kernels through the
+derivatives of the branches in those parameters, which no command forms.
+Every branch's relaxation time raised alike (a Burgers body's two
+viscosities scaled together, its strengths held) pairs with the sum over
+the branches, as `uniform_log_viscosity_pairing` (below) gives it. In
+1D, `<name>_viscosity_kernel.txt`: columns `r_m`, `K_branch_<b>` per
+branch and `W_m3`, the kernel in eta_b in SI, dJ = integral of K
+delta eta_b dV = sum over the rows of W_m3 K delta eta_b, eta_b in Pa s; the rows are the radial mesh's nodes, element by element (a
 shared element edge twice, once per element), `W_m3` the node's volume
 weight (4 pi r^2 times its radial quadrature weight). In 3D,
 `<name>_viscosity_kernels.nc`: the log-viscosity kernels as a planetmodel
@@ -2756,13 +2871,12 @@ pairings with the run's own lateral structure are zero, it having none,
 and `uniform_log_viscosity_pairing` is the radial kernel's pairing with a
 uniform change of ln eta over the viscous mantle. The grids' members of
 the `solver` block, `transform_degrees` (the transforms cut by depth as a
-3D run's are) and `cache_mb`, are taken by such a run through time and
-refused by a radial run otherwise; they are the sweep's alone, out of the
-run's hash, so a run recorded into the trajectory store once serves the
-lateral kernels at any `transform_degrees`. The static problem takes the
-member
-as the run through time does (its fields are the moduli's, on the band's
-grid at every node). On a model with lateral
+3D run's are) and `cache_mb`, are taken by such a run, through time or
+in the static problem (whose fields are the moduli's, on the band's grid
+at every node), and refused by a radial run otherwise; `solve` takes them
+on the same config and leaves them unused. They are the sweep's alone, out
+of the run's hash, so a run recorded into the trajectory store once
+serves the lateral kernels at any `transform_degrees`. On a model with lateral
 structure the kernels are fields whatever the member says: `"lateral":
 false` there is refused, naming the model's structure. `"lateral": true`
 naming neither `"viscosity"` nor `"moduli"` is refused. The files of a

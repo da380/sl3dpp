@@ -649,6 +649,9 @@ void WriteHistoryFile(const SolveInput& input,
   if (!run.model.viscosity.empty()) {
     file.meta.emplace("viscosity", run.model.viscosity.string());
   }
+  if (!run.model.burgers.empty()) {
+    file.meta.emplace("burgers", DescribeBurgers(run.model.burgers));
+  }
   if (!run.model.moduli.empty()) {
     file.meta.emplace("moduli", run.model.moduli.string());
   }
@@ -1916,14 +1919,18 @@ std::string RunSolve(const std::filesystem::path& config) {
     if (earth.LateralModuli()) {
       return RunStatic3D(config, input, top, earth, meaning);
     }
-    RefuseThreeDSolver(top, "the static problem on a radial Earth");
+    // the grids' members pass where the kernels are lateral: the kernel
+    // sweep's, unused here, as the `kernels` block is
+    RefuseThreeDSolver(top, "the static problem on a radial Earth",
+                       LateralKernelsAsked(top));
     // one process's run: on several ranks, the first rank's alone
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});
     return RunStatic1D(config, input, top, earth, meaning);
   }
   if (!earth.Lateral()) {
-    RefuseThreeDSolver(top, "a 1-D run (a radial model)");
+    RefuseThreeDSolver(top, "a 1-D run (a radial model)",
+                       LateralKernelsAsked(top));
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});
     return Run1D(config, input, top, earth, meaning);

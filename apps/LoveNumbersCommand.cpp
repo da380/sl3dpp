@@ -22,7 +22,9 @@ ModelFormat ReadFormat(const Json& top) {
                              {{"maxwell", ModelFormat::Gia},
                               {"gia", ModelFormat::Gia},
                               {"mineos", ModelFormat::Mineos},
-                              {"elastic", ModelFormat::Elastic}});
+                              {"elastic", ModelFormat::Elastic},
+                              {"prony", ModelFormat::Prony},
+                              {"burgers", ModelFormat::Burgers}});
 }
 
 /// The model, mesh and material of a config's deck.

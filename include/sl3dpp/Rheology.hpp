@@ -16,7 +16,9 @@
  * convention, so a model frozen at a frequency and the time stepping
  * describe the same body. A Burgers body (a Maxwell element in series
  * with a Kelvin element) is exactly two branches with no long-term
- * modulus (BurgersPronyTerms). mu_k = 0 deactivates a node in branch k;
+ * modulus (BurgersPronyTerms). planetmodel's Maxwell, prony and burgers
+ * decks state these bodies in their columns (FromModel). mu_k = 0
+ * deactivates a node in branch k;
  * itau_k = 0 is an infinite relaxation time. Bulk relaxation is not
  * modelled, and the material must be isotropic where any branch is active
  * (the degree-basis internal variables of A&T 2014 App. D assume isotropic
@@ -126,10 +128,42 @@ class Rheology {
       const std::map<std::size_t, RadialValue>& viscosity,
       const std::map<std::size_t, Kelvin>& kelvin);
 
-  /// The rheology the model's own fields declare: each layer holding a
-  /// `viscosity` field is a Maxwell body with tau = viscosity / mu.
+  /// The rheology the model's own fields declare, as planetmodel's
+  /// viscoelastic decks state it (Deck.hpp: GiaFormat, PronyFormat,
+  /// BurgersFormat), each field read where it is joined (EarthModel):
+  ///  - a layer holding `viscosity` alone is a Maxwell body,
+  ///    tau = viscosity / mu (Maxwell);
+  ///  - one holding `viscosity`, `kelvin_viscosity` and
+  ///    `kelvin_modulus_fraction` (a burgers deck's Burgers layer) a
+  ///    Burgers body, its Kelvin element the viscosity eta_K and the
+  ///    modulus fraction times the unrelaxed mu at every node (Burgers);
+  ///  - one holding `relaxation_strength_k` and `relaxation_time_k`, k = 1
+  ///    to N (a prony deck's), a generalised Maxwell body, branch k's
+  ///    modulus the strength times the unrelaxed mu and its time the
+  ///    branch's, a branch of strength zero inactive there. Strengths
+  ///    summing past one by the rounding a prony deck allows (to N times
+  ///    planetmodel's STRENGTH_ROUNDING, 1e-8) are taken to sum to one,
+  ///    each divided by their sum at the node; a relaxed modulus (a sum
+  ///    below one) is kept.
+  /// The branches are as many as the most a layer holds, the k-th of every
+  /// layer together: a Maxwell layer's one, a Burgers layer's slower term
+  /// first, a prony layer's in the deck's order. Refused: no layer holding
+  /// any of these; a layer holding a viscosity and Prony branches, or
+  /// Kelvin columns and Prony branches, or Kelvin columns without a
+  /// viscosity or without each other, or a branch's strength without its
+  /// time; strengths summing past one by more than the rounding; and as
+  /// Create refuses.
   [[nodiscard]] static std::expected<Rheology, RheologyError> FromModel(
       const Material& material, const EarthModel& model);
+
+  /// The model's Maxwell rheology (FromModel) with each layer in `kelvin`
+  /// a Burgers body over its own viscosity, its Kelvin element the entry's
+  /// (Burgers). Refused where the model states another rheology (Kelvin
+  /// columns or Prony branches of its own), where a layer in `kelvin`
+  /// holds no viscosity, and as Burgers refuses.
+  [[nodiscard]] static std::expected<Rheology, RheologyError> FromModel(
+      const Material& material, const EarthModel& model,
+      const std::map<std::size_t, Kelvin>& kelvin);
 
   /// Stable for the lifetime of any copy of this Rheology.
   [[nodiscard]] const Material& BaseMaterial() const { return *material_; }

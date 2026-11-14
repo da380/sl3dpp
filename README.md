@@ -116,7 +116,10 @@ With `"shorelines": "migrating"` in `ocean` the shorelines follow
 flotation; `"quasi_static"` with a `times` block, the state at an end of
 the window (`ocean.at`) and an ice history runs GIA through time; without
 `ocean` the body has none; a lateral `model.viscosity` or `model.moduli`
-file makes the run 3D; a `kernels` block serves `sl3d kernel`. Outputs,
+file makes the run 3D; a planetmodel prony or burgers deck
+(`"format": "prony"`, `"burgers"`), or `model.burgers` on a Maxwell deck,
+gives generalised Maxwell and Burgers bodies; a `kernels` block serves
+`sl3d kernel`. Outputs,
 planetmodel files and plain tables, record the program, its version and
 the config. Every member is in [docs/sl3d-configs.md](docs/sl3d-configs.md),
 and threads, memory, MPI and long runs in [docs/running.md](docs/running.md).
@@ -126,7 +129,8 @@ and threads, memory, MPI and long runs in [docs/running.md](docs/running.md).
 sl3dpp reads and writes [planetmodel](https://github.com/da380/planetmodel)'s
 files and its formulation is pyslfp's, so the three are one toolchain
 (`pip install "planetmodel[netcdf]" pyslfp`). planetmodel writes decks
-(`deck.write_deck`), 3D models from tomography (`conversion`,
+(`deck.write_deck`; a model's prony and burgers decks,
+`conversion.prony.prony_deck` and `burgers_deck`), 3D models from tomography (`conversion`,
 `modelfile.write_model`) and field histories (`surfacefile.write_surface`),
 pyslfp's `ice.export_ice_history` writes ICE-5G, 6G or 7G, and
 `surfacefile.read_surface` and `modelfile.read_model` read the outputs.

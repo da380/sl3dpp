@@ -172,6 +172,27 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   logarithmic after it, the deck's Maxwell times marked. On nodes three
   times as close the means move by at most 3.2 mm, 1.8% of their change
   (at lmax 64). About 46 s and 4.0 GB on four threads.
+- **`sea_level_postseismic_burgers.json`** — that run on the post-seismic
+  Earth's Burgers twin: `model.burgers` makes the asthenosphere, the
+  deck's viscous layers from the lid's base at 50 km to 217 km, Burgers
+  bodies, a Kelvin element of the unrelaxed shear modulus and 1e18 Pa s (a
+  tenth of the steady viscosity there) in series with each layer's
+  Maxwell element, the rest of the mantle Maxwell as before:
+  `out/sea_level_postseismic_burgers/sea_level_postseismic_burgers.nc`.
+  It is `ExampleSeismic`'s Burgers twin through the program, the
+  rheology the same branch for branch (`TestAppsDecks`). The
+  asthenosphere relaxes a part of the way within months: in 2° means the
+  uplift over the fault grows from 0.150 m at the event to 0.181 m in the
+  first year, against 0.156 m on the Maxwell Earth, the two differing by
+  26 mm at 1.5 to 2 years, by 16 mm at 10 years and by little after about
+  35 years (3 mm less on the Burgers Earth at 55 to 100 years, 0.231 m
+  against 0.233 m at 300 years); 250 km down dip it rises from 0.052 m to
+  0.074 m in the first year, against 0.057 m. A burgers deck holding the
+  same body (`"format": "burgers"`, planetmodel's
+  `conversion.prony.burgers_deck`) gives the same run to rounding, and a
+  prony deck of its two branches (`"format": "prony"`) the same to the
+  eight digits it writes them with and to their joining between knots
+  (docs/sl3d-configs.md, Earth models). About 37 s on four threads.
 - **`no_ocean_postseismic.json`** — that thrust without an ocean and
   without rotational feedback, on the same Earth, nodes and lmax: the
   solid body's response, `out/no_ocean_postseismic/no_ocean_postseismic.nc`

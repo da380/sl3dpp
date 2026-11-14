@@ -57,20 +57,125 @@ DeckFormat FormatOf(ModelFormat format) {
       return GiaFormat();
     case ModelFormat::Mineos:
       return MineosFormat();
+    case ModelFormat::Prony:
+      return PronyFormat();
+    case ModelFormat::Burgers:
+      return BurgersFormat();
     case ModelFormat::Elastic:
       break;
   }
   return DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0);
 }
 
+std::string_view NameOf(ModelFormat format) {
+  switch (format) {
+    case ModelFormat::Gia:
+      return "maxwell";
+    case ModelFormat::Mineos:
+      return "mineos";
+    case ModelFormat::Prony:
+      return "prony";
+    case ModelFormat::Burgers:
+      return "burgers";
+    case ModelFormat::Elastic:
+      break;
+  }
+  return "elastic";
+}
+
+std::string DescribeBurgers(std::span<const BurgersRegion> regions) {
+  auto out = std::string{};
+  for (const auto& region : regions) {
+    out += std::format(
+        "{}{:.17g} to {:.17g} km: kelvin_viscosity {:.17g} Pa "
+        "s, kelvin_modulus_fraction {:.17g}",
+        out.empty() ? "" : "; ", region.top / 1e3, region.bottom / 1e3,
+        region.kelvin_viscosity, region.kelvin_modulus_fraction);
+  }
+  return out;
+}
+
+namespace {
+
+/// A positive finite number.
+double Positive(const Json& object, std::string_view key) {
+  const auto value = Number(object, key);
+  if (!(std::isfinite(value) && value > 0.0)) {
+    Fail(object.At(key), "is not a positive number");
+  }
+  return value;
+}
+
+/// The regions of `model.burgers` (ReadModelBlock).
+std::vector<BurgersRegion> ReadBurgers(const Json& member) {
+  if (!member.IsArray()) {
+    Fail(member,
+         "is not a list: `burgers` is a list of regions, each an object of "
+         "`depth_km` [top, bottom], `kelvin_viscosity` and "
+         "`kelvin_modulus_fraction`");
+  }
+  const auto& items = member.AsArray();
+  if (items.empty()) Fail(member, "names no region");
+  auto out = std::vector<BurgersRegion>{};
+  for (const auto& item : items) {
+    if (!item.IsObject()) {
+      Fail(item,
+           "is not a region: an object of `depth_km` [top, bottom], "
+           "`kelvin_viscosity` and `kelvin_modulus_fraction`");
+    }
+    Allow(item, {"depth_km", "kelvin_viscosity", "kelvin_modulus_fraction"});
+    for (const auto* name :
+         {"depth_km", "kelvin_viscosity", "kelvin_modulus_fraction"}) {
+      if (!Has(item, name)) {
+        Fail(item, std::format(
+                       "has no `{}`: a region is its depths, `depth_km` [top, "
+                       "bottom], and its Kelvin element, `kelvin_viscosity` "
+                       "(Pa s) and `kelvin_modulus_fraction` (its shear "
+                       "modulus over the layer's elastic one)",
+                       name));
+      }
+    }
+    const auto& depth = item.At("depth_km");
+    if (!depth.IsArray() || depth.AsArray().size() != 2) {
+      Fail(depth, "is not [top, bottom]: two depths in km");
+    }
+    const auto top = depth.AsArray()[0].AsNumber();
+    const auto bottom = depth.AsArray()[1].AsNumber();
+    if (!(std::isfinite(top) && std::isfinite(bottom) && top >= 0.0 &&
+          bottom > top)) {
+      Fail(depth,
+           "is not [top, bottom] with 0 <= top < bottom: the depths of the "
+           "region's top and bottom below the surface, km");
+    }
+    out.push_back(BurgersRegion{
+        .top = 1e3 * top,
+        .bottom = 1e3 * bottom,
+        .kelvin_viscosity = Positive(item, "kelvin_viscosity"),
+        .kelvin_modulus_fraction = Positive(item, "kelvin_modulus_fraction")});
+  }
+  for (auto i = std::size_t{0}; i < out.size(); ++i) {
+    for (auto j = std::size_t{0}; j < i; ++j) {
+      if (out[i].top < out[j].bottom && out[j].top < out[i].bottom) {
+        Fail(items[i].At("depth_km"),
+             std::format("overlaps region {} ({:g} to {:g} km): a layer is "
+                         "one body",
+                         j, out[j].top / 1e3, out[j].bottom / 1e3));
+      }
+    }
+  }
+  return out;
+}
+
+}  // namespace
+
 ModelBlock ReadModelBlock(const Json& block,
                           const std::filesystem::path& directory) {
   if (!block.IsObject()) {
     Fail(block,
          "is not a block: `model` is an object of `deck` (the deck's path), "
-         "`format`, `moduli` and `viscosity`");
+         "`format`, `moduli`, `viscosity` and `burgers`");
   }
-  Allow(block, {"deck", "format", "moduli", "viscosity"});
+  Allow(block, {"deck", "format", "moduli", "viscosity", "burgers"});
   auto out = ModelBlock{};
   out.deck = PathOf(block, "deck", directory);
   if (Has(block, "format")) {
@@ -78,8 +183,12 @@ ModelBlock ReadModelBlock(const Json& block,
                                      {{"maxwell", ModelFormat::Gia},
                                       {"gia", ModelFormat::Gia},
                                       {"mineos", ModelFormat::Mineos},
-                                      {"elastic", ModelFormat::Elastic}});
+                                      {"elastic", ModelFormat::Elastic},
+                                      {"prony", ModelFormat::Prony},
+                                      {"burgers", ModelFormat::Burgers}});
   }
+  const auto statesRheology =
+      out.format == ModelFormat::Prony || out.format == ModelFormat::Burgers;
   if (Has(block, "moduli")) {
     const auto& moduli = block.At("moduli");
     Allow(moduli, {"file", "reference"});
@@ -92,6 +201,16 @@ ModelBlock ReadModelBlock(const Json& block,
   }
   if (Has(block, "viscosity")) {
     const auto& viscosity = block.At("viscosity");
+    if (statesRheology) {
+      Fail(viscosity,
+           std::format("is a viscosity file, the viscosity of a Maxwell body, "
+                       "beside a deck of format \"{}\", which states its "
+                       "rheology in its own columns: a viscosity file over "
+                       "such a deck is not built (the 3-D step scales every "
+                       "branch's relaxation time alike, exp(-delta)); give a "
+                       "\"maxwell\" deck",
+                       NameOf(out.format)));
+    }
     Allow(viscosity, {"file", "reference"});
     out.viscosity = PathOf(viscosity, "file", directory);
     if (Has(viscosity, "reference")) {
@@ -99,6 +218,33 @@ ModelBlock ReadModelBlock(const Json& block,
           Choice<bool>(viscosity.At("reference"),
                        {{"geometric_mean", false}, {"file_radial", true}});
     }
+  }
+  if (Has(block, "burgers")) {
+    const auto& burgers = block.At("burgers");
+    if (statesRheology) {
+      Fail(burgers,
+           std::format("makes layers of a Maxwell deck Burgers bodies; a deck "
+                       "of format \"{}\" states its rheology in its own "
+                       "columns",
+                       NameOf(out.format)));
+    }
+    if (out.format != ModelFormat::Gia) {
+      Fail(burgers,
+           std::format("makes layers of a Maxwell deck Burgers bodies, over "
+                       "their viscosity; a deck of format \"{}\" has none: "
+                       "give a \"maxwell\" deck",
+                       NameOf(out.format)));
+    }
+    if (!out.viscosity.empty()) {
+      Fail(burgers,
+           "makes layers of the deck Burgers bodies over the deck's "
+           "viscosity, and `model.viscosity` replaces it: a Burgers body over "
+           "a viscosity file is not built (the 3-D step scales every branch's "
+           "relaxation time alike, exp(-delta), the Kelvin element's "
+           "viscosity with the steady one, where `kelvin_viscosity` is "
+           "absolute)");
+    }
+    out.burgers = ReadBurgers(burgers);
   }
   return out;
 }

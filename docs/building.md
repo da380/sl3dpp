@@ -83,15 +83,23 @@ for is in [design.md](design.md) §13.
   An installed copy found by `FIND_PACKAGE_ARGS` is used before the
   checkout; `-DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` makes the build
   take the checkouts and downloads alone.
-- **The fault file.** The `fault_file` seismic term of `sl3d`, and the
-  library's `FaultSourcesOf`, read planetmodel's fault file
-  (`planetmodel.fault/1`), which planetmodel's C++ library holds after
-  1.5.1. They are compiled where planetmodel's
-  `<planetmodel/faultfile.hpp>` is found (`SL3DPP_HAVE_FAULT_FILE`, defined
-  by `sl3dpp/Fault.hpp`); against an older planetmodel the build and its
-  tests pass without them, and `sl3d` refuses the term, naming the
-  planetmodel it was built with. Until the pin reaches a planetmodel with
-  the fault file, build against a checkout that has it:
+- **planetmodel 1.6.0.** The `fault_file` seismic term of `sl3d`, and
+  the library's `FaultSourcesOf`, read planetmodel's fault file
+  (`planetmodel.fault/1`) and lay its slice quadrature; the `"prony"` and
+  `"burgers"` deck formats (`PronyFormat`, `BurgersFormat`) are read by
+  planetmodel's own readers; and the viscosities and relaxation times of
+  a deck are joined by planetmodel's logarithmic kinds. These are the C++
+  interfaces of planetmodel's 1.6.0 release. planetmodel states no feature
+  macros, so the configure step compiles a probe of them against the
+  planetmodel it builds with, at every configure, and defines
+  `SL3DPP_PLANETMODEL_1_6` for the library and its users where it
+  compiles (the status line says which); `sl3dpp/Fault.hpp` defines
+  `SL3DPP_HAVE_FAULT_FILE` where that holds and
+  `<planetmodel/faultfile.hpp>` is found. Against an older planetmodel
+  the build and its tests pass without them: `sl3d` refuses the term and
+  the formats, naming the planetmodel it was built with, and a deck's
+  columns are joined by that planetmodel's kinds. Until the pin reaches
+  planetmodel 1.6.0, build against a checkout that has it:
 
   ```sh
   cmake -B build -DFETCHCONTENT_SOURCE_DIR_PLANETMODEL=<checkouts>/planetmodel

@@ -17,7 +17,18 @@
  * Each deck column becomes one interpolant per layer through that layer's
  * knots (a column NaN throughout a layer is absent from it; NaN on part of
  * one is refused), evaluated right-continuously at layer boundaries with
- * both one-sided values available.
+ * both one-sided values available. The elastic columns are the model's own
+ * cubic splines (Options::spline); the columns of planetmodel's
+ * viscoelastic decks are joined as planetmodel joins them
+ * (planetmodel::DeckLayers, ViscoelasticDeckKinds): a viscosity, a Kelvin
+ * element's viscosity and a Prony branch's relaxation time in their
+ * logarithm by straight lines (`log-linear`, geometric between knots), a
+ * Prony branch's strength and a Kelvin element's modulus fraction by
+ * straight lines, so that a deck read here and by planetmodel is the same
+ * body. A deck is a table dense enough in knots that the interpolation
+ * between them does not matter in practice: the kinds are a default for
+ * joining knots, not part of the model, and a column constant through a
+ * layer is that constant under any of them.
  *
  * The reference gravity follows planetmodel's `mesh1d.gravity`: for a
  * spherically symmetric density, g(r) = G M(r) / r^2 with
@@ -32,6 +43,8 @@
 #include <Interpolation/CubicSpline.hpp>
 #include <cstddef>
 #include <expected>
+#include <functional>
+#include <map>
 #include <optional>
 #include <ranges>
 #include <span>
@@ -58,6 +71,14 @@ enum class SplineKind { Cubic, Natural };
 /// right-continuous evaluation.
 enum class Side { Below, Above };
 
+/// planetmodel's kinds for the columns of its viscoelastic decks, by
+/// column name or family stem, of the planetmodel the library is built
+/// with: its MAXWELL_KINDS, and with its prony and burgers decks
+/// (SL3DPP_PLANETMODEL_1_6) its PRONY_KINDS and BURGERS_KINDS too (the
+/// viscosities and the relaxation times `log-linear`, the strengths and
+/// the Kelvin modulus fraction `linear`).
+[[nodiscard]] std::map<std::string, std::string> ViscoelasticDeckKinds();
+
 class EarthModel {
  public:
   struct Options {
@@ -66,13 +87,29 @@ class EarthModel {
     /// deck's surface radius (G = 1, surface at 1).
     std::optional<Scales> scales = {};
     /// Column dimensions beyond the built-in vocabulary (rho, the
-    /// velocities, kappa/mu, viscosity, and the dimensionless qkappa,
-    /// qmu, eta); an unknown column is taken dimensionless.
+    /// velocities, kappa/mu, the viscosities, the relaxation times, and the
+    /// dimensionless qkappa, qmu, eta, strengths and Kelvin modulus
+    /// fraction); an unknown column is taken dimensionless.
     std::vector<std::pair<std::string, Dimensions>> dimensions = {};
+    /// The columns joined by a kind of planetmodel's rather than by
+    /// `spline`, by column name or family stem (`relaxation_time` for
+    /// every `relaxation_time_k`), as planetmodel::DeckLayers takes them:
+    /// `"cubic"`, `"natural"` or `"linear"`, or one of them after `"log-"`
+    /// (the polynomial through the logarithms, the value its exponential).
+    /// Absent: ViscoelasticDeckKinds, for the columns the deck holds.
+    /// Given: exactly these, each naming a column of the deck or the stem
+    /// of a family it holds a member of; `rho` is refused (the gravity
+    /// integrals are taken on its spline's segments). A column so joined
+    /// holds its value and first derivative (EvaluateInLayer with nu up to
+    /// 1).
+    std::optional<std::map<std::string, std::string>> kinds = {};
   };
 
-  /// A model from a deck (SI); refused when the deck lacks `rho`, or a
-  /// column is NaN on part of a layer.
+  /// A model from a deck (SI); refused when the deck lacks `rho`, a
+  /// column is NaN on part of a layer, a kind is refused, or a column
+  /// joined in its logarithm is not positive and finite at every knot of
+  /// a layer holding it (planetmodel's refusals, naming the column, the
+  /// layer and the radius).
   [[nodiscard]] static std::expected<EarthModel, ModelError> FromDeck(
       const Deck& deck, Options options);
   [[nodiscard]] static std::expected<EarthModel, ModelError> FromDeck(
@@ -111,7 +148,7 @@ class EarthModel {
   }
 
   /// Whether a layer is viscoelastic: `viscosity` is present and positive
-  /// throughout it.
+  /// throughout it, or it holds Prony branches (`relaxation_time_k`).
   [[nodiscard]] bool IsViscoelastic(std::size_t layer) const {
     return layers_[layer].viscoelastic;
   }
@@ -134,8 +171,12 @@ class EarthModel {
                                 Side side = Side::Above) const;
 
   /// The field's SI value at r (metres) from a named layer's interpolant
-  /// (which continues smoothly slightly outside its interval); `nu` asks
-  /// for the nu-th radial derivative (0, 1 or 2).
+  /// (a spline continues smoothly slightly outside its interval; a column
+  /// joined by a kind of planetmodel's takes a radius within planetmodel's
+  /// tolerance of its interval as at the nearer end, and throws
+  /// planetmodel::Error beyond it); `nu` asks for the nu-th radial
+  /// derivative (0, 1 or 2; 0 or 1 for a column joined by a kind,
+  /// std::invalid_argument otherwise).
   [[nodiscard]] double EvaluateInLayer(const std::string& name,
                                        std::size_t layer, double r,
                                        int nu = 0) const;
@@ -229,6 +270,18 @@ class EarthModel {
   using View = std::ranges::owning_view<std::vector<double>>;
   using Spline = Interpolation::CubicSpline<View, View>;
 
+  /// A column on one layer, non-dimensional: the model's own spline, or a
+  /// function joined by a kind of planetmodel's (Options::kinds), its
+  /// value (derivative 0) or first derivative (1) at a radius.
+  struct Interpolant {
+    std::optional<Spline> spline;
+    std::function<double(double, int)> joined;
+
+    [[nodiscard]] double Value(double r) const {
+      return spline ? spline->Evaluate(r) : joined(r, 0);
+    }
+  };
+
   struct Layer {
     double lo = 0;
     double hi = 0;
@@ -251,10 +304,10 @@ class EarthModel {
   [[nodiscard]] double PressureND(double r) const;
 
   [[nodiscard]] std::size_t IndexOf(const std::string& name) const;
-  [[nodiscard]] const Spline* Find(const std::string& name,
-                                   std::size_t layer) const;
-  [[nodiscard]] const Spline& Require(const std::string& name,
-                                      std::size_t layer) const;
+  [[nodiscard]] const Interpolant* Find(const std::string& name,
+                                        std::size_t layer) const;
+  [[nodiscard]] const Interpolant& Require(const std::string& name,
+                                           std::size_t layer) const;
 
   /// 4 pi int_a^b rho(s) s^p ds within one layer, segment-exact,
   /// non-dimensional.
@@ -270,7 +323,7 @@ class EarthModel {
   std::vector<Dimensions> dimensions_;  // parallel to names_
   // fields_[field][layer], absent where the layer lacks the field;
   // non-dimensional abscissae and ordinates.
-  std::vector<std::vector<std::optional<Spline>>> fields_;
+  std::vector<std::vector<std::optional<Interpolant>>> fields_;
   // The non-dimensional mass inside each boundary radius.
   std::vector<double> massBelow_;
 };

@@ -25,6 +25,7 @@
 #include <filesystem>
 #include <numbers>
 #include <optional>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -62,11 +63,27 @@ struct DiscretisationBlock {
                                                           int least);
 
 /// The deck formats a config may name: planetmodel's GIA and MINEOS
-/// tables, and the library's six-column elastic table (rho, vpv, vsv,
-/// vph, vsh, eta; no header), the test and example decks' format.
-/// Gia is planetmodel's Maxwell deck (`"maxwell"` in a config; `"gia"`, the
-/// format's other name, is accepted too).
-enum class ModelFormat { Gia, Mineos, Elastic };
+/// tables, its prony and burgers decks, and the library's six-column
+/// elastic table (rho, vpv, vsv, vph, vsh, eta; no header), the test and
+/// example decks' format. Gia is planetmodel's Maxwell deck (`"maxwell"` in
+/// a config; `"gia"`, the format's other name, is accepted too).
+enum class ModelFormat { Gia, Mineos, Elastic, Prony, Burgers };
+
+/// A format's name in a config: `maxwell`, `mineos`, `elastic`, `prony`
+/// or `burgers`.
+[[nodiscard]] std::string_view NameOf(ModelFormat format);
+
+/// A region of `model.burgers`: whole layers of the deck, from depth `top`
+/// to `bottom` (m), made Burgers bodies over their Maxwell viscosity, a
+/// Kelvin element in series of viscosity `kelvin_viscosity` (Pa s,
+/// absolute) and shear modulus `kelvin_modulus_fraction` times the
+/// layer's elastic one.
+struct BurgersRegion {
+  double top = 0.0;
+  double bottom = 0.0;
+  double kelvin_viscosity = 0.0;
+  double kelvin_modulus_fraction = 0.0;
+};
 
 /// The format a `ModelFormat` stands for.
 [[nodiscard]] DeckFormat FormatOf(ModelFormat format);
@@ -87,12 +104,30 @@ struct ModelBlock {
   /// deck's own viscosity column.
   std::filesystem::path viscosity;
   bool viscosity_file_radial = false;  ///< the file's own radial reference
+  /// The Burgers regions of a Maxwell deck (`model.burgers`), in the order
+  /// given; empty for the deck's own rheology.
+  std::vector<BurgersRegion> burgers;
 };
+
+/// The Burgers regions as the outputs' metadata state them, `<top> to
+/// <bottom> km: kelvin_viscosity <eta_K> Pa s, kelvin_modulus_fraction
+/// <f>`, joined by `; `, the numbers to 17 significant digits.
+[[nodiscard]] std::string DescribeBurgers(
+    std::span<const BurgersRegion> regions);
 
 /// Reads a `model` block, relative paths against `directory`: `deck`
 /// (required), `format` (a word, default "maxwell"), `moduli` (an object
-/// of `file` and `reference`) and `viscosity` (an object of `file` and
-/// `reference`).
+/// of `file` and `reference`), `viscosity` (an object of `file` and
+/// `reference`) and `burgers` (a list of regions, each an object of
+/// `depth_km` [top, bottom], `kelvin_viscosity` and
+/// `kelvin_modulus_fraction`, all required). Refused: a viscosity file
+/// beside a prony or burgers deck, whose rheology is its own; `burgers`
+/// on a deck other than a Maxwell deck (a prony or burgers deck states its
+/// rheology; a mineos or elastic deck has no viscosity) or beside a
+/// viscosity file; a region not [top, bottom] with 0 <= top < bottom, a
+/// Kelvin element not positive and finite, and regions that overlap. That
+/// each region is whole layers holding a viscosity is held when the deck is
+/// read (BuildEarth).
 [[nodiscard]] ModelBlock ReadModelBlock(const Json& block,
                                         const std::filesystem::path& directory);
 

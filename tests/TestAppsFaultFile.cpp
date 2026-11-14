@@ -2,11 +2,12 @@
 // the twin of a planar fault, static and through time, with an ocean and
 // without; the sign and geometry of a thrust; the quadrature's convergence
 // on a curved patch; slip on a time axis against the same history given as
-// a factor and against the file evaluated directly; the moment kernels at
-// the quadrature's points; the refusals; and the run hash. The faults are
-// the fixtures of scripts/make_fault_fixtures.py, written by planetmodel's
-// own writer, on the homogeneous test ball. A build whose planetmodel
-// cannot read fault files refuses the term.
+// a factor and against the file evaluated directly; a file served at its
+// stored times alone, read at them through the run's units; the moment
+// kernels at the quadrature's points; the refusals; and the run hash. The
+// faults are written by planetmodel's own writer into each test's
+// directory (FaultFixtures.hpp), on the homogeneous test ball. A build
+// whose planetmodel cannot read fault files refuses the term.
 
 #include <gtest/gtest.h>
 
@@ -17,18 +18,19 @@
 #include <format>
 #include <fstream>
 #include <numbers>
-#include <sstream>
-#include <string>
-#include <vector>
-
 #include <planetmodel/error.hpp>
 #include <planetmodel/json.hpp>
 #include <planetmodel/surfacefile.hpp>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "AppFixtures.hpp"
 #include "Blocks.hpp"
 #include "Commands.hpp"
 #include "Common.hpp"
+#include "FaultFixtures.hpp"
+#include "Files.hpp"
 #include "Forcing.hpp"
 #include "RunHash.hpp"
 #include "sl3dpp/Deck.hpp"
@@ -58,6 +60,9 @@ class FaultFileTest : public ::testing::Test {
                             ->name()});
     fs::remove_all(dir_);
     fs::create_directories(dir_);
+#ifdef SL3DPP_HAVE_FAULT_FILE
+    test::WriteFaultFixtures(dir_);
+#endif
   }
   void TearDown() override { fs::remove_all(dir_); }
 
@@ -83,6 +88,11 @@ class FaultFileTest : public ::testing::Test {
     return std::string{SL3DPP_TEST_DATA_DIR} + "/" + name;
   }
 
+  /// A fault file of the test's own directory (FaultFixtures.hpp).
+  std::string Fixture(const std::string& name) const {
+    return (dir_ / name).string();
+  }
+
   fs::path dir_;
 };
 
@@ -94,15 +104,15 @@ constexpr auto kFault = R"("fault": {"latitude": -40, "longitude": 150,
     "length_km": 600, "width_km": 200, "moment_nm": 1e22,
     "patches_along_strike": 4, "patches_down_dip": 2})";
 
-/// A `fault_file` term of a fixture, its quadrature `cells` and further
-/// members.
+/// A `fault_file` term of a fault file in the config's directory (the
+/// test's), its quadrature `cells` and further members.
 std::string FileTerm(const std::string& file, const std::string& cells = "4, 2",
                      const std::string& more = "") {
   const auto comma = cells.find(',');
-  return std::format(R"("fault_file": {{"file": "{}/{}",
+  return std::format(R"("fault_file": {{"file": "{}",
       "cells_along_strike": {}, "cells_down_dip": {}{}}})",
-                     SL3DPP_TEST_DATA_DIR, file, cells.substr(0, comma),
-                     cells.substr(comma + 1), more);
+                     file, cells.substr(0, comma), cells.substr(comma + 1),
+                     more);
 }
 
 /// The largest departure of two files' fields, each over its largest
@@ -213,9 +223,10 @@ TEST_F(FaultFileTest, IsThePlanarFaultsTwin) {
     EXPECT_LT(gap, 1e-11) << name;
     EXPECT_TRUE(planar.variables.contains("toroidal_potential")) << name;
     const auto described = std::get<std::string>(file.meta.at("seismic"));
-    EXPECT_TRUE(described.starts_with(
-        "fault file " + Data("fault_plane.nc") +
-        " (1 patch, static), 4 by 2 cells a patch, 1 Gauss point each way a cell"))
+    EXPECT_TRUE(described.starts_with("fault file " +
+                                      Fixture("fault_plane.nc") +
+                                      " (1 patch, static), 4 by 2 cells a "
+                                      "patch, 1 Gauss point each way a cell"))
         << described;
   }
 }
@@ -358,6 +369,47 @@ TEST_F(FaultFileTest, SlipOnATimeAxisIsItsHistory) {
   EXPECT_EQ(before, 0.0);
 }
 
+TEST_F(FaultFileTest, StoredTimesAreReadThroughTheRunsUnits) {
+  // A file served at its stored times alone (time rule `none`, its axis in
+  // years: no slip at -1000 yr, the twin's at -999 yr) is read at them by a
+  // run counting forwards in kyr with its zero at 120 kyr on the run's
+  // clock, nodes 119 and 119.001: the second node reaches the file as
+  // -998.99999999999511 yr, 4.9e-12 yr from its stored time, which a
+  // tolerance on the 1 yr span alone would refuse, and the program's
+  // tolerance on every file's time axis, 1e-9 of the larger of the span
+  // and its ends' magnitudes (planetmodel's scale), reads as -999 yr. The
+  // run is the static twin under the same history as a factor, to rounding.
+  static_cast<void>(Ball());
+  const auto run = [&](const std::string& name, const std::string& term) {
+    const auto config = Write(name + ".json", std::format(R"({{
+        "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+        "discretisation": {{"lmax": 8}}, "rotation": "none",
+        "times": {{"unit": "kyr", "at": [119, 119.001]}},
+        "forcing": {{"seismic": [{{{}}}]}}, "output": {{"surface": "out/{}.nc"}}}})",
+                                                          term, name));
+    static_cast<void>(app::RunSolve(config));
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto stored = run(
+      "stored", FileTerm("fault_stored.nc", "4, 2", R"(, "time_origin": 120)"));
+  const auto factor =
+      run("factor", FileTerm("fault_plane.nc") +
+                        R"(, "history": [[119, 0], [119.001, 1]])");
+  RecordProperty("departure", std::format("{:.2e}", Departure(stored, factor)));
+  EXPECT_LT(Departure(stored, factor), 1e-11);
+  // the date the second node reaches the file at, against its axis
+  const auto fault = pm::ReadFaultFile(Fixture("fault_stored.nc")).fault;
+  const auto date = (119.001 - 120.0) * app::KYR / fault.GetScales().Time();
+  EXPECT_NE(date, -999.0);
+  // a tolerance on the axis's span alone, a year, refuses it
+  EXPECT_THROW(static_cast<void>(fault.Rows(date, {.time_rtol = 1e-15})),
+               pm::Error);
+  const auto rows = fault.Rows(date, {.time_rtol = app::kAxisRtol});
+  EXPECT_EQ(rows.first.first, 1u);
+  EXPECT_EQ(rows.first.second, 1.0);
+  EXPECT_EQ(rows.second.second, 0.0);
+}
+
 TEST_F(FaultFileTest, TurningSlipIsTheFileReadAtEachNode) {
   // The turning file (a thrust at 0 yr, a strike-slip of twice it at 10
   // yr, linear between): the term's sources at a run's nodes, its slices'
@@ -383,7 +435,7 @@ TEST_F(FaultFileTest, TurningSlipIsTheFileReadAtEachNode) {
   const auto moduli = [&](const BodyPoint& at) { return LoveModuliAt(model, at.radius); };
   const auto times = std::vector<double>{0.0, 2.5, 5.0, 7.5, 10.0};
   app::PlaceFaultFiles(forcing.seismic, R, moduli, block, times);
-  const auto fault = pm::ReadFaultFile(Data("fault_turning.nc")).fault;
+  const auto fault = pm::ReadFaultFile(Fixture("fault_turning.nc")).fault;
   auto worst = 0.0;
   for (const auto t : times) {
     const auto sources = app::SeismicSourcesAt(forcing.seismic, t, R);
@@ -506,9 +558,9 @@ TEST_F(FaultFileTest, IsRefusedByName) {
       std::string{R"("problem": "quasi_static", "times": {"unit": "yr", "at": [0, 1000, 2500]})"};
   refused(solve("unknown", fixed, FileTerm("fault_plane.nc", "4, 2", R"(, "cells": 3)")),
           "forcing.seismic[0].fault_file.cells", "");
-  refused(solve("missing", fixed,
-                std::format(R"("fault_file": {{"file": "{}"}})", Data("fault_plane.nc"))),
-          "forcing.seismic[0].fault_file", "cells_along_strike");
+  refused(
+      solve("missing", fixed, R"("fault_file": {"file": "fault_plane.nc"})"),
+      "forcing.seismic[0].fault_file", "cells_along_strike");
   refused(solve("count", fixed, FileTerm("fault_plane.nc", "0, 2")),
           "forcing.seismic[0].fault_file.cells_along_strike", "is not a positive count");
   refused(solve("both", fixed, std::string{kFault} + ", " + FileTerm("fault_plane.nc")),
@@ -602,7 +654,7 @@ TEST_F(FaultFileTest, ItsRunHashesTheFilesContents) {
   // file's contents, by its bytes (a copy elsewhere hashes alike, another
   // file does not), its quadrature and its placement.
   static_cast<void>(Ball());
-  fs::copy_file(Data("fault_plane.nc"), dir_ / "copy.nc");
+  fs::copy_file(dir_ / "fault_plane.nc", dir_ / "copy.nc");
   const auto hash = [&](const std::string& name, const std::string& term) {
     const auto config = Write(name + ".json", std::format(R"({{
         "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
@@ -633,10 +685,9 @@ TEST_F(FaultFileTest, IsRefusedWithoutPlanetmodelsFaultFile) {
   const auto config = Write("fault.json", std::format(R"({{
       "problem": "static", "model": {{"deck": "ball.deck"}},
       "discretisation": {{"lmax": 8}}, "rotation": "none",
-      "forcing": {{"seismic": [{{"fault_file": {{"file": "{}",
+      "forcing": {{"seismic": [{{"fault_file": {{"file": "fault_plane.nc",
           "cells_along_strike": 4, "cells_down_dip": 2}}}}]}},
-      "output": {{"surface": "out/fault.nc"}}}})",
-                                                      Data("fault_plane.nc")));
+      "output": {{"surface": "out/fault.nc"}}}})"));
   try {
     static_cast<void>(app::RunSolve(config));
     ADD_FAILURE() << "the fault file was not refused";
@@ -646,6 +697,8 @@ TEST_F(FaultFileTest, IsRefusedWithoutPlanetmodelsFaultFile) {
     EXPECT_NE(message.find("this build of sl3d does not read"), std::string::npos)
         << message;
     EXPECT_NE(message.find("planetmodel.fault/1"), std::string::npos) << message;
+    EXPECT_NE(message.find("planetmodel 1.6.0 or later"), std::string::npos)
+        << message;
   }
 }
 

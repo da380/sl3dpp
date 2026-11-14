@@ -1,6 +1,7 @@
 // A fault given by its slip: the moment of a slip across an element
 // (isotropic and transversely isotropic, its basis against the double
 // couple's), planetmodel's plane as the planar fault point for point, the
+// slices' moments at a date as the moments of planetmodel's slip there, the
 // placement and the refusals of FaultSourcesOf, and the forces of sources
 // at one radius formed together.
 
@@ -357,6 +358,60 @@ TEST(FaultSources, APlaneIsThePlanarFault) {
     EXPECT_NEAR(normal[i], wantNormal[i], 1e-15);
     EXPECT_NEAR(slip[i] / D, wantSlip[i], 1e-15);
   }
+}
+
+TEST(FaultSources, AtADateAreTheMomentsOfItsSlipThere) {
+  // A plane whose slip turns between two slices (a thrust at t = 0, a
+  // strike-slip of twice it at t = 10, linear between): at each date the
+  // slices' tensors under the rows planetmodel reads there (MomentsAt) are
+  // the moments of the slip planetmodel gives at that date, both by its
+  // slice quadrature's combination (SlipOf) and by its quadrature at the
+  // date (Fault::Quadrature), to rounding; rows naming a slice the sources
+  // lack are refused.
+  const auto R = 6371e3, mu = 3.0e10, lambda = 4.0e10;
+  const auto frame = pm::FaultFrame::Geographic(R);
+  auto slip = pm::FaultSlip({0.0, 2.0, 0.0, 4.0, 0.0, 0.0}, 2, 1, 1, "cell");
+  auto patch = pm::FaultPatch::Plane(
+      frame,
+      pm::PlaneParameters{.centroid = {10.0, -30.0, R - 25e3},
+                          .strike = 45.0,
+                          .dip = 30.0,
+                          .length = 200e3,
+                          .width = 60e3},
+      std::move(slip));
+  const auto fault =
+      pm::Fault({std::move(patch)}, pm::TimeSupport::Node, pm::TimeRule::Linear,
+                std::vector<double>{0.0, 10.0});
+  const auto moduli = [&](const BodyPoint&) { return Isotropic(lambda, mu); };
+  const auto sources = FaultSourcesOf(fault, {.cellsAlongStrike = 5,
+                                              .cellsDownDip = 3,
+                                              .points = 2,
+                                              .surfaceRadius = R,
+                                              .placement = std::nullopt,
+                                              .moduli = moduli});
+  const auto slices = fault.SliceQuadrature(5, 3, 2);
+  ASSERT_EQ(sources.slices.size(), 2u);
+  ASSERT_EQ(sources.points.size(), slices.Size());
+  auto worst = 0.0;
+  for (const auto t : {0.0, 2.5, 7.5, 10.0}) {
+    const auto rows = fault.Rows(t);
+    const auto moments = sources.MomentsAt(rows);
+    const auto combined = slices.SlipOf(rows);
+    const auto atDate = fault.Quadrature(5, 3, 2, t);
+    ASSERT_EQ(moments.size(), slices.Size());
+    for (auto p = std::size_t{0}; p < moments.size(); ++p) {
+      const auto& at = sources.points[p];
+      for (const auto* s : {&combined[p], &atDate.slip[p]}) {
+        const auto want = SlipMoment(moduli(at), at, *s, slices.normals[p],
+                                     slices.weights[p]);
+        worst = std::max(worst, Difference(moments[p], want) / Largest(want));
+      }
+    }
+  }
+  RecordProperty("worst", std::format("{:.2e}", worst));
+  EXPECT_LT(worst, 1e-14);
+  EXPECT_THROW(static_cast<void>(sources.MomentsAt({{2, 1.0}, {2, 0.0}})),
+               std::invalid_argument);
 }
 
 TEST(FaultSources, ArePlacedAndRefusedByName) {

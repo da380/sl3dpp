@@ -81,13 +81,21 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
                      "is elastic and has no use for it",
                      kNeedsQuasiStatic));
   }
+  if (!timed && model.IsObject() && Has(model, "burgers")) {
+    Fail(model.At("burgers"),
+         std::format("is a rheology, Burgers layers, which {}; the static "
+                     "problem's Earth is elastic and has no use for it",
+                     kNeedsQuasiStatic));
+  }
   out.model = ReadModelBlock(model, directory);
   if (timed && out.model.viscosity.empty() &&
-      out.model.format != ModelFormat::Gia) {
+      (out.model.format == ModelFormat::Mineos ||
+       out.model.format == ModelFormat::Elastic)) {
     Fail(model.At("format"),
          "names a deck format with no viscosity column, which the "
          "quasi-static problem needs: give a \"maxwell\" deck with a "
-         "viscosity, or a `model.viscosity` file");
+         "viscosity, a \"prony\" or \"burgers\" deck, or a "
+         "`model.viscosity` file");
   }
   out.lmax = ReadDiscretisationBlock(top, 1).lmax;
   // the terms' times are given as the window's are: dates in a dated run,
@@ -193,10 +201,16 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
              std::format("sets the time step, which {}", kNeedsQuasiStatic));
       }
       // the static problem takes the 3-D step on a laterally varying
-      // moduli file, which BuildEarth reads; without one it is refused here
+      // moduli file, which BuildEarth reads; without one it is refused here,
+      // but for the grids' members where the kernels are lateral, whose
+      // sweep expands on the grids
       if (out.model.moduli.empty()) {
+        const auto transforms = LateralKernelsAsked(top);
         for (const auto* name : {"step", "step_rtol", "step_max_iterations",
                                  "transform_degrees", "cache_mb"}) {
+          const auto grid = std::string_view{name} == "transform_degrees" ||
+                            std::string_view{name} == "cache_mb";
+          if (transforms && grid) continue;
           if (Has(solver, name)) {
             Fail(solver.At(name),
                  std::format("sets the 3-D step, which {} or lateral moduli "
@@ -211,6 +225,14 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
     out.solver = ReadSolverBlock(solver, out.lmax);
   }
   return out;
+}
+
+bool LateralKernelsAsked(const Json& top) {
+  if (!Has(top, "kernels")) return false;
+  const auto& kernels = top.At("kernels");
+  if (!kernels.IsObject() || !Has(kernels, "lateral")) return false;
+  const auto& lateral = kernels.At("lateral");
+  return lateral.IsBool() && lateral.AsBool();
 }
 
 void RefuseThreeDSolver(const Json& top, std::string_view what,
@@ -290,6 +312,65 @@ std::string BuiltEarth::Dimension() const {
   return "1-D";
 }
 
+std::map<std::size_t, Rheology::Kelvin> KelvinOf(const Run& run,
+                                                 const EarthModel& model,
+                                                 const Json& top) {
+  auto out = std::map<std::size_t, Rheology::Kelvin>{};
+  if (run.model.burgers.empty()) return out;
+  const auto& member = top.At("model").At("burgers");
+  const auto b = model.Boundaries();
+  const auto surface = model.SurfaceRadius();
+  const auto tolerance = 1e-9 * surface;
+  const auto km = [&](double r) { return (surface - r) / 1e3; };
+  // a layer as a refusal names it: its index and depths
+  const auto named = [&](std::size_t layer) {
+    return std::format("layer {} ({:g} to {:g} km deep)", layer,
+                       km(b[layer + 1]), km(b[layer]));
+  };
+  // the boundary at a depth, or the refusal of a depth inside a layer
+  const auto boundaryAt = [&](const Json& depth, double d) {
+    for (auto j = std::size_t{0}; j < b.size(); ++j) {
+      if (std::abs(surface - d - b[j]) <= tolerance) return j;
+    }
+    const auto r = surface - d;
+    if (!(r > b.front() && r < b.back())) {
+      Fail(depth, std::format("reaches {:g} km deep, beyond the deck, whose "
+                              "depths are 0 to {:g} km",
+                              d / 1e3, km(b.front())));
+    }
+    Fail(depth,
+         std::format("puts an end at {:g} km, inside {}: a Burgers region is "
+                     "whole layers of the deck, its ends on the deck's "
+                     "boundaries",
+                     d / 1e3, named(model.LayerOf(r))));
+  };
+  const auto& items = member.AsArray();
+  for (auto k = std::size_t{0}; k < run.model.burgers.size(); ++k) {
+    const auto& region = run.model.burgers[k];
+    const auto& depth = items[k].At("depth_km");
+    const auto upper = boundaryAt(depth, region.top);
+    const auto lower = boundaryAt(depth, region.bottom);
+    for (auto layer = lower; layer < upper; ++layer) {
+      const auto viscous =
+          model.Has("viscosity") && model.Has("viscosity", layer);
+      if (model.IsFluid(layer) || !viscous) {
+        Fail(depth,
+             std::format("covers {}, which {}: a Burgers body is built over a "
+                         "layer's Maxwell viscosity",
+                         named(layer),
+                         model.IsFluid(layer) ? "is fluid"
+                                              : "is elastic, holding no "
+                                                "viscosity"));
+      }
+      out[layer] = Rheology::Kelvin{
+          .modulus_fraction = region.kelvin_modulus_fraction,
+          .viscosity = region.kelvin_viscosity /
+                       model.ModelScales().Factor(ViscosityDimensions)};
+    }
+  }
+  return out;
+}
+
 BuiltEarth BuildEarth(const Run& run, const Json& top) {
   const auto& modelMember = top.At("model");
   const auto& deckMember = modelMember.At("deck");
@@ -303,7 +384,8 @@ BuiltEarth BuildEarth(const Run& run, const Json& top) {
   if (!mesh) Fail(deckMember, mesh.error().message);
   auto material = Material::Create(*model, *mesh);
   if (!material) Fail(deckMember, material.error().message);
-  auto out = BuiltEarth{std::move(*model), std::move(*material), {}, {}};
+  auto out = BuiltEarth{std::move(*model), std::move(*material), {}, {}, {}};
+  out.kelvin = KelvinOf(run, out.model, top);
   if (!run.model.viscosity.empty()) {
     auto read = io::ModelViscosity::Read(
         run.model.viscosity, out.model,
@@ -332,7 +414,7 @@ Rheology RheologyOf(const BuiltEarth& earth, const Json& top) {
   auto rheology =
       earth.viscosity
           ? Rheology::Maxwell(earth.material, earth.viscosity->Viscosity())
-          : Rheology::FromModel(earth.material, earth.model);
+          : Rheology::FromModel(earth.material, earth.model, earth.kelvin);
   if (!rheology) {
     if (earth.viscosity) {
       Fail(modelMember.At("viscosity").At("file"), rheology.error().message);

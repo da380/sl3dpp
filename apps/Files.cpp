@@ -109,7 +109,7 @@ io::FieldHistory OpenFileInput(const FileInput& input, const SurfaceGrid& grid,
 
 double SpanTolerance(std::pair<double, double> span) {
   const auto [first, last] = span;
-  return 1e-9 * std::max({last - first, std::abs(first), std::abs(last)});
+  return kAxisRtol * std::max({last - first, std::abs(first), std::abs(last)});
 }
 
 std::string AxisLabel(double time, const std::optional<TimeUnit>& unit) {

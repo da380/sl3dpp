@@ -48,6 +48,19 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
   hash.AddValue(run.lmax);
   if (!run.model.viscosity.empty()) hash.AddFile(run.model.viscosity);
   hash.AddValue(run.model.viscosity_file_radial);
+  // the Burgers regions of a Maxwell deck, their numbers whole (added only
+  // then, so that a run without them keeps its hash)
+  if (!run.model.burgers.empty()) {
+    hash.AddText("model burgers");
+    hash.AddValue(run.model.burgers.size());
+    for (const auto& region : run.model.burgers) {
+      for (const auto value :
+           {region.top, region.bottom, region.kelvin_viscosity,
+            region.kelvin_modulus_fraction}) {
+        hash.AddValue(value);
+      }
+    }
+  }
   // the state's files, or the body's having no ocean
   if (run.ocean) {
     hash.AddFile(run.ocean->seaLevel.input.file);

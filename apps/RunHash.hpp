@@ -38,7 +38,8 @@ class Fnv1a {
 /// Adds the members of a run that decide its forward computation, and the
 /// contents of its input files, to a hash: what determines the forward
 /// run's trajectory, nothing of what only a reverse sweep reads. The
-/// deck, its format and lmax,
+/// deck, its format and lmax, the Burgers regions of `model.burgers`
+/// (added only where given),
 /// the viscosity and moduli files with their references, the state's
 /// files and variables (or the body's having no ocean), the land, the ice
 /// change term by term (a file's contents, a cap's numbers whole beside

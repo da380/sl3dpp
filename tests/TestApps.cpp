@@ -587,7 +587,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 59);
+  EXPECT_EQ(read, 60);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -8714,6 +8714,80 @@ TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
                       "{" + lateralModel + ", " +
                           kernels(R"("lateral": false,)", "out_bad") + "}"),
                 "kernels.lateral", "is false, and the model is 3-D");
+}
+
+TEST_F(AppsTest, TransformDegreesOnARadialRunAreTheLateralKernels) {
+  // The grids' members of the `solver` block (`transform_degrees`,
+  // `cache_mb`) on a radial model whose config asks for lateral kernels
+  // (`kernels.lateral` true): `solve` takes them and leaves them unused,
+  // as it does the `kernels` block, its run the run without them to the
+  // bit, in the static problem and through time; the static problem's
+  // `kernel` sweeps its lateral kernels on the grids they cut, its moduli
+  // kernels then those of the coarser grids at depth. Without lateral
+  // kernels a radial run refuses them, `solve` and `kernel` alike.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  const auto staticRun = [&](const std::string& name, const std::string& solver,
+                             bool lateral) {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "static", "model": {{"deck": "ball.deck"}},
+      "discretisation": {{"lmax": 8}}, "rotation": "none",
+      "forcing": {{"load": [{{"cap": {{"latitude": 60, "longitude": -85,
+          "width_deg": 20, "amplitude_kg_m2": 1.0e6}}}}]}},
+      {}"output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"lateral": {}, "parameters": ["load", "moduli"],
+        "measurements": [{{"type": "displacement_cap", "name": "uplift",
+          "latitude": 55, "longitude": -80, "width_deg": 10}}],
+        "output": "out/{}_kernels"}}}})",
+                                             solver, name, lateral, name));
+  };
+  constexpr auto kCut =
+      R"("solver": {"transform_degrees": [2, 4], "cache_mb": 1}, )";
+  static_cast<void>(app::RunSolve(staticRun("plain", "", true)));
+  static_cast<void>(app::RunSolve(staticRun("cut", kCut, true)));
+  const auto read = [&](const std::string& name) {
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  for (const auto& [name, variable] : read("plain").variables) {
+    EXPECT_EQ(read("cut").variables.at(name).values, variable.values) << name;
+  }
+  static_cast<void>(app::RunKernel(staticRun("plain", "", true)));
+  static_cast<void>(app::RunKernel(staticRun("cut", kCut, true)));
+  const auto plain =
+      KernelValues(dir_ / "out" / "plain_kernels" / "uplift_moduli_kernels.nc");
+  const auto cut =
+      KernelValues(dir_ / "out" / "cut_kernels" / "uplift_moduli_kernels.nc");
+  EXPECT_FALSE(plain.empty());
+  EXPECT_NE(cut, plain);
+  ExpectRefused(app::RunSolve, staticRun("radial", kCut, false),
+                "solver.transform_degrees", "3-D step");
+  ExpectRefused(app::RunKernel, staticRun("radial", kCut, false),
+                "solver.transform_degrees", "3-D step");
+  // through time
+  const auto body = std::string{R"("model": {"deck": "ball.deck"},
+    "discretisation": {"lmax": 4}, )"} +
+                    Window(3) + R"(, "rotation": "axial")";
+  const auto timed = [&](const std::string& name, const std::string& solver,
+                         bool lateral) {
+    return Write(name + ".json",
+                 "{" + body + ", " + solver +
+                     std::format(R"("output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"lateral": {}, "parameters": ["viscosity"],
+        "measurements": [{{"type": "relative_sea_level_cap", "name": "site",
+          "latitude": -30.0, "longitude": 10.0, "width_deg": 25.0,
+          "date_kyr_bp": 0.0}}],
+        "output": "out/{}_kernels"}}}})",
+                                 name, lateral, name));
+  };
+  static_cast<void>(app::RunSolve(timed("timed_plain", "", true)));
+  static_cast<void>(app::RunSolve(timed("timed_cut", kCut, true)));
+  for (const auto& [name, variable] : read("timed_plain").variables) {
+    EXPECT_EQ(read("timed_cut").variables.at(name).values, variable.values)
+        << name;
+  }
+  ExpectRefused(app::RunSolve, timed("timed_radial", kCut, false),
+                "solver.transform_degrees", "3-D step, which a 1-D run");
 }
 
 TEST_F(AppsTest, Kernel1DRecordsItsTrajectoryToo) {
