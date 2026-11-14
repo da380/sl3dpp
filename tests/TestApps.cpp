@@ -303,24 +303,16 @@ double VectorPointOf(const planetmodel::SurfaceFile& file, std::size_t node,
   return out;
 }
 
-/// The mean displacement of a solve surface file over a Gaussian cap
-/// along a direction in the local frame at each point (the radial,
-/// tangential and toroidal potentials paired with DisplacementMeasurement's
-/// duals of the cap-mean weight).
+/// The displacement of a solve surface file smoothed over a Gaussian cap
+/// as a vector, read at its centre along a direction there (the radial,
+/// tangential and toroidal potentials paired with
+/// CapDisplacementMeasurement's duals).
 double VectorCapOf(const planetmodel::SurfaceFile& file, std::size_t node,
                    GeographicPoint site, double width_deg,
                    SurfaceDirection direction, int lmax = 8) {
-  const SurfaceGrid grid(lmax, {.nmax = 1});
-  const auto cap =
-      CapMeanDual(grid, 1.0, site, width_deg * std::numbers::pi / 180.0);
-  const auto along = [&](double component) {
-    auto out = cap;
-    for (auto& v : out) v *= component;
-    return out;
-  };
-  const auto m = DisplacementMeasurement(grid, {.east = along(direction.east),
-                                                .north = along(direction.north),
-                                                .up = along(direction.up)});
+  const SurfaceGrid grid(lmax);
+  const auto m = CapDisplacementMeasurement(
+      grid, 1.0, site, width_deg * std::numbers::pi / 180.0, direction);
   auto out = 0.0;
   for (const auto& [dual, name] :
        {std::pair{&m.displacementDual, "displacement"},
@@ -6548,8 +6540,8 @@ TEST_F(AppsTest, SolveTakesATideUnderMigratingShorelines) {
         Write("hashed.json",
               "{" + body + R"(, "output": {"surface": "out/hashed.nc"}})"));
     auto hash = app::Fnv1a{};
-    app::AddRunMembers(hash, input.run);
-    return std::pair{hash.Value(), app::TrajectoryHashOf(input.run)};
+    app::AddRunMembers(hash, input.run, false);
+    return std::pair{hash.Value(), app::TrajectoryHashOf(input.run, false)};
   };
   const auto [plainCheckpoint, plainStore] = hashesOf(bare);
   const auto [tideCheckpoint, tideStore] = hashesOf(tidal);
@@ -7102,7 +7094,10 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
   // kind, the width and the degree weights. Through time under a point
   // source, which has a toroidal part, every node's components are the
   // library's displacement field of V and W, and its smoothed fields are
-  // its cap means. With an ocean under frozen shorelines a run through
+  // its cap means. A displacement_vector_cap measurement is the smoothed
+  // east, north and upward components at its centre, at every width (2,
+  // 6 and 20 degrees), next to either pole and between, with a toroidal
+  // part and without. With an ocean under frozen shorelines a run through
   // time writes the state's ocean function, one static field, which is a
   // migrating run's first node.
   namespace pm = planetmodel;
@@ -7219,6 +7214,42 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
     EXPECT_LT(curl, 1e-12 * size) << east;
   }
 
+  // A displacement_vector_cap measurement is the displacement smoothed as
+  // a vector read at the cap's centre: its east, north and upward
+  // components each the file's smoothed field there, to rounding, at grid
+  // points next to either pole and between them.
+  const auto vectorCaps = [&](const pm::SurfaceFile& f, std::size_t node,
+                              int lmax, double widthDeg) {
+    const SurfaceGrid g(lmax);
+    const auto ring = g.Longitudes().size();
+    const auto rows = g.CoLatitudes().size();
+    const auto east = FieldAt(f, "displacement_east_smoothed", node);
+    const auto north = FieldAt(f, "displacement_north_smoothed", node);
+    const auto up = FieldAt(f, "displacement_smoothed", node);
+    auto scale = 0.0;
+    for (const auto* c : {&east, &north, &up}) {
+      for (const auto v : *c) scale = std::max(scale, std::abs(v));
+    }
+    ASSERT_GT(scale, 0.0);
+    for (const auto [it, ip] :
+         {std::pair{std::size_t{0}, ring / 3}, std::pair{rows / 3, ring / 7},
+          std::pair{rows / 2, ring * 3 / 4}, std::pair{rows - 1, ring / 2}}) {
+      const auto at = it * ring + ip;
+      const auto site = GeographicPoint::FromSpherical(g.CoLatitudes()[it],
+                                                       g.Longitudes()[ip]);
+      for (const auto& [direction, field, label] :
+           {std::tuple{SurfaceDirection{.east = 1.0}, &east, "east"},
+            std::tuple{SurfaceDirection{.north = 1.0}, &north, "north"},
+            std::tuple{SurfaceDirection{.up = 1.0}, &up, "up"}}) {
+        EXPECT_NEAR(VectorCapOf(f, node, site, widthDeg, direction, lmax),
+                    (*field)[at], 1e-12 * scale)
+            << label << " at " << site.latitude << ", " << site.longitude
+            << ", lmax " << lmax << ", width " << widthDeg << ", node " << node;
+      }
+    }
+  };
+  vectorCaps(file, 0, kLmax, kWidthDeg);
+
   // the smoothed fields are the cap means at grid points and between them
   // (a grid point's index, or none for a point between them)
   const auto nphi = grid.Longitudes().size();
@@ -7254,9 +7285,11 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
         std::format(R"({{"problem": "static", "model": {{"deck": "ball.deck"}},
             "discretisation": {{"lmax": {}}}, "forcing": {{"load": [{}]}},
             "rotation": "none", "output": {{"surface": "out/{}.nc",
+            "fields": ["horizontal_displacement"],
             "smoothing": {{"kind": "gaussian", "width_deg": 2}}}}}})",
                     lmax, kCap, name))));
     const auto narrow = pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+    vectorCaps(narrow, 0, lmax, 2.0);
     const SurfaceGrid fine(lmax);
     const auto ring = fine.Longitudes().size();
     for (const auto* field : {"displacement", "potential", "relative_sea_level_change"}) {
@@ -7301,6 +7334,10 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
       "asked_run",
       R"("surface": "out/asked_run.nc", "fields": ["horizontal_displacement"],
          "smoothing": {"kind": "gaussian", "width_deg": 20})");
+  const auto sharper = timed(
+      "sharper_run",
+      R"("surface": "out/sharper_run.nc", "fields": ["horizontal_displacement"],
+         "smoothing": {"kind": "gaussian", "width_deg": 6})");
   for (const auto& [name, field] : quiet.variables) {
     EXPECT_EQ(run.variables.at(name).values, field.values) << name;
   }
@@ -7308,6 +7345,8 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
   const SurfaceGrid small(24, {.nmax = 1});
   const auto nodes = run.time->size();
   for (auto n = std::size_t{0}; n < nodes; ++n) {
+    vectorCaps(run, n, 24, 20.0);
+    vectorCaps(sharper, n, 24, 6.0);
     const auto u =
         DisplacementField(small, {}, Slice(run, "tangential_potential", n),
                           Slice(run, "toroidal_potential", n));
@@ -8560,7 +8599,9 @@ TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
   // those of the run without the member; from a recording into the
   // trajectory store, and swept again from it with the same values to the
   // bit; the grids' members of `solver` taken, which a radial run refuses
-  // otherwise. Refused: `lateral` true naming neither the viscosity nor the
+  // otherwise, and left out of the run's hashes, so that the store serves
+  // the sweep at other transforms (a lateral run's store, at its own
+  // alone). Refused: `lateral` true naming neither the viscosity nor the
   // moduli, and false on a model with lateral structure.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
@@ -8607,6 +8648,53 @@ TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
       << again;
   EXPECT_EQ(KernelValues(out / "site_viscosity_kernels.nc"), viscosity);
   EXPECT_EQ(KernelValues(out / "site_moduli_kernels.nc"), moduli);
+  // The transforms' degrees are the sweep's alone on a radial run: they
+  // leave the run's hashes as they are, and the store recorded at one
+  // serves a sweep at another, whose kernels are, to the bit, those of
+  // the run at that one in memory. A lateral run's hashes change with
+  // them, and its store serves the run it recorded alone.
+  const auto atDegrees = [&](const std::string& name, const std::string& model,
+                             const std::string& degrees,
+                             const std::string& trajectory) {
+    return Write(name + ".json",
+                 "{" + model + trajectory +
+                     R"(, "solver": {"transform_degrees": )" + degrees + "}, " +
+                     kernels(R"("lateral": true,)", "out_" + name) + "}");
+  };
+  constexpr auto kStore = R"(, "trajectory": {"directory": "store"})";
+  const auto hashes = [&](const fs::path& path, bool lateralRun) {
+    const auto input = app::ReadKernelInput(path);
+    auto hash = app::Fnv1a{};
+    app::AddRunMembers(hash, input.run, lateralRun);
+    return std::pair{hash.Value(),
+                     app::TrajectoryHashOf(input.run, lateralRun)};
+  };
+  const auto two = atDegrees("two", body, "[2]", kStore);
+  EXPECT_EQ(hashes(two, false), hashes(lateral, false));
+  const auto fromStore = app::RunKernel(two);
+  EXPECT_NE(
+      fromStore.find("; the forward run read back from the trajectory store "),
+      std::string::npos)
+      << fromStore;
+  static_cast<void>(app::RunKernel(atDegrees("two_memory", body, "[2]", "")));
+  for (const auto* name :
+       {"site_viscosity_kernels.nc", "site_moduli_kernels.nc"}) {
+    EXPECT_EQ(KernelValues(dir_ / "out_two" / name),
+              KernelValues(dir_ / "out_two_memory" / name))
+        << name;
+  }
+  const auto lateralBody = Prem8() + ", " + Window(3);
+  constexpr auto kLateralStore =
+      R"(, "trajectory": {"directory": "lateral_store"})";
+  const auto three =
+      atDegrees("lateral_three", lateralBody, "[3]", kLateralStore);
+  const auto twoLateral =
+      atDegrees("lateral_two", lateralBody, "[2]", kLateralStore);
+  EXPECT_NE(hashes(three, true).first, hashes(twoLateral, true).first);
+  EXPECT_NE(hashes(three, true).second, hashes(twoLateral, true).second);
+  static_cast<void>(app::RunKernel(three));
+  ExpectRefused(app::RunKernel, twoLateral, "trajectory.directory",
+                "holds the trajectory store of another run");
 
   ExpectRefused(app::RunKernel,
                 Write("bad_parameters.json",
@@ -9328,8 +9416,8 @@ TEST_F(AppsTest, ReadsOutsideAFilesSpanAreRefusedUnlessHeld) {
   const auto hashesOf = [&](const fs::path& path) {
     const auto input = app::ReadSolveInput(path);
     auto hash = app::Fnv1a{};
-    app::AddRunMembers(hash, input.run);
-    return std::pair{hash.Value(), app::TrajectoryHashOf(input.run)};
+    app::AddRunMembers(hash, input.run, false);
+    return std::pair{hash.Value(), app::TrajectoryHashOf(input.run, false)};
   };
   const auto stopping = [&](const std::string& name, const std::string& hold,
                             const std::string& limit) {
@@ -10877,8 +10965,9 @@ TEST_F(AppsTest, LoadKernelsUnderMigratingShorelines) {
 TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
   // The static problem without an ocean on the ball with lateral shear and
   // bulk moduli, under a cap load and a point source: the 3-D kernels of a
-  // radial displacement over a cap and of a vector displacement at a point
-  // (its toroidal part the lateral structure's), in the load, the source's
+  // radial displacement over a cap, of a vector displacement at a point
+  // and of one smoothed over a cap (their toroidal parts the lateral
+  // structure's), in the load, the source's
   // moment tensor and the moduli. Their values are solve's; each is its
   // load and moment kernels paired with the load applied and the tensor,
   // the run linear in both, and a solve run with the tensor's member rt
@@ -10923,7 +11012,10 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
             "longitude": -80, "width_deg": 10}},
           {{"type": "displacement_vector_point", "name": "drift",
             "latitude": 40, "longitude": -60,
-            "direction": {{"east": 1, "north": 1}}}}],
+            "direction": {{"east": 1, "north": 1}}}},
+          {{"type": "displacement_vector_cap", "name": "swept",
+            "latitude": 40, "longitude": -60, "width_deg": 10,
+            "direction": {{"east": 1, "north": 1, "up": 0.2}}}}],
         "output": "out/{}_kernels"}}}})",
                                              moduli, rt, name, name));
   };
@@ -10943,16 +11035,21 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemOnLateralModuli) {
   const auto stiff = read("stiff");
   const auto soft = read("soft");
   const auto raised = read("raised");
-  const auto valueOf = [](const pm::SurfaceFile& file, const std::string& name) {
-    return name == "uplift"
-               ? CapMeanOf(file, "displacement", 0, {55.0, -80.0}, 10.0)
-               : VectorPointOf(file, 0, {40.0, -60.0},
-                               {.east = 1.0, .north = 1.0});
+  const auto valueOf = [](const pm::SurfaceFile& file,
+                          const std::string& name) {
+    if (name == "uplift") {
+      return CapMeanOf(file, "displacement", 0, {55.0, -80.0}, 10.0);
+    }
+    return name == "drift"
+               ? VectorPointOf(file, 0, {40.0, -60.0},
+                               {.east = 1.0, .north = 1.0})
+               : VectorCapOf(file, 0, {40.0, -60.0}, 10.0,
+                             {.east = 1.0, .north = 1.0, .up = 0.2});
   };
   EXPECT_TRUE(run.variables.contains("toroidal_potential"));
   const auto out = dir_ / "out" / "run_kernels";
   const auto& applied = run.variables.at("load_outside_water_budget").values;
-  for (const auto* name : {"uplift", "drift"}) {
+  for (const auto* name : {"uplift", "drift", "swept"}) {
     const auto label = std::string{name};
     const auto value = valueOf(run, label);
     EXPECT_LT(Gap(MeasuredValue(out, label), value), 1e-9) << label;
@@ -12128,8 +12225,8 @@ TEST_F(AppsTest, TheRunHashesTakeACapsNumbersWhole) {
   const auto hashesOf = [&](const fs::path& path) {
     const auto input = app::ReadSolveInput(path);
     auto hash = app::Fnv1a{};
-    app::AddRunMembers(hash, input.run);
-    return Hashes{hash.Value(), app::TrajectoryHashOf(input.run),
+    app::AddRunMembers(hash, input.run, false);
+    return Hashes{hash.Value(), app::TrajectoryHashOf(input.run, false),
                   app::Describe(input.run.forcing.ice_change.at(1))};
   };
   const auto base =
@@ -12340,8 +12437,8 @@ TEST_F(AppsTest, SolveWithoutGravity) {
                           : std::format(R"(, "gravity": "{}",)", gravity)));
       const auto input = app::ReadSolveInput(path);
       auto hash = app::Fnv1a{};
-      app::AddRunMembers(hash, input.run);
-      return std::pair{hash.Value(), app::TrajectoryHashOf(input.run)};
+      app::AddRunMembers(hash, input.run, false);
+      return std::pair{hash.Value(), app::TrajectoryHashOf(input.run, false)};
     };
     const auto absent = hashesOf("");
     const auto full = hashesOf("full");
@@ -12362,9 +12459,6 @@ TEST_F(AppsTest, SolveWithoutGravity) {
           "", "ocean", "a run without gravity");
   refused("", R"(, "tide": [{"degree": 2, "amplitude_m2_s2": 1.0}])",
           "forcing.tide", "a run without gravity");
-  refused("", R"(, "load": [{"cap": {"latitude": 90, "longitude": 0,
-             "width_deg": 20, "amplitude_kg_m2": 1.0e6}}])",
-          "forcing.load", "has a degree-1 part");
   refused(R"(, "rotation": "full")", "", "rotation", "a rotational feedback");
   refused(R"(, "rotation": "axial")", "", "rotation", "a rotational feedback");
   refused(R"(, "moments": "hydrostatic")", "", "moments",
@@ -12416,8 +12510,10 @@ TEST_F(AppsTest, SolveWithoutGravityUnderLoads) {
   // beside it; the static problem is the traction numbers times the
   // load's weight; the same run with gravity differs, and hashes as
   // another run; a run under loads resumes from its checkpoints to the
-  // uninterrupted run; and loads with a degree-1 part are refused, naming
-  // `forcing.load`, and so is the volume file.
+  // uninterrupted run; loads with a degree-1 part, through time and
+  // static, are answered as the loads less it (the runs under their
+  // projections given without one, to rounding), the run saying so in one
+  // line on standard error; and the volume file is refused.
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   constexpr auto kLmax = 8;
@@ -12599,8 +12695,8 @@ TEST_F(AppsTest, SolveWithoutGravityUnderLoads) {
       const auto input =
           app::ReadSolveInput(config("hash", termOf(table, history), extra));
       auto hash = app::Fnv1a{};
-      app::AddRunMembers(hash, input.run);
-      return std::pair{hash.Value(), app::TrajectoryHashOf(input.run)};
+      app::AddRunMembers(hash, input.run, false);
+      return std::pair{hash.Value(), app::TrajectoryHashOf(input.run, false)};
     };
     const auto absent = hashesOf("");
     const auto full = hashesOf(R"(, "gravity": "full")");
@@ -12639,23 +12735,83 @@ TEST_F(AppsTest, SolveWithoutGravityUnderLoads) {
     }
   }
 
-  // loads with a degree-1 part, through time and static, and the volume
-  // file, are refused
-  static_cast<void>(Write("tilted_lm.txt", "0 0 2.0e5 0\n1 1 1.0e4 0\n"));
-  ExpectRefused(app::RunSolve,
-                config("polar", R"({"cap": {"latitude": 90, "longitude": 0,
-                    "width_deg": 20, "amplitude_kg_m2": 1.0e6}})"),
-                "forcing.load", "has a degree-1 part");
-  ExpectRefused(
-      app::RunSolve,
-      config("tilted", R"({"coefficients": {"file": "tilted_lm.txt"}})"),
-      "forcing.load", "a net force on the body");
-  ExpectRefused(app::RunSolve,
-                config("polar_static", R"({"cap": {"latitude": 90,
-                    "longitude": 0, "width_deg": 20,
-                    "amplitude_kg_m2": 1.0e6}})",
-                       R"(, "gravity": "none")", ""),
-                "forcing.load", "has a degree-1 part");
+  // loads with a degree-1 part, through time and static: answered as the
+  // loads less it, the run saying how much it removed in one line on
+  // standard error; a load without one says nothing
+  {
+    // a run's line on standard error, and its surface file
+    const auto run = [&](const fs::path& config) {
+      testing::internal::CaptureStderr();
+      static_cast<void>(app::RunSolve(config));
+      return testing::internal::GetCapturedStderr();
+    };
+    // a coefficient table of a field's expansion on the run's grid, less
+    // its degree-1 part
+    const auto projected = [&](const std::string& name,
+                               const std::vector<double>& field) {
+      const auto c = grid.Expand(field);
+      auto text = std::string{"# a load less its degree-1 part\n"};
+      for (auto l = 0; l <= kLmax; ++l) {
+        if (l == 1) continue;
+        for (auto m = 0; m <= l; ++m) {
+          const auto v = c[SurfaceGrid::Index(l, m)];
+          text +=
+              std::format("{} {} {:.17g} {:.17g}\n", l, m, v.real(), v.imag());
+        }
+      }
+      static_cast<void>(Write(name, text));
+      return std::format(R"({{"coefficients": {{"file": "{}"}}}})", name);
+    };
+    const auto same = [&](const std::string& a, const std::string& b,
+                          std::size_t nodes) {
+      const auto x = Output(a);
+      const auto y = Output(b);
+      for (auto n = std::size_t{0}; n < nodes; ++n) {
+        for (const auto* name : {"displacement", "tangential_potential"}) {
+          const auto gap =
+              nodes == 1 ? Departure(x.variables.at(name).values,
+                                     y.variables.at(name).values)
+                         : Departure(Slice(x, name, n), Slice(y, name, n));
+          EXPECT_LT(gap, 1e-12) << a << " " << name << " node " << n;
+        }
+      }
+    };
+    constexpr auto kPolar = R"({"cap": {"latitude": 90, "longitude": 0,
+        "width_deg": 20, "amplitude_kg_m2": 1.0e6}})";
+    const auto said = run(config("polar", kPolar));
+    EXPECT_NE(said.find("sl3d: forcing.load: the loads' degree-1 part ("),
+              std::string::npos)
+        << said;
+    EXPECT_NE(said.find(" of their size at "), std::string::npos) << said;
+    EXPECT_NE(said.find("it is removed"), std::string::npos) << said;
+    EXPECT_EQ(std::ranges::count(said, '\n'), 1) << said;
+    const auto polar = Output("polar");
+    EXPECT_EQ(run(config("polar_less",
+                         projected("polar_lm.txt", Slice(polar, "load", 0)))),
+              "");
+    same("polar", "polar_less", 3);
+    // the static problem
+    EXPECT_NE(run(config("polar_static", kPolar, R"(, "gravity": "none")", ""))
+                  .find("the loads' degree-1 part ("),
+              std::string::npos);
+    static_cast<void>(run(
+        config("polar_static_less",
+               projected("polar_static_lm.txt",
+                         Output("polar_static").variables.at("load").values),
+               R"(, "gravity": "none")", "")));
+    same("polar_static", "polar_static_less", 1);
+    // a coefficient table with a degree-1 row
+    static_cast<void>(
+        Write("tilted_lm.txt", "0 0 2.0e5 0\n1 1 1.0e4 0\n2 1 4.0e4 -2.5e4\n"));
+    static_cast<void>(Write("level_lm.txt", "0 0 2.0e5 0\n2 1 4.0e4 -2.5e4\n"));
+    EXPECT_NE(
+        run(config("tilted", R"({"coefficients": {"file": "tilted_lm.txt"}})"))
+            .find("the loads' degree-1 part ("),
+        std::string::npos);
+    static_cast<void>(
+        run(config("level", R"({"coefficients": {"file": "level_lm.txt"}})")));
+    same("tilted", "level", 3);
+  }
   ExpectRefused(
       app::RunSolve,
       Write("volume.json",

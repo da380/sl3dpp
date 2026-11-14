@@ -42,7 +42,7 @@ void Fnv1a::AddFile(const std::filesystem::path& path) {
   }
 }
 
-void AddRunMembers(Fnv1a& hash, const Run& run) {
+void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
   hash.AddFile(run.model.deck);
   hash.AddValue(run.model.format);
   hash.AddValue(run.lmax);
@@ -121,7 +121,9 @@ void AddRunMembers(Fnv1a& hash, const Run& run) {
   if (run.ocean && run.ocean->at != WindowEnd::Start) {
     hash.AddValue(run.ocean->at);
   }
-  if (!run.solver.transform_degrees.empty()) {
+  // the 3-D steps' transforms, which a radial run's forward problem has
+  // none of (there they set the reverse sweep's lateral kernels alone)
+  if (lateral && !run.solver.transform_degrees.empty()) {
     hash.AddValue(run.solver.transform_degrees.size());
     for (const auto degree : run.solver.transform_degrees) {
       hash.AddValue(degree);
@@ -202,10 +204,10 @@ void AddRunMembers(Fnv1a& hash, const Run& run) {
   if (!run.gravitating) hash.AddText("gravity none");
 }
 
-std::string TrajectoryHashOf(const Run& run) {
+std::string TrajectoryHashOf(const Run& run, bool lateral) {
   auto hash = Fnv1a{};
   hash.AddText("sl3d trajectory store");
-  AddRunMembers(hash, run);
+  AddRunMembers(hash, run, lateral);
   // the seismic sources, term by term, their numbers whole
   hash.AddValue(run.forcing.seismic.size());
   for (const auto& term : run.forcing.seismic) {

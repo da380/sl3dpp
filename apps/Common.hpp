@@ -62,7 +62,7 @@ struct Run {
   /// "none"): without it the body has no ocean, no tide and no rotational
   /// feedback, and is forced on a radial model by surface loads, by their
   /// weight, and seismic sources (ViscoelasticOperator::Options::
-  /// gravitating), loads with a degree-1 part refused.
+  /// gravitating), the loads' degree-1 part removed (a net force).
   bool gravitating = true;
   /// With "hydrostatic", the moments of inertia difference is set from
   /// the model's own hydrostatic fluid limit (WithHydrostaticMoments),
@@ -105,8 +105,9 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 /// gravity (`gravity`:
 /// "none") the `ocean` block, a tide, a rotational feedback other than
 /// "none" (the default then) and hydrostatic moments are refused, each
-/// naming its member; surface loads with a degree-1 part are refused when
-/// the loads are built (DriveOf, StaticLoadsOf).
+/// naming its member; the surface loads' degree-1 part, a net force, is
+/// removed by the evolution, and said when the loads are built (DriveOf,
+/// StaticLoadsOf).
 [[nodiscard]] Run ReadRun(const Json& top,
                           const std::filesystem::path& directory);
 
@@ -524,9 +525,10 @@ struct Drive {
 
 /// The drive of a run through time on its world (Drive), the surface
 /// loads read onto the solver's grid against the config's `forcing`.
-/// Without gravity, loads with a degree-1 part at a node are refused,
-/// naming `forcing.load` and the node: a net force, which nothing
-/// balances (DegreeOneShare).
+/// Without gravity, the loads' degree-1 part, a net force, which nothing
+/// balances and the evolution removes, is said in one line on standard
+/// error with the node where it is largest, where it is above rounding
+/// (DegreeOneShare above 1e-12).
 template <class EvolutionForcing>
 [[nodiscard]] Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
                                               const GRDSolver& solver,
@@ -571,8 +573,7 @@ struct StaticWorld {
 
 /// The static problem's surface loads on a grid (SurfaceLoads, each term
 /// read once, a `field` file at its date), or null without any. Without
-/// gravity, loads with a degree-1 part are refused, as DriveOf refuses
-/// them.
+/// gravity, the loads' degree-1 part is said as DriveOf says it.
 [[nodiscard]] std::shared_ptr<const SurfaceLoads> StaticLoadsOf(
     const Run& run, const Json& top, const SurfaceGrid& grid);
 

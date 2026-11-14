@@ -8,7 +8,7 @@
 // adjoint's kernels, and the instantaneous elastic response under lateral
 // moduli (the fingerprint). Each rank's memory nodes are a slice of the one
 // process's, compared value by value. TestDistributed runs the same under
-// mpiexec.
+// mpiexec. And a sea level solve that fails on one rank fails on all.
 
 #include <gtest/gtest.h>
 
@@ -27,6 +27,7 @@
 #include <memory>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -1095,6 +1096,76 @@ TEST(RadialRanks, LateralModuliAdjointsMatchTheOneProcessSweeps) {
     EXPECT_LT(worstIce, 1e-10) << label;
     EXPECT_LT(worstViscosity, 1e-10) << label;
     std::cout << label << ": ice " << worstIce << ", viscosity " << worstViscosity << '\n';
+  }
+}
+
+TEST(RadialRanks, ASeaLevelSolveThatFailsOnOneRankFailsOnAll) {
+  // The continuous 3D adjoint's jump under lateral moduli (the
+  // instantaneous fixed point, closed by the sea level solve on every
+  // rank) on three ranks, the second of which is given a sea level
+  // tolerance no solve meets (a negative one), as a rank whose transforms
+  // round differently may miss a tolerance the others meet: the solve
+  // fails on every rank, each reporting the solve's failure rather than
+  // another rank's dropping out. Under MPI a rank failing alone would
+  // leave the others waiting at their next collective.
+  constexpr auto lmax = 8;
+  constexpr auto count = 3;
+  const auto body = Body::Make(lmax);
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  auto solvers = std::vector<GRDSolver>{};
+  for (auto rank = 0; rank < count; ++rank) {
+    solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                         SeaLevelParameters{});
+  }
+  const auto length = solvers[0].SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto state = solvers[0].MakeState(toNd(fingerprint.IceThickness()),
+                                          toNd(fingerprint.SeaLevel()));
+  const auto times = std::vector<double>{0.0};
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[0].relativeSeaLevelDual =
+      solvers[0].Grid().FromFunction([](double theta, double phi) {
+        return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+      });
+  const auto cuts = body.material.Mesh().BalancedCuts(
+      count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .moduli = RankModuli(), .radial_cuts = cuts};
+  ThreadRanks ranks(count);
+  auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+  for (auto rank = 0; rank < count; ++rank) {
+    auto mine = options;
+    mine.segments = {rank};
+    mine.collectives = ranks.For(rank);
+    ops.push_back(std::make_unique<Viscoelastic3D>(body.rheology, lmax, Peaked, mine));
+  }
+  auto messages = std::vector<std::string>(count);
+  EXPECT_THROW(
+      ranks.Run([&](int rank) {
+        Evolution3D evolution(*ops[rank], solvers[rank], state,
+                              {.rtol = 1e-12, .max_coupled_iterations = 100,
+                               .coupled_rtol = 1e-11});
+        try {
+          static_cast<void>(
+              AdjointSolver3D(evolution, {.rtol = rank == 1 ? -1.0 : 1e-12,
+                                          .max_coupled_iterations = 100,
+                                          .coupled_rtol = 1e-11})
+                  .FirstOrderKernels(times, measurements));
+        } catch (const std::exception& error) {
+          messages[rank] = error.what();
+          throw;
+        }
+      }),
+      std::runtime_error);
+  for (auto rank = 0; rank < count; ++rank) {
+    EXPECT_NE(messages[rank].find("did not converge"), std::string::npos)
+        << "rank " << rank << ": " << messages[rank];
   }
 }
 

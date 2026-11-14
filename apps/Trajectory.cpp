@@ -59,7 +59,7 @@ io::TrajectoryStore::Description Described(const Run& run, int stride,
                                            const GRDSolver& solver,
                                            int dimension) {
   auto out = io::TrajectoryStore::Description{};
-  out.hash = TrajectoryHashOf(run);
+  out.hash = TrajectoryHashOf(run, dimension == 3);
   out.dimension = dimension;
   out.times.assign(times.begin(), times.end());
   out.record_stride = stride;

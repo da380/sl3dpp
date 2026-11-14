@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <format>
+#include <iostream>
 #include <numbers>
 #include <optional>
 #include <planetmodel/json.hpp>
@@ -1085,15 +1086,22 @@ CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
 
 namespace {
 
-/// Without gravity, the refusal of surface loads with a degree-1 part at
-/// one of `times` (the terms' clock), naming `forcing.load` and, through
-/// `label`, the time: a net force on the body, which nothing balances.
-/// The part is measured as the evolution measures it (DegreeOneShare
-/// against kDegreeOneTolerance), on the loads applied, every term summed.
-void RefuseDegreeOneLoads(const Json& top, const SurfaceLoads& loads,
-                          const SurfaceGrid& grid,
-                          std::span<const double> times,
-                          const std::function<std::string(std::size_t)>& label) {
+/// The share of a run's loads, below which the degree-1 part removed
+/// without gravity is rounding and goes unremarked.
+constexpr auto kDegreeOneRounding = 1e-12;
+
+/// Without gravity, the degree-1 part of the surface loads, a net force on
+/// the body, which nothing balances: the evolution removes it whatever its
+/// size (Evolution.hpp). Measured as the evolution sees the loads
+/// (DegreeOneShare of the loads applied, every term summed) at each of
+/// `times` (the terms' clock), its largest share is said in one line on
+/// the first rank's standard error, with the time (through `label`), where
+/// it is above rounding.
+void NoteDegreeOneLoads(const SurfaceLoads& loads, const SurfaceGrid& grid,
+                        std::span<const double> times,
+                        const std::function<std::string(std::size_t)>& label) {
+  auto largest = 0.0;
+  auto at = std::size_t{0};
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     const auto node = loads.At(times[n]);
     auto total = std::vector<double>(grid.FieldSize(), 0.0);
@@ -1103,17 +1111,17 @@ void RefuseDegreeOneLoads(const Json& top, const SurfaceLoads& loads,
       }
     }
     const auto share = DegreeOneShare(grid.Expand(total), grid.LMax());
-    if (share > kDegreeOneTolerance) {
-      Fail(top.At("forcing").At("load"),
-           std::format(
-               "has a degree-1 part ({:.3g} of the loads' size{}), a net "
-               "force on the body, which nothing balances in a run without "
-               "gravity (`gravity`: \"none\"): give loads with no degree-1 "
-               "part between them (a pair of antipodal caps or disks, a "
-               "zonal degree-2 pattern, a coefficient table without l = 1)",
-               share, label ? " at " + label(n) : std::string{}));
+    if (share > largest) {
+      largest = share;
+      at = n;
     }
   }
+  if (largest <= kDegreeOneRounding || !TheRanks().First()) return;
+  std::cerr << std::format(
+      "sl3d: forcing.load: the loads' degree-1 part ({:.3g} of their size{}) "
+      "is a net force on the body, which nothing balances without gravity: "
+      "it is removed, and the run answers the loads less it\n",
+      largest, label ? " at " + label(at) : std::string{});
 }
 
 }  // namespace
@@ -1252,10 +1260,9 @@ Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
     out.loads->CheckCovers(times);
     if (!run.gravitating) {
       const auto& window = *run.times;
-      RefuseDegreeOneLoads(top, *out.loads, solver.Grid(), times,
-                           [&window](std::size_t n) {
-                             return window.Label(window.Axis(n));
-                           });
+      NoteDegreeOneLoads(
+          *out.loads, solver.Grid(), times,
+          [&window](std::size_t n) { return window.Label(window.Axis(n)); });
     }
   }
   if (out.forced) {
@@ -1388,7 +1395,7 @@ std::shared_ptr<const SurfaceLoads> StaticLoadsOf(const Run& run,
                                                   top.At("forcing"), false);
   if (!run.gravitating) {
     const auto instant = std::vector<double>{0.0};
-    RefuseDegreeOneLoads(top, *out, grid, instant, {});
+    NoteDegreeOneLoads(*out, grid, instant, {});
   }
   return out;
 }

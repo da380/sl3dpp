@@ -18,9 +18,9 @@
     "parameters": ["ice", "viscosity"],
     "measurements": [
       {"type": "relative_sea_level_cap", "name": "hudson_bay_10ka",
-       "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 10.0},
+       "latitude": 60, "longitude": 275, "width_deg": 12, "date_kyr_bp": 10.0},
       {"type": "relative_sea_level_cap", "name": "hudson_bay_6ka",
-       "latitude": 60, "longitude": 275, "width_deg": 4, "date_kyr_bp": 6.0}
+       "latitude": 60, "longitude": 275, "width_deg": 12, "date_kyr_bp": 6.0}
     ],
     "output": "out/timestep_continuous_n40"
   }

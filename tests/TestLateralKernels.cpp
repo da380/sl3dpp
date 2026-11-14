@@ -3,8 +3,9 @@
 // same model with zero lateral structure, configuration by configuration
 // and both methods; against central differences of the 3D forward run along
 // lateral perturbations; their means over the sphere against the radial
-// kernels; and the static problem against ElasticPerturbation3D's static
-// kernels.
+// kernels; and the static problem's kernels against the transpose of
+// ElasticPerturbation3D's lateral force on the static adjoint and forward
+// solutions.
 
 #include <gtest/gtest.h>
 
@@ -137,10 +138,13 @@ double Departure(std::span<const double> got, std::span<const double> want) {
 }
 
 /// A lateral modulus perturbation that changes nothing a solve can see
-/// (one part in 1e300) but has the 3D operator carry memory nodes over the
-/// whole solid, where the radial route's moduli kernels live.
+/// (one part in 1e100) but has the 3D operator carry memory nodes over the
+/// whole solid, where the radial route's moduli kernels live. The forces
+/// it makes stay normal numbers: at one part in 1e300 those of a toroidal
+/// traction alone are subnormal, and the sea level solve they force
+/// cannot meet a relative tolerance on them.
 Viscoelastic3D::Options::LateralModuli EverySolidElement() {
-  return {.shear = [](double, double, double) { return 1e-300; }, .bulk = {}};
+  return {.shear = [](double, double, double) { return 1e-100; }, .bulk = {}};
 }
 
 struct Gaps {
@@ -291,27 +295,18 @@ void ExpectGate(const Gaps& gaps, double tolerance) {
   EXPECT_LT(gaps.logViscosity, tolerance);
   EXPECT_LT(gaps.kappa, tolerance);
   EXPECT_LT(gaps.mu, tolerance);
+  EXPECT_LT(gaps.ice, tolerance);
 }
 
 /// The gate of one configuration and method: against the 3D sweep on the
 /// 3D operator of zero lateral viscosity (its memory nodes the viscous
 /// elements'), and against the 3D sweep on one whose memory nodes cover
-/// the whole solid (a lateral modulus one part in 1e300), where the
-/// radial route's moduli kernels live — the latter, by the continuous
-/// method, without a measurement of the potential under the rotational
-/// feedback nor of the toroidal potential under the full one: the
-/// continuous 3D sweep under lateral moduli closes its jumps by the
-/// instantaneous fixed point, which there departs from its own
-/// Love-number closure (by 1e-3 in the load kernels) or does not converge.
-void Gate(const Scene& scene, Case c, AdjointMethod method) {
+/// the whole solid (a lateral modulus one part in 1e100), where the
+/// radial route's moduli kernels live — the latter closing its jumps and
+/// equilibria by the instantaneous fixed point of lateral moduli.
+void Gate(const Scene& scene, const Case& c, AdjointMethod method) {
   if (c.rheology == nullptr || c.rheology->BranchCount() > 0) {
     ExpectGate(RunGate(scene, c, method, false), 1e-9);
-  }
-  if (method == AdjointMethod::Continuous && c.rotation != RotationalFeedback::None) {
-    for (auto& [node, m] : c.measurements) {
-      m.potentialDual.clear();
-      if (c.rotation == RotationalFeedback::Full) m.toroidalPotentialDual.clear();
-    }
   }
   ExpectGate(RunGate(scene, c, method, true), 1e-9);
 }
@@ -382,7 +377,9 @@ TEST(LateralKernels, ZeroLateralGateLoadsAndAnOcean) {
 TEST(LateralKernels, ZeroLateralGateRotationAndEveryMeasurement) {
   // The full rotational feedback, every field measured at three nodes
   // (the toroidal potential among them, whose adjoint the radial route
-  // carries for the lateral kernels alone) and uneven steps.
+  // carries for the lateral kernels alone), the toroidal potential alone
+  // at a fourth (its jump forces the sea level solve with nothing but the
+  // lateral coupling's leak), and uneven steps.
   auto scene = Scene::Make(1e21);
   std::mt19937 rng(43);
   Case c;
@@ -394,6 +391,7 @@ TEST(LateralKernels, ZeroLateralGateRotationAndEveryMeasurement) {
   c.measurements[5] = EveryField(scene, rng, true);
   c.measurements[3] = EveryField(scene, rng, true);
   c.measurements[0] = EveryField(scene, rng, true);
+  c.measurements[4].toroidalPotentialDual = scene.Smooth(rng, 0.8);
   c.label = "rotation, every field, uneven steps";
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     Gate(scene, c, method);
@@ -890,10 +888,11 @@ double Seconds(std::chrono::steady_clock::time_point from) {
   return std::chrono::duration<double>(std::chrono::steady_clock::now() - from).count();
 }
 
-/// The static problem on the radial body by both routes at one degree:
-/// the gaps of the radial route's moduli kernels from minus
-/// ElasticPerturbation3D's static kernels (both methods, a load and a
-/// tide) and the two routes' times, kernels only and with their setup.
+/// The static problem on the radial body at one degree: the gaps of the
+/// radial route's moduli kernels from minus the transpose of
+/// ElasticPerturbation3D's Force on the static adjoint and forward
+/// solutions (ForceTranspose; both methods, a load and a tide), and the
+/// times of the two, kernels only and with their setup.
 struct StaticComparison {
   double kappa = 0.0, mu = 0.0;
   double radialSetup = 0.0, radialKernels = 0.0, bornSetup = 0.0, bornKernels = 0.0;
@@ -934,10 +933,10 @@ StaticComparison CompareStaticRoutes(int lmax) {
         born.Solve(tidal ? born.TideForces(Scaled(tide, ratios.toMatPotential))
                          : born.LoadForces(Scaled(grid.Expand(load), ratios.toMatDensity)),
                    {});
-    auto staticKernels = born.StaticKernels(y, x);
+    auto transpose = born.ForceTranspose(y, x);
     out.bornKernels = Seconds(clock);
-    for (auto& v : staticKernels.kappa) v = -v;
-    for (auto& v : staticKernels.mu) v = -v;
+    for (auto& v : transpose.kappa) v = -v;
+    for (auto& v : transpose.mu) v = -v;
     for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       clock = std::chrono::steady_clock::now();
       const LateralKernelSolver solver(evolution, {.method = method, .rtol = 1e-12},
@@ -954,8 +953,8 @@ StaticComparison CompareStaticRoutes(int lmax) {
         EXPECT_EQ(a.ElementOfNode(rn), b.ElementOfNode(rn));
         EXPECT_EQ(a.NodeInElementOf(rn), b.NodeInElementOf(rn));
       }
-      out.kappa = std::max(out.kappa, Departure(kernels.kappaKernel3D, staticKernels.kappa));
-      out.mu = std::max(out.mu, Departure(kernels.muKernel3D, staticKernels.mu));
+      out.kappa = std::max(out.kappa, Departure(kernels.kappaKernel3D, transpose.kappa));
+      out.mu = std::max(out.mu, Departure(kernels.muKernel3D, transpose.mu));
     }
   }
   return out;
@@ -963,14 +962,14 @@ StaticComparison CompareStaticRoutes(int lmax) {
 
 }  // namespace
 
-TEST(LateralKernels, TheStaticProblemIsElasticPerturbation3DsStaticKernels) {
-  // Where the static problem's kernels have a second route — a radial
-  // body without an ocean or rotational feedback, measured in U, V and
-  // phi, the memory points at the GLL nodes — the radial route at one
-  // node is minus ElasticPerturbation3D's static kernels of the static
-  // adjoint and forward solutions, at every grid value: the guard of the
-  // entry point's static case. The two routes' times are printed (the
-  // static kernels' are their solves and expansions alone).
+TEST(LateralKernels, TheStaticRouteAgreesWithTheTransposeOfTheForce) {
+  // The entry point's static case against an independent form of the
+  // same kernels: on a radial body without an ocean or rotational
+  // feedback, measured in U, V and phi, the memory points at the GLL
+  // nodes, the radial route at one node is minus the transpose of
+  // ElasticPerturbation3D's Force on the static adjoint and forward
+  // solutions (ForceTranspose), at every grid value. The two times are
+  // printed (the transpose's are its solves and expansions alone).
   const auto c = CompareStaticRoutes(kLmax);
   std::cout << std::format(
       "[static, lmax {}] kappa {:.2e}, mu {:.2e}; radial route {:.3f} s (+{:.3f} s "
@@ -981,8 +980,8 @@ TEST(LateralKernels, TheStaticProblemIsElasticPerturbation3DsStaticKernels) {
 }
 
 TEST(LateralKernels, DISABLED_StaticRoutesTiming) {
-  // The same at higher degree, for the routes' cost (SL3DPP_LMAX, default
-  // 32).
+  // The same at higher degree, for the cost of the route and of the
+  // transpose (SL3DPP_LMAX, default 32).
   const auto* env = std::getenv("SL3DPP_LMAX");
   const auto lmax = env != nullptr ? std::atoi(env) : 32;
   const auto c = CompareStaticRoutes(lmax);

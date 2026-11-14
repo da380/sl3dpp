@@ -31,7 +31,7 @@
  * derivative of a measurement with respect to every patch's moment tensor
  * at every node (AdjointSolver::Options::moment_points), with no forward
  * trajectory needed. Here the measurement, on the Maxwell Earth, is the
- * relative sea level about a tide gauge on the coast, averaged over 2
+ * relative sea level about a tide gauge on the coast, averaged over 3
  * degrees, a century after the event; contracted with the change of each
  * patch's tensor when the rake turns from 90 to 120 degrees (an oblique
  * thrust), the kernels predict the gauge's change, which a second forward
@@ -39,12 +39,13 @@
  * 1e-12).
  *
  * The maps and the time series are the fields' means over Gaussian caps of
- * 2 degrees about every point, not their point values: at these degrees
+ * 3 degrees about every point, not their point values: at these degrees
  * the fields of a source this shallow ring at the truncation wavelength,
- * and a point's value is not converged in lmax, while the 2 degree mean is
- * (to a few per cent at the default lmax 64).
+ * and a point's value is not converged in lmax, while the 3 degree mean,
+ * a cap at least half the truncation wavelength 360 / lmax degrees wide at
+ * the default lmax 64 (5.6), is.
  *
- * Outputs (SI), in output/library/seismic/seismic.txt: maps of the 2
+ * Outputs (SI), in output/library/seismic/seismic.txt: maps of the 3
  * degree means of the co-seismic vertical, horizontal (east, north) and
  * sea level response and of the change from the event to the last node
  * on the Maxwell Earth, on a grid three times the solver's; the uplift and sea
@@ -288,12 +289,15 @@ int main(int argc, char** argv) {
   const auto burgersSnapshots = run(burgersEvolution, times, sources);
 
   // The relative sea level a century on about a tide gauge on the coast,
-  // averaged over a Gaussian cap of 2 degrees, J in metres: the cap mean
+  // averaged over a Gaussian cap of 3 degrees, J in metres: the cap mean
   // is the steady datum where the band-limited fields ring about a source
-  // shallower than they resolve.
+  // shallower than they resolve, and a cap at least half the truncation
+  // wavelength 360 / lmax degrees wide (5.6 at the default lmax 64) is
+  // resolved by the band.
   const GeographicPoint gauge{-22.0, 288.0};
   const auto a = solver.Radius();
-  const auto capWidth = 2.0 * std::numbers::pi / 180.0;
+  constexpr auto capWidthDeg = 3.0;
+  const auto capWidth = capWidthDeg * std::numbers::pi / 180.0;
   const auto dual = CapMeanDual(grid, a, gauge, capWidth);
   auto measurements = std::map<std::size_t, Measurement>{};
   measurements[measured] = FieldMeasurement(FieldChannel::SeaLevel, dual);
@@ -356,12 +360,11 @@ int main(int argc, char** argv) {
       actual, predicted, std::abs(predicted - actual) / std::abs(actual)));
 
   // The maps and the series show the fields' means over Gaussian caps of
-  // 2 degrees about every point: the fields of a fault a few kilometres
+  // 3 degrees about every point: the fields of a fault a few kilometres
   // deep, laid out as point sources 50 km apart, are not converged in
   // lmax at any degree a run like this reaches (the truncation rings about
   // the source, and finer degrees resolve the point sources one by one),
-  // while their 2 degree means are (to a few per cent at lmax 64, a few
-  // tenths of one at lmax 96). By Funk and Hecke the mean about every
+  // while their 3 degree means are. By Funk and Hecke the mean about every
   // point is the expansion with each degree weighted by the cap's mean of
   // P_l (CapMeanWeights, the cap of CapMeanDual and of sl3d's
   // `output.smoothing`), synthesised.
@@ -434,7 +437,7 @@ int main(int argc, char** argv) {
   out.Scalar("patches_down_dip", downDip);
   out.Scalar("gauge_lat", gauge.latitude);
   out.Scalar("gauge_lon", gauge.longitude);
-  out.Scalar("cap_width_deg", 2.0);
+  out.Scalar("cap_width_deg", capWidthDeg);
   out.Scalar("measured_yr", years[measured]);
   out.Scalar("rake_deg", rake);
   out.Scalar("other_rake_deg", otherRake);
@@ -457,7 +460,7 @@ int main(int argc, char** argv) {
              patches);
 
   // The uplift and sea level through time over the fault, about the gauge
-  // and in the far field to the west, each the 2 degree mean there, on the
+  // and in the far field to the west, each the 3 degree mean there, on the
   // Maxwell Earth and on the Burgers one.
   const GeographicPoint places[] = {{-22.0, 285.5}, gauge, {-22.0, 276.0}};
   auto duals = std::vector<std::vector<double>>{};

@@ -12,7 +12,7 @@
     "parameters": ["load", "moduli"],
     "measurements": [
       {"type": "displacement_cap", "name": "uplift",
-       "latitude": 60, "longitude": 275, "width_deg": 2},
+       "latitude": 60, "longitude": 275, "width_deg": 6},
       {"type": "displacement_vector_point", "name": "north_shift",
        "latitude": 50, "longitude": 275, "direction": {"north": 1}}
     ],

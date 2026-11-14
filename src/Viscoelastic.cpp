@@ -437,18 +437,15 @@ void RefuseTideWithoutGravity(const ViscoelasticOperator& op,
 }
 
 /// The load channel's columns at a degree and time (FetchColumns).
-/// Without gravity its degree-1 columns must vanish: a degree-1 traction
-/// exerts a net force on the body, which nothing balances.
+/// Without gravity its degree-1 columns are removed: a degree-1 traction
+/// exerts a net force on the body, which nothing balances, and the load is
+/// projected on the loads that exert none (Evolution.hpp).
 std::optional<std::vector<double>> LoadColumns(const ViscoelasticOperator& op,
                                                const LoadCallable& load, int l,
                                                double t, int ncols) {
   auto columns = FetchColumns(load, l, t, ncols);
-  if (columns && l == 1 && !op.Gravitating() &&
-      std::ranges::any_of(*columns, [](double v) { return v != 0.0; })) {
-    throw std::invalid_argument(
-        "a degree-1 load exerts a net force on the body, which nothing "
-        "balances without gravity: the load channel's degree-1 columns must "
-        "vanish");
+  if (columns && l == 1 && !op.Gravitating()) {
+    std::ranges::fill(*columns, 0.0);
   }
   return columns;
 }

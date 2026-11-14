@@ -727,11 +727,16 @@ The store belongs to its run by a hash of the members that decide the
 forward run's numbers and of the contents of the files the config names:
 the members `solve`'s checkpoints hash (Checkpoints and restarts, below),
 and the seismic sources, the static problem's dates of its terms and the
-file inputs' formats beside them. The `kernels`, `output`, `checkpoint`
-and `trajectory` blocks, `restart`, `solver.cache_mb`, the file inputs'
-`outside_span` and the paths are left out, so that one store serves
-every kernel config of one run and a run directory can move; the stride
-and the ranks are checked beside the hash, each with its own message.
+file inputs' formats beside them. The hash covers what determines the
+forward trajectory and nothing of the reverse sweep: the `kernels`,
+`output`, `checkpoint` and `trajectory` blocks, `restart`,
+`solver.cache_mb`, the file inputs' `outside_span` and the paths are left
+out, and so is `solver.transform_degrees` on a radial model, where the
+forward run has no 3D step and the member sets only the grids of the
+sweep's lateral kernels (`kernels.lateral`); so one store serves every
+kernel config of one run, at any `transform_degrees` of a radial run,
+and a run directory can move. The stride and the ranks are checked
+beside the hash, each with its own message.
 
 **Solve once, kernel many.** One config, the run and its `trajectory`
 block, with a `kernels` block per batch of measurements (or one config
@@ -906,7 +911,7 @@ is refused in the static problem.
 | `ocean` | object | absent | the state, its instant, the shorelines and, in the quasi-static problem, the initial sea level's calibration (The ocean block, above); absent, the body has no ocean (Without an ocean, below) |
 | `rotation` | word | `"full"` | the rotational feedback (Rotation and moments, above); without gravity `"none"`, its default then |
 | `moments` | word | `"input"` | the moments of inertia (Rotation and moments, above) |
-| `gravity` | word | `"full"` | `"full"`, the problem with self-gravitation, or `"none"`, the problem without gravity: a radial body under surface loads, acting by their weight, and seismic sources, with no ocean, tide or rotational feedback, and loads without a degree-1 part (Without gravity, below) |
+| `gravity` | word | `"full"` | `"full"`, the problem with self-gravitation, or `"none"`, the problem without gravity: a radial body under surface loads, acting by their weight, and seismic sources, with no ocean, tide or rotational feedback, the loads' degree-1 part removed (Without gravity, below) |
 | `solver` | object | absent | the solves (The solver block, above): in the static problem, `rtol` alone on a radial Earth, and the 3D step's members too on lateral moduli |
 | `checkpoint` | object | absent | the quasi-static problem alone: the checkpoints (Checkpoints and restarts, below) |
 | `restart` | boolean | `true` | the quasi-static problem alone: whether to resume from a checkpoint (Checkpoints and restarts, below) |
@@ -936,7 +941,7 @@ conserved. Without an ocean there is no ice to change, and
 | `forcing.ice_change[k].cap_thickness` | object | one of the four | a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds). Refused with the state at the window's end |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt). Refused with the state at the window's end |
 | `forcing.ice_change[k].history_kyr_bp`, `forcing.ice_change[k].history` | list of pairs | absent | the quasi-static problem, beside a cap: the cap's amplitude history, as a surface load's (below), dated in a dated run and on the run's clock in one counting forwards; without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
-| `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below; without gravity the loads summed must have no degree-1 part (Without gravity, below) |
+| `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below; without gravity the loads summed act less their degree-1 part (Without gravity, below) |
 | `forcing.load[k].water_budget` | true or false | required with an ocean; `false` without one | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water. Without an ocean there is no water to exchange, and it has no effect |
 | `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more; without gravity, which forms no sea level change, the layer acts by its weight alone, as any load |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
@@ -1143,6 +1148,25 @@ lays out by the same strike, dip and rake, and its midpoint quadrature on
 the `fault`'s patches puts its points at their centres: the file of a
 plane whose uniform slip is a `fault`'s moment over mu L W is that `fault`,
 field for field to rounding.
+
+**Choosing the cells.** The quadrature integrates the moment density, the
+model's moduli times the slip, over the fault, so the cells are chosen for
+that integrand and not for `lmax`: fine enough to follow the slip (its
+taper towards the edges above all) and the fault's change of depth. With
+smooth moduli the midpoint rule converges at second order, and two or
+three `points` a cell serve coarser cells. Where the fault crosses an
+interface of the model the moduli jump, a point takes the moduli of its
+own side, and the moment then converges only at first order in the cells
+down dip, moving as points pass from one side of an interface to the
+other. The megathrust of the examples (2 to 50 km deep through PREM's
+crustal interfaces at 12 and 21.4 km and the 50 km base of its lid) shows
+the size: its moment is 2.39e22 N m on 36 by 6 cells and on 72 by 12,
+2.30e22 on 144 by 24, 2.22e22 on 36 by 6 with two points a cell and
+2.08e22 on 18 by 3, with its potency (slip times area) the same to
+0.3 % on all of them. A moment wanted to better than a few per cent on a
+layered model takes many cells down dip, or a model with smooth moduli
+through the fault's depths; doubling the cells and comparing is the test.
+The cost grows with the number of distinct radii among the points.
 
 **Placement.** The file's positions are latitude, longitude and radius
 about its own reference sphere (`reference_radius`); a model's surface may
@@ -1694,16 +1718,12 @@ measurement of a field is the field smoothed over the cap read at the
 centre, to rounding, at every width: at the seismic examples' 2° and
 lmax 96 as at 20° and lmax 32, where both are the cap means of a fine
 quadrature of the band-limited fields to rounding. A
-`displacement_vector_cap` measurement takes the same cap's weight at each
-point times the direction's components in that point's frame (east,
-north, up): its upward part is the smoothed radial displacement at the
-centre, to rounding, but its east and north parts are the cap means of
-the east and north components, which turn across the cap, and are not the
-smoothed east and north components (the components of the smoothed
-potentials' displacement): at 2° at eight grid points over and beside the
-co-seismic example's fault the two differ by up to 6e-4 (east) and 7e-3
-(north) of the largest horizontal mean, while the scalar caps there are
-the smoothed fields to 4e-14.
+`displacement_vector_cap` measurement reads the displacement smoothed as
+a vector the same way, at the centre along its direction: the upward part
+the smoothed radial displacement, the east and north parts the centre's
+components of the displacement of the smoothed potentials, which are
+`displacement_east_smoothed` and `displacement_north_smoothed` there, to
+rounding (the library's `CapDisplacementMeasurement`).
 
 The fields of the state and of the forcing are not smoothed: the
 initial sea level, the ocean functions (a smoothed ocean function is not
@@ -1897,22 +1917,33 @@ changes nothing.
   without an ocean).
 - **Degree 1.** A load with a degree-1 part exerts a net force on the
   body, which nothing balances without gravity (with gravity the load's
-  own attraction of the body does): the loads applied, every term summed,
-  must have no degree-1 part. The part is the norm of the loads'
-  degree-1 coefficients over that of all of them; above 1e-10 at a node
-  (or, static, at the problem's instant) the run is refused, naming
-  `forcing.load` and the node, and a part at or below it, rounding, is
-  taken as none. A cap or a disk alone has one, and is refused; loads
-  without one are, for instance, a pair of antipodal caps or disks of the
-  same amplitude and history (caps are sampled on the grid: a pair as
-  wide as the grid's spacing or wider has its part at rounding, while a
-  much narrower pair can alias a part above the tolerance), a zonal
-  degree-2 pattern, or a coefficient table without l = 1 (or with its
-  rows zero).
+  own attraction of the body does), and has no equilibrium. The run
+  removes it: the loads applied, every term summed, act at every node
+  less their degree-1 part, whatever its size, as a finite-element solver
+  of the problem would project out the rigid translation. Physical loads
+  balance, and theirs is the grid's error: a pair of antipodal caps or
+  disks of the same amplitude and history has none, but caps are sampled
+  on the grid, and a pair narrower than the grid's spacing aliases one
+  (at lmax 32, a pair of 3° caps 1e-10 of its size, of 2° 5e-6, of 1°
+  7e-3), which is removed as every part is: the run answers the pair, to
+  the odd degrees above 1 that the sampling aliases too (6e-7 and 3e-4 of
+  the response at 3° and 2°), which exert no net force. A load that does
+  not balance, a cap or a disk alone, a coefficient table with l = 1 rows,
+  is answered as the load less its degree-1 part (if you specify a net
+  force, you get the response to the rest). The part is measured as the norm of the loads' degree-1
+  coefficients over that of all of them; where it is above 1e-12 at some
+  node (or, static, at the problem's instant) the run says so in one line
+  on standard error, `sl3d: forcing.load: the loads' degree-1 part (... of
+  their size at ...) ...`, with its largest share and that node, and
+  runs on. The response is in the frame of the centre of mass of the
+  solved region, as every response without gravity is (The body, below).
+  The surface file's loads (`load`, `load_in_water_budget`,
+  `load_outside_water_budget`) are the loads as given, their degree-1
+  part included.
 - **What it refuses**, each naming its member: the `ocean` block (there
   is no sea level without gravity), `forcing.tide` (an external
-  potential) and `forcing.ice_change` (it needs an ocean); loads with a
-  degree-1 part (above); a `rotation` other than `"none"`, which is the
+  potential) and `forcing.ice_change` (it needs an ocean); a `rotation`
+  other than `"none"`, which is the
   default without gravity (the rotational feedback reads the inertia's
   change from the degree-2 potential, which is absent);
   `"moments": "hydrostatic"`; a model file that varies laterally (a 3D
@@ -2064,8 +2095,9 @@ output again.
 A checkpoint is bound to its run: it records a hash of the members that
 decide the computation (everything but `checkpoint`, `restart`,
 `solver.cache_mb`, `output` and the file inputs' `outside_span`, which
-a run that runs computes alike either way; the inputs' variables, the
-sea level's quantity, the state's end of the window, the ice change's
+a run that runs computes alike either way, and on a radial model
+`solver.transform_degrees`, which only a 3D run's steps use; the inputs'
+variables, the sea level's quantity, the state's end of the window, the ice change's
 terms, the surface loads and the tide's coefficients, every number whole,
 and
 whether the body has an ocean among them, and a run's having no gravity
@@ -2725,7 +2757,10 @@ and `uniform_log_viscosity_pairing` is the radial kernel's pairing with a
 uniform change of ln eta over the viscous mantle. The grids' members of
 the `solver` block, `transform_degrees` (the transforms cut by depth as a
 3D run's are) and `cache_mb`, are taken by such a run through time and
-refused by a radial run otherwise. The static problem takes the member
+refused by a radial run otherwise; they are the sweep's alone, out of the
+run's hash, so a run recorded into the trajectory store once serves the
+lateral kernels at any `transform_degrees`. The static problem takes the
+member
 as the run through time does (its fields are the moduli's, on the band's
 grid at every node). On a model with lateral
 structure the kernels are fields whatever the member says: `"lateral":
@@ -2767,7 +2802,7 @@ refused then, naming the member.
 | `relative_sea_level_point` | `latitude`, `longitude`, the instant | the sea-level change at the point, m |
 | `displacement_cap` | `latitude`, `longitude`, `width_deg`, the instant | the mean radial displacement over the cap, m |
 | `displacement_point` | `latitude`, `longitude`, the instant | the radial displacement at the point, m |
-| `displacement_vector_cap` | `latitude`, `longitude`, `width_deg`, `direction`, the instant | the mean over the cap of the displacement along the direction held in each point's frame, m |
+| `displacement_vector_cap` | `latitude`, `longitude`, `width_deg`, `direction`, the instant | the displacement smoothed over the cap as a vector field (`output.smoothing`'s), read at its centre along the direction, m |
 | `displacement_vector_point` | `latitude`, `longitude`, `direction`, the instant | the displacement at the point along the direction, m |
 | `potential_cap` | `latitude`, `longitude`, `width_deg`, the instant | the mean potential perturbation over the cap, m^2 s^-2 |
 | `potential_point` | `latitude`, `longitude`, the instant | the potential perturbation at the point, m^2 s^-2 |
@@ -2787,12 +2822,20 @@ refused then, naming the member.
   the cap's kernel on the band `lmax` (its degree weights synthesised
   about the centre). A point value is the band-limited value at `lmax`
   (the grid's reproducing kernel); a narrow cap is often the steadier
-  datum.
+  datum. The band resolves a cap whose width is at least half the
+  truncation wavelength, w >= 180°/lmax (its degree weights below 1% by
+  `lmax`); a narrower cap is read just as exactly, but what it reads is the
+  truncated field under a cap the band cuts off, and the example configs
+  keep to the rule (examples/configs/README.md).
 - `displacement_vector_cap`, `displacement_vector_point`: `direction` is an
   object of `east`, `north` and `up` (each optional, default 0, not all
-  zero), the components along the local east, north and upward unit
-  vectors at each point of the cap, or at the point; it need not be a
-  unit vector (a line of sight is one). The tangential displacement is
+  zero), the components along the east, north and upward unit vectors at
+  the cap's centre, or at the point; it need not be a unit vector (a line
+  of sight is one). A cap's displacement is smoothed as a vector, through
+  its potentials U, V and W, each weighted by the cap's degree weights as
+  `output.smoothing` weights them, and read at the centre: not the mean
+  over the cap of the components in each point's own frame, which turn
+  across the cap. The tangential displacement is
   read through the potentials V and W of u = U r + grad_1 V - r x grad_1
   W, in the frame of no net rotation of the surface, as `solve`'s
   `toroidal_potential` is.
@@ -2902,7 +2945,7 @@ present, on a radial Earth.
     "parameters": ["ice", "viscosity"],
     "measurements": [
       {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
-       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 6.0},
+       "longitude": -59.6, "width_deg": 3.0, "date_kyr_bp": 6.0},
       {"type": "displacement_point", "name": "uplift_hudson",
        "latitude": 60.0, "longitude": -85.0},
       {"type": "displacement_vector_point", "name": "east_hudson",
@@ -2943,7 +2986,7 @@ discrete adjoint from that store, without running the forward problem
     "parameters": ["ice", "viscosity"],
     "measurements": [
       {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
-       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 10.0}
+       "longitude": -59.6, "width_deg": 3.0, "date_kyr_bp": 10.0}
     ],
     "output": "out/kernels_3d"
   }
@@ -2972,7 +3015,7 @@ second config of other measurements sweeps from the same store.
     "parameters": ["viscosity", "moduli"],
     "measurements": [
       {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
-       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 10.0}
+       "longitude": -59.6, "width_deg": 3.0, "date_kyr_bp": 10.0}
     ],
     "output": "out/kernels_lateral"
   }
@@ -2996,7 +3039,7 @@ nodes, where the high degrees have no dofs, cut to degree 16 or 32.
     "parameters": ["load", "moduli"],
     "measurements": [
       {"type": "displacement_cap", "name": "uplift", "latitude": 60,
-       "longitude": 275, "width_deg": 2}
+       "longitude": 275, "width_deg": 6}
     ],
     "output": "out/static_moduli"
   }

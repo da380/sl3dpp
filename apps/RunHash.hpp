@@ -35,15 +35,20 @@ class Fnv1a {
   std::uint64_t hash_ = 14695981039346656037ull;
 };
 
-/// Adds the members of a run that decide its computation, and the
-/// contents of its input files, to a hash: the deck, its format and lmax,
+/// Adds the members of a run that decide its forward computation, and the
+/// contents of its input files, to a hash: what determines the forward
+/// run's trajectory, nothing of what only a reverse sweep reads. The
+/// deck, its format and lmax,
 /// the viscosity and moduli files with their references, the state's
 /// files and variables (or the body's having no ocean), the land, the ice
 /// change term by term (a file's contents, a cap's numbers whole beside
 /// its description, which rounds them), the nodes (the window and its
 /// count, or the listed nodes in their form and unit with the state's
 /// date), the time step, the rotation and moments, the tolerances and
-/// budget of the solves, the 3-D step's transforms and solver, the
+/// budget of the solves, the 3-D step's solver and, on a `lateral` run
+/// (one through the 3-D operator: a lateral viscosity or lateral moduli),
+/// its transforms (`transform_degrees`; on a radial run they set the
+/// reverse sweep's lateral kernels alone, and are left out), the
 /// shorelines and the state's end of the window, the loads and the tide
 /// whole, the calibration and the run's having no gravity (added only
 /// then, so that a run with gravity keeps its hash). The paths themselves
@@ -52,7 +57,7 @@ class Fnv1a {
 /// state's date instead.
 /// `solve`'s checkpoints hash these members alone (with, on several
 /// ranks, the rank count).
-void AddRunMembers(Fnv1a& hash, const Run& run);
+void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral);
 
 /// The trajectory store's run hash (io::TrajectoryStore::Description::
 /// hash): AddRunMembers with what checkpoints leave out because a
@@ -63,7 +68,8 @@ void AddRunMembers(Fnv1a& hash, const Run& run);
 /// inputs' formats, and the memory points the operators carry their
 /// internal variables at. Not the rank count (the store checks the
 /// processes' parts itself), and nothing of the `kernels`, `output`,
-/// `checkpoint` or `trajectory` blocks.
-[[nodiscard]] std::string TrajectoryHashOf(const Run& run);
+/// `checkpoint` or `trajectory` blocks: a recorded run serves every
+/// sweep of it. `lateral` as AddRunMembers's.
+[[nodiscard]] std::string TrajectoryHashOf(const Run& run, bool lateral);
 
 }  // namespace sl3dpp::app

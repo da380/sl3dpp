@@ -176,6 +176,15 @@ class GRDSolver {
   [[nodiscard]] std::array<double, 3> CentrifugalDual(
       std::span<const std::complex<double>> tideDual) const;
 
+  /// The degree-0 inertia moment of a surface mass density on the
+  /// solver's sphere, in GeneralisedForcing::inertiaMomentChange's
+  /// measure: a^2 / 2 times its mass. The solve adds it itself for a
+  /// direct load and for the attraction piece of a split load
+  /// (GeneralisedForcing::potentialLoad), whose mass it is; a caller that
+  /// gives the body's answer to such a piece as ready responses gives
+  /// this beside the body's moment.
+  [[nodiscard]] double SurfaceMassMoment(std::span<const double> density) const;
+
   // -- the surface state ------------------------------------------------------
 
   /**
@@ -287,6 +296,11 @@ class GRDSolver {
     /// see it and no Love number makes it, so it is only carried to the
     /// response. Empty: none, and none returned.
     std::vector<std::complex<double>> toroidalResponse;
+    /// The ready degree-0 inertia moment, int rho u . x dV (half the
+    /// change of int rho r^2 dV) of what the ready responses moved, with
+    /// any mass whose body response they carry (SurfaceMassMoment): the
+    /// trace term of the axial rotational feedback, beside the moments
+    /// the solve forms for its own loads.
     double inertiaMomentChange = 0.0;
     std::array<double, 3> angularMomentumChange{0.0, 0.0, 0.0};
     /// A prescribed tidal potential, its coefficients on the surface: the

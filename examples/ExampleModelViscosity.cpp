@@ -22,7 +22,7 @@
  * Outputs (SI), in output/library/model_viscosity/model_viscosity.txt:
  * present-day sea-level change for both runs and their difference, delta
  * at 1000 km depth, the 21 ka ice, and the sea-level histories at two
- * sites near the former ice sheets.
+ * sites near the former ice sheets (6 degree cap means).
  *
  *   ExampleModelViscosity [--lmax N] [--state FILE]
  *
@@ -32,6 +32,7 @@
 #include <cmath>
 #include <format>
 #include <iostream>
+#include <numbers>
 
 #include "Common.hpp"
 #include "sl3dpp/Evolution3D.hpp"
@@ -148,7 +149,10 @@ int main(int argc, char** argv) {
     return delta(rDeep, theta, phi);
   }));
 
-  // The cap-mean sea level at two sites near the former ice sheets.
+  // The sea level at two sites near the former ice sheets, averaged over
+  // Gaussian caps of 6 degrees: at least half the truncation wavelength
+  // 360 / lmax degrees at the default lmax 32 (5.6), so that the band
+  // resolves the caps.
   const auto a = solver.Radius();
   const GeographicPoint sites[] = {{60.0, 275.0},  // Hudson Bay
                                    {60.0, 10.0}};  // southern Norway
@@ -156,7 +160,8 @@ int main(int argc, char** argv) {
   for (auto n = std::size_t{0}; n < with.size(); ++n) {
     auto row = std::vector<double>{startKyr - startKyr * n / (nodes - 1)};
     for (const auto& site : sites) {
-      const auto dual = CapMeanDual(grid, a, site, 0.05);
+      const auto dual =
+          CapMeanDual(grid, a, site, 6.0 * std::numbers::pi / 180.0);
       row.push_back(length *
                     PairedValue(grid, a, dual, with[n].relativeSeaLevelChange));
       row.push_back(length *

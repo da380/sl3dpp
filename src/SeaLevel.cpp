@@ -260,6 +260,15 @@ std::array<double, 3> GRDSolver::CentrifugalDual(
               uniformRotationFactor_ * tideDual[SurfaceGrid::Index(0, 0)].real()};
 }
 
+double GRDSolver::SurfaceMassMoment(std::span<const double> density) const {
+  if (density.size() != grid_.FieldSize()) {
+    throw std::invalid_argument("the density does not live on the grid");
+  }
+  // traceFactor_ times this is shellFactor_ times the density's degree-0
+  // coefficient: the shell term of Rotation
+  return 0.5 * radius_ * radius_ * IntegrateSurface(density);
+}
+
 double GRDSolver::IntegrateSurface(std::span<const double> field) const {
   return radius_ * radius_ * grid_.Integrate(field);
 }

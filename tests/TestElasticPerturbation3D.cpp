@@ -245,12 +245,12 @@ TEST(ElasticPerturbation3D, SelectionRules) {
   }
 }
 
-TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
-  // The static material kernels of a solution pair: their grid pairing
-  // with lateral directions in kappa and mu equals the Hermitian pairing
-  // of the dual solution with the force of those directions on the
-  // other — the transpose of Force; with the dual the response to a
-  // surface dual, the kernels of a static surface measurement.
+TEST(ElasticPerturbation3D, ForceTransposePairsWithTheForce) {
+  // ForceTranspose of a solution pair is the transpose of Force: its grid
+  // pairing with lateral directions in kappa and mu equals the Hermitian
+  // pairing of the dual solution with the force of those directions on
+  // the other; with the dual the response to a surface dual, minus it is
+  // a static surface measurement's kernels.
   const auto material = MakeMaterial();
   ElasticPerturbation3D born(material, kLmax);
   const auto& coupling = born.Coupling();
@@ -284,7 +284,7 @@ TEST(ElasticPerturbation3D, StaticKernelsAreTheTransposeOfTheForce) {
       [](double theta, double phi) {
         return std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
       });
-  const auto kernels = born.StaticKernels(y, x);
+  const auto kernels = born.ForceTranspose(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> d) {
     return VolumePairing(coupling, kernel, d);
   };
@@ -575,7 +575,7 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   // The adjoint of the laterally heterogeneous static problem: with y the
   // lateral solve of a surface measurement's dual forces and x that of
   // the load, both under the background delta mu_0(x), delta kappa_0(x),
-  // -StaticKernels(y, x) paired with a direction (v_mu, v_kappa) equals
+  // -ForceTranspose(y, x) paired with a direction (v_mu, v_kappa) equals
   // the central difference of the measurement along the direction,
   // through the full solve.
   const auto material = MakeMaterial();
@@ -639,7 +639,7 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
       born.SurfaceDualForces(dual, Component::Phi), {}, mu0, kappa0, options);
   EXPECT_TRUE(infoX.converged);
   EXPECT_TRUE(infoY.converged);
-  const auto kernels = born.StaticKernels(y, x);
+  const auto kernels = born.ForceTranspose(y, x);
   auto pairing = [&](std::span<const double> kernel, std::span<const double> v) {
     return VolumePairing(coupling, kernel, v);
   };
@@ -715,8 +715,8 @@ TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveBitwiseUnchanged) {
   compare(a.spheroidal, b.spheroidal);
   compare(a.toroidal, b.toroidal);
   EXPECT_GT(scale, 0.0);
-  const auto ka = standard.StaticKernels(a, a);
-  const auto kb = small.StaticKernels(b, b);
+  const auto ka = standard.ForceTranspose(a, a);
+  const auto kb = small.ForceTranspose(b, b);
   EXPECT_FALSE(ka.mu.empty());
   ASSERT_EQ(ka.mu, kb.mu);
   ASSERT_EQ(ka.kappa, kb.kappa);

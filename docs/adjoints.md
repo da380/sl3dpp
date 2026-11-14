@@ -960,17 +960,25 @@ paired with the forcings' through `DegreeOperator::MaterialGradient`;
 gated against `ComputeLoveNumberDerivatives` along a direction at 1e-10
 for every channel and degree
 (`MaterialDerivatives.LoveNumberKernelsPairToTheDerivatives`). In 3D
-`ElasticPerturbation3D::StaticKernels(y, x)` (the transpose of its
-`Force`, per unit volume on its grid) with `SolveSurfaceDual` for
-the adjoint solution of a surface measurement; gated as the transpose
-of `Force` under the Hermitian pairing at 1e-10 and by the dual solve
-being the adjoint of the surface readout
-(`ElasticPerturbation3D.StaticKernelsAreTheTransposeOfTheForce`), and
+a measurement's kernels in κ(x) and μ(x) are those of the evolution
+asked for one solve (§19, *The elastic problem*), through
+`LateralKernelSolver` (§21): about a radial body its radial route,
+under lateral moduli the 3D sweeps; with an ocean, the rotational
+feedback, sources, every measurement and either point set.
+
+Beneath that route, `ElasticPerturbation3D::ForceTranspose(y, x)` is the
+transpose of its `Force`, per unit volume on its grid: with y the solve
+of a surface measurement's dual (`SolveSurfaceDual`, or `SolveLateral`
+under a lateral background) and x the forward solution, minus it is
+that measurement's kernels in the static problem without an ocean or
+rotational feedback. It is not a route of its own but the route's
+independent check (§19, §21). It is gated as the transpose of `Force`
+under the Hermitian pairing at 1e-10 and by the dual solve being the
+adjoint of the surface readout
+(`ElasticPerturbation3D.ForceTransposePairsWithTheForce`), and
 under a lateral background with both solutions from the full solve
 (§13j) against central differences of the measurement at 1e-5
-(`KernelsUnderLateralStructureMatchFiniteDifferences`). The 3D elastic
-benchmark against AdGIA can thus compare kernels as well as responses,
-at the heterogeneous model itself.
+(`KernelsUnderLateralStructureMatchFiniteDifferences`).
 
 ### 13j. The full 3D static solve
 
@@ -1004,10 +1012,12 @@ heterogeneous body; `sl3d solve` solves that problem by the stepper,
 `SurfaceDualForces` (a measurement's dual), or their sum, with toroidal
 forces allowed. Because the operator is symmetric, the solve of a
 measurement's dual forces under the lateral structure is the adjoint
-solution at that structure, and `-StaticKernels(y, x)` with both
-solutions from the lateral solve are the measurement's kernels in μ(x)
-and κ(x) at the laterally heterogeneous model: the static path's
-adjoint, discrete-exact, under 3D structure.
+solution at that structure, and the transpose of `Force` on it and the
+lateral forward solution, negated (`-ForceTranspose(y, x)`), is the
+measurement's gradient in μ(x) and κ(x) at the laterally heterogeneous
+model, discrete-exact: the kernels the route gives there (the 3D sweeps
+of a one-node `Evolution3D` on the same moduli, through
+`LateralKernelSolver`, §19, §21), which it checks.
 
 GATES (`TestElasticPerturbation3D`, prem8 at lmax 6): the converged
 solution's full, unpreconditioned residual at 1e-9 of the forcing; its
@@ -1711,6 +1721,12 @@ along a direction, band-limited as the point dual is, and needs no
 transform: the upward part is the grid's reproducing kernel
 K(x . x0), the horizontal part its derivative along the direction,
 (x . d) K'(x . x0), on V, and along d x r on W.
+`CapDisplacementMeasurement` reads the displacement smoothed over a
+Gaussian cap as a vector field at the cap's centre: the same kernels with
+degree l weighted by the cap's degree weights (`CapMeanWeights`), so that
+it reads the displacement of the potentials U, V and W each smoothed
+over the cap, the field `sl3d solve`'s `output.smoothing` writes, at the
+centre along the direction.
 
 A rigid rotation of a solid region carries no strain, so the toroidal
 degree 1 of a solution is the solver's gauge, and an adjoint force that
@@ -1755,7 +1771,18 @@ traction moves no load and no potential in the radial reference: its
 unrelaxed toroidal response joins the jump's solution through its
 strain alone. Under lateral moduli both tractions' forces join the
 instantaneous fixed point's (`OpenStep::AddToroidalForce` for the
-toroidal one). The rotational feedback needs no term of its own.
+toroidal one); they carry no mass, and the rotational feedback needs no
+term of theirs. The attraction piece joins it as a force too, but
+carries the load's mass: its degree-0 inertia moment, a^2 / 2 int z_phi
+dS (`GRDSolver::SurfaceMassMoment`), which the Love-number closure adds
+itself for `potentialLoad` (the shell term), is given to the fixed
+point's sea level solve beside the body's. On lateral moduli under the
+axial and the full feedback, measured in the potential with a degree-0
+part, the elastic problem's continuous second-order sweep (the jump and
+its derivative along the moduli) is symmetric and equal to the
+second-order run and to the discrete sweep within 3e-12, and to central
+differences of the continuous first-order kernels within 1.2e-8
+(Richardson; `SecondOrderAdjoint3D.PotentialMeasurementUnderRotationAndLateralModuli`).
 
 **What takes them.** The tangent-linear runs, 1D and 3D, take the tide,
 about a frozen or a migrating run, and return V, and in 3D W. Every
@@ -2014,17 +2041,21 @@ size their arrays at the memory points by the points themselves, not by
 a branch. The static problems therefore have no sweeps of their own:
 load, tide and source kernels, kernels in kappa and mu about a laterally
 heterogeneous background, and the Hessian's action, are those of the
-evolution asked for one solve. Without an ocean they are
-ElasticPerturbation3D's static kernels (§13h, §13j):
-`StaticDerivatives.OneNodeSweepsReproduceTheStaticKernels` holds the
-one-node sweeps' kernels in kappa and mu, both methods, to the static
-kernels' means over the sphere at every node of the static coupling at
-1e-11, under a load and under a body tide measured in U, V and phi, and
-`…UnderLateralModuli` to the static kernels themselves at every grid
-value of the coupling at 1e-11, the static solutions from the full
-lateral solves. The 3D one-node route forms its kernels at the
-coupling's memory nodes only, which on a branchless rheology are where
-the lateral moduli are non-zero.
+evolution asked for one solve, and the lateral kernels about a radial
+one are `LateralKernelSolver`'s at one node (§21). Without an ocean or
+rotational feedback the kernels in kappa and mu have an independent
+form, minus the transpose of `ElasticPerturbation3D::Force` on the
+static adjoint and forward solutions (`ForceTranspose`, §13h, §13j),
+which checks them:
+`StaticDerivatives.OneNodeSweepsReproduceTheForceTranspose` holds the
+one-node sweeps' kernels in kappa and mu, both methods, to that
+transpose's means over the sphere at every node of the static coupling
+at 1e-11, under a load and under a body tide measured in U, V and phi,
+and `…UnderLateralModuli` to the transpose itself at every grid value
+of the coupling at 1e-11, the static solutions from the full lateral
+solves. The 3D one-node route forms its kernels at the coupling's
+memory nodes only, which on a branchless rheology are where the
+lateral moduli are non-zero.
 
 **What is formed on one process.** The 3D moment kernels of both
 sweeps and the continuous sweep's tide kernels are formed on one
@@ -2154,47 +2185,46 @@ viscosity and for lateral moduli over the whole solid, and
 (`transform_degrees`) as the 3D classes' are.
 
 **The entry point.** `LateralKernelSolver` (`LateralKernels.hpp`) is the
-one route to lateral kernels: built on an `Evolution` it runs the radial
-sweeps with the grid expansion, through time or at one node (the static
-problem); built on an `Evolution3D` it runs the 3D sweeps. Its
-`Coupling()` is the layout either way.
+one route to lateral kernels, the static problem's included: built on an
+`Evolution` it runs the radial sweeps with the grid expansion, through
+time or at one node (the static problem); built on an `Evolution3D` it
+runs the 3D sweeps, at one node the static problem under lateral
+moduli. Its `Coupling()` is the layout either way. It takes an ocean,
+the rotational feedback, sources, every measurement and either point
+set.
 
-The static problem without an ocean or rotational feedback has a second
-route, `ElasticPerturbation3D::StaticKernels` of the static adjoint and
-forward solutions (§13h). On a radial body the two agree at every grid
-value at 2.4e-12 (κ) and 9e-13 (μ) at lmax 8, and 1.5e-12 / 2.7e-13 at
-lmax 32 and 64 (`LateralKernels.TheStaticProblemIsElasticPerturbation3DsStaticKernels`,
-the guard of the entry point's static case), at the same cost: 0.288 s
-against 0.280 s at lmax 32 and 2.20 s against 2.12 s at lmax 64 on four
-threads (the radial route's time includes its sweep's sea level solves;
-the expansions dominate both). The radial route takes an ocean, the
-rotational feedback, sources, every measurement and either point set, so
-it is the entry point's static route; `StaticKernels` stays the transpose
-of `Force` (§13b, §13j), gated against it.
+**The static problem's check.** Without an ocean or rotational feedback
+the static kernels in κ and μ have an independent form: minus the
+transpose of `ElasticPerturbation3D::Force` (§13b, §13j) on the static
+adjoint and forward solutions (`ForceTranspose`, §13h), not a route of
+its own but the check of this one. On a radial body the two agree at
+every grid value within 4e-12 (κ) and 1.3e-12 (μ) at lmax 8, and
+1.5e-12 / 2.7e-13 at lmax 32 and 64
+(`LateralKernels.TheStaticRouteAgreesWithTheTransposeOfTheForce`), at
+the same cost: 0.29 s against 0.30 s at lmax 32 and 2.3 s against 2.2 s
+at lmax 64 on four threads (the route's time includes its sweep's sea
+level solves; the expansions dominate both). Under lateral moduli the
+3D sweeps at one node agree with it likewise (§19).
 
 **Gates** (`TestLateralKernels`, prem8 with a 1e21 Pa s mantle at lmax 8):
 
 - *Zero lateral structure.* Against the 3D sweep of the same method on
   a `Viscoelastic3D` with δ ≡ 0 (its nodes the viscous elements'), and
   against one whose memory nodes cover the whole solid (a lateral shear of
-  one part in 1e300, which no solve sees), every field at every grid
-  value: a melting load on the analytic ocean measured in the sea level
-  and the displacement, GLL and Gauss points, both schemes; the full
-  rotational feedback with every field measured at three nodes (the
-  toroidal potential among them) on uneven steps; no ocean, a load and a
-  tide, the axial feedback; a growing point source, with and without a
-  measurement of W, both schemes; migrating shorelines with a solved
-  start (a load and a layer at the first node); and the static problem
-  on a branchless and on the Maxwell rheology, with an ocean and without.
-  The discrete route equals the 3D sweep at 3e-14 – 3.4e-12, the
-  continuous at 9e-14 – 3.3e-11 (the 3D fixed point's and conjugate
-  gradients' tolerances, 1e-12); the load kernels at 1e-14. The continuous 3D sweep
-  under lateral moduli closes its jumps by the instantaneous fixed point,
-  which departs from its own Love-number closure — and from the radial
-  sweep — by 1e-3 in the load kernels when a measurement of the
-  potential meets the rotational feedback, and does not converge (at
-  1e-12) for a measurement of W under the full feedback; those two are
-  compared with the δ ≡ 0 operator alone.
+  one part in 1e100, which no solve sees and whose forces stay normal
+  numbers), every field at every grid value, the load kernels included:
+  a melting load on the analytic ocean measured in the sea level and the
+  displacement, GLL and Gauss points, both schemes; the full rotational
+  feedback with every field measured at three nodes (the toroidal
+  potential among them) and W alone at a fourth, on uneven steps; no
+  ocean, a load and a tide, the axial feedback; a growing point source,
+  with and without a measurement of W, both schemes; migrating
+  shorelines with a solved start (a load and a layer at the first node);
+  and the static problem on a branchless and on the Maxwell rheology,
+  with an ocean and without. The discrete route equals the 3D sweep at
+  3e-14 – 3.4e-12, the continuous at 9e-14 – 3.3e-11 (the 3D fixed
+  point's and conjugate gradients' tolerances, 1e-12); the load kernels
+  within 1.5e-14.
 - *Differences of the 3D run.* The kernels paired with lateral
   perturbations of the log viscosity, the shear and the bulk modulus,
   each of degree 2 and of degree 6, against central differences of the 3D

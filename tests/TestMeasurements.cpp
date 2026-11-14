@@ -1,6 +1,8 @@
 // Measurement duals and the decay-time estimator: a cap mean integrates
 // to one and reads a band-limited field's mean over the cap exactly at
-// every width, the point dual reads a band-limited field exactly, the
+// every width, a cap's displacement measurement reads the displacement
+// smoothed as a vector at the centre, the point dual reads a band-limited
+// field exactly, the
 // coefficient dual reads the real orthonormal pair, the rotation and
 // field measurements carry their duals, a clean exponential is fitted
 // exactly, the fit's weights ARE the datum's derivative (held to central
@@ -16,6 +18,7 @@
 #include <iostream>
 #include <fstream>
 #include <numbers>
+#include <span>
 #include <sstream>
 #include <stdexcept>
 #include <string>
@@ -111,6 +114,97 @@ TEST(MeasurementDuals, PointDisplacementReadsADirection) {
                   d.east * north2 - d.north * east2, 1e-10);
     }
   }
+}
+
+TEST(MeasurementDuals, CapDisplacementIsTheSmoothedVectorAtTheCentre) {
+  // The displacement smoothed over a cap as a vector: band-limited U, V
+  // and W of every degree, each weighted by the cap's degree weights (W in
+  // the frame of no net rotation of the surface, as sl3d's output smooths
+  // it), and the displacement field of the smoothed potentials; the cap
+  // measurement read at a grid point, along each axis and along a mixed
+  // direction, is that field's components there, to rounding, at widths
+  // the grid resolves and one it does not, next to either pole and
+  // between. Its upward part is the cap mean of U.
+  constexpr auto lmax = 24;
+  const auto grid = SurfaceGrid(lmax, {.nmax = 1});
+  const auto a = 6.371e6;
+  const auto fieldOf = [&](double phase) {
+    auto c = grid.ZeroCoefficients();
+    for (auto l = 0; l <= lmax; ++l) {
+      for (auto m = 0; m <= l; ++m) {
+        const auto k = static_cast<double>(SurfaceGrid::Index(l, m));
+        c[SurfaceGrid::Index(l, m)] = {
+            std::sin(1.7 * k + phase), m == 0 ? 0.0 : std::cos(2.3 * k - phase)};
+      }
+    }
+    return grid.Synthesise(c);
+  };
+  const auto U = fieldOf(0.3);
+  const auto V = fieldOf(1.1);
+  const auto W = fieldOf(-0.7);
+  const auto smoothed = [&](std::span<const double> field,
+                            const std::vector<double>& weights) {
+    auto c = grid.Expand(field);
+    for (auto l = 0; l <= lmax; ++l) {
+      for (auto m = 0; m <= l; ++m) c[SurfaceGrid::Index(l, m)] *= weights[l];
+    }
+    return grid.Synthesise(c);
+  };
+  const auto nphi = grid.Longitudes().size();
+  const auto rows = grid.CoLatitudes().size();
+  auto worst = 0.0;
+  for (const auto widthDeg : {2.0, 7.0, 25.0}) {
+    const auto width = widthDeg * std::numbers::pi / 180.0;
+    const auto weights = CapMeanWeights(lmax, width);
+    const auto u = DisplacementField(grid, smoothed(U, weights),
+                                     smoothed(V, weights),
+                                     smoothed(WithoutNetRotation(grid, W), weights));
+    auto scale = 0.0;
+    for (const auto* c : {&u.east, &u.north, &u.up}) {
+      for (const auto v : *c) scale = std::max(scale, std::abs(v));
+    }
+    for (const auto [it, ip] :
+         {std::pair{std::size_t{0}, nphi / 3}, std::pair{rows / 4, nphi / 7},
+          std::pair{rows / 2, nphi * 3 / 4}, std::pair{rows - 1, nphi / 2}}) {
+      const auto at = it * nphi + ip;
+      const auto site = GeographicPoint::FromSpherical(grid.CoLatitudes()[it],
+                                                       grid.Longitudes()[ip]);
+      for (const auto d : {SurfaceDirection{.east = 1.0},
+                           SurfaceDirection{.north = 1.0},
+                           SurfaceDirection{.up = 1.0},
+                           SurfaceDirection{.east = 0.3, .north = -0.8, .up = 0.5}}) {
+        const auto m = CapDisplacementMeasurement(grid, a, site, width, d);
+        auto read = 0.0;
+        for (const auto& [dual, field] :
+             {std::pair{&m.displacementDual, &U},
+              std::pair{&m.tangentialPotentialDual, &V},
+              std::pair{&m.toroidalPotentialDual, &W}}) {
+          if (!dual->empty()) read += PairedValue(grid, a, *dual, *field);
+        }
+        const auto want =
+            d.east * u.east[at] + d.north * u.north[at] + d.up * u.up[at];
+        worst = std::max(worst, std::abs(read - want) / scale);
+        EXPECT_NEAR(read, want, 1e-12 * scale)
+            << widthDeg << " deg at " << site.latitude << ", "
+            << site.longitude << " along " << d.east << ", " << d.north
+            << ", " << d.up;
+        if (d.up != 0.0) {
+          auto cap = CapMeanDual(grid, a, site, width);
+          for (auto& v : cap) v *= d.up;
+          EXPECT_EQ(m.displacementDual, cap);
+        } else {
+          EXPECT_TRUE(m.displacementDual.empty());
+        }
+      }
+    }
+  }
+  std::cout << std::format(
+      "[cap displacement] the smoothed field's components within {:.2e} of "
+      "the largest\n",
+      worst);
+  EXPECT_THROW(static_cast<void>(CapDisplacementMeasurement(
+                   grid, a, GeographicPoint{10.0, 20.0}, 0.0, {.east = 1.0})),
+               std::invalid_argument);
 }
 
 TEST(MeasurementDuals, AVectorWeightReadsTheDisplacement) {

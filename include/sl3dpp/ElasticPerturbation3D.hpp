@@ -8,7 +8,11 @@
  * first-order (Born) response, and the full solve of the laterally
  * heterogeneous problem by preconditioned conjugate gradients with the
  * reference systems as the preconditioner (SolveLateral), for loads,
- * body tides and measurement duals (the adjoint under the structure).
+ * body tides and measurement duals (the adjoint under the structure); and
+ * the transpose of its lateral force (ForceTranspose). The kernels of a
+ * measurement in the moduli, of the static problem as of the run through
+ * time, are LateralKernelSolver's (LateralKernels.hpp; the static problem
+ * a run of one node), which that transpose checks.
  *
  * The elastic structure of the reference problem is radial, and a lateral
  * delta mu(x) enters its bilinear form exactly as the lateral viscosity
@@ -154,9 +158,12 @@ class ElasticPerturbation3D {
   /// The same for any forces (a load's, a tide's, a surface dual's or
   /// their sum; toroidal forces allowed): the operator is symmetric, so
   /// the solve of a measurement's dual forces under the lateral
-  /// structure is the adjoint solution of that structure, and
-  /// -StaticKernels(y, x) are then the measurement's kernels in the
-  /// moduli at the laterally heterogeneous model.
+  /// structure is the adjoint solution y of that structure, and with x
+  /// the forward solution -ForceTranspose(y, x) is the measurement's
+  /// gradient in the moduli at the laterally heterogeneous model: the
+  /// static problem's kernels without an ocean or rotational feedback,
+  /// which LateralKernelSolver gives about a one-node Evolution3D on the
+  /// same moduli.
   [[nodiscard]] std::pair<Solutions, SolveInfo> SolveLateral(
       const Forces& spheroidal, const Forces& toroidal,
       std::span<const double> dMu, std::span<const double> dKappa,
@@ -179,23 +186,28 @@ class ElasticPerturbation3D {
   [[nodiscard]] static double Pair(const Solutions& x, const Forces& spheroidal,
                                    const Forces& toroidal);
 
-  /// The static material kernels of a pair of solutions: the kernels in
-  /// kappa(x) and mu(x) for J = <y, K x>, densities per unit volume over
-  /// the grid values (the Kernels3D layout and convention) — the
-  /// transpose of Force: VolumePairing(kappa, dKappa) + VolumePairing(mu,
-  /// dMu) = Pair(y, Force(x, dMu, dKappa)). With y the response to a
-  /// measurement's dual (SolveSurfaceDual), minus the kernels of that
-  /// measurement of the static problem without an ocean or rotational
-  /// feedback. The kernels of a measurement, of the static problem as of
-  /// the run through time, are LateralKernelSolver's (LateralKernels.hpp),
-  /// which on a radial body equal these at every grid value where both
-  /// apply, at the same cost (docs/adjoints.md §21).
-  struct Kernels {
+  /// The transpose of Force on a pair of solutions: the fields kappa and
+  /// mu over the grid values, densities per unit volume (the Kernels3D
+  /// layout and convention), with VolumePairing(kappa, dKappa) +
+  /// VolumePairing(mu, dMu) = Pair(y, Force(x, dMu, dKappa)) for every
+  /// dKappa, dMu: the gradient of <y, K x> in kappa(x) and mu(x). With y
+  /// the solve of a surface measurement's dual forces (SolveSurfaceDual,
+  /// or SolveLateral under a lateral structure) and x the forward
+  /// solution, minus these are that measurement's kernels for the static
+  /// problem without an ocean or rotational feedback.
+  ///
+  /// Not the route to a measurement's kernels: those are
+  /// LateralKernelSolver's (LateralKernels.hpp), the static problem's as a
+  /// run of one node, with an ocean, rotational feedback, sources, every
+  /// measurement and either point set. Where both apply they agree at
+  /// every grid value, at the same cost, and this transpose is the
+  /// route's independent check (docs/adjoints.md §13h, §21).
+  struct ModuliFields {
     std::vector<double> kappa;
     std::vector<double> mu;
   };
-  [[nodiscard]] Kernels StaticKernels(const Solutions& y,
-                                      const Solutions& x) const;
+  [[nodiscard]] ModuliFields ForceTranspose(const Solutions& y,
+                                            const Solutions& x) const;
 
   /// The reference response to a dual on a surface component: per degree
   /// the m >= 0 coefficients of a surface field's dual (the pairing

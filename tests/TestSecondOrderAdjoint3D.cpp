@@ -17,6 +17,7 @@
 #include <map>
 #include <memory>
 #include <random>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -2036,5 +2037,170 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
         EXPECT_NEAR(ab, forward, 1e-7 * std::abs(forward)) << label << ", " << c.name;
       }
     }
+  }
+}
+
+TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
+  // The elastic problem (one node) on lateral moduli, measured in the
+  // potential alone — its degree-0 part included, whose adjoint load's own
+  // mass the rotational feedback carries through the jump's instantaneous
+  // fixed point — under the axial and the full feedback. Along directions
+  // in a direct load and the lateral moduli, the continuous second-order
+  // sweep (the jump and its derivative, exact at one node) gives a Hessian
+  // that is symmetric, equal to the second-order tangent-linear run and to
+  // the discrete sweep's, and equal to central differences of the
+  // continuous first-order kernels along the direction (Richardson; the
+  // moduli moved in the operator, the load in the run).
+  using Function = std::function<double(double, double, double)>;
+  auto scene = Scene::Make(1e21);
+  std::mt19937 rng(113);
+  const auto times = std::vector<double>{0.0};
+  const auto load = scene.MeltLoad(-0.1);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  auto& potential = measurements[0].potentialDual;
+  potential = scene.Smooth(rng, 0.7);
+  for (auto& v : potential) v += 0.5;  // a degree-0 part of its own
+  const Function shear0 = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+            0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+  };
+  const Function bulk0 = [](double r, double theta, double) {
+    return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+  };
+  const Function shearU = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi));
+  };
+  const Function bulkU = [](double r, double theta, double phi) {
+    return 0.05 * (1.0 - 0.5 * r) * (1.0 - 0.4 * std::sin(theta) * std::cos(phi));
+  };
+  const Function shearW = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (Cap(theta, phi, 1.9, 4.4, 0.7) +
+            0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi) + 0.2);
+  };
+  const Function bulkW = [](double r, double theta, double phi) {
+    return 0.05 * (1.0 - 0.5 * r) * (Cap(theta, phi, 0.9, 1.1, 0.6) + 0.3);
+  };
+  auto operatorWith = [&](const Function& shear, const Function& bulk) {
+    auto options = Viscoelastic3D::Options{};
+    options.solve_rtol = 1e-12;
+    options.moduli = {.shear = shear, .bulk = bulk};
+    return std::make_unique<Viscoelastic3D>(
+        scene.rheology, kLmax, [](double, double, double) { return 0.0; },
+        options);
+  };
+  auto along = [](const Function& base, const Function& direction, double eps) {
+    return Function([=](double r, double theta, double phi) {
+      return base(r, theta, phi) + eps * direction(r, theta, phi);
+    });
+  };
+  const auto op = operatorWith(shear0, bulk0);
+  const auto& coupling = op->Coupling();
+  // A direction: a direct load, and the absolute moduli of relative
+  // perturbations as the operator samples them.
+  auto directionOf = [&](const Function& shear, const Function& bulk,
+                         std::vector<double> directLoad) {
+    const auto sampled = operatorWith(shear, bulk);
+    EXPECT_EQ(sampled->Coupling().GridValueCount(), coupling.GridValueCount());
+    TangentPerturbation3D d;
+    d.directLoad = {std::move(directLoad)};
+    const auto mu = sampled->UnrelaxedShearPerturbation();
+    const auto kappa = sampled->BulkPerturbation();
+    d.material.mu.assign(mu.begin(), mu.end());
+    d.material.kappa.assign(kappa.begin(), kappa.end());
+    return d;
+  };
+  const auto loadScale = scene.solver.IceDensity() * 20.0 * scene.Metre();
+  const auto u = directionOf(shearU, bulkU, scene.Smooth(rng, loadScale));
+  const auto w = directionOf(shearW, bulkW, scene.Smooth(rng, loadScale));
+  auto pair = [&](const auto& kernels, const TangentPerturbation3D& d) {
+    return scene.Surface(kernels.ice.directLoadKernels[0], d.directLoad[0]) +
+           VolumePairing(coupling, kernels.kappaKernel3D, d.material.kappa) +
+           VolumePairing(coupling, kernels.muKernel3D, d.material.mu);
+  };
+  auto objective = [&](const std::vector<Evolution3D::Snapshot>& run) {
+    return scene.Surface(potential, run[0].potential);
+  };
+  for (const auto rotation : {RotationalFeedback::Axial, RotationalFeedback::Full}) {
+    const auto name = std::string(rotation == RotationalFeedback::Full ? "full" : "axial");
+    const auto evolutionOptions = Evolution3D::Options{
+        .rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1};
+    auto runOf = [&](Evolution3D& evolution, const std::vector<double>& f) {
+      return ForwardTrajectory3D::FromSnapshots(
+          evolution.Run(times, [&](double) { return f; }));
+    };
+    Evolution3D evolution(*op, scene.solver, scene.state, evolutionOptions);
+    const auto trajectory = runOf(evolution, load);
+    auto hessians = std::map<AdjointMethod, double>{};
+    for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto label = name + (method == AdjointMethod::Discrete ? ", discrete" : ", continuous");
+      TangentLinearSolver3D tangent(evolution, {.method = method,
+                                                .rtol = 1e-12,
+                                                .coupled_rtol = 1e-12,
+                                                .record = true});
+      const auto runU = tangent.Run(times, u, &trajectory);
+      const auto runW = tangent.Run(times, w, &trajectory);
+      AdjointSolver3D adjoint(evolution, {.method = method,
+                                          .rtol = 1e-12,
+                                          .coupled_rtol = 1e-12,
+                                          .material_kernels = true});
+      const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
+      const auto alongTangent = objective(runU);
+      ASSERT_NE(alongTangent, 0.0) << label;
+      EXPECT_NEAR(pair(first, u), alongTangent, 1e-8 * std::abs(alongTangent)) << label;
+      const auto alongU =
+          adjoint.SecondOrderKernels(times, measurements, runU, {}, trajectory, {}, u.material)
+              .second;
+      const auto alongW =
+          adjoint.SecondOrderKernels(times, measurements, runW, {}, trajectory, {}, w.material)
+              .second;
+      const auto uw = pair(alongU, w);
+      const auto wu = pair(alongW, u);
+      SecondOrderDirection3D second;
+      second.materialU = u.material;
+      second.materialV = w.material;
+      const auto forward =
+          objective(tangent.RunSecondOrder(times, runU, runW, second, &trajectory));
+      ASSERT_NE(forward, 0.0) << label;
+      std::cout << label << " feedback: <H u, w> " << uw << ", symmetry gap "
+                << std::abs(uw - wu) / std::abs(forward) << ", gap to the second-order run "
+                << std::abs(uw - forward) / std::abs(forward) << '\n';
+      EXPECT_NEAR(uw, wu, 1e-8 * std::abs(forward)) << label;
+      EXPECT_NEAR(uw, forward, 1e-8 * std::abs(forward)) << label;
+      hessians[method] = uw;
+    }
+    const auto exact = hessians.at(AdjointMethod::Discrete);
+    std::cout << name << " feedback: continuous against discrete "
+              << std::abs(hessians.at(AdjointMethod::Continuous) - exact) / std::abs(exact)
+              << '\n';
+    EXPECT_NEAR(hessians.at(AdjointMethod::Continuous), exact, 1e-8 * std::abs(exact)) << name;
+
+    // central differences of the continuous first-order kernels along u
+    auto gradientAt = [&](double eps) {
+      const auto moved = operatorWith(along(shear0, shearU, eps), along(bulk0, bulkU, eps));
+      auto f = load;
+      for (auto i = std::size_t{0}; i < f.size(); ++i) f[i] += eps * u.directLoad[0][i];
+      Evolution3D movedEvolution(*moved, scene.solver, scene.state, evolutionOptions);
+      const auto movedTrajectory = runOf(movedEvolution, f);
+      const auto kernels =
+          AdjointSolver3D(movedEvolution, {.method = AdjointMethod::Continuous,
+                                           .rtol = 1e-12,
+                                           .coupled_rtol = 1e-12,
+                                           .material_kernels = true})
+              .FirstOrderKernels(times, measurements, &movedTrajectory);
+      return pair(kernels, w);
+    };
+    const auto h = 0.05;
+    const auto coarse = (gradientAt(h) - gradientAt(-h)) / (2.0 * h);
+    const auto fine = (gradientAt(0.5 * h) - gradientAt(-0.5 * h)) / h;
+    const auto richardson = (4.0 * fine - coarse) / 3.0;
+    const auto continuous = hessians.at(AdjointMethod::Continuous);
+    std::cout << name << " feedback: differences " << coarse << ", " << fine
+              << ", Richardson " << richardson << " against " << continuous
+              << " (gap " << std::abs(richardson - continuous) / std::abs(continuous)
+              << ")\n";
+    EXPECT_NEAR(richardson, continuous, 1e-6 * std::abs(continuous)) << name;
   }
 }

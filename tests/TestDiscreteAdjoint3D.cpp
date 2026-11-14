@@ -2035,6 +2035,93 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
             << ", viscosity " << viscosityGaps[0] << " -> " << viscosityGaps[1] << '\n';
 }
 
+TEST(DiscreteAdjoint3D, LoadKernelsUnderRotationAndLateralModuli) {
+  // The load kernels under lateral moduli and the rotational feedback,
+  // axial and full, of a measurement of the potential (its degree-0
+  // part included, whose adjoint load's own mass the feedback carries)
+  // and of the toroidal potential at the last node, paired with a load
+  // history against central differences of the 3D forward run along it
+  // (exact for the linear problem): the discrete kernels at the solve
+  // tolerances; the continuous ones at one node, the static problem,
+  // where they are the instantaneous adjoint's, likewise, and over a run
+  // at the commute error, falling at second order as the steps halve.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(97);
+  const auto base = scene.MeltLoad(-0.1);
+  const auto pattern = scene.Smooth(rng, 3e3 * scene.Sigma());
+  auto measurement = Measurement{};
+  measurement.potentialDual = scene.Smooth(rng, 0.7);
+  measurement.toroidalPotentialDual = scene.Smooth(rng, 0.8);
+  Viscoelastic3D op(
+      scene.rheology, kLmax,
+      [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      },
+      {.moduli = TestModuli()});
+  const auto span = 10.0 * scene.Kyr();
+  for (const auto rotation :
+       {RotationalFeedback::Axial, RotationalFeedback::Full}) {
+    const auto name = rotation == RotationalFeedback::Full ? "full" : "axial";
+    auto commute = std::vector<double>{};
+    for (const auto nodes : {1, 5, 9}) {
+      auto times = std::vector<double>{};
+      for (auto n = 0; n < nodes; ++n) {
+        times.push_back(nodes == 1 ? 0.0 : span * n / (nodes - 1));
+      }
+      // the direction: the pattern growing through the run
+      auto direction = [&](double t) {
+        auto out = pattern;
+        for (auto& v : out) v *= 0.5 + t / span;
+        return out;
+      };
+      auto history = [&](double sign) {
+        return [&, sign](double t) {
+          auto out = direction(t);
+          for (auto i = std::size_t{0}; i < out.size(); ++i) {
+            out[i] = sign * out[i] + (nodes == 1 ? 1.0 : t / span) * base[i];
+          }
+          return out;
+        };
+      };
+      auto measurements = std::map<std::size_t, Measurement>{};
+      measurements[times.size() - 1] = measurement;
+      Evolution3D evolution(
+          op, scene.solver, scene.state,
+          {.rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12});
+      auto objective = [&](double sign) {
+        return Objective(scene, evolution.Run(times, history(sign)),
+                         measurements);
+      };
+      const auto differences = (objective(1.0) - objective(-1.0)) / 2.0;
+      ASSERT_NE(differences, 0.0);
+      for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+        const auto kernels =
+            AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12})
+                .FirstOrderKernels(times, measurements);
+        auto paired = 0.0;
+        for (auto n = std::size_t{0}; n < times.size(); ++n) {
+          paired += scene.Surface(kernels.ice.directLoadKernels[n],
+                                  direction(times[n]));
+        }
+        const auto gap = std::abs(paired - differences) / std::abs(differences);
+        const auto discrete = method == AdjointMethod::Discrete;
+        std::cout << name << " feedback, " << nodes << " nodes, "
+                  << (discrete ? "discrete" : "continuous") << ": gap " << gap
+                  << '\n';
+        if (discrete || nodes == 1) {
+          EXPECT_LT(gap, 1e-9) << name << ", " << nodes << " nodes";
+        } else {
+          commute.push_back(gap);
+        }
+      }
+    }
+    EXPECT_LT(commute[0], 0.1) << name;
+    EXPECT_GT(commute[0] / commute[1], 3.0) << name << " " << commute[0] << " "
+                                            << commute[1];
+  }
+}
+
 /// The continuous material kernels at a laterally heterogeneous elastic
 /// background (the equilibria and jumps now zero-length steps) against
 /// the exact discrete ones: a few per cent at 2.5 kyr steps, falling

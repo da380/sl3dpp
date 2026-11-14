@@ -1,6 +1,7 @@
 // The 3D continuous adjoint: the zero-lateral limit — with
 // delta = 0 the 3D sweep's ice kernels and spherically reduced viscosity
-// kernels must reproduce the 1D continuous sweep's — and the
+// kernels must reproduce the 1D continuous sweep's, and so must its load
+// kernels under lateral moduli without lateral structure — and the
 // finite-difference check of the full 3D log-viscosity kernel with
 // lateral structure on, at the continuous formulation's (commute-error)
 // accuracy in the resolved regime.
@@ -12,6 +13,7 @@
 #include <filesystem>
 #include <functional>
 #include <map>
+#include <tuple>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -185,6 +187,88 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
     }
     EXPECT_GT(kScale, 0.0);
     EXPECT_LT(kWorst, 1e-6 * kScale) << "branch " << k;
+  }
+}
+
+TEST(Adjoint3D, ZeroLateralModuliMatchThe1DSweepUnderRotation) {
+  // Under lateral moduli the continuous sweep closes its jumps and
+  // equilibria by the instantaneous fixed point (a zero-length step with
+  // the sea level solve) instead of the Love-number closure. With the
+  // moduli's lateral structure one part in 1e100 (no solve sees it), its
+  // load kernels are the 1D continuous sweep's, under the axial and the
+  // full rotational feedback: a measurement of the potential at the last
+  // node (its degree-0 part included, whose adjoint load's own mass the
+  // feedback carries), every field at a middle one, and the toroidal
+  // potential alone at another (its jump forcing the sea level solve with
+  // nothing but the lateral coupling's leak).
+  auto scene = Scene::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  auto field = [&](double scale, double colat, double lon, double width) {
+    return grid.FromFunction([=](double t, double p) {
+      return scale * Cap(t, p, colat, lon, width);
+    });
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[5].potentialDual = field(0.7, 1.2, 0.8, 0.5);
+  auto& every = measurements[3];
+  every.relativeSeaLevelDual = field(1.0, 2.0, 3.0, 0.6);
+  every.displacementDual = field(-0.5, 0.7, 4.1, 0.4);
+  every.potentialDual = field(0.6, 2.4, 5.2, 0.7);
+  every.tangentialPotentialDual = field(-0.6, 1.5, 1.9, 0.5);
+  every.toroidalPotentialDual = field(0.8, 1.0, 2.6, 0.6);
+  every.angularVelocityDual = {0.2, -0.4, 0.8};
+  measurements[2].toroidalPotentialDual = field(0.8, 2.6, 0.4, 0.5);
+
+  Viscoelastic3D op3(
+      scene.rheology, kLmax, [](double, double, double) { return 0.0; },
+      {.moduli = {.shear = [](double, double, double) { return 1e-100; },
+                  .bulk = {}}});
+  ASSERT_TRUE(op3.HasLateralModuli());
+  ViscoelasticOperator op1(scene.rheology, kLmax);
+  for (const auto rotation :
+       {RotationalFeedback::Axial, RotationalFeedback::Full}) {
+    Evolution evolution1(op1, scene.solver, scene.state,
+                         {.rotation = rotation, .rtol = 1e-12});
+    const auto kernels1 =
+        AdjointSolver(evolution1,
+                      {.method = AdjointMethod::Continuous, .rtol = 1e-12})
+            .FirstOrderKernels(times, measurements);
+    Evolution3D evolution3(
+        op3, scene.solver, scene.state,
+        {.rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto kernels3 =
+        AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12})
+            .FirstOrderKernels(times, measurements);
+    // every view of a surface load, all nodes
+    for (const auto& [name, a, b] :
+         {std::tuple{"direct load", &kernels1.directLoadKernels,
+                     &kernels3.ice.directLoadKernels},
+          std::tuple{"load outside the water budget",
+                     &kernels1.directLoadOutsideWaterBudgetKernels,
+                     &kernels3.ice.directLoadOutsideWaterBudgetKernels},
+          std::tuple{"layer on the solid surface",
+                     &kernels1.solidSurfaceChangeKernels,
+                     &kernels3.ice.solidSurfaceChangeKernels}}) {
+      ASSERT_EQ(a->size(), times.size());
+      ASSERT_EQ(b->size(), times.size());
+      auto scale = 0.0, worst = 0.0;
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        for (auto i = std::size_t{0}; i < (*a)[n].size(); ++i) {
+          scale = std::max(scale, std::abs((*a)[n][i]));
+          worst = std::max(worst, std::abs((*b)[n][i] - (*a)[n][i]));
+        }
+      }
+      EXPECT_GT(scale, 0.0) << name;
+      EXPECT_LT(worst, 1e-10 * scale)
+          << name << ", "
+          << (rotation == RotationalFeedback::Full ? "full" : "axial")
+          << " feedback";
+    }
   }
 }
 

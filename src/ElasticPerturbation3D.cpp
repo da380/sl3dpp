@@ -505,7 +505,7 @@ ElasticPerturbation3D::SurfaceToroidal(const Solutions& x) const {
   return out;
 }
 
-ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
+ElasticPerturbation3D::ModuliFields ElasticPerturbation3D::ForceTranspose(
     const Solutions& y, const Solutions& x) const {
   const auto& coupling = coupling_;
   const auto values = coupling.GridValueCount();
@@ -534,7 +534,7 @@ ElasticPerturbation3D::Kernels ElasticPerturbation3D::StaticKernels(
   const auto ex = strainOf(x);
   const auto Dy = dilatationOf(y);
   const auto Dx = dilatationOf(x);
-  Kernels out;
+  ModuliFields out;
   out.kappa.assign(values, 0.0);
   out.mu.assign(values, 0.0);
   detail::ForEach(options_.parallel, nodes, [&](std::size_t n) {

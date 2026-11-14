@@ -467,7 +467,7 @@ std::shared_ptr<FaultFileState> ReadFault(const SeismicTerm& term,
          "holds a fault in a Cartesian frame, a flat body: this body is a "
          "sphere, and takes a fault in the geographic frame");
   }
-  if (fault.Support() != "node") {
+  if (fault.Support() != planetmodel::TimeSupport::Node) {
     for (const auto* name : {"time_origin", "outside_span"}) {
       if (!Has(member, name)) continue;
       Fail(member.At(name),
@@ -828,7 +828,7 @@ std::optional<double> FileTimeOf(const SeismicTerm& term,
 std::vector<double> SliceWeights(const SeismicTerm& term, double t) {
   const auto& fault = PlacedOf(term).fault;
   auto out = std::vector<double>(fault.NSlices(), 0.0);
-  if (fault.Support() != "node") {
+  if (fault.Support() != planetmodel::TimeSupport::Node) {
     out[0] = 1.0;
     return out;
   }
@@ -944,7 +944,7 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
       Fail(member, error.what());
     }
     state.placed = true;
-    if (fault.Support() != "node") continue;
+    if (fault.Support() != planetmodel::TimeSupport::Node) continue;
     // every node's time within the file's span, and a time its rule reads
     const auto scale = fault.GetScales().Time();
     const auto& axis = *fault.Time();
@@ -1269,9 +1269,9 @@ std::string Describe(const SeismicTerm& term) {
       const auto& fault = term.fault->fault;
       const auto patches = fault.Patches().size();
       out += std::format(" ({} patch{}, ", patches, patches == 1 ? "" : "es");
-      out += fault.Support() == "node"
+      out += fault.Support() == planetmodel::TimeSupport::Node
                  ? std::format("slip at {} times, {})", fault.NSlices(),
-                               fault.TimeInterpolation())
+                               fault.TimeInterpolationName())
                  : std::string{"static)"};
     }
 #endif
@@ -1285,7 +1285,7 @@ std::string Describe(const SeismicTerm& term) {
     }
     auto onAxis = false;
 #ifdef SL3DPP_HAVE_FAULT_FILE
-    onAxis = term.fault && term.fault->fault.Support() == "node";
+    onAxis = term.fault && term.fault->fault.Support() == planetmodel::TimeSupport::Node;
 #endif
     if (onAxis && term.dated) {
       out += ", read by date";

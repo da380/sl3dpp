@@ -1,10 +1,11 @@
 // The elastic problem as the evolution asked for one solve: a time grid
 // of one node. The tangent-linear runs, both adjoint sweeps and the
 // second-order sweeps take it, in the forcing (a load and a point
-// source) and in the moduli; and without an ocean their kernels in the
-// moduli are the static problem's of ElasticPerturbation3D (its
-// StaticKernels of the adjoint and forward static solutions), on a
-// radial body and under lateral moduli.
+// source) and in the moduli; and without an ocean or rotational feedback
+// their kernels in the moduli agree with an independent form of them,
+// minus the transpose of ElasticPerturbation3D's lateral force on the
+// static adjoint and forward solutions (ForceTranspose), on a radial body
+// and under lateral moduli.
 
 #include <gtest/gtest.h>
 
@@ -227,7 +228,7 @@ TEST(StaticDerivatives, AnElasticBodyWithNoRelaxingLayer) {
   }
 }
 
-// -- the static kernels by one route --------------------------------------
+// -- the static kernels against the transpose of the force ---------------
 
 namespace {
 
@@ -339,18 +340,18 @@ double Departure(std::span<const double> got, std::span<const double> want) {
 
 }  // namespace
 
-TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernels) {
-  // The static problem without an ocean and without rotational feedback,
-  // by two routes on the radial body: the one-node run of the evolution
-  // on a branchless rheology (its memory points at the GLL nodes), its
-  // kernels in kappa and mu by both sweeps; and ElasticPerturbation3D's
-  // static adjoint and forward solutions with StaticKernels, the
-  // measurement's kernels as minus those. Under a load, and under a body
-  // tide, measured in U, V and phi at the surface: the two routes'
-  // measurements agree, and at every node of the static coupling (the
-  // solid above the element holding the centre) the static kernels'
-  // means over the sphere — the kernels of a radial perturbation — are
-  // the one-node sweeps' kernels, both methods.
+TEST(StaticDerivatives, OneNodeSweepsReproduceTheForceTranspose) {
+  // The static problem without an ocean and without rotational feedback
+  // on the radial body: the one-node run of the evolution on a branchless
+  // rheology (its memory points at the GLL nodes), its kernels in kappa
+  // and mu by both sweeps; against ElasticPerturbation3D's static adjoint
+  // and forward solutions, the measurement's kernels minus the transpose
+  // of its Force on them (ForceTranspose). Under a load, and under a body
+  // tide, measured in U, V and phi at the surface: the two measurements
+  // agree, and at every node of the static coupling (the solid above the
+  // element holding the centre) the transpose's means over the sphere —
+  // the kernels of a radial perturbation — are the one-node sweeps'
+  // kernels, both methods.
   auto setup = Scene::Make(1e21);
   const auto elastic = Rheology::Create(setup.material, {}).value();
   ViscoelasticOperator op(elastic, kLmax, {.memory_points = MemoryPointSet::Gll});
@@ -396,9 +397,9 @@ TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernels) {
     ASSERT_NE(viaEvolution, 0.0) << label;
     EXPECT_NEAR(viaStatic, viaEvolution, 1e-8 * std::abs(viaEvolution)) << label;
 
-    const auto staticKernels = born.StaticKernels(y, x);
-    auto kappaMean = SphericalMean(coupling, staticKernels.kappa);
-    auto muMean = SphericalMean(coupling, staticKernels.mu);
+    const auto transpose = born.ForceTranspose(y, x);
+    auto kappaMean = SphericalMean(coupling, transpose.kappa);
+    auto muMean = SphericalMean(coupling, transpose.mu);
     for (auto& v : kappaMean) v = -v;
     for (auto& v : muMean) v = -v;
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
@@ -421,18 +422,18 @@ TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernels) {
   }
 }
 
-TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernelsUnderLateralModuli) {
+TEST(StaticDerivatives, OneNodeSweepsReproduceTheForceTransposeUnderLateralModuli) {
   // The same in 3D at degree 6: the one-node run of the 3D evolution on a
   // branchless rheology with the memory nodes at the GLL points, its
   // lateral moduli a 10% shear and bulk pattern varying with angle over
   // the whole solid, no ocean and no rotational feedback; against
   // ElasticPerturbation3D's full lateral solves (the forward solution and
-  // the measurement's adjoint solution under the same moduli) and their
-  // StaticKernels. Under a load and under a body tide, measured in U, V
-  // and phi: the two routes' measurements agree, and the one-node sweeps'
-  // kernels in kappa(x) and mu(x) are the static kernels at every grid
-  // value of the coupling (the two couplings hold the same nodes and
-  // grids), both methods.
+  // the measurement's adjoint solution under the same moduli) and the
+  // transpose of its Force on them (ForceTranspose). Under a load and
+  // under a body tide, measured in U, V and phi: the two measurements
+  // agree, and the one-node sweeps' kernels in kappa(x) and mu(x) are
+  // minus the transpose at every grid value of the coupling (the two
+  // couplings hold the same nodes and grids), both methods.
   constexpr auto kLmax3 = 6;
   auto deck =
       Deck::Read(std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -530,17 +531,17 @@ TEST(StaticDerivatives, OneNodeSweepsReproduceTheStaticKernelsUnderLateralModuli
       ASSERT_NE(viaEvolution, 0.0) << label;
       EXPECT_NEAR(viaStatic, viaEvolution, 1e-8 * std::abs(viaEvolution)) << label;
 
-      auto staticKernels = born.StaticKernels(y, x);
-      for (auto& v : staticKernels.kappa) v = -v;
-      for (auto& v : staticKernels.mu) v = -v;
+      auto transpose = born.ForceTranspose(y, x);
+      for (auto& v : transpose.kappa) v = -v;
+      for (auto& v : transpose.mu) v = -v;
       for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
         const auto kernels = AdjointSolver3D(evolution, {.method = method,
                                                          .rtol = 1e-12,
                                                          .coupled_rtol = 1e-12,
                                                          .material_kernels = true})
                                  .FirstOrderKernels(times, measurements, &trajectory);
-        const auto kappa = Departure(kernels.kappaKernel3D, staticKernels.kappa);
-        const auto mu = Departure(kernels.muKernel3D, staticKernels.mu);
+        const auto kappa = Departure(kernels.kappaKernel3D, transpose.kappa);
+        const auto mu = Departure(kernels.muKernel3D, transpose.mu);
         std::cout << std::format("[static, 3D, {}, method {}] kappa {:.2e}, mu {:.2e}\n",
                                  label, static_cast<int>(method), kappa, mu);
         EXPECT_LT(kappa, 1e-7) << label << ", method " << static_cast<int>(method);

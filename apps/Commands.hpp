@@ -159,7 +159,9 @@ struct MeasurementSpec {
   int order = 0;           ///< the sine term)
   AngularVelocityComponent component = AngularVelocityComponent::Z;
   /// A vector displacement's direction, by its components to the east, to
-  /// the north and upwards in the local frame at each point.
+  /// the north and upwards at the site (a cap's centre): the smoothed
+  /// displacement there along it (CapDisplacementMeasurement), or the
+  /// displacement at the point.
   SurfaceDirection direction{};
   /// The node a single-instant measurement reads (0 in the static
   /// problem).

@@ -8,7 +8,7 @@ The problem: the synthetic deglaciation (data/synthetic_earth.nc) from
 1e21 Pa s Maxwell mantle, its Maxwell times, viscosity over shear
 modulus, from 0.11 to 0.43 kyr), at lmax 16, without rotational feedback
 (so that the viscoelastic memory is all the time step acts on), and two
-measurements of the sea level averaged over a 4 degree cap at Hudson Bay:
+measurements of the sea level averaged over a 12 degree cap at Hudson Bay:
 at 10 ka, mid-run, and at 6 ka, the end. Every step size divides the
 10 kyr window into a whole number of steps that puts a node at 10 ka, so
 the mid-run measurement is at the same date in every run.
@@ -60,7 +60,7 @@ START, END, MID = 16.0, 6.0, 10.0  # kyr BP: the window and the mid-run date
 STEPS = [5, 10, 20, 40, 80]  # steps over the window
 REFERENCE = 320
 SHORT_STEPS, SHORT_REFERENCE = [10, 20, 40], 160
-SITE = {"latitude": 60, "longitude": 275, "width_deg": 4}  # Hudson Bay
+SITE = {"latitude": 60, "longitude": 275, "width_deg": 12}  # Hudson Bay
 MEASUREMENTS = {f"hudson_bay_{date:g}ka": date for date in (MID, END)}
 SCHEMES = {"et": "exponential_trapezoid", "be": "backward_euler"}
 ADJOINTS = ("discrete", "continuous")

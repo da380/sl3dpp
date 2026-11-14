@@ -427,15 +427,28 @@ Measurement DisplacementMeasurement(const SurfaceGrid& grid,
   return out;
 }
 
-Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
-                                         GeographicPoint site,
-                                         SurfaceDirection direction) {
+namespace {
+
+/// The displacement at `site` along `direction` of the displacement whose
+/// potentials have degree l weighted by `weights[l]` (all ones when
+/// empty): the up part on U by `upDual` (the dual reading U so weighted at
+/// the site), the horizontal part the derivative along the direction of
+/// the weighted reproducing kernel sum_l w_l (2l + 1) P_l(x . x0) / (4 pi
+/// a^2), on V and (turned a quarter) on W, the latter from degree 2.
+Measurement WeightedPointDisplacement(const SurfaceGrid& grid, double a,
+                                      GeographicPoint site,
+                                      SurfaceDirection direction,
+                                      std::span<const double> weights,
+                                      std::vector<double> upDual) {
   const auto colat0 = site.CoLatitude();
   const auto lon0 = site.Longitude();
   const auto lmax = grid.LMax();
+  const auto weight = [&](int l) {
+    return weights.empty() ? 1.0 : weights[static_cast<std::size_t>(l)];
+  };
   auto out = Measurement{};
   if (direction.up != 0.0) {
-    out.displacementDual = PointDual(grid, a, site);
+    out.displacementDual = std::move(upDual);
     for (auto& v : out.displacementDual) v *= direction.up;
   }
   if (direction.east == 0.0 && direction.north == 0.0) return out;
@@ -455,11 +468,13 @@ Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
   // A band-limited field's value at the site is its pairing with the
   // reproducing kernel K(x . x0) = sum_l (2l + 1) P_l / (4 pi a^2); its
   // derivative along d at the site pairs with (x . d) K'(x . x0), and so
-  // d . grad_1 V and d . (-r x grad_1 W) = -(d x r) . grad_1 W.
+  // d . grad_1 V and d . (-r x grad_1 W) = -(d x r) . grad_1 W. Weighting
+  // degree l of the kernel weights degree l of the field it reads.
   out.tangentialPotentialDual.resize(grid.FieldSize());
   out.toroidalPotentialDual.resize(grid.FieldSize());
   const auto ntheta = grid.CoLatitudes().size();
   const auto nphi = grid.Longitudes().size();
+  const auto first = lmax >= 1 ? 3.0 * weight(1) : 0.0;
   for (auto it = std::size_t{0}; it < ntheta; ++it) {
     const auto theta = grid.CoLatitudes()[it];
     for (auto ip = std::size_t{0}; ip < nphi; ++ip) {
@@ -467,22 +482,21 @@ Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
       const Vector x{std::sin(theta) * std::cos(phi),
                      std::sin(theta) * std::sin(phi), std::cos(theta)};
       const auto c = std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0);
-      // sum_l (2l + 1) P_l'(c), by P_{l+1}' = P_{l-1}' + (2l + 1) P_l
+      // sum_l w_l (2l + 1) P_l'(c), by P_{l+1}' = P_{l-1}' + (2l + 1) P_l
       auto pBefore = 1.0, pNow = c;         // P_0, P_1
       auto dBefore = 0.0, dNow = 1.0;       // P_0', P_1'
-      auto sum = lmax >= 1 ? 3.0 : 0.0;
+      auto sum = first;
       for (auto l = 1; l < lmax; ++l) {
         const auto pNext = ((2.0 * l + 1.0) * c * pNow - l * pBefore) / (l + 1.0);
         const auto dNext = dBefore + (2.0 * l + 1.0) * pNow;
-        sum += (2.0 * l + 3.0) * dNext;
+        sum += (2.0 * l + 3.0) * weight(l + 1) * dNext;
         pBefore = std::exchange(pNow, pNext);
         dBefore = std::exchange(dNow, dNext);
       }
       const auto kernel = sum / (4.0 * std::numbers::pi * a * a);
-      // W's from degree 2, its degree-1 term 3 P_1' = 3 left out: the
-      // rigid rotation is gauge
-      const auto kernelW =
-          (lmax >= 1 ? sum - 3.0 : 0.0) / (4.0 * std::numbers::pi * a * a);
+      // W's from degree 2, its degree-1 term 3 w_1 P_1' = 3 w_1 left out:
+      // the rigid rotation is gauge
+      const auto kernelW = (sum - first) / (4.0 * std::numbers::pi * a * a);
       const auto i = it * nphi + ip;
       out.tangentialPotentialDual[i] =
           kernel * (x[0] * along[0] + x[1] * along[1] + x[2] * along[2]);
@@ -491,6 +505,26 @@ Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
     }
   }
   return out;
+}
+
+}  // namespace
+
+Measurement PointDisplacementMeasurement(const SurfaceGrid& grid, double a,
+                                         GeographicPoint site,
+                                         SurfaceDirection direction) {
+  return WeightedPointDisplacement(
+      grid, a, site, direction, {},
+      direction.up != 0.0 ? PointDual(grid, a, site) : std::vector<double>{});
+}
+
+Measurement CapDisplacementMeasurement(const SurfaceGrid& grid, double a,
+                                       GeographicPoint site, double width,
+                                       SurfaceDirection direction) {
+  const auto weights = CapMeanWeights(grid.LMax(), width);
+  return WeightedPointDisplacement(grid, a, site, direction, weights,
+                                   direction.up != 0.0
+                                       ? CapMeanDual(grid, a, site, width)
+                                       : std::vector<double>{});
 }
 
 namespace {

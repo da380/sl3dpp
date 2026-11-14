@@ -21,7 +21,12 @@
  * route at one node.
  *
  * About a LATERAL background (an Evolution3D: lateral viscosity, lateral
- * moduli or both) the kernels are the 3D sweeps' as they stand.
+ * moduli or both) the kernels are the 3D sweeps' as they stand, the
+ * static problem's on lateral moduli at one node likewise.
+ *
+ * This is the route to kernels in the moduli, the static problem's
+ * included; ElasticPerturbation3D::ForceTranspose, the transpose of its
+ * lateral force, is the independent check of its static case.
  *
  * Either way the result is a Kernels3D on Coupling(): the layout, pairing
  * (VolumePairing) and units of the 3D sweeps, its `ice` the run's surface

@@ -610,7 +610,7 @@ TEST_F(FaultFileTest, ItsRunHashesTheFilesContents) {
         "times": {{"unit": "yr", "at": [0, 1]}},
         "forcing": {{"seismic": [{{{}}}]}}, "output": {{"surface": "out/{}.nc"}}}})",
                                                           term, name));
-    return app::TrajectoryHashOf(app::ReadSolveInput(config).run);
+    return app::TrajectoryHashOf(app::ReadSolveInput(config).run, false);
   };
   const auto base = hash("base", FileTerm("fault_plane.nc"));
   EXPECT_EQ(hash("copy", R"("fault_file": {"file": "copy.nc", "cells_along_strike": 4,

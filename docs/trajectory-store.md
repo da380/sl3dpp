@@ -196,24 +196,31 @@ state need not be read for them) and each state as the sweep reaches it.
 
 The manifest's hash is the recorder's: opaque bytes that change with
 whatever changes the forward run's numbers, so that a store is read only
-by the run that recorded it. It must cover the model (the deck's and any
-lateral files' contents and how they are read), the degree, the nodes (in
-the form that fixes their times to the bit), the forcing (every term's
-numbers whole and its files' contents), the ocean's state and its files,
-the shorelines, the initial sea level's calibration, the rotation and the
-moments, the solves' tolerances and budgets, the time step and the 3D
-step's transforms and solver, and the memory points of the operators. It
-must not cover what only steers the run or what is checked beside it:
-the paths themselves (a run directory may move), the record stride and
-the processes' layout (the manifest states both, and a reader checks
-them as their own faults), output, checkpoints, and the sweeps'
-measurements and methods.
+by the run that recorded it. The principle: the hash covers what
+determines the forward trajectory, and nothing of the reverse sweep, so
+that one recorded run serves every sweep of it. It must cover the model
+(the deck's and any lateral files' contents and how they are read), the
+degree, the nodes (in the form that fixes their times to the bit), the
+forcing (every term's numbers whole and its files' contents), the
+ocean's state and its files, the shorelines, the initial sea level's
+calibration, the rotation and the moments, the solves' tolerances and
+budgets, the time step, the 3D step's solver and, where the forward run
+steps the 3D operator (a lateral viscosity or lateral moduli), its
+transforms, and the memory points of the operators. It must not cover
+what only steers the run, what only a sweep reads, or what is checked
+beside it: the paths themselves (a run directory may move), the record
+stride and the processes' layout (the manifest states both, and a reader
+checks them as their own faults), output, checkpoints, the sweeps'
+measurements and methods, and on a radial run the transforms
+(`solver.transform_degrees`), which there set only the grids the reverse
+sweep expands its lateral kernels on (`kernels.lateral`).
 
 `sl3d` writes `sl3d run fnv1a-64 <16 hexadecimal digits>`: FNV-1a over
 the members of `apps/RunHash.cpp` (AddRunMembers, which its checkpoints
 hash too, then the seismic sources, the static problem's dates of its
 terms, the file inputs' formats and the memory points), the transforms'
-cache left out because it does not change the numbers.
+cache left out because it does not change the numbers, and the
+transforms' degrees entering on a 3D run alone.
 
 ## Writing
 

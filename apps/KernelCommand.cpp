@@ -538,34 +538,6 @@ double PairedOrNothing(const SurfaceGrid& grid, double a,
   return PairedValue(grid, a, dual, field);
 }
 
-/// The duals of a vector displacement over a Gaussian cap: the cap-mean
-/// weight times the direction's components in the local frame at each
-/// point, through a grid of the solver's points carrying upper index 1.
-Measurement VectorCapMeasurement(const SurfaceGrid& grid, double a,
-                                 const MeasurementSpec& spec) {
-  const SurfaceGrid spin(grid.LMax(), {.nmax = 1});
-  const auto same = [](std::span<const double> x, std::span<const double> y) {
-    return std::ranges::equal(x, y);
-  };
-  if (!same(spin.CoLatitudes(), grid.CoLatitudes()) ||
-      !same(spin.Longitudes(), grid.Longitudes())) {
-    throw std::logic_error(
-        "the grid of upper index 1 does not share the solver grid's points");
-  }
-  const auto cap = CapMeanDual(grid, a, spec.site, spec.width);
-  auto component = [&](double along) {
-    auto out = std::vector<double>{};
-    if (along == 0.0) return out;
-    out = cap;
-    for (auto& v : out) v *= along;
-    return out;
-  };
-  return DisplacementMeasurement(
-      spin, {.east = component(spec.direction.east),
-             .north = component(spec.direction.north),
-             .up = component(spec.direction.up)});
-}
-
 template <class Snapshot>
 Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
                        const GRDSolver& solver,
@@ -626,7 +598,8 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
       // frame of no net rotation of the surface)
       length();
       auto m = spec.type == Type::DisplacementVectorCap
-                   ? VectorCapMeasurement(grid, a, spec)
+                   ? CapDisplacementMeasurement(grid, a, spec.site, spec.width,
+                                                spec.direction)
                    : PointDisplacementMeasurement(grid, a, spec.site,
                                                   spec.direction);
       const auto& s = snapshots[spec.node];

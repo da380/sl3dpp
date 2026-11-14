@@ -380,6 +380,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     agree(out.psiA);
     agree(out.zu);
     agree(out.zphi);
+    agree(out.zv);
+    agree(out.zw);
     return out;
   };
 
@@ -1132,9 +1134,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     f.potentialResponse =
         ev.Coefficients(op.Surface(response, Component::Phi), ev.toNdPotential_);
     f.inertiaMomentChange = momentOf(response) * ev.toNdMoment_;
-    const auto resp =
+    auto resp =
         solverFor(op.ElasticLove()).SolveGeneralised(ev.state_, f, sleOptions);
-    if (!resp.converged) {
+    if (!everywhere(resp.converged)) {
       throw std::runtime_error(
           "the derivative of the instantaneous adjoint fingerprint did not "
           "converge");
@@ -1144,12 +1146,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       dlam[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
     }
-    const auto dlamC = grid.Expand(dlam);
+    auto dlamC = grid.Expand(dlam);
     // the closed channels of the derivative: the ocean's load and, under
     // the rotational feedback, the centrifugal potential of its rotation
-    const auto dpsiC = rotation != RotationalFeedback::None
-                           ? solver.CentrifugalCoefficients(resp.angularVelocity)
-                           : grid.ZeroCoefficients();
+    auto dpsiC = rotation != RotationalFeedback::None
+                     ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                     : grid.ZeroCoefficients();
+    agree(dlamC);
+    agree(dpsiC);
+    agree(resp.relativeSeaLevelChange);
     for (auto l = 0; l <= lmax; ++l) {
       const auto& units = locked([&]() -> const std::vector<double>& {
         return reference.UnitResponses(nullptr, l);
@@ -1262,6 +1267,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           "(residual {} after {} passes)",
           to, info.residual, info.iterations));
     }
+    // the fixed point's flag is the ranks' alike (its residual is reduced
+    // over them); the last sea level solve's is each rank's own
+    if (!everywhere(response.converged)) {
+      throw std::runtime_error(std::format(
+          "the reversed sea level solve at node {} did not converge "
+          "(error {})",
+          to, response.error));
+    }
     op.Recycle(std::exchange(carried.state,
                              std::move(step).Finish(std::move(strain))));
     if (record != nullptr) {
@@ -1309,18 +1322,25 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           op.Surface(responses, Component::U), ev.toNdLength_);
       f.potentialResponse = ev.Coefficients(
           op.Surface(responses, Component::Phi), ev.toNdPotential_);
-      f.inertiaMomentChange = step.InertiaMoment(responses) * ev.toNdMoment_;
+      // the body's moment beside the base's (a split load's own mass)
+      f.inertiaMomentChange = base.inertiaMomentChange +
+                              step.InertiaMoment(responses) * ev.toNdMoment_;
       out.response = elastic.SolveGeneralised(ev.state_, f, sleOptions);
       auto lamGrid = std::vector<double>(fieldSize);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         lamGrid[i] = (base.directLoad.empty() ? 0.0 : base.directLoad[i]) +
                      rhoW * Cn[i] * out.response.relativeSeaLevelChange[i];
       }
-      const auto lam = grid.Expand(lamGrid);
-      const auto psiA =
+      auto lam = grid.Expand(lamGrid);
+      auto psiA =
           rotation != RotationalFeedback::None
               ? solver.CentrifugalCoefficients(out.response.angularVelocity)
               : grid.ZeroCoefficients();
+      // rank 0's channels force every segment, and its sea level is the
+      // jump's lump on every rank (as reversedStep's closure)
+      agree(lam);
+      agree(psiA);
+      agree(out.response.relativeSeaLevelChange);
       return std::pair{ev.Columns(lam, ev.toMatDensity_),
                        ev.Columns(psiA, ev.toMatPotential_)};
     };
@@ -1340,7 +1360,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                        return step.StrainOf(responses);
                      },
                      control);
-    if (!info.converged || !out.response.converged) {
+    // the fixed point's flag is the ranks' alike (its residual is reduced
+    // over them); the last sea level solve's is each rank's own
+    if (!info.converged || !everywhere(out.response.converged)) {
       throw std::runtime_error(std::format(
           "the instantaneous adjoint fixed point at node {} did not converge",
           node));
@@ -1357,12 +1379,26 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     base.rotation = rotation;
     base.oceanFunctionOverride = overrideAt(node);
     if (!m.relativeSeaLevelDual.empty()) base.directLoad = m.relativeSeaLevelDual;
+    // the potential dual's adjoint load, the attraction piece of a split
+    // load (the Love-number closure's potentialLoad)
+    auto zetaPhi = std::vector<double>{};
+    if (!m.potentialDual.empty()) {
+      zetaPhi.resize(fieldSize);
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        zetaPhi[i] = -g * m.potentialDual[i];
+      }
+    }
     if (rotation != RotationalFeedback::None) {
       auto avc = std::array<double, 3>{0.0, 0.0, 0.0};
       for (auto j = 0; j < 3; ++j) avc[j] = -g * m.angularVelocityDual[j];
       if (!m.potentialDual.empty()) {
         const auto ps = psiStar(m.potentialDual);
         for (auto j = 0; j < 3; ++j) avc[j] += g * ps[j];
+        // The attraction piece's own mass: the body answers the piece as
+        // a force below, and its moment is the body's alone, so the
+        // engine is given the mass's (what it adds itself for a
+        // potentialLoad).
+        base.inertiaMomentChange = solver.SurfaceMassMoment(zetaPhi);
       }
       base.angularMomentumChange = avc;
     }
@@ -1382,13 +1418,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
         }
         zu = grid.Expand(zetaU);
       }
-      if (!m.potentialDual.empty()) {
-        auto zetaPhi = std::vector<double>(fieldSize);
-        for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-          zetaPhi[i] = -g * m.potentialDual[i];
-        }
-        zphi = grid.Expand(zetaPhi);
-      }
+      if (!zetaPhi.empty()) zphi = grid.Expand(zetaPhi);
+      agree(zu);
+      agree(zphi);
+      agree(zv);
       for (auto l = 0; l <= lmax; ++l) {
         const auto& system = op.Spheroidal(l);
         const auto ndof = static_cast<std::size_t>(system.DofCount());
@@ -1412,8 +1445,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
     auto twist = std::map<int, std::vector<Complex>>{};
     if (!m.toroidalPotentialDual.empty()) {
-      twist = toroidalTractionForces(detail::TractionPotentialOfTangentialDual(
-          grid, m.toroidalPotentialDual));
+      auto zw = detail::TractionPotentialOfTangentialDual(
+          grid, m.toroidalPotentialDual);
+      agree(zw);
+      twist = toroidalTractionForces(zw);
     }
     auto inst = instantaneous(node, base, nullptr, nullptr,
                               split.empty() ? nullptr : &split,

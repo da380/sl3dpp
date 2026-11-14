@@ -250,18 +250,36 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc`. Each pass of the
   3D fixed point solves the nonlinear sea level equation; the calibration
   takes four runs (about 20 s on 8 threads).
+The cap measurements of the kernel configs (and of the time-step study,
+below) are caps their runs' truncation resolves. A Gaussian cap of width
+w (`width_deg`, its standard deviation in great-circle distance) is
+resolved at lmax when w is at least half the truncation wavelength,
+w >= 180°/lmax (360°/lmax the wavelength): the cap's degree weights have
+fallen below 1% by lmax (e^(-pi^2 / 2), 0.007, at w = 180°/lmax), so the
+measurement is the field's mean over the cap and not the mean of its
+truncation. A narrower cap is still read exactly (docs/sl3d-configs.md,
+Measurements), but what it reads is the truncated field smoothed by a
+cap the band cuts off. The caps here: 8° at lmax 24 (`kernel1d`, at
+least 7.5°), 15° at lmax 12 (`kernel`, `kernel1d_lateral`, at least
+15°), 6° at lmax 32 (`kernel_static_moduli`, at least 5.6°) and 12° at
+lmax 16 (the time-step study, at least 11.25°); the drivers'
+(`ExampleViscosityKernels3D`, `ExampleModelViscosity`,
+`ExampleSeismic`) follow the same rule at their default degrees
+(examples/README.md).
+
 - **`kernel1d.json`** (`sl3d kernel`) — adjoint kernels in 1D of five
   measurements of that deglaciation (its forward run read from the same
   blocks as `sea_level_1d.json`'s, the measurements in its `kernels`
-  block): the present sea level averaged over Hudson Bay, the sea level at
+  block): the present sea level averaged over Hudson Bay (an 8° cap), the sea level at
   a far-field point at 10 ka, the length of day (the axial rotation), the
   degree-2 zonal Stokes coefficient J2, and the decay time of the Hudson
-  Bay series over the last 7 kyr. Each gets its ice-history kernels and
+  Bay series over the last 7 kyr (the same cap; 2.8 kyr). Each gets its ice-history kernels and
   its radial viscosity kernel (`"parameters": ["ice", "viscosity"]`):
   `out/kernel1d/`. About 5 s on four threads.
 - **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
-  sea level and decay time, with the log-viscosity kernels of the 3D
-  viscosity: `out/kernel/`. About 3 s on four threads.
+  sea level and decay time, over a 15° cap at its lmax 12, with the
+  log-viscosity kernels of the 3D viscosity: `out/kernel/`. About 3 s on
+  four threads.
 - **`kernel1d_lateral.json`** (`sl3d kernel`) — the same two measurements
   about the radial Earth (`kernel.json`'s deck without its viscosity file),
   with `"kernels": {"lateral": true}`: the kernels in the log viscosity and
@@ -277,7 +295,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
 - **`kernel_static_moduli.json`** (`sl3d kernel`) — the static problem
   without an ocean on the radial `../data/prem8.elastic.deck` at lmax 32,
   under a disk of 1e5 kg m^-2 over Hudson Bay: the kernels in the load and
-  in the moduli kappa and mu of the uplift averaged over a 2° cap at its
+  in the moduli kappa and mu of the uplift averaged over a 6° cap at its
   centre and of the northward displacement 10° south of it (a vector
   displacement, through the tangential potential). Its `output` block is
   `solve`'s, so `sl3d solve` on the same config writes the response the
@@ -490,8 +508,8 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   equipotential above the surface. About 1 s.
 - **`no_gravity_load.json`** — surface loads in the problem without
   gravity (`"gravity": "none"`), where a load acts by its weight, a normal
-  traction g sigma, and must have no degree-1 part (its net force would
-  be unbalanced): `no_ocean_load_cap.json`'s cap and its antipode (60° S,
+  traction g sigma, less its degree-1 part (a net force, which nothing
+  balances, removed): `no_ocean_load_cap.json`'s cap and its antipode (60° S,
   95° E), with the same history, on the radial Maxwell deck at lmax 32,
   without an ocean, a potential or a rotational feedback, the degree
   systems taking the displacement alone and stopping at the core-mantle
@@ -499,8 +517,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   the tangential potential and the loads applied; no potential and no sea
   level change) and exchange tables of the displacement at 3, 7 and
   12 kyr, `out/no_gravity_load/no_gravity_load_{node}.txt`. The pair's
-  degree-1 part is 4e-16 of its size; a single cap is refused, naming
-  `forcing.load`. Without buoyancy the surface under each cap sinks 203 m
+  degree-1 part is 4e-16 of its size; a single cap would be answered as
+  the cap less its degree-1 part, the run saying how much it removed.
+  Without buoyancy the surface under each cap sinks 203 m
   once the load is on and 1018 m by 7 kyr (125 m and 327 m with gravity),
   and after the load is gone it springs back by its elastic part alone,
   792 m down at 12 kyr against 60 m with gravity, as the figure
@@ -512,7 +531,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   several step sizes: the synthetic deglaciation from 16 to 6 ka on the
   radial Earth of `../data/prem8.gia.deck` (Maxwell times 0.11 to
   0.43 kyr) at lmax 16, without rotation, with the sea level averaged over
-  a 4° cap at Hudson Bay measured at 10 ka (mid-run) and at 6 ka (the
+  a 12° cap at Hudson Bay measured at 10 ka (mid-run) and at 6 ka (the
   end). N is the number of steps over the 10 kyr window, each N putting a
   node at 10 ka; `et` and `be` are the forward run by the exponential
   trapezoid and by backward Euler, `discrete` and `continuous` the
@@ -525,20 +544,21 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   1 kyr steps (about nine of the shortest Maxwell times) the sea level is
   wrong by 0.5–0.6% (relative L2 over the sphere) under the exponential
   trapezoid and 0.7–1.0% under backward Euler, and the measured values by
-  0.5–0.8%; the viscosity kernel is wrong by 3.3–4.0% by the discrete
-  adjoint and 13–16% by the continuous one. The errors, at 2, 1, 1/2, 1/4
+  0.2–0.5%; the viscosity kernel is wrong by 1.8–4.1% by the discrete
+  adjoint and 18–28% by the continuous one. The errors, at 2, 1, 1/2, 1/4
   and 1/8 kyr: sea level by the exponential trapezoid 1.7e-2, 6.2e-3,
   2.0e-3, 5.5e-4, 1.4e-4 (at 10 ka; 1.1e-2 to 1.1e-4 at 6 ka), by backward
   Euler 2.1e-2, 1.0e-2, 5.5e-3, 2.8e-3, 1.4e-3 (1.4e-2 to 1.1e-3 at 6 ka);
-  the kernel at 6 ka by the discrete adjoint 7.7e-2, 4.0e-2, 1.7e-2,
-  5.5e-3, 1.4e-3, by the continuous 0.34, 0.16, 6.0e-2, 1.8e-2, 4.9e-3.
+  the kernel at 6 ka by the discrete adjoint 1.7e-2, 1.8e-2, 1.3e-2,
+  5.0e-3, 1.4e-3 (at 10 ka 9.7e-2 to 1.0e-3), by the continuous 0.60,
+  0.28, 0.11, 3.5e-2, 9.5e-3.
   Backward Euler is first order throughout; the exponential trapezoid and
   both adjoints reach second order (1.9–2.0) only once the step comes down
   to the Maxwell times, and converge more slowly above them. At the
-  reference step the two adjoints' kernels agree to 4e-4. The lesson: at
+  reference step the two adjoints' kernels agree to 7e-4. The lesson: at
   a given step the kernels are several times less accurate than the
-  fields they are kernels of (here five to eight times by the discrete
-  adjoint and twenty to thirty-three by the continuous one). The discrete adjoint is the exact
+  fields they are kernels of (here, at 1 kyr steps, four to seven times
+  by the discrete adjoint and thirty to sixty by the continuous one). The discrete adjoint is the exact
   gradient of the time-stepped model, not the exact gradient of the
   Earth's: it inherits the time step's error, and more of it than the
   fields carry. A step that serves the forward run may not serve the

@@ -41,9 +41,13 @@
  * height (Forcing::solidSurfaceChange) enters the sea level change alone,
  * which is not formed, and changes nothing, its weight being the direct
  * load beside it. A load with a degree-1 part exerts a net force on the
- * body, which nothing balances without gravity: a node whose load has a
- * degree-1 part above kDegreeOneTolerance of its size (DegreeOneShare) is
- * refused, and a part at or below it, rounding, is taken as none. The
+ * body, which nothing balances without gravity: every node's load is
+ * projected on the loads that exert none, its degree-1 part removed
+ * whatever its size (DegreeOneShare measures it), as a finite-element
+ * solver of the problem would; a balanced load's part is the grid's
+ * error, and an unbalanced load is answered as the load less it. The
+ * response stays in the frame of the centre of mass of the solved region
+ * (DegreeOperator). The
  * snapshots carry the displacement, the tangential and the toroidal
  * potentials; the sea level change and the potential are left empty. A
  * tide, an ocean, the rotational feedback and the migrating runs are
@@ -71,13 +75,10 @@ namespace sl3dpp {
 /// norm of its degree-1 coefficients over the norm of all of them, each
 /// order m > 0 counted with its conjugate at -m (the ratio of the two
 /// fields' norms on the sphere); zero for a load of none. Coefficients in
-/// SurfaceGrid's layout, degrees 0 to lmax.
+/// SurfaceGrid's layout, degrees 0 to lmax. Without gravity it is the share
+/// of a load the evolution removes.
 [[nodiscard]] double DegreeOneShare(
     std::span<const std::complex<double>> coefficients, int lmax);
-
-/// The largest DegreeOneShare a run without gravity takes as rounding: a
-/// load's degree-1 part above it is a net force on the body, refused.
-inline constexpr double kDegreeOneTolerance = 1e-10;
 
 class Evolution {
  public:

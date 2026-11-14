@@ -9,7 +9,8 @@
  * recorded at every node for the reverse sweeps. Two observations at a
  * site near the former Laurentide centre:
  *
- * - the cap-mean sea-level change from 21 ka to the present (m);
+ * - the sea-level change from 21 ka to the present averaged over a
+ *   Gaussian cap of 8 degrees (m);
  * - the decay time of the site's sea-level series over the last 7 kyr
  *   (kyr): the relaxation time of a fitted a e^(-t / tau) + b, a datum
  *   whose kernel comes from the fit's exact sensitivity to the series
@@ -126,9 +127,12 @@ int main(int argc, char** argv) {
   // unit for the sea level, and in kyr for the decay time (the series is
   // paired in solver units, so its weights pair with the fields as they
   // stand).
+  // Both read the sea level averaged over a Gaussian cap of 8 degrees, at
+  // least half the truncation wavelength 360 / lmax degrees at the default
+  // lmax 24 (7.5), so that the band resolves the cap.
   const GeographicPoint site{60.0, 275.0};  // Hudson Bay
   const auto a = solver.Radius();
-  const auto dual = CapMeanDual(grid, a, site, 0.05);
+  const auto dual = CapMeanDual(grid, a, site, 8.0 * std::numbers::pi / 180.0);
   auto seaLevel = std::map<std::size_t, Measurement>{};
   seaLevel[nodes - 1] = FieldMeasurement(FieldChannel::SeaLevel, dual);
   auto windowNodes = std::vector<std::size_t>{};

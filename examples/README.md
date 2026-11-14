@@ -14,7 +14,7 @@ Python plotting script, and an example config for every command of the
 | `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
 | `ExampleViscosityKernels3D` | 3D adjoint kernels: the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 31 s | `plot_kernels_3d.py` |
 | `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
-| `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean on the post-seismic Earth (`data/prem8.postseismic.deck`: a 50 km elastic lid over a 1e19 Pa s asthenosphere) and on its twin with a Burgers asthenosphere (`Rheology::Burgers`), the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13); maps and series as 2° Gaussian means, the degree weights of the cap measurements' cap (`CapMeanWeights`) | lmax 64, 73 s | `plot_seismic.py` |
+| `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean on the post-seismic Earth (`data/prem8.postseismic.deck`: a 50 km elastic lid over a 1e19 Pa s asthenosphere) and on its twin with a Burgers asthenosphere (`Rheology::Burgers`), the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13); maps and series as 3° Gaussian means, the degree weights of the cap measurements' cap (`CapMeanWeights`) | lmax 64, 73 s | `plot_seismic.py` |
 
 The defaults keep each run under a minute on 8 threads, the times shown,
 but `ExampleSeismic`'s (two runs through time of 29 nodes, and an
@@ -26,6 +26,13 @@ configs, one per `sl3d` command, are described in
 
 Every driver takes `[--lmax N] [--state FILE]`: the degree (the defaults are
 sized for a laptop; CI runs each at a small one) and the Earth's state.
+The drivers' measurements over Gaussian caps take caps their default
+degree resolves, a width at least half the truncation wavelength
+360°/lmax (configs/README.md, where the kernel configs are described):
+6° at lmax 32 (`ExampleModelViscosity`), 8° at lmax 24
+(`ExampleViscosityKernels3D`), 3° at lmax 64 (`ExampleSeismic`) and
+2.9° at lmax 128 (`ExampleIceKernels`); at a much lower `--lmax` the band
+cuts them off.
 
 Each driver writes into its own `output/library/<example>/`, and its
 plotting script draws `figures/library/<example>.png`, where `<example>` is
@@ -203,9 +210,9 @@ at the layers' Maxwell times. Without gravity it grows the more, to
 0.356 m at a century and 0.297 m at 300 years against 0.296 m and 0.200 m
 with gravity and no ocean. `ExampleSeismic`'s Burgers asthenosphere
 relaxes a part of the way within months, where the Maxwell one has
-barely begun: over the fault the uplift gains 31 mm in the first year
-against 6 mm, the two Earths' difference peaking at 26 mm at 1.5 years
-and gone by about 30 years, both then relaxing alike. A GPS station's
+barely begun: over the fault the uplift, its 3° mean, gains 16 mm in the
+first year against 3 mm, the two Earths' difference peaking at 13 mm at
+1.5 to 2 years and gone by about 40 years, both then relaxing alike. A GPS station's
 eastward motion 20 years on, -0.64 m (a point value at lmax 32), and the
 moment kernels contracted with the fault's own mechanism and moment give
 back each measurement's value.

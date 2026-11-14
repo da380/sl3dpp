@@ -211,6 +211,23 @@ struct SurfaceDirection {
     const SurfaceGrid& grid, double a, GeographicPoint site,
     SurfaceDirection direction);
 
+/// The `Measurement` of the displacement smoothed over CapMeanDual's cap
+/// as a vector field, read at the cap's centre `site` along `direction`
+/// (the components at the centre). The displacement is smoothed through
+/// its potentials: U, V and W each with degree l weighted by the cap's
+/// degree weights lambda_l (CapMeanWeights), the smoothed displacement
+/// that of the smoothed potentials, as `sl3d solve`'s output.smoothing
+/// smooths the horizontal displacement. Its upward part is the cap mean
+/// of U (CapMeanDual); its horizontal part is PointDisplacementMeasurement's
+/// with the reproducing kernel's degree l weighted by lambda_l, so paired
+/// with a band-limited displacement it reads direction . u_smoothed at the
+/// centre exactly, at every width, in the frame of no net rotation of the
+/// surface. Not the cap mean of the components in each point's frame,
+/// which turn across the cap.
+[[nodiscard]] Measurement CapDisplacementMeasurement(
+    const SurfaceGrid& grid, double a, GeographicPoint site, double width,
+    SurfaceDirection direction);
+
 /// The `Measurement` of the change of the straight-line distance between
 /// two sites of the surface, e . (u(to) - u(from)) with e the unit
 /// vector from the one to the other, in the displacement's unit. No

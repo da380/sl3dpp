@@ -987,9 +987,10 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   // without gravity; its weight is the direct load beside it.
   const bool loaded =
       forcing.directLoad || forcing.directLoadOutsideWaterBudget;
-  // The loads' coefficients at a node, solver units, refused where they
-  // have a degree-1 part (a net force, which nothing balances without
-  // gravity) and with a part at rounding taken as none.
+  // The loads' coefficients at a node, solver units, their degree-1 part
+  // removed: a net force, which nothing balances without gravity (the load
+  // projected on the loads that exert none; a balanced load's part is grid
+  // error).
   auto loadAt = [&](double t) {
     auto total = std::vector<double>(fieldSize, 0.0);
     for (const auto* given :
@@ -1010,14 +1011,6 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       }
     }
     auto coefficients = grid.Expand(total);
-    const auto share = DegreeOneShare(coefficients, grid.LMax());
-    if (share > kDegreeOneTolerance) {
-      throw std::invalid_argument(std::format(
-          "a surface load with a degree-1 part ({:.3g} of its size at t = "
-          "{:.6g}) exerts a net force on the body, which nothing balances "
-          "without gravity: the load must have no degree-1 part",
-          share, t));
-    }
     for (auto m = 0; m <= 1; ++m) coefficients[SurfaceGrid::Index(1, m)] = 0.0;
     return coefficients;
   };

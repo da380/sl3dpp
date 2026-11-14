@@ -6,8 +6,8 @@
 // two Prony terms against the Burgers modulus); a static load against the non-gravitating traction numbers times its
 // weight; a body with a fluid core against its shell above the core; a
 // resumed run and the factored sources against the general run; loads and
-// sources together against the sum of their runs; and what a run without
-// gravity refuses, a load's degree-1 part among it.
+// sources together against the sum of their runs; a load's degree-1 part
+// removed; and what a run without gravity refuses.
 //
 // The oracle. By the correspondence principle the Laplace transform of the
 // response to a step source is the elastic closed form
@@ -29,13 +29,16 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <complex>
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <iostream>
 #include <map>
+#include <memory>
 #include <numbers>
 #include <string>
 #include <vector>
@@ -1583,73 +1586,127 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
       std::invalid_argument);
 }
 
-TEST(WithoutGravity, ALoadWithADegreeOnePartIsRefused) {
+TEST(WithoutGravity, ALoadsDegreeOnePartIsRemoved) {
   // A degree-1 load exerts a net force on the body, which nothing balances
-  // without gravity: a load whose degree-1 part exceeds 1e-10 of its size
-  // is refused, by the evolution and by the operator's channel; a pair of
-  // antipodal caps, and a load whose degree-1 part is at rounding, pass.
-  const auto earth = Earth::Make(false, kEarthLmax);
-  const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
-                                ComputeLoveNumbers(earth.material, kEarthLmax),
-                                SeaLevelParameters{});
-  const auto& grid = solver.Grid();
-  const ViscoelasticOperator op(earth.rheology, kEarthLmax,
-                                {.gravitating = false});
+  // without gravity: the load is projected on the loads that exert none,
+  // its degree-1 part removed whatever its size, by the evolution and by
+  // the operator's channel. A cap alone, and a load with a degree-1
+  // coefficient, are answered as the load less its degree-1 part (the
+  // runs under the projected loads, given without one) to rounding, with
+  // no degree-1 response; an oblique antipodal pair of caps of 2 and 3
+  // degrees at lmax 32, narrower than the grid resolves, whose sampled
+  // degree-1 parts (5e-6 and 1e-10 of their size) are grid error, as its
+  // projection to rounding, and as the exactly balanced pair (its
+  // expansion's odd degrees removed) to the response of the odd degrees
+  // the sampling aliases, which exert no net force; and the operator's
+  // channel answers a channel with degree-1 columns as the channel without
+  // them.
+  struct Setting {
+    Earth earth;
+    GRDSolver solver;
+    ViscoelasticOperator op;
+  };
+  const auto settingOf = [](int lmax) {
+    auto earth = Earth::Make(false, lmax);
+    auto solver = GRDSolver(SurfaceGrid(lmax),
+                            ComputeLoveNumbers(earth.material, lmax),
+                            SeaLevelParameters{});
+    auto op = ViscoelasticOperator(earth.rheology, lmax, {.gravitating = false});
+    return std::make_unique<Setting>(
+        Setting{std::move(earth), std::move(solver), std::move(op)});
+  };
+  const auto coarse = settingOf(kEarthLmax);
+  const auto fine = settingOf(32);
   const auto times = std::vector<double>{0.0, 1.0};
-  auto runUnder = [&](const std::vector<double>& field) {
-    Evolution evolution(op, solver, solver.NoOceanState(),
+  auto runUnder = [&](const Setting& at, const std::vector<double>& field) {
+    Evolution evolution(at.op, at.solver, at.solver.NoOceanState(),
                         {.rotation = RotationalFeedback::None});
     return evolution.Run(
         times, Evolution::Forcing{.directLoad = [&](double) { return field; }});
   };
-  auto expectRefused = [&](const std::vector<double>& field,
-                           const char* what) {
-    try {
-      static_cast<void>(runUnder(field));
-      ADD_FAILURE() << what << " was not refused";
-    } catch (const std::invalid_argument& error) {
-      EXPECT_NE(std::string{error.what()}.find("degree-1 part"),
-                std::string::npos)
-          << error.what();
+  // a field's expansion with the degrees `drop` says removed, synthesised
+  auto without = [](const SurfaceGrid& grid, const std::vector<double>& field,
+                    auto drop) {
+    auto c = grid.Expand(field);
+    for (auto l = 0; l <= grid.LMax(); ++l) {
+      if (!drop(l)) continue;
+      for (auto m = 0; m <= l; ++m) c[SurfaceGrid::Index(l, m)] = 0.0;
     }
+    return grid.Synthesise(c);
   };
-  // a cap at the pole, and one degree-1 coefficient
-  auto cap = std::vector<double>{};
-  auto pair = std::vector<double>{};
-  for (const auto theta : grid.CoLatitudes()) {
-    for (auto k = 0; k < grid.NumberOfLongitudes(); ++k) {
-      const auto north = std::exp(-theta * theta / (2.0 * 0.04));
-      const auto south = std::exp(-(std::numbers::pi - theta) *
-                                  (std::numbers::pi - theta) / (2.0 * 0.04));
-      cap.push_back(north);
-      pair.push_back(north + south);
+  const auto degreeOne = [](int l) { return l == 1; };
+  const auto odd = [](int l) { return l % 2 == 1; };
+  // the two runs' largest departure, every node, U and V; and no degree-1
+  // response in the first
+  auto gap = [&](const Setting& at, const std::vector<double>& field,
+                 const std::vector<double>& reference) {
+    const auto& grid = at.solver.Grid();
+    const auto a = runUnder(at, field);
+    const auto b = runUnder(at, reference);
+    auto out = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      out = std::max(out, Departure(grid, a[n].displacement,
+                                    b[n].displacement, 0));
+      out = std::max(out, Departure(grid, a[n].tangentialPotential,
+                                    b[n].tangentialPotential, 0));
+      const auto U = grid.Expand(a[n].displacement);
+      auto largest = 0.0;
+      for (const auto& c : U) largest = std::max(largest, std::abs(c));
+      for (auto m = 0; m <= 1; ++m) {
+        EXPECT_LT(std::abs(U[SurfaceGrid::Index(1, m)]), 1e-14 * largest);
+      }
     }
-  }
+    return out;
+  };
+  // a Gaussian cap of unit height by its centre and width, radians
+  auto capOf = [](const SurfaceGrid& grid, double colat, double lon,
+                  double width) {
+    return grid.FromFunction([&](double theta, double phi) {
+      const auto c = std::cos(theta) * std::cos(colat) +
+                     std::sin(theta) * std::sin(colat) * std::cos(phi - lon);
+      const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+      return std::exp(-0.5 * (d / width) * (d / width));
+    });
+  };
+  const auto& grid = coarse->solver.Grid();
+  // a cap alone
+  const auto cap = capOf(grid, 0.0, 0.0, 0.2);
   EXPECT_GT(DegreeOneShare(grid.Expand(cap), kEarthLmax), 0.1);
-  expectRefused(cap, "a cap");
+  const auto capGap = gap(*coarse, cap, without(grid, cap, degreeOne));
+  RecordProperty("cap_projected", std::format("{:.3e}", capGap));
+  EXPECT_LT(capGap, 1e-12);
+  // one degree-1 coefficient beside a load without one
   auto coefficients = LoadWithoutDegreeOne(grid);
   auto tilted = coefficients;
-  tilted[SurfaceGrid::Index(1, 1)] = Complex(1e-6, 0.0);
-  expectRefused(grid.Synthesise(tilted), "a degree-1 coefficient");
-  // the antipodal pair and a degree-1 part at rounding pass
-  const auto paired = DegreeOneShare(grid.Expand(pair), kEarthLmax);
-  RecordProperty("antipodal_pair_share", std::format("{:.3e}", paired));
-  EXPECT_LT(paired, kDegreeOneTolerance);
-  EXPECT_EQ(runUnder(pair).size(), times.size());
-  auto rounding = coefficients;
-  rounding[SurfaceGrid::Index(1, 0)] = Complex(1e-15, 0.0);
-  EXPECT_EQ(runUnder(grid.Synthesise(rounding)).size(), times.size());
-  // and taken as none: the run is the run without it
-  {
-    const auto with = runUnder(grid.Synthesise(rounding));
-    const auto without = runUnder(grid.Synthesise(coefficients));
-    EXPECT_LT(Departure(grid, with.back().displacement,
-                        without.back().displacement, 0),
-              1e-13);
+  tilted[SurfaceGrid::Index(1, 1)] = Complex(0.3, -0.2);
+  EXPECT_LT(gap(*coarse, grid.Synthesise(tilted), grid.Synthesise(coefficients)),
+            1e-12);
+  // the oblique antipodal pairs at lmax 32
+  constexpr auto deg = std::numbers::pi / 180.0;
+  const auto& sphere = fine->solver.Grid();
+  for (const auto& [widthDeg, bound] :
+       {std::pair{2.0, 1e-3}, std::pair{3.0, 2e-6}}) {
+    const auto north = capOf(sphere, 30.0 * deg, 275.0 * deg, widthDeg * deg);
+    const auto south = capOf(sphere, 150.0 * deg, 95.0 * deg, widthDeg * deg);
+    auto pair = north;
+    for (auto i = std::size_t{0}; i < pair.size(); ++i) pair[i] += south[i];
+    const auto share = DegreeOneShare(sphere.Expand(pair), 32);
+    EXPECT_GT(share, 1e-10) << widthDeg;
+    const auto projected = gap(*fine, pair, without(sphere, pair, degreeOne));
+    EXPECT_LT(projected, 1e-12) << widthDeg;
+    const auto balanced = gap(*fine, pair, without(sphere, pair, odd));
+    std::cout << std::format(
+        "[without gravity] a {:g} degree antipodal pair at lmax 32: degree-1 "
+        "share {:.2e}, against its projection {:.2e}, against the balanced "
+        "pair {:.2e}\n",
+        widthDeg, share, projected, balanced);
+    RecordProperty(std::format("pair_{:g}_balanced", widthDeg),
+                   std::format("{:.3e}", balanced));
+    EXPECT_LT(balanced, bound) << widthDeg;
   }
 
-  // the operator's load channel: degree-1 columns refused, zero ones taken
-  const auto state = op.ZeroState([](int l) { return 2 * (l + 1); });
+  // the operator's load channel: degree-1 columns removed
+  const auto state = coarse->op.ZeroState([](int l) { return 2 * (l + 1); });
   const LoadCallable zero = [](int l, double) {
     return std::optional<std::vector<double>>(
         std::vector<double>(2 * (l + 1), 0.0));
@@ -1657,10 +1714,19 @@ TEST(WithoutGravity, ALoadWithADegreeOnePartIsRefused) {
   const LoadCallable tilt = [](int l, double) {
     auto columns = std::vector<double>(2 * (l + 1), 0.0);
     if (l == 1) columns[0] = 1.0;
+    if (l == 2) columns[1] = 0.5;
     return std::optional<std::vector<double>>(std::move(columns));
   };
-  EXPECT_NO_THROW((void)op.SolveElastic(state, zero));
-  EXPECT_THROW((void)op.SolveElastic(state, tilt), std::invalid_argument);
+  const LoadCallable level = [](int l, double) {
+    auto columns = std::vector<double>(2 * (l + 1), 0.0);
+    if (l == 2) columns[1] = 0.5;
+    return std::optional<std::vector<double>>(std::move(columns));
+  };
+  EXPECT_NO_THROW((void)coarse->op.SolveElastic(state, zero));
+  // the same solve: the channel's columns are those of the channel
+  // without degree 1
+  EXPECT_EQ(coarse->op.SolveElastic(state, tilt),
+            coarse->op.SolveElastic(state, level));
 }
 
 

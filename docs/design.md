@@ -199,14 +199,19 @@ longer free, an unphysical effect.
   traction numbers per unit traction. At degree 0 a load is a uniform
   pressure and the body compresses. A load with a degree-1 part exerts a
   net force on the body, which without gravity nothing balances (with
-  gravity the load's attraction of the body balances it): the channel's
-  degree-1 columns must vanish, and the evolution refuses a node whose
-  load has a degree-1 part above 1e-10 of its size (`DegreeOneShare`,
-  the norm of the degree-1 coefficients over that of all;
-  `kDegreeOneTolerance`), taking a part at or below it, rounding, as
-  none. A load without one is, for instance, a pair of antipodal caps, a
-  zonal degree-2 pattern or a coefficient table without l = 1; a cap
-  alone has one.
+  gravity the load's attraction of the body balances it): the load is
+  projected on the loads that exert none, its degree-1 part removed
+  whatever its size, by the evolution (every node's load) and by the
+  operator's channel (its degree-1 columns), as a finite-element solver
+  of the problem would project out its null space. A physical load's
+  forces balance, and its degree-1 part is the grid's error (a pair of
+  antipodal caps narrower than the grid's spacing aliases one); a load
+  that does not balance is answered as the load less its degree-1 part.
+  `DegreeOneShare` (the norm of the degree-1 coefficients over that of
+  all) measures what is removed. The response is in the frame of the
+  centre of mass of the solved region (above), as every response without
+  gravity is: with no net force left the pinned degree-1 solve is the
+  full system's.
 - **The evolution.** `Evolution` on such an operator is the solid body
   stepped under surface loads (`Forcing::directLoad` and
   `directLoadOutsideWaterBudget`, the direct load of `Run` and `Resume`)
@@ -225,8 +230,8 @@ longer free, an unphysical effect.
   its grid and scales alone. Runs resume from their checkpoints, and
   `factor_sources` holds for sources alone (with a load the loop carries
   every order anyway, as with gravity, and the option is refused).
-- **Refused.** The operator refuses the tide channel, a load channel with
-  a degree-1 part and the sea level equation's Love numbers; the
+- **Refused.** The operator refuses the tide channel and the sea level
+  equation's Love numbers; the
   derivative solvers (`AdjointSolver`, `TangentLinearSolver`, and so the
   second-order sweeps) refuse such an evolution; the 3D stepper has no
   such option. `sl3d` exposes it as `"gravity": "none"` (sl3d-configs.md,
@@ -647,10 +652,11 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   response so the Born response is its first step. Any forcing: a load,
   a tidal potential (`TideForces`, the static body tide of a
   heterogeneous body), a surface dual (`SurfaceDualForces`, the adjoint
-  solution under the structure, whose `StaticKernels` with the forward
-  solution are the measurement's kernels at the heterogeneous model).
-  Realistic contrasts converge in under ten iterations
-  (docs/adjoints.md §13j).
+  solution under the structure). The transpose of the lateral force
+  (`ForceTranspose`) on that adjoint solution and the forward one is the
+  measurement's gradient at the heterogeneous model, the independent
+  check of the kernel route there. Realistic contrasts converge in under
+  ten iterations (docs/adjoints.md §13j).
 - **Lateral moduli in the 3D stepper** (`Viscoelastic3D::Options::
   moduli`): relative δμ_U(x), δκ(x) over every solid element above the
   centre (the branch moduli scaled with the unrelaxed shear, times
@@ -681,9 +687,11 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   kernels are held at the memory points, GLL or Gauss, where a
   perturbation of the moduli enters (`ViscoelasticOperator::Options::
   moduli`, `Viscoelastic3D::Options::moduli`). The static kernels: `ComputeLoveNumberKernels` (the Love
-  numbers' in κ(r), μ(r) per channel and degree) and
-  `ElasticPerturbation3D::StaticKernels` with `SolveSurfaceDual` (the
-  lateral kernels of a static surface measurement).
+  numbers' in κ(r), μ(r) per channel and degree); a measurement's
+  kernels in κ(x), μ(x) in the static problem are the evolution's at one
+  node, through `LateralKernelSolver` (docs/adjoints.md §19, §21),
+  checked against the transpose of `ElasticPerturbation3D::Force`
+  (`ForceTranspose`) on the static adjoint and forward solutions.
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
@@ -895,9 +903,10 @@ Beyond the fixtures:
   resumes bitwise from a checkpoint with its strain and at 3e-12 from one
   without (regenerated under the checkpoint's loads), streams, and keeps
   the uninterrupted run's states under a record offset; a layer's height
-  changes nothing; a load with a degree-1 part is refused, by the
-  evolution and the operator, and an antipodal pair of caps and a part at
-  rounding pass; what needs gravity is refused (`WithoutGravity`).
+  changes nothing; a load's degree-1 part is removed, by the evolution
+  and the operator, a cap answered as the cap less its degree-1 part and
+  an antipodal pair of caps as the pair; what needs gravity is refused
+  (`WithoutGravity`).
 - **Writers and units.** Kernel files round-trip through planetmodel's
   reader at 1e-11; `UnitsParity` holds the constants equal.
 - **External.** The Fortran sl3d's `visco_test` with lateral viscosity
@@ -1079,8 +1088,8 @@ What is not built, or holds only within limits:
 - **The problem without gravity** (§3a) is the radial forward problem
   alone: the 3D stepper, the derivative solvers and the kernels do not
   take it, and the rotational feedback, which would need the inertia's
-  change from the displacement directly, is refused. A load with a
-  degree-1 part is refused there, its net force unbalanced.
+  change from the displacement directly, is refused. A load's degree-1
+  part is removed there, its net force having no equilibrium.
 - **Inversion.** There are no inversion drivers or optimiser interface: the
   library supplies forward runs, kernels and gradients for one to use.
 - **An unexplained elastic discrepancy with the Fortran.** Elastic Love

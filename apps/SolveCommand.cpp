@@ -49,6 +49,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -130,16 +131,17 @@ constexpr std::uint64_t KindOf(const Evolution3D::Checkpoint&) {
 }
 
 /// What a run's checkpoints belong to: the members that decide the
-/// computation, and the contents of its input files (AddRunMembers), so
+/// computation, and the contents of its input files (AddRunMembers, the
+/// 3-D steps' transforms on a `lateral` run alone), so
 /// that a restart with another run's checkpoints -- another config, or the
 /// same config over changed inputs -- is refused. The members that only
 /// steer the run (the checkpoint stride and directory, the wall-time limit,
 /// restart, the transforms' cache, the output) are left out, and so are the
 /// paths themselves, so that these can change between a run and its
 /// resumption and a run directory can move.
-std::uint64_t RunHashOf(const SolveInput& input) {
+std::uint64_t RunHashOf(const SolveInput& input, bool lateral) {
   auto hash = Fnv1a{};
-  AddRunMembers(hash, input.run);
+  AddRunMembers(hash, input.run, lateral);
   // on several ranks each rank's checkpoint holds its own radial segment:
   // a restart over another number of ranks is another run
   if (TheRanks().Distributed()) hash.AddValue(TheRanks().size);
@@ -902,7 +904,9 @@ Reached RunThrough(
   const auto& checkpoint = input.checkpoint;
   const auto checkpointing = !checkpoint.directory.empty();
   const auto directory = RankDirectory(checkpoint.directory);
-  const auto hash = checkpointing ? RunHashOf(input) : std::uint64_t{0};
+  const auto hash =
+      checkpointing ? RunHashOf(input, std::is_same_v<Evolution, Evolution3D>)
+                    : std::uint64_t{0};
   auto resumed = std::optional<ReadBack<typename Evolution::Checkpoint>>{};
   if (checkpointing && input.restart) {
     using CheckpointT = typename Evolution::Checkpoint;

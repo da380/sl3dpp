@@ -154,9 +154,10 @@ class ViscoelasticOperator {
     /// g sigma pressing on the surface, g the material's surface gravity
     /// (DegreeOperator::Load on the system without the potential, the
     /// forcing of the non-gravitating traction numbers times g); its
-    /// degree-1 columns must vanish (a degree-1 traction exerts a net
-    /// force, which nothing balances). A tide channel is refused, and so
-    /// are the Love numbers of the sea level equation.
+    /// degree-1 columns are removed (a degree-1 traction exerts a net
+    /// force, which nothing balances: the load is projected on the loads
+    /// that exert none). A tide channel is refused, and so are the Love
+    /// numbers of the sea level equation.
     bool gravitating = true;
   };
 
