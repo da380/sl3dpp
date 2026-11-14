@@ -184,8 +184,12 @@ class ElasticPerturbation3D {
   /// the grid values (the Kernels3D layout and convention) — the
   /// transpose of Force: VolumePairing(kappa, dKappa) + VolumePairing(mu,
   /// dMu) = Pair(y, Force(x, dMu, dKappa)). With y the response to a
-  /// measurement's dual (SolveSurfaceDual), the kernels of that
-  /// measurement of the static problem.
+  /// measurement's dual (SolveSurfaceDual), minus the kernels of that
+  /// measurement of the static problem without an ocean or rotational
+  /// feedback. The kernels of a measurement, of the static problem as of
+  /// the run through time, are LateralKernelSolver's (LateralKernels.hpp),
+  /// which on a radial body equal these at every grid value where both
+  /// apply, at the same cost (docs/adjoints.md §21).
   struct Kernels {
     std::vector<double> kappa;
     std::vector<double> mu;

@@ -552,6 +552,27 @@ void GridCoupling::AddScalarState(SpectralTensor& spectral, int l,
   }
 }
 
+void GridCoupling::AddToroidalScalarState(SpectralTensor& spectral, int l,
+                                          std::span<const Complex> M,
+                                          std::span<const Complex> S) const {
+  const auto columns = static_cast<std::size_t>(l + 1);
+  if (l < 1 || M.size() != nodes_.size() * columns || S.size() != M.size()) {
+    throw std::invalid_argument(std::format(
+        "a degree-{} toroidal scalar state needs a degree from 1 and {} nodes "
+        "x {} columns",
+        l, nodes_.size(), columns));
+  }
+  const auto first = FirstNodeFor(firstElementOf_.at(l), l);
+  for (auto node = first; node < NodeCount(); ++node) {
+    const auto r = nodes_[node].radius;
+    for (auto m = 0; m <= l; ++m) {
+      const auto at = node * columns + m;
+      const auto A = ComponentsFromToroidalScalars(l, M[at], S[at], r);
+      Scatter(spectral, node, l, m, A);
+    }
+  }
+}
+
 void GridCoupling::Scatter(SpectralTensor& spectral, int node, int l, int m,
                            std::span<const Complex, 5> A) const {
   // One m >= 0 column of a real field carries its m < 0 twin implicitly:

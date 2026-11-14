@@ -229,6 +229,19 @@ std::string TrajectoryHashOf(const Run& run) {
       hash.AddValue(term.history.times[k]);
       hash.AddValue(term.history.factors[k]);
     }
+    // a fault file: its contents (as every file input's, by its bytes), its
+    // quadrature, its placement and how its time axis is read
+    if (term.kind == SeismicTerm::Kind::FaultFile) {
+      hash.AddFile(term.file);
+      hash.AddValue(term.cellsAlongStrike);
+      hash.AddValue(term.cellsDownDip);
+      hash.AddValue(term.points);
+      hash.AddValue(term.placement.has_value());
+      if (term.placement) hash.AddValue(*term.placement);
+      hash.AddValue(term.time_origin);
+      hash.AddValue(term.dated);
+      hash.AddValue(term.outside);
+    }
   }
   // the dates the static problem reads its terms' files at, and every file
   // input's format

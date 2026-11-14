@@ -47,10 +47,18 @@ namespace sl3dpp {
 
 // -- spatial duals ----------------------------------------------------------
 
-/// A Gaussian cap in great-circle distance about `site`, of the given
-/// `width` in radians, normalised to unit physical surface integral on a
-/// sphere of radius `a`: paired with a field it reads the cap-weighted
-/// mean, in the field's own unit.
+/// The mean over a Gaussian cap w(d) = exp(-d^2 / (2 width^2)) about
+/// `site` (d the great-circle distance, `width` in radians), as a dual on
+/// a sphere of radius `a`: the cap's band-limited kernel
+///   sum_l lambda_l (2l + 1) P_l(cos d) / (4 pi a^2),  l = 0 .. lmax,
+/// lambda_l the cap's degree weights (CapMeanWeights), of unit physical
+/// surface integral. Paired with a field of degree at most the grid's band
+/// it reads the field's mean over the cap about the site exactly, at every
+/// width, in the field's own unit — the field smoothed over the cap
+/// (CapMeanWeights) read at the site; a field beyond the band is read
+/// through its expansion on the grid. The kernel is the cap's projection
+/// on the band, which rings beyond the cap where the band does not
+/// resolve it (as the point kernel, PointDual, does).
 [[nodiscard]] std::vector<double> CapMeanDual(const SurfaceGrid& grid, double a,
                                               GeographicPoint site,
                                               double width);
@@ -65,10 +73,7 @@ namespace sl3dpp {
 /// normalised to unit integral (lambda_0 = 1). The integrals are taken by
 /// Gauss-Legendre quadrature in d over [0, min(pi, 12 width)], past which
 /// w is below e^-72 of its peak, on lmax + 128 nodes: exact to rounding.
-/// CapMeanDual reads the same mean by the grid's quadrature of the cap
-/// sampled at its points, which equals this to rounding where the grid
-/// resolves the cap (lambda_l below rounding by degree lmax + 2) and
-/// otherwise differs from it by that quadrature's aliasing.
+/// CapMeanDual is the dual reading this mean at one point.
 [[nodiscard]] std::vector<double> CapMeanWeights(int lmax, double width);
 
 /// The band-limited point evaluation at `site`: the grid's reproducing

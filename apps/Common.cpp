@@ -212,16 +212,65 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
   return out;
 }
 
-void RefuseThreeDSolver(const Json& top, std::string_view what) {
+void RefuseThreeDSolver(const Json& top, std::string_view what,
+                        bool transforms) {
   if (!Has(top, "solver")) return;
   const auto& solver = top.At("solver");
   for (const auto* name : {"step", "step_rtol", "step_max_iterations",
                            "transform_degrees", "cache_mb"}) {
+    const auto transform = std::string_view{name} == "transform_degrees" ||
+                           std::string_view{name} == "cache_mb";
+    if (transforms && transform) continue;
     if (Has(solver, name)) {
       Fail(solver.At(name),
            std::format("sets the 3-D step, which {} does not have", what));
     }
   }
+}
+
+std::function<LoveModuli(const BodyPoint&)> ModuliOf(const BuiltEarth& earth) {
+  const auto* model = &earth.model;
+  auto shear = std::function<double(double, double, double)>{};
+  auto bulk = std::function<double(double, double, double)>{};
+  if (earth.LateralModuli()) {
+    shear = earth.moduli->Shear();
+    bulk = earth.moduli->Bulk();
+  }
+  return [model, shear, bulk](const BodyPoint& at) {
+    auto m = LoveModuliAt(*model, at.radius);
+    if (!shear && !bulk) return m;
+    const auto r = at.radius / model->ModelScales().Length();
+    const auto s = shear ? shear(r, at.colatitude, at.longitude) : 0.0;
+    const auto b = bulk ? bulk(r, at.colatitude, at.longitude) : 0.0;
+    // the perturbations of the Voigt-averaged moduli, an isotropic change
+    const auto mu = s * (m.A + m.C - 2.0 * m.F + 5.0 * m.N + 6.0 * m.L) / 15.0;
+    const auto kappa = b * (4.0 * m.A + m.C + 4.0 * m.F - 4.0 * m.N) / 9.0;
+    m.A += kappa + 4.0 * mu / 3.0;
+    m.C += kappa + 4.0 * mu / 3.0;
+    m.F += kappa - 2.0 * mu / 3.0;
+    m.L += mu;
+    m.N += mu;
+    return m;
+  };
+}
+
+void PlaceSeismicSources(Run& run, const BuiltEarth& earth, const Json& top) {
+  if (std::ranges::none_of(run.forcing.seismic, [](const SeismicTerm& term) {
+        return term.kind == SeismicTerm::Kind::FaultFile;
+      })) {
+    return;
+  }
+  // the nodes on the terms' clock: kyr from the window's start in a dated
+  // run, the run's own clock in one counting forwards
+  auto times = std::vector<double>{};
+  if (run.times) {
+    const auto& window = *run.times;
+    for (const auto node : window.nodes) {
+      times.push_back(window.Dated() ? window.Start() - node : node);
+    }
+  }
+  PlaceFaultFiles(run.forcing.seismic, earth.model.SurfaceRadius(),
+                  ModuliOf(earth), top.At("forcing"), times);
 }
 
 std::string BuiltEarth::Dimension() const {

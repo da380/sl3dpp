@@ -16,7 +16,8 @@
  * minus the fixed bedrock height on land.
  *
  * The build runs it from build/examples, writing the examples' input
- * data/synthetic_earth.nc (the default output):
+ * data/synthetic_earth.nc (the default output), which it replaces only
+ * where the content changed (KeepUnchanged.hpp):
  *
  *   MakeSyntheticEarth [output.nc]
  *
@@ -32,6 +33,7 @@
 #include <string>
 #include <vector>
 
+#include "KeepUnchanged.hpp"
 #include "sl3dpp/Geography.hpp"
 #include "sl3dpp/Version.hpp"
 
@@ -162,9 +164,13 @@ int main(int argc, char** argv) {
   options.meaning = "surface height above sea level, ice included";
   file.variables.emplace("topography",
                          pm::SurfaceField("topography", topography, options));
-  pm::WriteSurfaceFile(path, file);
+  // beside the target first: the target is replaced only where the
+  // content changed, so a rebuild leaves an unchanged input's bytes alone
+  const auto written = examples::Beside(path);
+  pm::WriteSurfaceFile(written, file);
+  const auto replaced = examples::ReplaceIfChanged(written, path);
 
-  std::cout << "wrote " << path << " (" << dates.size()
-            << " dates, 21 ka to the present, 1 degree)\n";
+  std::cout << (replaced ? "wrote " : "kept, unchanged, ") << path << " ("
+            << dates.size() << " dates, 21 ka to the present, 1 degree)\n";
   return 0;
 }

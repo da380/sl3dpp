@@ -17,7 +17,8 @@
  *
  * The build runs it from build/examples, reading the deck in data/ and
  * writing the examples' input data/synthetic_moduli.nc (the default
- * output):
+ * output), which it replaces only where the content changed
+ * (KeepUnchanged.hpp):
  *
  *   MakeSyntheticModuli [output.nc]
  */
@@ -27,6 +28,7 @@
 #include <string>
 
 #include "Common.hpp"
+#include "KeepUnchanged.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/io/ModelModuli.hpp"
 
@@ -70,13 +72,17 @@ int main(int argc, char** argv) {
                                : examples::DataFile("synthetic_moduli.nc");
   const auto earth = examples::Earth::Make(kLmax, 1e21);
   const sl3dpp::SurfaceGrid grid(kLmax);
+  // beside the target first: the target is replaced only where the
+  // content changed, so a rebuild leaves an unchanged input's bytes alone
+  const auto beside = examples::Beside(output);
   const auto written = sl3dpp::io::WriteModuli(
-      output, earth.model, grid, Shear, Bulk,
+      beside, earth.model, grid, Shear, Bulk,
       {.name = "synthetic 3D elastic Earth", .elementMetres = 100.0e3});
   if (!written) {
     std::cerr << "MakeSyntheticModuli: " << written.error().message << "\n";
     return 1;
   }
-  std::cout << "wrote " << output.string() << "\n";
+  const auto replaced = examples::ReplaceIfChanged(beside, output);
+  std::cout << (replaced ? "wrote " : "kept, unchanged, ") << output.string() << "\n";
   return 0;
 }

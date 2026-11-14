@@ -345,6 +345,8 @@ class Evolution {
 
   /// The sea level solver the evolution was built with.
   [[nodiscard]] const GRDSolver& Solver() const { return *solver_; }
+  /// The operator the evolution steps.
+  [[nodiscard]] const ViscoelasticOperator& Operator() const { return *op_; }
 
  private:
   friend class AdjointSolver;  // reuses the operator/solver/state/ratios

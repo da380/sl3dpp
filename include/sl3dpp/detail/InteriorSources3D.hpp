@@ -50,7 +50,10 @@ namespace sl3dpp::detail {
                     &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
       *c *= toMatMoment;
     }
-    add(PointSourceForces(material, op.LMax(), sph, tor, source));
+  }
+  // sources at one radius are formed together
+  if (!sources.empty()) {
+    add(PointSourcesForces(material, op.LMax(), sph, tor, sources));
   }
   for (auto& glut : gluts) {
     glut.radius /= toNdLength;

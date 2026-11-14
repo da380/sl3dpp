@@ -14,6 +14,7 @@ without to figures/sl3d/with_and_without_gravity/:
     sea_level_3d_calibrated/calibration.png
     kernel1d/kernels.png
     kernel/viscosity_kernels.png
+    kernel1d_lateral/viscosity_kernels.png
     no_ocean/displacement.png
     no_ocean_viscoelastic/displacement.png
     no_ocean_1d_disk/displacement.png
@@ -25,6 +26,8 @@ without to figures/sl3d/with_and_without_gravity/:
     no_ocean_cap_weak/relaxation.png            (with no_ocean_cap_strong)
     timestep_study/accuracy.png                 (the timestep_* runs)
     sea_level_static_coseismic/coseismic.png
+    sea_level_static_megathrust/coseismic.png   (with planetmodel's fault
+                                                 module, after 1.5.1)
     sea_level_postseismic/postseismic.png
     no_ocean_postseismic/postseismic.png
     no_gravity_postseismic/postseismic.png
@@ -455,6 +458,78 @@ def kernels3d() -> None:
     fig.suptitle("sl3d kernel: 3D log-viscosity kernels")
     fig.tight_layout()
     save(fig, "kernel", "viscosity_kernels")
+
+
+def kernels1d_lateral() -> None:
+    """The lateral kernels about the radial example Earth (kernels.lateral):
+    each measurement's log-viscosity kernel as a field over the viscous
+    mantle — a depth slice where it is largest, a section along the meridian
+    through Hudson Bay, and its lateral mean and rms against radius, the
+    mean being the radial kernel's."""
+    directory = OUT / "kernel1d_lateral"
+    if not directory.exists():
+        return
+    values = measurements(directory)
+    fig = plt.figure(figsize=(16, 7.5))
+    stems = ["hudson_bay_sea_level", "hudson_bay_decay"]
+    for row, stem in enumerate(stems):
+        model = read_model_file(directory / f"{stem}_viscosity_kernels.nc")
+        # the kernels' nodes span the whole solid (the moduli's are among
+        # the parameters): the viscosity's part is the mantle's, where it
+        # is not zero
+        part = max((p for p in model.parts if "K_ln_eta_0" in p.variables),
+                   key=lambda p: float(np.max(np.abs(
+                       p.variables["K_ln_eta_0"].values))))
+        surface_radius = max(float(np.max(p.mesh.r)) for p in model.parts)
+        kernel = np.asarray(part.variables["K_ln_eta_0"].values)
+        radius = np.asarray(part.mesh.r).ravel()
+        depth = (surface_radius - radius) / 1e3
+        scale = float(np.max(np.abs(kernel))) or 1.0
+        # the depth slice where the kernel is largest
+        index = int(np.argmax(np.max(np.abs(kernel), axis=(1, 2))))
+        ex = Example.from_fields(part.grid.colatitudes, part.grid.longitudes,
+                                 {"kernel": kernel[index] / scale})
+        ax = world_map(fig, 2, 3, 3 * row + 1)
+        mesh = plot_field(ax, ex, "kernel",
+                          title=f"{stem}\nat {depth[index]:.0f} km depth, "
+                                "over its largest")
+        mark_sites(ax, [HUDSON_BAY])
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+        # the section along the meridian through Hudson Bay, from the north
+        # pole to 30 degrees south
+        colatitudes = np.rad2deg(np.asarray(part.grid.colatitudes))
+        longitudes = np.rad2deg(np.asarray(part.grid.longitudes))
+        east = int(np.argmin(np.abs(longitudes - HUDSON_BAY[1])))
+        span = colatitudes <= 120.0
+        section = kernel[:, span, east] / scale
+        ax = fig.add_subplot(2, 3, 3 * row + 2)
+        limit = float(np.max(np.abs(section))) or 1.0
+        mesh = ax.pcolormesh(90.0 - colatitudes[span], depth, section,
+                             cmap="RdBu_r", vmin=-limit, vmax=limit,
+                             shading="gouraud")
+        ax.invert_xaxis()
+        ax.invert_yaxis()
+        ax.axvline(HUDSON_BAY[0], color="k", linewidth=0.6, linestyle=":")
+        ax.set_xlabel(f"latitude along {HUDSON_BAY[1]:g}$^\\circ$E "
+                      "(degrees)")
+        ax.set_ylabel("depth (km)")
+        ax.set_title(f"{stem}: section through Hudson Bay (dotted)",
+                     fontsize=10)
+        fig.colorbar(mesh, ax=ax, shrink=0.7)
+        ax = fig.add_subplot(2, 3, 3 * row + 3)
+        rms = np.sqrt(np.mean(kernel**2, axis=(1, 2)))
+        mean = np.mean(kernel, axis=(1, 2))
+        ax.plot(rms, radius / 1e3, label="lateral rms")
+        ax.plot(mean, radius / 1e3, label="lateral mean (the radial kernel)")
+        ax.set_xlabel("dJ / d(ln $\\eta$) per m$^3$")
+        ax.set_ylabel("radius (km)")
+        ax.set_title(f"{stem} (J = {values[stem]:.3g})", fontsize=10)
+        ax.axvline(0.0, color="0.7", linewidth=0.6)
+        ax.legend(fontsize=8)
+    fig.suptitle("sl3d kernel (1D, lateral): log-viscosity kernels as fields "
+                 "about the radial Earth, by the radial sweeps")
+    fig.tight_layout()
+    save(fig, "kernel1d_lateral", "viscosity_kernels")
 
 
 def no_ocean() -> None:
@@ -1636,19 +1711,102 @@ def node_times(file):
 # of a per cent of lmax 128; configs/README.md).
 
 
-def coseismic(name: str, title: str) -> None:
+class Drawn:
+    """How a co-seismic figure draws its source: the place its maps are
+    centred on and its profile crosses (`source`: latitude, longitude and
+    the strike there, degrees), what marks it on a map (`mark`), the
+    profile's stretch over the fault (km, up dip negative), and the
+    words for both."""
+
+    def __init__(self, source: dict, mark, span: tuple[float, float],
+                 drawn: str, through: str) -> None:
+        self.source, self.mark, self.span = source, mark, span
+        self.drawn, self.through = drawn, through
+
+
+def planar_drawn(name: str) -> Drawn:
+    """A config's planar fault or point source as its co-seismic figure
+    draws it: the fault's surface projection, its up-dip edge heavy."""
+    kind, source = seismic_source(name)
+    half = (0.5 * source["width_km"] * np.cos(np.deg2rad(source["dip_deg"]))
+            if kind == "fault" else 0.0)
+    return Drawn(source, lambda ax: mark_source(ax, kind, source),
+                 (-half, half),
+                 "the fault's surface projection drawn, its up-dip edge heavy",
+                 "its centroid")
+
+
+def fault_file_drawn(name: str) -> Drawn | None:
+    """A config's fault file (its first seismic term's `fault_file`) as its
+    co-seismic figure draws it, read with planetmodel's reader: every
+    patch's outline on the surface, its trench (the up-dip edge, v = -1/2)
+    heavy, the maps centred on the first patch's middle and the profile
+    crossing it along the strike there. None without planetmodel's fault
+    module (planetmodel after 1.5.1) or the file."""
+    try:
+        from planetmodel.faultfile import read_fault
+    except ImportError:
+        return None
+    term = json.loads((CONFIGS / f"{name}.json").read_text())["forcing"][
+        "seismic"][0]["fault_file"]
+    path = CONFIGS / term["file"]
+    if not path.exists():
+        return None
+    fault = read_fault(path)
+    edge = np.linspace(-0.5, 0.5, 101)
+    low, high = np.full_like(edge, -0.5), np.full_like(edge, 0.5)
+    outlines = []
+    for patch in fault.patches:
+        u = np.concatenate([edge, high, edge[::-1], low])
+        v = np.concatenate([low, edge, high, edge[::-1]])
+        outlines.append((patch.position(u, v), patch.position(edge, low)))
+    first = fault.patches[0]
+    middle = first.position(0.0, 0.0)
+    basis = fault.frame.basis(middle)
+    strike = first.fault_basis(0.0, 0.0)[:, 0]
+    source = {"latitude": float(middle[0]), "longitude": float(middle[1]),
+              "strike_deg": float(np.rad2deg(np.arctan2(strike @ basis[:, 0],
+                                                        strike @ basis[:, 1])))}
+
+    def across(position) -> float:
+        """The signed distance (km) of a point's surface place from the
+        middle's, down dip positive."""
+        a, b = np.deg2rad(middle[:2]), np.deg2rad(position[:2])
+        d = 2.0 * np.arcsin(np.sqrt(
+            np.sin(0.5 * (b[0] - a[0])) ** 2
+            + np.cos(a[0]) * np.cos(b[0]) * np.sin(0.5 * (b[1] - a[1])) ** 2))
+        return 6371.0 * float(d)
+
+    span = (-across(first.position(0.0, -0.5)), across(first.position(0.0, 0.5)))
+
+    def mark(ax) -> None:
+        kwargs = {"transform": ccrs.PlateCarree()} if HAVE_CARTOPY else {}
+        for outline, trench in outlines:
+            ax.plot(outline[:, 1], outline[:, 0], color="k", lw=0.9, zorder=6,
+                    **kwargs)
+            ax.plot(trench[:, 1], trench[:, 0], color="k", lw=2.6, zorder=6,
+                    **kwargs)
+
+    return Drawn(source, mark, span,
+                 "the fault's outline drawn from its file, its trench heavy",
+                 "its middle")
+
+
+def coseismic(name: str, title: str, drawn: Drawn | None = None) -> None:
     """A fault's co-seismic response, the static problem: maps centred on
     the source of the vertical displacement, of the horizontal
     displacement (its size, and arrows) and, with an ocean, of the relative
-    sea-level change over the ocean, each a 2° Gaussian mean, the fault's
-    surface projection drawn (its up-dip edge heavy); and every one along
-    a profile across the fault through its centroid, the 2° means and the
+    sea-level change over the ocean, each a 2° Gaussian mean, the fault
+    drawn (`drawn`: a planar fault's surface projection, its up-dip edge
+    heavy, by default); and every one along a profile across the fault
+    through its centroid (a fault file's middle), the 2° means and the
     vertical displacement's point values, whose ripples are the
     truncation."""
     path = OUT / name / f"{name}.nc"
     if not path.exists():
         return
-    kind, source = seismic_source(name)
+    drawn = drawn or planar_drawn(name)
+    source = drawn.source
     file = read_surface_file(path)
     check_components(file)
     width = smoothing_width(file)
@@ -1671,7 +1829,7 @@ def coseismic(name: str, title: str) -> None:
         if not symmetric:
             mesh.set_clim(0.0, region_limit(ex, [field], extent))
             arrows(ax, grid_motion(file), extent)
-        mark_source(ax, kind, source)
+        drawn.mark(ax)
         fig.colorbar(mesh, ax=ax, shrink=0.8, label="m")
 
     distance, up, updip, strike, sea = profile(file, source)
@@ -1686,21 +1844,19 @@ def coseismic(name: str, title: str) -> None:
     if np.any(np.isfinite(sea)):
         ax.plot(distance, sea, color="C2", lw=2.0, alpha=0.7,
                 label="relative sea level, over the ocean")
-    half = 0.5 * source["width_km"] * np.cos(np.deg2rad(source["dip_deg"]))
-    ax.axvspan(-half, half, color="0.85", zorder=0,
+    ax.axvspan(*drawn.span, color="0.85", zorder=0,
                label="the fault's surface projection")
     ax.axhline(0.0, color="0.6", lw=0.5)
-    ax.set_xlabel(f"distance across the fault through its centroid (km, "
+    ax.set_xlabel(f"distance across the fault through {drawn.through} (km, "
                   f"positive down dip, to azimuth "
-                  f"{(source['strike_deg'] + 90.0) % 360.0:g}°)")
+                  f"{(source['strike_deg'] + 90.0) % 360.0:.0f}°)")
     ax.set_ylabel("m")
     ax.set_title(f"along a profile across the fault: {width:g}° means "
                  f"(thick), and the\npoint values, whose ripples, 360/{lmax} "
                  f"degrees apart, are the truncation", fontsize=10)
     ax.legend(fontsize=7)
     fig.suptitle(f"{title}, lmax {lmax}\nmaps centred on the fault, "
-                 "meridians and parallels 5° apart, the fault's surface "
-                 f"projection drawn, its up-dip edge heavy;\nmaps "
+                 f"meridians and parallels 5° apart, {drawn.drawn};\nmaps "
                  f"{means(width)}",
                  fontsize=10)
     fig.tight_layout()
@@ -2297,6 +2453,7 @@ if __name__ == "__main__":
     sea_level_ice7g()
     kernels1d()
     kernels3d()
+    kernels1d_lateral()
     no_ocean()
     no_ocean_viscoelastic()
     no_ocean_1d_disk()
@@ -2316,6 +2473,15 @@ if __name__ == "__main__":
               "thrust off the synthetic South America\n(600 by 150 km, "
               "dipping 18° east, 2e22 N m as 12 by 3 point sources), with an "
               "ocean and full rotational feedback, on the elastic prem8 deck")
+    megathrust = fault_file_drawn("sea_level_static_megathrust")
+    if megathrust is not None:
+        coseismic("sea_level_static_megathrust",
+                  "sl3d solve, the static problem: the co-seismic response of "
+                  "a curved megathrust off the synthetic South America (a "
+                  "fault file: 940 km of trench,\na thrust tapered from 12 m, "
+                  "at 36 by 6 quadrature points), with an ocean and full "
+                  "rotational feedback, on prem8.postseismic.deck",
+                  megathrust)
     postseismic("sea_level_postseismic",
                 "sl3d solve: that thrust's co-seismic and post-seismic "
                 "response with an ocean and full rotational feedback, on "

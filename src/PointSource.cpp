@@ -1,6 +1,7 @@
 #include "sl3dpp/PointSource.hpp"
 
 #include <GSHTrans/All>
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <format>
@@ -398,6 +399,69 @@ DegreeFields PointSourceForces(
     const PointSource& source) {
   return ForcesOfMoments(material, lmax, spheroidal, toroidal, source.at.radius,
                          MomentsOf(lmax, source));
+}
+
+DegreeFields PointSourcesForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    std::span<const PointSource> sources) {
+  // the distinct points, their tensors added
+  auto points = std::vector<PointSource>{};
+  for (const auto& source : sources) {
+    const auto found = std::ranges::find_if(points, [&](const PointSource& p) {
+      return p.at.radius == source.at.radius &&
+             p.at.colatitude == source.at.colatitude &&
+             p.at.longitude == source.at.longitude;
+    });
+    if (found == points.end()) {
+      points.push_back(source);
+      continue;
+    }
+    auto& M = found->moment;
+    const auto& N = source.moment;
+    M = {.rr = M.rr + N.rr, .tt = M.tt + N.tt, .pp = M.pp + N.pp,
+         .rt = M.rt + N.rt, .rp = M.rp + N.rp, .tp = M.tp + N.tp};
+  }
+  // the shells, each with the moments of its points summed
+  struct Shell {
+    double radius = 0.0;
+    SourceMoments moments;
+  };
+  auto shells = std::vector<Shell>{};
+  for (const auto& point : points) {
+    const auto r = point.at.radius;
+    const auto found = std::ranges::find_if(shells, [r](const Shell& s) {
+      return std::abs(s.radius - r) <=
+             kSameShell * std::max(std::abs(s.radius), std::abs(r));
+    });
+    auto moments = MomentsOf(lmax, point);
+    if (found == shells.end()) {
+      shells.push_back({.radius = r, .moments = std::move(moments)});
+      continue;
+    }
+    for (auto i = std::size_t{0}; i < moments.at.size(); ++i) {
+      for (auto k = 0; k < 6; ++k) found->moments.at[i][k] += moments.at[i][k];
+    }
+  }
+  auto out = DegreeFields{};
+  auto join = [](auto& to, auto& from) {
+    for (auto& [l, f] : from) {
+      auto& t = to[l];
+      if (t.empty()) {
+        t = std::move(f);
+      } else {
+        for (auto i = std::size_t{0}; i < t.size(); ++i) t[i] += f[i];
+      }
+    }
+  };
+  for (const auto& shell : shells) {
+    auto forces = ForcesOfMoments(material, lmax, spheroidal, toroidal,
+                                  shell.radius, shell.moments);
+    join(out.spheroidal, forces.spheroidal);
+    join(out.toroidal, forces.toroidal);
+  }
+  return out;
 }
 
 DegreeFields StressGlutForces(

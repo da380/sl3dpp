@@ -290,6 +290,13 @@ class GridCoupling {
   void AddScalarState(SpectralTensor& spectral, int l,
                       std::span<const Complex> M, std::span<const Complex> R,
                       std::span<const Complex> S) const;
+  /// The same for the toroidal scalars (M, S) of a degree from 1
+  /// (ComponentsFromToroidalScalars): the toroidal systems' internal
+  /// variables or strain scalars at every radial node, laid out (node,
+  /// column m), zero below the degree's element subset.
+  void AddToroidalScalarState(SpectralTensor& spectral, int l,
+                              std::span<const Complex> M,
+                              std::span<const Complex> S) const;
 
   /// Adds the deviatoric strain of degree solutions to a spectral tensor:
   /// per degree, complex m >= 0 columns over the spheroidal system's dofs

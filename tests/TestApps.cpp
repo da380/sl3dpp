@@ -23,6 +23,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <set>
 #include <functional>
 #include <initializer_list>
 #include <iostream>
@@ -36,6 +37,7 @@
 #include <planetmodel/json.hpp>
 #include <planetmodel/modelfile.hpp>
 #include <planetmodel/surfacefile.hpp>
+#include <span>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -593,7 +595,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 57);
+  EXPECT_EQ(read, 59);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -738,16 +740,16 @@ TEST_F(AppsTest, SolveRespondsWithoutAnOceanOnAToyModuliFile) {
   }
 }
 
-TEST_F(AppsTest, SolveIsBitwiseIndependentOfTheCache) {
+TEST_F(AppsTest, SolveIsIndependentOfTheCache) {
   // cache_mb reaches every transform grid of the static problem on lateral
   // moduli (the sea level grid, the 3D operator's coupling and the volume
-  // file's radial reference coupling), and the run is bit for bit the
-  // same under any setting. At lmax 24 the smallest
+  // file's radial reference coupling), and the run is the same to
+  // rounding under any setting. At lmax 24 the smallest
   // setting, 1 MiB, cuts the couplings' batched spin -2 transforms into
   // chunks of 53 fields against the default's 63, and the ball's mesh
   // carries more nodes than a chunk, so the chunks fall differently
   // through every batch: the surface file, the exchange table and the
-  // volume file are nevertheless the default's exactly.
+  // volume file are nevertheless the default's, to rounding.
   constexpr auto kLmax = 24;
   const auto deck = Deck();
   const auto read =
@@ -795,11 +797,22 @@ TEST_F(AppsTest, SolveIsBitwiseIndependentOfTheCache) {
   namespace pm = planetmodel;
   const auto standard = pm::ReadSurfaceFile(dir_ / "standard" / "response.nc");
   const auto small = pm::ReadSurfaceFile(dir_ / "small" / "response.nc");
+  // to rounding throughout: the chunks of another size are transformed
+  // under plans of their own, which the planner's timings may choose
+  // differently from the default's
+  const auto close = [](std::span<const double> a, std::span<const double> b) {
+    if (a.size() != b.size()) return false;
+    auto scale = 0.0, worst = 0.0;
+    for (auto i = std::size_t{0}; i < a.size(); ++i) {
+      scale = std::max(scale, std::abs(a[i]));
+      worst = std::max(worst, std::abs(a[i] - b[i]));
+    }
+    return worst <= 1e-12 * scale;
+  };
   for (const auto& [name, field] : standard.variables) {
-    EXPECT_EQ(field.values, small.variables.at(name).values) << name;
+    EXPECT_TRUE(close(field.values, small.variables.at(name).values)) << name;
   }
-  for (const auto* name :
-       {"step_iterations", "solve_iterations", "step_residual"}) {
+  for (const auto* name : {"step_iterations", "solve_iterations"}) {
     EXPECT_EQ(standard.meta.at(name), small.meta.at(name)) << name;
   }
 
@@ -807,15 +820,21 @@ TEST_F(AppsTest, SolveIsBitwiseIndependentOfTheCache) {
   // lines name the config)
   const auto rows = [&](const std::string& name) {
     auto in = std::ifstream(dir_ / name / "response.txt");
-    auto out = std::vector<std::string>{};
+    auto out = std::vector<double>{};
+    auto count = std::size_t{0};
     for (std::string line; std::getline(in, line);) {
-      if (!line.starts_with("#")) out.push_back(line);
+      if (line.starts_with("#")) continue;
+      ++count;
+      auto fields = std::istringstream(line);
+      for (double value; fields >> value;) out.push_back(value);
     }
-    return out;
+    return std::pair{count, out};
   };
-  const auto standardRows = rows("standard");
-  EXPECT_GT(standardRows.size(), static_cast<std::size_t>(kLmax));
-  EXPECT_EQ(standardRows, rows("small"));
+  const auto [standardCount, standardRows] = rows("standard");
+  const auto [smallCount, smallRows] = rows("small");
+  EXPECT_GT(standardCount, static_cast<std::size_t>(kLmax));
+  EXPECT_EQ(standardCount, smallCount);
+  EXPECT_TRUE(close(standardRows, smallRows));
 
   const auto standardVolume =
       pm::ReadModelFile(dir_ / "standard" / "response_volume.nc");
@@ -825,7 +844,8 @@ TEST_F(AppsTest, SolveIsBitwiseIndependentOfTheCache) {
   for (auto p = std::size_t{0}; p < standardVolume.Parts().size(); ++p) {
     const auto& held = smallVolume.Parts()[p].variables;
     for (const auto& [name, var] : standardVolume.Parts()[p].variables) {
-      EXPECT_EQ(var.values, held.at(name).values) << name << " in part " << p;
+      EXPECT_TRUE(close(var.values, held.at(name).values))
+          << name << " in part " << p;
     }
   }
 }
@@ -7076,8 +7096,8 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
   // surface gradient of V, curl-free with divergence -l (l + 1) V_lm
   // degree by degree (their spin-weighted expansions); each smoothed field
   // read at grid points and between them is the cap mean the library's
-  // measurement of that width reads there, to rounding where the grid
-  // resolves the cap; the smoothed east and north components are the
+  // measurement of that width reads there, to rounding at every width (2
+  // degrees at lmax 32 and 96 too); the smoothed east and north components are the
   // gradient of the smoothed V; the metadata state the convention, the
   // kind, the width and the degree weights. Through time under a point
   // source, which has a toroidal part, every node's components are the
@@ -7088,7 +7108,7 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
   namespace pm = planetmodel;
   static_cast<void>(Deck());
   constexpr auto kLmax = 32;
-  constexpr auto kWidthDeg = 20.0;  // resolved at lmax 32
+  constexpr auto kWidthDeg = 20.0;
   const auto plain = std::string{R"("surface": "out/plain.nc")"};
   const auto asked = std::format(
       R"("surface": "out/asked.nc", "fields": ["horizontal_displacement"],
@@ -7223,6 +7243,42 @@ TEST_F(AppsTest, SolveWritesTheHorizontalDisplacementAndSmoothedFields) {
           at ? values[*at] : PointValueOf(file, smoothed, 0, site, kLmax);
       EXPECT_NEAR(value, mean, 1e-12 * std::abs(scale))
           << smoothed << " at " << site.latitude << ", " << site.longitude;
+    }
+  }
+  // and at a width no grid of the band resolves, 2 degrees at lmax 32 and
+  // at lmax 96: the measurement is the smoothed field at its centre still
+  for (const auto lmax : {32, 96}) {
+    const auto name = std::format("narrow_{}", lmax);
+    static_cast<void>(app::RunSolve(Write(
+        name + ".json",
+        std::format(R"({{"problem": "static", "model": {{"deck": "ball.deck"}},
+            "discretisation": {{"lmax": {}}}, "forcing": {{"load": [{}]}},
+            "rotation": "none", "output": {{"surface": "out/{}.nc",
+            "smoothing": {{"kind": "gaussian", "width_deg": 2}}}}}})",
+                    lmax, kCap, name))));
+    const auto narrow = pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+    const SurfaceGrid fine(lmax);
+    const auto ring = fine.Longitudes().size();
+    for (const auto* field : {"displacement", "potential", "relative_sea_level_change"}) {
+      const auto smoothed = std::string{field} + "_smoothed";
+      const auto& values = narrow.variables.at(smoothed).values;
+      const auto scale =
+          std::ranges::max(values, {}, [](double v) { return std::abs(v); });
+      // at grid points under the load and beside it, and between them
+      for (const auto [it, ip] : {std::pair{lmax / 6, ring * 3 / 4},
+                                  std::pair{lmax / 3, ring / 5}}) {
+        const auto site = GeographicPoint::FromSpherical(
+            fine.CoLatitudes()[static_cast<std::size_t>(it)], fine.Longitudes()[ip]);
+        EXPECT_NEAR(values[static_cast<std::size_t>(it) * ring + ip],
+                    CapMeanOf(narrow, field, 0, site, 2.0, lmax),
+                    1e-12 * std::abs(scale))
+            << smoothed << " at lmax " << lmax;
+      }
+      const auto site = GeographicPoint{57.3, -83.1};
+      EXPECT_NEAR(PointValueOf(narrow, smoothed, 0, site, lmax),
+                  CapMeanOf(narrow, field, 0, site, 2.0, lmax),
+                  1e-12 * std::abs(scale))
+          << smoothed << " at lmax " << lmax;
     }
   }
 
@@ -8472,6 +8528,104 @@ TEST_F(AppsTest, CacheMbIsReadAndChecked) {
     const auto member = std::string{R"("cache_mb": )"} + bad;
     ExpectRefused(app::ReadSolveInput, seaLevel(member), "cache_mb", what);
   }
+}
+
+/// The data lines of a text table (those not starting with '#').
+std::vector<std::string> DataLines(const fs::path& path) {
+  auto in = std::ifstream(path);
+  auto out = std::vector<std::string>{};
+  for (auto line = std::string{}; std::getline(in, line);) {
+    if (!line.starts_with('#')) out.push_back(line);
+  }
+  return out;
+}
+
+/// The kernel variables of a model file, by part and name.
+std::map<std::pair<std::size_t, std::string>, std::vector<double>> KernelValues(
+    const fs::path& path) {
+  const auto file = planetmodel::ReadModelFile(path);
+  auto out = std::map<std::pair<std::size_t, std::string>, std::vector<double>>{};
+  for (auto p = std::size_t{0}; p < file.Parts().size(); ++p) {
+    for (const auto& [name, variable] : file.Parts()[p].variables) {
+      if (name.starts_with("K_")) out[{p, name}] = variable.values;
+    }
+  }
+  return out;
+}
+
+TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
+  // `kernels.lateral` on a radial run: the kernels in the viscosity and the
+  // moduli as fields over the memory nodes' grids, written as a 3-D run's
+  // are, beside the radial profiles — which are, data line for data line,
+  // those of the run without the member; from a recording into the
+  // trajectory store, and swept again from it with the same values to the
+  // bit; the grids' members of `solver` taken, which a radial run refuses
+  // otherwise. Refused: `lateral` true naming neither the viscosity nor the
+  // moduli, and false on a model with lateral structure.
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  const auto body = std::string{R"("model": {"deck": "ball.deck"},
+    "discretisation": {"lmax": 4}, )"} + Window(3) + R"(, "rotation": "axial")";
+  const auto kernels = [&](const std::string& extra, const std::string& output) {
+    return std::string{R"("kernels": {)"} + extra + R"(
+      "parameters": ["ice", "viscosity", "moduli"],
+      "measurements": [
+        {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+         "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}],
+      "output": ")" + output + R"("})";
+  };
+  const auto lateral = Write(
+      "lateral.json", "{" + body + R"(, "trajectory": {"directory": "store"},
+    "solver": {"transform_degrees": [3], "cache_mb": 1}, )" +
+                          kernels(R"("lateral": true,)", "out_lateral") + "}");
+  const auto radial =
+      Write("radial.json", "{" + body + ", " + kernels("", "out_radial") + "}");
+  const auto first = app::RunKernel(lateral);
+  EXPECT_NE(first.find("; the forward run recorded to the trajectory store "),
+            std::string::npos)
+      << first;
+  static_cast<void>(app::RunKernel(radial));
+  const auto out = dir_ / "out_lateral";
+  for (const auto* name : {"site_viscosity_kernel.txt", "site_moduli_kernel.txt"}) {
+    EXPECT_EQ(DataLines(out / name), DataLines(dir_ / "out_radial" / name)) << name;
+  }
+  EXPECT_FALSE(fs::exists(dir_ / "out_radial" / "site_viscosity_kernels.nc"));
+  const auto viscosity = KernelValues(out / "site_viscosity_kernels.nc");
+  const auto moduli = KernelValues(out / "site_moduli_kernels.nc");
+  auto held = std::set<std::string>{};
+  for (const auto* file : {&viscosity, &moduli}) {
+    for (const auto& [key, values] : *file) {
+      if (!key.second.ends_with("_poles")) held.insert(key.second);
+    }
+  }
+  EXPECT_EQ(held, (std::set<std::string>{"K_ln_eta_0", "K_kappa", "K_mu"}));
+  // swept again from the complete store, the same to the bit
+  fs::rename(out, dir_ / "out_lateral_first");
+  const auto again = app::RunKernel(lateral);
+  EXPECT_NE(again.find("; the forward run read back from the trajectory store "),
+            std::string::npos)
+      << again;
+  EXPECT_EQ(KernelValues(out / "site_viscosity_kernels.nc"), viscosity);
+  EXPECT_EQ(KernelValues(out / "site_moduli_kernels.nc"), moduli);
+
+  ExpectRefused(app::RunKernel,
+                Write("bad_parameters.json",
+                      "{" + body + R"(, "kernels": {"lateral": true,
+      "parameters": ["ice"],
+      "measurements": [{"type": "rotation", "name": "lod", "component": "z"}],
+      "output": "out_bad"}})"),
+                "kernels.lateral", "names neither");
+  ExpectRefused(app::RunKernel,
+                Write("bad_transforms.json",
+                      "{" + body + R"(, "solver": {"transform_degrees": [3]}, )" +
+                          kernels("", "out_bad") + "}"),
+                "solver.transform_degrees", "3-D step, which a 1-D run");
+  const auto lateralModel = Prem8() + ", " + Window(3);
+  ExpectRefused(app::RunKernel,
+                Write("bad_model.json",
+                      "{" + lateralModel + ", " +
+                          kernels(R"("lateral": false,)", "out_bad") + "}"),
+                "kernels.lateral", "is false, and the model is 3-D");
 }
 
 TEST_F(AppsTest, Kernel1DRecordsItsTrajectoryToo) {

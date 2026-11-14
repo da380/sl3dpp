@@ -948,6 +948,9 @@ TEST(UnevenSteps, TheDecayTimeOverAnUnevenWindow) {
   }
 
   // the datum through the sweep, against the forward runs' decay times
+  // (steps of 4% and 2% of the relaxation times: at narrower ones the
+  // fit's own stopping tolerance stands against the differences'
+  // truncation error and the ratio reads it)
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
   const auto kernels =
       AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
@@ -963,7 +966,7 @@ TEST(UnevenSteps, TheDecayTimeOverAnUnevenWindow) {
                             options)
             .decay_time;
       },
-      0.02, predicted);
+      0.04, predicted);
   std::cout << std::format(
       "[uneven decay time] {:.4f} kyr; along itau: ratio {:.3f}, Richardson gap {:.2e}\n",
       fit.decay_time, fd.ratio, Gap(fd.richardson, predicted));

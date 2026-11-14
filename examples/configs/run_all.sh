@@ -8,9 +8,11 @@
 # deck with S40RTS only once that deck and its lateral files exist too
 # (make_earth_deck.py and make_lateral_model.py write them), the toy
 # planet's only once ../data/planet.gia.deck and ../data/planet.elastic.deck
-# exist (python make_planet_deck.py writes them), and the load given as a
+# exist (python make_planet_deck.py writes them), the load given as a
 # file and as a coefficient table only once make_load_field.py and
-# make_load_coefficients.py have written them. CI calls this.
+# make_load_coefficients.py have written them, and the megathrust's fault
+# file only once make_megathrust.py has written ../data/megathrust.nc (with
+# planetmodel's fault module, after 1.5.1). CI calls this.
 #
 #   cd build/examples/configs && ./run_all.sh
 #
@@ -50,9 +52,6 @@ run solve sea_level_static_coseismic.json
 run solve sea_level_postseismic.json
 run solve no_ocean_postseismic.json
 run solve no_gravity_postseismic.json
-# the checkpoints of a former run_all.sh go first: the build may have
-# written the run's inputs since, which makes them another run's
-rm -rf out/sea_level_1d/checkpoints
 run solve sea_level_1d.json
 run solve sea_level_1d_calibrated.json
 run solve sea_level_tide_migrating.json
@@ -60,11 +59,11 @@ run solve sea_level_3d.json
 run solve sea_level_3d_calibrated.json
 run kernel kernel1d.json
 run kernel kernel.json
+run kernel kernel1d_lateral.json
 run kernel kernel_static_moduli.json
-# solve records the post-seismic run into its trajectory store, and kernel
-# sweeps from the store without running it again (the store of a former
-# run_all.sh, whose inputs the build may have written since, goes first)
-rm -rf out/kernel_postseismic/trajectory
+# solve records the post-seismic run into its trajectory store (a store a
+# former run_all.sh left complete is the run's, and kept), and kernel sweeps
+# from the store without running it again
 run solve kernel_postseismic.json
 run kernel kernel_postseismic.json
 run solve sea_level_fingerprint_ice_cap.json
@@ -120,4 +119,12 @@ else
   echo "run_all.sh: no ../data/load_cap_history.nc or ../data/load_cap_lm.txt," \
        "so the load from a file and from a table are skipped" \
        "(make_load_field.py and make_load_coefficients.py write them)"
+fi
+
+if [[ -f ../data/megathrust.nc ]]; then
+  run solve sea_level_static_megathrust.json
+else
+  echo "run_all.sh: no ../data/megathrust.nc, so the megathrust's fault file" \
+       "config is skipped (python make_megathrust.py in build/examples writes" \
+       "it, with planetmodel's fault module)"
 fi

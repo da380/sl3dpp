@@ -1,5 +1,6 @@
 // Measurement duals and the decay-time estimator: a cap mean integrates
-// to one, the point dual reads a band-limited field exactly, the
+// to one and reads a band-limited field's mean over the cap exactly at
+// every width, the point dual reads a band-limited field exactly, the
 // coefficient dual reads the real orthonormal pair, the rotation and
 // field measurements carry their duals, a clean exponential is fitted
 // exactly, the fit's weights ARE the datum's derivative (held to central
@@ -9,13 +10,18 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <format>
+#include <iostream>
 #include <fstream>
 #include <numbers>
 #include <sstream>
 #include <stdexcept>
 #include <string>
 #include <vector>
+
+#include <GaussQuad/All>
 
 #include "sl3dpp/Measurements.hpp"
 #include "sl3dpp/ShConventions.hpp"
@@ -374,9 +380,8 @@ TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
   // A field of every degree weighted by CapMeanWeights and synthesised is
   // its cap mean about every point: read at grid points and between them
   // (the band-limited point dual), it is CapMeanDual's pairing there, to
-  // rounding, on a grid that resolves the cap (its weights below rounding
-  // by degree lmax + 2). On a grid that does not, the two differ by the
-  // cap's quadrature.
+  // rounding, at a width the grid resolves (its weights below rounding by
+  // degree lmax + 2) and at one it does not.
   constexpr auto lmax = 24;
   const auto grid = SurfaceGrid(lmax);
   const auto width = 20.0 * std::numbers::pi / 180.0;
@@ -428,7 +433,7 @@ TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
     EXPECT_NEAR(value, measured, 1e-13 * std::abs(scale))
         << site.latitude << " " << site.longitude;
   }
-  // a cap the grid does not resolve: the sampled cap's quadrature differs
+  // a cap the grid does not resolve: the same
   const auto narrow = 2.0 * std::numbers::pi / 180.0;
   const auto narrowWeights = CapMeanWeights(lmax, narrow);
   auto blurred = coefficients;
@@ -441,9 +446,134 @@ TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
   const auto gap = std::abs(
       PairedValue(grid, a, PointDual(grid, a, site), grid.Synthesise(blurred)) -
       PairedValue(grid, a, CapMeanDual(grid, a, site, narrow), field));
-  EXPECT_GT(gap, 1e-6 * std::abs(scale));
+  EXPECT_LT(gap, 1e-13 * std::abs(scale));
   EXPECT_THROW(static_cast<void>(CapMeanWeights(lmax, 0.0)),
                std::invalid_argument);
+}
+
+namespace {
+
+/// The mean over the Gaussian cap of `width` about `site` of the field
+/// f(r) = sum_j (n_j . r)^k_j, by quadrature about the site: Gauss-Legendre
+/// in the distance d over [0, min(pi, 12 width)] (the weight there below
+/// e^-72 of its peak) and the trapezoid in the azimuth, exact for the
+/// field's degree. Independent of the grids and of the degree weights.
+double FineCapMean(GeographicPoint site, double width,
+                   const std::vector<std::pair<std::array<double, 3>, int>>& terms,
+                   int degree) {
+  const auto theta0 = site.CoLatitude();
+  const auto phi0 = site.Longitude();
+  const auto s = std::array{std::sin(theta0) * std::cos(phi0),
+                            std::sin(theta0) * std::sin(phi0), std::cos(theta0)};
+  const auto e1 = std::array{std::cos(theta0) * std::cos(phi0),
+                             std::cos(theta0) * std::sin(phi0), -std::sin(theta0)};
+  const auto e2 = std::array{-std::sin(phi0), std::cos(phi0), 0.0};
+  const auto reach = std::min(std::numbers::pi, 12.0 * width);
+  const auto rule = GaussQuad::GaussLegendreQuadrature1D<double>(600);
+  const auto azimuths = 2 * degree + 4;
+  auto weighted = 0.0, total = 0.0;
+  for (auto k = std::size_t{0}; k < rule.Points().size(); ++k) {
+    const auto d = 0.5 * reach * (rule.Points()[k] + 1.0);
+    const auto w = 0.5 * reach * rule.Weights()[k] * std::sin(d) *
+                   std::exp(-0.5 * (d / width) * (d / width));
+    auto ring = 0.0;
+    for (auto j = 0; j < azimuths; ++j) {
+      const auto alpha = 2.0 * std::numbers::pi * j / azimuths;
+      auto r = std::array<double, 3>{};
+      for (auto c = 0; c < 3; ++c) {
+        r[c] = std::cos(d) * s[c] +
+               std::sin(d) * (std::cos(alpha) * e1[c] + std::sin(alpha) * e2[c]);
+      }
+      for (const auto& [n, power] : terms) {
+        ring += std::pow(n[0] * r[0] + n[1] * r[1] + n[2] * r[2], power);
+      }
+    }
+    weighted += w * ring / azimuths;
+    total += w;
+  }
+  return weighted / total;
+}
+
+}  // namespace
+
+TEST(MeasurementDuals, CapMeanIsExactAtEveryWidth) {
+  // The cap measurement of a band-limited field is its mean over the cap,
+  // exactly, at every width: against a fine quadrature of the mean about
+  // the site, independent of the grid and of the degree weights, and
+  // against the field smoothed by the degree weights read at the site
+  // (output.smoothing's), to rounding, at 2 degrees on grids that do not
+  // resolve the cap (lmax 32 and 96) as at widths they do; and at widths
+  // the grid resolves the dual is the Gaussian sampled at the grid's
+  // points and normalised by its quadrature, to rounding.
+  const auto a = 6.371e6;
+  for (const auto lmax : {32, 96}) {
+    const auto grid = SurfaceGrid(lmax);
+    // a field of degree lmax: powers of r along three directions
+    const auto terms = std::vector<std::pair<std::array<double, 3>, int>>{
+        {{0.36, -0.48, 0.8}, lmax}, {{0.6, 0.0, -0.8}, lmax / 2}, {{0.0, 1.0, 0.0}, 3}};
+    const auto field = grid.FromFunction([&](double theta, double phi) {
+      const auto r = std::array{std::sin(theta) * std::cos(phi),
+                                std::sin(theta) * std::sin(phi), std::cos(theta)};
+      auto sum = 0.0;
+      for (const auto& [n, power] : terms) {
+        sum += std::pow(n[0] * r[0] + n[1] * r[1] + n[2] * r[2], power);
+      }
+      return sum;
+    });
+    const auto coefficients = grid.Expand(field);
+    for (const auto widthDeg : {2.0, 6.0, 20.0, 40.0}) {
+      const auto width = widthDeg * std::numbers::pi / 180.0;
+      const auto weights = CapMeanWeights(lmax, width);
+      auto weighted = coefficients;
+      for (auto l = 0; l <= lmax; ++l) {
+        for (auto m = 0; m <= l; ++m) weighted[SurfaceGrid::Index(l, m)] *= weights[l];
+      }
+      const auto smoothed = grid.Synthesise(weighted);
+      const auto scale = *std::ranges::max_element(
+          smoothed, {}, [](double v) { return std::abs(v); });
+      for (const auto site :
+           {GeographicPoint{40.0, 30.0}, GeographicPoint{-32.05, 115.74},
+            GeographicPoint{89.0, 200.0}, GeographicPoint{0.3, 300.0}}) {
+        const auto measured =
+            PairedValue(grid, a, CapMeanDual(grid, a, site, width), field);
+        const auto fine = FineCapMean(site, width, terms, lmax);
+        const auto atSite = PairedValue(grid, a, PointDual(grid, a, site), smoothed);
+        EXPECT_NEAR(measured, fine, 1e-12 * std::abs(scale))
+            << "lmax " << lmax << ", " << widthDeg << " degrees at "
+            << site.latitude << ", " << site.longitude;
+        EXPECT_NEAR(measured, atSite, 1e-12 * std::abs(scale))
+            << "lmax " << lmax << ", " << widthDeg << " degrees at "
+            << site.latitude << ", " << site.longitude;
+      }
+      // where the grid resolves the cap (its weights below rounding by
+      // degree lmax + 2, and its weight at the antipode too), the dual is
+      // the sampled Gaussian
+      const auto resolved =
+          CapMeanWeights(lmax + 2, width).back() < 1e-15 && widthDeg <= 20.0;
+      if (!resolved) continue;
+      const auto site = GeographicPoint{40.0, 30.0};
+      auto sampled = grid.FromFunction([&](double theta, double phi) {
+        const auto c = std::cos(theta) * std::cos(site.CoLatitude()) +
+                       std::sin(theta) * std::sin(site.CoLatitude()) *
+                           std::cos(phi - site.Longitude());
+        const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+        return std::exp(-0.5 * (d / width) * (d / width));
+      });
+      const auto norm = a * a * grid.Integrate(sampled);
+      for (auto& v : sampled) v /= norm;
+      const auto dual = CapMeanDual(grid, a, site, width);
+      const auto peak = *std::ranges::max_element(dual);
+      auto worst = 0.0;
+      for (auto i = std::size_t{0}; i < dual.size(); ++i) {
+        worst = std::max(worst, std::abs(dual[i] - sampled[i]));
+      }
+      std::cout << std::format(
+          "[lmax {}, {} degrees] the dual against the sampled Gaussian: {:.1e} of its "
+          "peak\n",
+          lmax, widthDeg, worst / peak);
+      EXPECT_LT(worst, 1e-12 * peak) << "lmax " << lmax << ", " << widthDeg;
+    }
+  }
 }
 
 TEST(Measurements, CarryTheirDuals) {

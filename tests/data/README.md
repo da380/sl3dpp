@@ -39,6 +39,7 @@ anything back.
 | `e1_traction_numbers.txt` | `make_e1_fixtures.py` | `TestTractionNumbers` | their traction numbers, without and with gravity |
 | `viscosity_log.nc`, `viscosity_mean.nc`, `viscosity_full3d.nc`, `viscosity_radial.nc` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` (and `viscosity_log.nc` `TestApps`, `TestAppsDistributed` and the 3D examples) | the `TestViscoelastic3D` body's viscosity as planetmodel model files: a zero-mean log perturbation, one with a lateral mean, stored fully 3D, and radial alone |
 | `viscosity_probes_log.txt`, `viscosity_probes_mean.txt`, `viscosity_probes_full3d.txt` | `make_model_viscosity_fixtures.py` | `TestModelViscosity` | planetmodel's own reading of those files at fixed off-grid points |
+| `fault_plane.nc`, `fault_growing.nc`, `fault_turning.nc`, `fault_curved.nc` | `make_fault_fixtures.py` | `TestAppsFaultFile` | planetmodel fault files (`planetmodel.fault/1`) on the homogeneous test ball: the twin of a planar fault of 1e22 N m, that plane's slip growing on a time axis and turning between two slices, and a curved megathrust with a tapered thrust. The fault module is planetmodel's after 1.5.1: run the script with `PYTHONPATH=<planetmodel checkout>/src` until a release carries it |
 
 ## From the Fortran sl3d
 

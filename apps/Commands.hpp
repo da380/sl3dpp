@@ -183,6 +183,12 @@ struct KernelsBlock {
   /// The kernels written, each named once, in the order of
   /// KernelParameter.
   std::vector<KernelParameter> parameters;
+  /// `lateral`: the kernels in the viscosity and the moduli as fields over
+  /// the memory nodes' grids whatever the background (true), or the radial
+  /// profiles of a radial run (false). Absent: fields on a model with
+  /// lateral structure, profiles on a radial one; false on a model with
+  /// lateral structure is refused when the run is built.
+  std::optional<bool> lateral;
   std::vector<MeasurementSpec> measurements;
   std::filesystem::path output;  ///< the directory the files land in
 
@@ -192,7 +198,8 @@ struct KernelsBlock {
 /// Reads a `kernels` block of a run, relative paths against `directory`,
 /// and holds it to the run: `method` (a word, default "continuous"),
 /// `parameters` (required, distinct words, each one the run gives; its
-/// absence refused, listing them), `measurements` (required, at least
+/// absence refused, listing them), `lateral` (true or false; true refused
+/// unless the parameters name the viscosity or the moduli), `measurements` (required, at least
 /// one, each located on the run's nodes and held to its band and its
 /// ocean) and `output` (required, the directory). The
 /// recording's members, `record_stride` and `trajectory`, are refused,

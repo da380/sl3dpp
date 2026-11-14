@@ -33,7 +33,7 @@ import argparse
 import numpy as np
 from planetmodel import MAXWELL, PREM, sample_deck, write_deck
 
-from inputs import DATA, maxwell_times, with_viscosity, wrote
+from inputs import DATA, keep_unchanged, maxwell_times, with_viscosity, wrote
 
 KNOTS_PER_LAYER = 8  # as tests/data/prem8.elastic.deck
 CMB = 3480.0e3  # m: PREM's core-mantle boundary
@@ -99,7 +99,8 @@ def main() -> None:
                "fluid" if model.is_fluid(lay.index) else "elastic")
         print(f"  {lay.interval[0] / 1e3:8.1f} - {lay.interval[1] / 1e3:6.1f}"
               f" km  {lay.name or '-':24s} {eta}")
-    path = wrote(write_deck(args.out, deck, MAXWELL))
+    path = wrote(keep_unchanged(
+        args.out, lambda target: write_deck(target, deck, MAXWELL))[0])
     print("Maxwell times eta / mu, from the deck as written (depths below "
           f"the surface at {surface / 1e3:g} km):")
     for top, bottom, eta, shortest, longest in maxwell_times(path):

@@ -8,8 +8,9 @@
  * surface loads (SurfaceLoadTerm) are load terms of surface mass density
  * that each state their place in the water budget and whether they move
  * the solid surface; a tide is a sum of coefficients of an external
- * potential (TideTerm); and seismic sources are point moment tensors and
- * planar faults inside the body (SeismicTerm). Without an `ocean` block
+ * potential (TideTerm); and seismic sources are point moment tensors,
+ * planar faults and the slip of fault files inside the body
+ * (SeismicTerm). Without an `ocean` block
  * the body has no ocean and no ice to change.
  *
  * A load term is one of
@@ -43,6 +44,8 @@
 
 #include <complex>
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <span>
 #include <string>
@@ -151,14 +154,21 @@ struct TideTerm {
   AmplitudeHistory history;  ///< the coefficient's factor through time
 };
 
-/// One seismic source: a point moment tensor, or a planar fault of uniform
-/// slip laid out as point sources (Fault.hpp). The moment is the stress
+/// A fault file's fault as read and, once the Earth is built, its point
+/// sources (PlaceFaultFiles): defined where the build reads fault files
+/// (SL3DPP_HAVE_FAULT_FILE).
+struct FaultFileState;
+
+/// One seismic source: a point moment tensor, a planar fault of uniform
+/// slip laid out as point sources, or a fault file's slip laid out as point
+/// sources at a quadrature's points (Fault.hpp). The moment is the stress
 /// glut itself: in a run through time it acts from its onset (the run's
 /// start when absent) and is held, times its amplitude history where one
-/// is given; in the static problem it acts whole. SI throughout: metres
-/// and N m.
+/// is given; in the static problem it acts whole. A fault file whose slip
+/// is on a time axis (`node`) is instead the slip its own rule reads at
+/// each time. SI throughout: metres and N m.
 struct SeismicTerm {
-  enum class Kind { Point, Fault };
+  enum class Kind { Point, Fault, FaultFile };
   Kind kind = Kind::Point;
   GeographicPoint site{};  ///< the point, or the fault's centroid
   double depth = 0.0;      ///< below the surface, m
@@ -171,6 +181,24 @@ struct SeismicTerm {
   double length = 0.0, width = 0.0;
   double scalarMoment = 0.0;
   int alongStrike = 1, downDip = 1;
+  /// A fault file (`fault_file`): the file; the quadrature, cells along
+  /// strike and down dip on every patch and Gauss-Legendre points each way
+  /// in a cell; how it is placed where its reference radius is not the
+  /// model's surface radius; and, for slip on a time axis, the time of the
+  /// terms' clock at which the file's time zero falls, in the clock's unit
+  /// (the window's start in a dated run, which reads the file by date), and
+  /// what a read outside the file's span does. The file is read, and its
+  /// sources formed, when the term is placed in the model (PlaceFaultFiles):
+  /// `fault`'s, null before.
+  std::filesystem::path file;
+  int cellsAlongStrike = 0, cellsDownDip = 0, points = 1;
+  std::optional<FaultPlacement> placement;
+  double time_origin = 0.0;
+  bool dated = false;
+  OutsideSpan outside = OutsideSpan::Refuse;
+  /// The terms' clock of a run through time; absent in the static problem.
+  std::optional<TermClock> clock;
+  std::shared_ptr<FaultFileState> fault;
   /// The onset on the terms' clock (TermClock), in its unit
   /// (`onset_kyr_bp` turned to it, or `onset`); absent: from the run's
   /// start.
@@ -190,9 +218,40 @@ struct SeismicTerm {
 /// The point sources of seismic terms at time t of the terms' clock, SI
 /// (radius in metres from the centre, moments in N m), for a surface of
 /// radius `surfaceRadius` metres. Every term gives its sources at every
-/// time, with zero moment before its onset.
+/// time, at its points (SeismicPointsOf), with zero moment before its
+/// onset. A fault file's are its placed sources (PlaceFaultFiles): a
+/// static file's slip times the term's factor; a file's slip on a time
+/// axis, at each point the moments of its slices weighted as the file's
+/// own rule reads them at the file's time (t - time_origin) in the term's
+/// unit: the sum over the slices of each slice's tensors times its hat
+/// function (`linear`: piecewise linear between the file's times, one at
+/// its own and zero at the others; `previous`: one from its time to the
+/// next), which is the moment of the slip the file reads at every time.
 [[nodiscard]] std::vector<PointSource> SeismicSourcesAt(
     std::span<const SeismicTerm> seismic, double t, double surfaceRadius);
+
+/// A seismic term's points, SI (radius in metres): a point source's one, a
+/// planar fault's patches' centres within the body (PlanarFaultSources), a
+/// fault file's quadrature points as placed, patch by patch.
+[[nodiscard]] std::vector<BodyPoint> SeismicPointsOf(const SeismicTerm& term,
+                                                     double surfaceRadius);
+
+/// Places the fault files of seismic terms in a model of surface radius
+/// `surfaceRadius` (m), its elastic moduli at a point `moduli` (SI): reads
+/// each file whole (planetmodel::ReadFaultFile), lays its quadrature and
+/// forms its sources (FaultSourcesOf), and holds a file's slip on a time
+/// axis to its span at every time of the terms' clock in `times` (the
+/// run's nodes there). `block` is the config's `forcing` block, where a
+/// fault is reported (at `seismic[k]`): a term the build cannot read (its
+/// planetmodel has no fault file), a file that cannot be read or is in a
+/// Cartesian frame, a static file given a time origin or `outside_span`, a
+/// file on a time axis in the static problem or beside an onset or a
+/// history, a reference radius not the model's surface radius without
+/// `place_by`, a point above the surface or in a fluid, and a node's time
+/// outside the span without `"outside_span": "hold"` are refused there.
+void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
+                     const std::function<LoveModuli(const BodyPoint&)>& moduli,
+                     const Json& block, std::span<const double> times);
 
 /// The load terms on a run's grid at one time, SI.
 struct BuiltLoads {
@@ -300,8 +359,9 @@ class TimedLoads {
     const std::filesystem::path& path, int lmax, const Json& member);
 
 /// One line describing a load term, a tide coefficient or a seismic
-/// source, for provenance: its pattern and, where set, its time origin,
-/// onset and amplitude history.
+/// source, for provenance: its pattern (a fault file's file, its patches
+/// and time axis, its quadrature and placement) and, where set, its time
+/// origin, onset and amplitude history.
 [[nodiscard]] std::string Describe(const LoadTerm& term);
 [[nodiscard]] std::string Describe(const TideTerm& term);
 [[nodiscard]] std::string Describe(const SeismicTerm& term);
@@ -419,7 +479,12 @@ struct Forcing {
 /// `fault` (`latitude`, `longitude`, `depth_km` of its centroid,
 /// `strike_deg`, `dip_deg`, `rake_deg`, `length_km`, `width_km`,
 /// `moment_nm`, and optionally `patches_along_strike` and
-/// `patches_down_dip`). At least one term of the lists is required. Their
+/// `patches_down_dip`) and `fault_file` (`file`, a planetmodel fault file
+/// read when it is placed, PlaceFaultFiles; `cells_along_strike`,
+/// `cells_down_dip`, optionally `points` and `place_by` (`depth` or
+/// `radius`), and for slip on a time axis `time_origin`, refused in a
+/// dated run, and `outside_span`). At least one term of the lists is
+/// required. Their
 /// times are given as the run's `clock` says (TermClock; absent, the
 /// static problem's, which has none). In the static problem and a DATED
 /// run they are dates, kyr before present, as the window's are: a history

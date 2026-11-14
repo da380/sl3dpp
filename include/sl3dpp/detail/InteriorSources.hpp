@@ -62,10 +62,12 @@ namespace sl3dpp::detail {
                     &source.moment.rt, &source.moment.rp, &source.moment.tp}) {
       *c *= toMatMoment;
     }
-    const auto forces = PointSourceForces(material, op.LMax(), sph, tor, source);
-    add(out.spheroidal, forces.spheroidal);
-    add(out.toroidal, forces.toroidal);
   }
+  // sources at one radius are formed together
+  const auto forces =
+      PointSourcesForces(material, op.LMax(), sph, tor, sources);
+  add(out.spheroidal, forces.spheroidal);
+  add(out.toroidal, forces.toroidal);
   for (auto& glut : gluts) {
     glut.radius /= toNdLength;
     for (auto* c : {&glut.moment.rr, &glut.moment.tt, &glut.moment.pp,

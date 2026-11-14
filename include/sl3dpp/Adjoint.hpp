@@ -30,6 +30,10 @@
  * trajectory: the adjoint stays linear with the time-reversed C(t) as its
  * coefficients (Yu et al. 2025, §3.3; the shoreline-motion singular terms
  * cancel), as pyslfp's `ocean_functions`.
+ *
+ * The same sweeps form the kernels in LATERAL structure about the radial
+ * run, their fields expanded on angular grids (LateralKernels.hpp,
+ * docs/adjoints.md §21).
  */
 
 #include <array>
@@ -45,6 +49,13 @@
 #include "sl3dpp/PointSource.hpp"
 
 namespace sl3dpp {
+
+class GridCoupling;
+struct Kernels3D;
+class LateralKernelSolver;
+namespace detail {
+class LateralAccumulator;
+}  // namespace detail
 
 /**
  * @brief A recorded forward trajectory, for the viscosity kernels: the
@@ -386,6 +397,25 @@ class AdjointSolver {
       const PointMaterialDirection& material = {}) const;
 
  private:
+  /// The route of the lateral kernels about this radial run
+  /// (LateralKernels.hpp, docs/adjoints.md §21).
+  friend class LateralKernelSolver;
+  /// The sweep of Options::method with the lateral kernels formed beside
+  /// the radial ones, on `coupling` (a coupling over this run's rheology
+  /// and memory points): in the viscosity (`viscosity`) and in the moduli
+  /// (`moduli`, which forms the radial moduli kernels too). The radial
+  /// kernels are the returned Kernels3D's `ice`.
+  [[nodiscard]] Kernels3D LateralSweep(
+      const GridCoupling& coupling, bool viscosity, bool moduli,
+      std::span<const double> times,
+      const std::map<std::size_t, Measurement>& measurements,
+      const ForwardTrajectory& trajectory,
+      std::span<const std::vector<double>> oceanFunctions) const;
+  /// The checks FirstOrderKernels makes of its arguments.
+  void CheckArguments(std::span<const double> times,
+                      const std::map<std::size_t, Measurement>& measurements,
+                      const ForwardTrajectory* trajectory,
+                      std::span<const std::vector<double>> oceanFunctions) const;
   [[nodiscard]] std::pair<Kernels, KernelDerivatives> DiscreteSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
@@ -402,16 +432,20 @@ class AdjointSolver {
       const ForwardTrajectory& trajectory,
       std::span<const std::vector<double>> oceanFunctions,
       const PointMaterialDirection& material) const;
+  /// The two sweeps; with `lateral`, the lateral kernels' fields are
+  /// handed to it as the sweep passes them.
   [[nodiscard]] Kernels DiscreteSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
-      std::span<const std::vector<double>> oceanFunctions) const;
+      std::span<const std::vector<double>> oceanFunctions,
+      detail::LateralAccumulator* lateral = nullptr) const;
   [[nodiscard]] Kernels ContinuousSweep(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
-      std::span<const std::vector<double>> oceanFunctions) const;
+      std::span<const std::vector<double>> oceanFunctions,
+      detail::LateralAccumulator* lateral = nullptr) const;
   /// The material pieces the second-order sweeps share (the variations
   /// of a direction, its forces, the tangent solution's recovery):
   /// detail/AdjointInternals.hpp.

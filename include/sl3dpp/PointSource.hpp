@@ -37,6 +37,7 @@
 #include <complex>
 #include <functional>
 #include <map>
+#include <span>
 #include <vector>
 
 #include "sl3dpp/DegreeOperator.hpp"
@@ -119,6 +120,21 @@ struct DegreeFields {
     const std::function<const DegreeOperator&(int)>& spheroidal,
     const std::function<const ToroidalOperator&(int)>& toroidal,
     const PointSource& source);
+
+/// The relative difference within which two radii are one shell to
+/// PointSourcesForces: rounding's, never a move of a source.
+inline constexpr double kSameShell = 1e-12;
+
+/// The forces of several point sources, summed: the sum of their
+/// PointSourceForces, at the cost of one source a radius. Sources at one
+/// point add their tensors; then those whose radii agree to kSameShell are
+/// formed together, at the first one's radius, from their moments summed
+/// (SourceMoments), which add. No sources, no forces.
+[[nodiscard]] DegreeFields PointSourcesForces(
+    const Material& material, int lmax,
+    const std::function<const DegreeOperator&(int)>& spheroidal,
+    const std::function<const ToroidalOperator&(int)>& toroidal,
+    std::span<const PointSource> sources);
 
 // -- the factored form --------------------------------------------------------
 //

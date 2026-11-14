@@ -79,6 +79,16 @@ A state's sea level is built from its topography and ice thickness by
 `SeaLevelFromTopography` (pyslfp's construction), as the `sl3d` program
 does.
 
+A generated input is replaced only where its content changed: the build's
+generators (`KeepUnchanged.hpp`) and the `make_*.py` scripts
+(`keep_unchanged` in `inputs.py`) write beside the target and keep the
+target, its bytes untouched, where the two hold the same dimensions,
+variables, values and attributes but for the creation stamp `created`
+(the same bytes, for a deck or a table). A run's hash covers its inputs'
+bytes, so the checkpoints and trajectory stores of a run stay its own
+across rebuilds that leave its inputs as they were, and a generator whose
+output does change rewrites it.
+
 ## Making inputs with planetmodel and pyslfp
 
 The `make_*.py` scripts write inputs for the `sl3d` program into `data/`,
@@ -95,6 +105,7 @@ uses it; `inputs.py` holds what they share.
 | `make_ice_history.py` | `ice7g.nc` (ICE-5G/6G/7G through pyslfp), or a hand-made disk ice sheet from numpy arrays, `synthetic_disk.nc` and its present day, `synthetic_disk_present.nc` | `ocean.ice` and `ocean.topography` (the state), a `thickness` term of `forcing.ice_change` (the history) |
 | `make_load_field.py` | `load_disk.nc`, `load_cap.nc` or `load_greenland.nc`, a surface mass density, static or (`--history`) on the run's clock | a `field` load term (`forcing.load`) |
 | `make_load_coefficients.py` | `<file>_lm.txt`: a load field's coefficient table, in the exchange table's harmonics | a `coefficients` load term (`forcing.load`) |
+| `make_megathrust.py` | `megathrust.nc`: a planetmodel fault file, a curved megathrust off the synthetic South America swept from a small-circle trench, a thrust tapered from 12 m. It needs planetmodel's fault module (after 1.5.1; until a release carries it, `PYTHONPATH=<planetmodel checkout>/src`), and without it says so and writes nothing | a `fault_file` seismic term (`forcing.seismic`); `sea_level_static_megathrust.json` |
 | `make_tide_history.py` | `configs/no_ocean_tide_oscillating.json`: a config of a sinusoidal degree-2 tide at a chosen period on a body without an ocean | `sl3d solve` |
 
 A data set a script needs that is not on disk yet (S40RTS for
@@ -147,6 +158,7 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | `sea_level_fingerprint_3d_ice7g` | `fingerprint.png`: the fingerprint on PREM with S40RTS's moduli, over the ocean and near Greenland, and its 3D minus radial difference |
 | `sea_level_3d_ice7g` (with `sea_level_1d_ice7g_custom`) | `sea_level.png`: the sea-level change since 26 ka in 3D and 3D minus radial, and relative sea-level histories at three sites, 3D and radial |
 | `sea_level_static_coseismic` | `coseismic.png`: maps centred on the fault of the vertical displacement, the horizontal displacement (its size, and arrows) and the relative sea-level change over the ocean, 2° Gaussian means (the fields the run writes smoothed, `output.smoothing`), the fault's surface projection drawn, and all of them along a profile across the fault, with the vertical displacement's point values, whose ripples are the truncation |
+| `sea_level_static_megathrust` | `coseismic.png`: as `sea_level_static_coseismic`'s, the fault's outline and trench drawn from its file (with planetmodel's fault module), the profile through the middle of the fault across its strike there |
 | `sea_level_postseismic`, `no_ocean_postseismic`, `no_gravity_postseismic`, `no_ocean_seismic` | `postseismic.png`: maps centred on the source of the vertical displacement at the event and of its change since then at two later nodes (near twice the shortest Maxwell time, and the last), of the sea-level change (without an ocean, the horizontal motion) since the event at the last, and the vertical displacement and the sea level (without an ocean, the horizontal displacement up dip) through time at three places, all 2° Gaussian means (the fields the run writes smoothed), the co-seismic step included, on a time axis linear about the event and logarithmic after it with the deck's Maxwell times marked |
 | `kernel_postseismic` | `kernels.png`: each measurement's kernels in the moment tensors of the fault's patches (the six components at each patch, held from the onset), their contraction with the fault's own mechanism (the derivative per unit of each patch's slip, summing to the measurement with the fault's moment), and the radial viscosity kernels |
 | `no_gravity_postseismic` against `no_ocean_postseismic` | `with_and_without_gravity/postseismic.png`: the vertical and horizontal displacement through time at three places without gravity and with it on one panel, and the vertical displacement across the fault at the event and the last node, 2° Gaussian means |

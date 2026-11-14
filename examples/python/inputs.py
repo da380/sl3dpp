@@ -2,8 +2,9 @@
 program with planetmodel and pyslfp: the two radial deck formats sl3d
 reads, a deck read back as a planetmodel model, an angular grid from
 latitude and longitude arrays, the surface files of ice histories,
-present-day states and loads, and the check that a pyslfp data set is on
-disk before anything is downloaded.
+present-day states and loads, each written beside its target and replacing
+it only where the content changed (keep_unchanged), and the check that a
+pyslfp data set is on disk before anything is downloaded.
 
 Every path is relative to the current directory, build/examples, whose
 data/ holds the examples' inputs (docs/sl3d-configs.md describes the
@@ -35,6 +36,61 @@ def wrote(path, what: str = "") -> Path:
     return Path(path)
 
 
+# ------------------------------------------------- unchanged inputs kept
+def _netcdf_content(group, root: bool = True) -> dict:
+    """A netCDF group's content, comparable: its attributes (the root's
+    `created` stamp aside), dimensions, variables (type, dimensions,
+    attributes, values) and subgroups."""
+    out = {}
+    for name in group.ncattrs():
+        if root and name == "created":
+            continue
+        out[f"attribute {name}"] = repr(group.getncattr(name))
+    for name, dim in group.dimensions.items():
+        out[f"dimension {name}"] = len(dim)
+    for name, var in group.variables.items():
+        var.set_auto_maskandscale(False)
+        values = np.asarray(var[...])
+        out[f"variable {name}"] = (
+            str(var.dtype), var.dimensions,
+            tuple((a, repr(var.getncattr(a))) for a in var.ncattrs()),
+            values.tobytes() if values.dtype != object else repr(values.tolist()))
+    for name, sub in group.groups.items():
+        for key, value in _netcdf_content(sub, False).items():
+            out[f"{name}/{key}"] = value
+    return out
+
+
+def same_but_created(a, b) -> bool:
+    """Whether two files hold the same content: two netCDF files the same
+    dimensions, variables, values and attributes but for the root group's
+    `created` stamp; any other two the same bytes."""
+    a, b = Path(a), Path(b)
+    if a.suffix != ".nc":
+        return a.read_bytes() == b.read_bytes()
+    from netCDF4 import Dataset
+    with Dataset(a) as first, Dataset(b) as second:
+        return _netcdf_content(first) == _netcdf_content(second)
+
+
+def keep_unchanged(path, write) -> tuple[Path, bool]:
+    """Writes a generated input through `write(target)` beside `path`
+    (<stem>.new<suffix>) and replaces `path` with it only when the content
+    changed (same_but_created): an unchanged input keeps its bytes, and so
+    the hash a run takes of its inputs, and the run's checkpoints and
+    trajectory stores stay its own. Returns the path and whether it was
+    replaced."""
+    path = Path(path)
+    beside = path.with_name(f"{path.stem}.new{path.suffix}")
+    write(beside)
+    if path.exists() and same_but_created(beside, path):
+        beside.unlink()
+        print(f"kept, unchanged, {path}")
+        return path, False
+    beside.replace(path)
+    return path, True
+
+
 # ------------------------------------------------------------------ decks
 def with_viscosity(model, layers, viscosity: float):
     """The model with a constant viscosity (Pa s) on the layers given, each
@@ -56,10 +112,10 @@ def write_decks(model, stem) -> tuple[Path, Path]:
     Maxwell (GIA) format with the viscosity `nan` in elastic and fluid
     layers ("format": "maxwell"), and <stem>.elastic.deck, the elastic
     structure alone ("format": "elastic")."""
-    gia = write_deck(f"{stem}.gia.deck", sample_deck(model, MAXWELL.columns),
-                     MAXWELL)
-    elastic = write_deck(f"{stem}.elastic.deck",
-                         sample_deck(model, ELASTIC.columns), ELASTIC)
+    gia, _ = keep_unchanged(f"{stem}.gia.deck", lambda target: write_deck(
+        target, sample_deck(model, MAXWELL.columns), MAXWELL))
+    elastic, _ = keep_unchanged(f"{stem}.elastic.deck", lambda target: write_deck(
+        target, sample_deck(model, ELASTIC.columns), ELASTIC))
     return wrote(gia), wrote(elastic)
 
 
@@ -160,11 +216,11 @@ def write_ice_history(path, grid, dates_kyr_bp, ice_thickness, topography,
             np.asarray(topography)[order],
             meaning="surface height above sea level, the ice included",
             **node)}
-    return write_surface(Path(path), grid, fields=fields, title=title,
-                         source=Path(__file__).name, time=-dates[order],
-                         scales=Scales(time=KYR),
-                         meta={"time": "kiloyears relative to the present, "
-                                       "negative in the past"})
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields=fields, title=title, source=Path(__file__).name,
+        time=-dates[order], scales=Scales(time=KYR),
+        meta={"time": "kiloyears relative to the present, "
+                      "negative in the past"}))[0]
 
 
 def write_state(path, grid, ice_thickness, topography, *, title: str):
@@ -177,8 +233,9 @@ def write_state(path, grid, ice_thickness, topography, *, title: str):
         "topography": SurfaceVariable(
             topography, dimensions=LENGTH,
             meaning="surface height above sea level, the ice included")}
-    return write_surface(Path(path), grid, fields=fields, title=title,
-                         source=Path(__file__).name)
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields=fields, title=title,
+        source=Path(__file__).name))[0]
 
 
 def write_load(path, grid, load, *, times_kyr=None, title: str):
@@ -189,17 +246,18 @@ def write_load(path, grid, load, *, times_kyr=None, title: str):
     if times_kyr is None:
         variable = SurfaceVariable(load, dimensions=SURFACE_DENSITY,
                                    meaning="surface mass density")
-        return write_surface(Path(path), grid, fields={"load": variable},
-                             title=title, source=Path(__file__).name)
+        return keep_unchanged(path, lambda target: write_surface(
+            target, grid, fields={"load": variable}, title=title,
+            source=Path(__file__).name))[0]
     variable = SurfaceVariable(load, support="node",
                                time_interpolation="linear",
                                dimensions=SURFACE_DENSITY,
                                meaning="surface mass density")
-    return write_surface(Path(path), grid, fields={"load": variable},
-                         title=title, source=Path(__file__).name,
-                         time=np.asarray(times_kyr, float),
-                         scales=Scales(time=KYR),
-                         meta={"time": "kiloyears on the run's clock"})
+    return keep_unchanged(path, lambda target: write_surface(
+        target, grid, fields={"load": variable}, title=title,
+        source=Path(__file__).name, time=np.asarray(times_kyr, float),
+        scales=Scales(time=KYR),
+        meta={"time": "kiloyears on the run's clock"}))[0]
 
 
 # --------------------------------------------------------- data on disk

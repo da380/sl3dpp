@@ -114,6 +114,35 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   "gaussian", "width_deg": 2}`, as `<field>_smoothed`), which the figure
   (`coseismic.png`) draws, with the point values along a profile across
   the fault for their ripples. About 2.5 s and 1.2 GB on four threads.
+- **`sea_level_static_megathrust.json`** — the static problem forced by a
+  fault given by its slip, a planetmodel fault file (`forcing.seismic`'s
+  `fault_file`): a curved megathrust off the synthetic South America, its
+  trench an arc of 940 km near 74° W from 24° S to 16° S (a small circle
+  about a pole inland), the interface descending east at 10° at the trench
+  steepening to 25° at its base, 50 km deep, and a thrust of 12 m at its
+  middle tapered to nothing at every edge, about 2.4e22 N m on this deck
+  (Mw 8.9), on the present day's state on the post-seismic Earth
+  `../data/prem8.postseismic.deck` at lmax 96 with full rotational
+  feedback: `out/sea_level_static_megathrust/sea_level_static_megathrust.nc`.
+  `make_megathrust.py` (examples/README.md) writes the file,
+  `../data/megathrust.nc`, through planetmodel's swept patch; it needs
+  planetmodel's fault module (planetmodel after 1.5.1), and `run_all.sh`
+  runs this config only once the file exists. The file holds the slip
+  alone: sl3d lays a quadrature of 36 by 6 cells over the patch, a point at
+  each cell's centre, and forms each point's moment from the deck's moduli
+  there, the slip and the patch's normal. Its positions are on the Earth's
+  mean sphere, 6371 km, and the deck ends at 6368 km (PREM without its
+  ocean), so the config places the fault by depth (`"place_by":
+  "depth"`). In 2° means the sea floor rises by up to 0.13 m over the
+  fault and moves by up to 0.88 m towards the trench, the sea level
+  falling by the uplift; the ocean's water is conserved, the sea level
+  change integrating to 5e-17 of its magnitude over the ocean. The figure
+  (`coseismic.png`) is `sea_level_static_coseismic`'s, the fault's outline
+  and trench drawn from the file. The 216 points lie at 102 radii (the
+  patch is a surface of revolution about the trench's pole, its points
+  pairing across the arc's middle), and the sources at one radius are
+  formed together: about 10 s and 1.2 GB on four threads, against 20 s
+  with every point formed on its own.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
   relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
@@ -184,9 +213,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_1d/sea_level_1d.nc`. It also writes checkpoints every six
   nodes to `out/sea_level_1d/checkpoints`, so a rerun resumes rather than
   starting again; a rerun after the config or an input has changed is
-  refused instead, until `"restart": false` is set or the directory removed.
-  `run_all.sh` removes the directory before its run, a build being free to
-  write the inputs again.
+  refused instead, until `"restart": false` is set or the directory removed
+  (a rebuild leaves the synthetic Earth as it was unless its content
+  changed, so its checkpoints stay the run's).
 - **`sea_level_1d_calibrated.json`** — that deglaciation with migrating
   shorelines, its initial sea level calibrated against the synthetic Earth's
   present day rather than read at 21 ka (the device a thickness-only ice
@@ -233,6 +262,18 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
 - **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
   sea level and decay time, with the log-viscosity kernels of the 3D
   viscosity: `out/kernel/`. About 3 s on four threads.
+- **`kernel1d_lateral.json`** (`sl3d kernel`) — the same two measurements
+  about the radial Earth (`kernel.json`'s deck without its viscosity file),
+  with `"kernels": {"lateral": true}`: the kernels in the log viscosity and
+  in the moduli as fields over the memory nodes' grids, by the radial
+  sweeps with the grid expansion (no 3D solve), written as `kernel.json`'s
+  are (`<name>_viscosity_kernels.nc`, `<name>_moduli_kernels.nc`) beside the
+  radial profiles they average to (`<name>_viscosity_kernel.txt`,
+  `<name>_moduli_kernel.txt`): `out/kernel1d_lateral/`. The figure
+  (`kernel1d_lateral/viscosity_kernels.png`) maps the log-viscosity
+  kernel at the depth where it is largest, cuts a section through Hudson
+  Bay and draws its lateral mean and rms against radius. About 1.3 s on
+  four threads.
 - **`kernel_static_moduli.json`** (`sl3d kernel`) — the static problem
   without an ocean on the radial `../data/prem8.elastic.deck` at lmax 32,
   under a disk of 1e5 kg m^-2 over Hudson Bay: the kernels in the load and
@@ -267,8 +308,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   nodes the measurements move by 0.4 to 2.1% and the viscosity kernels
   by 4% (the GPS station's) and 9% (the gauge's), a kernel carrying more
   of the time step's error than the field it is of (the time-step study,
-  below). `run_all.sh` removes a former store first,
-  its inputs being the build's to rewrite. The figure (`kernels.png`)
+  below). The figure (`kernels.png`)
   draws the moment kernels per patch, held from the onset, and their
   contraction with the fault's own mechanism, which gives back each
   measurement's value with the fault's moment.
@@ -486,19 +526,19 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   wrong by 0.5–0.6% (relative L2 over the sphere) under the exponential
   trapezoid and 0.7–1.0% under backward Euler, and the measured values by
   0.5–0.8%; the viscosity kernel is wrong by 3.3–4.0% by the discrete
-  adjoint and 13–15% by the continuous one. The errors, at 2, 1, 1/2, 1/4
+  adjoint and 13–16% by the continuous one. The errors, at 2, 1, 1/2, 1/4
   and 1/8 kyr: sea level by the exponential trapezoid 1.7e-2, 6.2e-3,
   2.0e-3, 5.5e-4, 1.4e-4 (at 10 ka; 1.1e-2 to 1.1e-4 at 6 ka), by backward
   Euler 2.1e-2, 1.0e-2, 5.5e-3, 2.8e-3, 1.4e-3 (1.4e-2 to 1.1e-3 at 6 ka);
   the kernel at 6 ka by the discrete adjoint 7.7e-2, 4.0e-2, 1.7e-2,
-  5.5e-3, 1.4e-3, by the continuous 0.33, 0.16, 5.9e-2, 1.8e-2, 4.9e-3.
+  5.5e-3, 1.4e-3, by the continuous 0.34, 0.16, 6.0e-2, 1.8e-2, 4.9e-3.
   Backward Euler is first order throughout; the exponential trapezoid and
   both adjoints reach second order (1.9–2.0) only once the step comes down
   to the Maxwell times, and converge more slowly above them. At the
   reference step the two adjoints' kernels agree to 4e-4. The lesson: at
   a given step the kernels are several times less accurate than the
   fields they are kernels of (here five to eight times by the discrete
-  adjoint and twenty to thirty by the continuous one). The discrete adjoint is the exact
+  adjoint and twenty to thirty-three by the continuous one). The discrete adjoint is the exact
   gradient of the time-stepped model, not the exact gradient of the
   Earth's: it inherits the time step's error, and more of it than the
   fields carry. A step that serves the forward run may not serve the

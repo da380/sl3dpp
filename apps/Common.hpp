@@ -112,8 +112,11 @@ void AllowTopLevel(const Json& top, std::span<const std::string_view> allowed);
 
 /// Refuses the `solver` members that set the 3-D step (`step`,
 /// `step_rtol`, `step_max_iterations`, `transform_degrees`, `cache_mb`)
-/// for a run on a radial model, `what` naming the run.
-void RefuseThreeDSolver(const Json& top, std::string_view what);
+/// for a run on a radial model, `what` naming the run; with `transforms`
+/// the grids' members (`transform_degrees`, `cache_mb`) pass, for the
+/// lateral kernels of a radial run, which expand on the grids.
+void RefuseThreeDSolver(const Json& top, std::string_view what,
+                        bool transforms = false);
 
 /// The Earth of a run: the deck's model and material at lmax, and the
 /// viscosity and moduli files' contents where given.
@@ -146,6 +149,20 @@ struct BuiltEarth {
 /// model files of `model.viscosity` and `model.moduli` read about their
 /// chosen references.
 [[nodiscard]] BuiltEarth BuildEarth(const Run& run, const Json& top);
+
+/// The elastic moduli of a run's Earth at a point (radius in metres), SI:
+/// the deck's (LoveModuliAt) and, where the moduli file varies laterally,
+/// its relative perturbations there of the shear and bulk moduli, s and b,
+/// taken against the deck's Voigt-averaged mu and kappa as the 3-D
+/// operator takes them (delta mu = s mu, delta kappa = b kappa, an
+/// isotropic change of the deck's tensor).
+[[nodiscard]] std::function<LoveModuli(const BodyPoint&)> ModuliOf(
+    const BuiltEarth& earth);
+
+/// Places the run's fault files (PlaceFaultFiles) in its Earth: the deck's
+/// surface radius, the moduli at each point (ModuliOf), and the run's
+/// nodes on the terms' clock. Nothing to do without one.
+void PlaceSeismicSources(Run& run, const BuiltEarth& earth, const Json& top);
 
 /// The Maxwell rheology of a run through time: the viscosity file's
 /// radial reference where given, the deck's viscosity column otherwise.

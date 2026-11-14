@@ -211,14 +211,23 @@ std::vector<double> CapMeanDual(const SurfaceGrid& grid, double a,
   }
   const auto colat0 = site.CoLatitude();
   const auto lon0 = site.Longitude();
-  auto dual = grid.FromFunction([&](double theta, double phi) {
-    const auto d =
-        std::acos(std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0));
-    return std::exp(-0.5 * (d / width) * (d / width));
+  const auto lmax = grid.LMax();
+  const auto weights = CapMeanWeights(lmax, width);
+  // the cap's band-limited kernel about the site, sum_l lambda_l (2l + 1)
+  // P_l(cos d) / (4 pi a^2): its pairing with a field is the field's
+  // expansion weighted by lambda_l and synthesised there
+  return grid.FromFunction([&](double theta, double phi) {
+    const auto x = std::clamp(CosDistance(theta, phi, colat0, lon0), -1.0, 1.0);
+    auto before = 1.0, current = x;
+    auto sum = weights[0] + (lmax >= 1 ? 3.0 * weights[1] * x : 0.0);
+    for (auto l = 2; l <= lmax; ++l) {
+      const auto next =
+          ((2.0 * l - 1.0) * x * current - (l - 1.0) * before) / l;
+      sum += (2.0 * l + 1.0) * weights[static_cast<std::size_t>(l)] * next;
+      before = std::exchange(current, next);
+    }
+    return sum / (4.0 * std::numbers::pi * a * a);
   });
-  const auto norm = a * a * grid.Integrate(dual);
-  for (auto& v : dual) v /= norm;
-  return dual;
 }
 
 std::vector<double> CapMeanWeights(int lmax, double width) {

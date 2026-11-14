@@ -7,7 +7,8 @@ Yu et al. 2025 (equation references below are to that paper); the 3D
 path is sl3dpp's own. Sections 6a and 6b give the 3D continuous sweep
 and the design of the discrete 3D transpose; §8–§17 the tangent-linear
 runs, the second-order adjoints, the discrete 3D transpose (§12), the
-material derivatives and kernels, and their distribution over radius.
+material derivatives and kernels, and their distribution over radius;
+§21 the kernels in lateral structure about a radial background.
 The overview is [design.md](design.md) §7.*
 
 ## 1. Both formulations, continuous preferred
@@ -2072,3 +2073,190 @@ outside the water budget, the layer, the thickness, the initial sea
 level, the moments, the relaxation times or log viscosity, the moduli)
 and the continuous Hessian converging to the discrete at second order,
 1D and 3D.
+
+## 21. Lateral kernels about a radial background
+
+The kernels of a measurement in LATERAL structure — each branch's log
+viscosity, the bulk modulus κ(x) and the unrelaxed shear modulus μ(x),
+as fields over the memory nodes' angular grids — are the starting point
+of a 3D inversion, and about a radial Earth they need no 3D solve (Al-Attar
+& Tromp 2014; Crawford et al. 2018): the forward and adjoint problems
+separate by degree, coupled only through the sea level equation, and a
+kernel is the pointwise product of the forward and adjoint fields
+expanded in space, accumulated over the time steps.
+
+**What the radial route computes.** The radial sweeps (§3, §13e, §13g,
+§19) run as they do for the radial kernels, and at each place where they
+pair an adjoint field with a forward one they hand both, degree by
+degree, to an accumulator (`detail/LateralKernels.hpp`) that expands them
+on the grids of a `GridCoupling` over the radial model's memory points
+(`AddScalarState` for the spheroidal internal variables and strain
+scalars, `AddToroidalScalarState` for the toroidal ones, whose components
+are those of a strain of W alone, `AddStrainOfSolution` and
+`AddDilatationOfSolution` for solutions), contracts them pointwise with
+the energy metric of §6a and adds them with the 3D sweeps' weights:
+
+| Kernel | Method | Adjoint field | Forward field | Weight |
+| --- | --- | --- | --- | --- |
+| itau, branch k | continuous | the adjoint memory m†_k | d − m_k | pairing × time weight × μ_k Wq r² / itau_k |
+| itau, branch k | discrete | the dual of the decayed memory, m̃†_k | dE m_k + dA d⁰ + dB d¹ of the step | dt Wq r² |
+| μ | continuous | the strain of the adjoint displacement λ | Σ_k f_k m_k − d | pairing × time weight × Wq r² |
+| μ | discrete | the strain of the step's dual solution y | Σ_k f_k m̃_k − (1 − Σ_k f_k b_k) d¹ | Wq r² |
+| κ | both | the dilatation D(λ) or D(y) (the scalar companion) | D(x), x the full forward solution | minus μ's, without r² |
+
+with the observations' lumped pairings (continuous, no time weight) and
+the start's transposed unrelaxed solve (discrete, every weight one) as in
+§13e–§13g. The log-viscosity kernel is −itau K_itau; the means over the
+sphere are kept beside the fields (`itauKernelSpherical`,
+`kappaKernelSpherical`, `muKernelSpherical`), and the result is a
+`Kernels3D` in the 3D sweeps' layout, pairing and units (§4), its `ice`
+the radial sweep's own kernels.
+
+**Why it is the 3D sweep.** With δ = 0 and no lateral moduli the 3D
+step's lateral weight vanishes, its fixed point closes in one pass, and
+every grid field the 3D sweeps hold — the forward state and strain, the
+adjoint state, the duals, the dual and adjoint solutions — is the
+synthesis of the degree-domain field the radial sweep holds at the same
+node of the same step; the scheme weights, the branch moduli and
+fractions, the effective factor and itau are radial. The 3D kernel
+integrands are therefore pointwise products of syntheses of the radial
+sweep's fields, at the same nodes in time with the same weights, which is
+what the accumulator forms. The scalings are fixed by the pairings: the
+continuous adjoint state and the solutions are natural coefficients; a
+discrete sweep's dual of a solution pairs by the real-column dot
+product, which counts each order m > 0 twice, so the 3D dual is it over
+(1, 2, 2, …); and the discrete dual of the decayed memory carries the
+memory pairing's weight k_s Wq of each scalar besides (k_s the force
+weights k²(k²−2), 4/3, k²), which the energy metric of §6a reproduces in
+the angle-uniform reduction — dividing it out gives the 3D sweep's dual
+m̃† = m† + μ_k Exit(x†). The radial kernels are these fields' means.
+
+The 3D integrands read every field over every node of the coupling: the
+forward strain in the moduli kernels is the full solution's (the radial
+state carries strain on its memory window only, the viscous elements, so
+the elastic elements' comes from the solution), and the toroidal fields
+enter beside the spheroidal ones. A measurement of the toroidal potential
+W makes a toroidal adjoint even about a load-driven run, and a seismic
+source a toroidal forward run; their products with the spheroidal fields
+integrate to zero over the sphere but not pointwise, so the radial
+sweeps carry the toroidal adjoint wherever a measurement reads W
+(the toroidal partner of §19, its decayed-memory duals read off
+`ToroidalViscoelastic::StepTransposed`), and the forward toroidal states
+of a source-driven run are the trajectory's.
+
+**Where the nodes are.** `LateralCoupling`: the operator's memory points
+at its lmax, over the viscous elements when the viscosity's kernels
+alone are asked for, and over every solid element above the one holding
+the centre when the moduli's are (an elastic element's viscosity kernel
+is then zero) — the elements the 3D operator carries for a lateral
+viscosity and for lateral moduli over the whole solid, and
+`ElasticPerturbation3D`'s. The transforms may be cut by depth
+(`transform_degrees`) as the 3D classes' are.
+
+**The entry point.** `LateralKernelSolver` (`LateralKernels.hpp`) is the
+one route to lateral kernels: built on an `Evolution` it runs the radial
+sweeps with the grid expansion, through time or at one node (the static
+problem); built on an `Evolution3D` it runs the 3D sweeps. Its
+`Coupling()` is the layout either way.
+
+The static problem without an ocean or rotational feedback has a second
+route, `ElasticPerturbation3D::StaticKernels` of the static adjoint and
+forward solutions (§13h). On a radial body the two agree at every grid
+value at 2.4e-12 (κ) and 9e-13 (μ) at lmax 8, and 1.5e-12 / 2.7e-13 at
+lmax 32 and 64 (`LateralKernels.TheStaticProblemIsElasticPerturbation3DsStaticKernels`,
+the guard of the entry point's static case), at the same cost: 0.288 s
+against 0.280 s at lmax 32 and 2.20 s against 2.12 s at lmax 64 on four
+threads (the radial route's time includes its sweep's sea level solves;
+the expansions dominate both). The radial route takes an ocean, the
+rotational feedback, sources, every measurement and either point set, so
+it is the entry point's static route; `StaticKernels` stays the transpose
+of `Force` (§13b, §13j), gated against it.
+
+**Gates** (`TestLateralKernels`, prem8 with a 1e21 Pa s mantle at lmax 8):
+
+- *Zero lateral structure.* Against the 3D sweep of the same method on
+  a `Viscoelastic3D` with δ ≡ 0 (its nodes the viscous elements'), and
+  against one whose memory nodes cover the whole solid (a lateral shear of
+  one part in 1e300, which no solve sees), every field at every grid
+  value: a melting load on the analytic ocean measured in the sea level
+  and the displacement, GLL and Gauss points, both schemes; the full
+  rotational feedback with every field measured at three nodes (the
+  toroidal potential among them) on uneven steps; no ocean, a load and a
+  tide, the axial feedback; a growing point source, with and without a
+  measurement of W, both schemes; migrating shorelines with a solved
+  start (a load and a layer at the first node); and the static problem
+  on a branchless and on the Maxwell rheology, with an ocean and without.
+  The discrete route equals the 3D sweep at 3e-14 – 3.4e-12, the
+  continuous at 9e-14 – 3.3e-11 (the 3D fixed point's and conjugate
+  gradients' tolerances, 1e-12); the load kernels at 1e-14. The continuous 3D sweep
+  under lateral moduli closes its jumps by the instantaneous fixed point,
+  which departs from its own Love-number closure — and from the radial
+  sweep — by 1e-3 in the load kernels when a measurement of the
+  potential meets the rotational feedback, and does not converge (at
+  1e-12) for a measurement of W under the full feedback; those two are
+  compared with the δ ≡ 0 operator alone.
+- *Differences of the 3D run.* The kernels paired with lateral
+  perturbations of the log viscosity, the shear and the bulk modulus,
+  each of degree 2 and of degree 6, against central differences of the 3D
+  forward run with the perturbation (steps of 2% and 1%, Richardson): the
+  discrete kernels at 2e-11 – 5e-10, the continuous at their commute
+  error, 0.15–2.9% at 2 kyr steps on a 1e22 Pa s mantle, falling by 3.4–4.4
+  as the steps halve.
+- *Means and recordings.* The means over the sphere are the radial
+  kernels to 2e-12 (itau at the GLL points, κ and μ at both point sets,
+  about a source-driven run); a recording kept at every second node
+  gives the lateral kernels of the full recording at 2e-12, as it gives
+  the radial ones.
+
+**Cost.** The expansions are the route's cost: per node, two tensor
+syntheses for each branch's viscosity kernel (the adjoint and the
+forward field, both sides of a node in one where the state does not jump
+between them) and two tensor and two scalar syntheses for the moduli's,
+and no fixed point. On four threads, ten 1 kyr steps of a 1e21 Pa s
+mantle, a sea-level and a displacement measurement (the disabled probe
+`LateralKernels.CostAgainstTheAlternatives`, `SL3DPP_LMAX`), against the
+radial kernels alone and the 3D sweep at zero lateral structure with its
+forward run (its nodes over the whole solid for the moduli):
+
+| lmax | kernels | method | radial kernels | radial route | 3D sweep + 3D run | recordings, radial / 3D |
+| --- | --- | --- | --- | --- | --- | --- |
+| 16 | viscosity | discrete | 0.05 s | 0.16 s | 0.58 + 0.29 s | 24 / 160 MB |
+| 16 | viscosity | continuous | 0.06 s | 0.19 s | 0.37 + 0.29 s | 24 / 160 MB |
+| 16 | viscosity, moduli | discrete | 0.10 s | 0.46 s | 2.09 + 0.41 s | 24 / 246 MB |
+| 16 | viscosity, moduli | continuous | 0.16 s | 0.65 s | 2.92 + 0.41 s | 24 / 246 MB |
+| 32 | viscosity | discrete | 0.37 s | 1.20 s | 5.12 + 2.09 s | 167 / 1200 MB |
+| 32 | viscosity | continuous | 0.44 s | 1.33 s | 3.01 + 2.09 s | 167 / 1200 MB |
+| 32 | viscosity, moduli | discrete | 0.63 s | 3.51 s | 18.1 + 3.3 s | 167 / 1842 MB |
+| 32 | viscosity, moduli | continuous | 1.13 s | 5.00 s | 25.9 + 3.3 s | 167 / 1842 MB |
+
+The radial run itself is 0.07 s at lmax 16 and 0.33 s at 32 against the
+3D run's 0.29–0.41 s and 2.1–3.3 s. So the lateral kernels about a radial
+Earth cost three to six times its radial kernels; with the forward runs
+counted, 2.5–4.7 times less than the 3D route for the viscosity's and
+4.8–5.6 times less with the moduli's, the gain growing with lmax, on a
+recording seven to eleven times smaller; the kernels themselves (each a field over
+the nodes' grids, 44 MB for the viscosity's and 134 MB with the moduli's
+at lmax 32 over 568 and 872 nodes) are the same size either way. The
+transforms dominate, and the by-depth transform degrees cut them as they
+cut the 3D route's.
+
+**Over ranks.** A radial run is one process's (`sl3d` runs it on the
+first rank), and so are its lateral kernels. The expansion is local to
+each node, so it would distribute over radial segments with nothing
+new: every rank runs the radial sweep (cheap, and deterministic up to the
+transforms' rounding), its accumulator holding a coupling over its own
+elements (`GridCoupling::Options::elements`, cut by `TransformWeights`),
+and the fields gathered at the end as the 3D app gathers its own. Not
+built.
+
+**Not built: the lateral direction.** The tangent-linear run along a
+lateral perturbation about a radial Earth (the Born response through
+time) does not separate by degree: the perturbation's force on each
+step, Entry(δW ⊙ Exit(x)) and its bulk companion, couples every degree
+and order and turns spheroidal motion toroidal, so the tangent state is
+a 3D field however radial the background. It is the 3D tangent-linear
+run (§10, §13d) on a δ ≡ 0 operator, whose within-step fixed point closes
+at once; a dedicated route would save that fixed point's second pass and
+the 3D forward run (the base fields synthesised from the radial
+trajectory, as here), not the tangent's own transforms. The second-order
+sweeps along such a direction need that run.

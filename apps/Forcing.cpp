@@ -16,7 +16,23 @@
 
 #include "sl3dpp/io/FieldHistory.hpp"
 
+#include <planetmodel/version.hpp>
+#ifdef SL3DPP_HAVE_FAULT_FILE
+#include <planetmodel/faultfile.hpp>
+#endif
+
 namespace sl3dpp::app {
+
+#ifdef SL3DPP_HAVE_FAULT_FILE
+struct FaultFileState {
+  planetmodel::Fault fault;
+  /// The sources, once placed (PlaceFaultFiles).
+  FaultSources sources{};
+  bool placed = false;
+};
+#else
+struct FaultFileState {};
+#endif
 
 namespace {
 
@@ -366,15 +382,143 @@ TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
   return term;
 }
 
-/// One seismic source: a point moment tensor or a planar fault; `timed`, a
-/// run through time's, which alone takes an onset and a history.
-SeismicTerm ReadSeismicTerm(const Json& item, bool timed = true,
-                            const TermClock& clock = {}) {
+/// A seismic term's `fault_file`: the file's path, the quadrature, the
+/// placement and, for slip on a time axis, the time origin (a run counting
+/// forwards; refused in a dated run, which reads such a file by date) and
+/// what a read outside the span does. The file itself is read, and held to
+/// the rest of the config, when it is placed (PlaceFaultFiles); `timed`, a
+/// run through time's, on the terms' `clock`.
+void ReadFaultFileTerm(SeismicTerm& term, const Json& item,
+                       const std::filesystem::path& directory, bool timed,
+                       const TermClock& clock) {
+  const auto& member = item.At("fault_file");
+  if (!member.IsObject()) {
+    Fail(member,
+         "is not a fault file input: an object of `file`, "
+         "`cells_along_strike` and `cells_down_dip`");
+  }
+  Allow(member, {"file", "cells_along_strike", "cells_down_dip", "points",
+                 "place_by", "time_origin", "outside_span"});
+  term.kind = SeismicTerm::Kind::FaultFile;
+  term.file = PathOf(member, "file", directory);
+  term.cellsAlongStrike = Integer(member, "cells_along_strike");
+  term.cellsDownDip = Integer(member, "cells_down_dip");
+  term.points = Integer(member, "points", 1);
+  for (const auto& [name, count] :
+       {std::pair{"cells_along_strike", term.cellsAlongStrike},
+        std::pair{"cells_down_dip", term.cellsDownDip},
+        std::pair{"points", term.points}}) {
+    if (count < 1) Fail(member.At(name), "is not a positive count");
+  }
+  if (Has(member, "place_by")) {
+    term.placement = Choice<FaultPlacement>(
+        member.At("place_by"),
+        {{"depth", FaultPlacement::Depth}, {"radius", FaultPlacement::Radius}});
+  }
+  if (Has(member, "outside_span")) {
+    term.outside = Choice<OutsideSpan>(
+        member.At("outside_span"),
+        {{"refuse", OutsideSpan::Refuse}, {"hold", OutsideSpan::Hold}});
+  }
+  if (timed) term.clock = clock;
+  if (Has(member, "time_origin")) {
+    if (timed && clock.form == Form::Dated) {
+      Fail(member.At("time_origin"),
+           "is a time origin on a run's own clock, the form of a `times` "
+           "block counting forwards with a `unit`; a dated run reads a fault "
+           "file with a time axis by date, at each node's, its axis the "
+           "calendar's (the present at zero, the past negative), as it reads "
+           "a `field` load's file");
+    }
+    term.time_origin = member.At("time_origin").AsNumber();
+    if (!std::isfinite(term.time_origin)) {
+      Fail(member.At("time_origin"), "is not a finite number");
+    }
+  }
+  if (timed && clock.form == Form::Dated) {
+    // a file on a time axis is read by date: its time zero is the present,
+    // the window's start on the clock, in kyr
+    term.dated = true;
+    term.time_origin = clock.start_kyr_bp.value();
+  }
+}
+
+#ifdef SL3DPP_HAVE_FAULT_FILE
+
+/// A fault file term's file, read whole and checked as planetmodel reads
+/// it, and held to the term's members and the run (`item`, the term in
+/// the config): a Cartesian frame is refused; a static file refuses a
+/// time origin and `outside_span`; a file on a time axis refuses the
+/// static problem, an onset and a history.
+std::shared_ptr<FaultFileState> ReadFault(const SeismicTerm& term,
+                                          const Json& item) {
+  const auto& member = item.At("fault_file");
+  auto read = [&] {
+    try {
+      return planetmodel::ReadFaultFile(term.file);
+    } catch (const std::exception& error) {
+      Fail(member.At("file"), error.what());
+    }
+  };
+  auto file = read();
+  const auto& fault = file.fault;
+  if (fault.Frame().GetKind() != planetmodel::FaultFrame::Kind::Geographic) {
+    Fail(member.At("file"),
+         "holds a fault in a Cartesian frame, a flat body: this body is a "
+         "sphere, and takes a fault in the geographic frame");
+  }
+  if (fault.Support() != "node") {
+    for (const auto* name : {"time_origin", "outside_span"}) {
+      if (!Has(member, name)) continue;
+      Fail(member.At(name),
+           std::format("{} of a fault file's time axis, and {} is static, its "
+                       "slip the same at every time: drop it",
+                       std::string_view{name} == "time_origin"
+                           ? "is the time origin"
+                           : "says what a read outside the span does",
+                       term.file.string()));
+    }
+  } else {
+    const auto times = fault.NSlices();
+    if (!term.clock) {
+      Fail(member.At("file"),
+           std::format("holds slip on a time axis ({} times), which the "
+                       "static problem does not read: its source is one slip, "
+                       "a static fault file; a run through time reads a file "
+                       "on a time axis",
+                       times));
+    }
+    const auto names = NamesOf(term.clock->form);
+    for (const auto name : {names.onset, names.history}) {
+      if (!Has(item, name)) continue;
+      Fail(item.At(name),
+           std::format("is {}, beside a fault file whose slip is on a time "
+                       "axis of its own ({} times), which is its time "
+                       "dependence: drop it",
+                       name == names.onset ? "an onset" : "an amplitude history",
+                       times));
+    }
+  }
+  return std::make_shared<FaultFileState>(
+      FaultFileState{.fault = std::move(file.fault)});
+}
+
+#endif
+
+/// One seismic source: a point moment tensor, a planar fault or a fault
+/// file (`directory` resolving its path); `timed`, a run through time's,
+/// which alone takes an onset and a history.
+SeismicTerm ReadSeismicTerm(const Json& item,
+                            const std::filesystem::path& directory,
+                            bool timed = true, const TermClock& clock = {}) {
   RefuseOtherClock(item, clock, timed);
   const auto names = NamesOf(clock.form);
-  Allow(item, {"point", "fault", names.onset, names.history});
-  if (Has(item, "point") == Has(item, "fault")) {
-    Fail(item, "is exactly one of \"point\" and \"fault\"");
+  Allow(item, {"point", "fault", "fault_file", names.onset, names.history});
+  const auto kinds = static_cast<int>(Has(item, "point")) +
+                     static_cast<int>(Has(item, "fault")) +
+                     static_cast<int>(Has(item, "fault_file"));
+  if (kinds != 1) {
+    Fail(item, "is exactly one of \"point\", \"fault\" and \"fault_file\"");
   }
   auto term = SeismicTerm{};
   if (!timed && Has(item, names.onset)) {
@@ -437,6 +581,8 @@ SeismicTerm ReadSeismicTerm(const Json& item, bool timed = true,
         *c *= moment;
       }
     }
+  } else if (Has(item, "fault_file")) {
+    ReadFaultFileTerm(term, item, directory, timed, clock);
   } else {
     const auto& fault = item.At("fault");
     Allow(fault, {"latitude", "longitude", "depth_km", "strike_deg", "dip_deg",
@@ -632,6 +778,210 @@ double SeismicTerm::FactorAt(double t) const {
   return history.At(t);
 }
 
+namespace {
+
+/// A planar fault term's sources.
+std::vector<PointSource> PlanarSourcesOf(const SeismicTerm& term,
+                                         double surfaceRadius) {
+  return PlanarFaultSources(PlanarFault{.centroid = term.site,
+                                        .depth = term.depth,
+                                        .strike = term.strike,
+                                        .dip = term.dip,
+                                        .rake = term.rake,
+                                        .length = term.length,
+                                        .width = term.width,
+                                        .moment = term.scalarMoment},
+                            surfaceRadius, term.alongStrike, term.downDip);
+}
+
+#ifdef SL3DPP_HAVE_FAULT_FILE
+
+/// A fault file term's state once placed.
+const FaultFileState& PlacedOf(const SeismicTerm& term) {
+  if (!term.fault || !term.fault->placed) {
+    throw std::logic_error(
+        "a fault file's sources are formed once the Earth is built "
+        "(PlaceFaultFiles)");
+  }
+  return *term.fault;
+}
+
+/// The SI time of a fault file's axis that time t of the terms' clock
+/// reads, within SpanTolerance of an end taken as that end; empty where it
+/// lies beyond the span.
+std::optional<double> FileTimeOf(const SeismicTerm& term,
+                                 const planetmodel::Fault& fault, double t) {
+  const auto time = (t - term.time_origin) * term.unit.seconds;
+  const auto scale = fault.GetScales().Time();
+  const auto& axis = *fault.Time();
+  const auto span = std::pair{axis.front() * scale, axis.back() * scale};
+  const auto tolerance = SpanTolerance(span);
+  if (time >= span.first - tolerance && time <= span.second + tolerance) {
+    return std::clamp(time, span.first, span.second);
+  }
+  if (term.outside == OutsideSpan::Hold) return time;
+  return std::nullopt;
+}
+
+/// Each slice's weight at time t of the terms' clock: one for a static
+/// file, the file's own rule's at its time for a file on a time axis.
+std::vector<double> SliceWeights(const SeismicTerm& term, double t) {
+  const auto& fault = PlacedOf(term).fault;
+  auto out = std::vector<double>(fault.NSlices(), 0.0);
+  if (fault.Support() != "node") {
+    out[0] = 1.0;
+    return out;
+  }
+  const auto time = FileTimeOf(term, fault, t);
+  if (!time) {
+    throw std::runtime_error(std::format(
+        "{}: the run reads it at {:g} {} on the terms' clock, outside its "
+        "span",
+        term.file.string(), t, term.unit.name));
+  }
+  const auto [first, second] = fault.Rows(
+      *time / fault.GetScales().Time(), term.outside == OutsideSpan::Hold
+                                            ? planetmodel::Extrapolation::Hold
+                                            : planetmodel::Extrapolation::Refuse);
+  out[first.first] += first.second;
+  out[second.first] += second.second;
+  return out;
+}
+
+/// A fault file term's sources at time t of the terms' clock: at each
+/// point the slices' tensors under their weights.
+std::vector<PointSource> FileSourcesOf(const SeismicTerm& term, double t) {
+  const auto& sources = PlacedOf(term).sources;
+  const auto weights = SliceWeights(term, t);
+  auto out = std::vector<PointSource>{};
+  for (auto p = std::size_t{0}; p < sources.points.size(); ++p) {
+    auto M = SphericalTensor{};
+    for (auto k = std::size_t{0}; k < weights.size(); ++k) {
+      if (weights[k] == 0.0) continue;
+      const auto& S = sources.slices[k][p];
+      const auto w = weights[k];
+      M = {.rr = M.rr + w * S.rr, .tt = M.tt + w * S.tt, .pp = M.pp + w * S.pp,
+           .rt = M.rt + w * S.rt, .rp = M.rp + w * S.rp, .tp = M.tp + w * S.tp};
+    }
+    out.push_back({.at = sources.points[p], .moment = M});
+  }
+  return out;
+}
+
+#endif
+
+}  // namespace
+
+std::vector<BodyPoint> SeismicPointsOf(const SeismicTerm& term,
+                                       double surfaceRadius) {
+  auto out = std::vector<BodyPoint>{};
+  switch (term.kind) {
+    case SeismicTerm::Kind::Point:
+      out.push_back({.radius = surfaceRadius - term.depth,
+                     .colatitude = term.site.CoLatitude(),
+                     .longitude = term.site.Longitude()});
+      break;
+    case SeismicTerm::Kind::Fault:
+      for (const auto& source : PlanarSourcesOf(term, surfaceRadius)) {
+        out.push_back(source.at);
+      }
+      break;
+    case SeismicTerm::Kind::FaultFile:
+#ifdef SL3DPP_HAVE_FAULT_FILE
+      out = PlacedOf(term).sources.points;
+#endif
+      break;
+  }
+  return out;
+}
+
+void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
+                     const std::function<LoveModuli(const BodyPoint&)>& moduli,
+                     const Json& block, std::span<const double> times) {
+  for (auto k = std::size_t{0}; k < seismic.size(); ++k) {
+    auto& term = seismic[k];
+    if (term.kind != SeismicTerm::Kind::FaultFile) continue;
+    const auto& item = block.At("seismic").At(k);
+    const auto& member = item.At("fault_file");
+#ifndef SL3DPP_HAVE_FAULT_FILE
+    static_cast<void>(surfaceRadius);
+    static_cast<void>(moduli);
+    static_cast<void>(times);
+    Fail(member,
+         std::format("is a fault file, which this build of sl3d does not read: "
+                     "it needs planetmodel's C++ library with the fault file "
+                     "(planetmodel.fault/1, <planetmodel/faultfile.hpp>: "
+                     "planetmodel after 1.5.1), and was built with planetmodel "
+                     "{}. Build sl3d against such a planetmodel "
+                     "(docs/building.md)",
+                     planetmodel::Version()));
+#else
+    term.fault = ReadFault(term, item);
+    auto& state = *term.fault;
+    const auto& fault = state.fault;
+    const auto reference =
+        fault.Frame().Reference() * fault.GetScales().Length();
+    if (std::abs(reference - surfaceRadius) > kSameSurface * surfaceRadius &&
+        !term.placement) {
+      Fail(member,
+           std::format("holds a fault whose reference radius, {:.10g} m, is "
+                       "not the model's surface radius, {:.10g} m: say how it "
+                       "is placed, `\"place_by\": \"depth\"` (each point at its "
+                       "depth below the file's reference surface, that depth "
+                       "below the model's) or `\"place_by\": \"radius\"` (each "
+                       "point at its radius as stored)",
+                       reference, surfaceRadius));
+    }
+    try {
+      state.sources = FaultSourcesOf(
+          fault, {.cellsAlongStrike = term.cellsAlongStrike,
+                  .cellsDownDip = term.cellsDownDip,
+                  .points = term.points,
+                  .surfaceRadius = surfaceRadius,
+                  .placement = term.placement,
+                  .moduli = moduli});
+    } catch (const std::invalid_argument& error) {
+      Fail(member, error.what());
+    }
+    state.placed = true;
+    if (fault.Support() != "node") continue;
+    // every node's time within the file's span, and a time its rule reads
+    const auto scale = fault.GetScales().Time();
+    const auto& axis = *fault.Time();
+    const auto where =
+        term.dated ? std::string{"a node's date, where the run reads it"}
+                   : std::string{"a node's time less `time_origin`, where the "
+                                 "run reads it"};
+    const auto label = [&](double seconds) {
+      return term.dated ? std::format("{:g} kyr BP", 0.0 - seconds / KYR)
+                        : std::format("{:g} {} on the file's own axis",
+                                      seconds / term.unit.seconds,
+                                      term.unit.name);
+    };
+    for (const auto t : times) {
+      const auto time = FileTimeOf(term, fault, t);
+      if (!time) {
+        Fail(member.At("file"),
+             std::format("spans {} to {}, which leaves out {}, {}: give a "
+                         "file that covers it, or \"outside_span\": \"hold\" "
+                         "to hold the file's first or last slip outside its "
+                         "span",
+                         label(axis.front() * scale), label(axis.back() * scale),
+                         label((t - term.time_origin) * term.unit.seconds),
+                         where));
+      }
+      try {
+        static_cast<void>(SliceWeights(term, t));
+      } catch (const std::exception& error) {
+        Fail(member.At("file"),
+             std::format("is read at {}, {}: {}", label(*time), where,
+                         error.what()));
+      }
+    }
+#endif
+  }
+}
+
 std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
                                           double t, double surfaceRadius) {
   auto out = std::vector<PointSource>{};
@@ -639,21 +989,14 @@ std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
     const auto factor = term.FactorAt(t);
     auto sources = std::vector<PointSource>{};
     if (term.kind == SeismicTerm::Kind::Point) {
-      sources.push_back({.at = {.radius = surfaceRadius - term.depth,
-                                .colatitude = term.site.CoLatitude(),
-                                .longitude = term.site.Longitude()},
+      sources.push_back({.at = SeismicPointsOf(term, surfaceRadius).front(),
                          .moment = term.moment});
+    } else if (term.kind == SeismicTerm::Kind::Fault) {
+      sources = PlanarSourcesOf(term, surfaceRadius);
     } else {
-      sources = PlanarFaultSources(
-          PlanarFault{.centroid = term.site,
-                      .depth = term.depth,
-                      .strike = term.strike,
-                      .dip = term.dip,
-                      .rake = term.rake,
-                      .length = term.length,
-                      .width = term.width,
-                      .moment = term.scalarMoment},
-          surfaceRadius, term.alongStrike, term.downDip);
+#ifdef SL3DPP_HAVE_FAULT_FILE
+      sources = FileSourcesOf(term, t);
+#endif
     }
     for (auto& source : sources) {
       for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
@@ -911,7 +1254,7 @@ std::string Describe(const SeismicTerm& term) {
         term.site.latitude, term.site.longitude, term.depth / 1e3,
         term.moment.rr, term.moment.tt, term.moment.pp, term.moment.rt,
         term.moment.rp, term.moment.tp);
-  } else {
+  } else if (term.kind == SeismicTerm::Kind::Fault) {
     out = std::format(
         "fault centred at latitude {:g}, longitude {:g}, depth {:g} km, strike "
         "{:g}, dip {:g}, rake {:g} deg, {:g} by {:g} km, moment {:g} N m, {} "
@@ -919,6 +1262,37 @@ std::string Describe(const SeismicTerm& term) {
         term.site.latitude, term.site.longitude, term.depth / 1e3, term.strike,
         term.dip, term.rake, term.length / 1e3, term.width / 1e3,
         term.scalarMoment, term.alongStrike, term.downDip);
+  } else {
+    out = std::format("fault file {}", term.file.string());
+#ifdef SL3DPP_HAVE_FAULT_FILE
+    if (term.fault) {
+      const auto& fault = term.fault->fault;
+      const auto patches = fault.Patches().size();
+      out += std::format(" ({} patch{}, ", patches, patches == 1 ? "" : "es");
+      out += fault.Support() == "node"
+                 ? std::format("slip at {} times, {})", fault.NSlices(),
+                               fault.TimeInterpolation())
+                 : std::string{"static)"};
+    }
+#endif
+    out += std::format(", {} by {} cells a patch, {} Gauss point{} each way a "
+                       "cell",
+                       term.cellsAlongStrike, term.cellsDownDip, term.points,
+                       term.points == 1 ? "" : "s");
+    if (term.placement) {
+      out += term.placement == FaultPlacement::Depth ? ", placed by depth"
+                                                     : ", placed by radius";
+    }
+    auto onAxis = false;
+#ifdef SL3DPP_HAVE_FAULT_FILE
+    onAxis = term.fault && term.fault->fault.Support() == "node";
+#endif
+    if (onAxis && term.dated) {
+      out += ", read by date";
+    } else if (onAxis && term.time_origin != 0.0) {
+      out += std::format(", time origin {:g} {}", term.time_origin,
+                         term.unit.name);
+    }
   }
   if (term.onset && term.start_kyr_bp) {
     out += std::format(", from {:g} kyr BP", *term.start_kyr_bp - *term.onset);
@@ -1153,7 +1527,7 @@ Forcing ReadForcing(const Json& block, const std::filesystem::path& directory,
   }
   if (Has(block, "seismic")) {
     for (const auto& item : block.At("seismic").AsArray()) {
-      out.seismic.push_back(ReadSeismicTerm(item, timed, clock));
+      out.seismic.push_back(ReadSeismicTerm(item, directory, timed, clock));
     }
   }
   if (Has(block, "ice_change")) {

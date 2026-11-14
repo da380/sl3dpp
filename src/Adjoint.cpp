@@ -11,6 +11,7 @@
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
+#include "sl3dpp/detail/LateralKernels.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -90,6 +91,39 @@ Kernels AdjointSolver::FirstOrderKernels(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
+  CheckArguments(times, measurements, trajectory, oceanFunctions);
+  return options_.method == AdjointMethod::Discrete
+             ? DiscreteSweep(times, measurements, trajectory, oceanFunctions)
+             : ContinuousSweep(times, measurements, trajectory, oceanFunctions);
+}
+
+Kernels3D AdjointSolver::LateralSweep(
+    const GridCoupling& coupling, bool viscosity, bool moduli,
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory& trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
+  CheckArguments(times, measurements, &trajectory, oceanFunctions);
+  // the moduli's lateral kernels ride on the material pairings, which
+  // form the radial moduli kernels as well
+  auto options = options_;
+  options.material_kernels = options.material_kernels || moduli;
+  const AdjointSolver sweeps(*evolution_, options);
+  detail::LateralAccumulator lateral(*evolution_->op_, coupling, viscosity, moduli);
+  auto radial =
+      options.method == AdjointMethod::Discrete
+          ? sweeps.DiscreteSweep(times, measurements, &trajectory, oceanFunctions,
+                                 &lateral)
+          : sweeps.ContinuousSweep(times, measurements, &trajectory,
+                                   oceanFunctions, &lateral);
+  return lateral.Finish(std::move(radial));
+}
+
+void AdjointSolver::CheckArguments(
+    std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions) const {
   if (times.empty()) {
     throw std::invalid_argument("times must hold at least one entry");
   }
@@ -146,9 +180,6 @@ Kernels AdjointSolver::FirstOrderKernels(
           "Evolution::Run");
     }
   }
-  return options_.method == AdjointMethod::Discrete
-             ? DiscreteSweep(times, measurements, trajectory, oceanFunctions)
-             : ContinuousSweep(times, measurements, trajectory, oceanFunctions);
 }
 
 // -- the discrete transpose
@@ -158,7 +189,8 @@ Kernels AdjointSolver::DiscreteSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    detail::LateralAccumulator* lateral) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -347,7 +379,14 @@ Kernels AdjointSolver::DiscreteSweep(
   // About a source-driven trajectory the toroidal systems carry memory,
   // and the kernel in the relaxation times has their part.
   const bool sourcedBase = trajectory != nullptr && !trajectory->toroidal.empty();
-  const bool twisting = moments || sourcedBase;
+  // The lateral kernels pair the toroidal duals pointwise with the
+  // spheroidal forward fields, so they carry them wherever a measurement
+  // reads the toroidal potential.
+  const bool lateralItau = lateral != nullptr && lateral->Viscosity();
+  const bool lateralModuli = lateral != nullptr && lateral->Moduli();
+  const bool twisting =
+      moments || sourcedBase ||
+      (lateral != nullptr && detail::ReadsTheToroidalPotential(measurements));
   auto toroidal = std::optional<ToroidalViscoelastic>{};
   auto tdual = ToroidalViscoelastic::Dual{};
   auto momentKernels =
@@ -577,6 +616,10 @@ Kernels AdjointSolver::DiscreteSweep(
         std::vector<std::pair<std::vector<double>, std::vector<double>>>(
             material ? lmax + 1 : 0);
     auto dualSolutions = std::vector<std::vector<double>>(moments ? lmax + 1 : 0);
+    // the lateral kernels' fields of the step: the dual solutions and the
+    // duals of the decayed memory, per degree
+    auto lateralDuals = std::vector<std::vector<double>>(lateralModuli ? lmax + 1 : 0);
+    auto lateralDecayed = std::vector<std::vector<double>>(lateralItau ? lmax + 1 : 0);
     detail::ForEachTask(op.options_.parallel, lmax + 1, [&](int i) {
       const auto l = lmax - i;
       const auto& deg = *degs[l];
@@ -590,6 +633,7 @@ Kernels AdjointSolver::DiscreteSweep(
       }
       const auto y = systems[l]->Solve(rhs, ncols);
       if (moments) dualSolutions[l] = y;
+      if (lateralModuli) lateralDuals[l] = y;
       const auto sy = deg.Strain(y, ncols);
       const auto wsy = deg.ApplyWeights(sy, ncols);
       if (material) {
@@ -634,6 +678,8 @@ Kernels AdjointSolver::DiscreteSweep(
       auto& md = *mds[l];
       auto& dd = *dds[l];
       std::ranges::fill(dd, 0.0);
+      auto* decayedDual = lateralItau ? &lateralDecayed[l] : nullptr;
+      if (decayedDual != nullptr) decayedDual->assign(md.size(), 0.0);
       auto* terms = dweights != nullptr ? &kernelTerms[l] : nullptr;
       if (terms != nullptr) {
         terms->assign(K * static_cast<std::size_t>(deg.ne) * deg.np, 0.0);
@@ -651,6 +697,7 @@ Kernels AdjointSolver::DiscreteSweep(
               for (auto c = 0; c < ncols; ++c) {
                 const auto mdOld = md[at + c];
                 const auto mtilde = mdOld + wsy[at + c];
+                if (decayedDual != nullptr) (*decayedDual)[at + c] = mtilde;
                 if (dweights != nullptr) {
                   // The derivative of the step in h = dt itau pairs the
                   // duals with the forward trajectory; dh = dt d(itau).
@@ -695,6 +742,8 @@ Kernels AdjointSolver::DiscreteSweep(
         muKernel[i] += mu[i];
       }
     }
+    auto yT = ToroidalViscoelastic::Fields{};
+    auto decayedT = ToroidalViscoelastic::Fields{};
     if (twisting) {
       auto pairing = ToroidalViscoelastic::ItauPairing{};
       if (sourcedBase) {
@@ -708,16 +757,35 @@ Kernels AdjointSolver::DiscreteSweep(
                            .force = &trajectory->sourceForces[n].toroidal,
                            .mu = &muKernel};
       }
-      const auto yT = toroidal->StepTransposed(
+      yT = toroidal->StepTransposed(
           tdual, dt, scheme, toroidalSurfaceDual(adj),
           sourcedBase ? &pairing : nullptr,
-          sourcedBase && material ? &materialPairing : nullptr);
+          sourcedBase && material ? &materialPairing : nullptr,
+          lateralItau ? &decayedT : nullptr);
       if (moments) {
         auto y = std::map<int, std::vector<double>>{};
         for (auto l = 0; l <= lmax; ++l) {
           y.emplace(l, std::move(dualSolutions[l]));
         }
         momentKernels[n] = momentKernelsOf(y, yT);
+      }
+    }
+    if (lateral != nullptr) {
+      // the step's lateral kernels: its duals against the forward step
+      // (the toroidal states of a source-driven run beside the spheroidal)
+      const auto* prevT = sourcedBase ? &trajectory->toroidal[n - 1] : nullptr;
+      const auto* nextT = sourcedBase ? &trajectory->toroidal[n] : nullptr;
+      if (lateralItau) {
+        auto decayed = std::map<int, std::vector<double>>{};
+        for (auto l = 0; l <= lmax; ++l) decayed.emplace(l, std::move(lateralDecayed[l]));
+        lateral->DiscreteItau(dt, scheme, decayed, twisting ? &decayedT : nullptr,
+                              *fwdPrev, *fwdN, prevT, nextT);
+      }
+      if (lateralModuli) {
+        auto y = std::map<int, std::vector<double>>{};
+        for (auto l = 0; l <= lmax; ++l) y.emplace(l, std::move(lateralDuals[l]));
+        lateral->DiscreteMaterial(dt, scheme, y, twisting ? &yT : nullptr, xn,
+                                  *fwdPrev, prevT, nextT);
       }
     }
   }
@@ -796,6 +864,7 @@ Kernels AdjointSolver::DiscreteSweep(
         }
       }
     }
+    auto startDuals = std::map<int, std::vector<double>>{};
     if (material) {
       // The start's dual solution: the transposed unrelaxed solve under
       // the start duals and the start's response duals, paired with the
@@ -818,7 +887,21 @@ Kernels AdjointSolver::DiscreteSweep(
           kappaKernel[i] += kappa[i];
           muKernel[i] += mu[i];
         }
+        if (lateralModuli) startDuals.emplace(l, y);
       }
+    }
+    if (lateralModuli) {
+      // the start's lateral moduli kernels: its dual solution, toroidal
+      // part included, against the forward start solution
+      auto y0T = ToroidalViscoelastic::Fields{};
+      auto x0T = ToroidalViscoelastic::Fields{};
+      if (twisting) y0T = toroidal->StartTransposed(tdual, toroidalSurfaceDual(adj));
+      if (sourcedBase) {
+        x0T = toroidal->SolveElastic(toroidal->ZeroState(),
+                                     trajectory->sourceForces[0].toroidal);
+      }
+      lateral->DiscreteStart(startDuals, twisting ? &y0T : nullptr, x0,
+                             sourcedBase ? &x0T : nullptr);
     }
   }
 
@@ -886,7 +969,8 @@ Kernels AdjointSolver::ContinuousSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    detail::LateralAccumulator* lateral) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -944,7 +1028,12 @@ Kernels AdjointSolver::ContinuousSweep(
   // About a source-driven trajectory the toroidal systems carry memory:
   // the toroidal adjoint is swept for the kernels' toroidal parts.
   const bool sourcedBase = trajectory != nullptr && !trajectory->toroidal.empty();
-  const bool twisting = moments || sourcedBase;
+  // The lateral kernels pair the toroidal adjoint pointwise with the
+  // spheroidal forward fields, so they carry it wherever a measurement
+  // reads the toroidal potential.
+  const bool twisting =
+      moments || sourcedBase ||
+      (lateral != nullptr && detail::ReadsTheToroidalPotential(measurements));
   auto fractions = std::vector<std::vector<double>>{};
   std::vector<double> kappaKernel, muKernel;
   if (material) {
@@ -1510,6 +1599,48 @@ Kernels AdjointSolver::ContinuousSweep(
     }
   };
 
+  // The lateral kernels at a node (docs/adjoints.md §21): the adjoint
+  // state against the forward state, and the adjoint displacement against
+  // the forward solution and memory, each under the time weight, the
+  // toroidal parts beside the spheroidal.
+  auto forwardSolution = [&](std::size_t node) {
+    const auto& fwd = cursor->State(node);
+    auto x =
+        op.SolveElastic(fwd, ev.Columns(trajectory->loads[node], ev.toMatDensity_),
+                        ev.Columns(trajectory->tides[node], ev.toMatPotential_));
+    if (sourcedBase) {
+      for (const auto& [l, f] : trajectory->sourceForces[node].spheroidal) {
+        const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
+        auto& to = x.at(l);
+        for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
+      }
+    }
+    return x;
+  };
+  auto lateralMaterial = [&](const std::map<int, std::vector<double>>& lambda,
+                             const ToroidalViscoelastic::Fields* twist,
+                             std::size_t node, double scale) {
+    const auto x = forwardSolution(node);
+    lateral->ContinuousMaterial(scale, lambda, twist, x, cursor->State(node),
+                                sourcedBase ? &trajectory->toroidal[node] : nullptr);
+  };
+  auto lateralAt = [&](std::size_t node, double weight) {
+    if (lateral == nullptr || weight == 0.0) return;
+    if (lateral->Viscosity()) {
+      lateral->ContinuousItau(pairing * weight, vstate, twisting ? &tadj : nullptr,
+                              cursor->State(node),
+                              sourcedBase ? &trajectory->toroidal[node] : nullptr);
+    }
+    if (lateral->Moduli()) {
+      const auto lambda =
+          op.SolveElastic(vstate, ev.Columns(sigmaC, ev.toMatDensity_),
+                          ev.Columns(psiC, ev.toMatPotential_));
+      auto twist = ToroidalViscoelastic::Fields{};
+      if (twisting) twist = toroidal->SolveElastic(tadj, {});
+      lateralMaterial(lambda, twisting ? &twist : nullptr, node, pairing * weight);
+    }
+  };
+
   auto observe = [&](std::size_t node) {
     const auto found = measurements.find(node);
     if (found == measurements.end()) return;
@@ -1549,6 +1680,10 @@ Kernels AdjointSolver::ContinuousSweep(
         pairToroidalMaterial(lumpTwist, node, pairing);
       }
     }
+    if (lateral != nullptr && lateral->Moduli()) {
+      // the lumped adjoint displacement, no time weight
+      lateralMaterial(lumpSolutions, twisting ? &lumpTwist : nullptr, node, pairing);
+    }
     if (tidal) addTide(lumpSolutions, j.lam, node, 1.0);
     lumpShift.emplace(node, j.shift);
     lumpLoad.emplace(node, grid.Synthesise(j.lam));
@@ -1565,6 +1700,7 @@ Kernels AdjointSolver::ContinuousSweep(
   observe(N);
   accumulateItau(N, wEarly[N] * perTime);
   accumulateMaterial(N, wEarly[N] * perTime);
+  lateralAt(N, wEarly[N] * perTime);
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
@@ -1603,9 +1739,14 @@ Kernels AdjointSolver::ContinuousSweep(
     if (twisting) tadj = toroidal->Step(tadj, dt, scheme, {}).first;
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     accumulateMaterial(n - 1, wLate[n - 1] * perTime);
+    // the lateral kernels' two sides of a node in one pass where the
+    // state does not jump between them
+    const bool observed = measurements.contains(n - 1);
+    lateralAt(n - 1, (observed ? wLate[n - 1] : wLate[n - 1] + wEarly[n - 1]) * perTime);
     observe(n - 1);
     accumulateItau(n - 1, wEarly[n - 1] * perTime);
     accumulateMaterial(n - 1, wEarly[n - 1] * perTime);
+    if (observed) lateralAt(n - 1, wEarly[n - 1] * perTime);
   }
 
   // Node duals from the density and the lumps. The jumps divide by

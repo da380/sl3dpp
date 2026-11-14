@@ -1892,9 +1892,10 @@ SolveInput ReadSolveInput(const std::filesystem::path& config) {
 
 std::string RunSolve(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  const auto input = ReadSolveInput(config);
+  auto input = ReadSolveInput(config);
+  const auto earth = BuildEarth(input.run, top);
+  PlaceSeismicSources(input.run, earth, top);
   const auto& run = input.run;
-  const auto earth = BuildEarth(run, top);
   if (!run.gravitating && earth.Lateral()) {
     const auto& model = top.At("model");
     Fail(earth.LateralModuli() ? model.At("moduli").At("file")

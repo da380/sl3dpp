@@ -697,7 +697,8 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::FirstOrderDrive(
 
 ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
     Dual& dual, double dt, Scheme scheme, const Fields& surfaceDual,
-    const ItauPairing* pairing, const MaterialPairing* material) const {
+    const ItauPairing* pairing, const MaterialPairing* material,
+    Fields* decayedDual) const {
   const auto& op = *op_;
   auto base = BaseStep{};
   auto fractions = std::vector<std::span<const double>>{};
@@ -779,6 +780,9 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
       }
     }
     std::ranges::fill(dd, 0.0);
+    auto* decayed = decayedDual != nullptr
+                        ? &((*decayedDual)[l] = std::vector<double>(md.size(), 0.0))
+                        : nullptr;
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
       for (auto s = 0; s < 2; ++s) {
@@ -793,6 +797,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
               const auto mdOld = md[at + c];
               const auto mtilde =
                   md[at + c] + factor * sy[s * block + node + c];
+              if (decayed != nullptr) (*decayed)[at + c] = mtilde;
               if (pairing != nullptr) {
                 // the step's derivative in h = dt itau pairs the duals
                 // with the forward trajectory (the spheroidal sweep's

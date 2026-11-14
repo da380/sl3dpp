@@ -25,11 +25,12 @@ the API.
 | `Fingerprint.hpp` | Elastic sea-level fingerprints, SI in and out |
 | `SeaLevel.hpp` | The sea-level solver (linear, generalised, nonlinear), on a state with an ocean or without one (`NoOceanState`), and its adjoint; a state's sea level from a topography (`SeaLevelFromTopography`) |
 | `Viscoelastic.hpp`, `ToroidalViscoelastic.hpp`, `Evolution.hpp` | The 1D viscoelastic operator and its time steps, and its toroidal partner under interior sources; the coupled 1D evolution under any forcing, frozen or migrating shorelines |
-| `PointSource.hpp`, `Fault.hpp` | Interior sources: point moment tensors and stress gluts on shells as forces on the degree systems, and the strain at a point; point sources laid over a planar fault (`PlanarFaultSources`, `DoubleCouple`) |
+| `PointSource.hpp`, `Fault.hpp` | Interior sources: point moment tensors and stress gluts on shells as forces on the degree systems (several point sources at once, those at one radius formed together: `PointSourcesForces`), and the strain at a point; point sources laid over a planar fault (`PlanarFaultSources`, `DoubleCouple`), and over a fault given by its slip, planetmodel's fault file (`FaultSourcesOf`, at a quadrature's points, each moment the elastic tensor there contracted with the slip and the normal, `SlipMoment`, from a model's moduli at a radius, `LoveModuliAt`; with a planetmodel that holds the fault file) |
 | `InitialSeaLevel.hpp` | The final sea level misfit and its gradient; the initial sea level calibrated against a final one |
 | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `SpinComponents.hpp`, `Evolution3D.hpp` | The 3D operator under a lateral viscosity and lateral moduli (`Options::moduli`), each step closed by the within-step fixed point or by conjugate gradients (`Options::solver`), and its static solve on a rheology without branches (`SolveElastic`); the grid coupling and its spin algebra; the coupled 3D evolution and its instantaneous response (`Instantaneous`), frozen or migrating shorelines |
-| `ElasticPerturbation3D.hpp` | The static elastic problem under lateral δμ, δκ: its first-order (Born) response, the full solve of the laterally heterogeneous problem by preconditioned conjugate gradients (`SolveLateral`) for loads, body tides and measurement duals, and the static kernels of a surface measurement (`StaticKernels`) |
+| `ElasticPerturbation3D.hpp` | The static elastic problem under lateral δμ, δκ: its first-order (Born) response, the full solve of the laterally heterogeneous problem by preconditioned conjugate gradients (`SolveLateral`) for loads, body tides and measurement duals, and the transpose of its lateral force (`StaticKernels`, a tested helper: the kernels of a measurement are `LateralKernelSolver`'s) |
 | `Adjoint.hpp`, `Adjoint3D.hpp` | Adjoint sweeps and kernels, 1D and 3D, by the continuous adjoint or the discrete transpose: in the ice history, surface loads, a tide, the initial sea level, the moment tensors, the inverse relaxation times (and in 3D the log viscosity) and the moduli; the second-order adjoints (`SecondOrderKernels`) |
+| `LateralKernels.hpp` | The kernels in lateral structure (the log viscosity, κ(x), μ(x) as fields over the memory nodes' grids) about any run, by one entry point (`LateralKernelSolver`): about a radial Earth the radial sweeps with the grid expansion, no 3D solve; about a laterally heterogeneous one the 3D sweeps |
 | `TangentLinear.hpp`, `TangentLinear3D.hpp` | Tangent-linear runs of the coupled evolutions, 1D and 3D, and the second-order runs |
 | `Measurements.hpp` | Measurement duals (cap means, point values, expansion coefficients, displacements along a direction, baselines and angles between sites, rotation components), the degree weights of the cap mean about every point (a field smoothed over the cap), the displacement as a vector field of its east, north and upward components, and the decay time of a site's series as a fitted, kernel-ready datum |
 | `Collectives.hpp`, `Distributed.hpp` | Radial distribution: the collectives a distributed run needs, as callbacks, and their MPI form (with `SL3DPP_WITH_MPI`) |
@@ -99,7 +100,11 @@ The other entry points follow the same pattern:
   (`FromSnapshots`), and call
   `AdjointSolver(evolution).FirstOrderKernels(times, measurements, &trajectory)`
   (`AdjointSolver3D` in 3D), with `measurements` the duals of the observed
-  quantities, keyed by time node.
+  quantities, keyed by time node. The kernels as fields in the lateral
+  structure, about a radial run or a 3D one alike:
+  `LateralKernelSolver(evolution, options, {.moduli = true})
+  .FirstOrderKernels(times, measurements, trajectory)`, laid out on its
+  `Coupling()`.
 
 Model construction returns `std::expected`; solver failures are reported in
 the returned diagnostics or thrown. The example drivers

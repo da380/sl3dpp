@@ -50,6 +50,7 @@
 #include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Evolution3D.hpp"
+#include "sl3dpp/LateralKernels.hpp"
 #include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/Version.hpp"
@@ -405,8 +406,8 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
          "is not a block: `kernels` is an object of `method`, `parameters`, "
          "`measurements` and `output`");
   }
-  Allow(block, {"method", "parameters", "measurements", "record_stride",
-                "trajectory", "output"});
+  Allow(block, {"method", "parameters", "lateral", "measurements",
+                "record_stride", "trajectory", "output"});
   if (!run.gravitating) {
     Fail(block,
          "asks for kernels, which a run without gravity (`gravity`: "
@@ -431,6 +432,16 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
                              {"discrete", AdjointMethod::Discrete}});
   }
   out.parameters = ReadParameters(block, run);
+  if (Has(block, "lateral")) {
+    out.lateral = block.At("lateral").AsBool();
+    if (*out.lateral && !out.Writes(KernelParameter::Viscosity) &&
+        !out.Writes(KernelParameter::Moduli)) {
+      Fail(block.At("lateral"),
+           "asks for the kernels in the viscosity and the moduli as fields over "
+           "the Earth, and `parameters` names neither: add \"viscosity\" or "
+           "\"moduli\"");
+    }
+  }
   const auto& measurements = block.At("measurements");
   const auto& items = measurements.AsArray();
   if (items.empty()) Fail(measurements, "holds no measurements");
@@ -699,9 +710,9 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
 // -- the kernel files ---------------------------------------------------------
 
 /// A point of the run's seismic sources, where its moment kernels are
-/// formed: the term it belongs to, its patch (0 for a point source), its
-/// place (degrees and the depth below the surface in metres) and the point
-/// in the solver's units.
+/// formed: the term it belongs to, its patch (0 for a point source; a
+/// fault file's quadrature point), its place (degrees and the depth below
+/// the surface in metres) and the point in the solver's units.
 struct SourcePoint {
   std::size_t term = 0;
   std::size_t patch = 0;
@@ -713,23 +724,18 @@ struct SourcePoint {
 
 /// The run's seismic sources' points, in the order the forcing gives them
 /// (each term's, a fault's patches along strike then down dip, as
-/// PlanarFaultSources lays them out).
+/// PlanarFaultSources lays them out, a fault file's quadrature points patch
+/// by patch: SeismicPointsOf).
 std::vector<SourcePoint> SourcePointsOf(const Run& run,
                                         const GRDSolver& solver) {
   const auto length = solver.SolverScales().Length();
   const auto surface = solver.Radius() * length;
-  const auto sources = SeismicSourcesAt(run.forcing.seismic, 0.0, surface);
   auto out = std::vector<SourcePoint>{};
-  auto next = std::size_t{0};
   const auto degrees = 180.0 / std::numbers::pi;
   for (auto t = std::size_t{0}; t < run.forcing.seismic.size(); ++t) {
-    const auto& term = run.forcing.seismic[t];
-    const auto patches =
-        term.kind == SeismicTerm::Kind::Point
-            ? std::size_t{1}
-            : static_cast<std::size_t>(term.alongStrike * term.downDip);
-    for (auto p = std::size_t{0}; p < patches; ++p, ++next) {
-      const auto& at = sources.at(next).at;
+    const auto points = SeismicPointsOf(run.forcing.seismic[t], surface);
+    for (auto p = std::size_t{0}; p < points.size(); ++p) {
+      const auto& at = points[p];
       out.push_back({.term = t,
                      .patch = p,
                      .latitude_deg = 90.0 - at.colatitude * degrees,
@@ -1081,7 +1087,9 @@ void WriteMomentKernels(const std::filesystem::path& path, const Writing& w,
          "phi east), in J's unit per N m:\n"
          "# dJ = sum_n sum_p sum_c dJ_dM_c(n, p) dM_c(p, t_n); a term's "
          "moment at a node is its tensor times its\n"
-         "# factor there (zero before its onset), a fault's patches each a "
+         "# factor there (zero before its onset; a fault file's on a time "
+         "axis, its slices as its rule reads them),\n"
+         "# a fault's patches and a fault file's quadrature points each a "
          "point of its own\n"
          "# the points: point term patch latitude_deg longitude_deg depth_m\n";
   for (auto p = std::size_t{0}; p < w.points.size(); ++p) {
@@ -1286,9 +1294,11 @@ std::string SweepEach(
     names += NameOf(parameter);
   }
   return std::format(
-      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint)", read,
+      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{})", read,
       block.measurements.size(), block.output.string(), names,
-      block.method == AdjointMethod::Discrete ? "discrete" : "continuous");
+      block.method == AdjointMethod::Discrete ? "discrete" : "continuous",
+      block.lateral.value_or(false) ? "; the kernels in the Earth as fields"
+                                    : "");
 }
 
 /// The adjoint's options of the kernels asked for: the method and the
@@ -1330,42 +1340,6 @@ Writing WritingOf(const std::filesystem::path& config, const Run& run,
   return w;
 }
 
-/// The 1-D kernels over a recorded radial run (the static problem's one
-/// node, or a run through time), its snapshots from `evolution` on the
-/// operator's rheology.
-std::string Sweep1D(const KernelInput& input, const Writing& w,
-                    const Evolution& evolution,
-                    std::span<const Evolution::Snapshot> snapshots,
-                    std::span<const double> times,
-                    const ViscoelasticOperator& op, const Rheology& rheology,
-                    const Material& material, std::string_view iceRead,
-                    std::string_view seaLevelRead, std::string_view read) {
-  const auto& block = input.kernels;
-  const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
-  // about a migrating run, the sweeps linearise about its own shorelines
-  const auto oceans = input.run.Migrating()
-                          ? OceanFunctionsOf(snapshots)
-                          : std::vector<std::vector<double>>{};
-  const AdjointSolver adjoint(
-      evolution, AdjointOptionsOf<AdjointSolver::Options>(input, w));
-  return SweepEach<Evolution::Snapshot>(
-      input, w, snapshots, iceRead, seaLevelRead, read,
-      [&](const MeasurementSpec& spec, const Built& built,
-          const std::filesystem::path& stem) {
-        const auto kernels = adjoint.FirstOrderKernels(
-            times, built.measurements, &trajectory, oceans);
-        WriteSurfaceKernels(stem, w, block, spec, kernels, built);
-        if (block.Writes(KernelParameter::Viscosity)) {
-          WriteViscosityKernel1D(stem.string() + "_viscosity_kernel.txt", w,
-                                 spec, built, kernels, rheology, material);
-        }
-        if (block.Writes(KernelParameter::Moduli)) {
-          WriteModuliKernel1D(stem.string() + "_moduli_kernel.txt", w, spec,
-                              built, kernels, op, material);
-        }
-      });
-}
-
 /// The whole mesh's coupling of a 3-D operator distributed over the ranks,
 /// on the first rank (null elsewhere and on one rank): the layout of the
 /// ranks' parts laid end to end, which the kernel files are written over.
@@ -1404,6 +1378,170 @@ double PairedOverRanks(const GridCoupling& coupling,
   return total;
 }
 
+/// The field kernels of one measurement as planetmodel model files over a
+/// coupling's memory nodes (gathered to the first rank on several, over the
+/// whole mesh's coupling `whole` there): the log-viscosity kernels of each
+/// branch, with their pairings against the run's own lateral log
+/// viscosity `delta` and against a uniform one (ln eta raised by one
+/// wherever the coupling carries nodes), and the moduli kernels, with
+/// their pairing against the run's own lateral moduli (empty where it has
+/// none), in the metadata. The values in SI under the model's scales.
+void WriteFieldKernels(const std::filesystem::path& stem,
+                       const KernelsBlock& block, const MeasurementSpec& spec,
+                       const Built& built, const Kernels3D& kernels,
+                       const GridCoupling& coupling, const GridCoupling* whole,
+                       const RadialMesh& mesh, const BuiltEarth& earth,
+                       std::span<const double> delta,
+                       std::span<const double> shearPerturbation,
+                       std::span<const double> bulkPerturbation) {
+  const auto& ranks = TheRanks();
+  const auto& matScales = earth.material.ModelScales();
+  // the values non-dimensional under the model's own scales, the
+  // writer's
+  const auto toModel = built.factor / matScales.Factor(built.objective);
+  const auto write = [&](const std::string& suffix,
+                         std::vector<io::NodeField> fields,
+                         io::KernelFileOptions file) {
+    if (!ranks.First()) return;
+    const auto path = std::filesystem::path(stem.string() + suffix);
+    const auto written = io::WriteNodeFields(path, whole ? *whole : coupling,
+                                             mesh, earth.model, fields, file);
+    if (!written) throw std::runtime_error(written.error().message);
+  };
+  const auto scaled = [&](std::vector<double> values) {
+    for (auto& v : values) v *= toModel;
+    if (ranks.Distributed()) values = GatherToFirst(values);
+    return values;
+  };
+  if (block.Writes(KernelParameter::Viscosity)) {
+    // the pairings with the run's lateral log-viscosity perturbation
+    // and with a uniform one, ln eta raised by one wherever the
+    // coupling carries memory nodes
+    auto lateral = 0.0, uniform = 0.0;
+    const auto ones = std::vector<double>(coupling.GridValueCount(), 1.0);
+    auto kept = std::vector<std::vector<double>>{};
+    auto fields = std::vector<io::NodeField>{};
+    for (auto b = std::size_t{0}; b < kernels.logViscosityKernel3D.size(); ++b) {
+      lateral += PairedOverRanks(coupling, kernels.logViscosityKernel3D[b], delta);
+      uniform += PairedOverRanks(coupling, kernels.logViscosityKernel3D[b], ones);
+      kept.push_back(scaled(kernels.logViscosityKernel3D[b]));
+    }
+    for (auto b = std::size_t{0}; b < kept.size(); ++b) {
+      fields.push_back(io::NodeField{
+          .name = std::format("K_ln_eta_{}", b),
+          .meaning = std::format(
+              "dJ per unit ln(viscosity) of branch {}, per unit volume", b),
+          .dimensions = Dimensions{.mass = built.objective.mass,
+                                   .length = built.objective.length - 3,
+                                   .time = built.objective.time},
+          .values = kept[b]});
+    }
+    write("_viscosity_kernels.nc", std::move(fields),
+          {.name = std::format("viscosity kernels of {}", spec.name),
+           .meta = {{"lateral_log_viscosity_pairing", built.factor * lateral},
+                    {"uniform_log_viscosity_pairing", built.factor * uniform}}});
+  }
+  if (block.Writes(KernelParameter::Moduli)) {
+    if (kernels.kappaKernel3D.size() != coupling.GridValueCount() ||
+        kernels.muKernel3D.size() != coupling.GridValueCount()) {
+      throw std::logic_error(
+          "the sweep formed no moduli kernels over the coupling");
+    }
+    const auto pairing =
+        PairedOverRanks(coupling, kernels.muKernel3D, shearPerturbation) +
+        PairedOverRanks(coupling, kernels.kappaKernel3D, bulkPerturbation);
+    const auto kappa = scaled(kernels.kappaKernel3D);
+    const auto mu = scaled(kernels.muKernel3D);
+    // per Pa of the modulus and per cubic metre
+    const auto dims = Dimensions{.mass = built.objective.mass - 1,
+                                 .length = built.objective.length + 1 - 3,
+                                 .time = built.objective.time + 2};
+    write("_moduli_kernels.nc",
+          {io::NodeField{.name = "K_kappa",
+                         .meaning = "dJ per Pa of the bulk modulus "
+                                    "(absolute perturbation), per unit "
+                                    "volume",
+                         .dimensions = dims,
+                         .values = kappa},
+           io::NodeField{.name = "K_mu",
+                         .meaning = "dJ per Pa of the unrelaxed shear "
+                                    "modulus (absolute perturbation, "
+                                    "the branch moduli as fixed "
+                                    "fractions of it), per unit volume",
+                         .dimensions = dims,
+                         .values = mu}},
+          {.name = std::format("moduli kernels of {}", spec.name),
+           .meta = {{"lateral_moduli_pairing", built.factor * pairing}}});
+  }
+}
+
+/// The kernels over a recorded radial run (the static problem's one
+/// node, or a run through time), its snapshots from `evolution` on the
+/// operator's rheology: the radial profiles of the viscosity and moduli
+/// kernels, and with `kernels.lateral` their fields over the memory nodes'
+/// grids too (LateralKernelSolver's radial route), written as a 3-D run's
+/// are, the run's own lateral structure none.
+std::string Sweep1D(const KernelInput& input, const Writing& w,
+                    const Evolution& evolution,
+                    std::span<const Evolution::Snapshot> snapshots,
+                    std::span<const double> times,
+                    const ViscoelasticOperator& op, const Rheology& rheology,
+                    const BuiltEarth& earth, std::string_view iceRead,
+                    std::string_view seaLevelRead, std::string_view read) {
+  const auto& block = input.kernels;
+  const auto& material = earth.material;
+  const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+  // about a migrating run, the sweeps linearise about its own shorelines
+  const auto oceans = input.run.Migrating()
+                          ? OceanFunctionsOf(snapshots)
+                          : std::vector<std::vector<double>>{};
+  const auto options = AdjointOptionsOf<AdjointSolver::Options>(input, w);
+  const AdjointSolver adjoint(evolution, options);
+  auto lateral = std::optional<LateralKernelSolver>{};
+  if (block.lateral.value_or(false)) {
+    const auto& solver = input.run.solver;
+    lateral.emplace(evolution, options,
+                    LateralKernelOptions{
+                        .viscosity = block.Writes(KernelParameter::Viscosity),
+                        .moduli = block.Writes(KernelParameter::Moduli),
+                        .transform_degrees = solver.transform_degrees,
+                        .cache_bytes = solver.cache_mb << 20});
+  }
+  // the run's lateral log viscosity at the grid values (zero: a radial
+  // viscosity file holds none), for the viscosity kernels' pairing with it
+  const auto delta =
+      lateral && block.Writes(KernelParameter::Viscosity)
+          ? io::SampleNodeField(lateral->Coupling(), DeltaOf(earth))
+          : std::vector<double>{};
+  return SweepEach<Evolution::Snapshot>(
+      input, w, snapshots, iceRead, seaLevelRead, read,
+      [&](const MeasurementSpec& spec, const Built& built,
+          const std::filesystem::path& stem) {
+        auto fields = std::optional<Kernels3D>{};
+        if (lateral) {
+          fields = lateral->FirstOrderKernels(times, built.measurements, trajectory,
+                                              oceans);
+        }
+        const auto kernels =
+            fields ? fields->ice
+                   : adjoint.FirstOrderKernels(times, built.measurements, &trajectory,
+                                               oceans);
+        WriteSurfaceKernels(stem, w, block, spec, kernels, built);
+        if (block.Writes(KernelParameter::Viscosity)) {
+          WriteViscosityKernel1D(stem.string() + "_viscosity_kernel.txt", w,
+                                 spec, built, kernels, rheology, material);
+        }
+        if (block.Writes(KernelParameter::Moduli)) {
+          WriteModuliKernel1D(stem.string() + "_moduli_kernel.txt", w, spec,
+                              built, kernels, op, material);
+        }
+        if (fields) {
+          WriteFieldKernels(stem, block, spec, built, *fields, lateral->Coupling(),
+                            nullptr, op.BaseMaterial().Mesh(), earth, delta, {}, {});
+        }
+      });
+}
+
 /// The 3-D kernels over a recorded 3-D run: the ice-history, load, tide
 /// and moment kernels as the 1-D ones, the log-viscosity kernels and the
 /// moduli kernels as planetmodel model files over the coupling's memory
@@ -1429,7 +1567,6 @@ std::string Sweep3D(const KernelInput& input, const Writing& w,
   const auto whole = WholeCoupling(op, run.lmax);
   const auto& coupling = op.Coupling();
   const auto& mesh = op.GetRheology().BaseMaterial().Mesh();
-  const auto& matScales = earth.material.ModelScales();
   // the run's own log-viscosity perturbation at the grid values, for the
   // viscosity kernels' pairing with it
   const auto delta = block.Writes(KernelParameter::Viscosity)
@@ -1444,93 +1581,9 @@ std::string Sweep3D(const KernelInput& input, const Writing& w,
         if (ranks.First()) {
           WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built);
         }
-        // the values non-dimensional under the model's own scales, the
-        // writer's
-        const auto toModel = built.factor / matScales.Factor(built.objective);
-        const auto write = [&](const std::string& suffix,
-                               std::vector<io::NodeField> fields,
-                               io::KernelFileOptions file) {
-          if (!ranks.First()) return;
-          const auto path = std::filesystem::path(stem.string() + suffix);
-          const auto written =
-              io::WriteNodeFields(path, whole ? *whole : coupling, mesh,
-                                  earth.model, fields, file);
-          if (!written) throw std::runtime_error(written.error().message);
-        };
-        const auto scaled = [&](std::vector<double> values) {
-          for (auto& v : values) v *= toModel;
-          if (ranks.Distributed()) values = GatherToFirst(values);
-          return values;
-        };
-        if (block.Writes(KernelParameter::Viscosity)) {
-          // the pairings with the run's lateral log-viscosity perturbation
-          // and with a uniform one, ln eta raised by one wherever the
-          // coupling carries memory nodes
-          auto lateral = 0.0, uniform = 0.0;
-          const auto ones = std::vector<double>(coupling.GridValueCount(), 1.0);
-          auto kept = std::vector<std::vector<double>>{};
-          auto fields = std::vector<io::NodeField>{};
-          for (auto b = std::size_t{0};
-               b < kernels.logViscosityKernel3D.size(); ++b) {
-            lateral += PairedOverRanks(
-                coupling, kernels.logViscosityKernel3D[b], delta);
-            uniform += PairedOverRanks(
-                coupling, kernels.logViscosityKernel3D[b], ones);
-            kept.push_back(scaled(kernels.logViscosityKernel3D[b]));
-          }
-          for (auto b = std::size_t{0}; b < kept.size(); ++b) {
-            fields.push_back(io::NodeField{
-                .name = std::format("K_ln_eta_{}", b),
-                .meaning = std::format(
-                    "dJ per unit ln(viscosity) of branch {}, per unit volume",
-                    b),
-                .dimensions = Dimensions{.mass = built.objective.mass,
-                                         .length = built.objective.length - 3,
-                                         .time = built.objective.time},
-                .values = kept[b]});
-          }
-          write("_viscosity_kernels.nc", std::move(fields),
-                {.name = std::format("viscosity kernels of {}", spec.name),
-                 .meta = {{"lateral_log_viscosity_pairing",
-                           built.factor * lateral},
-                          {"uniform_log_viscosity_pairing",
-                           built.factor * uniform}}});
-        }
-        if (block.Writes(KernelParameter::Moduli)) {
-          if (kernels.kappaKernel3D.size() != coupling.GridValueCount() ||
-              kernels.muKernel3D.size() != coupling.GridValueCount()) {
-            throw std::logic_error(
-                "the sweep formed no moduli kernels over the coupling");
-          }
-          const auto pairing =
-              PairedOverRanks(coupling, kernels.muKernel3D,
-                              op.UnrelaxedShearPerturbation()) +
-              PairedOverRanks(coupling, kernels.kappaKernel3D,
-                              op.BulkPerturbation());
-          const auto kappa = scaled(kernels.kappaKernel3D);
-          const auto mu = scaled(kernels.muKernel3D);
-          // per Pa of the modulus and per cubic metre
-          const auto dims =
-              Dimensions{.mass = built.objective.mass - 1,
-                         .length = built.objective.length + 1 - 3,
-                         .time = built.objective.time + 2};
-          write("_moduli_kernels.nc",
-                {io::NodeField{.name = "K_kappa",
-                               .meaning = "dJ per Pa of the bulk modulus "
-                                          "(absolute perturbation), per unit "
-                                          "volume",
-                               .dimensions = dims,
-                               .values = kappa},
-                 io::NodeField{.name = "K_mu",
-                               .meaning = "dJ per Pa of the unrelaxed shear "
-                                          "modulus (absolute perturbation, "
-                                          "the branch moduli as fixed "
-                                          "fractions of it), per unit volume",
-                               .dimensions = dims,
-                               .values = mu}},
-                {.name = std::format("moduli kernels of {}", spec.name),
-                 .meta = {{"lateral_moduli_pairing", built.factor * pairing}}});
-        }
+        WriteFieldKernels(stem, block, spec, built, kernels, coupling,
+                          whole ? &*whole : nullptr, mesh, earth, delta,
+                          op.UnrelaxedShearPerturbation(), op.BulkPerturbation());
       });
 }
 
@@ -1640,8 +1693,8 @@ std::string KernelStatic1D(const std::filesystem::path& config,
   const auto w = WritingOf(config, run, solver);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(loads.get()));
-  return Sweep1D(input, w, evolution, snapshots, times, op, rheology,
-                 earth.material, world.iceRead, world.seaLevelRead, read) +
+  return Sweep1D(input, w, evolution, snapshots, times, op, rheology, earth,
+                 world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }
 
@@ -1750,8 +1803,8 @@ std::string Kernel1D(const std::filesystem::path& config,
   const auto w = WritingOf(config, run, solver);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(drive.loads.get()));
-  return Sweep1D(input, w, evolution, snapshots, times, op, rheology,
-                 earth.material, world.iceRead, world.seaLevelRead, read) +
+  return Sweep1D(input, w, evolution, snapshots, times, op, rheology, earth,
+                 world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }
 
@@ -1824,11 +1877,22 @@ std::string Kernel3D(const std::filesystem::path& config,
 
 std::string RunKernel(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
-  const auto input = ReadKernelInput(config);
+  auto input = ReadKernelInput(config);
+  const auto earth = BuildEarth(input.run, top);
+  PlaceSeismicSources(input.run, earth, top);
   const auto& run = input.run;
-  const auto earth = BuildEarth(run, top);
   const auto meaning = Meaning(run, earth);
   const auto& ranks = TheRanks();
+  // a model with lateral structure has its kernels in the viscosity and
+  // the moduli as fields, and only so
+  if (earth.Lateral() && input.kernels.lateral == false) {
+    Fail(top.At("kernels").At("lateral"),
+         std::format("is false, and the model is {}: its kernels in the "
+                     "viscosity and the moduli are fields over the Earth; "
+                     "drop the member or give true",
+                     earth.Dimension()));
+  }
+  const auto lateral = input.kernels.lateral.value_or(false);
   if (run.problem == Problem::Static) {
     // a viscosity file is refused in the static problem when the config is
     // read, so a lateral Earth here is one of lateral moduli
@@ -1842,7 +1906,7 @@ std::string RunKernel(const std::filesystem::path& config) {
     return KernelStatic1D(config, input, top, earth, meaning);
   }
   if (!earth.Lateral()) {
-    RefuseThreeDSolver(top, "a 1-D run (a radial model)");
+    RefuseThreeDSolver(top, "a 1-D run (a radial model)", lateral);
     if (!ranks.First()) return "";
     const RanksOverride alone(Ranks{});
     return Kernel1D(config, input, top, earth, meaning);

@@ -37,7 +37,8 @@ of mantle viscosity using deglacial sea level observations;
   frozen or migrating shorelines and the initial sea level calibrated
   against a present-day one; or the solid body's response alone.
 - **Forcings, in any mix.** An ice change, surface loads, a prescribed tide
-  and seismic sources (moment tensors, planar faults), with rotational
+  and seismic sources (moment tensors, planar faults, and faults given by
+  their slip in a planetmodel fault file, static or in time), with rotational
   feedback none, axial or full; with `"gravity": "none"`, the radial
   forward problem without self-gravitation, under surface loads (their
   weight, a normal traction; no degree-1 part) and seismic sources.
@@ -45,8 +46,11 @@ of mantle viscosity using deglacial sea level observations;
   and rotation measurements, continuous or exactly discrete, 1D and 3D,
   in the ice history, surface loads, a tide, the initial sea level, the
   viscosity (in 3D the log-viscosity field), the moduli κ and μ and the
-  sources' moment tensors; tangent-linear runs and second-order adjoints
-  (Hessian-vector products). None is taken in the density
+  sources' moment tensors; the kernels in lateral structure (the log
+  viscosity and the moduli as fields) about a radial Earth by the radial
+  sweeps alone, with no 3D solve, as about a 3D one by the 3D sweeps;
+  tangent-linear runs and second-order adjoints (Hessian-vector
+  products). None is taken in the density
   ([docs/adjoints.md](docs/adjoints.md) §13l).
 - **At scale.** OpenMP threads; a trajectory store on disk, from which the
   reverse sweeps run without the forward problem; checkpoints; and,

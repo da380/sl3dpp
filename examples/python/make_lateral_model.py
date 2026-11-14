@@ -77,7 +77,7 @@ from planetmodel import (SCALAR, AnalyticField, PerturbedField, RadialMesh,
                          equiangular, gauss_legendre, perturbed)
 from planetmodel.modelfile import read_model_file, write_model
 
-from inputs import DATA, read_deck_model, wrote
+from inputs import DATA, keep_unchanged, read_deck_model, wrote
 
 MOHO = 6346.6e3  # m: PREM's Moho, where S40RTS ends
 LID_DEPTH = 400.0e3  # m: how deep below the surface a lid's base is sought
@@ -329,10 +329,12 @@ def main() -> None:
         meta.update({"vp_scaling": args.vp_scaling} if not viscosity else
                     {"law": args.law, "renormalised": int(args.renormalise),
                      "lid_threshold_pa_s": args.lid or 0.0})
-    write_model(out, model, grid=gauss_legendre(args.lmax),
-                radial=radial, fields=fields,
-                interpolation={n: ("polynomial", "cubic") for n in varying},
-                meta=meta, source=Path(__file__).name)
+    # beside the target, replacing it only where the content changed
+    keep_unchanged(out, lambda target: write_model(
+        target, model, grid=gauss_legendre(args.lmax), radial=radial,
+        fields=fields,
+        interpolation={n: ("polynomial", "cubic") for n in varying},
+        meta=meta, source=Path(__file__).name))
     top = deck.layer(layers[-1]).interval[1]
     wrote(out, f"{args.field}, {what}, lmax {args.lmax}, on "
                f"{len(layers)} layers from {span[0] / 1e3:.0f} to "

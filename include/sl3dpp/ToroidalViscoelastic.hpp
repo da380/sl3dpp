@@ -215,10 +215,15 @@ class ToroidalViscoelastic {
     const Fields* force = nullptr;
     std::vector<double>* mu = nullptr;
   };
+  /// With `decayedDual`, the duals of the step's decayed memory are
+  /// written to it per degree, in State::m's layout: the duals before
+  /// the end weights close the recursion (the lateral kernels about a
+  /// radial background expand them on a grid).
   [[nodiscard]] Fields StepTransposed(
       Dual& dual, double dt, Scheme scheme, const Fields& surfaceDual,
       const ItauPairing* pairing = nullptr,
-      const MaterialPairing* material = nullptr) const;
+      const MaterialPairing* material = nullptr,
+      Fields* decayedDual = nullptr) const;
   /// The transpose of the unrelaxed start (SolveElastic on a zero state,
   /// then SetStrain): the duals of the start's forces.
   /// With `baseStart` and `mu`, the start's part of the kernel in the

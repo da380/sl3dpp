@@ -2,7 +2,10 @@
 
 #include <array>
 #include <cmath>
+#include <format>
+#include <numbers>
 #include <stdexcept>
+#include <string>
 
 namespace sl3dpp {
 
@@ -116,5 +119,148 @@ std::vector<PointSource> PlanarFaultSources(const PlanarFault& fault,
   }
   return out;
 }
+
+LoveModuli LoveModuliAt(const EarthModel& model, double r) {
+  const auto rho = model.Density(r);
+  auto isotropic = [](double kappa, double mu) {
+    return LoveModuli{.A = kappa + 4.0 * mu / 3.0,
+                      .C = kappa + 4.0 * mu / 3.0,
+                      .F = kappa - 2.0 * mu / 3.0,
+                      .L = mu,
+                      .N = mu};
+  };
+  if (model.Has("kappa") && model.Has("mu")) {
+    return isotropic(model.Evaluate("kappa", r), model.Evaluate("mu", r));
+  }
+  if (model.Has("vpv") && model.Has("vsv")) {
+    const auto vpv = model.Evaluate("vpv", r);
+    const auto vsv = model.Evaluate("vsv", r);
+    const auto vph = model.Has("vph") ? model.Evaluate("vph", r) : vpv;
+    const auto vsh = model.Has("vsh") ? model.Evaluate("vsh", r) : vsv;
+    const auto eta = model.Has("eta") ? model.Evaluate("eta", r) : 1.0;
+    auto out = LoveModuli{.A = rho * vph * vph,
+                          .C = rho * vpv * vpv,
+                          .F = 0.0,
+                          .L = rho * vsv * vsv,
+                          .N = rho * vsh * vsh};
+    out.F = eta * (out.A - 2.0 * out.L);
+    return out;
+  }
+  if (model.Has("vp") && model.Has("vs")) {
+    const auto vp = model.Evaluate("vp", r);
+    const auto vs = model.Evaluate("vs", r);
+    const auto mu = rho * vs * vs;
+    return isotropic(rho * vp * vp - 4.0 * mu / 3.0, mu);
+  }
+  throw std::invalid_argument(
+      "the model holds no moduli: it needs kappa and mu, vpv and vsv (with "
+      "optional vph, vsh, eta), or vp and vs");
+}
+
+SphericalTensor SlipMoment(const LoveModuli& moduli, const BodyPoint& at,
+                           const std::array<double, 3>& slip,
+                           const std::array<double, 3>& normal, double area) {
+  const PolarBasis basis(at.colatitude, at.longitude);
+  // the slip and the normal in the polar basis at the point
+  const auto s = Vector{Dot(slip, basis.r), Dot(slip, basis.theta),
+                        Dot(slip, basis.phi)};
+  const auto n = Vector{Dot(normal, basis.r), Dot(normal, basis.theta),
+                        Dot(normal, basis.phi)};
+  // e = (s n + n s) / 2, indices 0 = r, 1 = theta, 2 = phi
+  const auto e = [&](int i, int j) { return 0.5 * (s[i] * n[j] + s[j] * n[i]); };
+  const auto& [A, C, F, L, N] = moduli;
+  return {.rr = area * (F * (e(1, 1) + e(2, 2)) + C * e(0, 0)),
+          .tt = area * (A * e(1, 1) + (A - 2.0 * N) * e(2, 2) + F * e(0, 0)),
+          .pp = area * ((A - 2.0 * N) * e(1, 1) + A * e(2, 2) + F * e(0, 0)),
+          .rt = area * 2.0 * L * e(0, 1),
+          .rp = area * 2.0 * L * e(0, 2),
+          .tp = area * 2.0 * N * e(1, 2)};
+}
+
+#ifdef SL3DPP_HAVE_FAULT_FILE
+
+FaultSources FaultSourcesOf(const planetmodel::Fault& fault,
+                            const FaultSourceOptions& options) {
+  if (options.cellsAlongStrike < 1 || options.cellsDownDip < 1 ||
+      options.points < 1) {
+    throw std::invalid_argument(
+        "a fault's quadrature has at least one cell each way and one point");
+  }
+  if (!(options.surfaceRadius > 0.0) || !options.moduli) {
+    throw std::invalid_argument(
+        "a fault's sources need the model's surface radius and its moduli");
+  }
+  const auto& frame = fault.Frame();
+  if (frame.GetKind() != planetmodel::FaultFrame::Kind::Geographic) {
+    throw std::invalid_argument(
+        "the fault is in a Cartesian frame, a flat body; this body is a "
+        "sphere, and takes a fault in the geographic frame");
+  }
+  const auto length = fault.GetScales().Length();
+  const auto surface = options.surfaceRadius;
+  const auto reference = frame.Reference() * length;
+  const auto same = std::abs(reference - surface) <= kSameSurface * surface;
+  if (!same && !options.placement) {
+    throw std::invalid_argument(std::format(
+        "the fault's reference radius, {:.10g} m, is not the model's surface "
+        "radius, {:.10g} m: say how the fault is placed, by its points' "
+        "depths below its reference surface or by their radii",
+        reference, surface));
+  }
+  const auto byDepth = !same && *options.placement == FaultPlacement::Depth;
+  const auto degrees = 180.0 / std::numbers::pi;
+  auto out = FaultSources{};
+  out.slices.resize(fault.NSlices());
+  const auto& patches = fault.Patches();
+  for (auto k = std::size_t{0}; k < patches.size(); ++k) {
+    // the patch's points, placed, and the moduli there
+    const auto first = out.points.size();
+    auto moduli = std::vector<LoveModuli>{};
+    for (auto slice = std::size_t{0}; slice < fault.NSlices(); ++slice) {
+      const auto q = patches[k].Quadrature(
+          static_cast<std::size_t>(options.cellsAlongStrike),
+          static_cast<std::size_t>(options.cellsDownDip),
+          static_cast<std::size_t>(options.points), slice);
+      for (auto i = std::size_t{0}; i < q.Size(); ++i) {
+        if (slice == 0) {
+          const auto& x = q.points[i];
+          const auto stored = std::sqrt(Dot(x, x)) * length;
+          const auto radius = byDepth ? surface - (reference - stored) : stored;
+          const auto at = BodyPoint{
+              .radius = radius,
+              .colatitude = std::atan2(std::hypot(x[0], x[1]), x[2]),
+              .longitude = std::atan2(x[1], x[0])};
+          if (radius > surface) {
+            throw std::invalid_argument(std::format(
+                "patch {}'s quadrature point at (u, v) = ({:g}, {:g}), "
+                "latitude {:.6g}, longitude {:.6g}, lies {:.6g} m above the "
+                "model's surface (its depth {:.6g} m): a fault lies inside "
+                "the body",
+                k, q.u[i], q.v[i], 90.0 - at.colatitude * degrees,
+                at.longitude * degrees, radius - surface, surface - radius));
+          }
+          moduli.push_back(options.moduli(at));
+          if (!(moduli.back().L > 0.0 && moduli.back().N > 0.0)) {
+            throw std::invalid_argument(std::format(
+                "patch {}'s quadrature point at depth {:.6g} m lies where the "
+                "model has no shear modulus (a fluid), which holds no fault",
+                k, surface - radius));
+          }
+          out.points.push_back(at);
+          out.depths.push_back(surface - radius);
+          out.patch.push_back(k);
+        }
+        const auto& s = q.slip[i];
+        out.slices[slice].push_back(
+            SlipMoment(moduli[i], out.points[first + i],
+                       {s[0] * length, s[1] * length, s[2] * length},
+                       q.normals[i], q.weights[i] * length * length));
+      }
+    }
+  }
+  return out;
+}
+
+#endif
 
 }  // namespace sl3dpp

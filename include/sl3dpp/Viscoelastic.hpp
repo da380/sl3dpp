@@ -181,6 +181,7 @@ class ViscoelasticOperator {
     return nodalMaterial_ ? *nodalMaterial_ : rheology_->BaseMaterial();
   }
   [[nodiscard]] int LMax() const { return lmax_; }
+  [[nodiscard]] const Options& GetOptions() const { return options_; }
   /// Whether the systems carry gravity (Options::gravitating).
   [[nodiscard]] bool Gravitating() const { return options_.gravitating; }
   /// The unrelaxed spheroidal system of a degree: its dof map, and the

@@ -80,6 +80,22 @@ for is in [design.md](design.md) §13.
   rather than the downloads, set `FETCHCONTENT_SOURCE_DIR_<NAME>` for each
   (`NUMERICCONCEPTS`, `GAUSSQUAD`, `INTERPOLATION`, `FFTWPP`, `GSHTRANS`,
   `PLANETMODEL`; the comment at the top of `CMakeLists.txt` lists them).
+  An installed copy found by `FIND_PACKAGE_ARGS` is used before the
+  checkout; `-DFETCHCONTENT_TRY_FIND_PACKAGE_MODE=NEVER` makes the build
+  take the checkouts and downloads alone.
+- **The fault file.** The `fault_file` seismic term of `sl3d`, and the
+  library's `FaultSourcesOf`, read planetmodel's fault file
+  (`planetmodel.fault/1`), which planetmodel's C++ library holds after
+  1.5.1. They are compiled where planetmodel's
+  `<planetmodel/faultfile.hpp>` is found (`SL3DPP_HAVE_FAULT_FILE`, defined
+  by `sl3dpp/Fault.hpp`); against an older planetmodel the build and its
+  tests pass without them, and `sl3d` refuses the term, naming the
+  planetmodel it was built with. Until the pin reaches a planetmodel with
+  the fault file, build against a checkout that has it:
+
+  ```sh
+  cmake -B build -DFETCHCONTENT_SOURCE_DIR_PLANETMODEL=<checkouts>/planetmodel
+  ```
 
 ## The MPI build
 

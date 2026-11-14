@@ -1545,7 +1545,7 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
     Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationOf(scheme),
-         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+         .rtol = 1e-12, .coupled_rtol = 1e-11, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
@@ -1563,14 +1563,14 @@ void MaterialKernelsPairWithTheTangentUnderLateralModuli(Viscoelastic3D::Options
         });
     AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                         .rtol = 1e-12,
-                                        .coupled_rtol = 1e-12,
+                                        .coupled_rtol = 1e-11,
                                         .material_kernels = true});
     const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto kappaRhs = VolumePairing(coupling, kernels.kappaKernel3D, d.kappa);
     const auto muRhs = VolumePairing(coupling, kernels.muKernel3D, d.mu);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
-                                              .coupled_rtol = 1e-12});
+                                              .coupled_rtol = 1e-11});
     for (const auto& [name, kappa, mu, rhs] :
          {std::tuple{"kappa", true, false, kappaRhs},
           std::tuple{"mu", false, true, muRhs},

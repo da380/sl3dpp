@@ -50,9 +50,14 @@ endforeach()
 # cycle), written into data/ by the build so that the examples and the sl3d
 # configs run with no data to fetch.
 sl3dpp_add_example(MakeSyntheticEarth)
+# The generators replace an input only where its content changed
+# (KeepUnchanged.hpp), so that a rebuild leaves its bytes, and the hash a
+# run takes of them, as they were; its time is set all the same, the build
+# then seeing it made.
 add_custom_command(
   OUTPUT ${SL3DPP_EXAMPLE_DATA}/synthetic_earth.nc
   COMMAND MakeSyntheticEarth data/synthetic_earth.nc
+  COMMAND ${CMAKE_COMMAND} -E touch_nocreate data/synthetic_earth.nc
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS MakeSyntheticEarth
   COMMENT "Writing the examples' synthetic Earth")
@@ -67,6 +72,7 @@ sl3dpp_add_example(MakeSyntheticModuli)
 add_custom_command(
   OUTPUT ${SL3DPP_EXAMPLE_DATA}/synthetic_moduli.nc
   COMMAND MakeSyntheticModuli data/synthetic_moduli.nc
+  COMMAND ${CMAKE_COMMAND} -E touch_nocreate data/synthetic_moduli.nc
   WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
   DEPENDS MakeSyntheticModuli ${SL3DPP_EXAMPLE_DATA}/prem8.elastic.deck
   COMMENT "Writing the examples' synthetic 3D elastic Earth")

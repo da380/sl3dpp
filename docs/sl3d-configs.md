@@ -584,7 +584,7 @@ hold what they would.
 | `solver.step_rtol` | number > 0 | 1e-9 | the relative tolerance of a 3D step's closure: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the static problem's one zero-length step) |
 | `solver.step_max_iterations` | integer >= 1 | 60 | its iteration budget; a step that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the lateral structure's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
-| `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are bitwise independent of it: it sets only how many fields a batched transform takes at a time |
+| `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are independent of it to rounding: it sets only how many fields a batched transform takes at a time, and the batches of another size are transformed under plans of their own |
 | `solver.scheme` | word | `"exponential_trapezoid"` | the quasi-static problem alone: the time step, `"exponential_trapezoid"` (second order) or `"backward_euler"` (first) |
 | `solver.step` | word | `"fixed_point"` | the quasi-static problem alone, but for the static problem on lateral moduli: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`), the conjugate-gradient solves nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`) |
 
@@ -1056,8 +1056,9 @@ against the depth of a shelf flooding or draining it; the fields mean
 what they mean under frozen shorelines.
 
 **Seismic sources.** Each element of `forcing.seismic` is a source inside
-the body: an object holding exactly one of `point` and `fault`, and, in
-the quasi-static problem, optionally an onset and a history. The source is
+the body: an object holding exactly one of `point`, `fault` and
+`fault_file`, and, in the quasi-static problem, optionally an onset and a
+history. The source is
 the stress glut itself, a moment tensor: in the static problem it acts
 whole, the co-seismic response; through time it acts from its onset
 (`onset_kyr_bp`, a date, in a dated run, `onset` on the run's clock in
@@ -1092,6 +1093,106 @@ A patch whose centre lies above the surface is left out, its share of
 the moment with it. One point source is band-limited by `lmax`; a fault
 of several patches is the way to a smoother source.
 
+A `fault_file` is a fault given by its slip: a planetmodel fault file
+(`planetmodel.fault/1`, written by planetmodel's `write_fault`; its format
+page is planetmodel's `docs/source/formats/fault_file.rst`), one or more
+patches of surface (planes and curved structured patches) with the slip of
+the hanging wall on each, in fault components on a grid of its own,
+static or on a time axis. It is laid out as point sources at the points
+of a quadrature over every patch:
+
+| Member | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `file` | path | required | the fault file |
+| `cells_along_strike`, `cells_down_dip` | integer >= 1 | required | the quadrature's cells on every patch: equal cells of the patch's parameter square, u along strike and v down dip |
+| `points` | integer >= 1 | 1 | Gauss–Legendre points each way in a cell; 1 is the midpoint rule, a point at each cell's centre |
+| `place_by` | `"depth"` or `"radius"` | required where the file's reference radius is not the model's surface radius | how the fault is placed in the model (below) |
+| `time_origin` | number | 0 | a file on a time axis in a run counting forwards: the time of the run's clock, in its unit, at which the file's time zero falls. Refused in a dated run and on a static file |
+| `outside_span` | `"refuse"` or `"hold"` | `"refuse"` | a file on a time axis: what a node's time outside the file's span does, as for a file input (File inputs, above). Refused on a static file |
+
+The quadrature is planetmodel's (`Fault::Quadrature`): each patch cut into
+the cells given, with `points` by `points` Gauss–Legendre points in each, a
+point's weight w the area it stands for; the points are taken patch by
+patch, u slowest. At each point the file's slip s (the displacement of the
+hanging wall relative to the footwall) and the patch's unit normal n (from
+the footwall into the hanging wall) give the moment tensor
+`M = w C : (s n)`, with C the model's elastic tensor there. The file holds
+no rigidity, so the same file on another model gives another moment. C is
+transversely isotropic about the radial direction (the deck's Love moduli
+A, C, F, L, N; isotropic, A = C = lambda + 2 mu, F = lambda, L = N = mu),
+and with e = (s n + n s) / 2 in the spherical polar basis at the point
+(r up, theta south, phi east):
+
+```
+M_tt = w (A e_tt + (A - 2N) e_pp + F e_rr)
+M_pp = w ((A - 2N) e_tt + A e_pp + F e_rr)
+M_rr = w (F (e_tt + e_pp) + C e_rr)
+M_rt = 2 w L e_rt,   M_rp = 2 w L e_rp,   M_tp = 2 w N e_tp
+```
+
+(isotropic: w (lambda (s.n) I + mu (s n + n s)); a slip in the fault's
+surface, s.n = 0, a double couple of moment mu w |s|). The moduli are the
+deck's at the point's radius, the layer above at a boundary, read from its
+`kappa` and `mu`, its velocities (`vpv`, `vsv`, `vph`, `vsh`, `eta`), or
+`vp` and `vs` as the radial solver reads them; where a moduli file varies
+laterally (`model.moduli`), its relative perturbations s and b at the point
+are added as the 3-D operator applies them, delta mu = s mu and
+delta kappa = b kappa against the deck's Voigt-averaged mu and kappa there
+(an isotropic change). A plane of the file is the rectangle a `fault`
+lays out by the same strike, dip and rake, and its midpoint quadrature on
+the `fault`'s patches puts its points at their centres: the file of a
+plane whose uniform slip is a `fault`'s moment over mu L W is that `fault`,
+field for field to rounding.
+
+**Placement.** The file's positions are latitude, longitude and radius
+about its own reference sphere (`reference_radius`); a model's surface may
+lie elsewhere (PREM without its ocean ends at 6368 km). Where the two radii
+agree to 1e-9 the positions are taken as they are; otherwise `place_by`
+is required: `"depth"` keeps each point's depth below the file's reference
+sphere, below the model's surface (the point moved along its radius, its
+normal, slip and weight the file's), and `"radius"` takes each point's
+radius as stored. A point above the model's surface is refused, naming its
+patch, place and depth (a `fault`'s patch above the surface is left out; a
+file's never is), and so is a point where the model has no shear modulus.
+A file in a Cartesian frame (a flat body) is refused: this body is a
+sphere.
+
+**Time.** A static file is a rupture: its slip acts as a `point`'s or a
+`fault`'s moment does, from its onset and times its history where given.
+A file whose slip is on a time axis (`node`, the slip at each stored time
+the cumulative slip) carries its own time dependence: an onset or a
+history beside it is refused, and so is such a file in the static problem,
+whose source is one slip. In a run counting forwards it is read at
+t - `time_origin` (the run's unit) at the clock's time t, as a `field`
+load's file is; in a dated run it is read by date, its axis the
+calendar's (the present at zero, the past negative), as a `field` load's
+file is, and `time_origin` is refused. A node's time outside the file's
+span is refused before the run, or, with `"outside_span": "hold"`, the
+file's first or last slip is held there; within 1e-9 of an end it is read
+at the end. At each time the slip is read by the file's own rule (`linear`
+between its times, `previous` from the latest not after the time, `none`
+at its stored times alone, any other time then refused): each slice of
+the slip is laid out as its own set of tensors, and the moment at a point
+is the sum of the slices' tensors weighted by their hat functions there
+(`linear`: one at the slice's own time, zero at the others and linear
+between; `previous`: one from its time to the next), which is the moment
+of the slip the file reads at that time, its size and direction both.
+
+**Cost.** Each quadrature point is a point source. Sources at one radius,
+to 1e-12 (rounding, never a move of a source), are formed together, at
+the cost of one: a plane's points pair across its middle along strike,
+and so do those of a patch swept from a small-circle trench (a surface of
+revolution about the circle's pole) at a quadrature symmetric about the
+arc's middle; points whose radii differ by more, as a curved patch's along
+strike otherwise do, are formed one by one. In a run through time the
+sources are formed at every node.
+
+**The build.** The term needs planetmodel's C++ library with the fault
+file (`<planetmodel/faultfile.hpp>`, in planetmodel after 1.5.1); a build
+of sl3d against an older planetmodel reads the config but refuses the
+term when it runs, naming the planetmodel it was built with
+(docs/building.md).
+
 **What the seismic forcing resolves.** sl3d is a global code: a source's
 field is carried to degree `lmax`, a wavelength of about 40 000 km /
 `lmax` at the surface (400 km at lmax 96), while a source at depth d
@@ -1099,8 +1200,9 @@ puts structure into degrees up to about a / d (a the radius: some 600
 for a source 10 km deep). Within a few source depths of a shallow fault
 the point values of the displacement and the sea level are therefore not
 converged at any degree a global run reaches, and they ring at the
-truncation wavelength; the patches of a fault, being point sources, are
-resolved one by one where `lmax` passes a / (their spacing). Averages
+truncation wavelength; the patches of a fault and the quadrature points of
+a fault file, being point sources, are resolved one by one where `lmax`
+passes a / (their spacing). Averages
 over caps wider than the truncation wavelength are converged: the
 measurements' caps, and the smoothed fields of `output.smoothing`
 (Optional and smoothed fields, below), the 2° means the examples'
@@ -1149,7 +1251,10 @@ a static file is the same pattern at every node, and a history on a
 field term multiplies the field read. The forcing at a node is each
 term's pattern at the node's time times its factor there: the forcing
 enters a run through time at its nodes alone, and a history's or a field
-file's variation between two nodes is not seen.
+file's variation between two nodes is not seen. A fault file whose slip is
+on a time axis is read by the same rules, on the run's clock from its
+`time_origin` or by date, its span held before the run (Seismic sources,
+above).
 
 The names of the other form are refused, naming this form's: the dated
 names in a run counting forwards and the forwards names in a dated run
@@ -1581,22 +1686,24 @@ smoothed W. The metadata record `smoothing_kind` (`gaussian`),
 for l = 0 to lmax) and the definition (`smoothing`).
 
 A cap measurement of `kernel` of the same width (`relative_sea_level_cap`,
-`displacement_cap`, `potential_cap`) reads the same mean about its
-centre, by the grid's quadrature of the cap sampled at the grid's points
-rather than by the degree weights. The two agree to rounding where the
-grid resolves the cap: s above about 490° / (lmax + 2.5) (14° at lmax
-32, 5° at lmax 96), so that lambda_l is below rounding by degree lmax +
-2, and below about 20°, past which the weight at the antipode is above
-rounding and its kink there resolved by no grid. Otherwise they differ by
-the quadrature's error, the smoothed field being the exact mean: at the
-seismic examples' 2° and lmax 96 the smoothed fields are the cap means
-of a fine quadrature of the band-limited fields to 1e-14, and the
-measurement's reading departs from them by up to 1.3e-4 of the largest
-mean. The smoothed east and north components are not the cap means of
-the east and north components, which a `displacement_vector_cap`
-measurement reads: it takes the east and the north at each point of the
-cap, and they turn across it; at 2° over the seismic examples' fault the
-two differ by up to 5e-4 of the largest horizontal mean.
+`displacement_cap`, `potential_cap`, and the series of a `decay_time`)
+reads the same mean about its centre: its dual is the cap's band-limited
+kernel, sum_l lambda_l (2l + 1) P_l(cos d) / (4 pi a^2) about the centre
+with the same degree weights (the library's `CapMeanDual`), so a
+measurement of a field is the field smoothed over the cap read at the
+centre, to rounding, at every width: at the seismic examples' 2° and
+lmax 96 as at 20° and lmax 32, where both are the cap means of a fine
+quadrature of the band-limited fields to rounding. A
+`displacement_vector_cap` measurement takes the same cap's weight at each
+point times the direction's components in that point's frame (east,
+north, up): its upward part is the smoothed radial displacement at the
+centre, to rounding, but its east and north parts are the cap means of
+the east and north components, which turn across the cap, and are not the
+smoothed east and north components (the components of the smoothed
+potentials' displacement): at 2° at eight grid points over and beside the
+co-seismic example's fault the two differ by up to 6e-4 (east) and 7e-3
+(north) of the largest horizontal mean, while the scalar caps there are
+the smoothed fields to 4e-14.
 
 The fields of the state and of the forcing are not smoothed: the
 initial sea level, the ocean functions (a smoothed ocean function is not
@@ -2427,6 +2534,7 @@ level fixed.
 | the shared blocks | | | as for `solve` (The blocks, above); `output`, `checkpoint` and `restart` checked as `solve` checks them and not used |
 | `kernels.method` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map) |
 | `kernels.parameters` | array of words | required | the kernels written, at least one, each where the run gives it (below) |
+| `kernels.lateral` | boolean | false on a radial model, true on one with lateral structure | the kernels in the viscosity and the moduli as fields over the Earth, whatever the background (Lateral kernels, below) |
 | `kernels.measurements` | array | required | the measurements, at least one (below) |
 | `kernels.output` | path | required | the directory the kernel files go into |
 
@@ -2455,9 +2563,9 @@ kernel's, and is refused here, the error naming `"moment"`.
 | `"ice"` | in the ice history: the ice thickness at each node, its rates, the state's ice and the initial sea level | with an ocean | `<name>_ice_kernels.nc` |
 | `"load"` | in a surface load at each node: in the water budget, outside it, and the height of a layer on the solid surface | always; without an ocean the one load kernel | `<name>_load_kernels.nc` |
 | `"tide"` | in the coefficients of a tidal potential at each node | always: with an ocean or without, under frozen or migrating shorelines (about a migrating run, its own shorelines held) | `<name>_tide_kernels.txt` |
-| `"moment"` | in the point moment tensors of the run's seismic sources at each node, at every point source and every patch of a fault | with `forcing.seismic` | `<name>_moment_kernels.txt` |
-| `"viscosity"` | in the viscosity | through time | 1D `<name>_viscosity_kernel.txt`, 3D `<name>_viscosity_kernels.nc` |
-| `"moduli"` | in the bulk modulus kappa and the unrelaxed shear modulus mu | always | 1D `<name>_moduli_kernel.txt`, 3D `<name>_moduli_kernels.nc` |
+| `"moment"` | in the point moment tensors of the run's seismic sources at each node, at every point source, every patch of a fault and every quadrature point of a fault file | with `forcing.seismic` | `<name>_moment_kernels.txt` |
+| `"viscosity"` | in the viscosity | through time | 1D `<name>_viscosity_kernel.txt` (and `<name>_viscosity_kernels.nc` with `kernels.lateral`), 3D `<name>_viscosity_kernels.nc` |
+| `"moduli"` | in the bulk modulus kappa and the unrelaxed shear modulus mu | always | 1D `<name>_moduli_kernel.txt` (and `<name>_moduli_kernels.nc` with `kernels.lateral`), 3D `<name>_moduli_kernels.nc` |
 
 The kernels in the surface fields (ice, load) are densities per square
 metre of the surface of the run's sphere (its radius, `radius_m`, in each
@@ -2548,14 +2656,22 @@ likewise.
 **The seismic sources.** `<name>_moment_kernels.txt` lists the run's
 source points under its header (`# point p term patch latitude_deg
 longitude_deg depth_m`, a point source one patch, a fault's patches along
-strike then down dip), then rows `node <time> point dJ_dMrr dJ_dMtt
-dJ_dMpp dJ_dMrt dJ_dMrp dJ_dMtp`: the derivatives of J with respect to
-the members of the point's moment tensor at the node, in the basis of
-`moment_tensor_nm` (r up, theta south, phi east), an off-diagonal member
-setting the symmetric pair, in J's unit per N m. A term's moment at a
-node is its tensor times its factor there (zero before its onset), so
-the derivative with respect to a point source's member is the sum over
-the nodes of the factor times the entry.
+strike then down dip, a fault file's quadrature points patch by patch, u
+slowest, numbered in the `patch` column), then rows `node <time> point
+dJ_dMrr dJ_dMtt dJ_dMpp dJ_dMrt dJ_dMrp dJ_dMtp`: the derivatives of J
+with respect to the members of the point's moment tensor at the node, in
+the basis of `moment_tensor_nm` (r up, theta south, phi east), an
+off-diagonal member setting the symmetric pair, in J's unit per N m. A
+term's moment at a node is its tensor times its factor there (zero before
+its onset; a fault file's on a time axis, its slices as its rule reads
+them), so the derivative with respect to a point source's member is the
+sum over the nodes of the factor times the entry. Kernels in a fault
+file's slip are not written: they follow from these, the moment at a
+quadrature point being w C : (s n) (Seismic sources, above), so that the
+derivative of J with respect to the slip there is w (C : K) n, K the
+point's moment kernel (with its off-diagonal entries halved, each setting
+a pair), gathered onto the slip's own grid through the rule that reads
+the slip at the point.
 
 **The viscosity.** In 1D, `<name>_viscosity_kernel.txt`: columns `r_m`,
 `K_branch_<b>` per Maxwell branch and `W_m3`, the kernel in eta in SI,
@@ -2589,7 +2705,37 @@ is not covered. Its metadata `lateral_moduli_pairing` is the kernels
 paired with the run's own lateral moduli perturbation, dJ per unit scale
 of it.
 
-**Over MPI ranks.** A 1D run is the first rank's alone. A 3D run is
+**Lateral kernels.** The kernels in lateral structure — the
+log-viscosity and moduli kernels as fields — are the starting point of a
+3D inversion, and about a radial Earth they need no 3D run: the forward
+and adjoint problems separate by degree, and the radial sweeps expand
+their fields on the angular grids and multiply them pointwise
+(docs/adjoints.md §21). `"lateral": true` on a radial model writes
+`<name>_viscosity_kernels.nc` and `<name>_moduli_kernels.nc` in the 3D
+form above (the words of `kernels.parameters` choose which) beside the
+radial `.txt` profiles, which are the fields' means over the sphere and
+are, line for line, those of the run without the member. They are the
+kernels a 3D run of the same model with no lateral structure gives, by
+the same method. Their nodes are the memory points of the viscous
+elements when the viscosity's kernels alone are written, and of every
+solid element above the one holding the centre when the moduli's are
+(the viscosity kernel is then zero in the elastic elements); the files'
+pairings with the run's own lateral structure are zero, it having none,
+and `uniform_log_viscosity_pairing` is the radial kernel's pairing with a
+uniform change of ln eta over the viscous mantle. The grids' members of
+the `solver` block, `transform_degrees` (the transforms cut by depth as a
+3D run's are) and `cache_mb`, are taken by such a run through time and
+refused by a radial run otherwise. The static problem takes the member
+as the run through time does (its fields are the moduli's, on the band's
+grid at every node). On a model with lateral
+structure the kernels are fields whatever the member says: `"lateral":
+false` there is refused, naming the model's structure. `"lateral": true`
+naming neither `"viscosity"` nor `"moduli"` is refused. The files of a
+run swept from its trajectory store are those of the run in memory, to
+the bit.
+
+**Over MPI ranks.** A 1D run is the first rank's alone, its lateral
+kernels too. A 3D run is
 distributed over radial segments, its 3D kernels gathered to rank 0 and
 written over the whole mesh, except what the sweeps form on one process,
 refused on several ranks naming the member: the kernels about a run
@@ -2617,13 +2763,13 @@ refused then, naming the member.
 
 | `type` | Members | Value (SI) |
 | --- | --- | --- |
-| `relative_sea_level_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean sea-level change, m |
+| `relative_sea_level_cap` | `latitude`, `longitude`, `width_deg`, the instant | the mean sea-level change over the Gaussian cap (the field smoothed over it, read at its centre: `output.smoothing`'s), m |
 | `relative_sea_level_point` | `latitude`, `longitude`, the instant | the sea-level change at the point, m |
-| `displacement_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean radial displacement, m |
+| `displacement_cap` | `latitude`, `longitude`, `width_deg`, the instant | the mean radial displacement over the cap, m |
 | `displacement_point` | `latitude`, `longitude`, the instant | the radial displacement at the point, m |
-| `displacement_vector_cap` | `latitude`, `longitude`, `width_deg`, `direction`, the instant | the cap-weighted mean of the displacement along the direction, m |
+| `displacement_vector_cap` | `latitude`, `longitude`, `width_deg`, `direction`, the instant | the mean over the cap of the displacement along the direction held in each point's frame, m |
 | `displacement_vector_point` | `latitude`, `longitude`, `direction`, the instant | the displacement at the point along the direction, m |
-| `potential_cap` | `latitude`, `longitude`, `width_deg`, the instant | the cap-weighted mean potential perturbation, m^2 s^-2 |
+| `potential_cap` | `latitude`, `longitude`, `width_deg`, the instant | the mean potential perturbation over the cap, m^2 s^-2 |
 | `potential_point` | `latitude`, `longitude`, the instant | the potential perturbation at the point, m^2 s^-2 |
 | `stokes_coefficient` | `degree`, `order`, the instant | a real orthonormal coefficient of the potential perturbation, m^2 s^-2 |
 | `rotation` | `component`, the instant | a component of the angular velocity perturbation, rad s^-1 |
@@ -2637,9 +2783,11 @@ refused then, naming the member.
   exp(-d^2 / (2 w^2)) with w = `width_deg` and normalised to unit area
   integral, so it reads a weighted mean: the mean `solve`'s
   `output.smoothing` of that width writes about every point (solve,
-  Optional and smoothed fields). A point value is the band-limited
-  value at `lmax` (the grid's reproducing kernel); a narrow cap is often the
-  steadier datum.
+  Optional and smoothed fields), exactly at every width, the dual being
+  the cap's kernel on the band `lmax` (its degree weights synthesised
+  about the centre). A point value is the band-limited value at `lmax`
+  (the grid's reproducing kernel); a narrow cap is often the steadier
+  datum.
 - `displacement_vector_cap`, `displacement_vector_point`: `direction` is an
   object of `east`, `north` and `up` (each optional, default 0, not all
   zero), the components along the local east, north and upward unit
@@ -2704,7 +2852,9 @@ In `kernels.output`:
 
 Summary: `<what the config was taken to mean>; <the inputs as read>;
 wrote <n> measurement(s) of kernels to <output> (<parameters>; <method>
-adjoint)`, the first two as in `solve`'s summary, then, with
+adjoint)` (`; the kernels in the Earth as fields` before the
+closing parenthesis with `kernels.lateral` true), the first two as in
+`solve`'s summary, then, with
 `trajectory.directory`, `; the forward run recorded to the trajectory
 store <directory> (<size>)` or `; the forward run read back from the
 trajectory store <directory> (<size>)`.
@@ -2804,6 +2954,35 @@ A 3D run under a lateral viscosity, its recording on disk: the first
 `sl3d kernel` runs the forward problem and records it, every ninth state
 to `/scratch/trajectory` (each rank's to its own `rank_RRRR`), and a
 second config of other measurements sweeps from the same store.
+
+```json
+{
+  "problem": "quasi_static",
+  "model": {"deck": "prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 64},
+  "times": {"start_kyr_bp": 20.0, "end_kyr_bp": 0.0, "nodes": 81},
+  "forcing": {"ice_change": [{"thickness": {"file": "ice7g.nc"}}]},
+  "ocean": {"at": "start",
+            "topography": {"file": "ice7g.nc"}, "ice": {"file": "ice7g.nc"}},
+  "rotation": "full",
+  "moments": "hydrostatic",
+  "solver": {"transform_degrees": [16, 32]},
+  "kernels": {
+    "lateral": true,
+    "parameters": ["viscosity", "moduli"],
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "barbados", "latitude": 13.1,
+       "longitude": -59.6, "width_deg": 2.0, "date_kyr_bp": 10.0}
+    ],
+    "output": "out/kernels_lateral"
+  }
+}
+```
+
+The same measurement's kernels in the lateral structure about the radial
+Earth, the starting point of a 3D inversion: the radial run and its
+sweep, the fields expanded on the grids, the transforms of the deep
+nodes, where the high degrees have no dofs, cut to degree 16 or 32.
 
 ```json
 {
