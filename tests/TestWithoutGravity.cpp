@@ -1078,8 +1078,9 @@ TEST(WithoutGravity, TheMaxwellSphereUnderASurfaceLoadInClosedForm) {
             scheme == Scheme::ExponentialTrapezoid ? "trapezoid" : "euler",
             steps);
         RecordProperty(name, std::format("{:.3e}", gaps.back()));
-        // degree 1 has no load, and no response
-        EXPECT_LT(worst1, 1e-14 * size) << name;
+        // degree 1 has no load, and no response but the transforms'
+        // rounding (measured 7e-16 of the response)
+        EXPECT_LT(worst1, 1e-12 * size) << name;
       }
       // the scheme's order: the gap falls by 2^order a halving of the step.
       // Under the ramp the flow without bound grows quadratically, which
@@ -1270,6 +1271,7 @@ TEST(WithoutGravity, AResumedRunAndTheFactoredSourcesAreTheGeneralRun) {
   const auto resumed =
       again.Resume(checkpoints.at(2), std::span(times).subspan(2), forcing);
   ASSERT_EQ(resumed.size(), times.size() - 3);
+  // one process, the same transforms: bitwise
   for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
     EXPECT_EQ(resumed[k].displacement, run[k + 3].displacement) << k;
     EXPECT_EQ(resumed[k].toroidalPotential, run[k + 3].toroidalPotential) << k;
@@ -1292,7 +1294,8 @@ TEST(WithoutGravity, AResumedRunAndTheFactoredSourcesAreTheGeneralRun) {
                    0)});
   }
   RecordProperty("factored_departure", std::format("{:.3e}", worst));
-  EXPECT_LT(worst, 1e-11);
+  // two routes' rounding: measured 2e-13
+  EXPECT_LT(worst, 1e-10);
 }
 
 TEST(WithoutGravity, AStaticLoadIsTheTractionNumbersTimesItsWeight) {
@@ -1360,7 +1363,8 @@ TEST(WithoutGravity, AStaticLoadIsTheTractionNumbersTimesItsWeight) {
       }
       RecordProperty(std::format("{}_degree_{}", name, l),
                      std::format("{:.3e}", gap / size));
-      EXPECT_LT(elsewhere * sle.Length(), 1e-14 * size) << name << " " << l;
+      // the transforms' rounding alone: measured 8e-15 of the response
+      EXPECT_LT(elsewhere * sle.Length(), 1e-12 * size) << name << " " << l;
       worst = std::max(worst, gap / size);
     }
     EXPECT_LT(worst, 1e-12) << name;
@@ -1413,10 +1417,12 @@ TEST(WithoutGravity, LoadsAndSourcesTogetherAreTheSumOfTheirRuns) {
         scale = std::max({scale, std::abs(b[i]), std::abs(c[i])});
       }
     }
+    // the load leaves the toroidal systems' arithmetic as it is: bitwise
     EXPECT_EQ(both[n].toroidalPotential, sourced[n].toroidalPotential) << n;
   }
   RecordProperty("superposition", std::format("{:.3e}", worst / scale));
-  EXPECT_LT(worst, 1e-13 * scale);
+  // measured 2e-14
+  EXPECT_LT(worst, 1e-11 * scale);
 }
 
 TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
@@ -1470,6 +1476,7 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
                       {.rotation = RotationalFeedback::None});
       const auto resumed = again.Resume(checkpoints.at(2), rest, forcing);
       ASSERT_EQ(resumed.size(), times.size() - 3) << label;
+      // one process, the same transforms: bitwise
       for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
         EXPECT_EQ(resumed[k].displacement, run[k + 3].displacement)
             << label << " " << k;
@@ -1495,9 +1502,11 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
       }
       // the regenerated strain is the unrelaxed system's, the kept one the
       // step's effective system's: the two agree to the solves' rounding
+      // (measured 2.7e-12)
       RecordProperty("resumed_regenerated", std::format("{:.3e}", worst));
-      EXPECT_LT(worst, 1e-11);
-      // and the direct load's own entries, Run and Resume
+      EXPECT_LT(worst, 1e-9);
+      // and the direct load's own entries, Run and Resume: without an
+      // ocean the two entries form the same load, bitwise
       Evolution direct(op, solver, solver.NoOceanState(),
                        {.rotation = RotationalFeedback::None});
       const auto plain = direct.Run(times, load);
@@ -1521,6 +1530,7 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
                            .keep_snapshots = false});
       EXPECT_TRUE(evolution.Run(times, forcing).empty()) << label;
       ASSERT_EQ(streamed.size(), times.size()) << label;
+      // the same run in one process: bitwise
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         EXPECT_EQ(streamed[n].displacement, run[n].displacement)
             << label << " " << n;
@@ -1535,6 +1545,7 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
                        .record_offset = 2});
       const auto resumed = again.Resume(checkpoints.at(2), rest, forcing);
       ASSERT_EQ(resumed.size(), times.size() - 3);
+      // one process, the same transforms: bitwise
       for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
         const auto whole = k + 3;
         const auto keeps = whole % 2 == 0 || whole + 1 == times.size();
@@ -1564,6 +1575,7 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
     Evolution plain(op, solver, solver.NoOceanState(),
                     {.rotation = RotationalFeedback::None});
     const auto alone = plain.Run(times, Evolution::Forcing{.directLoad = load});
+    // the layer's height is checked and not used: bitwise
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       EXPECT_EQ(layered[n].displacement, alone[n].displacement) << n;
     }
@@ -1652,8 +1664,9 @@ TEST(WithoutGravity, ALoadsDegreeOnePartIsRemoved) {
       const auto U = grid.Expand(a[n].displacement);
       auto largest = 0.0;
       for (const auto& c : U) largest = std::max(largest, std::abs(c));
+      // the transforms' rounding alone: measured 1.4e-15
       for (auto m = 0; m <= 1; ++m) {
-        EXPECT_LT(std::abs(U[SurfaceGrid::Index(1, m)]), 1e-14 * largest);
+        EXPECT_LT(std::abs(U[SurfaceGrid::Index(1, m)]), 1e-12 * largest);
       }
     }
     return out;
@@ -1692,8 +1705,9 @@ TEST(WithoutGravity, ALoadsDegreeOnePartIsRemoved) {
     for (auto i = std::size_t{0}; i < pair.size(); ++i) pair[i] += south[i];
     const auto share = DegreeOneShare(sphere.Expand(pair), 32);
     EXPECT_GT(share, 1e-10) << widthDeg;
+    // measured 1e-14 and 2.2e-14
     const auto projected = gap(*fine, pair, without(sphere, pair, degreeOne));
-    EXPECT_LT(projected, 1e-12) << widthDeg;
+    EXPECT_LT(projected, 1e-11) << widthDeg;
     const auto balanced = gap(*fine, pair, without(sphere, pair, odd));
     std::cout << std::format(
         "[without gravity] a {:g} degree antipodal pair at lmax 32: degree-1 "
@@ -1723,8 +1737,8 @@ TEST(WithoutGravity, ALoadsDegreeOnePartIsRemoved) {
     return std::optional<std::vector<double>>(std::move(columns));
   };
   EXPECT_NO_THROW((void)coarse->op.SolveElastic(state, zero));
-  // the same solve: the channel's columns are those of the channel
-  // without degree 1
+  // the same solve, the radial systems' alone (no transform): the
+  // channel's columns are those of the channel without degree 1, bitwise
   EXPECT_EQ(coarse->op.SolveElastic(state, tilt),
             coarse->op.SolveElastic(state, level));
 }

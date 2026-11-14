@@ -744,6 +744,7 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
       sea[i] += sign * deltaSea[i];
     }
     const auto start = scene.solver.MakeState(state.iceThickness, sea);
+    // 0/1 by flotation: only a cell sitting on the threshold could flip
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
     const auto snaps = runAt(sign, start).first;
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
@@ -1419,6 +1420,11 @@ Viscoelastic3D::Options::LateralModuli TestModuli() {
           }};
 }
 
+/// The combined fixed points' tolerance under lateral moduli: their
+/// rounding floor there (forward, tangent and adjoint) is 3e-13 to 7e-13,
+/// and about 1e-12 for the nested conjugate-gradient closure.
+constexpr auto kModuliCoupledRtol = 1e-11;
+
 }  // namespace
 
 void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
@@ -1461,16 +1467,17 @@ void PairsWithTheTangentUnderLateralModuli(Viscoelastic3D::Options::StepSolver s
     ASSERT_TRUE(op.HasLateralModuli());
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+        {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol,
+         .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                         .rtol = 1e-12,
-                                        .coupled_rtol = 1e-12});
+                                        .coupled_rtol = kModuliCoupledRtol});
     const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                               .rtol = 1e-12,
-                                              .coupled_rtol = 1e-12});
+                                              .coupled_rtol = kModuliCoupledRtol});
     TangentPerturbation3D d;
     d.directLoad = deltas;
     d.logViscosity = OnCoupling(op.Coupling(), direction);
@@ -1682,13 +1689,13 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepTakesATangentialMeasurement) {
         }
       }
       Evolution3D evolution(op, scene.solver, scene.state,
-                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                            {.rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol});
       auto paired = std::map<AdjointMethod, double>{};
       for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
         const auto kernels =
             AdjointSolver3D(evolution, {.method = method,
                                         .rtol = 1e-12,
-                                        .coupled_rtol = 1e-12})
+                                        .coupled_rtol = kModuliCoupledRtol})
                 .FirstOrderKernels(times, measurements);
         auto total = 0.0;
         for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -1869,19 +1876,19 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepFormsMomentKernels) {
         direction.sources.push_back(std::move(at));
       }
       Evolution3D evolution(op, scene.solver, scene.state,
-                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                            {.rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol});
       const auto along = Objective(
           scene,
           TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                             .rtol = 1e-12,
-                                            .coupled_rtol = 1e-12})
+                                            .coupled_rtol = kModuliCoupledRtol})
               .Run(times, direction),
           measurements);
       ASSERT_NE(along, 0.0);
       const auto kernels =
           AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
                                       .rtol = 1e-12,
-                                      .coupled_rtol = 1e-12,
+                                      .coupled_rtol = kModuliCoupledRtol,
                                       .moment_points = points})
               .FirstOrderKernels(times, measurements);
       ASSERT_EQ(kernels.ice.momentKernels.size(), times.size());
@@ -1950,19 +1957,19 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepFormsTideKernels) {
         direction.tide.push_back(std::move(tide));
       }
       Evolution3D evolution(op, scene.solver, scene.state,
-                            {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                            {.rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol});
       const auto along = Objective(
           scene,
           TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                             .rtol = 1e-12,
-                                            .coupled_rtol = 1e-12})
+                                            .coupled_rtol = kModuliCoupledRtol})
               .Run(times, direction),
           measurements);
       ASSERT_NE(along, 0.0);
       const auto kernels =
           AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
                                       .rtol = 1e-12,
-                                      .coupled_rtol = 1e-12,
+                                      .coupled_rtol = kModuliCoupledRtol,
                                       .tide_kernels = true})
               .FirstOrderKernels(times, measurements);
       ASSERT_EQ(kernels.ice.tideKernels.size(), times.size());
@@ -2004,7 +2011,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+        {.rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, Ramp(load, span)));
     auto measurements = std::map<std::size_t, Measurement>{};
@@ -2013,7 +2020,7 @@ TEST(DiscreteAdjoint3D, ContinuousGapClosesUnderLateralModuli) {
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels =
           AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
-                                      .coupled_rtol = 1e-12})
+                                      .coupled_rtol = kModuliCoupledRtol})
               .FirstOrderKernels(times, measurements, &trajectory);
       auto loads = 0.0;
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -2087,7 +2094,7 @@ TEST(DiscreteAdjoint3D, LoadKernelsUnderRotationAndLateralModuli) {
       measurements[times.size() - 1] = measurement;
       Evolution3D evolution(
           op, scene.solver, scene.state,
-          {.rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12});
+          {.rotation = rotation, .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol});
       auto objective = [&](double sign) {
         return Objective(scene, evolution.Run(times, history(sign)),
                          measurements);
@@ -2097,7 +2104,7 @@ TEST(DiscreteAdjoint3D, LoadKernelsUnderRotationAndLateralModuli) {
       for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
         const auto kernels =
             AdjointSolver3D(evolution, {.method = method, .rtol = 1e-12,
-                                        .coupled_rtol = 1e-12})
+                                        .coupled_rtol = kModuliCoupledRtol})
                 .FirstOrderKernels(times, measurements);
         auto paired = 0.0;
         for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -2163,7 +2170,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
     Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationalFeedback::None,
-         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+         .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     const auto& coupling = op.Coupling();
@@ -2182,7 +2189,7 @@ void ContinuousMaterialKernelsAgreeUnderLateralModuli(
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto kernels = AdjointSolver3D(evolution, {.method = method,
                                                        .rtol = 1e-12,
-                                                       .coupled_rtol = 1e-12,
+                                                       .coupled_rtol = kModuliCoupledRtol,
                                                        .material_kernels = true})
                                .FirstOrderKernels(times, measurements, &trajectory);
       paired[method] = VolumePairing(coupling, kernels.kappaKernel3D, dKappa) +
@@ -2460,7 +2467,7 @@ TEST(DiscreteAdjoint3D, InteriorSourcesInThePairUnderLateralModuli) {
         {.solver = stepSolver, .solve_rtol = 1e-12, .moduli = TestModuli()});
     ASSERT_TRUE(op.HasLateralModuli());
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                          {.rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol});
     const auto forward = Objective(
         scene,
         evolution.Run(times, Evolution3D::Forcing{.sources = [&](double t) {
@@ -2474,14 +2481,14 @@ TEST(DiscreteAdjoint3D, InteriorSourcesInThePairUnderLateralModuli) {
         scene,
         TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                           .rtol = 1e-12,
-                                          .coupled_rtol = 1e-12})
+                                          .coupled_rtol = kModuliCoupledRtol})
             .Run(times, direction),
         measurements);
     EXPECT_NEAR(along, forward, 1e-8 * std::abs(forward)) << label;
     const auto kernels =
         AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                     .rtol = 1e-12,
-                                    .coupled_rtol = 1e-12,
+                                    .coupled_rtol = kModuliCoupledRtol,
                                     .moment_points = points})
             .FirstOrderKernels(times, measurements);
     auto paired = 0.0;

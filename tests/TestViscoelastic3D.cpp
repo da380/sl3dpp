@@ -538,6 +538,7 @@ TEST(Lateral, RecycledArraysGiveBitwiseTheFreshSteps) {
   };
   const auto fresh = run(false);
   const auto recycled = run(true);
+  // one process, operators of one configuration: the same transforms
   ASSERT_EQ(fresh.m.size(), recycled.m.size());
   for (auto k = std::size_t{0}; k < fresh.m.size(); ++k) {
     EXPECT_EQ(fresh.m[k].c[0], recycled.m[k].c[0]) << "branch " << k;
@@ -590,6 +591,7 @@ TEST(Lateral, AdaptiveMixingEngagesOnlyWhenPicardIsSlow) {
   EXPECT_TRUE(weak.info.converged);
   EXPECT_EQ(weak.info.mixedPasses, 0);
   EXPECT_EQ(weak.info.iterations, weakPicard.info.iterations);
+  // one process, the same transforms: bitwise
   EXPECT_EQ(gap(weak.solutions, weakPicard.solutions), 0.0);
 
   const auto slow = second(10.0, 5, 0.5);
@@ -819,6 +821,7 @@ TEST(Lateral, OpenStepsOutliveTheCacheAndStepsMayRunConcurrently) {
       options);
   const auto scheme = Scheme::ExponentialTrapezoid;
   const auto state = op.Step(op.ZeroState(), tau, scheme, load).state;
+  // one process, operators of one configuration, the same transforms: bitwise
   auto same = [](const Viscoelastic3D::State& a,
                  const Viscoelastic3D::State& b) {
     return a.m[0].c[0] == b.m[0].c[0] && a.m[0].c[1] == b.m[0].c[1] &&

@@ -148,8 +148,10 @@ TEST(DegreeOperator, ReciprocityAndSigns) {
     EXPECT_LT(ln.h_u[l] + ln.h_phi[l], 0.0) << "l = " << l;
     EXPECT_LT(ln.k_u[l] + ln.k_phi[l], 0.0) << "l = " << l;
   }
-  // The axial pair: m_phi vanishes with k_c (the shell theorem).
-  EXPECT_NEAR(ln.k_c, 0.0, 1e-12);
+  // The axial pair: m_phi vanishes with k_c (the shell theorem). k_c is
+  // then the degree-zero solve's rounding (7e-13 here, 1.6e-12 of the
+  // tidal k at degree 2, a number of its kind), held against that scale.
+  EXPECT_NEAR(ln.k_c, 0.0, 1e-9 * std::abs(ln.k_t[2]));
 }
 
 TEST(ToroidalOperator, HomogeneousSphereClosedForm) {

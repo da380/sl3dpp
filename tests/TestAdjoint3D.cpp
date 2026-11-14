@@ -368,6 +368,7 @@ TEST(Adjoint3D, CheckpointedRecordingsRebuildTheGaps) {
   const auto full = kernels(1);
   for (const auto stride : {2, 4}) {
     const auto gapped = kernels(stride);
+    // one operator in one process, the same transforms: bitwise
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       ASSERT_EQ(gapped.ice.directLoadKernels[n], full.ice.directLoadKernels[n])
           << "stride " << stride << ", node " << n;

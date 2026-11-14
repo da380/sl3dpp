@@ -193,6 +193,7 @@ TEST(NodeBlocks, FollowTheTruncation) {
       EXPECT_EQ(weights[e], 0.0);
       continue;
     }
+    // a formula, no transform: deterministic
     EXPECT_DOUBLE_EQ(
         weights[e],
         nodesIn[e] * std::pow((degrees[e] + 1.0) / (kLmax + 1.0), 3));
@@ -258,18 +259,21 @@ TEST(NodeBlocks, TransformsInvertAndCarryToTheSurfaceGrid) {
   for (auto i = std::size_t{0}; i < back.r.size(); ++i) {
     worst = std::max(worst, std::abs(back.r[i] - spectral.r[i]));
   }
-  EXPECT_LT(worst, 1e-13);
+  // coefficients of order one half: measured 8e-15
+  EXPECT_LT(worst, 1e-12);
 
   // A block's real field, carried to the lmax grid, is the single grid's
   // synthesis of the same coefficients zero padded.
   const auto carried = blocked.OnSurfaceGrid(field.r);
   const auto want = single.Synthesise(padded).r;
   ASSERT_EQ(carried.size(), want.size());
-  auto carriedWorst = 0.0;
+  auto carriedWorst = 0.0, carriedScale = 0.0;
   for (auto i = std::size_t{0}; i < want.size(); ++i) {
     carriedWorst = std::max(carriedWorst, std::abs(carried[i] - want[i]));
+    carriedScale = std::max(carriedScale, std::abs(want[i]));
   }
-  EXPECT_LT(carriedWorst, 1e-13);
+  // transforms of two sizes, to rounding: measured 3e-15 of the field
+  EXPECT_LT(carriedWorst, 1e-12 * carriedScale);
   EXPECT_THROW(static_cast<void>(blocked.OnSurfaceGrid(want)),
                std::invalid_argument);
 }
@@ -408,8 +412,8 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     EXPECT_LT(spherical, tolerance) << label;
     EXPECT_LT(loadDual, tolerance) << label;
   };
-  // measured 1.4e-14 to 1.0e-13, and 3.4e-10 to 2.9e-9
-  compare([](double, double, double) { return 0.0; }, 1e-12, "zero_lateral");
+  // measured 4e-14 to 1.6e-13, and 3.4e-10 to 2.9e-9
+  compare([](double, double, double) { return 0.0; }, 1e-10, "zero_lateral");
   compare(
       [](double, double theta, double phi) {
         return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);

@@ -1203,7 +1203,8 @@ kernels and continuous second-order sweep converge likewise
 instantaneous response equals the run's first node to the bit, with and
 without lateral moduli, rotation off and full, both step solvers
 (`LateralModuli3D.InstantaneousIsTheRunsFirstNode`); with the moduli set
-but zero it is the radial fingerprint, to the bit
+but zero it is the radial fingerprint, to rounding (1e-12; bitwise in the
+test's one process)
 (`InstantaneousWithoutLateralStructureIsTheRadialFingerprint`); 10%
 shear and 5% bulk perturbations move it by 2.3e-2 of the sea level's
 largest magnitude, the two step solvers agreeing at 1e-9
@@ -1256,15 +1257,17 @@ solve); `ElasticPerturbation3D` itself stays single-process.
 
 GATES: two and three threads-as-ranks (`RadialRanks.
 LateralModuliStepsMatchTheOneProcessSteps`): the start solve's
-iteration count, two lateral steps' surface responses and memory
-slices, and the branchless static solve, against the one process at
-1e-11 (measured 1e-13); the continuous and discrete sweeps on three
+iteration count (to within one: a residual at the tolerance in another
+summation order may take one more), two lateral steps' surface
+responses and memory slices, and the branchless static solve, against
+the one process at 1e-9 (measured 6e-12, the conjugate-gradient solves
+at 1e-12); the continuous and discrete sweeps on three
 ranks with lateral moduli and the axial rotational feedback
 (`LateralModuliAdjointsMatchTheOneProcessSweeps`): ice kernels and
-viscosity-kernel slices at 1e-10 (measured 6e-13 and 2e-13); the
+viscosity-kernel slices at 1e-9 (measured 3e-12); the
 instantaneous response on three ranks, on the Maxwell and on the
-branchless rheology, both step solvers, at 1e-10 (measured 2e-16 by the
-fixed point and 1.2e-12 by the conjugate gradients;
+branchless rheology, both step solvers, at 1e-9 (measured 2e-16 by the
+fixed point and 1.4e-12 by the conjugate gradients;
 `InstantaneousResponsesMatchTheOneProcess`); under
 mpiexec on two and three ranks
 (`Distributed.LateralModuliStepsMatchTheOneProcessSteps`), likewise.
@@ -1627,8 +1630,10 @@ the 3D tangent-linear runs of both methods along loads, a lateral log
 viscosity and lateral moduli; the first-order sweeps of both methods
 with the material kernels; the second-order sweeps of both methods along
 that direction with the kernels' derivatives — the ice views on every
-rank and each rank's slices of the 3D kernels and derivatives against
-the one process on the same cuts, all at 1e-11.
+rank against the one process at 1e-11, and each rank's slices of the 3D
+kernels and derivatives on the same cuts at 1e-9 (measured 1e-12: the
+sweeps close at the coupled tolerance of 1e-11, in another summation
+order).
 `Distributed.DerivativesMatchTheOneProcess` is the same under mpiexec
 (TestDistributed), on 2, 3 and 4 ranks.
 Not distributed: the static Born perturbation (`ElasticPerturbation3D`),
@@ -2073,7 +2078,10 @@ loads and the thickness the difference of two runs at 1e-8; along the
 relaxation times (the log viscosity in 3D) and the moduli the
 derivative of the run, central differences at second order with
 Richardson at 1e-6; the discrete sweeps the tangents' transposes at
-1e-8 (every kernel, and a stride-2 recording); the distributional and
+1e-8 (every kernel, and a stride-2 recording: in 3D at 1e-9, in 1D the
+relaxation-time kernel at 1e-4 of the full recording's, its rebuilt
+backward trapezoid steps amplifying rounding by about 800); the
+distributional and
 quelled views equal to the thickness view; the discrete Hessian
 symmetric and equal to the second-order run (1e-9 in 1D, 1e-8 in 3D,
 where they agree to parts in 1e12), which is itself

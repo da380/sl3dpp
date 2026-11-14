@@ -119,6 +119,7 @@ TEST(EvolutionResume, AResumedRunIsTheUninterruptedOne) {
       checkpoints.at(3),
       std::vector<double>(times.begin() + 3, times.end()), directLoad);
   ASSERT_EQ(tail.size(), times.size() - 4);
+  // one process, the same transforms: bitwise, here and below
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[4 + k];
     const auto& b = tail[k];
@@ -248,6 +249,7 @@ TEST(EvolutionResume, AResumedRunUnderInteriorSourcesIsTheUninterruptedOne) {
       checkpoints.at(3), std::vector<double>(times.begin() + 3, times.end()),
       forcing);
   ASSERT_EQ(tail.size(), times.size() - 4);
+  // one process, the same transforms: bitwise
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[4 + k];
     const auto& b = tail[k];

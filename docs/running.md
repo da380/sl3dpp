@@ -155,7 +155,10 @@ OMP_NUM_THREADS=32 OMP_PLACES=cores OMP_PROC_BIND=close \
   laptop eight one-thread ranks were 50% slower per pass than one
   eight-thread rank.
 - **Results.** They agree with a one-process run to round-off of the
-  radially substructured solves (about 1e-12 relative), not bitwise.
+  radially substructured solves (about 1e-12 relative), not bitwise; an
+  iterative solve that closes a pass earlier or later on the ranks than
+  on one process moves the fields within its tolerance (up to about
+  1e-10 relative at sl3d's default tolerances of 1e-9).
 - **Files.** Rank 0 writes every output and prints the summary. Each rank
   writes its checkpoints and its trajectory-store states into its own
   `rank_RRRR` subdirectory, and a run resumes, or a store is swept, over

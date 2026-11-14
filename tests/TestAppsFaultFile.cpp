@@ -363,7 +363,7 @@ TEST_F(FaultFileTest, SlipOnATimeAxisIsItsHistory) {
   EXPECT_NE(described.find("(1 patch, slip at 2 times, linear)"), std::string::npos)
       << described;
   EXPECT_NE(described.find(", read by date"), std::string::npos) << described;
-  // nothing moves before the slip begins
+  // nothing moves before the slip begins: no slip, exactly zero
   auto before = 0.0;
   for (const auto v : Node(node, "displacement", 0)) before = std::max(before, std::abs(v));
   EXPECT_EQ(before, 0.0);

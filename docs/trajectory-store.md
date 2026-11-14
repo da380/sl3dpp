@@ -219,8 +219,10 @@ sweep expands its lateral kernels on (`kernels.lateral`).
 the members of `apps/RunHash.cpp` (AddRunMembers, which its checkpoints
 hash too, then the seismic sources, the static problem's dates of its
 terms, the file inputs' formats and the memory points), the transforms'
-cache left out because it does not change the numbers, and the
-transforms' degrees entering on a 3D run alone.
+cache left out because it changes the numbers at most at rounding (it
+sets how many fields a batched transform takes at a time, and batches of
+another size run under FFT plans of their own), and the transforms'
+degrees entering on a 3D run alone.
 
 ## Writing
 

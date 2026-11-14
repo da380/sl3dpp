@@ -226,7 +226,8 @@ TEST(KernelWriter, RoundTripIsExactAtTheNodes) {
       EXPECT_NEAR(fromFile, inMemory, 1e-11 * std::abs(inMemory));
     }
 
-    // The file's shape: the model's skeleton, the viscous layers held.
+    // The file's shape: the model's skeleton (written and read back:
+    // bitwise), the viscous layers held.
     const auto& skeleton = file.GetSkeleton().Boundaries();
     ASSERT_EQ(skeleton.size(), body.model.Boundaries().size());
     for (auto i = std::size_t{0}; i < skeleton.size(); ++i) {

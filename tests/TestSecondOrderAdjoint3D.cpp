@@ -1045,6 +1045,10 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
   }
 }
 
+/// The combined fixed points' tolerance under lateral moduli: their
+/// rounding floor there (forward, tangent and adjoint) is 2e-13 to 7e-13.
+constexpr auto kModuliCoupledRtol = 1e-11;
+
 void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
   // The discrete second-order sweep with lateral elastic moduli in the
   // background as well as lateral viscosity: the carried kernels equal the
@@ -1108,7 +1112,7 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
       op, scene.solver, scene.state,
       {.rotation = RotationalFeedback::None,
        .rtol = 1e-12,
-       .coupled_rtol = 1e-12,
+       .coupled_rtol = kModuliCoupledRtol,
        .record_stride = 1});
   const auto& coupling = op.Coupling();
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(
@@ -1143,13 +1147,13 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
       });
   TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
                                             .rtol = 1e-12,
-                                            .coupled_rtol = 1e-12,
+                                            .coupled_rtol = kModuliCoupledRtol,
                                             .record = true});
   const auto runU = tangent.Run(times, u.tangent, &trajectory);
   const auto runW = tangent.Run(times, w.tangent, &trajectory);
   AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
                                       .rtol = 1e-12,
-                                      .coupled_rtol = 1e-12,
+                                      .coupled_rtol = kModuliCoupledRtol,
                                       .material_kernels = true});
   const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
   const auto [kernelsU, alongU] = adjoint.SecondOrderKernels(
@@ -1265,7 +1269,7 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
         op, scene.solver, scene.state,
         {.rotation = RotationalFeedback::None,
          .rtol = 1e-12,
-         .coupled_rtol = 1e-12,
+         .coupled_rtol = kModuliCoupledRtol,
          .record_stride = 1});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, FrozenLoad(scene, times, thickness)));
@@ -1310,13 +1314,13 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       TangentLinearSolver3D tangent(evolution, {.method = method,
                                                 .rtol = 1e-12,
-                                                .coupled_rtol = 1e-12,
+                                                .coupled_rtol = kModuliCoupledRtol,
                                                 .record = true});
       const auto runU = tangent.Run(times, u.tangent, &trajectory);
       const auto runW = tangent.Run(times, w.tangent, &trajectory);
       AdjointSolver3D adjoint(evolution, {.method = method,
                                           .rtol = 1e-12,
-                                          .coupled_rtol = 1e-12,
+                                          .coupled_rtol = kModuliCoupledRtol,
                                           .material_kernels = true});
       const auto [kernels, alongU] = adjoint.SecondOrderKernels(
           times, measurements, runU, u.itau, trajectory, {}, u.material);
@@ -1934,7 +1938,7 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
     Evolution3D evolution(op, scene.solver, scene.state,
                           {.rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
-                           .coupled_rtol = 1e-12,
+                           .coupled_rtol = kModuliCoupledRtol,
                            .record_stride = 1});
     Evolution3D::Forcing forcing;
     forcing.directLoad = [&](double) { return load; };
@@ -1995,7 +1999,7 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
                          ", method " + std::to_string(static_cast<int>(method));
       TangentLinearSolver3D tangent(evolution, {.method = method,
                                                 .rtol = 1e-12,
-                                                .coupled_rtol = 1e-12,
+                                                .coupled_rtol = kModuliCoupledRtol,
                                                 .record = true});
       struct Case {
         const char* name;
@@ -2004,7 +2008,7 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
       };
       AdjointSolver3D adjoint(evolution, {.method = method,
                                           .rtol = 1e-12,
-                                          .coupled_rtol = 1e-12,
+                                          .coupled_rtol = kModuliCoupledRtol,
                                           .material_kernels = true,
                                           .moment_points = {at}});
       const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
@@ -2126,7 +2130,8 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
   for (const auto rotation : {RotationalFeedback::Axial, RotationalFeedback::Full}) {
     const auto name = std::string(rotation == RotationalFeedback::Full ? "full" : "axial");
     const auto evolutionOptions = Evolution3D::Options{
-        .rotation = rotation, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1};
+        .rotation = rotation, .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol,
+        .record_stride = 1};
     auto runOf = [&](Evolution3D& evolution, const std::vector<double>& f) {
       return ForwardTrajectory3D::FromSnapshots(
           evolution.Run(times, [&](double) { return f; }));
@@ -2138,13 +2143,13 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
       const auto label = name + (method == AdjointMethod::Discrete ? ", discrete" : ", continuous");
       TangentLinearSolver3D tangent(evolution, {.method = method,
                                                 .rtol = 1e-12,
-                                                .coupled_rtol = 1e-12,
+                                                .coupled_rtol = kModuliCoupledRtol,
                                                 .record = true});
       const auto runU = tangent.Run(times, u, &trajectory);
       const auto runW = tangent.Run(times, w, &trajectory);
       AdjointSolver3D adjoint(evolution, {.method = method,
                                           .rtol = 1e-12,
-                                          .coupled_rtol = 1e-12,
+                                          .coupled_rtol = kModuliCoupledRtol,
                                           .material_kernels = true});
       const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
       const auto alongTangent = objective(runU);
@@ -2187,7 +2192,7 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
       const auto kernels =
           AdjointSolver3D(movedEvolution, {.method = AdjointMethod::Continuous,
                                            .rtol = 1e-12,
-                                           .coupled_rtol = 1e-12,
+                                           .coupled_rtol = kModuliCoupledRtol,
                                            .material_kernels = true})
               .FirstOrderKernels(times, measurements, &movedTrajectory);
       return pair(kernels, w);

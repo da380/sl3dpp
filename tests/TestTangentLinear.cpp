@@ -521,7 +521,8 @@ TEST(TangentLinear, ATideAndTheTangentialDisplacementInThePair) {
     EXPECT_NE(tideRows, 0.0);
     EXPECT_NE(loadRows, 0.0);
     // without an ocean a layer is its thickness off the sea level and
-    // nothing that the relaxation times reach: its row is nil
+    // nothing that the relaxation times reach: its row is nil (exactly:
+    // every term of it is a product with zero)
     if (background == &dry) {
       EXPECT_EQ(layerRows, 0.0) << label;
     } else {
@@ -1592,6 +1593,7 @@ TEST(TangentLinear, AForcedMigratingRunWhereNoShorelineMoves) {
                                     static_cast<int>(rotation), sourced);
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
         ASSERT_TRUE(moving[n].converged) << what << ", node " << n;
+        // 0 or 1 by flotation: a point flips only on the threshold itself
         ASSERT_EQ(moving[n].oceanFunction, state.oceanFunction)
             << what << ", node " << n;
         for (auto field : {&Evolution::Snapshot::relativeSeaLevelChange,
@@ -1798,6 +1800,8 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
       sea[i] += sign * deltaSea[i];
     }
     const auto start = setup.solver.MakeState(state.iceThickness, sea);
+    // ocean functions are 0 or 1 by flotation, here and below: a point
+    // flips only on the threshold itself
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
     Evolution trial(op, setup.solver, start, {.rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
@@ -1827,6 +1831,9 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     const auto snaps = tangent.Run(cap.times, direction, nullptr, oceans);
     EXPECT_NEAR(Objective(setup, snaps, measurement), fd, 1e-7 * std::abs(fd))
         << "method " << static_cast<int>(method);
+    // the ocean functions given, carried over; and the start's forcing is
+    // nil (no thickness change, C_0 - C_0 against the sea level), so its
+    // solve is exactly zero
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]);
     }
@@ -1844,7 +1851,8 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   }
   EXPECT_NEAR(paired, fd, 1e-7 * std::abs(fd));
 
-  // Under frozen shorelines the initial sea level contributes nothing.
+  // Under frozen shorelines the initial sea level contributes nothing: it
+  // forces no node, and the solves of a nil forcing are exactly zero.
   Evolution frozen(op, setup.solver, state, {.rtol = 1e-12});
   TangentPerturbation seaOnly;
   seaOnly.initialSeaLevel = deltaSea;
@@ -1929,6 +1937,7 @@ TEST(TangentLinear, TheOneNodeRunIsTheStaticProblem) {
     moved.rotation = rotation;
     const auto nonlinear = elastic.SolveNonlinear(state, moved, options);
     ASSERT_TRUE(nonlinear.response.converged);
+    // 0 or 1 by flotation: a point flips only on the threshold itself
     EXPECT_EQ(moving[0].oceanFunction, nonlinear.finalState.oceanFunction);
     EXPECT_NE(moving[0].oceanFunction, state.oceanFunction);
     EXPECT_LT(worst(moving[0].relativeSeaLevelChange,
@@ -1966,6 +1975,7 @@ TEST(TangentLinear, TheOneNodeRunIsTheStaticProblem) {
   const auto alone = evolution.RunMigrating(one, ice, forcing);
   const auto longer = evolution.RunMigrating(cap.times, ice, forcing);
   ASSERT_EQ(alone.size(), 1u);
+  // one process, the start's solve under the same transforms: bitwise
   EXPECT_EQ(alone[0].relativeSeaLevelChange, longer[0].relativeSeaLevelChange);
   EXPECT_EQ(alone[0].displacement, longer[0].displacement);
   ASSERT_FALSE(alone[0].toroidalPotential.empty());
@@ -2095,6 +2105,8 @@ TEST(TangentLinear, AboutAForcedMigratingTrajectory) {
       sea[i] += sign * deltaSea[i];
     }
     const auto start = setup.solver.MakeState(state.iceThickness, sea);
+    // ocean functions are 0 or 1 by flotation, here and below: a point
+    // flips only on the threshold itself
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
     const auto snaps = runAt(sign, start).first;
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
@@ -2329,6 +2341,8 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     }
     const auto second =
         tangent.RunSecondOrder(times, runs[0], runs[1], {}, &trajectory);
+    // no viscosity perturbation drives the run: its solves of a nil
+    // forcing are exactly zero, here and below
     for (const auto& snap : second) {
       EXPECT_EQ(MaxAbs(snap.relativeSeaLevelChange), 0.0);
       EXPECT_EQ(MaxAbs(snap.displacement), 0.0);
@@ -2359,7 +2373,7 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
                                                {}, &trajectory, oceans);
     for (auto n = std::size_t{0}; n < second.size(); ++n) {
       EXPECT_EQ(MaxAbs(second[n].relativeSeaLevelChange), 0.0);
-      EXPECT_EQ(second[n].oceanFunction, oceans[n]);
+      EXPECT_EQ(second[n].oceanFunction, oceans[n]);  // the given, carried
     }
   }
 }

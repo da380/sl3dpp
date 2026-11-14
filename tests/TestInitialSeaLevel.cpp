@@ -302,6 +302,7 @@ TEST(InitialSeaLevel, WeightedCalibrationUpdatesOnlyWhereWeighted) {
   auto worst = 0.0;
   for (auto i = std::size_t{0}; i < final.size(); ++i) {
     if (weights[i] == 0.0) {
+      // no update where the weight vanishes: exact
       EXPECT_EQ(calibration.state.seaLevel[i], final[i]) << "point " << i;
     } else {
       const auto reached = calibration.state.seaLevel[i] +
@@ -388,6 +389,7 @@ TEST(Migrating, MatchesFrozenWhenShorelinesCannotMove) {
   for (auto n = std::size_t{0}; n < frozen.size(); ++n) {
     EXPECT_TRUE(moving[n].converged);
     EXPECT_TRUE(frozen[n].oceanFunction.empty());
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(moving[n].oceanFunction, state.oceanFunction) << "node " << n;
     const auto top = MaxAbs(frozen[n].relativeSeaLevelChange);
     EXPECT_LE(MaxDiff(frozen[n].relativeSeaLevelChange, moving[n].relativeSeaLevelChange),
@@ -451,6 +453,7 @@ TEST(Migrating, ElasticLimitIsTheNonlinearSolveDateByDate) {
     EXPECT_LT(MaxDiff(run[n].relativeSeaLevelChange, want.response.relativeSeaLevelChange),
               1e-7 * top)
         << "node " << n;
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(run[n].oceanFunction, want.finalState.oceanFunction);
   }
 }
@@ -476,6 +479,7 @@ TEST(Migrating, AResumedRunIsTheUninterruptedOne) {
   const auto resumed =
       again.ResumeMigrating(checkpoints.at(2), rest, thickness);
   ASSERT_EQ(resumed.size(), rest.size() - 1);
+  // one process, the same transforms: bitwise
   for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
     EXPECT_EQ(resumed[k].relativeSeaLevelChange, full[k + 3].relativeSeaLevelChange);
     EXPECT_EQ(resumed[k].oceanFunction, full[k + 3].oceanFunction);
@@ -502,6 +506,8 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
     const auto frozen = adjoint.FirstOrderKernels(cap.times, measurements);
     const auto about =
         adjoint.FirstOrderKernels(cap.times, measurements, nullptr, constant);
+    // the same arithmetic on the same ocean function: bitwise; and every
+    // C_n - C_0 of the initial sea level kernel vanishes exactly
     for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
       EXPECT_EQ(frozen.thickness[n], about.thickness[n]) << "node " << n;
     }
@@ -555,6 +561,7 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
       sea[i] += sign * deltaSea[i];
     }
     const auto shifted = body.solver.MakeState(state.iceThickness, sea);
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(shifted.oceanFunction, state.oceanFunction);
     return shifted;
   };
@@ -573,6 +580,7 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
       ice[i] += sign * deltaIce[i];
     }
     const auto shifted = body.solver.MakeState(ice, state.seaLevel);
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(shifted.oceanFunction, state.oceanFunction);
     return functional(shifted, [&, sign](double t) {
       auto out = cap.Thickness(t);
@@ -633,6 +641,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
         }
         return out;
       });
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
         EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
       }
@@ -758,6 +767,7 @@ TEST(InitialSeaLevel, FinalMisfitGradientMatchesCentralDifferences) {
       sea[i] += sign * eps * direction[i];
     }
     const auto state = body.solver.MakeState(setting.truth.iceThickness, sea);
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     ASSERT_EQ(state.oceanFunction, setting.truth.oceanFunction);
     evolution.SetBackgroundState(state);
     values.push_back(ComputeFinalSeaLevelMisfit(evolution, setting.cap.times,
@@ -1055,6 +1065,7 @@ TEST(Migrating3D, ZeroLateralRunIsThe1DMigratingRun) {
       << "no cell flipped";
   for (auto n = std::size_t{0}; n < run.size(); ++n) {
     EXPECT_TRUE(run[n].converged) << "node " << n;
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(run[n].oceanFunction, reference[n].oceanFunction) << "node " << n;
     const auto top = MaxAbs(reference[n].relativeSeaLevelChange);
     EXPECT_LE(MaxDiff(run[n].relativeSeaLevelChange, reference[n].relativeSeaLevelChange),
@@ -1125,6 +1136,7 @@ TEST(Migrating3D, AResumedRunIsTheUninterruptedOne) {
   const auto resumed =
       again.ResumeMigrating(checkpoints.at(2), rest, setting.Thickness());
   ASSERT_EQ(resumed.size(), rest.size() - 1);
+  // one process, the same transforms: bitwise
   for (auto k = std::size_t{0}; k < resumed.size(); ++k) {
     EXPECT_EQ(resumed[k].relativeSeaLevelChange, full[k + 3].relativeSeaLevelChange);
     EXPECT_EQ(resumed[k].oceanFunction, full[k + 3].oceanFunction);
@@ -1163,6 +1175,7 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
   const auto run3 = evolution3.RunMigrating(times, setting.Thickness());
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(run3);
   const auto oceans3 = OceanFunctionsOf(run3);
+  // flotation's 0/1: rounding changes it only at a cell on the threshold
   EXPECT_EQ(oceans3, OceanFunctionsOf(run1));
   const auto kernels3 =
       AdjointSolver3D(evolution3, {.rtol = 1e-12, .coupled_rtol = 1e-12})
@@ -1239,6 +1252,7 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
         }
         return out;
       });
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
         EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
       }
@@ -1309,6 +1323,7 @@ TEST(Migrating3D, CalibrationRecoversTheTruth) {
     EXPECT_LT(MaxDiff(calibration.state.seaLevel, truth.seaLevel),
               1e-7 * MaxAbs(truth.seaLevel))
         << static_cast<int>(method);
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(calibration.state.oceanFunction, truth.oceanFunction);
     EXPECT_EQ(evolution.BackgroundState().seaLevel, calibration.state.seaLevel);
     EXPECT_FALSE(calibration.snapshots.back().oceanFunction.empty());

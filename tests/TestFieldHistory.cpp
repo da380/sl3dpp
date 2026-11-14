@@ -114,7 +114,8 @@ TEST_F(FieldHistoryTest, ResamplesToSiOnTheSolverGrid) {
   }
   EXPECT_LT(worst, 1e-5);
 
-  // linear in time between the nodes, exactly
+  // linear in time between the nodes, exactly (pointwise arithmetic on the
+  // resampled nodes, no transform)
   const auto at_half = history.Values("ice_thickness", 50.0);
   const auto at_start = history.Values("ice_thickness", 0.0);
   for (auto i = std::size_t{0}; i < at_half.size(); ++i) {
@@ -132,7 +133,8 @@ TEST_F(FieldHistoryTest, ResamplesToSiOnTheSolverGrid) {
   }
   EXPECT_LT(worst, 1e-5);
 
-  // outside the span the ends are held by default
+  // outside the span the ends are held by default: the end nodes' own
+  // values, bitwise
   EXPECT_EQ(history.Values("ice_thickness", 1.0e9), at_end);
   EXPECT_EQ(history.Values("ice_thickness", -1.0), at_start);
 }

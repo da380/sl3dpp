@@ -886,9 +886,10 @@ Beyond the fixtures:
   second order with lateral moduli and viscosity together; the coupled
   evolution against the shifted rheology at every node including the
   start, rotation on, at 1e-9; the instantaneous response against the
-  run's first node, and with zero lateral moduli against the radial
-  fingerprint, to the bit, and over three threads-as-ranks against one
-  process at 1e-10 (measured 1.2e-12).
+  run's first node, to the bit (one code path), and with zero lateral
+  moduli against the radial fingerprint, to rounding (1e-12; bitwise in
+  the test's one process), and over three threads-as-ranks against one
+  process at 1e-9 (measured 1.4e-12).
 - **The sweeps under lateral moduli.** The discrete sweep's pairing
   with the tangent (loads, log viscosity, κ and μ directions) at 1e-8;
   the tangent against central differences on the shifted background at

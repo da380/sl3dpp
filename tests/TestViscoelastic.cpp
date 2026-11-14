@@ -147,7 +147,7 @@ TEST(Rheology, MaxwellConstructionAndLimits) {
     if (rheology.IsActive(i)) {
       EXPECT_NEAR(muL[i], 0.0, 1e-12 * muU[i]);
     } else {
-      EXPECT_DOUBLE_EQ(muL[i], muU[i]);
+      EXPECT_DOUBLE_EQ(muL[i], muU[i]);  // nothing relaxes it: as it was
     }
     EXPECT_NEAR(kappaL[i], kappaU[i], 1e-12 * kappaU[i]);
   }
@@ -293,6 +293,7 @@ TEST(Rheology, BurgersLayersAreTwoBranches) {
       const auto& slow = burgers.BranchAt(0);
       const auto& fast = burgers.BranchAt(1);
       if (!isBurgers) {
+        // the Maxwell node's own arithmetic, no transform: bitwise
         EXPECT_EQ(slow.mu[node], maxwell.BranchAt(0).mu[node]);
         EXPECT_EQ(slow.itau[node], maxwell.BranchAt(0).itau[node]);
         EXPECT_EQ(fast.mu[node], 0.0);

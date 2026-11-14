@@ -11,6 +11,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
@@ -111,6 +112,19 @@ double MaxAbs(const std::map<int, std::vector<Complex>>& m) {
     for (auto c : v) out = std::max(out, std::abs(c));
   }
   return out;
+}
+
+/// The largest difference of two arrays over the largest magnitude of the
+/// first.
+template <class A, class B>
+double Departure(const A& x, const B& y) {
+  EXPECT_EQ(x.size(), y.size());
+  auto worst = 0.0, top = 0.0;
+  for (auto i = std::size_t{0}; i < std::min(x.size(), y.size()); ++i) {
+    worst = std::max(worst, std::abs(x[i] - y[i]));
+    top = std::max(top, std::abs(x[i]));
+  }
+  return top > 0.0 ? worst / top : worst;
 }
 
 }  // namespace
@@ -651,14 +665,19 @@ TEST(ElasticPerturbation3D, KernelsUnderLateralStructureMatchFiniteDifferences) 
   EXPECT_NE(difference, 0.0);
 }
 
-TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveBitwiseUnchanged) {
+TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveUnchanged) {
   // Options::cache_bytes reaches the coupling's grid, and a cache small
   // enough that the batched transforms over the nodes take smaller chunks
   // than under the default (16 KiB: 11 spin -2 fields at a time against
   // 63, so the chunks fall differently through the batch) leaves the
-  // lateral solve, every conjugate-gradient residual and the static
-  // kernels bit for bit as they are under the default.
+  // lateral solve as it is under the default: its iteration count the
+  // same, and every conjugate-gradient residual, the solution and the
+  // static kernels equal to rounding. Each operator's grid plans its own
+  // transforms, and two plans may sum in different orders, so the last
+  // bits may differ; a fault in the chunking would differ in the leading
+  // digits.
   constexpr auto kSmall = std::size_t{16} << 10;
+  constexpr auto kRounding = 1e-12;
   const auto material = MakeMaterial();
   ElasticPerturbation3D standard(material, kLmax);
   ElasticPerturbation3D small(material, kLmax, {.cache_bytes = kSmall});
@@ -701,15 +720,28 @@ TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveBitwiseUnchanged) {
   EXPECT_TRUE(infoA.converged);
   EXPECT_GT(infoA.iterations, 1);
   EXPECT_EQ(infoA.iterations, infoB.iterations);
-  EXPECT_EQ(infoA.residuals, infoB.residuals);
+  // the residuals against the largest of them
+  EXPECT_LE(Departure(infoA.residuals, infoB.residuals), kRounding);
 
   auto scale = 0.0;
   auto compare = [&](const std::map<int, std::vector<Complex>>& x,
                      const std::map<int, std::vector<Complex>>& y) {
     ASSERT_EQ(x.size(), y.size());
+    // against the largest value of any degree: a degree the solve barely
+    // reaches holds little more than rounding
+    auto top = 0.0;
     for (const auto& [l, u] : x) {
-      for (auto c : u) scale = std::max(scale, std::abs(c));
-      ASSERT_EQ(u, y.at(l)) << "degree " << l;
+      for (auto c : u) top = std::max(top, std::abs(c));
+    }
+    scale = std::max(scale, top);
+    for (const auto& [l, u] : x) {
+      const auto& v = y.at(l);
+      ASSERT_EQ(u.size(), v.size()) << "degree " << l;
+      auto worst = 0.0;
+      for (auto i = std::size_t{0}; i < u.size(); ++i) {
+        worst = std::max(worst, std::abs(u[i] - v[i]));
+      }
+      EXPECT_LE(worst, kRounding * top) << "degree " << l;
     }
   };
   compare(a.spheroidal, b.spheroidal);
@@ -718,8 +750,8 @@ TEST(ElasticPerturbation3D, CacheSizeLeavesTheLateralSolveBitwiseUnchanged) {
   const auto ka = standard.ForceTranspose(a, a);
   const auto kb = small.ForceTranspose(b, b);
   EXPECT_FALSE(ka.mu.empty());
-  ASSERT_EQ(ka.mu, kb.mu);
-  ASSERT_EQ(ka.kappa, kb.kappa);
+  EXPECT_LE(Departure(ka.mu, kb.mu), kRounding);
+  EXPECT_LE(Departure(ka.kappa, kb.kappa), kRounding);
 }
 
 TEST(ElasticPerturbation3D, DISABLED_TimingAtHigherDegree) {

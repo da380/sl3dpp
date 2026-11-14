@@ -73,6 +73,7 @@ TEST(Lateral, CouplingsShareOneGrid) {
   }
   const auto a = own.Synthesise(spectral);
   const auto b = shared1.Synthesise(spectral);
+  // one process, grids of one configuration, the same transforms: bitwise
   for (auto i = std::size_t{0}; i < a.c[0].size(); ++i) {
     ASSERT_EQ(a.c[0][i], b.c[0][i]);
   }

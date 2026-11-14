@@ -47,12 +47,13 @@
  * detail/LateralSolve.hpp (docs/adjoints.md §13k).
  *
  * With delta = 0 and no lateral moduli the lateral term vanishes
- * identically and a step reproduces the 1D two-phase stepper exactly. The memory nodes are the
- * Gauss points of the viscous elements or, with Options::memory_points,
- * their GLL nodes (MemoryPoints.hpp); the 1D reference takes the same
- * set, so the identity holds for either. Load channels are prescribed
- * here (complex m >= 0 columns of real fields); the sea-level coupling
- * drives this class through the same channels.
+ * identically and a step reproduces the 1D two-phase stepper to rounding
+ * (its transforms round where the 1D stepper has none). The memory nodes
+ * are the Gauss points of the viscous elements or, with
+ * Options::memory_points, their GLL nodes (MemoryPoints.hpp); the 1D
+ * reference takes the same set, so the identity holds for either. Load
+ * channels are prescribed here (complex m >= 0 columns of real fields);
+ * the sea-level coupling drives this class through the same channels.
  */
 
 #include <complex>

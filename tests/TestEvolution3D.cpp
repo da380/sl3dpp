@@ -440,6 +440,7 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
     compare(coupled, reference, 1e-7, "no lateral perturbation");
     auto moved = std::size_t{0};
     for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       EXPECT_EQ(coupled[node].oceanFunction, reference[node].oceanFunction)
           << "node " << node;
       for (auto i = std::size_t{0}; i < state.oceanFunction.size(); ++i) {
@@ -466,6 +467,7 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
     const auto alone3 = evolution3.RunMigrating(one, thinned, forcing);
     ASSERT_EQ(alone3.size(), 1u);
     compare(alone3, alone1, 1e-7, "one node");
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(alone3[0].oceanFunction, alone1[0].oceanFunction);
     EXPECT_GT(WorstDeparture(alone3[0].relativeSeaLevelChange,
                              coupled[0].relativeSeaLevelChange),
@@ -494,6 +496,7 @@ TEST(LateralGate, ForcedMigratingRunsMatchThe1DLoopAndTheFrozenRun) {
     const auto frozen = evolution.Run(times, forcing);
     const auto moving = evolution.RunMigrating(times, still, forcing);
     for (const auto& snapshot : moving) {
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       ASSERT_EQ(snapshot.oceanFunction, state.oceanFunction);
     }
     compare(moving, frozen, 1e-7, "lateral viscosity");
@@ -528,6 +531,7 @@ TEST(Lateral, ARunOfOneNodeIsHeldToNoFluidLimit) {
   ASSERT_EQ(alone.size(), 1u);
   ASSERT_TRUE(alone[0].converged);
   const auto instant = evolution.Instantaneous(forcing);
+  // the same code in one process: bitwise
   EXPECT_EQ(alone[0].relativeSeaLevelChange, instant.relativeSeaLevelChange);
   EXPECT_EQ(alone[0].displacement, instant.displacement);
   EXPECT_EQ(alone[0].angularVelocity, instant.angularVelocity);
@@ -743,6 +747,7 @@ TEST(Lateral, AResumedCoupledRunIsTheUninterruptedOne) {
       checkpoints.at(1),
       std::vector<double>(times.begin() + 1, times.end()), directLoad);
   ASSERT_EQ(tail.size(), times.size() - 2);
+  // one process, the same transforms: bitwise, here and below
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[2 + k];
     const auto& b = tail[k];
@@ -815,6 +820,7 @@ TEST(Lateral, AResumedRunUnderInteriorSourcesIsTheUninterruptedOne) {
       checkpoints.at(1), std::vector<double>(times.begin() + 1, times.end()),
       forcing);
   ASSERT_EQ(tail.size(), times.size() - 2);
+  // one process, the same transforms: bitwise
   for (auto k = std::size_t{0}; k < tail.size(); ++k) {
     const auto& a = full[2 + k];
     const auto& b = tail[k];

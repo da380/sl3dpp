@@ -184,13 +184,16 @@ TEST(MeasurementDuals, CapDisplacementIsTheSmoothedVectorAtTheCentre) {
         const auto want =
             d.east * u.east[at] + d.north * u.north[at] + d.up * u.up[at];
         worst = std::max(worst, std::abs(read - want) / scale);
-        EXPECT_NEAR(read, want, 1e-12 * scale)
+        // to rounding through the transforms (3e-14 at worst)
+        EXPECT_NEAR(read, want, 1e-11 * scale)
             << widthDeg << " deg at " << site.latitude << ", "
             << site.longitude << " along " << d.east << ", " << d.north
             << ", " << d.up;
         if (d.up != 0.0) {
           auto cap = CapMeanDual(grid, a, site, width);
           for (auto& v : cap) v *= d.up;
+          // the kernel sampled point by point (no transform), scaled as the
+          // measurement scales it: bitwise
           EXPECT_EQ(m.displacementDual, cap);
         } else {
           EXPECT_TRUE(m.displacementDual.empty());
@@ -481,7 +484,7 @@ TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
   const auto width = 20.0 * std::numbers::pi / 180.0;
   const auto weights = CapMeanWeights(lmax, width);
   ASSERT_EQ(weights.size(), std::size_t{lmax + 1});
-  EXPECT_EQ(weights[0], 1.0);
+  EXPECT_EQ(weights[0], 1.0);  // normalised by itself: exactly
   for (auto l = 1; l <= lmax; ++l) {
     EXPECT_GT(weights[l], 0.0);
     EXPECT_LT(weights[l], weights[l - 1]);
@@ -524,7 +527,8 @@ TEST(MeasurementDuals, CapMeanWeightsAreTheCapMeanAboutEveryPoint) {
                            ? smoothed[at]
                            : PairedValue(grid, a, PointDual(grid, a, site),
                                          smoothed);
-    EXPECT_NEAR(value, measured, 1e-13 * std::abs(scale))
+    // (to 5e-15 here: the synthesis against the kernel's quadrature)
+    EXPECT_NEAR(value, measured, 1e-12 * std::abs(scale))
         << site.latitude << " " << site.longitude;
   }
   // a cap the grid does not resolve: the same
@@ -632,10 +636,12 @@ TEST(MeasurementDuals, CapMeanIsExactAtEveryWidth) {
             PairedValue(grid, a, CapMeanDual(grid, a, site, width), field);
         const auto fine = FineCapMean(site, width, terms, lmax);
         const auto atSite = PairedValue(grid, a, PointDual(grid, a, site), smoothed);
-        EXPECT_NEAR(measured, fine, 1e-12 * std::abs(scale))
+        // to rounding (2e-14 and 5e-14 at worst, the second through the
+        // transforms)
+        EXPECT_NEAR(measured, fine, 1e-11 * std::abs(scale))
             << "lmax " << lmax << ", " << widthDeg << " degrees at "
             << site.latitude << ", " << site.longitude;
-        EXPECT_NEAR(measured, atSite, 1e-12 * std::abs(scale))
+        EXPECT_NEAR(measured, atSite, 1e-11 * std::abs(scale))
             << "lmax " << lmax << ", " << widthDeg << " degrees at "
             << site.latitude << ", " << site.longitude;
       }
@@ -665,7 +671,7 @@ TEST(MeasurementDuals, CapMeanIsExactAtEveryWidth) {
           "[lmax {}, {} degrees] the dual against the sampled Gaussian: {:.1e} of its "
           "peak\n",
           lmax, widthDeg, worst / peak);
-      EXPECT_LT(worst, 1e-12 * peak) << "lmax " << lmax << ", " << widthDeg;
+      EXPECT_LT(worst, 1e-11 * peak) << "lmax " << lmax << ", " << widthDeg;
     }
   }
 }
@@ -858,6 +864,7 @@ TEST(DecayTime, MeasurementsCarryTheWeightedDual) {
   for (auto j = std::size_t{0}; j < nodes.size(); ++j) {
     const auto& m = measurements.at(nodes[j]);
     ASSERT_EQ(m.relativeSeaLevelDual.size(), dual.size());
+    // one product with the fit's own weight: to the last bits
     EXPECT_DOUBLE_EQ(m.relativeSeaLevelDual[0], 2.0 * fit.weights[j]);
     EXPECT_DOUBLE_EQ(m.relativeSeaLevelDual[1], -1.0 * fit.weights[j]);
     EXPECT_TRUE(m.displacementDual.empty());

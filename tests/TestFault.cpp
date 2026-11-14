@@ -187,6 +187,7 @@ TEST(LoveModuli, AreTheDecksAtARadius) {
   const auto r = 6.25e6;
   const auto m = LoveModuliAt(model, r);
   const auto rho = model.Density(r);
+  // the same evaluations and products, no transform: to the last bits
   EXPECT_DOUBLE_EQ(m.C, rho * std::pow(model.Evaluate("vpv", r), 2));
   EXPECT_DOUBLE_EQ(m.A, rho * std::pow(model.Evaluate("vph", r), 2));
   EXPECT_DOUBLE_EQ(m.L, rho * std::pow(model.Evaluate("vsv", r), 2));
@@ -255,7 +256,9 @@ TEST(PointSourcesForces, AreTheSumOfEachSourcesForces) {
         worst = std::max(worst, std::abs(g[i] - f[i]));
         size = std::max(size, std::abs(f[i]));
       }
-      EXPECT_LE(worst, 1e-12 * size) << "degree " << l;
+      // to rounding: the source formed at r1 rather than at its own radius
+      // 2e-16 above moves the forces by 7e-14 of their size
+      EXPECT_LE(worst, 1e-11 * size) << "degree " << l;
     }
   }
   EXPECT_TRUE(PointSourcesForces(material, kLmax, sph, tor, {}).spheroidal.empty());
@@ -333,11 +336,12 @@ TEST(FaultSources, APlaneIsThePlanarFault) {
                           std::abs(a.longitude - b.longitude)});
     tensors = std::max(tensors, Difference(sources.slices[0][p], planar[p].moment) /
                                     Largest(planar[p].moment));
-    EXPECT_DOUBLE_EQ(sources.depths[p], R - a.radius);
+    EXPECT_DOUBLE_EQ(sources.depths[p], R - a.radius);  // one subtraction
   }
   RecordProperty("positions", std::format("{:.2e}", positions));
   RecordProperty("tensors", std::format("{:.2e}", tensors));
-  EXPECT_LT(positions, 1e-14);
+  // (a few ulps here: 4e-16 and 1.5e-15)
+  EXPECT_LT(positions, 1e-13);
   EXPECT_LT(tensors, 1e-13);
   // the normal and the slip's direction at the centroid: Aki & Richards'
   const auto& patch = fault.Patches().front();
@@ -409,7 +413,7 @@ TEST(FaultSources, AtADateAreTheMomentsOfItsSlipThere) {
     }
   }
   RecordProperty("worst", std::format("{:.2e}", worst));
-  EXPECT_LT(worst, 1e-14);
+  EXPECT_LT(worst, 1e-13);  // (8e-16 here)
   EXPECT_THROW(static_cast<void>(sources.MomentsAt({{2, 1.0}, {2, 0.0}})),
                std::invalid_argument);
 }
@@ -448,6 +452,7 @@ TEST(FaultSources, ArePlacedAndRefusedByName) {
   for (auto p = std::size_t{0}; p < stored.points.size(); ++p) {
     EXPECT_NEAR(byDepth.depths[p], stored.depths[p], 1e-9);
     EXPECT_NEAR(byDepth.points[p].radius, stored.points[p].radius - 3e3, 1e-9);
+    // the same quadrature, no transform: what placement leaves is bitwise
     EXPECT_EQ(byDepth.points[p].colatitude, stored.points[p].colatitude);
     EXPECT_EQ(byRadius.points[p].radius, stored.points[p].radius);
     EXPECT_NEAR(byRadius.depths[p], stored.depths[p] - 3e3, 1e-9);

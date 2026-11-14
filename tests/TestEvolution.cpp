@@ -254,6 +254,7 @@ TEST(Evolution, ARunOfOneNodeIsHeldToNoFluidLimit) {
       state, melt, {.rtol = 1e-12, .max_iterations = 400});
   ASSERT_TRUE(moving[0].converged);
   ASSERT_TRUE(nonlinear.response.converged);
+  // flotation's 0/1: rounding changes it only at a cell on the threshold
   EXPECT_EQ(moving[0].oceanFunction, nonlinear.finalState.oceanFunction);
   EXPECT_LT(worst(moving[0].relativeSeaLevelChange,
                   nonlinear.response.relativeSeaLevelChange),
@@ -306,6 +307,7 @@ TEST(Evolution, ALandHeldThatChangesInTimeHoldsEachNodesOwn) {
   Evolution holding(op, setup.solver, setup.state, held);
   const auto moved = holding.RunMigrating(times, thickness);
   ASSERT_EQ(moved.size(), times.size());
+  // flotation's 0/1: rounding changes it only at a cell on the threshold
   EXPECT_EQ(moved[0].oceanFunction, free[0].oceanFunction);
   for (auto n = std::size_t{1}; n < times.size(); ++n) {
     auto stillOcean = 0.0;
@@ -327,6 +329,7 @@ TEST(Evolution, ALandHeldThatChangesInTimeHoldsEachNodesOwn) {
   own.land_held = [&](double) { return setup.state.forcedLand; };
   Evolution same(op, setup.solver, setup.state, own);
   const auto again = same.RunMigrating(times, thickness);
+  // the same flotation and solves in one process: bitwise
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     EXPECT_EQ(again[n].relativeSeaLevelChange, free[n].relativeSeaLevelChange)
         << "node " << n;

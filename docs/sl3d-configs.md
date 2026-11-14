@@ -68,7 +68,10 @@ on one process (kernel, below). `love-numbers` refuses several ranks
 (exit status 2).
 
 The results agree with a one-process run to round-off of the radially
-substructured solves (about 1e-12 relative), not bitwise. Each rank's
+substructured solves (about 1e-12 relative), not bitwise, and within the
+solves' tolerances where an iterative solve closes a pass earlier or
+later on the ranks (up to about 1e-10 relative at the default
+tolerances of 1e-9). Each rank's
 checkpoints go to its own subdirectory, `rank_RRRR` of
 `checkpoint.directory`, holding its own segment's state (rank 0's holds
 the histories too, the others' each node's iteration counts alone), and
@@ -590,7 +593,13 @@ and `nodes`, or the list (`start_kyr_bp` or `start` beside it is
 refused). Evenly spaced nodes take one step length, the window over
 (nodes - 1), for every step; listed nodes step by their differences, so
 uneven steps are allowed, and listed nodes that coincide with evenly
-spaced ones give the same run to the bit. Members of the two forms
+spaced ones give the same run: to the bit on a run's own clock, whose
+times are the nodes less the first in either form, and as dates to the
+last bit of a step's length (a listed date's step is the difference of
+two dates in seconds, an evenly spaced one a share of the window's span;
+the two agree to the bit where that arithmetic is exact, as for the dates
+2, 1.5, 1, 0.5 and 0 kyr BP). The run's hashes take the two forms of
+dates apart, as two runs. Members of the two forms
 together are refused, naming both, and so are `start_kyr`, `end_kyr` and
 `at_kyr` (kyr without a unit), naming the forwards form's `start`, `end`
 or `at` with its `unit`. A step's response moves with the last bit of its

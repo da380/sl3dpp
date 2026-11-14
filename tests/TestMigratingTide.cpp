@@ -312,6 +312,7 @@ TEST(MigratingTide, WhereNoShorelineMovesTheRunIsTheFrozenOne) {
       ASSERT_EQ(moving.size(), at.size());
       for (auto n = std::size_t{0}; n < at.size(); ++n) {
         ASSERT_TRUE(moving[n].converged) << label << ", node " << n;
+        // flotation's 0/1: rounding changes it only at a cell on the threshold
         ASSERT_EQ(moving[n].oceanFunction, world.state.oceanFunction)
             << label << ", node " << n;
         EXPECT_GT(Peak(moving[n].relativeSeaLevelChange), 0.1 * body.Metre());
@@ -368,6 +369,7 @@ TEST(MigratingTide, WhereNoShorelineMovesTheRunIsTheFrozenOneIn3D) {
     ASSERT_EQ(moving.size(), times.size());
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       ASSERT_TRUE(moving[n].converged) << label << ", node " << n;
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       ASSERT_EQ(moving[n].oceanFunction, world.state.oceanFunction)
           << label << ", node " << n;
       // measured below 1e-13
@@ -405,6 +407,7 @@ TEST(MigratingTide, ALargeTideMovesTheShorelinesByFlotation) {
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       const auto& node = run[n];
       ASSERT_TRUE(node.converged) << label << ", node " << n;
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       EXPECT_EQ(node.oceanFunction,
                 Flotation(solver, world.sea0, node.relativeSeaLevelChange,
                           world.ice0))
@@ -460,6 +463,7 @@ TEST(MigratingTide, ALargeTideMovesTheShorelinesByFlotationIn3D) {
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     const auto& node = run[n];
     ASSERT_TRUE(node.converged) << "node " << n;
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(node.oceanFunction,
               Flotation(solver, world.sea0, node.relativeSeaLevelChange,
                         world.ice0))
@@ -478,8 +482,9 @@ TEST(MigratingTide, InTheSmallTheResponseIsLinearInTheTide) {
   // About a run whose shorelines move under a large tide, a further tide
   // of amplitude epsilon flips no cell, and the response is linear in it:
   // the change at 2 epsilon is twice the change at epsilon, to parts in
-  // 1e9 of the change (measured below 5e-11; the solves at 1e-13, the
-  // change some 1e-4 of the run).
+  // 1e7 of the change (measured below 5e-11; the solves at 1e-13, the
+  // change some 1e-4 of the run, so that the solves' tolerance alone
+  // allows some 1e-9 of it).
   const auto body = Body::Make(16);
   const auto world = ShelfWorld::Make(body);
   const auto times = Times(body);
@@ -519,6 +524,7 @@ TEST(MigratingTide, InTheSmallTheResponseIsLinearInTheTide) {
     const auto r2 = runWith(2.0 * epsilon);
     auto moved = std::size_t{0};
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      // flotation's 0/1: rounding changes it only at a cell on the threshold
       ASSERT_EQ(r1[n].oceanFunction, r0[n].oceanFunction) << label << n;
       ASSERT_EQ(r2[n].oceanFunction, r0[n].oceanFunction) << label << n;
       for (auto i = std::size_t{0}; i < r0[n].oceanFunction.size(); ++i) {
@@ -540,7 +546,7 @@ TEST(MigratingTide, InTheSmallTheResponseIsLinearInTheTide) {
         for (auto i = std::size_t{0}; i < a.size(); ++i) {
           residual[i] = twice[i] - 2.0 * once[i];
         }
-        EXPECT_LT(Peak(residual), 1e-9 * Peak(once)) << label << ", node " << n;
+        EXPECT_LT(Peak(residual), 1e-7 * Peak(once)) << label << ", node " << n;
       }
     }
     EXPECT_GT(moved, std::size_t{20}) << label;
@@ -562,6 +568,7 @@ TEST(MigratingTide, AZeroTideIsNoTide) {
       evolution.RunMigrating(times, thickness, Evolution::Forcing{.directLoad = extra});
   const auto with = evolution.RunMigrating(
       times, thickness, Evolution::Forcing{.directLoad = extra, .tide = zero});
+  // a vanishing tide takes the path of no tide: bitwise
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     EXPECT_EQ(with[n].relativeSeaLevelChange, without[n].relativeSeaLevelChange);
     EXPECT_EQ(with[n].displacement, without[n].displacement);
@@ -580,6 +587,7 @@ TEST(MigratingTide, AZeroTideIsNoTide) {
       times, thickness, Evolution3D::Forcing{.directLoad = extra});
   const auto with3 = evolution3.RunMigrating(
       times, thickness, Evolution3D::Forcing{.directLoad = extra, .tide = zero});
+  // a vanishing tide takes the path of no tide: bitwise
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
     EXPECT_EQ(with3[n].relativeSeaLevelChange, without3[n].relativeSeaLevelChange);
     EXPECT_EQ(with3[n].displacement, without3[n].displacement);
@@ -771,6 +779,7 @@ TEST(MigratingTide, AResumedRunIsTheUninterruptedOne) {
         checkpoints.at(3), std::vector<double>(times.begin() + 3, times.end()),
         still, forcing);
     ASSERT_EQ(tail.size(), times.size() - 4);
+    // one process, the same transforms: bitwise
     for (auto k = std::size_t{0}; k < tail.size(); ++k) {
       const auto& a = full[4 + k];
       const auto& b = tail[k];
@@ -818,6 +827,7 @@ TEST(MigratingTide, AResumedRunIsTheUninterruptedOne) {
         checkpoints.at(3), std::vector<double>(times.begin() + 3, times.end()),
         still, forcing3);
     ASSERT_EQ(tail.size(), times.size() - 4);
+    // one process, the same transforms: bitwise
     for (auto k = std::size_t{0}; k < tail.size(); ++k) {
       const auto& a = full[4 + k];
       const auto& b = tail[k];

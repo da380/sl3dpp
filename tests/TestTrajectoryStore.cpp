@@ -224,6 +224,7 @@ class TrajectoryStore : public ::testing::Test {
 
 // -- the comparisons -------------------------------------------------------------
 
+// Records written and read back, or runs repeated, in one process: bitwise.
 void ExpectSame(const GRDSolver::State& got, const GRDSolver::State& want) {
   EXPECT_EQ(got.iceThickness, want.iceThickness);
   EXPECT_EQ(got.seaLevel, want.seaLevel);
@@ -527,6 +528,7 @@ TEST_F(TrajectoryStore, SweepsFromAReopenedStoreAreTheSweepsInMemory) {
                          .FirstOrderKernels(times, measurements, &fromDisk);
       const auto label =
           method == AdjointMethod::Discrete ? "discrete" : "continuous";
+      // one process, the same transforms over the same states: bitwise
       EXPECT_EQ(a.thickness, b.thickness) << label;
       EXPECT_EQ(a.directLoadKernels, b.directLoadKernels) << label;
       EXPECT_EQ(a.tideKernels, b.tideKernels) << label;
@@ -574,6 +576,7 @@ TEST_F(TrajectoryStore, SweepsFromAReopenedStoreAreTheSweepsInMemory) {
                          .FirstOrderKernels(times, measurements, &fromDisk);
       const auto label =
           method == AdjointMethod::Discrete ? "discrete" : "continuous";
+      // one process, the same transforms over the same states: bitwise
       EXPECT_EQ(a.ice.thickness, b.ice.thickness) << label;
       EXPECT_EQ(a.logViscosityKernel3D, b.logViscosityKernel3D) << label;
       EXPECT_EQ(a.itauKernelSpherical, b.itauKernelSpherical) << label;
@@ -826,6 +829,7 @@ TEST_F(TrajectoryStore, AnInterruptedRecordingIsContinuedFromItsCheckpoint) {
     }
     return out;
   };
+  // the resumed run is the uninterrupted one in one process: byte for byte
   EXPECT_TRUE(bytes(directory) == bytes(dir_ / "whole"));
   // short of a record to the node: refused, nothing removed
   const auto shorter = dir_ / "short";

@@ -580,7 +580,8 @@ TEST(TangentLinear3D, SecondOrderRunIsTheDerivativeOfTheFirst) {
         << "node " << n;
   }
 
-  // No viscosity perturbation: an affine map, no second derivative.
+  // No viscosity perturbation: an affine map, no second derivative (no
+  // forcing at all, so exactly zero).
   const auto none = tangent.RunSecondOrder(times, runU, runV, {}, &trajectory);
   for (const auto& snap : none) EXPECT_EQ(MaxAbs(snap.relativeSeaLevelChange), 0.0);
 
@@ -891,7 +892,8 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
                                                          .coupled_rtol = 1e-12})
                           .Run(times, d3, &trajectory3);
     ASSERT_EQ(run3.size(), times.size());
-    // the ramp starts from nothing: no start response at node 0
+    // the ramp starts from nothing: no start response at node 0 (zero in,
+    // exactly zero out)
     EXPECT_EQ(MaxAbs(run1[0].relativeSeaLevelChange), 0.0);
     EXPECT_EQ(MaxAbs(run3[0].relativeSeaLevelChange), 0.0);
     for (auto n = std::size_t{1}; n < times.size(); ++n) {
@@ -1113,6 +1115,9 @@ void MaterialDirectionMatchesDifferencesUnderLateralModuli(
   const auto vBulk = [](double r, double theta, double phi) {
     return 0.05 * (1.0 - 0.5 * r) * (1.0 + 0.5 * std::sin(theta) * std::sin(phi));
   };
+  // the combined fixed points' rounding floor under lateral moduli is
+  // 3e-13 to 1e-12 (the latter the nested conjugate-gradient closure's)
+  constexpr auto kCoupledRtol = 1e-11;
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     auto functional = [&](double eps) {
       Viscoelastic3D op(
@@ -1129,7 +1134,7 @@ void MaterialDirectionMatchesDifferencesUnderLateralModuli(
       Evolution3D evolution(
           op, scene.solver, scene.state,
           {.scheme = scheme, .rotation = RotationOf(scheme),
-           .rtol = 1e-12, .coupled_rtol = 1e-12});
+           .rtol = 1e-12, .coupled_rtol = kCoupledRtol});
       return Objective(scene, g, evolution.Run(times, directLoad).back().relativeSeaLevelChange);
     };
     Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
@@ -1140,7 +1145,7 @@ void MaterialDirectionMatchesDifferencesUnderLateralModuli(
     Evolution3D evolution(
         op, scene.solver, scene.state,
         {.scheme = scheme, .rotation = RotationOf(scheme),
-         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+         .rtol = 1e-12, .coupled_rtol = kCoupledRtol, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
     // the absolute direction over the grid values: the relative one
@@ -1163,7 +1168,7 @@ void MaterialDirectionMatchesDifferencesUnderLateralModuli(
     }
     const auto run = TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                                        .rtol = 1e-12,
-                                                       .coupled_rtol = 1e-12})
+                                                       .coupled_rtol = kCoupledRtol})
                          .Run(times, direction, &trajectory);
     const auto predicted = Objective(scene, g, run.back().relativeSeaLevelChange);
     auto fd = std::map<double, double>{};

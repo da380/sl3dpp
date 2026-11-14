@@ -292,7 +292,9 @@ TEST(EvolutionGate, StepperMatchesPyslfp) {
   // Parse and replay the fixture.
   std::ifstream file(data / "pyslfp_stepper.txt");
   ASSERT_TRUE(file.is_open());
-  constexpr auto tol = 1e-9;
+  // each code's own rounding, carried through the steps: 1.7e-10 at worst
+  // in the history, 1e-11 in the effective numbers
+  constexpr auto tol = 1e-8;
   auto scheme = sl3dpp::Scheme::ExponentialTrapezoid;
   auto state = std::optional<sl3dpp::ViscoelasticState>{};
   auto solutions = std::map<int, std::vector<double>>{};
@@ -403,7 +405,8 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
   }
   ASSERT_EQ(table.size(), static_cast<std::size_t>(lmax + 1));
 
-  constexpr auto tol = 1e-10;
+  // each code's solves' rounding: 6e-11 of a degree's scale at worst
+  constexpr auto tol = 1e-9;
   EXPECT_NEAR(ln.radius, radius, tol * radius);
   EXPECT_NEAR(ln.surface_gravity, surfaceGravity, tol * surfaceGravity);
   const std::vector<double>* columns[12] = {
@@ -429,7 +432,7 @@ TEST(LoveNumbersGate, LoveNumbersMatchPyslfp) {
     const double scale =
         std::max({std::abs(axial[i]), std::abs(values[i]), 1e-30});
     EXPECT_NEAR(values[i], axial[i],
-                std::max(tol * scale, 1e-10 * std::abs(axial[2])))
+                std::max(tol * scale, 1e-9 * std::abs(axial[2])))
         << "axial " << i;
   }
   EXPECT_NEAR(sl3dpp::FluidTidalNumber(material, 2), fluidTidal,

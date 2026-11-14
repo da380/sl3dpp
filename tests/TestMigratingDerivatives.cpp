@@ -187,10 +187,12 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
   // moved by eps along a direction, every node's shorelines checked.
   auto objective = [&](const ViscoelasticOperator& at, const GRDSolver::State& start,
                        const std::vector<std::vector<double>>& direction, double eps) {
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the background flipped";
     Evolution trial(at, setup.solver, start, options);
     const auto snaps =
         trial.RunMigrating(times, Field(times, ice, direction, eps), Evolution::Forcing{});
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -581,10 +583,12 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
 
   auto objective = [&](const Viscoelastic3D& at, const GRDSolver::State& start,
                        const std::vector<std::vector<double>>& direction, double eps) {
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the background flipped";
     Evolution3D trial(at, scene.solver, start, options);
     const auto snaps = trial.RunMigrating(times, Field(times, ice, direction, eps),
                                           Evolution3D::Forcing{});
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -973,6 +977,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
     Evolution trial(at, setup.solver, state, options);
     const auto snaps = trial.RunMigrating(
         times, Field(times, ice), ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0));
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -1369,6 +1374,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   auto objective = [&](const Viscoelastic3D& at) {
     Evolution3D trial(at, scene.solver, state, options);
     const auto snaps = trial.RunMigrating(times, Field(times, ice), forcing);
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -1778,6 +1784,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
     Evolution trial(at, setup.solver, state, options);
     const auto snaps =
         trial.RunMigrating(times, Field(times, ice), forcingOf(direction, eps));
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -1891,6 +1898,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
         const auto moved = MovedItau(setup, e, ditau);
         Evolution trial(moved, setup.solver, state, options);
         const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+        // flotation's 0/1: rounding changes it only at a cell on the threshold
         for (auto n = std::size_t{0}; n < nodes; ++n) {
           EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
         }
@@ -2043,6 +2051,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
     Evolution3D trial(at, scene.solver, state, options);
     const auto snaps =
         trial.RunMigrating(times, Field(times, ice), forcingOf(direction, eps));
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
       EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
@@ -2146,6 +2155,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
         const auto moved = movedViscosity(e);
         Evolution3D trial(*moved, scene.solver, state, options);
         const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
+        // flotation's 0/1: rounding changes it only at a cell on the threshold
         for (auto n = std::size_t{0}; n < nodes; ++n) {
           EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
         }
