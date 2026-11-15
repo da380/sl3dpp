@@ -810,6 +810,156 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
   }
 }
 
+TEST(Distributed, AcrossAJumpTheRunAndItsSweepsMatchTheOneProcess) {
+  // An earthquake at a repeated node under lateral viscosity beside a
+  // melting load, its left limit without the source: the zero-length step
+  // under mpiexec as on one process, the run and the tangent along a
+  // lateral log viscosity on every rank, and the first-order sweeps of
+  // both methods (the ice views on every rank, each rank's slice of the
+  // log-viscosity kernel), measured at the pair's right node and after.
+  constexpr auto lmax = 8;
+  const auto body = Body::Make(lmax);
+  const auto share =
+      ShareMesh(body.material.Mesh(), MPI_COMM_WORLD,
+                GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                   SeaLevelParameters{});
+  const auto& sle = solver.SolverScales();
+  const auto length = sle.Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto onset = 5.0 * kyr;
+  const auto times = std::vector<double>{0.0,   2.5 * kyr, onset,
+                                         onset, 7.5 * kyr, 10.0 * kyr};
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] =
+        -0.1 * solver.IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
+  }
+  const auto unit = 1e24 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto source = PointSource{
+      .at = {.radius = solver.Radius() - 400e3 / length,
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  const auto forcing = Evolution3D::Forcing{
+      .directLoad =
+          [&](double t) {
+            auto out = melt;
+            for (auto& v : out) v *= t / times.back();
+            return out;
+          },
+      .sources =
+          [&](double t) {
+            return t >= onset ? std::vector<PointSource>{source}
+                              : std::vector<PointSource>{};
+          },
+      .sourcesBefore = [&](double t) {
+        return t > onset ? std::vector<PointSource>{source}
+                         : std::vector<PointSource>{};
+      }};
+  auto measurements = std::map<std::size_t, Measurement>{};
+  const auto cap = solver.Grid().FromFunction([](double theta, double phi) {
+    return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+  });
+  measurements[times.size() - 1].relativeSeaLevelDual = cap;
+  measurements[3].displacementDual = cap;
+  measurements[3].toroidalPotentialDual = cap;
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
+  const auto evolutionOptions =
+      Evolution3D::Options{.rtol = 1e-12,
+                           .max_coupled_iterations = 100,
+                           .coupled_rtol = 1e-11,
+                           .record_stride = 1};
+  const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+  const auto& all = whole.Coupling();
+  auto logField = std::vector<double>(all.GridValueCount(), 0.0);
+  for (auto rn = 0; rn < all.NodeCount(); ++rn) {
+    const auto values = all.GridOf(rn).FromFunction(pU);
+    const auto at = all.FieldOffset(rn);
+    for (auto x = std::size_t{0}; x < values.size(); ++x) logField[at + x] = values[x];
+  }
+  struct Result {
+    std::vector<Evolution3D::Snapshot> run;
+    std::vector<Evolution3D::Snapshot> tangent;
+    std::map<AdjointMethod, Kernels3D> kernels;
+  };
+  auto runOn = [&](const Viscoelastic3D& op) {
+    Evolution3D evolution(op, solver, state, evolutionOptions);
+    Result out;
+    out.run = evolution.Run(times, forcing);
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(out.run);
+    auto direction = TangentPerturbation3D{};
+    direction.logViscosity = Slice(op.Coupling(), all, logField);
+    out.tangent = TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                                    .rtol = 1e-12,
+                                                    .max_coupled_iterations = 100,
+                                                    .coupled_rtol = 1e-11})
+                      .Run(times, direction, &trajectory);
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      out.kernels[method] =
+          AdjointSolver3D(evolution, {.method = method,
+                                      .rtol = 1e-12,
+                                      .max_coupled_iterations = 100,
+                                      .coupled_rtol = 1e-11})
+              .FirstOrderKernels(times, measurements, &trajectory);
+    }
+    return out;
+  };
+  const auto want = runOn(whole);
+  auto mine = options;
+  mine.segments = share.segments;
+  mine.collectives = share.collectives;
+  const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
+  const auto got = runOn(op);
+  ASSERT_EQ(got.run.size(), times.size());
+  auto worstRun = 0.0, worstTangent = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    EXPECT_TRUE(got.run[n].converged) << n;
+    for (auto field : {&Evolution3D::Snapshot::relativeSeaLevelChange,
+                       &Evolution3D::Snapshot::displacement,
+                       &Evolution3D::Snapshot::toroidalPotential}) {
+      worstRun = std::max(worstRun, Relative(got.run[n].*field, want.run[n].*field));
+    }
+    worstTangent = std::max(worstTangent,
+                            Relative(got.tangent[n].relativeSeaLevelChange,
+                                     want.tangent[n].relativeSeaLevelChange));
+  }
+  EXPECT_GT(Relative(got.run[3].displacement, got.run[2].displacement), 1e-3);
+  // measured on two and three ranks: 3e-15 in the run, 1.4e-15 in the
+  // tangent, 1.8e-14 in the ice views and 9e-13 in the 3D kernel, whose
+  // sweeps close at the coupled tolerance of 1e-11
+  EXPECT_LT(MaxOverRanks(worstRun), 1e-11);
+  EXPECT_LT(MaxOverRanks(worstTangent), 1e-11);
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto label = method == AdjointMethod::Discrete ? "discrete" : "continuous";
+    auto worstIce = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      worstIce = std::max(worstIce,
+                          Relative(got.kernels.at(method).ice.directLoadKernels[n],
+                                   want.kernels.at(method).ice.directLoadKernels[n]));
+    }
+    const auto worstField =
+        FieldSliceDifference(op.Coupling(), got.kernels.at(method).logViscosityKernel3D[0],
+                             all, want.kernels.at(method).logViscosityKernel3D[0]);
+    EXPECT_LT(MaxOverRanks(worstIce), 1e-11) << label;
+    EXPECT_LT(MaxOverRanks(worstField), 1e-9) << label;
+  }
+}
+
 int main(int argc, char** argv) {
   MPI_Init(&argc, &argv);
   ::testing::InitGoogleTest(&argc, argv);

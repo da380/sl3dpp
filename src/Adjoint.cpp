@@ -13,6 +13,7 @@
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/LateralKernels.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -124,14 +125,7 @@ void AdjointSolver::CheckArguments(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
     std::span<const std::vector<double>> oceanFunctions) const {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
+  detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
   const auto fieldSize = ev.solver_->Grid().FieldSize();
   for (const auto& [node, m] : measurements) {

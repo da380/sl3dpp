@@ -213,6 +213,16 @@ class Evolution {
   /// instantaneous elastic response to directLoad(times[0]). Returns one
   /// snapshot per node, the first included, and leaves the final internal
   /// state readable through FinalState().
+  ///
+  /// A time may be repeated once, times[k + 1] == times[k], for a jump of
+  /// the forcing there (Forcing::sourcesBefore): node k is its left limit,
+  /// node k + 1 its right, and the step between is of zero length, the
+  /// static elastic solve with the internal variables held (they are
+  /// continuous across a jump, the rest of the state jumps by that solve).
+  /// Both nodes are recorded, at the same time. The first node is not
+  /// repeated: it is the right limit at times[0] already. Every entry
+  /// takes such a grid, and so do the derivative runs about it, for which
+  /// the pair is an ordinary step of zero length.
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
@@ -258,6 +268,13 @@ class Evolution {
     /// loads alone.
     std::function<std::vector<PointSource>(double)> sources{};
     std::function<std::vector<StressGlut>(double)> stressGluts{};
+    /// The left limits of `sources` and `stressGluts` at time t, read at
+    /// the first node of a repeated pair (Run) where the sources jump
+    /// there, the plain callbacks being read at its second: an onset at t
+    /// is absent from these and present in those. Absent, the plain
+    /// callback, the sources continuous there.
+    std::function<std::vector<PointSource>(double)> sourcesBefore{};
+    std::function<std::vector<StressGlut>(double)> stressGlutsBefore{};
   };
 
   /// `Run` under a forcing: the start is the instantaneous elastic

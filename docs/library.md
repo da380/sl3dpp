@@ -137,7 +137,9 @@ surface file, and `examples/Common.hpp` reads one.
   interface. The time-dependent drivers (`Evolution`,
   `Evolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
   times, loads and fields in the sea-level solver's units: convert with
-  `solver.SolverScales()`.
+  `solver.SolverScales()`. Their time grids increase, a time repeated
+  once for a jump of the forcing (an earthquake's onset): its left limit,
+  then its right ([design.md](design.md) §5).
 - Spherical harmonics are complex, fully normalised, with the Condon–Shortley
   phase (GSHTrans's convention); `ShConventions.hpp` converts to and from real
   coefficients.

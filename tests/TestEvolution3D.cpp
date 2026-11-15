@@ -1523,3 +1523,444 @@ TEST(PointSourceEvolution, UnderLateralStructureTheStepSolversAgree) {
         << "node " << node;
   }
 }
+
+namespace {
+
+/// The fields of two snapshots' worst relative departure, the toroidal
+/// potential among them, and their angular velocities' against the
+/// later's size.
+template <class SnapshotT>
+double SnapshotDeparture(const SnapshotT& a, const SnapshotT& b) {
+  auto worst = 0.0;
+  for (auto field : {&SnapshotT::relativeSeaLevelChange, &SnapshotT::displacement,
+                     &SnapshotT::potential, &SnapshotT::tangentialPotential,
+                     &SnapshotT::toroidalPotential}) {
+    if ((b.*field).empty() || MaxAbsOf(b.*field) == 0.0) continue;
+    worst = std::max(worst, WorstDeparture(a.*field, b.*field));
+  }
+  auto omega = 0.0, size = 0.0;
+  for (auto i = 0; i < 3; ++i) {
+    omega = std::max(omega, std::abs(a.angularVelocity[i] - b.angularVelocity[i]));
+    size = std::max(size, std::abs(b.angularVelocity[i]));
+  }
+  if (size > 0.0) worst = std::max(worst, omega / size);
+  return worst;
+}
+
+}  // namespace
+
+TEST(PointSourceEvolution, AnOnsetAtARepeatedNodeIsTheRunStartedThere) {
+  // An earthquake at an interior node: the node repeated, its left limit
+  // without the sources (Forcing::sourcesBefore) and its right with them,
+  // the zero-length step between the elastic solve with the memory held.
+  // From the onset on, every field at every node is the run started at
+  // the onset, whose first node is the instantaneous elastic response:
+  // the radial run without an ocean and with one and the rotational
+  // feedback, both schemes; the factored route; the 3D run under lateral
+  // viscosity, and under lateral moduli beside it. Before the onset nothing
+  // moves.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto onset = 0.3 * kyr;
+  const auto jump =
+      std::vector<double>{0.0, onset, onset, 0.8 * kyr, 2.0 * kyr};
+  const auto started = std::vector<double>{onset, 0.8 * kyr, 2.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  const auto second = SourceAt(
+      setup, 150.0, 2.2, 1.0,
+      {.rr = -0.4, .tt = 0.8, .pp = -0.4, .rt = 0.5, .rp = 0.1, .tp = -0.3},
+      5e21);
+  auto sourcesAt = [&](double t) {
+    return t >= onset ? std::vector<PointSource>{thrust, second}
+                      : std::vector<PointSource>{};
+  };
+  auto before = [&](double t) {
+    return t > onset ? std::vector<PointSource>{thrust, second}
+                     : std::vector<PointSource>{};
+  };
+  const auto forcing =
+      Evolution::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+  const auto forcing3 =
+      Evolution3D::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+
+  auto compare = [&](const auto& got, const auto& want, double tolerance,
+                     const std::string& label) {
+    ASSERT_EQ(got.size(), jump.size()) << label;
+    ASSERT_EQ(want.size(), started.size()) << label;
+    EXPECT_EQ(got[1].t, got[2].t) << label;
+    const auto size = MaxAbsOf(got[2].displacement);
+    EXPECT_GT(size, 0.0) << label;
+    for (auto node : {std::size_t{0}, std::size_t{1}}) {
+      EXPECT_LE(MaxAbsOf(got[node].displacement), 1e-14 * size)
+          << label << ", node " << node;
+    }
+    auto worst = 0.0;
+    for (auto k = std::size_t{0}; k < started.size(); ++k) {
+      EXPECT_TRUE(got[2 + k].converged) << label;
+      worst = std::max(worst, SnapshotDeparture(got[2 + k], want[k]));
+    }
+    // measured: 1.4e-13 at worst, most cases bitwise
+    EXPECT_LT(worst, tolerance) << label;
+  };
+
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  const auto dry = solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
+                       ", scheme " + std::to_string(static_cast<int>(scheme));
+    const auto options = Evolution::Options{
+        .scheme = scheme, .rotation = rotation, .rtol = 1e-12};
+    Evolution evolution(op1, solver, *background, options);
+    const auto reference = evolution.Run(started, forcing);
+    compare(evolution.Run(jump, forcing), reference, 1e-11, label);
+    if (background == &dry) {
+      auto factoredOptions = options;
+      factoredOptions.factor_sources = true;
+      Evolution factored(op1, solver, *background, factoredOptions);
+      compare(factored.Run(jump, forcing), reference, 1e-11, "factored, " + label);
+    }
+  }
+
+  // the 3D run under lateral viscosity, with an ocean and the feedback
+  Viscoelastic3D op3(setup.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  Evolution3D evolution3(op3, solver, wet,
+                         {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  const auto reference3 = evolution3.Run(started, forcing3);
+  compare(evolution3.Run(jump, forcing3), reference3, 1e-11,
+          "3D, lateral viscosity");
+
+  // and lateral moduli beside it, whose zero-length step closes the
+  // instantaneous fixed point of the lateral operator
+  auto options = Viscoelastic3D::Options{};
+  options.solve_rtol = 1e-12;
+  options.moduli = Viscoelastic3D::Options::LateralModuli{
+      .shear =
+          [](double r, double theta, double phi) {
+            return 0.1 * (0.5 + r * r) *
+                   (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+                    0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+          },
+      .bulk = [](double r, double theta, double) {
+        return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+      }};
+  Viscoelastic3D moduli(
+      setup.rheology, kLmax,
+      [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      },
+      options);
+  Evolution3D lateral(moduli, solver, wet,
+                      {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  compare(lateral.Run(jump, forcing3), lateral.Run(started, forcing3), 1e-11,
+          "3D, lateral viscosity and moduli");
+}
+
+namespace {
+
+/// The forcings beside the sources that act through a jump: a load inside
+/// the water budget and one outside it, a layer on the solid surface and
+/// a prescribed tide, each growing in time, scaled by `scale`.
+template <class ForcingT>
+ForcingT LoadsThrough(const Setup& setup, double kyr, double scale) {
+  const auto& grid = setup.solver.Grid();
+  const auto length = setup.solver.SolverScales().Length();
+  const auto held = setup.MeltLoad(-0.1);
+  const auto pattern = grid.FromFunction([](double theta, double phi) {
+    return std::sin(theta) * std::sin(theta) * std::cos(2.0 * phi - 1.0);
+  });
+  const auto tide = TestTide(setup.solver, kyr);
+  auto out = ForcingT{};
+  out.directLoad = [held, scale, kyr](double t) {
+    auto f = held;
+    for (auto& v : f) v *= scale * (1.0 + 0.2 * t / kyr);
+    return f;
+  };
+  out.directLoadOutsideWaterBudget = [held, scale, kyr](double t) {
+    auto f = held;
+    for (auto i = std::size_t{0}; i < f.size(); ++i) {
+      f[i] = -0.6 * scale * held[f.size() - 1 - i] * (0.5 + 0.3 * t / kyr);
+    }
+    return f;
+  };
+  out.solidSurfaceChange = [pattern, scale, length, kyr](double t) {
+    auto f = pattern;
+    for (auto& v : f) v *= 3.0 * scale / length * (0.3 + t / (4.0 * kyr));
+    return f;
+  };
+  out.tide = [tide, scale](double t) {
+    auto psi = tide(t);
+    for (auto& c : psi) c *= scale;
+    return psi;
+  };
+  return out;
+}
+
+}  // namespace
+
+TEST(PointSourceEvolution, ARepeatedNodeWithoutAJumpChangesNothing) {
+  // A node repeated where nothing jumps, the loads, the layer, the tide
+  // and a growing source all continuous there: the zero-length step holds
+  // the memory and solves under the same forcing, so both nodes of the
+  // pair are the node of the grid without the repeat, and so is every
+  // node after, with an ocean and the rotational feedback: the radial run
+  // (both schemes, the shorelines frozen and migrating) and the 3D run
+  // under lateral viscosity.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto repeated =
+      std::vector<double>{0.0, 0.3 * kyr, 0.3 * kyr, 0.8 * kyr, 2.0 * kyr};
+  const auto plain = std::vector<double>{0.0, 0.3 * kyr, 0.8 * kyr, 2.0 * kyr};
+  const auto into = std::vector<std::size_t>{0, 1, 1, 2, 3};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  auto growing = [&](double t) {
+    auto at = thrust;
+    for (auto* c : {&at.moment.rr, &at.moment.tt, &at.moment.pp, &at.moment.rt,
+                    &at.moment.rp, &at.moment.tp}) {
+      *c *= 0.3 + t / kyr;
+    }
+    return std::vector<PointSource>{at};
+  };
+  auto forcing = LoadsThrough<Evolution::Forcing>(setup, kyr, 1.0);
+  forcing.sources = growing;
+  auto forcing3 = LoadsThrough<Evolution3D::Forcing>(setup, kyr, 1.0);
+  forcing3.sources = growing;
+  const auto melting = [&](double t) {
+    auto out = setup.state.iceThickness;
+    for (auto& v : out) v *= 1.0 - 0.1 * t / kyr;
+    return out;
+  };
+  auto compare = [&](const auto& got, const auto& want, const std::string& label) {
+    ASSERT_EQ(got.size(), repeated.size()) << label;
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < repeated.size(); ++n) {
+      EXPECT_TRUE(got[n].converged) << label;
+      worst = std::max(worst, SnapshotDeparture(got[n], want[into[n]]));
+      if (!want[into[n]].oceanFunction.empty()) {
+        EXPECT_EQ(got[n].oceanFunction, want[into[n]].oceanFunction)
+            << label << ", node " << n;
+      }
+    }
+    // the sea level solves re-converged to their tolerance (rtol 1e-12):
+    // measured 1.0e-11 at worst
+    EXPECT_LT(worst, 1e-10) << label;
+  };
+
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label = "scheme " + std::to_string(static_cast<int>(scheme));
+    Evolution evolution(op1, solver, setup.state,
+                        {.scheme = scheme,
+                         .rtol = 1e-12,
+                         .max_nonlinear_iterations = 200});
+    compare(evolution.Run(repeated, forcing), evolution.Run(plain, forcing),
+            "frozen, " + label);
+    compare(evolution.RunMigrating(repeated, melting, forcing),
+            evolution.RunMigrating(plain, melting, forcing), "migrating, " + label);
+  }
+  Viscoelastic3D op3(setup.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  Evolution3D evolution3(op3, solver, setup.state,
+                         {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  compare(evolution3.Run(repeated, forcing3), evolution3.Run(plain, forcing3),
+          "3D, lateral viscosity");
+}
+
+TEST(PointSourceEvolution, AnOnsetUnderLoadsActingThroughIt) {
+  // An earthquake at a repeated node while the loads, the layer and the
+  // tide act through it, with an ocean and the rotational feedback. Under
+  // frozen shorelines the problem is linear: the run under both is the
+  // run under the loads (which the repeat leaves alone) plus the run under
+  // the sources (the run started at the onset), the radial run for both
+  // schemes and the 3D run under lateral viscosity. Under migrating
+  // shorelines, through a melting, it is the limit of the runs with a node
+  // eps before the onset, which the earthquake ramps over a step of eps:
+  // their gap falls as eps.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto& sle = solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / sle.Time();
+  const auto onset = 0.3 * kyr;
+  const auto jump =
+      std::vector<double>{0.0, onset, onset, 0.8 * kyr, 2.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e24);
+  auto sourcesAt = [&](double t) {
+    return t >= onset ? std::vector<PointSource>{thrust}
+                      : std::vector<PointSource>{};
+  };
+  auto before = [&](double t) {
+    return t > onset ? std::vector<PointSource>{thrust}
+                     : std::vector<PointSource>{};
+  };
+  auto sum = [](auto a, const auto& b) {
+    for (auto field : {&std::decay_t<decltype(a)>::relativeSeaLevelChange,
+                       &std::decay_t<decltype(a)>::displacement,
+                       &std::decay_t<decltype(a)>::potential,
+                       &std::decay_t<decltype(a)>::tangentialPotential}) {
+      for (auto i = std::size_t{0}; i < (a.*field).size(); ++i) {
+        (a.*field)[i] += (b.*field)[i];
+      }
+    }
+    for (auto i = 0; i < 3; ++i) a.angularVelocity[i] += b.angularVelocity[i];
+    // the loads on a radial model make no toroidal motion
+    if (a.toroidalPotential.empty()) {
+      a.toroidalPotential = b.toroidalPotential;
+    } else {
+      for (auto i = std::size_t{0}; i < a.toroidalPotential.size(); ++i) {
+        a.toroidalPotential[i] += b.toroidalPotential[i];
+      }
+    }
+    return a;
+  };
+  auto check = [&](const auto& both, const auto& loads, const auto& sources,
+                   const std::string& label) {
+    ASSERT_EQ(both.size(), jump.size()) << label;
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < jump.size(); ++n) {
+      EXPECT_TRUE(both[n].converged) << label;
+      worst = std::max(worst, SnapshotDeparture(both[n], sum(loads[n], sources[n])));
+    }
+    // measured: 1.9e-13 at worst
+    EXPECT_LT(worst, 1e-11) << label;
+    // the jump moves the field
+    EXPECT_GT(WorstDeparture(both[2].displacement, both[1].displacement), 1e-2)
+        << label;
+  };
+
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label = "scheme " + std::to_string(static_cast<int>(scheme));
+    Evolution evolution(op1, solver, setup.state,
+                        {.scheme = scheme, .rtol = 1e-12});
+    auto loads = LoadsThrough<Evolution::Forcing>(setup, kyr, 1.0);
+    auto sources = Evolution::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+    auto both = loads;
+    both.sources = sourcesAt;
+    both.sourcesBefore = before;
+    check(evolution.Run(jump, both), evolution.Run(jump, loads),
+          evolution.Run(jump, sources), "frozen, " + label);
+  }
+  {
+    Viscoelastic3D op3(setup.rheology, kLmax, [](double, double theta, double phi) {
+      return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+    });
+    Evolution3D evolution3(op3, solver, setup.state,
+                           {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    auto loads = LoadsThrough<Evolution3D::Forcing>(setup, kyr, 1.0);
+    auto sources =
+        Evolution3D::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+    auto both = loads;
+    both.sources = sourcesAt;
+    both.sourcesBefore = before;
+    check(evolution3.Run(jump, both), evolution3.Run(jump, loads),
+          evolution3.Run(jump, sources), "3D, lateral viscosity");
+  }
+
+  // migrating shorelines: the limit of a node eps before the onset
+  const auto melting = [&](double t) {
+    auto out = setup.state.iceThickness;
+    for (auto& v : out) v *= 1.0 - 0.1 * t / kyr;
+    return out;
+  };
+  auto forcing = LoadsThrough<Evolution::Forcing>(setup, kyr, 1.0);
+  forcing.sources = sourcesAt;
+  forcing.sourcesBefore = before;
+  Evolution evolution(op1, solver, setup.state,
+                      {.rtol = 1e-12, .max_nonlinear_iterations = 200});
+  const auto exact = evolution.RunMigrating(jump, melting, forcing);
+  auto gaps = std::vector<double>{};
+  for (const auto eps : {1e-2, 1e-3, 1e-4}) {
+    auto near = jump;
+    near[1] = onset - eps * kyr;
+    const auto ramped = evolution.RunMigrating(near, melting, forcing);
+    auto gap = 0.0;
+    for (auto n = std::size_t{2}; n < jump.size(); ++n) {
+      gap = std::max(gap, SnapshotDeparture(ramped[n], exact[n]));
+    }
+    gaps.push_back(gap);
+  }
+  // first order in eps: measured 1.69e-2, 1.68e-3, 1.68e-4
+  for (auto k = std::size_t{0}; k + 1 < gaps.size(); ++k) {
+    EXPECT_GT(gaps[k] / gaps[k + 1], 8.0);
+    EXPECT_LT(gaps[k] / gaps[k + 1], 12.0);
+  }
+  EXPECT_LT(gaps.back(), 1e-3);
+}
+
+TEST(Lateral, AResumedRunAcrossAJumpIsTheUninterruptedOne) {
+  // An earthquake at a repeated node under lateral viscosity: resumed from
+  // the left node's checkpoint and from the right node's, the run is the
+  // uninterrupted one.
+  auto setup = Setup::Make();
+  const auto& scales = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  const auto times = std::vector<double>{0.0, kyr, kyr, 2 * kyr, 3 * kyr};
+  const auto source = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e24);
+  Evolution3D::Forcing forcing;
+  forcing.directLoad = [&](double t) {
+    auto out = setup.MeltLoad(-0.1);
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  forcing.sources = [&](double t) {
+    return t >= kyr ? std::vector<PointSource>{source}
+                    : std::vector<PointSource>{};
+  };
+  forcing.sourcesBefore = [&](double t) {
+    return t > kyr ? std::vector<PointSource>{source}
+                   : std::vector<PointSource>{};
+  };
+  Viscoelastic3D op(
+      setup.rheology, kLmax, [](double, double theta, double phi) {
+        return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto checkpoints = std::map<std::size_t, Evolution3D::Checkpoint>{};
+  auto options = Evolution3D::Options{};
+  options.checkpoint_stride = 1;
+  options.on_checkpoint = [&](std::size_t node, const Evolution3D::Checkpoint& cp) {
+    checkpoints.emplace(node, cp);
+  };
+  Evolution3D whole(op, setup.solver, setup.state, options);
+  const auto full = whole.Run(times, forcing);
+  for (const auto from : {std::size_t{1}, std::size_t{2}}) {
+    Evolution3D resumed(op, setup.solver, setup.state, {});
+    const auto tail = resumed.Resume(
+        checkpoints.at(from),
+        std::vector<double>(times.begin() + static_cast<long>(from), times.end()),
+        forcing);
+    ASSERT_EQ(tail.size(), times.size() - from - 1);
+    // one process, the same transforms: bitwise
+    for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+      const auto& a = full[from + 1 + k];
+      const auto& b = tail[k];
+      const auto where = "from node " + std::to_string(from) + ", node " +
+                         std::to_string(from + 1 + k);
+      EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange) << where;
+      EXPECT_EQ(a.displacement, b.displacement) << where;
+      EXPECT_EQ(a.toroidalPotential, b.toroidalPotential) << where;
+    }
+  }
+  EXPECT_GT(WorstDeparture(full[2].displacement, full[1].displacement), 1e-2);
+}

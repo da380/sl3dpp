@@ -765,9 +765,23 @@ double AmplitudeHistory::At(double t) const {
   return factors[i] + w * (factors[i + 1] - factors[i]);
 }
 
+namespace {
+/// The tolerance a seismic term's onset is read with on the terms' clock.
+double OnsetTolerance(double onset) { return 1e-12 * (1.0 + std::abs(onset)); }
+}  // namespace
+
 double SeismicTerm::FactorAt(double t) const {
-  if (onset && t < *onset - 1e-12 * (1.0 + std::abs(*onset))) return 0.0;
+  if (onset && t < *onset - OnsetTolerance(*onset)) return 0.0;
   return history.At(t);
+}
+
+double SeismicTerm::FactorBefore(double t) const {
+  if (onset && t <= *onset + OnsetTolerance(*onset)) return 0.0;
+  return history.At(t);
+}
+
+bool SeismicTerm::OnsetAt(double t) const {
+  return onset && std::abs(t - *onset) <= OnsetTolerance(*onset);
 }
 
 namespace {
@@ -943,10 +957,11 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
 }
 
 std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
-                                          double t, double surfaceRadius) {
+                                          double t, double surfaceRadius,
+                                          bool before) {
   auto out = std::vector<PointSource>{};
   for (const auto& term : seismic) {
-    const auto factor = term.FactorAt(t);
+    const auto factor = before ? term.FactorBefore(t) : term.FactorAt(t);
     auto sources = std::vector<PointSource>{};
     if (term.kind == SeismicTerm::Kind::Point) {
       sources.push_back({.at = SeismicPointsOf(term, surfaceRadius).front(),

@@ -42,6 +42,7 @@
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -88,14 +89,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const auto values = coupling.GridValueCount();
   const auto nodeCount = static_cast<std::size_t>(coupling.NodeCount());
 
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
+  detail::CheckTimeGrid(times);
   // Distributed over radius (Viscoelastic3D::Options::collectives): each
   // rank transposes its own memory nodes' part of every pass, the duals
   // of the load and centrifugal coefficients are the ranks' partial
@@ -769,10 +763,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     if (trajectory == nullptr || trajectory->sourceForces.empty()) return x;
     const auto& forces = trajectory->sourceForces[node];
     const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+    // (none where no source acts at the node)
     for (auto* pair : {&x.spheroidal, &x.toroidal}) {
       const auto& from = pair == &x.spheroidal ? add.spheroidal : add.toroidal;
-      for (auto& [l, to] : *pair) {
-        const auto& a = from.at(l);
+      for (const auto& [l, a] : from) {
+        auto& to = pair->at(l);
         for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
       }
     }

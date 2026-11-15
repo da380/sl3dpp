@@ -5869,10 +5869,34 @@ std::map<std::string, std::vector<double>> LibraryRunWithoutAnOcean(
       units.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
   const auto surface = material->Radius() * model.ModelScales().Length();
   const auto site = GeographicPoint{30.0, 40.0};
-  const auto times = timesOf(units.Time());
+  // an onset at a node after the start is a jump of the forcing there:
+  // the node repeated, the source absent from its left limit
+  // (Evolution::Forcing::sourcesBefore), the window's node its right
+  auto times = std::vector<double>{};
+  auto right = std::vector<std::size_t>{};
+  for (const auto t : timesOf(units.Time())) {
+    if (!times.empty() && std::abs(kyrOf(t) - onset) <= 1e-12) times.push_back(t);
+    right.push_back(times.size());
+    times.push_back(t);
+  }
+  const auto source = [&](double t, bool before) {
+    const auto kyr = kyrOf(t);
+    const auto on =
+        (before ? kyr > onset + 1e-12 : kyr >= onset - 1e-12) ? 1.0 : 0.0;
+    return std::vector<PointSource>{PointSource{
+        .at = {.radius = (surface - 300e3) / units.Length(),
+               .colatitude = site.CoLatitude(),
+               .longitude = site.Longitude()},
+        .moment = {.rr = on * 9e20 / energy,
+                   .tt = on * -2e20 / energy,
+                   .pp = on * -7e20 / energy,
+                   .rt = on * 3e20 / energy,
+                   .rp = on * -7e20 / energy,
+                   .tp = on * 6e20 / energy}}};
+  };
   Evolution evolution(op, solver, solver.NoOceanState(),
                       {.rotation = RotationalFeedback::None});
-  const auto snapshots = evolution.Run(
+  const auto run = evolution.Run(
       times,
       Evolution::Forcing{
           .directLoad =
@@ -5888,24 +5912,13 @@ std::map<std::string, std::vector<double>> LibraryRunWithoutAnOcean(
                                                 Complex{1.0, 0.5} / toPotential;
                 return out;
               },
-          .sources =
-              [&](double t) {
-                const auto on = kyrOf(t) >= onset - 1e-12 ? 1.0 : 0.0;
-                return std::vector<PointSource>{PointSource{
-                    .at = {.radius = (surface - 300e3) / units.Length(),
-                           .colatitude = site.CoLatitude(),
-                           .longitude = site.Longitude()},
-                    .moment = {.rr = on * 9e20 / energy,
-                               .tt = on * -2e20 / energy,
-                               .pp = on * -7e20 / energy,
-                               .rt = on * 3e20 / energy,
-                               .rp = on * -7e20 / energy,
-                               .tp = on * 6e20 / energy}}};
-              },
-          .stressGluts = {}});
-  EXPECT_EQ(snapshots.size(), times.size());
+          .sources = [&](double t) { return source(t, false); },
+          .stressGluts = {},
+          .sourcesBefore = [&](double t) { return source(t, true); }});
+  EXPECT_EQ(run.size(), times.size());
   auto out = std::map<std::string, std::vector<double>>{};
-  for (const auto& snapshot : snapshots) {
+  for (const auto k : right) {
+    const auto& snapshot = run[k];
     EXPECT_TRUE(snapshot.converged);
     for (const auto& [name, field, factor] :
          {std::tuple{"displacement", &snapshot.displacement, units.Length()},
@@ -6054,7 +6067,8 @@ TEST_F(AppsTest, SolveWithoutAnOceanIsTheLibrarysRunThroughTime) {
   // own and a point source from a date on, over a window from 2 kyr BP to
   // the present in half-kyr steps, is the library's evolution on a body
   // without an ocean under the same forcing (the histories' and the
-  // onset's dates turned to kyr from the window's start), built here, node
+  // onset's dates turned to kyr from the window's start, the onset's node
+  // repeated, the source absent from its left limit), built here, node
   // by node, to rounding (about 4e-15 here), the tangential and toroidal
   // potentials included; the load applied at each node is the cap times
   // its factor there, and each exchange table holds the expansion of its
@@ -8867,8 +8881,9 @@ TEST_F(AppsTest, SolveOnItsOwnClockIsTheLibrarysRunThroughTime) {
   // body without an ocean and without rotational feedback is the library's
   // evolution on the same uneven nodes under the same forcing, its times
   // taken as given: a cap with an amplitude history (`history`), a tide
-  // coefficient with its own and a point source from an onset (`onset`),
-  // node by node to rounding (about 4e-15 here: in kyr the two step
+  // coefficient with its own and a point source from an onset (`onset`, a
+  // node: the library's grid repeats it, the source absent from its left
+  // limit), node by node to rounding (about 4e-15 here: in kyr the two step
   // through the same times to the bit), the tangential and toroidal
   // potentials included. The same run in years, every time a thousand
   // times larger, agrees with it to the rounding of its node times, which
@@ -10253,6 +10268,136 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemWithAnIceChange) {
       RecordProperty(label + "_" + name + "_gap",
                      std::format("{:.3e}", Gap(predicted, measured)));
       EXPECT_LT(Gap(predicted, measured), 1e-6) << label << " " << name;
+    }
+  }
+}
+
+TEST_F(AppsTest, AnOnsetAtANodeHoldsTheCoSeismicResponse) {
+  // A point source under the ball of a 1e19 Pa s mantle without an ocean
+  // whose onset is a node after the start, a cap load and a tide acting
+  // through it: the library repeats the node (its left limit without the
+  // source), and the outputs hold one record per node of the window, the
+  // onset's the co-seismic response. Under the source alone the run from
+  // the onset on is the run started at the onset, to rounding, nothing
+  // moving before it. Under all three the kernels are over the window's
+  // nodes: the measurement dated at the onset reads the co-seismic field;
+  // the moment kernels from the onset on predict a solve run with the
+  // tensor's member rt raised (the source's moment at its onset node the
+  // co-seismic one); the load kernels, at the onset the two sides' summed,
+  // predict a solve run with the cap doubled, and the tide's a run with
+  // the tide's real part doubled.
+  namespace pm = planetmodel;
+  static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
+  const auto config = [&](const std::string& name, const std::string& times,
+                          double rt, double cap, double tide) {
+    const auto loads =
+        cap == 0.0
+            ? std::string{}
+            : std::format(R"(, "load": [{{"cap": {{"latitude": 35,
+                "longitude": 45, "width_deg": 15, "amplitude_kg_m2": {:.17g}}},
+                "history": [[0, 0.5], [10, 1.5]]}}],
+              "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": {:.17g},
+                "imaginary_m2_s2": 0.5}}])",
+                          cap, tide);
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static", "model": {{"deck": "soft.deck"}},
+      "discretisation": {{"lmax": 8}},
+      "times": {{"unit": "yr", "at": [{}]}},
+      "forcing": {{"seismic": [{{"point": {{"latitude": 30, "longitude": 40,
+          "depth_km": 100, "moment_tensor_nm": {{"rr": 9e20, "tt": -2e20,
+          "pp": -7e20, "rt": {:.17g}, "rp": -7e20, "tp": 6e20}}}},
+          "onset": 2.5}}]{}}},
+      "rotation": "none", "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"method": "discrete",
+        "parameters": ["load", "tide", "moment"],
+        "measurements": [
+          {{"type": "displacement_point", "name": "coseismic",
+            "latitude": 28, "longitude": 40, "time": 2.5}},
+          {{"type": "displacement_vector_point", "name": "drift",
+            "latitude": 33, "longitude": 42,
+            "direction": {{"east": 1, "north": -0.5}}, "time": 6}}],
+        "output": "out/{}_kernels"}}}})",
+                                             times, rt, loads, name, name));
+  };
+  const auto window = std::string{"0, 1, 2.5, 3, 6, 10"};
+  const auto read = [&](const std::string& name) {
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+
+  // -- the source alone, against the run started at its onset
+  const auto summary =
+      app::RunSolve(config("late", window, 3e20, 0.0, 0.0));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 6 nodes 0 to 10 yr on the run's clock"))
+      << summary;
+  static_cast<void>(
+      app::RunSolve(config("started", "2.5, 3, 6, 10", 3e20, 0.0, 0.0)));
+  const auto late = read("late");
+  const auto started = read("started");
+  ASSERT_EQ(late.time->size(), 6u);
+  for (auto n = std::size_t{0}; n < 2; ++n) {
+    for (const auto v : Slice(late, "displacement", n)) EXPECT_EQ(v, 0.0) << n;
+  }
+  auto worst = 0.0;
+  for (auto k = std::size_t{0}; k < 4; ++k) {
+    for (const auto* name : {"displacement", "tangential_potential",
+                             "potential", "toroidal_potential"}) {
+      worst = std::max(worst, Departure(Slice(late, name, 2 + k),
+                                        Slice(started, name, k)));
+    }
+  }
+  RecordProperty("onset_against_started", std::format("{:.3e}", worst));
+  // measured: 1.5e-12 (the potential's smallest coefficients)
+  EXPECT_LT(worst, 1e-10);
+
+  // -- the kernels under the source, the load and the tide
+  const auto base = config("run", window, 3e20, 1e4, 1.0);
+  static_cast<void>(app::RunKernel(base));
+  static_cast<void>(app::RunSolve(base));
+  static_cast<void>(app::RunSolve(config("raised", window, 4e20, 1e4, 1.0)));
+  static_cast<void>(app::RunSolve(config("heavier", window, 3e20, 2e4, 1.0)));
+  static_cast<void>(app::RunSolve(config("real", window, 3e20, 1e4, 2.0)));
+  const auto run = read("run");
+  ASSERT_EQ(run.time->size(), 6u);
+  const auto direction = SurfaceDirection{.east = 1.0, .north = -0.5};
+  const auto valueOf = [&](const pm::SurfaceFile& file, const std::string& name) {
+    return name == "drift"
+               ? VectorPointOf(file, 4, {33.0, 42.0}, direction)
+               : PointValueOf(file, "displacement", 2, {28.0, 40.0});
+  };
+  auto applied = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < 6; ++n) applied.push_back(FieldAt(run, "load", n));
+  const auto out = dir_ / "out" / "run_kernels";
+  for (const auto* name : {"coseismic", "drift"}) {
+    const auto label = std::string{name};
+    const auto value = valueOf(run, label);
+    // the measurement at the onset reads the co-seismic field
+    EXPECT_LT(Gap(MeasuredValue(out, label), value), 1e-10) << label;
+    const auto rows = TableRows(out / (label + "_moment_kernels.txt"));
+    ASSERT_EQ(rows.size(), 6u);
+    auto moment = 0.0;
+    for (const auto& row : rows) {
+      if (row[1] >= 2.5) moment += row[6] * 1e20;
+    }
+    const auto loads = pm::ReadSurfaceFile(out / (label + "_load_kernels.nc"));
+    ASSERT_EQ(loads.time->size(), 6u);
+    const auto load = NodePairing(loads, "load_dual", applied);
+    auto tide = 0.0;
+    for (const auto& row : TableRows(out / (label + "_tide_kernels.txt"))) {
+      if (row[2] == 2.0 && row[3] == 1.0) tide += row[4] * 1.0;
+    }
+    for (const auto& [term, predicted] :
+         {std::pair{std::string{"raised"}, moment},
+          std::pair{std::string{"heavier"}, load},
+          std::pair{std::string{"real"}, tide}}) {
+      const auto measured = valueOf(read(term), label) - value;
+      ASSERT_NE(measured, 0.0) << label << ", " << term;
+      RecordProperty(label + "_" + term + "_gap",
+                     std::format("{:.3e}", Gap(predicted, measured)));
+      // measured: 3.6e-11 at worst (the moment's at the onset); the moment
+      // kernel with the left side's added at the onset misses by 0.36
+      EXPECT_LT(Gap(predicted, measured), 1e-8) << label << ", " << term;
     }
   }
 }
@@ -11868,6 +12013,7 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
       "longitude": 40, "depth_km": 100, "moment_tensor_nm": {"rr": 9e20,
       "tt": -2e20, "pp": -7e20, "rt": 3e20, "rp": -7e20, "tp": 6e20}},
       "onset": 0.5})"};
+  const auto atNode = point.substr(0, point.rfind("0.5")) + "2.5}";
   const auto cases = std::vector<Case>{
       {"dated",
        std::string{kBall} + ", " + Window(9) +
@@ -11923,6 +12069,17 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
           {"type": "displacement_vector_point", "name": "drift",
            "latitude": 33, "longitude": 42,
            "direction": {"east": 1, "north": -0.5}, "time": 6}])",
+       1},
+      // an onset at a node: the store holds the library's repeat
+      {"postseismic_onset", R"("problem": "quasi_static",
+        "model": {"deck": "soft.deck"}, "discretisation": {"lmax": 8},
+        "times": {"unit": "yr", "at": [0, 1, 2.5, 3, 6, 10]},
+        "forcing": {"seismic": [)" + atNode + R"(]}, "rotation": "none")",
+       R"("method": "continuous", "parameters": ["moment", "viscosity"],
+        "measurements": [
+          {"type": "displacement_vector_point", "name": "drift",
+           "latitude": 33, "longitude": 42,
+           "direction": {"east": 1, "north": -0.5}, "time": 2.5}])",
        1},
       {"postseismic3d", R"("problem": "quasi_static",
         "model": {"deck": "soft.deck", "viscosity": {"file": "viscosity.nc"}},

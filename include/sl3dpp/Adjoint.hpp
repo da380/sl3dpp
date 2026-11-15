@@ -20,11 +20,14 @@
  * DISAGREEMENT is a resolution diagnostic for the forward calculation.
  *
  * Conventions: times are the forward driver's (increasing, SLE solver
- * units); measurements are keyed by node index into the time grid; duals
- * are non-dimensional SLE-unit grid densities pairing with the outputs by
- * the surface integral int . dS, the angular-velocity dual by the dot
- * product. The returned kernels pair with load perturbations the same
- * way; densities and rates are per unit SLE time. The sweeps linearise
+ * units, a node repeated once for a jump of the forcing, Evolution::Run:
+ * a zero-length step to the sweeps, each side of it a node of its own);
+ * measurements are keyed by node index into the time grid, an observation
+ * at a jump on its right node; duals are non-dimensional SLE-unit grid
+ * densities pairing with the outputs by the surface integral int . dS, the
+ * angular-velocity dual by the dot product. The returned kernels pair
+ * with load perturbations the same way; densities and rates are per unit
+ * SLE time. The sweeps linearise
  * about frozen shorelines (the forward driver's linear equation) or, given
  * the ocean function of every node of a migrating run, about that
  * trajectory: the adjoint stays linear with the time-reversed C(t) as its
@@ -334,8 +337,9 @@ class AdjointSolver {
       : AdjointSolver(evolution, Options{}) {}
 
   /// The ice-history kernels of the objective the measurements define,
-  /// over the forward time grid (increasing, SLE units; one node is the
-  /// elastic problem, whose kernels are the instantaneous ones alone).
+  /// over the forward time grid (increasing, SLE units, a node repeated
+  /// once at a jump of the forcing; one node is the elastic problem, whose
+  /// kernels are the instantaneous ones alone).
   /// Measurement keys are node indices into `times`. With a
   /// recorded forward `trajectory` (one entry per node, from a run with
   /// record_stride under the same scheme and loads), the kernels also

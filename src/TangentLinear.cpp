@@ -8,6 +8,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -78,16 +79,7 @@ class ForwardCursor {
   ViscoelasticState state_;
 };
 
-void CheckTimes(std::span<const double> times) {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
-}
+void CheckTimes(std::span<const double> times) { detail::CheckTimeGrid(times); }
 
 void CheckPerNode(const std::vector<std::vector<double>>& fields,
                   std::size_t nodes, std::size_t fieldSize, const char* what) {
@@ -426,11 +418,10 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
         cursor->State(0), ev->Columns(trajectory->loads[0], ev->toMatDensity_),
         ev->Columns(trajectory->tides[0], ev->toMatPotential_));
     if (!trajectory->sourceForces.empty()) {
-      // the base start under its sources too
-      const auto extra =
-          UnrelaxedResponse(trajectory->sourceForces[0].spheroidal);
-      for (auto& [l, x] : x0) {
-        const auto& add = extra.at(l);
+      // the base start under its sources too (none where none act there)
+      for (const auto& [l, add] :
+           UnrelaxedResponse(trajectory->sourceForces[0].spheroidal)) {
+        auto& x = x0.at(l);
         for (auto i = std::size_t{0}; i < x.size(); ++i) x[i] += add[i];
       }
     }

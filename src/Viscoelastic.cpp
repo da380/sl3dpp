@@ -272,6 +272,10 @@ ViscoelasticOperator::SchemeWeightSecondDerivativesOf(Scheme scheme,
 
 std::vector<double> ViscoelasticOperator::PointShearModulus(Scheme scheme,
                                                             double dt) const {
+  // a zero-length step's weights are one: the elastic operators' own
+  if (dt == 0.0 && options_.memory_points != MemoryPointSet::Gll) {
+    return elasticShear_;
+  }
   const auto& weights = SchemeWeightsOf(scheme, dt);
   auto s = std::vector<double>(
       static_cast<std::size_t>(BaseMaterial().Mesh().ElementCount()) *
@@ -350,6 +354,8 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
         "effective solid is the long-term material plus a shear at the "
         "memory points (MemoryPoints.hpp), not a material");
   }
+  // a zero-length step's weights are one: the unrelaxed material itself
+  if (dt == 0.0) return BaseMaterial();
   const auto& weights = SchemeWeightsOf(scheme, dt);
   auto w = std::vector<std::vector<double>>{};
   for (const auto& branch : weights) {
@@ -942,7 +948,8 @@ ViscoelasticStep ViscoelasticOperator::StartStep(
         "a two-phase step is implicit: ExponentialTrapezoid or "
         "BackwardEuler");
   }
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  // a zero-length step is the elastic solve with the memory held
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   return ViscoelasticStep(*this, state, dt, scheme, load, tide);
 }
 
@@ -950,7 +957,7 @@ std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
 ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
                            Scheme scheme, const LoadCallable& load,
                            const LoadCallable& tide) const {
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   if (scheme == Scheme::ExponentialEuler) {
     auto dStart = StartStrain(state, load, tide);
     const auto& weights = SchemeWeightsOf(Scheme::ExponentialTrapezoid, dt);
@@ -999,7 +1006,7 @@ ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
     throw std::invalid_argument(
         "a step inverts for ExponentialTrapezoid or BackwardEuler");
   }
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   if (!state.HasStrain()) {
     throw std::invalid_argument(
         "the state must carry its strain cache; reconstruct from a "
@@ -1111,6 +1118,8 @@ ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
 const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                                               double dt) const {
   RequireGravity(*this, "the Love numbers of the sea level equation");
+  // a zero-length step's solid is the unrelaxed one
+  if (dt == 0.0) return ElasticLoveNumbers();
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {

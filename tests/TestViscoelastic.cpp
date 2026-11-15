@@ -28,6 +28,7 @@
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/StepWeights.hpp"
+#include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
 #include <planetmodel/deck.hpp>
@@ -657,4 +658,97 @@ TEST(Viscoelastic, EffectiveLoveNumberLimits) {
   EXPECT_TRUE(fine.state.has_value());
   auto coarse = op.AdaptiveStep(state, 50.0 * tau, 1e-10, UnitLoad());
   EXPECT_LT(coarse.dtNext, 50.0 * tau);
+}
+
+TEST(Viscoelastic, AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld) {
+  // A step of zero length (h = 0: e = 1, alpha = beta = 0, every effective
+  // weight one) from a state with memory, under a load other than the
+  // start's: its memory is the start's, bitwise, its solutions those of
+  // the unrelaxed systems under the memory and the new load, and its Love
+  // numbers the unrelaxed ones; by the two-phase step of each implicit
+  // scheme, by Step under all three, and back by StepBack. The memory
+  // points at the Gauss points and at the GLL nodes. The toroidal partner
+  // likewise under a force.
+  auto body = TestBody::Make(4);
+  const auto tau = body.rheology.MinRelaxationTime();
+  const LoadCallable doubled = [](int, double) { return std::vector<double>{2.0}; };
+  for (const auto points : {MemoryPointSet::Gauss, MemoryPointSet::Gll}) {
+    ViscoelasticOperator op(body.rheology, 4, {.memory_points = points});
+    for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler,
+                        Scheme::ExponentialEuler}) {
+      const auto label = std::format("scheme {}, {}", static_cast<int>(scheme),
+                                     points == MemoryPointSet::Gll ? "GLL" : "Gauss");
+      auto state = op.ZeroState();
+      op.PrimeStrain(state, UnitLoad());
+      for (auto i = 0; i < 3; ++i) {
+        state = op.Step(state, 0.7 * tau, Scheme::ExponentialTrapezoid, UnitLoad())
+                    .first;
+      }
+      const auto elastic = op.SolveElastic(state, doubled);
+      auto worst = 0.0, scale = 0.0;
+      auto compare = [&](const std::map<int, std::vector<double>>& got) {
+        for (const auto& [l, x] : elastic) {
+          for (auto i = std::size_t{0}; i < x.size(); ++i) {
+            worst = std::max(worst, std::abs(got.at(l)[i] - x[i]));
+            scale = std::max(scale, std::abs(x[i]));
+          }
+        }
+      };
+      // (the start strain is the state's cache, its load the earlier one)
+      auto [next, solutions] = op.Step(state, 0.0, scheme, doubled);
+      EXPECT_EQ(next.m, state.m) << label;
+      EXPECT_EQ(next.t, state.t) << label;
+      if (scheme == Scheme::ExponentialEuler) {
+        // the exponential Euler step hands back its start's solutions
+        continue;
+      }
+      compare(solutions);
+      auto step = op.StartStep(state, 0.0, scheme, UnitLoad());
+      EXPECT_EQ(step.EffectiveLove().h_u, op.ElasticLoveNumbers().h_u) << label;
+      auto [opened, opens] = step.Finish(doubled);
+      EXPECT_EQ(opened.m, state.m) << label;
+      compare(opens);
+      // back across it: the memory again, the solutions under the earlier load
+      auto [back, backSolutions] = op.StepBack(opened, 0.0, scheme, UnitLoad());
+      EXPECT_EQ(back.m, state.m) << label;
+      // measured: bitwise (the zero-length step's systems are the
+      // unrelaxed ones, assembled alike)
+      EXPECT_LT(worst, 1e-13 * scale) << label;
+    }
+    // the toroidal partner
+    const ToroidalViscoelastic toroidal(op);
+    auto tstate = toroidal.ZeroState();
+    auto force = ToroidalViscoelastic::Fields{};
+    for (auto l = 1; l <= 4; ++l) {
+      const auto ndof = static_cast<std::size_t>(toroidal.Unrelaxed(l).DofCount());
+      auto f = std::vector<double>(ndof * static_cast<std::size_t>(2 * (l + 1)), 0.0);
+      for (auto i = std::size_t{0}; i < f.size(); ++i) {
+        f[i] = std::sin(0.37 * static_cast<double>(i + l));
+      }
+      force.emplace(l, std::move(f));
+    }
+    toroidal.SetStrain(tstate, toroidal.SolveElastic(tstate, force));
+    for (auto i = 0; i < 3; ++i) {
+      tstate = toroidal.Step(tstate, 0.7 * tau, Scheme::ExponentialTrapezoid, force)
+                   .first;
+    }
+    auto twice = force;
+    for (auto& [l, f] : twice) {
+      for (auto& v : f) v *= 2.0;
+    }
+    for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+      auto [next, w] = toroidal.Step(tstate, 0.0, scheme, twice);
+      EXPECT_EQ(next.m, tstate.m);
+      const auto want = toroidal.SolveElastic(tstate, twice);
+      auto worst = 0.0, scale = 0.0;
+      for (const auto& [l, x] : want) {
+        for (auto i = std::size_t{0}; i < x.size(); ++i) {
+          worst = std::max(worst, std::abs(w.at(l)[i] - x[i]));
+          scale = std::max(scale, std::abs(x[i]));
+        }
+      }
+      // measured: bitwise
+      EXPECT_LT(worst, 1e-13 * scale);
+    }
+  }
 }

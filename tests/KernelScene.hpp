@@ -219,6 +219,42 @@ inline std::map<std::size_t, Measurement> FullMeasurements(const Scene& setup,
   return measurements;
 }
 
+/// A time grid of `steps` equal steps over [0, span] with node `at` (0 <
+/// at < steps) repeated: an earthquake there, node `at` its left limit and
+/// node `at` + 1 its right, a zero-length step between.
+inline std::vector<double> OnsetGrid(int steps, double span, int at) {
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= steps; ++n) {
+    times.push_back(span * n / steps);
+    if (n == at) times.push_back(times.back());
+  }
+  return times;
+}
+
+/// Interior sources given node by node on a grid with a repeated node:
+/// the plain callback reads the last node at a time, the left limit
+/// (Forcing::sourcesBefore) the first.
+inline Evolution::Forcing SourcesByNode(
+    std::vector<double> times, std::vector<std::vector<PointSource>> perNode) {
+  auto find = [times](double t, bool first) {
+    auto found = times.size();
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      if (std::abs(t - times[n]) <= 1e-12 * std::abs(times.back())) {
+        found = n;
+        if (first) break;
+      }
+    }
+    if (found == times.size()) {
+      throw std::runtime_error("the test history is read off its nodes");
+    }
+    return found;
+  };
+  return {.sources = [find, perNode](double t) { return perNode[find(t, false)]; },
+          .sourcesBefore = [find, perNode](double t) {
+            return perNode[find(t, true)];
+          }};
+}
+
 /// pyslfp's marine-grounded cap on a uniform ocean (the initial-sea-level
 /// tests' scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at
 /// 10 ka and melting linearly to nothing.

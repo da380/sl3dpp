@@ -171,8 +171,10 @@ class Evolution3D {
                       GRDSolver::State state)
       : Evolution3D(op, solver, std::move(state), Options{}) {}
 
-  /// As Evolution::Run: times increasing in SLE units,
-  /// directLoad(t) the non-ocean surface load on the SLE grid.
+  /// As Evolution::Run: times increasing in SLE units, a time repeated
+  /// once for a jump of the forcing (its left limit, then its right, a
+  /// zero-length step between), directLoad(t) the non-ocean surface load
+  /// on the SLE grid.
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
@@ -202,6 +204,10 @@ class Evolution3D {
     /// `sources`: the general stress glut, a tensor field on each shell,
     /// its moment per unit solid angle in the solver's units.
     std::function<std::vector<StressGlut>(double)> stressGluts{};
+    /// Their left limits at time t, read at the first node of a repeated
+    /// pair, as Evolution::Forcing's: absent, the plain callbacks.
+    std::function<std::vector<PointSource>(double)> sourcesBefore{};
+    std::function<std::vector<StressGlut>(double)> stressGlutsBefore{};
   };
 
   /// `Run` under a forcing, as Evolution's: on a background state without

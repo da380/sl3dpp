@@ -14,6 +14,7 @@
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 
 namespace sl3dpp {
 
@@ -23,16 +24,7 @@ using Complex = std::complex<double>;
 using Snapshot = Evolution3D::Snapshot;
 using State = Viscoelastic3D::State;
 
-void CheckTimes(std::span<const double> times) {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
-}
+void CheckTimes(std::span<const double> times) { detail::CheckTimeGrid(times); }
 
 void CheckPerNode(const std::vector<std::vector<double>>& fields,
                   std::size_t nodes, std::size_t fieldSize, const char* what) {
@@ -552,11 +544,12 @@ struct TangentLinearSolver3D::MaterialDrive3D
         // a source-driven base: under the sources' forces too
         const auto& forces = trajectory->sourceForces[node];
         const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+        // (none where no source acts at the node)
         for (auto* pair : {&base.x->spheroidal, &base.x->toroidal}) {
           const auto& from =
               pair == &base.x->spheroidal ? add.spheroidal : add.toroidal;
-          for (auto& [l, to] : *pair) {
-            const auto& a = from.at(l);
+          for (const auto& [l, a] : from) {
+            auto& to = pair->at(l);
             for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
           }
         }

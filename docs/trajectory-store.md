@@ -104,7 +104,7 @@ field:
 | hash | `text` | the run hash (below) |
 | writer | `text` | the program that wrote it, for provenance (`sl3dpp <version>`) |
 | dimension | `u64` | 1 (`Evolution`) or 3 (`Evolution3D`) |
-| times | `vec` | the N node times, increasing (one, at zero, for the static problem) |
+| times | `vec` | the N node times of the library's grid, increasing, a node repeated once where the forcing jumps (an onset: its left limit, then its right; both recorded) (one, at zero, for the static problem) |
 | stride | `u64` | s >= 1 |
 | kept | N `u64` | 1 where the node is kept (n mod s = 0, or n = N - 1), 0 elsewhere |
 | migrating | `flag` | the shorelines migrate: every surface record holds an ocean function |

@@ -1162,9 +1162,20 @@ the stress glut itself, a moment tensor: in the static problem it acts
 whole, the co-seismic response; through time it acts from its onset
 (`onset_kyr_bp`, a date, in a dated run, `onset` on the run's clock in
 one counting forwards; from the window's start when absent) and is held,
-times its amplitude history where one is given, so the node at which it
-first acts holds the co-seismic response and the nodes after it the
-post-seismic relaxation. The onset should be a node of the run. A source
+times its amplitude history where one is given. An onset at a node after
+the window's start is a jump of the forcing there: the run steps to the
+node without the source, and the library repeats the node (its left
+limit, then its right) and takes the jump as the static elastic solve
+with the relaxation so far held, so that node holds the co-seismic
+response, however long the step before it, and the nodes after it the
+post-seismic relaxation; the outputs keep one record per node of the
+window, the co-seismic one there, and a measurement dated at the onset
+reads it. An onset at the window's start needs no repeat: the first node
+is the instantaneous response. An onset between nodes is no jump the
+nodes see: the source is absent at the nodes before it and acts at those
+after, so the scheme spreads the earthquake over the step that holds the
+onset, and the node after it holds part of the relaxation beside the
+co-seismic response; give the onset as a node. A source
 excites toroidal motion as well as spheroidal, and the surface file then
 holds `toroidal_potential`.
 
@@ -1309,7 +1320,11 @@ gives them (`linear`: one at the slice's own time, zero at the others and
 linear between; `previous`: one from its time to the next), combined as
 planetmodel combines the slices' slip (`FaultSliceQuadrature::SlipOf`):
 the moment of the slip the file reads at that time, its size and
-direction both.
+direction both. `linear` and `none` give a moment continuous in time
+between the nodes the run reads it at; `previous` jumps at each of the
+file's times, where the run takes no left limit (as it does at an
+onset): a jump at a node is spread over the step before it, as an onset
+between nodes is.
 
 **Cost.** Each quadrature point is a point source. Sources at one radius,
 to 1e-12 (rounding, never a move of a source), are formed together, at
@@ -2798,9 +2813,16 @@ with respect to the members of the point's moment tensor at the node, in
 the basis of `moment_tensor_nm` (r up, theta south, phi east), an
 off-diagonal member setting the symmetric pair, in J's unit per N m. A
 term's moment at a node is its tensor times its factor there (zero before
-its onset; a fault file's on a time axis, its slices as its rule reads
-them), so the derivative with respect to a point source's member is the
-sum over the nodes of the factor times the entry. Kernels in a fault
+its onset, at an onset that is a node its co-seismic moment there; a
+fault file's on a time axis, its slices as its rule reads them), so the
+derivative with respect to a point source's member is the sum over the
+nodes of the factor times the entry. Every kernel file is over the
+window's nodes: at an onset that is a node (Seismic sources, above),
+where the library steps a node twice, the two sides' kernels are summed
+for everything both read at that node's one time (the ice, the loads, the
+tide, every other term), and a term whose onset it is takes the right
+side's alone, its moment there the co-seismic one and the left side's its
+absence. Kernels in a fault
 file's slip are not written: they follow from these, the moment at a
 quadrature point being w C : (s n) (Seismic sources, above), so that the
 derivative of J with respect to the slip there is w (C : K) n, K the

@@ -179,8 +179,10 @@ The kernels with respect to the ice history are fields on the surface
 grid and pair by ∫ · dS (below).
 
 Conventions (sl3dpp's, not pyslfp's): times are the forward driver's —
-increasing, SLE solver units; measurements are keyed by NODE INDEX into
-the time grid (no float matching); duals are non-dimensional SLE-unit
+increasing, SLE solver units, a node repeated once for a jump of the
+forcing (§20); measurements are keyed by NODE INDEX into the time grid
+(no float matching), an observation at a repeated time on the right
+node; duals are non-dimensional SLE-unit
 densities pairing by ∫ · dS on the solver grid, the angular-velocity
 dual by the dot product; densities/rates are per unit SLE time.
 
@@ -2112,6 +2114,37 @@ outside the water budget, the layer, the thickness, the initial sea
 level, the moments, the relaxation times or log viscosity, the moduli)
 and the continuous Hessian converging to the discrete at second order,
 1D and 3D.
+
+**A jump of the forcing.** A time repeated once in the grid, times[k + 1]
+= times[k], is a jump of the forcing there (an earthquake's onset,
+`Forcing::sourcesBefore` the left limits of the sources): node k the
+left limit, node k + 1 the right, joined by a step of zero length. At
+h = 0 the weights are exact (e = 1, α = β = 0, every effective weight
+one), so the step is the static elastic solve with the internal
+variables held, and its effective systems, unit responses and Love
+numbers are the unrelaxed ones (`EffectiveMaterial`, `PointShearModulus`
+and `EffectiveLoveNumbers` at dt = 0). The internal variables are
+continuous across the jump and the strain, the displacement and the sea
+level jump by that solve, the continuum's statement. Every derivative
+run sees an ordinary step of zero length, with the forward trajectory
+recorded at both nodes: the discrete transposes and tangents transpose
+and differentiate it as any step (its weights' h-derivatives meet
+dh = dt d(itau) = 0); the continuous sweeps' split trapezoid gives the
+zero-length interval no weight, so each side of the jump pairs with its
+own interval through its own recorded state, one-sided values of an
+integrand that jumps there, and an observation at the right node takes
+its jump there as at any node; the checkpointed cursor steps back across
+the pair exactly (StepBack at dt = 0 holds m). A source at the left node
+and one at the right are two parameters, each with its moment kernel.
+`TestTangentLinear` (DerivativesAcrossAnOnset, TheContinuousSweepAcross
+AnOnset, SecondOrderRunAcrossAnOnset), `TestSecondOrderAdjoint`,
+`TestDiscreteAdjoint3D`, `TestTangentLinear3D`, `TestSecondOrderAdjoint3D`,
+`TestLateralKernels` and `TestDistributed` hold them with an onset at an
+interior node measured at both nodes of the pair: the discrete sweeps
+the tangents' transposes (1e-8), the tangents central differences'
+limits (Richardson at 1e-6), the discrete Hessian symmetric and the
+second-order run's (1e-8), and the continuous kernels and Hessian rows
+converging to the discrete at second order through the jump.
 
 ## 21. Lateral kernels about a radial background
 

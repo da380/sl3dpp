@@ -302,6 +302,22 @@ longer free, an unphysical effect.
   `on_checkpoint`) and resume from them (`Resume`); a resumed run is
   bitwise the uninterrupted one within one process (across processes to
   rounding, as any two runs: Reproducibility, below).
+- **Jumps of the forcing.** At a jump of the forcing the internal
+  variables are continuous and the rest of the state jumps by one static
+  elastic solve. A grid holds a jump as a time repeated once, its first
+  node the left limit and its second the right, the step between of zero
+  length: at h = 0 the weights are exact (e = 1, α = β = 0, the effective
+  operators the unrelaxed ones), so that step is the elastic solve with
+  m held, by every scheme. The run integrates to the jump under the
+  forcing's left limit, takes the jump, and integrates on; both nodes are
+  recorded, and the derivative runs take the pair as an ordinary step
+  (adjoints.md §20). The forcing's left limits are callbacks beside its
+  plain ones (`Forcing::sourcesBefore`, `stressGlutsBefore`), read at the
+  first node of a pair (`detail::AtNode`, the one place a march decides
+  which side a node reads); the surface loads, the ice and the tide are
+  continuous in every use and take none. The first node is the right
+  limit at its time already (the instantaneous elastic response) and is
+  not repeated, except as a resumed run's checkpoint node.
 
 ## 6. The 3D coupling
 
@@ -425,7 +441,10 @@ moment in the basis at the point where the angles are given.
 the sources acting at each time, and `Instantaneous(forcing)` the
 elastic response alone. Their forces join each step's fixed forces
 on the degree systems, and the first node's response is a zero-length
-step under them. The surface values of the forced solutions, the
+step under them. A source switched on at a later node is a jump of the
+forcing there (§5): the node repeated, the source absent from its left
+limit, so the node holds the co-seismic response however long the step
+before it. The surface values of the forced solutions, the
 toroidal potential W among them, reach the sea level solve through its
 ready channels, so the ocean's load and the rotational feedback answer
 a source as they do a step's memory: no further coupling is needed.

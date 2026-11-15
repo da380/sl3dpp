@@ -1371,6 +1371,65 @@ TEST(WithoutGravity, AStaticLoadIsTheTractionNumbersTimesItsWeight) {
   }
 }
 
+TEST(WithoutGravity, AnOnsetAtARepeatedNodeIsTheRunStartedThere) {
+  // A thrust switched on at an interior node, the node repeated (its left
+  // limit without the source, Forcing::sourcesBefore): from the onset on
+  // the run is the run started there, by the general route and the
+  // factored one, both schemes.
+  const auto earth = Earth::Make(false, kEarthLmax);
+  const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
+                                ComputeLoveNumbers(earth.material, kEarthLmax),
+                                SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const ViscoelasticOperator op(earth.rheology, kEarthLmax,
+                                {.gravitating = false});
+  const auto source = ThrustIn(solver, earth.material);
+  const auto year = 3.15576e7 / solver.SolverScales().Time();
+  const auto onset = 50.0 * year;
+  const auto jump = std::vector<double>{0.0, 20.0 * year, onset, onset,
+                                        100.0 * year, 400.0 * year};
+  const auto started = std::vector<double>{onset, 100.0 * year, 400.0 * year};
+  const auto forcing = Evolution::Forcing{
+      .sources =
+          [&](double t) {
+            return t >= onset ? std::vector<PointSource>{source}
+                              : std::vector<PointSource>{};
+          },
+      .sourcesBefore = [&](double t) {
+        return t > onset ? std::vector<PointSource>{source}
+                         : std::vector<PointSource>{};
+      }};
+  for (const auto scheme :
+       {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    for (const auto factor : {false, true}) {
+      const auto options = Evolution::Options{.scheme = scheme,
+                                              .rotation = RotationalFeedback::None,
+                                              .factor_sources = factor};
+      Evolution evolution(op, solver, solver.NoOceanState(), options);
+      const auto run = evolution.Run(jump, forcing);
+      const auto reference = evolution.Run(started, forcing);
+      ASSERT_EQ(run.size(), jump.size());
+      for (auto n = std::size_t{0}; n < 3; ++n) {
+        for (auto v : run[n].displacement) EXPECT_EQ(v, 0.0) << n;
+      }
+      auto worst = 0.0;
+      for (auto k = std::size_t{0}; k < started.size(); ++k) {
+        worst = std::max(
+            {worst,
+             Departure(grid, run[3 + k].displacement, reference[k].displacement, 0),
+             Departure(grid, run[3 + k].tangentialPotential,
+                       reference[k].tangentialPotential, 0),
+             Departure(grid, run[3 + k].toroidalPotential,
+                       reference[k].toroidalPotential, 0)});
+      }
+      // measured: none (the zero-length step's systems are the unrelaxed
+      // ones, which the start solves)
+      EXPECT_LT(worst, 1e-11) << "scheme " << static_cast<int>(scheme)
+                              << (factor ? ", factored" : "");
+    }
+  }
+}
+
 TEST(WithoutGravity, LoadsAndSourcesTogetherAreTheSumOfTheirRuns) {
   // The problem is linear: a run under a load and a source is the sum of
   // the run under the load and the run under the source, to rounding, on

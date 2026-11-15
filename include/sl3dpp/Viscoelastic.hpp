@@ -228,7 +228,10 @@ class ViscoelasticOperator {
   /// read at the start and/or end time). Returns the new state (with its
   /// strain cache for the implicit schemes) and the last degree solutions
   /// (consistent with the new state; for the exponential Euler, the
-  /// start-of-step solutions).
+  /// start-of-step solutions). dt >= 0: a step of zero length is, by every
+  /// scheme, the elastic solve with the memory held (StepWeights.hpp at
+  /// h = 0; its flavour's systems, unit responses and Love numbers the
+  /// unrelaxed ones), what a jump of the forcing takes.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
   Step(const ViscoelasticState& state, double dt,
        Scheme scheme = Scheme::ExponentialTrapezoid,
@@ -248,7 +251,7 @@ class ViscoelasticOperator {
   /// Opens an implicit or trapezoid step before the end-time loads are
   /// known: the sea-level driver reads the step's memory responses,
   /// closes its equilibrium with the matching effective Love numbers, and
-  /// completes the step with ViscoelasticStep::Finish.
+  /// completes the step with ViscoelasticStep::Finish. dt >= 0, as Step's.
   [[nodiscard]] ViscoelasticStep StartStep(
       const ViscoelasticState& state, double dt,
       Scheme scheme = Scheme::ExponentialTrapezoid,
@@ -272,12 +275,14 @@ class ViscoelasticOperator {
   // ----------------------------------------------------------
 
   /// The material of a step's effective elastic solve: branch k weighted
-  /// by 1/(1 + h_k) (backward Euler) or phi1(h_k) (trapezoid).
+  /// by 1/(1 + h_k) (backward Euler) or phi1(h_k) (trapezoid); at dt = 0,
+  /// every weight one, the unrelaxed material itself.
   [[nodiscard]] Material EffectiveMaterial(Scheme scheme, double dt) const;
 
   /// The Love numbers of the step's effective solid (SI, as
-  /// ComputeLoveNumbers), cached per (scheme, dt); and the unrelaxed
-  /// solid's, cached once. Refused without gravity.
+  /// ComputeLoveNumbers), cached per (scheme, dt), the unrelaxed solid's at
+  /// dt = 0; and the unrelaxed solid's, cached once. Refused without
+  /// gravity.
   [[nodiscard]] const LoveNumbers& EffectiveLoveNumbers(Scheme scheme,
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;
@@ -343,7 +348,8 @@ class ViscoelasticOperator {
   /// (Options::moduli), (element, point) over the whole mesh. Away from
   /// the GLL nodes the effective operators are NodalMaterial's plus this
   /// term (PointShear); at the GLL points that is EffectiveMaterial's
-  /// assembly.
+  /// assembly. At dt = 0 the elastic operators' own (ElasticPointShear),
+  /// every weight one.
   [[nodiscard]] std::vector<double> PointShearModulus(Scheme scheme,
                                                       double dt) const;
   /// The elastic operators' point shear, sum_k mu_k at the points; null

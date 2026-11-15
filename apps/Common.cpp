@@ -1010,6 +1010,28 @@ std::vector<double> MakeTimes(const Run& run, const Scales& scales) {
   return run.times->Times(scales.Time());
 }
 
+StepGrid StepGridOf(const Run& run, const Scales& scales) {
+  auto out = StepGrid{};
+  const auto times = MakeTimes(run, scales);
+  const auto clock = SolverClockOf(run, scales);
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    // a seismic term's onset at a node after the first: its left limit
+    const auto jumps =
+        n > 0 && std::ranges::any_of(run.forcing.seismic,
+                                     [&](const SeismicTerm& term) {
+                                       return term.OnsetAt(clock.At(times[n]));
+                                     });
+    if (jumps) {
+      out.times.push_back(times[n]);
+      out.window.push_back(n);
+    }
+    out.library.push_back(out.times.size());
+    out.times.push_back(times[n]);
+    out.window.push_back(n);
+  }
+  return out;
+}
+
 SolverClock SolverClockOf(const Run& run, const Scales& scales) {
   if (!run.times || run.times->Dated()) {
     return {.zero = 0.0, .rate = scales.Time() / KYR};
@@ -1285,9 +1307,12 @@ EvolutionForcing ForcingOf(
     const auto surfaceRadius = solver.Radius() * length;
     const auto energy =
         scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
-    forcing.sources = [seismic = run.forcing.seismic, surfaceRadius, clock,
-                       length, energy](double t) {
-      auto sources = SeismicSourcesAt(seismic, clock.At(t), surfaceRadius);
+    // the sources at a time and their left limits there, which differ at
+    // an onset alone (a node of StepGridOf's repeated)
+    auto sourcesAt = [seismic = run.forcing.seismic, surfaceRadius, clock,
+                      length, energy](double t, bool before) {
+      auto sources =
+          SeismicSourcesAt(seismic, clock.At(t), surfaceRadius, before);
       for (auto& source : sources) {
         source.at.radius /= length;
         for (auto* c : {&source.moment.rr, &source.moment.tt,
@@ -1297,6 +1322,10 @@ EvolutionForcing ForcingOf(
         }
       }
       return sources;
+    };
+    forcing.sources = [sourcesAt](double t) { return sourcesAt(t, false); };
+    forcing.sourcesBefore = [sourcesAt](double t) {
+      return sourcesAt(t, true);
     };
   }
   return forcing;

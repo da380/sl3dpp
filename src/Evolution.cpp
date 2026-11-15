@@ -9,11 +9,13 @@
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
+#include <type_traits>
 
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 
 namespace sl3dpp {
 
@@ -74,15 +76,22 @@ std::vector<std::complex<double>> Evolution::Coefficients(
 
 namespace {
 
-void CheckTimes(std::span<const double> times) {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
+void CheckTimes(std::span<const double> times, bool resumed = false) {
+  detail::CheckTimeGrid(times, resumed);
+}
+
+/// The interior sources at a node: their left limits at the first node of
+/// a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere.
+std::vector<PointSource> PointSourcesAt(const Evolution::Forcing& forcing,
+                                        std::span<const double> times,
+                                        std::size_t node) {
+  return detail::AtNode(times, node, forcing.sources, forcing.sourcesBefore);
+}
+std::vector<StressGlut> StressGlutsAt(const Evolution::Forcing& forcing,
+                                      std::span<const double> times,
+                                      std::size_t node) {
+  return detail::AtNode(times, node, forcing.stressGluts,
+                        forcing.stressGlutsBefore);
 }
 
 /// The refusal of what a run without gravity cannot take.
@@ -199,7 +208,7 @@ std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
 
 void Evolution::Restore(const Checkpoint& from,
                                 std::span<const double> times) {
-  CheckTimes(times);
+  CheckTimes(times, true);
   if (times[0] != from.t) {
     throw std::invalid_argument(
         "the first time of a resumed run is the checkpoint's own node");
@@ -340,25 +349,34 @@ std::vector<Evolution::Snapshot> Evolution::March(
     options_.on_checkpoint(node, out);
   };
 
+  // Every term of the forcing is read at a node through detail::AtNode,
+  // the one place that decides which side of a repeated pair the node
+  // reads; the surface terms are continuous at every node and pass no left
+  // limit.
+  auto surfaceAt = [&](std::size_t node, const auto& term) {
+    using Callback = std::decay_t<decltype(term)>;
+    return detail::AtNode(times, node, term, Callback{});
+  };
   // The direct load at a node (none given: none), and the potential the
   // radial steps see there: the centrifugal potential of the rotation the
   // node's closure found, and the prescribed tide.
-  auto directLoadAt = [&](double t) {
-    return directLoad != nullptr ? (*directLoad)(t)
+  auto directLoadAt = [&](std::size_t node) {
+    return directLoad != nullptr ? surfaceAt(node, *directLoad)
                                  : std::vector<double>(fieldSize, 0.0);
   };
   // The load outside the water budget and the layer on the solid surface
   // at a node, where the forcing gives them (empty: none).
-  auto outsideAt = [&](double t) {
-    return interior != nullptr && interior->directLoadOutsideWaterBudget
-               ? interior->directLoadOutsideWaterBudget(t)
+  auto outsideAt = [&](std::size_t node) {
+    return interior != nullptr
+               ? surfaceAt(node, interior->directLoadOutsideWaterBudget)
                : std::vector<double>{};
   };
-  auto layerAt = [&](double t) {
-    return interior != nullptr && interior->solidSurfaceChange
-               ? interior->solidSurfaceChange(t)
-               : std::vector<double>{};
+  auto layerAt = [&](std::size_t node) {
+    return interior != nullptr ? surfaceAt(node, interior->solidSurfaceChange)
+                               : std::vector<double>{};
   };
+  auto tideAt = [&](std::size_t node) { return surfaceAt(node, *tide); };
+  auto iceAt = [&](std::size_t node) { return surfaceAt(node, *iceThickness); };
   // every direct load of a node, for the radial step's own load
   auto withOutside = [&](std::vector<double> load,
                          const std::vector<double>& outside) {
@@ -370,12 +388,12 @@ std::vector<Evolution::Snapshot> Evolution::March(
     for (auto i = std::size_t{0}; i < load.size(); ++i) load[i] += outside[i];
     return load;
   };
-  auto potentialAt = [&](double t, const std::array<double, 3>& omega) {
+  auto potentialAt = [&](std::size_t node, const std::array<double, 3>& omega) {
     auto psi = options_.rotation == RotationalFeedback::None
                    ? grid.ZeroCoefficients()
                    : solver.CentrifugalCoefficients(omega);
     if (tide != nullptr) {
-      const auto given = (*tide)(t);
+      const auto given = tideAt(node);
       if (given.size() != psi.size()) {
         throw std::invalid_argument(
             "the tide is not a coefficient vector of the solver's grid");
@@ -410,12 +428,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
     }
     twisted = &tstate;
   }
-  auto sourceForcesAt = [&](double t) {
-    return detail::ForcesOfSources(
-        op, *toroidal, solver.SolverScales(), toNdLength_,
-        interior->sources ? interior->sources(t) : std::vector<PointSource>{},
-        interior->stressGluts ? interior->stressGluts(t)
-                              : std::vector<StressGlut>{});
+  auto sourceForcesAt = [&](std::size_t node) {
+    return detail::ForcesOfSources(op, *toroidal, solver.SolverScales(),
+                                   toNdLength_,
+                                   PointSourcesAt(*interior, times, node),
+                                   StressGlutsAt(*interior, times, node));
   };
   // The toroidal potential's coefficients of the node's toroidal solutions.
   auto toroidalCoefficients = [&] {
@@ -427,7 +444,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
   // joins the start's.
   auto startResponse = std::map<int, std::vector<double>>{};
   auto startSources = [&](auto& forcing) {
-    nodeForces = sourceForcesAt(times[0]);
+    nodeForces = sourceForcesAt(0);
     const auto& forces = nodeForces;
     for (const auto& [l, f] : forces.spheroidal) {
       startResponse.emplace(l, op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1)));
@@ -457,13 +474,14 @@ std::vector<Evolution::Snapshot> Evolution::March(
   };
   // The forcing beside the ice of a migrating node: the loads, the layer
   // and the tide, changes from the background.
-  auto movingLoadsAt = [&](double t, GRDSolver::NonlinearForcing& moving) {
-    if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
-    moving.directLoadOutsideWaterBudget = outsideAt(t);
-    moving.solidSurfaceChange = layerAt(t);
-    if (tide != nullptr) moving.tide = (*tide)(t);
+  auto movingLoadsAt = [&](std::size_t node,
+                           GRDSolver::NonlinearForcing& moving) {
+    if (directLoad != nullptr) moving.directLoad = directLoadAt(node);
+    moving.directLoadOutsideWaterBudget = outsideAt(node);
+    moving.solidSurfaceChange = layerAt(node);
+    if (tide != nullptr) moving.tide = tideAt(node);
     // a land mask that changes in time: the node's own
-    if (options_.land_held) moving.forcedLand = options_.land_held(t);
+    if (options_.land_held) moving.forcedLand = options_.land_held(times[node]);
   };
   // every stride-th node of the whole run is kept, and the last
   auto kept = [&](std::size_t node) {
@@ -480,18 +498,18 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // on the unrelaxed body, from the background.
     GRDSolver::NonlinearForcing moving;
     // the ice at the first node may differ from the background's
-    moving.iceThicknessChange = (*iceThickness)(times[0]);
+    moving.iceThicknessChange = iceAt(0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       moving.iceThicknessChange[i] -= state_.iceThickness[i];
     }
-    movingLoadsAt(times[0], moving);
+    movingLoadsAt(0, moving);
     moving.rotation = options_.rotation;
     if (sourced) startSources(moving);
     auto solved = solverFor(0.0).SolveNonlinear(state_, moving, nonlinearOptions);
     response = std::move(solved.response);
     sigma_ = std::move(solved.loadCoefficients);
     ocean = std::move(solved.finalState.oceanFunction);
-    psi_ = potentialAt(times[0], response.angularVelocity);
+    psi_ = potentialAt(0, response.angularVelocity);
     if (sourced) primeUnderSources();
   } else if (!resumed && migrating) {
     // The background is the state at times[0]: the run starts undisturbed.
@@ -505,20 +523,20 @@ std::vector<Evolution::Snapshot> Evolution::March(
   } else if (!resumed) {
     // The instantaneous elastic response at the start: the right limit,
     // so a load switched on at times[0] is stepped at full order.
-    loadGrid = directLoadAt(times[0]);
+    loadGrid = directLoadAt(0);
     const auto& elasticSolver = solverFor(0.0);
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = loadGrid;
-    forcing.directLoadOutsideWaterBudget = outsideAt(times[0]);
-    forcing.solidSurfaceChange = layerAt(times[0]);
-    if (tide != nullptr) forcing.tide = (*tide)(times[0]);
+    forcing.directLoadOutsideWaterBudget = outsideAt(0);
+    forcing.solidSurfaceChange = layerAt(0);
+    if (tide != nullptr) forcing.tide = tideAt(0);
     forcing.rotation = options_.rotation;
     if (sourced) startSources(forcing);
     response = elasticSolver.SolveGeneralised(state_, forcing, sleOptions);
     sigma_ = totalLoadCoefficients(
         withOutside(loadGrid, forcing.directLoadOutsideWaterBudget),
         response.relativeSeaLevelChange);
-    psi_ = potentialAt(times[0], response.angularVelocity);
+    psi_ = potentialAt(0, response.angularVelocity);
     if (sourced) primeUnderSources();
   }
   if (stride > 0 && !sourced) {
@@ -578,7 +596,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // the node's sources force the step; the toroidal systems are
     // stepped under theirs
     auto stepSources = [&](auto& forcing) {
-      nodeForces = sourceForcesAt(times[node]);
+      nodeForces = sourceForcesAt(node);
       const auto& forces = nodeForces;
       step.AddForce(forces.spheroidal);
       auto stepped =
@@ -592,11 +610,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
       // background, the memory field entering through the response
       // channels (pyslfp's `_run_migrating`).
       GRDSolver::NonlinearForcing moving;
-      moving.iceThicknessChange = (*iceThickness)(times[node]);
+      moving.iceThicknessChange = iceAt(node);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         moving.iceThicknessChange[i] -= state_.iceThickness[i];
       }
-      movingLoadsAt(times[node], moving);
+      movingLoadsAt(node, moving);
       if (sourced) stepSources(moving);
       moving.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
@@ -615,11 +633,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
       ocean = std::move(solved.finalState.oceanFunction);
     } else {
       GRDSolver::GeneralisedForcing coupled;
-      loadGrid = directLoadAt(times[node]);
+      loadGrid = directLoadAt(node);
       coupled.directLoad = loadGrid;
-      coupled.directLoadOutsideWaterBudget = outsideAt(times[node]);
-      coupled.solidSurfaceChange = layerAt(times[node]);
-      if (tide != nullptr) coupled.tide = (*tide)(times[node]);
+      coupled.directLoadOutsideWaterBudget = outsideAt(node);
+      coupled.solidSurfaceChange = layerAt(node);
+      if (tide != nullptr) coupled.tide = tideAt(node);
       if (sourced) stepSources(coupled);
       coupled.displacementResponse =
           Coefficients(step.MemorySurface(Component::U), toNdLength_);
@@ -634,7 +652,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
           withOutside(loadGrid, coupled.directLoadOutsideWaterBudget),
           response.relativeSeaLevelChange);
     }
-    psi_ = potentialAt(times[node], response.angularVelocity);
+    psi_ = potentialAt(node, response.angularVelocity);
     vstate_ = step.Finish(Columns(sigma_, toMatDensity_),
                           Columns(psi_, toMatPotential_))
                   .first;
@@ -719,7 +737,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchFactored(
     };
     auto positions = std::vector<Position>{};
     for (auto n = std::size_t{0}; n < nodes; ++n) {
-      for (const auto& source : forcing.sources(times[n])) {
+      for (const auto& source : PointSourcesAt(forcing, times, n)) {
         auto found = std::ranges::find_if(positions, [&](const Position& p) {
           return p.at.radius == source.at.radius &&
                  p.at.colatitude == source.at.colatitude &&
@@ -775,7 +793,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchFactored(
   if (forcing.stressGluts) {
     auto histories = std::vector<std::vector<StressGlut>>{};
     for (auto n = std::size_t{0}; n < nodes; ++n) {
-      histories.push_back(forcing.stressGluts(times[n]));
+      histories.push_back(StressGlutsAt(forcing, times, n));
       if (histories.back().size() != histories.front().size()) {
         throw std::invalid_argument(
             "factor_sources takes the same stress gluts at every node, each "
@@ -991,12 +1009,18 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   // removed: a net force, which nothing balances without gravity (the load
   // projected on the loads that exert none; a balanced load's part is grid
   // error).
-  auto loadAt = [&](double t) {
+  // (every term read at a node through detail::AtNode, as March's; the
+  // surface terms pass no left limit)
+  auto surfaceAt = [&](std::size_t node, const auto& term) {
+    using Callback = std::decay_t<decltype(term)>;
+    return detail::AtNode(times, node, term, Callback{});
+  };
+  auto loadAt = [&](std::size_t node) {
     auto total = std::vector<double>(fieldSize, 0.0);
     for (const auto* given :
          {&forcing.directLoad, &forcing.directLoadOutsideWaterBudget}) {
       if (!*given) continue;
-      const auto field = (*given)(t);
+      const auto field = surfaceAt(node, *given);
       if (field.empty()) continue;
       if (field.size() != fieldSize) {
         throw std::invalid_argument("a direct load lives on the solver's grid");
@@ -1004,7 +1028,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       for (auto i = std::size_t{0}; i < fieldSize; ++i) total[i] += field[i];
     }
     if (forcing.solidSurfaceChange) {
-      const auto layer = forcing.solidSurfaceChange(t);
+      const auto layer = surfaceAt(node, forcing.solidSurfaceChange);
       if (!layer.empty() && layer.size() != fieldSize) {
         throw std::invalid_argument(
             "a layer's height lives on the solver's grid");
@@ -1055,13 +1079,12 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
         "loads' coefficients at its node");
   }
   auto nodeForces = RadialSourceForces{};
-  auto forcesAt = [&](double t) {
+  auto forcesAt = [&](std::size_t node) {
     if (!sourced) return RadialSourceForces{};
-    return detail::ForcesOfSources(
-        op, toroidal, solver.SolverScales(), toNdLength_,
-        forcing.sources ? forcing.sources(t) : std::vector<PointSource>{},
-        forcing.stressGluts ? forcing.stressGluts(t)
-                            : std::vector<StressGlut>{});
+    return detail::ForcesOfSources(op, toroidal, solver.SolverScales(),
+                                   toNdLength_,
+                                   PointSourcesAt(forcing, times, node),
+                                   StressGlutsAt(forcing, times, node));
   };
 
   auto spheroidal = std::map<int, std::vector<double>>{};
@@ -1119,8 +1142,8 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   if (!resumed) {
     // The start: the unrelaxed response to the loads and the sources
     // there, with no memory before it.
-    nodeForces = forcesAt(times[0]);
-    if (loaded) sigma_ = loadAt(times[0]);
+    nodeForces = forcesAt(0);
+    if (loaded) sigma_ = loadAt(0);
     spheroidal = op.SolveElastic(vstate_, channel(sigma_));
     for (const auto& [l, f] : nodeForces.spheroidal) {
       const auto x = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
@@ -1141,9 +1164,9 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
     auto step = op.StartStep(vstate_, dt, options_.scheme, channel(sigma_));
-    nodeForces = forcesAt(times[node]);
+    nodeForces = forcesAt(node);
     step.AddForce(nodeForces.spheroidal);
-    if (loaded) sigma_ = loadAt(times[node]);
+    if (loaded) sigma_ = loadAt(node);
     auto finished = step.Finish(channel(sigma_));
     vstate_ = std::move(finished.first);
     spheroidal = std::move(finished.second);

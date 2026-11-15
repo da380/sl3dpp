@@ -262,7 +262,8 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
         "the toroidal step is implicit: ExponentialTrapezoid or "
         "BackwardEuler");
   }
-  if (dt <= 0.0) throw std::invalid_argument("dt must be positive");
+  // a zero-length step is the elastic solve with the memory held
+  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   const auto& op = *op_;
   const bool implicit = scheme == Scheme::BackwardEuler;
   const auto& weights = op.SchemeWeightsOf(scheme, dt);

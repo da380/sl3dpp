@@ -86,9 +86,10 @@ class ToroidalViscoelastic {
   /// The state's strain cache set from a solution consistent with it.
   void SetStrain(State& state, const Fields& solutions) const;
 
-  /// One step of dt ending under `force`: the new state, with its
-  /// strain, and the solutions at the end. The trapezoid needs the
-  /// state's strain (SetStrain, or a previous step's).
+  /// One step of dt >= 0 ending under `force`: the new state, with its
+  /// strain, and the solutions at the end (at dt = 0 the elastic solve
+  /// with the memory held). The trapezoid needs the state's strain
+  /// (SetStrain, or a previous step's).
   /// `memory`, when given, is added to the step's decayed memory (the
   /// drive of a tangent-linear step, FirstOrderDrive's).
   [[nodiscard]] std::pair<State, Fields> Step(const State& state, double dt,

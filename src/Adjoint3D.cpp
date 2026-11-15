@@ -14,6 +14,7 @@
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -172,6 +173,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const bool lateral = op.HasLateralModuli();
   const bool nested = op.GetOptions().solver ==
                       Viscoelastic3D::Options::StepSolver::ConjugateGradients;
+  detail::CheckTimeGrid(times);
   const auto N = times.size() - 1;
 
   for (const auto& [node, m] : measurements) {
@@ -994,10 +996,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     if (trajectory == nullptr || trajectory->sourceForces.empty()) return x;
     const auto& forces = trajectory->sourceForces[node];
     const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
+    // (none where no source acts at the node)
     for (auto* pair : {&x.spheroidal, &x.toroidal}) {
       const auto& from = pair == &x.spheroidal ? add.spheroidal : add.toroidal;
-      for (auto& [l, to] : *pair) {
-        const auto& a = from.at(l);
+      for (const auto& [l, a] : from) {
+        auto& to = pair->at(l);
         for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += a[i];
       }
     }

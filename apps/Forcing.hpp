@@ -212,6 +212,13 @@ struct SeismicTerm {
   /// The factor of the moment at time t of the terms' clock: zero before
   /// the onset.
   [[nodiscard]] double FactorAt(double t) const;
+  /// Its left limit at t: zero up to the onset, the onset included (the
+  /// term absent just before it), FactorAt's after. The two differ at the
+  /// onset alone, where the term jumps on.
+  [[nodiscard]] double FactorBefore(double t) const;
+  /// Whether the term's onset falls at time t of the terms' clock, to the
+  /// tolerance FactorAt reads it with.
+  [[nodiscard]] bool OnsetAt(double t) const;
 };
 
 /// The point sources of seismic terms at time t of the terms' clock, SI
@@ -226,8 +233,12 @@ struct SeismicTerm {
 /// function (`linear`: piecewise linear between the file's times, one at
 /// its own and zero at the others; `previous`: one from its time to the
 /// next), which is the moment of the slip the file reads at every time.
+/// With `before`, their left limits at t: a term absent at its onset
+/// (SeismicTerm::FactorBefore), every other as at t, its time dependence
+/// continuous there.
 [[nodiscard]] std::vector<PointSource> SeismicSourcesAt(
-    std::span<const SeismicTerm> seismic, double t, double surfaceRadius);
+    std::span<const SeismicTerm> seismic, double t, double surfaceRadius,
+    bool before = false);
 
 /// A seismic term's points, SI (radius in metres): a point source's one, a
 /// planar fault's patches' centres within the body (PlanarFaultSources), a

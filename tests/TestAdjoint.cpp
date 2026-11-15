@@ -634,6 +634,54 @@ TEST(Adjoint, CheckpointedKernelsReconstruct) {
       std::invalid_argument);
 }
 
+TEST(Adjoint, CheckpointedKernelsReconstructAcrossARepeatedNode) {
+  // A repeated node (a zero-length step, the loads continuous there) inside
+  // the gaps of a strided recording: the exact backward reconstruction
+  // steps back across it, and the viscosity kernels are the full record's.
+  auto setup = Scene::Make(1e22);
+  std::mt19937 rng(11);
+  const auto& scales = setup.solver.SolverScales();
+  const auto kyr = 1000.0 * 3.15576e7 / scales.Time();
+  auto distinct = std::vector<double>{};
+  for (auto n = 0; n <= 8; ++n) distinct.push_back(n * kyr);
+  auto times = distinct;
+  times.insert(times.begin() + 4, times[4]);  // nodes 4 and 5 at 4 kyr
+  const auto sigma = scales.Factor(Dimensions{.mass = 1, .length = -2});
+  auto loads = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < distinct.size(); ++n) {
+    loads.push_back(setup.Smooth(rng, 100.0 / sigma));
+  }
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[5].displacementDual = setup.Smooth(rng, 0.5);
+
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  Evolution full(op, setup.solver, setup.state, {.rtol = 1e-12, .record_stride = 1});
+  const auto fullTrajectory =
+      ForwardTrajectory::FromSnapshots(full.Run(times, History(distinct, loads)));
+  Evolution sparse(op, setup.solver, setup.state,
+                   {.rtol = 1e-12, .record_stride = 3});
+  const auto sparseSnapshots = sparse.Run(times, History(distinct, loads));
+  ASSERT_FALSE(sparseSnapshots[4].internalState.has_value());
+  ASSERT_FALSE(sparseSnapshots[5].internalState.has_value());
+  const auto sparseTrajectory = ForwardTrajectory::FromSnapshots(sparseSnapshots);
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    AdjointSolver adjoint(full, {.method = method, .rtol = 1e-12});
+    const auto reference =
+        adjoint.FirstOrderKernels(times, measurements, &fullTrajectory).itauKernel[0];
+    const auto kernels =
+        adjoint.FirstOrderKernels(times, measurements, &sparseTrajectory)
+            .itauKernel[0];
+    auto diff = 0.0, norm = 0.0;
+    for (auto i = std::size_t{0}; i < reference.size(); ++i) {
+      diff += (kernels[i] - reference[i]) * (kernels[i] - reference[i]);
+      norm += reference[i] * reference[i];
+    }
+    // measured 1.2e-11 (discrete), 8e-12 (continuous)
+    EXPECT_LT(std::sqrt(diff / norm), 1e-9) << "method " << static_cast<int>(method);
+  }
+}
+
 TEST(AdjointGate, KernelsMatchPyslfp) {
   // The reference is pyslfp's adjoint kernels on its GLQ grid (which
   // coincides with ours at this lmax, isolating implementation error):

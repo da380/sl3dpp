@@ -19,6 +19,7 @@
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ToroidalSecondOrder.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -69,14 +70,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
     const PointMaterialDirection& material) const {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
+  detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto fieldSize = ev.solver_->Grid().FieldSize();

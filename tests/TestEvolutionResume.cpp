@@ -269,4 +269,92 @@ TEST(EvolutionResume, AResumedRunUnderInteriorSourcesIsTheUninterruptedOne) {
                std::invalid_argument);
 }
 
+TEST(EvolutionResume, AResumedRunAcrossAJumpIsTheUninterruptedOne) {
+  // An earthquake at a repeated node, its left limit without the source and
+  // its right with it, a load beside it: the run resumed from the left
+  // node's checkpoint (whose first step is the zero-length one) and from
+  // the right node's is the uninterrupted run, field for field.
+  const auto scene = Scene::Make();
+  const auto& grid = scene.solver.Grid();
+  const auto& sle = scene.solver.SolverScales();
+  ViscoelasticOperator op(scene.rheology, kLmax);
+  const auto mask = grid.FromFunction([](double theta, double phi) {
+    const auto c = std::cos(theta) * 0.5 +
+                   std::sin(theta) * std::sqrt(0.75) * std::cos(phi);
+    return std::exp(-8.0 * (1.0 - c));
+  });
+  const auto onset = 0.06;
+  const auto times =
+      std::vector<double>{0.0, 0.02, 0.04, onset, onset, 0.08, 0.10, 0.12};
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto source = PointSource{
+      .at = {.radius = surface - 400e3 / sle.Length(),
+             .colatitude = 1.1,
+             .longitude = 4.0},
+      .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                 .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  Evolution::Forcing forcing;
+  forcing.directLoad = [&](double t) {
+    auto load = std::vector<double>(mask.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = -1e-4 * (t / times.back()) * mask[i];
+    }
+    return load;
+  };
+  forcing.sources = [&](double t) {
+    return t >= onset ? std::vector<PointSource>{source}
+                      : std::vector<PointSource>{};
+  };
+  forcing.sourcesBefore = [&](double t) {
+    return t > onset ? std::vector<PointSource>{source}
+                     : std::vector<PointSource>{};
+  };
+  auto checkpoints = std::map<std::size_t, Evolution::Checkpoint>{};
+  auto options = Evolution::Options{};
+  options.checkpoint_stride = 1;
+  options.on_checkpoint = [&](std::size_t node, const Evolution::Checkpoint& cp) {
+    checkpoints.emplace(node, cp);
+  };
+  Evolution whole(op, scene.solver, scene.state, options);
+  const auto full = whole.Run(times, forcing);
+  ASSERT_EQ(full.size(), times.size());
+  for (const auto from : {std::size_t{3}, std::size_t{4}}) {
+    Evolution resumed(op, scene.solver, scene.state, {});
+    const auto tail = resumed.Resume(
+        checkpoints.at(from),
+        std::vector<double>(times.begin() + static_cast<long>(from), times.end()),
+        forcing);
+    ASSERT_EQ(tail.size(), times.size() - from - 1);
+    // one process, the same transforms: bitwise
+    for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+      const auto& a = full[from + 1 + k];
+      const auto& b = tail[k];
+      const auto where = "from node " + std::to_string(from) + ", node " +
+                         std::to_string(from + 1 + k);
+      EXPECT_EQ(a.t, b.t) << where;
+      EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange) << where;
+      EXPECT_EQ(a.displacement, b.displacement) << where;
+      EXPECT_EQ(a.tangentialPotential, b.tangentialPotential) << where;
+      EXPECT_EQ(a.toroidalPotential, b.toroidalPotential) << where;
+      EXPECT_EQ(a.angularVelocity, b.angularVelocity) << where;
+    }
+  }
+  // the jump moves the field, and a run does not start on a repeat
+  auto moved = 0.0;
+  for (auto i = std::size_t{0}; i < full[3].displacement.size(); ++i) {
+    moved = std::max(moved,
+                     std::abs(full[4].displacement[i] - full[3].displacement[i]));
+  }
+  EXPECT_GT(moved, 0.0);
+  const auto repeatedStart = std::vector<double>{onset, onset, 0.08};
+  EXPECT_THROW(static_cast<void>(whole.Run(repeatedStart, forcing)),
+               std::invalid_argument);
+  const auto thrice = std::vector<double>{0.0, onset, onset, onset, 0.08};
+  EXPECT_THROW(static_cast<void>(whole.Run(thrice, forcing)),
+               std::invalid_argument);
+}
+
 }  // namespace

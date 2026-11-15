@@ -5,12 +5,14 @@
 #include <optional>
 #include <span>
 #include <stdexcept>
+#include <type_traits>
 #include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources3D.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
+#include "sl3dpp/detail/TimeGrid.hpp"
 
 namespace sl3dpp {
 
@@ -67,15 +69,8 @@ std::vector<Evolution3D::Complex> Evolution3D::Coefficients(
 
 namespace {
 
-void CheckTimes(std::span<const double> times) {
-  if (times.empty()) {
-    throw std::invalid_argument("times must hold at least one entry");
-  }
-  for (auto i = std::size_t{1}; i < times.size(); ++i) {
-    if (times[i] <= times[i - 1]) {
-      throw std::invalid_argument("times must be increasing");
-    }
-  }
+void CheckTimes(std::span<const double> times, bool resumed = false) {
+  detail::CheckTimeGrid(times, resumed);
 }
 
 }  // namespace
@@ -144,7 +139,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::ResumeMigrating(
 
 void Evolution3D::Restore(const Checkpoint& from,
                                   std::span<const double> times) {
-  CheckTimes(times);
+  CheckTimes(times, true);
   if (times[0] != from.t) {
     throw std::invalid_argument(
         "the first time of a resumed run is the checkpoint's own node");
@@ -581,28 +576,44 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   Coupled coupled(*this, migrating);
   auto& response = coupled.response;
   auto& ocean = coupled.ocean;
+  // Every term of the forcing is read at a node through detail::AtNode,
+  // the one place that decides which side of a repeated pair the node
+  // reads; the surface terms are continuous at every node and pass no left
+  // limit.
+  auto surfaceAt = [&](std::size_t node, const auto& term) {
+    using Callback = std::decay_t<decltype(term)>;
+    return detail::AtNode(times, node, term, Callback{});
+  };
   // The forcing at a node: the direct load (none given: none) and the
   // prescribed tide, which the coupling carries through the node's passes.
-  auto directLoadAt = [&](double t) {
-    return directLoad != nullptr ? (*directLoad)(t)
+  auto directLoadAt = [&](std::size_t node) {
+    return directLoad != nullptr ? surfaceAt(node, *directLoad)
                                  : std::vector<double>(fieldSize, 0.0);
   };
-  auto setTide = [&](double t) {
+  auto setTide = [&](std::size_t node) {
     if (tide != nullptr) {
-      coupled.tide = (*tide)(t);
+      coupled.tide = surfaceAt(node, *tide);
       RequireTideDegrees(coupled.tide);
     }
     if (interior != nullptr && interior->directLoadOutsideWaterBudget) {
-      coupled.outsideGrid = interior->directLoadOutsideWaterBudget(t);
+      coupled.outsideGrid =
+          surfaceAt(node, interior->directLoadOutsideWaterBudget);
     }
     if (interior != nullptr && interior->solidSurfaceChange) {
-      coupled.layerGrid = interior->solidSurfaceChange(t);
+      coupled.layerGrid = surfaceAt(node, interior->solidSurfaceChange);
     }
-    if (interior != nullptr && (interior->sources || interior->stressGluts)) {
-      coupled.SetSources(
-          interior->sources ? interior->sources(t) : std::vector<PointSource>{},
-          interior->stressGluts ? interior->stressGluts(t) : std::vector<StressGlut>{});
+  };
+  auto iceAt = [&](std::size_t node) { return surfaceAt(node, *iceThickness); };
+  // The interior sources at a node: their left limits at the first node of
+  // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere.
+  auto setSources = [&](std::size_t node) {
+    if (interior == nullptr || !(interior->sources || interior->stressGluts)) {
+      return;
     }
+    coupled.SetSources(
+        detail::AtNode(times, node, interior->sources, interior->sourcesBefore),
+        detail::AtNode(times, node, interior->stressGluts,
+                       interior->stressGlutsBefore));
   };
 
   const auto stride = options_.record_stride;
@@ -630,15 +641,15 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   // The forcing beside the ice of a migrating node, changes from the
   // background: the loads, the layer, the tide and the sources.
-  auto setMoving = [&](double t) {
+  auto setMoving = [&](std::size_t node) {
     auto& moving = coupled.moving;
     moving = GRDSolver::NonlinearForcing{};
     moving.rotation = options_.rotation;
     // a land mask that changes in time: the node's own
-    if (options_.land_held) moving.forcedLand = options_.land_held(t);
+    if (options_.land_held) moving.forcedLand = options_.land_held(times[node]);
     if (interior == nullptr) return;
-    setTide(t);
-    if (directLoad != nullptr) moving.directLoad = (*directLoad)(t);
+    setTide(node);
+    if (directLoad != nullptr) moving.directLoad = directLoadAt(node);
     moving.directLoadOutsideWaterBudget = coupled.outsideGrid;
     moving.solidSurfaceChange = coupled.layerGrid;
     moving.tide = coupled.tide;
@@ -648,9 +659,10 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   if (!resumed && migrating && interior != nullptr) {
     // The start under a forcing beside the ice: solved, from the
     // background.
-    setMoving(times[0]);
+    setMoving(0);
+    setSources(0);
     // the ice at the first node may differ from the background's
-    coupled.moving.iceThicknessChange = (*iceThickness)(times[0]);
+    coupled.moving.iceThicknessChange = iceAt(0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       coupled.moving.iceThicknessChange[i] -= state_.iceThickness[i];
     }
@@ -668,8 +680,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     ocean = state_.oceanFunction;
   } else if (!resumed) {
     // The instantaneous elastic response at the start (Instantaneous).
-    setTide(times[0]);
-    startInfo = Start(coupled, times[0], directLoadAt(times[0]));
+    setTide(0);
+    setSources(0);
+    startInfo = Start(coupled, times[0], directLoadAt(0));
   }
   PrimeForRecording();
 
@@ -708,15 +721,16 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     // flotation condition inside the fixed point.
     auto& moving = coupled.moving;
     if (migrating) {
-      setMoving(times[node]);
-      moving.iceThicknessChange = (*iceThickness)(times[node]);
+      setMoving(node);
+      moving.iceThicknessChange = iceAt(node);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         moving.iceThicknessChange[i] -= state_.iceThickness[i];
       }
     } else {
-      coupled.loadGrid = directLoadAt(times[node]);
-      setTide(times[node]);
+      coupled.loadGrid = directLoadAt(node);
+      setTide(node);
     }
+    setSources(node);
     coupled.ApplySources();
 
     // The combined fixed point: strain, ocean load and rotation together.

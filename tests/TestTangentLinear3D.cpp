@@ -1341,3 +1341,102 @@ TEST(TangentLinear3D, ModuliAboutASourceDrivenRun) {
     }
   }
 }
+
+TEST(TangentLinear3D, ModuliAcrossAnOnset) {
+  // The moduli as parameters of a 3D run under lateral viscosity with an
+  // earthquake at a repeated node (its left limit without the sources):
+  // along a direction in kappa and mu the tangent run is the derivative of
+  // the forward run on the shifted material (central differences at
+  // second order, Richardson to 1e-6), and the discrete sweep's material
+  // kernels pair with the direction to the same number; measured at the
+  // pair's right node and at the end.
+  auto scene = Scene::Make(1e21);
+  const auto& sle = scene.solver.SolverScales();
+  const auto kyr = scene.Kyr();
+  const auto times =
+      std::vector<double>{0.0, 0.5 * kyr, 1.0 * kyr, 1.0 * kyr, 1.5 * kyr};
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto unit = 1e21 / sle.Factor(energy);
+  const auto sources = std::vector<PointSource>{
+      {.at = {.radius = surface - 400e3 / sle.Length(),
+              .colatitude = 1.1,
+              .longitude = 4.0},
+       .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
+                  .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}}};
+  const auto onset = times[2];
+  const auto forcing = Evolution3D::Forcing{
+      .sources = [&](double t) {
+        return t >= onset ? sources : std::vector<PointSource>{};
+      },
+      .sourcesBefore = [&](double t) {
+        return t > onset ? sources : std::vector<PointSource>{};
+      }};
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto gU = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  const auto gW = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 2.0, 3.5, 0.6); });
+  const auto gRight = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.0, 4.2, 0.5); });
+  auto objective = [&](const std::vector<Evolution3D::Snapshot>& run) {
+    return Objective(scene, gU, run.back().displacement) +
+           Objective(scene, gW, run.back().toroidalPotential) +
+           Objective(scene, gRight, run[3].displacement);
+  };
+  const auto d = SmoothMaterialDirection(scene);
+  auto functional = [&](double eps) {
+    const auto [shifted, rheology] = ShiftedRheology(scene, d, eps);
+    Viscoelastic3D op(rheology, kLmax, baseDelta,
+                      {.memory_points = MemoryPointSet::Gll});
+    Evolution3D evolution(op, scene.solver, scene.state,
+                          {.rotation = RotationalFeedback::None,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12});
+    return objective(evolution.Run(times, forcing));
+  };
+  Viscoelastic3D op(scene.rheology, kLmax, baseDelta,
+                    {.memory_points = MemoryPointSet::Gll});
+  Evolution3D evolution(op, scene.solver, scene.state,
+                        {.rotation = RotationalFeedback::None,
+                         .rtol = 1e-12,
+                         .coupled_rtol = 1e-12,
+                         .record_stride = 1});
+  const auto trajectory =
+      ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
+  TangentPerturbation3D direction;
+  direction.material.kappa = UniformOnCoupling(op.Coupling(), scene.material, d.kappa);
+  direction.material.mu = UniformOnCoupling(op.Coupling(), scene.material, d.mu);
+  const auto predicted =
+      objective(TangentLinearSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                                  .rtol = 1e-12,
+                                                  .coupled_rtol = 1e-12})
+                    .Run(times, direction, &trajectory));
+  ASSERT_NE(predicted, 0.0);
+  auto fd = std::map<double, double>{};
+  for (double eps : {0.1, 0.05}) {
+    fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+  }
+  const auto r1 = std::abs(fd[0.1] - predicted);
+  const auto r2 = std::abs(fd[0.05] - predicted);
+  EXPECT_GT(r1 / r2, 3.0) << fd[0.1] << " " << fd[0.05] << " " << predicted;
+  EXPECT_LT(r1 / r2, 5.0);
+  EXPECT_NEAR((4.0 * fd[0.05] - fd[0.1]) / 3.0, predicted, 1e-6 * std::abs(predicted));
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].displacementDual = gU;
+  measurements[times.size() - 1].toroidalPotentialDual = gW;
+  measurements[3].displacementDual = gRight;
+  const auto kernels =
+      AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
+                                  .rtol = 1e-12,
+                                  .coupled_rtol = 1e-12,
+                                  .material_kernels = true})
+          .FirstOrderKernels(times, measurements, &trajectory);
+  const auto paired =
+      VolumePairing(op.Coupling(), kernels.kappaKernel3D, direction.material.kappa) +
+      VolumePairing(op.Coupling(), kernels.muKernel3D, direction.material.mu);
+  EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted));
+}

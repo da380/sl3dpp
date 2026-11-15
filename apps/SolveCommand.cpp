@@ -853,7 +853,10 @@ Reached RunThrough(
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
-  const auto times = MakeTimes(run, scales);
+  // the library's grid, a node where the forcing jumps repeated; the
+  // history keeps the window's nodes, the right limit at a repeat
+  const auto steps = StepGridOf(run, scales);
+  const auto& times = steps.times;
   const auto migrating = run.Migrating();
   auto out = Reached{};
   // what drives the run: the ice's load or thickness and the forcing
@@ -906,6 +909,12 @@ Reached RunThrough(
   // rank's alone.
   const auto& checkpoint = input.checkpoint;
   const auto checkpointing = !checkpoint.directory.empty();
+  if (checkpointing && steps.Repeats()) {
+    // a repeat is a seismic onset, and such a run is not checkpointed
+    // (ReadSolveInput): its checkpoints count the window's nodes
+    throw std::logic_error(
+        "a run whose forcing jumps at a node is not checkpointed");
+  }
   const auto directory = RankDirectory(checkpoint.directory);
   const auto hash =
       checkpointing ? RunHashOf(input, std::is_same_v<Evolution, Evolution3D>)
@@ -966,10 +975,13 @@ Reached RunThrough(
   if (store && !continued) store->PutStart(world.background);
 
   const auto base_node = resumed ? resumed->node : std::size_t{0};
-  // the evolution counts a resumed run's nodes from its checkpoint's
+  // the evolution counts a resumed run's nodes from its checkpoint's; the
+  // left limit of a repeat is the library's alone
   options.on_snapshot = [&](std::size_t node,
                             const typename Evolution::Snapshot& s) {
-    keep(base_node + node, s);
+    const auto k = base_node + node;
+    if (steps.Left(k)) return;
+    keep(steps.window[k], s);
   };
   options.keep_snapshots = false;
   if (checkpointing) {
@@ -1745,7 +1757,7 @@ std::string Run1D(const std::filesystem::path& config,
       input.trajectory.directory.empty()
           ? std::optional<io::TrajectoryStore::Description>{}
           : TrajectoryOf(run, input.trajectory.record_stride,
-                         MakeTimes(run, solver.SolverScales()), solver);
+                         StepGridOf(run, solver.SolverScales()).times, solver);
   const auto reached = RunThrough<Evolution>(
       input, top, solver, world,
       [&](Evolution::Options options) {
@@ -1805,7 +1817,8 @@ std::string Run3D(const std::filesystem::path& config,
       input.trajectory.directory.empty()
           ? std::optional<io::TrajectoryStore::Description>{}
           : TrajectoryOf(run, input.trajectory.record_stride,
-                         MakeTimes(run, solver.SolverScales()), solver, op);
+                         StepGridOf(run, solver.SolverScales()).times, solver,
+                         op);
   const auto reached = RunThrough<Evolution3D>(
       input, top, solver, world,
       [&](Evolution3D::Options options) {

@@ -37,6 +37,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -526,7 +527,9 @@ struct Built {
   Dimensions objective = {};
   std::string unit;
   std::optional<DecayTimeFit> fit;
-  std::vector<std::size_t> nodes;  ///< the nodes the duals sit on
+  /// The window's nodes the duals sit on; `measurements` is keyed by their
+  /// library nodes (StepGrid), the right limit at a repeat.
+  std::vector<std::size_t> nodes;
 };
 
 /// The surface pairing a^2 int dual field dOmega, nothing where either is
@@ -538,19 +541,24 @@ double PairedOrNothing(const SurfaceGrid& grid, double a,
   return PairedValue(grid, a, dual, field);
 }
 
+/// `snapshots` are the library's nodes (`steps`): a measurement dated at a
+/// repeated node reads its right limit, the co-seismic field.
 template <class Snapshot>
 Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
                        const GRDSolver& solver,
-                       std::span<const Snapshot> snapshots) {
+                       std::span<const Snapshot> snapshots,
+                       const StepGrid& steps) {
   const auto& grid = solver.Grid();
   const auto a = solver.Radius();
   const auto& scales = solver.SolverScales();
+  const auto at = [&steps](std::size_t node) { return steps.library.at(node); };
   auto out = Built{};
   auto single = [&](FieldChannel channel, std::vector<double> dual,
                     auto field_of) {
     out.nodes = {spec.node};
-    out.value_nd = PairedValue(grid, a, dual, field_of(snapshots[spec.node]));
-    out.measurements.emplace(spec.node,
+    out.value_nd =
+        PairedValue(grid, a, dual, field_of(snapshots[at(spec.node)]));
+    out.measurements.emplace(at(spec.node),
                              FieldMeasurement(channel, std::move(dual)));
   };
   const auto sea = [](const Snapshot& s) -> std::span<const double> {
@@ -602,7 +610,7 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
                                                 spec.direction)
                    : PointDisplacementMeasurement(grid, a, spec.site,
                                                   spec.direction);
-      const auto& s = snapshots[spec.node];
+      const auto& s = snapshots[at(spec.node)];
       out.nodes = {spec.node};
       out.value_nd =
           PairedOrNothing(grid, a, m.displacementDual, s.displacement) +
@@ -610,7 +618,7 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
                           s.tangentialPotential) +
           PairedOrNothing(grid, a, m.toroidalPotentialDual,
                           s.toroidalPotential);
-      out.measurements.emplace(spec.node, std::move(m));
+      out.measurements.emplace(at(spec.node), std::move(m));
       break;
     }
     case Type::PotentialCap:
@@ -633,8 +641,9 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
       out.objective = Dimensions{.time = -1};
       out.unit = "rad s^-1";
       const auto component = static_cast<std::size_t>(spec.component);
-      out.value_nd = snapshots[spec.node].angularVelocity[component];
-      out.measurements.emplace(spec.node, RotationMeasurement(spec.component));
+      out.value_nd = snapshots[at(spec.node)].angularVelocity[component];
+      out.measurements.emplace(at(spec.node),
+                               RotationMeasurement(spec.component));
       break;
     }
     case Type::DecayTime: {
@@ -650,17 +659,19 @@ Built BuildMeasurement(const MeasurementSpec& spec, const Run& run,
                         (static_cast<int>(window.Size()) - 1);
       auto elapsed = std::vector<double>{};
       auto series = std::vector<double>{};
+      auto library = std::vector<std::size_t>{};
       for (auto node = spec.first; node <= spec.last; ++node) {
         elapsed.push_back(even ? step * static_cast<double>(node - spec.first)
                                : (window.Axis(node) - window.Axis(spec.first)) /
                                      unit);
         series.push_back(metres *
-                         PairedValue(grid, a, dual, sea(snapshots[node])));
+                         PairedValue(grid, a, dual, sea(snapshots[at(node)])));
         out.nodes.push_back(node);
+        library.push_back(at(node));
       }
       auto fit = DecayTimeFit{};
       out.measurements = DecayTimeMeasurements(
-          out.nodes, elapsed, series, FieldChannel::SeaLevel, dual,
+          library, elapsed, series, FieldChannel::SeaLevel, dual,
           {.time_uncertainty = spec.time_uncertainty,
            .value_uncertainty = spec.value_uncertainty_m},
           &fit);
@@ -736,6 +747,9 @@ struct Writing {
   std::vector<double> axis;
   bool held = false;
   std::vector<SourcePoint> points;
+  /// The library's grid the sweeps ran over (StepGridOf; the static
+  /// problem's one node).
+  StepGrid steps;
 };
 
 /// The first lines of a kernel table: the program, the config, and the
@@ -1060,8 +1074,9 @@ void WriteMomentKernels(const std::filesystem::path& path, const Writing& w,
          "phi east), in J's unit per N m:\n"
          "# dJ = sum_n sum_p sum_c dJ_dM_c(n, p) dM_c(p, t_n); a term's "
          "moment at a node is its tensor times its\n"
-         "# factor there (zero before its onset; a fault file's on a time "
-         "axis, its slices as its rule reads them),\n"
+         "# factor there (zero before its onset, its co-seismic moment at "
+         "it; a fault file's on a time axis, its slices as its rule reads "
+         "them),\n"
          "# a fault's patches and a fault file's quadrature points each a "
          "point of its own\n"
          "# the points: point term patch latitude_deg longitude_deg depth_m\n";
@@ -1086,12 +1101,110 @@ void WriteMomentKernels(const std::filesystem::path& path, const Writing& w,
   }
 }
 
+/// Kernels over the library's nodes (Writing::steps) as kernels over the
+/// window's. At a repeated node both sides read the ice, the loads, the
+/// tide and every seismic term without its onset there at the node's one
+/// time, so a change of any of them there pairs with the sum of the two
+/// sides' kernels; a term whose onset falls there has, at the node, its
+/// co-seismic moment, the right side's (the left limit its absence), and
+/// its points take the right side's kernel alone. The quelled view's
+/// zero-length interval goes (no ice changes across it), the delta
+/// amplitudes are keyed by the window's node, and the density, per unit
+/// time, is the two sides' weighted by the half-steps each pairs with.
+Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
+  const auto& steps = w.steps;
+  if (!steps.Repeats()) return kernels;
+  const auto& run = *w.run;
+  const auto clock = SolverClockOf(run, w.solver->SolverScales());
+  const auto nodes = steps.library.size();
+  auto out = kernels;
+  auto summed = [&](const auto& perNode) {
+    using Row = std::decay_t<decltype(perNode.front())>;
+    auto rows = std::vector<Row>{};
+    if (perNode.empty()) return rows;
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      const auto k = steps.library[n];
+      auto row = perNode[k];
+      if (k > 0 && steps.Left(k - 1)) {
+        for (auto i = std::size_t{0}; i < row.size(); ++i) {
+          row[i] += perNode[k - 1][i];
+        }
+      }
+      rows.push_back(std::move(row));
+    }
+    return rows;
+  };
+  out.directLoadKernels = summed(kernels.directLoadKernels);
+  out.directLoadOutsideWaterBudgetKernels =
+      summed(kernels.directLoadOutsideWaterBudgetKernels);
+  out.solidSurfaceChangeKernels = summed(kernels.solidSurfaceChangeKernels);
+  out.tideKernels = summed(kernels.tideKernels);
+  out.thickness = summed(kernels.thickness);
+  out.times.clear();
+  out.momentKernels.clear();
+  out.density.clear();
+  out.rate.clear();
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    const auto k = steps.library[n];
+    const auto repeated = k > 0 && steps.Left(k - 1);
+    out.times.push_back(steps.times[k]);
+    if (!kernels.momentKernels.empty()) {
+      auto row = kernels.momentKernels[k];
+      if (repeated) {
+        const auto t = clock.At(steps.times[k]);
+        for (auto p = std::size_t{0}; p < row.size(); ++p) {
+          if (run.forcing.seismic[w.points[p].term].OnsetAt(t)) continue;
+          const auto& left = kernels.momentKernels[k - 1][p];
+          row[p].rr += left.rr;
+          row[p].tt += left.tt;
+          row[p].pp += left.pp;
+          row[p].rt += left.rt;
+          row[p].rp += left.rp;
+          row[p].tp += left.tp;
+        }
+      }
+      out.momentKernels.push_back(std::move(row));
+    }
+    if (!kernels.density.empty()) {
+      auto row = kernels.density[k];
+      if (repeated) {
+        // the left side pairs with the half-step before, the right with
+        // the half-step after
+        const auto before = steps.times[k - 1] - steps.times[k - 2];
+        const auto after = k + 1 < steps.times.size()
+                               ? steps.times[k + 1] - steps.times[k]
+                               : 0.0;
+        for (auto i = std::size_t{0}; i < row.size(); ++i) {
+          row[i] = (before * kernels.density[k - 1][i] + after * row[i]) /
+                   (before + after);
+        }
+      }
+      out.density.push_back(std::move(row));
+    }
+    if (n > 0 && !kernels.rate.empty()) {
+      out.rate.push_back(kernels.rate[k - (repeated ? 2 : 1)]);
+    }
+  }
+  out.instantaneous.clear();
+  for (const auto& [k, lump] : kernels.instantaneous) {
+    auto& to = out.instantaneous[steps.window[k]];
+    if (to.empty()) {
+      to = lump;
+    } else {
+      for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += lump[i];
+    }
+  }
+  return out;
+}
+
 /// The kernel files every dimension shares, as the block names them: the
-/// ice's, the load's, the tide's and the moments'.
+/// ice's, the load's, the tide's and the moments', over the window's nodes
+/// (OnTheWindow).
 void WriteSurfaceKernels(const std::filesystem::path& stem, const Writing& w,
                          const KernelsBlock& block,
-                         const MeasurementSpec& spec, const Kernels& kernels,
+                         const MeasurementSpec& spec, const Kernels& library,
                          const Built& built) {
+  const auto kernels = OnTheWindow(library, w);
   const auto named = [&stem](std::string_view suffix) {
     return std::filesystem::path(stem.string() + std::string{suffix});
   };
@@ -1249,7 +1362,7 @@ std::string SweepEach(
       "# name type value_si [decay: tau_{} amplitude_m offset_m]\n", unit);
   for (const auto& spec : block.measurements) {
     const auto built = BuildMeasurement<Snapshot>(spec, run, *w.solver,
-                                                  snapshots);
+                                                  snapshots, w.steps);
     sweep(spec, built, block.output / spec.name);
     values << spec.name << ' ' << spec.word << ' '
            << std::format("{:.17g}", built.factor * built.value_nd);
@@ -1302,11 +1415,13 @@ Writing WritingOf(const std::filesystem::path& config, const Run& run,
                    .solver = &solver,
                    .axis = {},
                    .held = false,
-                   .points = {}};
+                   .points = {},
+                   .steps = {.times = {0.0}, .window = {0}, .library = {0}}};
   if (run.times) {
     for (auto n = std::size_t{0}; n < run.times->Size(); ++n) {
       w.axis.push_back(run.times->Axis(n));
     }
+    w.steps = StepGridOf(run, solver.SolverScales());
   }
   w.held = run.ocean && (!run.times || run.ocean->at == WindowEnd::Start);
   w.points = SourcePointsOf(run, solver);
@@ -1741,7 +1856,8 @@ std::string Kernel1D(const std::filesystem::path& config,
   const GRDSolver solver(SurfaceGrid(run.lmax), op.ElasticLoveNumbers(),
                          ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
-  const auto times = MakeTimes(run, solver.SolverScales());
+  // the library's grid, a node where the forcing jumps repeated
+  const auto times = StepGridOf(run, solver.SolverScales()).times;
   const auto stride = input.trajectory.record_stride;
   const auto forward = Forward(top, input.trajectory, [&] {
     return TrajectoryOf(run, stride, times, solver);
@@ -1800,7 +1916,8 @@ std::string Kernel3D(const std::filesystem::path& config,
       SurfaceGrid(run.lmax, {.cache_bytes = op.GetOptions().cache_bytes}),
       op.ElasticLove(), ParametersOf(run, earth.material));
   auto world = LoadWorld(run, top, solver);
-  const auto times = MakeTimes(run, solver.SolverScales());
+  // the library's grid, a node where the forcing jumps repeated
+  const auto times = StepGridOf(run, solver.SolverScales()).times;
   const auto stride = input.trajectory.record_stride;
   const auto forward = Forward(top, input.trajectory, [&] {
     return TrajectoryOf(run, stride, times, solver, op);

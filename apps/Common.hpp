@@ -448,6 +448,31 @@ void CheckStateDate(const Run& run, const Json& top,
 [[nodiscard]] std::vector<double> MakeTimes(const Run& run,
                                             const Scales& scales);
 
+/// The time grid the library steps a run over: the window's nodes, with
+/// each node after the first at which the forcing jumps repeated, its left
+/// limit then its right (Evolution::Run). The forcing jumps where a
+/// seismic term's onset falls on a node: the left limit is without the
+/// term (Evolution::Forcing::sourcesBefore), the right with it, and the
+/// zero-length step between is the static elastic solve with the internal
+/// variables held. The run's outputs keep one record per node of the
+/// window, the right limit at a repeat; the library's trajectory and its
+/// kernels keep both.
+struct StepGrid {
+  /// The library's nodes, SLE units, zero at the window's start.
+  std::vector<double> times;
+  /// Per library node, the window's node it belongs to.
+  std::vector<std::size_t> window;
+  /// Per window node, its library node: the right limit at a repeat.
+  std::vector<std::size_t> library;
+  /// Whether library node k is the left limit of a repeat.
+  [[nodiscard]] bool Left(std::size_t k) const {
+    return k + 1 < window.size() && window[k + 1] == window[k];
+  }
+  /// Whether any node is repeated.
+  [[nodiscard]] bool Repeats() const { return times.size() > library.size(); }
+};
+[[nodiscard]] StepGrid StepGridOf(const Run& run, const Scales& scales);
+
 /// The terms' clock (TermClock) against the solver's time: the time on it
 /// at solver time t (SLE units, zero at the window's start) is
 /// `zero + t * rate`, kyr from the window's start in a dated run and in

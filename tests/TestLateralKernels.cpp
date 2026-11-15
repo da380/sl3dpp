@@ -209,7 +209,7 @@ struct Case {
   MemoryPointSet points = MemoryPointSet::Gauss;
   std::function<std::vector<double>(double)> directLoad, outside, layer;
   std::function<std::vector<std::complex<double>>(double)> tide;
-  std::function<std::vector<PointSource>(double)> sources;
+  std::function<std::vector<PointSource>(double)> sources, sourcesBefore;
   /// A migrating run's ice thickness history (empty: frozen shorelines).
   std::function<std::vector<double>(double)> iceThickness;
   int stride = 1;
@@ -226,6 +226,7 @@ Forcing ForcingOf(const Case& c) {
   f.solidSurfaceChange = c.layer;
   f.tide = c.tide;
   f.sources = c.sources;
+  f.sourcesBefore = c.sourcesBefore;
   return f;
 }
 
@@ -452,6 +453,35 @@ TEST(LateralKernels, ZeroLateralGateUnderASeismicSource) {
   c.measurements[3].toroidalPotentialDual.clear();
   c.label = "a seismic source, no toroidal measurement";
   c.scheme = Scheme::ExponentialTrapezoid;
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    Gate(scene, c, method);
+  }
+}
+
+TEST(LateralKernels, ZeroLateralGateAcrossAnOnset) {
+  // An earthquake at a repeated node beside the ice load, its left limit
+  // without the source: the radial route and the 3D sweep pair each side
+  // of the jump with its own interval, measured at both nodes of the pair
+  // and at the end.
+  auto scene = Scene::Make(1e21);
+  std::mt19937 rng(59);
+  Case c;
+  const auto kyr = scene.Kyr();
+  c.times = {0.0, kyr, kyr, 2.0 * kyr, 3.0 * kyr};
+  c.state = scene.state;
+  c.rotation = RotationalFeedback::Full;
+  c.directLoad = Ramp(scene.MeltLoad(-0.05), c.times.back());
+  const auto growing = GrowingSource(scene, c.times.back());
+  c.sources = [growing, kyr](double t) {
+    return t >= kyr ? growing(t) : std::vector<PointSource>{};
+  };
+  c.sourcesBefore = [growing, kyr](double t) {
+    return t > kyr ? growing(t) : std::vector<PointSource>{};
+  };
+  c.measurements[4] = EveryField(scene, rng, true);
+  c.measurements[2] = EveryField(scene, rng, false);
+  c.measurements[1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+  c.label = "an onset at a repeated node";
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     Gate(scene, c, method);
   }
