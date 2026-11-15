@@ -12,14 +12,16 @@ Python plotting script, and an example config for every command of the
 | `ExampleLateralViscosity` | 3D viscosity: an analytic lateral pattern of one decade against its radial twin, and the cost of the within-step iteration | lmax 48, 48 s | `plot_lateral.py` |
 | `ExampleModelViscosity` | the route from real tomography: a 3D viscosity read from a planetmodel model file (`io::ModelViscosity`), run through the whole deglaciation against the file's own radial reference | lmax 32, 20 s | `plot_model_viscosity.py` |
 | `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
-| `ExampleViscosityKernels3D` | 3D adjoint kernels: the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 31 s | `plot_kernels_3d.py` |
+| `ExampleViscosityKernels3D` | 3D adjoint kernels by the discrete adjoint (the library's default): the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 67 s | `plot_kernels_3d.py` |
 | `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
 | `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean on the post-seismic Earth (`data/prem8.postseismic.deck`: a 50 km elastic lid over a 1e19 Pa s asthenosphere) and on its twin with a Burgers asthenosphere (`Rheology::Burgers`), the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13); maps and series as 3° Gaussian means, the degree weights of the cap measurements' cap (`CapMeanWeights`) | lmax 64, 73 s | `plot_seismic.py` |
 
 The defaults keep each run under a minute on 8 threads, the times shown,
 but `ExampleSeismic`'s (two runs through time of 29 nodes, and an
 adjoint sweep and a second run of 26, its fault's 36 point sources
-forcing every step);
+forcing every step) and `ExampleViscosityKernels3D`'s (two discrete 3D
+sweeps of 21 steps after its forward run: the whole run 73 s on 6
+threads, against 39 s by the continuous sweeps);
 the largest peak memory is 11 GB, for `ExampleIceKernels`. The
 configs, one per `sl3d` command, are described in
 [configs/README.md](configs/README.md).
@@ -121,9 +123,11 @@ without it the script says what it would fetch and stops (`get_ice7g.py`
 gives `--download` itself).
 
 `timestep_study.py` is not an input script: it writes the time-step
-study's configs into `configs/`, runs each through `sl3d` and prints the
-errors against the converged reference (configs/README.md, The synthetic
-Earth); `--short` is the family `configs/` holds and `run_all.sh` runs.
+study's configs into `configs/` and the decks they need into `data/`,
+runs each through `sl3d` and prints the errors of the forward runs and of
+both adjoints' kernels against a truth taken from forward runs alone
+(configs/README.md, The time-step study); `--short` is the form
+`configs/` holds and `run_all.sh` runs.
 
 ## Running the sl3d program on the examples' inputs
 
@@ -161,7 +165,7 @@ file name without `.json`), and `poetry run python plot_app.py`, from
 | `sea_level_fingerprint_ice_cap` (with `no_ocean_ice_cap`) | `ocean.png`: one cap of ice laid on bare land without an ocean and with one, the displacement each way, its difference (the ocean's load) and the sea-level change |
 | `no_ocean_cap_weak` (with `no_ocean_cap_strong`) | `relaxation.png`: the lateral viscosity with the two caps, and the displacement at each cap's centre through time, 3D and radial model |
 | `no_ocean_load_field` (with `no_ocean_load_cap`, `no_ocean_load_coefficients`) | `agreement.png`: the forcing on the run's clock and the file's axis, the three runs' displacement, and their agreement |
-| `timestep_study` (the `timestep_*` configs) | `accuracy.png`: the error against the step of the sea level by both schemes and of the viscosity kernels by both adjoints, and the kernels at 1 kyr steps |
+| `timestep_study` (the `timestep_*` configs) | `accuracy.png`: the errors against the step of the sea level by both schemes and of the measurements' derivatives by both adjoints, in the viscosity (relative, and in metres beside the values') and along a change of the ice, against the truth from forward runs; `layers.png` (the whole study): each adjoint's error layer by layer, and the continuous adjoint's against the step over the shortest relaxation time with the viscosity scaled; `convergence.png`: the change at each halving of the step beside the error, and the error by the cap's width |
 | `sea_level_fingerprint_3d_ice7g` | `fingerprint.png`: the fingerprint on PREM with S40RTS's moduli, over the ocean and near Greenland, and its 3D minus radial difference |
 | `sea_level_3d_ice7g` (with `sea_level_1d_ice7g_custom`) | `sea_level.png`: the sea-level change since 26 ka in 3D and 3D minus radial, and relative sea-level histories at three sites, 3D and radial |
 | `sea_level_static_coseismic` | `coseismic.png`: maps centred on the fault of the vertical displacement, the horizontal displacement (its size, and arrows) and the relative sea-level change over the ocean, 2° Gaussian means (the fields the run writes smoothed, `output.smoothing`), the fault's surface projection drawn, and all of them along a profile across the fault, with the vertical displacement's point values, whose ripples are the truncation |

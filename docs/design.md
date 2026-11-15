@@ -274,10 +274,75 @@ longer free, an unphysical effect.
 - **Schemes.** The exponential trapezoid (the default; second order, no
   stability limit, one solve per step) with h = Δt itau, e = e^{−h},
   φ₁ = (1 − e)/h, α = φ₁ − e, β = 1 − φ₁, and m⁺ = e m + α dⁿ + β dⁿ⁺¹;
-  backward Euler and exponential Euler as alternatives. Step sizes are not
+  backward Euler and exponential Euler as alternatives; and Sdirk2, a
+  damped second-order scheme of two stages (below). Step sizes are not
   limited by the shortest Maxwell time. `ViscoelasticOperator` also offers
   an adaptive step controller (embedded exponential Euler); the evolution
   drivers step on the caller's time grid.
+- **Why a second scheme.** At a point whose h is large the trapezoid's e
+  and α vanish and its update is backward Euler's, m⁺ = dⁿ⁺¹. The slow,
+  buoyancy-driven modes that carry the observables involve such points (a
+  weak layer, a fast branch, the continuous adjoint's relaxation after a
+  measurement), and at steps long against those points' relaxation times
+  the trapezoid decays them at backward Euler's rate: first order on them,
+  most visibly after an abrupt change of the forcing (an unloading, a
+  seismic onset, the adjoint's impulse). No one-solve scheme of this form
+  is both second order on such modes and damped at the stiff points
+  (second order forces e → −1 there, Crank–Nicolson's undamped sawtooth);
+  two implicit stages are. Sdirk2 (Alexander 1977) is the two-stage,
+  second-order, L-stable and stiffly accurate singly diagonally implicit
+  Runge–Kutta scheme, γ = 1 − 1/√2: two backward Euler steps of length
+  γ Δt, the first from mⁿ to tⁿ + γ Δt, the second from (1 − r) mⁿ + r Y₁,
+  r = (1 − γ)/γ, to tⁿ⁺¹, each closed by the driver's equilibrium at its
+  own time (`StepRecipe.hpp`). Its amplification (1 + (1 − 2γ) z)/(1 − γz)²
+  vanishes as z → −∞; it is negative beyond h/T = 1 + √2 and −0.21 at its
+  least (near h/T = 8.5), so a mode it takes there decays at least 4.8
+  times a step, its sign alternating.
+- **Its cost and what it is for.** Two solves of one effective operator a
+  step (backward Euler's at γ Δt: one factorisation per step size, both
+  stages keying it), about twice the trapezoid's solves; in 3D about twice
+  the passes (43 a step against the trapezoid's 21 on the lateral
+  convergence test). It
+  pays where the steps are long against the shortest relaxation time: on
+  the standard mantle at steps 9.3 times it the forward sea level is 15
+  and 12 times closer than the trapezoid's (0.056 and 0.038 % against 0.82
+  and 0.46 %) and the continuous viscosity kernel 2.5 times, and at half
+  those steps the continuous moment kernels 15 to 30 times; after an
+  abrupt unloading over a 1e19 Pa s
+  layer 7 to 15 times, its steps keeping their sign; in the fluid limit
+  of a 1e17 Pa s layer within 1e-3 of the resolved run from the fourth
+  1 kyr step on (TestEvolution, TestAdjoint). On the time-step study's
+  problem at 1 kyr (examples/configs/README.md) the values are 0.015 /
+  0.043% off against 0.22 / 0.50%, the continuous kernel +1.9 / −1.0%
+  against +14 / +24%. At steps short against the
+  relaxation times the trapezoid, exact for a strain linear in a step, is
+  the closer (the Maxwell sphere without gravity, TestWithoutGravity).
+  The discrete adjoint, the tangent-linear run and the second-order
+  sweeps are not built for it (their exact derivatives of the stepped map
+  run through each step's stages); its continuous adjoint is
+  (adjoints.md §1a).
+- **The recipe layer.** A step of any scheme is a list of stages, each a
+  one-stage step (`StartStep` with the stage's family and length) from a
+  constant combination of the step's start state and the stages before,
+  closed at its own time and finished (`StepRecipe`, `RecipeOf`,
+  `StepByRecipe`). The evolutions step by it (1D and 3D, with gravity and
+  without, the toroidal systems beside the 1D ones a second chain under
+  the same stage forces, `StageStart`), and so do the continuous sweeps,
+  the one-stage schemes as one stage of themselves, operation for
+  operation the one-stage loop; the operators' own `Step` takes it for a
+  multi-stage scheme. A stage inside a step reads the
+  forcing's plain callbacks at its time (`detail::AtStage`); at c = 1 the
+  node's read, a repeated node's left limit included. The record of a run
+  is its nodes': no stage state is kept. Sdirk2's step reads no start
+  strain and no earlier node, so a checkpoint at a node restarts it, and
+  its zero-length step is backward Euler's, the elastic solve with m held.
+  What takes one stage, one set of weights or one effective operator
+  (`StartStep`, `StepBack`, the effective solid and its Love numbers, the
+  toroidal `Step`) refuses a multi-stage scheme at a step of nonzero
+  length; the reverse cursor's exact backward step has no Sdirk2 form, so
+  a sweep about an Sdirk2 run reads every node's recorded state
+  (record_stride 1), and the factored sources (histories sampled at the
+  nodes) are refused under it.
 - **The step.** The implicit step eliminates m⁺ into equilibrium, giving
   an effective operator per (scheme, Δt), forced by the load channels and
   the memory force of m̃ = e m + α dⁿ, finished through cached unit load
@@ -308,7 +373,8 @@ longer free, an unphysical effect.
   node the left limit and its second the right, the step between of zero
   length: at h = 0 the weights are exact (e = 1, α = β = 0, the effective
   operators the unrelaxed ones), so that step is the elastic solve with
-  m held, by every scheme. The run integrates to the jump under the
+  m held, by every scheme (Sdirk2's is one backward Euler stage of zero
+  length). The run integrates to the jump under the
   forcing's left limit, takes the jump, and integrates on; both nodes are
   recorded, and the derivative runs take the pair as an ordinary step
   (adjoints.md §20). The forcing's left limits are callbacks beside its
@@ -536,20 +602,28 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
 
 ## 7. Adjoints and kernels
 
-- **Two adjoints, one interface.** `AdjointSolver` offers the continuous
-  adjoint (the default and preferred path) and the discrete adjoint (the
-  exact transpose of the time-stepped forward map), with one result type.
-  The discrete gradient is exact for the discretised problem; the two
-  differ by the discretise–transpose commute error, which is large exactly
-  when the forward run is under-resolved, so their disagreement is a
-  resolution diagnostic. `AdjointSolver3D` offers both too: the
-  continuous adjoint (the default) and the discrete transpose of the
-  coupled lateral-viscosity map — the transposed within-step fixed point
-  solved by the same iteration, with the force assembly as the transpose
-  of the strain evaluation under the energy pairing; exact against the 3D
+- **Two adjoints, one interface.** `AdjointSolver` offers the discrete
+  adjoint (the exact transpose of the time-stepped forward map, its
+  `Options::method` default) and the continuous adjoint, with one result
+  type; `sl3d kernel` takes the discrete by default too
+  (`kernels.method`), and the tangent-linear solvers' `Options::method`
+  defaults alike, so that a second-order sweep and the tangent run it
+  reads agree unless both are stated. Both
+  converge to the same kernels at second order in the step. The discrete
+  gradient is exact for the discretised problem, its error the forward
+  run's own at any step; the continuous kernel is accurate once the
+  steps are short against the shortest relaxation time, on which its
+  adjoint relaxes after each measurement (docs/adjoints.md §1, with the
+  ratio's measured cost), and the program states that ratio for a
+  continuous kernel (`ShortestRelaxation`). Their agreement is a check
+  of the time discretisation. `AdjointSolver3D` offers both too: the
+  discrete transpose of the coupled lateral-viscosity map (the default)
+  — the transposed within-step fixed point solved by the same
+  iteration, with the force assembly as the transpose of the strain
+  evaluation under the energy pairing; exact against the 3D
   tangent-linear run at 1e-8 and second order to solver precision in the
-  Taylor test. Distributed over radius like the continuous sweep
-  (docs/adjoints.md §17).
+  Taylor test — and the continuous adjoint. Both are distributed over
+  radius (docs/adjoints.md §17).
 - **Measurements.** Linear functionals of one node's outputs,
   J = a² ∫ g ξ dΩ + a² ∫ g_u u dΩ + a² ∫ g_φ φ dΩ + g_ω·ω, keyed by node
   index into the time grid. `Measurements.hpp` builds the duals: cap means,
@@ -839,6 +913,31 @@ Beyond the fixtures:
 - **3D.** `Lateral` checks second-order self-convergence of the lateral
   step, threaded against serial runs, the degree-1 toroidal block (torque-
   free force, pin independence), and resumption.
+- **Sdirk2.** The recipe's tableau and amplification on a scalar equation
+  to rounding (`StepRecipe`); the operator's step its stages composed by
+  hand, bitwise, at second order; its zero-length step the elastic solve
+  with m held, and the refusals of what takes one stage
+  (`Viscoelastic.Sdirk2*`). The evolution at second order to the limit
+  the trapezoid's runs extrapolate to (7e-9 apart), its error at steps 9.3
+  times the shortest relaxation time 0.056% against the trapezoid's 0.82%,
+  with an ocean and the full rotational feedback; after an abrupt
+  unloading over a 1e19 Pa s layer every step's change of one sign, its
+  error a fifth of the trapezoid's or less, and in the fluid limit (a
+  1e17 Pa s layer) within 1e-3 of the resolved run from the fourth step
+  on (`Evolution.Sdirk2*`). The closed-form Maxwell sphere without
+  gravity at second order; an onset at a repeated node the run started
+  there, radial and 3D, under lateral viscosity and moduli, bitwise; the
+  migrating run the frozen one where no shoreline moves, 1D and 3D, and
+  flotation's ocean function where they move; the 3D loop the 1D one
+  with no lateral structure (8e-15), and at second order under a lateral
+  viscosity, resumed bitwise; a resumed run the uninterrupted one bitwise
+  from a checkpoint without its strain. The continuous kernels: the
+  viscosity kernel against central differences of forward runs at second
+  order, 1D and 3D; the moment kernels against the forward run under the
+  sources, 15 to 30 times closer than the trapezoid's at 0.5 kyr; the 3D
+  sweep the 1D one with no lateral structure (2e-15); distributed against
+  one process (`TestDistributed`); and each derivative not built refused
+  by name.
 - **Tangent-linear runs.** Linear in the loads (the run along a load
   perturbation equals the difference of two forward runs at 1e-8); the
   discrete run and the discrete adjoint exact transposes (the pairing
@@ -1064,11 +1163,11 @@ What is not built, or holds only within limits:
   every pass, so a cell sitting at the flotation threshold can flip between
   passes and hold the residual above a tight `coupled_rtol`; such a node is
   reported unconverged rather than accepted. The tests' marine caps converge
-  at 1e-12. The 3D gradient calibration uses the continuous adjoint by
-  default (`CalibrationOptions::adjoint3D`; the discrete sweep serves
-  too), whose kernel is exact only as the step goes to zero;
-  the iteration's fixed point is still the calibrated state, since the
-  kernel is linear in the residual.
+  at 1e-12. The 3D gradient calibration uses the discrete adjoint by
+  default, as the 1D one (`CalibrationOptions::adjoint3D`); the
+  continuous sweep serves too, its kernel exact only as the step goes to
+  zero, and the iteration's fixed point is still the calibrated state,
+  since the kernel is linear in the residual.
 - **Nonlinear (stress-dependent) rheologies.** Not built; they would fold
   into the same within-step fixed point.
 - **Transversely isotropic relaxation.** The elastic structure may be

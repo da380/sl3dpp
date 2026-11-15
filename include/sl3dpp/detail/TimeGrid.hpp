@@ -69,4 +69,25 @@ template <class Callback, class Value = std::invoke_result_t<Callback, double>>
   return plain ? plain(t) : std::move(fallback);
 }
 
+/// The time of a stage that ends at fraction c of the step ending at node
+/// n (StepRecipe.hpp): the node's own time at c = 1, else times[n - 1] +
+/// c (times[n] - times[n - 1]).
+[[nodiscard]] inline double StageTime(std::span<const double> times,
+                                      std::size_t n, double c) {
+  return c == 1.0 ? times[n] : times[n - 1] + c * (times[n] - times[n - 1]);
+}
+
+/// A forcing term at a stage of the step ending at node n: at c = 1 the
+/// node's read (AtNode, its left limit at the first node of a repeated
+/// pair), inside the step `plain` at the stage's time, where the forcing
+/// is continuous (a jump is at a repeated node, whose step has one
+/// stage). The one place a stage decides what it reads.
+template <class Callback, class Value = std::invoke_result_t<Callback, double>>
+[[nodiscard]] Value AtStage(std::span<const double> times, std::size_t n,
+                            double c, const Callback& plain,
+                            const Callback& before, Value fallback = {}) {
+  if (c == 1.0) return AtNode(times, n, plain, before, std::move(fallback));
+  return plain ? plain(StageTime(times, n, c)) : std::move(fallback);
+}
+
 }  // namespace sl3dpp::detail

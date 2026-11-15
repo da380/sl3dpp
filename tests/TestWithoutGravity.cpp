@@ -3,11 +3,12 @@
 // Maxwell sphere under a point source switched on at t = 0 and under a
 // surface load (its weight, a normal traction) held from t = 0 or ramped
 // up, and of the homogeneous Burgers sphere under the point source (its
-// two Prony terms against the Burgers modulus); a static load against the non-gravitating traction numbers times its
-// weight; a body with a fluid core against its shell above the core; a
-// resumed run and the factored sources against the general run; loads and
-// sources together against the sum of their runs; a load's degree-1 part
-// removed; and what a run without gravity refuses.
+// two Prony terms against the Burgers modulus); a static load against the
+// non-gravitating traction numbers times its weight; a body with a fluid core
+// against its shell above the core; a resumed run and the factored sources
+// against the general run; loads and sources together against the sum of their
+// runs; a load's degree-1 part removed; and what a run without gravity refuses;
+// under Sdirk2 the closed form at second order and an onset at a repeated node.
 //
 // The oracle. By the correspondence principle the Laplace transform of the
 // response to a step source is the elastic closed form
@@ -631,6 +632,103 @@ TEST(WithoutGravity, TheMaxwellSphereThroughTimeInClosedForm) {
     EXPECT_LT(gaps.back()[0], order == 2.0 ? 1e-8 : 2e-5);
     for (const auto& gap : gaps) EXPECT_LT(gap[1], 1e-9);
   }
+}
+
+TEST(WithoutGravity, TheMaxwellSphereUnderSdirk2InClosedForm) {
+  // TheMaxwellSphereThroughTimeInClosedForm under Sdirk2: the run without
+  // gravity, each step two backward Euler stages under the source, against
+  // the closed form at 0.5, 1, 2 and 3 tau, at 4, 8 and 16 steps a tau.
+  // The spheroidal gap falls at second order; the toroidal response, linear
+  // in time, is stepped exactly, its gap the discretisation's in space.
+  const auto body = Body::Make();
+  const auto& material = body.material;
+  const auto a = material.Radius();
+  const auto [kappas, mus] = material.Moduli().KappaMu();
+  const auto tau = 1.0;
+  const auto rheology = Rheology::Maxwell(material, mus.front() * tau).value();
+  const ViscoelasticOperator op(rheology, kLmax,
+                                {.eps = 1e-12, .gravitating = false});
+  const auto solver = SolverOf(material);
+  const auto& sle = solver.SolverScales();
+  const auto& scales = material.ModelScales();
+  const auto length = scales.Length() / sle.Length();
+  const auto energy = Dimensions{.mass = 1, .length = 2, .time = -2};
+  const auto moment = sle.Factor(energy) / scales.Factor(energy);
+  const auto time = sle.Time() / scales.Time();
+  const PointSource source{
+      .at = {.radius = 0.5 * a, .colatitude = 1.1, .longitude = 4.0},
+      .moment = {
+          .rr = 0.9, .tt = -0.2, .pp = 0.5, .rt = 0.3, .rp = -0.7, .tp = 0.6}};
+  auto given = source;
+  given.at.radius *= length;
+  for (auto* c : {&given.moment.rr, &given.moment.tt, &given.moment.pp,
+                  &given.moment.rt, &given.moment.rp, &given.moment.tp}) {
+    *c /= moment;
+  }
+  const auto oracle = MakeOracle(material, source, 1.0 / tau);
+  const auto checks = std::vector<double>{0.5 * tau, tau, 2.0 * tau, 3.0 * tau};
+  auto exact =
+      std::map<std::pair<int, int>, std::vector<std::array<Complex, 3>>>{};
+  auto scaleS = 0.0, scaleT = 0.0;
+  for (auto l = 0; l <= kLmax; ++l) {
+    for (auto m = 0; m <= l; ++m) {
+      auto& series = exact[{l, m}];
+      for (const auto t : checks) {
+        const auto value = oracle.At(l, m, t, false, 24);
+        scaleS = std::max({scaleS, std::abs(value[0]), std::abs(value[1])});
+        if (l >= 2) scaleT = std::max(scaleT, std::abs(value[2]));
+        series.push_back(value);
+      }
+    }
+  }
+  const SurfaceGrid& grid = solver.Grid();
+  const auto sources = [&](double) { return std::vector<PointSource>{given}; };
+  auto gaps = std::vector<std::array<double, 2>>{};
+  for (const auto steps : {4, 8, 16}) {
+    const auto dt = tau / steps;
+    auto times = std::vector<double>{};
+    for (auto n = 0; n <= 3 * steps; ++n) times.push_back(n * dt / time);
+    Evolution evolution(
+        op, solver, solver.NoOceanState(),
+        {.scheme = Scheme::Sdirk2, .rotation = RotationalFeedback::None});
+    const auto snapshots =
+        evolution.Run(times, Evolution::Forcing{.sources = sources});
+    auto worstS = 0.0, worstT = 0.0;
+    const auto compared =
+        std::vector<int>{steps / 2, steps, 2 * steps, 3 * steps};
+    for (auto k = std::size_t{0}; k < compared.size(); ++k) {
+      const auto& snapshot = snapshots[compared[k]];
+      const auto U = grid.Expand(snapshot.displacement);
+      const auto V = grid.Expand(snapshot.tangentialPotential);
+      const auto W = grid.Expand(snapshot.toroidalPotential);
+      for (auto l = 0; l <= kLmax; ++l) {
+        for (auto m = 0; m <= l; ++m) {
+          const auto i = SurfaceGrid::Index(l, m);
+          const auto& want = exact.at({l, m})[k];
+          worstS = std::max({worstS, std::abs(U[i] / length - want[0]),
+                             std::abs(V[i] / length - want[1])});
+          if (l >= 2)
+            worstT = std::max(worstT, std::abs(W[i] / length - want[2]));
+        }
+      }
+    }
+    gaps.push_back({worstS / scaleS, worstT / scaleT});
+    RecordProperty(std::format("sdirk2_dt_tau_over_{}_spheroidal", steps),
+                   std::format("{:.3e}", gaps.back()[0]));
+  }
+  std::cout << std::format("[sdirk2 Maxwell sphere] {:.3e} {:.3e} {:.3e}\n",
+                           gaps[0][0], gaps[1][0], gaps[2][0]);
+  // measured: 9.1e-7, 2.2e-7, 5.6e-8, rates 2.02 and 2.01. The trapezoid,
+  // exact for a strain linear in a step and here nearly so, is below 1e-8
+  // at 16 steps a tau: at steps short against the relaxation time it is
+  // the closer; Sdirk2 gains at steps long against it.
+  for (auto k = std::size_t{1}; k < gaps.size(); ++k) {
+    const auto rate = std::log2(gaps[k - 1][0] / gaps[k][0]);
+    EXPECT_GT(rate, 1.9) << "step " << k;
+    EXPECT_LT(rate, 2.1) << "step " << k;
+  }
+  EXPECT_LT(gaps.back()[0], 1e-7);
+  for (const auto& gap : gaps) EXPECT_LT(gap[1], 1e-9);
 }
 
 TEST(WithoutGravity, TheBurgersSphereThroughTimeInClosedForm) {
@@ -1428,6 +1526,63 @@ TEST(WithoutGravity, AnOnsetAtARepeatedNodeIsTheRunStartedThere) {
                               << (factor ? ", factored" : "");
     }
   }
+}
+
+TEST(WithoutGravity, AnOnsetAtARepeatedNodeUnderSdirk2IsTheRunStartedThere) {
+  // AnOnsetAtARepeatedNodeIsTheRunStartedThere under Sdirk2, by the general
+  // route (the factored one refuses it: its histories are sampled at the
+  // nodes, the first stage reads between them).
+  const auto earth = Earth::Make(false, kEarthLmax);
+  const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
+                                ComputeLoveNumbers(earth.material, kEarthLmax),
+                                SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const ViscoelasticOperator op(earth.rheology, kEarthLmax,
+                                {.gravitating = false});
+  const auto source = ThrustIn(solver, earth.material);
+  const auto year = 3.15576e7 / solver.SolverScales().Time();
+  const auto onset = 50.0 * year;
+  const auto jump = std::vector<double>{0.0,   20.0 * year,  onset,
+                                        onset, 100.0 * year, 400.0 * year};
+  const auto started = std::vector<double>{onset, 100.0 * year, 400.0 * year};
+  const auto forcing = Evolution::Forcing{
+      .sources =
+          [&](double t) {
+            return t >= onset ? std::vector<PointSource>{source}
+                              : std::vector<PointSource>{};
+          },
+      .sourcesBefore =
+          [&](double t) {
+            return t > onset ? std::vector<PointSource>{source}
+                             : std::vector<PointSource>{};
+          }};
+  Evolution evolution(
+      op, solver, solver.NoOceanState(),
+      {.scheme = Scheme::Sdirk2, .rotation = RotationalFeedback::None});
+  const auto run = evolution.Run(jump, forcing);
+  const auto reference = evolution.Run(started, forcing);
+  ASSERT_EQ(run.size(), jump.size());
+  for (auto n = std::size_t{0}; n < 3; ++n) {
+    for (auto v : run[n].displacement) EXPECT_EQ(v, 0.0) << n;
+  }
+  auto worst = 0.0;
+  for (auto k = std::size_t{0}; k < started.size(); ++k) {
+    worst = std::max(
+        {worst,
+         Departure(grid, run[3 + k].displacement, reference[k].displacement, 0),
+         Departure(grid, run[3 + k].tangentialPotential,
+                   reference[k].tangentialPotential, 0),
+         Departure(grid, run[3 + k].toroidalPotential,
+                   reference[k].toroidalPotential, 0)});
+  }
+  // measured: none
+  EXPECT_LT(worst, 1e-11);
+  Evolution factored(op, solver, solver.NoOceanState(),
+                     {.scheme = Scheme::Sdirk2,
+                      .rotation = RotationalFeedback::None,
+                      .factor_sources = true});
+  EXPECT_THROW(static_cast<void>(factored.Run(jump, forcing)),
+               std::invalid_argument);
 }
 
 TEST(WithoutGravity, LoadsAndSourcesTogetherAreTheSumOfTheirRuns) {

@@ -1,14 +1,14 @@
 #include "sl3dpp/TangentLinear.hpp"
 
-#include "sl3dpp/detail/InteriorSources.hpp"
-#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
-
 #include <format>
 #include <optional>
 #include <stdexcept>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
+#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -259,6 +259,8 @@ TangentLinearSolver::TangentLinearSolver(const Evolution& evolution,
         "the tangent-linear runs are not built for the problem without "
         "gravity");
   }
+  detail::RefuseDerivativeOfMultiStage(evolution.options_.scheme,
+                                       "the tangent-linear run");
 }
 
 /// What March takes for the material: a start response and a force per

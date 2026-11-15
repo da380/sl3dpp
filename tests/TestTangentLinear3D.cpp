@@ -446,7 +446,9 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
 
   // The continuous pair: the continuous run against the continuous
   // kernel paired with p, at the commute level.
-  AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Continuous,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12});
   const auto kernels = adjoint.FirstOrderKernels(times, measurements, &trajectory);
   const auto paired =
       VolumePairing(op.Coupling(), kernels.logViscosityKernel3D[0], d.logViscosity);
@@ -850,16 +852,17 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
   // With delta = 0 the 3D material tangent along an angle-uniform
   // direction is the 1D one through the grid pipeline (the effective
   // system's variation by the pointwise product against the 1D assembled
-  // variation operator), both schemes, with the memory points at the GLL
-  // nodes and at the Gauss points (the two take a perturbation of the
-  // moduli at the points by the one rule); and a lateral direction with
-  // the same angular mean is not the same run.
+  // variation operator), both schemes and both methods, with the memory
+  // points at the GLL nodes and at the Gauss points (the two take a
+  // perturbation of the moduli at the points by the one rule); and a
+  // lateral direction with the same angular mean is not the same run.
   auto scene = Scene::Make(1e21);
   auto times = std::vector<double>{};
   for (auto n = 0; n <= 4; ++n) times.push_back(2.0 * n * scene.Kyr());
   const auto load = scene.MeltLoad(-0.1);
   const auto directLoad = Ramp(load, times.back());
   const auto d = SmoothMaterialDirection(scene);
+  for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous})
   for (auto set : {MemoryPointSet::Gll, MemoryPointSet::Gauss})
   for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
     ViscoelasticOperator op1(scene.rheology, kLmax, {.memory_points = set});
@@ -872,8 +875,9 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
         ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
     TangentPerturbation d1;
     d1.material = AtMemoryPoints(op1.Points(), d);
-    const auto run1 = TangentLinearSolver(evolution1, {.rtol = 1e-12})
-                          .Run(times, d1, &trajectory1);
+    const auto run1 =
+        TangentLinearSolver(evolution1, {.method = method, .rtol = 1e-12})
+            .Run(times, d1, &trajectory1);
 
     Viscoelastic3D op3(scene.rheology, kLmax,
                        [](double, double, double) { return 0.0; },
@@ -888,7 +892,8 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
     TangentPerturbation3D d3;
     d3.material.kappa = UniformFromPoints(coupling, d1.material.kappa);
     d3.material.mu = UniformFromPoints(coupling, d1.material.mu);
-    const auto run3 = TangentLinearSolver3D(evolution3, {.rtol = 1e-12,
+    const auto run3 = TangentLinearSolver3D(evolution3, {.method = method,
+                                                         .rtol = 1e-12,
                                                          .coupled_rtol = 1e-12})
                           .Run(times, d3, &trajectory3);
     ASSERT_EQ(run3.size(), times.size());
@@ -900,7 +905,8 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
       EXPECT_LT(MaxDiff(run3[n].relativeSeaLevelChange, run1[n].relativeSeaLevelChange),
                 1e-7 * MaxAbs(run1[n].relativeSeaLevelChange))
           << "node " << n << " scheme " << static_cast<int>(scheme)
-          << ", points " << static_cast<int>(set);
+          << ", points " << static_cast<int>(set) << ", method "
+          << static_cast<int>(method);
       EXPECT_LT(MaxDiff(run3[n].displacement, run1[n].displacement),
                 1e-7 * MaxAbs(run1[n].displacement))
           << "node " << n << " scheme " << static_cast<int>(scheme);
@@ -919,7 +925,8 @@ TEST(TangentLinear3D, ZeroLateralMaterialMatchesThe1DRun) {
     for (auto i = std::size_t{0}; i < lateral.size(); ++i) {
       dl.material.mu[i] *= lateral[i];
     }
-    const auto runL = TangentLinearSolver3D(evolution3, {.rtol = 1e-12,
+    const auto runL = TangentLinearSolver3D(evolution3, {.method = method,
+                                                         .rtol = 1e-12,
                                                          .coupled_rtol = 1e-12})
                           .Run(times, dl, &trajectory3);
     EXPECT_GT(MaxDiff(runL.back().relativeSeaLevelChange, run3.back().relativeSeaLevelChange),

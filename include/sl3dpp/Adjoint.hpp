@@ -3,7 +3,7 @@
 /**
  * @file Adjoint.hpp
  * @brief Ice-history sensitivity kernels of the coupled evolution, by the
- * continuous adjoint (the preferred path) or the exact discrete transpose
+ * continuous adjoint or the exact discrete transpose
  * — one interface and result type for both, so every test and driver is
  * formulation-blind. Corresponds to pyslfp's `adjoint_ice_history` /
  * `continuous_adjoint_ice_history` (whose docstrings, with Yu et al. 2025,
@@ -15,9 +15,13 @@
  * continuum adjoint equations — the same form as the forward problem, so
  * between observations the state is stepped by the forward machinery in
  * reversed time, with finite jumps of the adjoint internal variables at
- * each observation. The two differ by the discretise/transpose commute
- * error, which vanishes as the run resolves its rheology: their
- * DISAGREEMENT is a resolution diagnostic for the forward calculation.
+ * each observation. Both converge to the same kernels at second order in
+ * the step. The discrete kernel's error is the forward run's own at any
+ * step; the continuous adjoint relaxes after each observation on the
+ * shortest relaxation time, which the forward run never has to resolve,
+ * and its kernels are accurate once the steps are short against it
+ * (ViscoelasticOperator::ShortestRelaxation; docs/adjoints.md §1). Their
+ * agreement is a check of the time discretisation.
  *
  * Conventions: times are the forward driver's (increasing, SLE solver
  * units, a node repeated once for a jump of the forcing, Evolution::Run:
@@ -303,7 +307,13 @@ namespace detail {
 class AdjointSolver {
  public:
   struct Options {
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// Discrete (the default, as `sl3d kernel`'s `kernels.method`) or
+    /// Continuous. About an evolution under Sdirk2 the continuous sweep
+    /// steps the adjoint by its stages, and reads every node's recorded
+    /// state; the discrete sweep and the second-order sweeps are not built
+    /// for it and refuse it, the continuous sweep then stated here
+    /// (docs/adjoints.md §1a).
+    AdjointMethod method = AdjointMethod::Discrete;
     /// The per-solve tolerance of the SLE (adjoint or forward) solves.
     double rtol = 1e-9;
     int anderson_memory = 5;

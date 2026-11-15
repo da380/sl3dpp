@@ -1,17 +1,24 @@
 // The coupled GIA evolution: the elastic-rheology limit against the
 // fingerprint solver (machine-tight, fully self-contained), qualitative
-// relaxation, and the coupled comparison with pyslfp.
+// relaxation, and the coupled comparison with pyslfp; Sdirk2's second
+// order and limit against the trapezoid's, and its damping after an
+// abrupt unloading on a weak layer and in the fluid limit.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <span>
 #include <sstream>
 #include <stdexcept>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -19,6 +26,7 @@
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
@@ -718,4 +726,328 @@ TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
   }
   EXPECT_GT(scale, 0.0);
   EXPECT_LT(worst, tol * scale);
+}
+
+namespace {
+
+/// prem8 at the given degree with a Maxwell mantle of `mantle` Pa s between
+/// the CMB and 400 km depth, and between 400 and 220 km depth of `weak` Pa
+/// s (the mantle's, unless given); its elastic solver and the analytic
+/// test state, as Setup.
+struct Layered {
+  int lmax = 0;
+  EarthModel model;
+  Material material;
+  Rheology rheology;
+  GRDSolver solver;
+  GRDSolver::State state;
+  std::vector<double> iceNd;
+
+  static Layered Make(int lmax, double mantle, double weak = 0.0) {
+    auto deck =
+        Deck::Read(
+            std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
+            DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
+                       0))
+            .value();
+    auto model = EarthModel::FromDeck(deck).value();
+    auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
+    auto material = Material::Create(model, mesh).value();
+    const auto& scales = model.ModelScales();
+    const auto b = model.DimensionlessView().Boundaries();
+    auto viscosity = std::map<std::size_t, RadialValue>{};
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
+      if (model.IsFluid(i) || b[i] < 3.4799e6 / scales.Length() ||
+          b[i + 1] > 6.1511e6 / scales.Length()) {
+        continue;
+      }
+      const auto upper = b[i] >= 5.9709e6 / scales.Length();
+      const auto eta = upper && weak > 0.0 ? weak : mantle;
+      viscosity.emplace(i, eta / scales.Factor(ViscosityDimensions));
+    }
+    auto rheology = Rheology::Maxwell(material, viscosity).value();
+    ViscoelasticOperator op(rheology, lmax);
+    GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+                     SeaLevelParameters{});
+    Fingerprint fingerprint(lmax, op.ElasticLoveNumbers());
+    fingerprint.SetAnalyticTestState(0.0);
+    const auto length = solver.SolverScales().Length();
+    auto toNd = [&](std::vector<double> si) {
+      for (auto& v : si) v /= length;
+      return si;
+    };
+    auto ice = toNd(fingerprint.IceThickness());
+    auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+    return Layered{lmax,
+                   std::move(model),
+                   std::move(material),
+                   std::move(rheology),
+                   std::move(solver),
+                   std::move(state),
+                   std::move(ice)};
+  }
+
+  [[nodiscard]] double Kyr() const {
+    return 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  }
+  [[nodiscard]] std::vector<double> MeltLoad(double fraction) const {
+    auto load = std::vector<double>(iceNd.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = solver.IceDensity() * (1.0 - state.oceanFunction[i]) *
+                fraction * iceNd[i];
+    }
+    return load;
+  }
+};
+
+/// The grid of n equal steps over [0, span].
+std::vector<double> Even(double span, int n) {
+  auto out = std::vector<double>{};
+  for (auto k = 0; k <= n; ++k) out.push_back(span * k / n);
+  return out;
+}
+
+/// The relative L2 gap of two grid fields.
+double Gap(const GRDSolver& solver, std::span<const double> got,
+           std::span<const double> want) {
+  auto d = std::vector<double>(want.size()),
+       w = std::vector<double>(want.size());
+  for (auto i = std::size_t{0}; i < want.size(); ++i) {
+    d[i] = (got[i] - want[i]) * (got[i] - want[i]);
+    w[i] = want[i] * want[i];
+  }
+  return std::sqrt(solver.Grid().Integrate(d) / solver.Grid().Integrate(w));
+}
+
+}  // namespace
+
+TEST(Evolution, Sdirk2ConvergesAtSecondOrderToTheTrapezoidsLimit) {
+  // A cap's load ramped on over half the window and held, with an ocean
+  // and the full rotational feedback, the steps from 9.3 times the
+  // shortest relaxation time down: Sdirk2's sea level at the kink and at
+  // the end converges at second order, to the limit the exponential
+  // trapezoid converges to (each Richardson-extrapolated from fine steps),
+  // and at the longest steps its error is many times the trapezoid's
+  // smaller, the trapezoid acting as backward Euler on the slow modes the
+  // stiff points carry.
+  const auto scene = Layered::Make(8, 1e21);
+  ViscoelasticOperator op(scene.rheology, scene.lmax);
+  const auto kyr = scene.Kyr();
+  const auto span = 8.0 * kyr;
+  const auto ratio = op.ShortestRelaxation().StepRatio(
+      Even(span, 8),
+      scene.solver.SolverScales().Time() / scene.model.ModelScales().Time());
+  const auto load = scene.MeltLoad(0.3);
+  const auto direct = [&](double t) {
+    auto out = load;
+    const auto f = std::min(t / (0.5 * span), 1.0);
+    for (auto& v : out) v *= f;
+    return out;
+  };
+  // the sea level at the kink and at the end
+  auto run = [&](Scheme scheme, int n) {
+    Evolution evolution(op, scene.solver, scene.state,
+                        {.scheme = scheme, .rtol = 1e-12});
+    const auto snapshots = evolution.Run(Even(span, n), direct);
+    return std::array{snapshots[n / 2].relativeSeaLevelChange,
+                      snapshots[n].relativeSeaLevelChange};
+  };
+  auto richardson = [](const std::array<std::vector<double>, 2>& coarse,
+                       const std::array<std::vector<double>, 2>& fine) {
+    auto out = fine;
+    for (auto k = 0; k < 2; ++k) {
+      for (auto i = std::size_t{0}; i < out[k].size(); ++i) {
+        out[k][i] += (fine[k][i] - coarse[k][i]) / 3.0;
+      }
+    }
+    return out;
+  };
+  const auto limit =
+      richardson(run(Scheme::Sdirk2, 64), run(Scheme::Sdirk2, 128));
+  const auto trapezoid = richardson(run(Scheme::ExponentialTrapezoid, 256),
+                                    run(Scheme::ExponentialTrapezoid, 512));
+  auto errors = std::map<std::pair<Scheme, int>, std::array<double, 2>>{};
+  for (const auto scheme : {Scheme::Sdirk2, Scheme::ExponentialTrapezoid}) {
+    for (const auto n : {8, 16, 32}) {
+      const auto x = run(scheme, n);
+      for (auto k = 0; k < 2; ++k) {
+        errors[{scheme, n}][k] = Gap(scene.solver, x[k], limit[k]);
+      }
+    }
+  }
+  std::cout << std::format("[sdirk2 convergence] step ratio {:.2f}\n", ratio);
+  for (const auto& [key, e] : errors) {
+    std::cout << std::format("  scheme {} n {}: {:.3e} {:.3e}\n",
+                             static_cast<int>(key.first), key.second, e[0],
+                             e[1]);
+  }
+  const auto limits = std::array{Gap(scene.solver, trapezoid[0], limit[0]),
+                                 Gap(scene.solver, trapezoid[1], limit[1])};
+  std::cout << std::format("  the limits' gap {:.3e} {:.3e}\n", limits[0],
+                           limits[1]);
+  // measured: steps 9.3 times the shortest relaxation time; Sdirk2's errors
+  // 5.6e-4, 1.4e-4, 3.3e-5 at the kink (3.8e-4, 9.1e-5, 2.2e-5 at the
+  // end), the trapezoid's 8.2e-3, 2.8e-3, 7.9e-4 (4.6e-3, 1.6e-3, 4.6e-4);
+  // the two limits 7e-9 apart
+  EXPECT_GT(ratio, 9.0);
+  EXPECT_LT(ratio, 9.5);
+  const auto error = [&](Scheme scheme, int n, int k) {
+    return errors.at(std::pair{scheme, n})[static_cast<std::size_t>(k)];
+  };
+  for (auto k = 0; k < 2; ++k) {
+    EXPECT_LT(limits[k], 1e-7) << k;
+    for (const auto n : {8, 16}) {
+      const auto order = std::log2(error(Scheme::Sdirk2, n, k) /
+                                   error(Scheme::Sdirk2, 2 * n, k));
+      EXPECT_GT(order, 1.9) << n << ", " << k;
+      EXPECT_LT(order, 2.2) << n << ", " << k;
+    }
+    const auto damped = error(Scheme::Sdirk2, 8, k);
+    EXPECT_LT(damped, error(Scheme::ExponentialTrapezoid, 8, k) / 10.0) << k;
+    EXPECT_LT(damped, 1e-3) << k;
+  }
+}
+
+TEST(Evolution, Sdirk2DampsAfterAnAbruptUnloading) {
+  // A cap's load held for 2 kyr and taken off over 0.02 kyr, then 1 kyr
+  // steps, on a mantle of 1e21 Pa s with a layer between 220 and 400 km
+  // depth of 1e19 Pa s (its relaxation time 0.0039 kyr, steps 250 times
+  // it), and of 1e17 Pa s (the fluid limit, 25 000 times). The sea level's
+  // projection on its change since the unloading, against the run with
+  // every step split in 64 (whose own split in 128 it meets to 6e-5): on
+  // the 1e19 layer the steps' changes keep their sign, no sawtooth, and
+  // after the first step Sdirk2's error is a fifth of the trapezoid's or
+  // less; in the fluid limit its error after the first step is below a
+  // tenth of the first's, and below 1e-3 of the change from the fourth
+  // step on, its sign alternating at first (the channel modes the step
+  // takes at h/T 3 to 20, where Sdirk2's amplification is -0.21 at the
+  // least, damped at least 4.8 times a step), the trapezoid's still 0.15 %
+  // at the end.
+  for (const auto weak : {1e19, 1e17}) {
+    const auto label = std::format("layer {:g} Pa s", weak);
+    const auto scene = Layered::Make(8, 1e21, weak);
+    ViscoelasticOperator op(scene.rheology, scene.lmax);
+    const auto kyr = scene.Kyr();
+    const auto load = scene.MeltLoad(0.3);
+    const auto off = 2.0 * kyr, ramp = 0.02 * kyr;
+    const auto direct = [&](double t) {
+      auto out = load;
+      const auto f = t <= off ? 1.0 : std::max(0.0, 1.0 - (t - off) / ramp);
+      for (auto& v : out) v *= f;
+      return out;
+    };
+    // 1 kyr to the unloading, the unloading, 6 kyr after; each step split
+    auto grid = [&](int split) {
+      auto out = std::vector<double>{0.0};
+      auto add = [&](double from, double to) {
+        for (auto k = 1; k <= split; ++k) {
+          out.push_back(from + (to - from) * k / split);
+        }
+      };
+      add(0.0, kyr);
+      add(kyr, off);
+      add(off, off + ramp);
+      for (auto j = 0; j < 6; ++j) {
+        add(off + ramp + j * kyr, off + ramp + (j + 1) * kyr);
+      }
+      return out;
+    };
+    auto run = [&](Scheme scheme, int split) {
+      Evolution evolution(op, scene.solver, scene.state,
+                          {.scheme = scheme, .rtol = 1e-12});
+      const auto snapshots = evolution.Run(grid(split), direct);
+      auto out = std::vector<std::vector<double>>{};
+      for (auto k = std::size_t{0}; k < snapshots.size(); k += split) {
+        out.push_back(snapshots[k].relativeSeaLevelChange);
+      }
+      return out;
+    };
+    const auto reference = run(Scheme::Sdirk2, 64);
+    // nodes 3 on: the unloading's end and the six steps after
+    auto change = reference.back();
+    for (auto i = std::size_t{0}; i < change.size(); ++i) {
+      change[i] -= reference[3][i];
+    }
+    auto project = [&](const std::vector<double>& field) {
+      auto p = std::vector<double>(field.size());
+      for (auto i = std::size_t{0}; i < field.size(); ++i) {
+        p[i] = field[i] * change[i];
+      }
+      return scene.solver.Grid().Integrate(p);
+    };
+    const auto total =
+        std::abs(project(reference.back()) - project(reference[3]));
+    auto errorsOf = [&](const std::vector<std::vector<double>>& x) {
+      auto out = std::vector<double>{};
+      for (auto k = std::size_t{3}; k < x.size(); ++k) {
+        out.push_back((project(x[k]) - project(reference[k])) / total);
+      }
+      return out;
+    };
+    const auto damped = run(Scheme::Sdirk2, 1);
+    const auto trapezoid = run(Scheme::ExponentialTrapezoid, 1);
+    const auto e = errorsOf(damped);
+    const auto t = errorsOf(trapezoid);
+    std::cout << std::format("[sdirk2 unloading] {}\n", label);
+    for (auto k = std::size_t{0}; k < e.size(); ++k) {
+      std::cout << std::format(
+          "  node {} sdirk2 {:+.3e} trapezoid {:+.3e} step {:+.4e}\n", k + 3,
+          e[k], t[k],
+          k > 0 ? project(damped[k + 3]) - project(damped[k + 2]) : 0.0);
+    }
+    if (weak == 1e19) {
+      // measured: errors -0.76, +2.8, +0.37, +0.38, +0.18, +0.12, +0.07 %
+      // (the trapezoid's +8.1, -3.4, -3.5, -2.7, -2.0, -1.4, -1.0 %: 7 to
+      // 15 times Sdirk2's after the first step), every step's change
+      // positive
+      const auto first = project(damped[4]) - project(damped[3]);
+      for (auto k = std::size_t{5}; k < damped.size(); ++k) {
+        const auto step = project(damped[k]) - project(damped[k - 1]);
+        EXPECT_GT(step * first, 0.0) << label << ", node " << k;
+      }
+      for (auto k = std::size_t{2}; k < e.size(); ++k) {
+        EXPECT_LT(std::abs(e[k]), std::abs(t[k]) / 5.0)
+            << label << ", node " << k + 3;
+      }
+      EXPECT_LT(std::abs(e[1]), 0.04) << label;
+    } else {
+      // measured: +0.89, +12.7, -0.98, +0.27, -0.020, +0.016, +0.0046 %
+      // (the trapezoid's -14, -4.2, -1.3, -0.50, -0.25, -0.15 % after the
+      // first step)
+      for (auto k = std::size_t{2}; k < e.size(); ++k) {
+        EXPECT_LT(std::abs(e[k]), 0.1 * std::abs(e[1]))
+            << label << ", node " << k + 3;
+      }
+      for (auto k = std::size_t{4}; k < e.size(); ++k) {
+        EXPECT_LT(std::abs(e[k]), 1e-3) << label << ", node " << k + 3;
+      }
+      EXPECT_LT(std::abs(e.back()), std::abs(t.back()) / 10.0) << label;
+    }
+  }
+}
+
+TEST(Evolution, Sdirk2RefusesTheFactoredSources) {
+  // factor_sources samples the sources' histories at the nodes, and
+  // Sdirk2's first stage reads them between: refused, naming the scheme.
+  const auto scene = Layered::Make(4, 1e21);
+  ViscoelasticOperator op(scene.rheology, scene.lmax);
+  Evolution evolution(op, scene.solver, scene.solver.NoOceanState(),
+                      {.scheme = Scheme::Sdirk2,
+                       .rotation = RotationalFeedback::None,
+                       .factor_sources = true});
+  const auto source = PointSource{.at = {.radius = 0.9 * scene.solver.Radius(),
+                                         .colatitude = 1.0,
+                                         .longitude = 2.0},
+                                  .moment = {.rr = 1e-12, .tt = -1e-12}};
+  const auto times = Even(scene.Kyr(), 2);
+  try {
+    static_cast<void>(
+        evolution.Run(times, Evolution::Forcing{.sources = [&](double) {
+                        return std::vector<PointSource>{source};
+                      }}));
+    ADD_FAILURE() << "the factored sources ran under Sdirk2";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string(error.what()).find("Sdirk2"), std::string::npos)
+        << error.what();
+  }
 }

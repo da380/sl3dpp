@@ -18,9 +18,9 @@
  *   tail sum of the later node-wise thickness duals: bounded, and free of
  *   the delta those carry at the observation;
  * - the radial viscosity kernels dJ / d eta(r), from the recorded
- *   forward trajectory, by BOTH the continuous adjoint (the preferred
- *   path) and the exact discrete transpose: their agreement is the
- *   resolution diagnostic (docs/adjoints.md §1).
+ *   forward trajectory, by BOTH the continuous adjoint and the exact
+ *   discrete transpose: their agreement is a check of the time
+ *   discretisation (docs/adjoints.md §1).
  *
  * Outputs: output/library/ice_kernels/ice_kernels.txt.
  *

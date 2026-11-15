@@ -34,6 +34,7 @@
 #include <map>
 #include <memory>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/ToroidalOperator.hpp"
@@ -86,10 +87,19 @@ class ToroidalViscoelastic {
   /// The state's strain cache set from a solution consistent with it.
   void SetStrain(State& state, const Fields& solutions) const;
 
+  /// A multi-stage step's memory state (StepRecipe.hpp): the internal
+  /// variables sum_j a_j m_j over the terms (a_j, state_j), states of one
+  /// layout, the first state's time, no strain.
+  [[nodiscard]] static State CombinedState(
+      std::span<const std::pair<double, const State*>> terms);
+
   /// One step of dt >= 0 ending under `force`: the new state, with its
   /// strain, and the solutions at the end (at dt = 0 the elastic solve
   /// with the memory held). The trapezoid needs the state's strain
-  /// (SetStrain, or a previous step's).
+  /// (SetStrain, or a previous step's). The step is one stage under one
+  /// force: a multi-stage scheme (Sdirk2) is stepped stage by stage by
+  /// its driver, each stage a BackwardEuler step under the force at its
+  /// time (StepRecipe.hpp), and refused here but at dt = 0.
   /// `memory`, when given, is added to the step's decayed memory (the
   /// drive of a tangent-linear step, FirstOrderDrive's).
   [[nodiscard]] std::pair<State, Fields> Step(const State& state, double dt,

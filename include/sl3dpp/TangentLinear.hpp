@@ -159,7 +159,10 @@ struct TangentToroidalDrive {
 class TangentLinearSolver {
  public:
   struct Options {
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// Discrete (the default, as AdjointSolver's): the forward mode of
+    /// the stepped map; or Continuous (FirstOrderDrive). A second-order
+    /// sweep about the run takes the same method as the run.
+    AdjointMethod method = AdjointMethod::Discrete;
     double rtol = 1e-9;
     int anderson_memory = 5;
     /// Keep the tangent-linear internal state (with its strain) and the
@@ -169,7 +172,8 @@ class TangentLinearSolver {
     std::function<void(std::size_t node)> on_node{};
   };
 
-  /// Refused for an evolution without gravity (Evolution.hpp).
+  /// Refused for an evolution without gravity (Evolution.hpp), and for one
+  /// under Sdirk2: not built (docs/adjoints.md §1a).
   explicit TangentLinearSolver(const Evolution& evolution,
                                Options options);
   explicit TangentLinearSolver(const Evolution& evolution)

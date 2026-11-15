@@ -24,7 +24,9 @@ without to figures/sl3d/with_and_without_gravity/:
                                                  runs' amplitudes and lags)
     sea_level_fingerprint_ice_cap/ocean.png     (with no_ocean_ice_cap)
     no_ocean_cap_weak/relaxation.png            (with no_ocean_cap_strong)
-    timestep_study/accuracy.png                 (the timestep_* runs)
+    timestep_study/accuracy.png                 (the timestep_* runs;
+    timestep_study/layers.png                    layers.png the full
+    timestep_study/convergence.png               study's alone)
     sea_level_static_coseismic/coseismic.png
     sea_level_static_megathrust/coseismic.png   (with planetmodel's fault
                                                  module, after 1.5.1)
@@ -1335,92 +1337,271 @@ def no_ocean_load() -> None:
     save(fig, "no_ocean_load_field", "agreement")
 
 
-def timestep_study() -> None:
-    """The time-stepping study of timestep_study.py: the error against the
-    step of the sea level at the two measurement dates by both schemes, and
-    of the viscosity kernels by both adjoints, each against its converged
-    reference, with first- and second-order guides and the step in
-    Maxwell times; and the kernels themselves at a 1 kyr step."""
-    import timestep_study as study
+# The time-step study's colours: one per adjoint, the forward run's ink.
+DISCRETE, CONTINUOUS, FORWARD, EULER = "#1f77b4", "#e66100", "0.2", "#7b3294"
+ADJOINT_STYLE = {"discrete": (DISCRETE, "discrete adjoint"),
+                 "continuous": (CONTINUOUS, "continuous adjoint")}
+DATE_MARKS = ({"marker": "o", "ls": "-"}, {"marker": "s", "ls": "--"})
+GRID = {"color": "0.92", "lw": 0.5}
 
-    result = study.errors()
-    if result is None:
-        return
-    table, (ref_fields, ref_kernels) = result
-    tau_min, tau_max = study.maxwell_times_kyr()
-    fig = plt.figure(figsize=(14, 4.8))
-    styles = {"et": ("C0", "exponential trapezoid"),
-              "be": ("C3", "backward Euler"),
-              "discrete": ("C0", "discrete adjoint"),
-              "continuous": ("C1", "continuous adjoint")}
-    marks = {f"hudson_bay_{study.MID:g}ka": ("o", "-",
-                                            f"{study.MID:g} ka (mid-run)"),
-             f"hudson_bay_{study.END:g}ka": ("s", "--",
-                                            f"{study.END:g} ka (the end)")}
-    panels = (("sea_level", f"(a) the sea level, against "
-                            f"{study.step_kyr(ref_fields):g} kyr steps",
-               "relative L2 error over the sphere"),
-              ("kernel", f"(b) the viscosity kernel, against the discrete "
-                         f"one at {study.step_kyr(ref_kernels):g} kyr",
-               "relative error, (∫ δK$^2$ r$^2$ dr)$^{1/2}$"))
-    for k, (quantity, title, ylabel) in enumerate(panels):
-        ax = fig.add_subplot(1, 3, k + 1)
-        low = np.inf
-        for label, (steps, errs) in table[quantity].items():
-            kind, measurement = label.split()
-            color, name = styles[kind]
-            marker, ls, when = marks[measurement]
-            dt = np.array([study.step_kyr(n) for n in steps])
-            ax.loglog(dt, errs, color=color, ls=ls, marker=marker, ms=4,
-                      label=f"{name}, {when}")
-            low = min(low, np.min(errs))
-        dt = np.array([study.step_kyr(n) for n in study.STEPS])
-        for order, anchor in ((1, 0.6), (2, 0.6)):
-            guide = anchor * low * (dt / dt[-1]) ** order * 4
-            ax.loglog(dt, guide, color="0.6", lw=0.8, ls=":")
-            ax.text(dt[0], guide[0], f" order {order}", fontsize=8,
-                    color="0.4", va="center")
-        ax.set_xlabel("step (kyr)")
-        ax.set_xticks(dt, [f"{d:g}" if d >= 1 else f"1/{1 / d:g}" for d in dt])
-        ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+
+def step_axis(ax, dt, tau_min: float | None) -> None:
+    """A log axis of the step (kyr), ticked at the study's steps `dt`, with
+    the step over the shortest relaxation time along the top."""
+    ax.set_xscale("log")
+    ax.set_xticks(dt, [f"{d:g}" if d >= 1 else f"1/{1 / d:g}" for d in dt])
+    ax.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+    ax.set_xlim(min(dt) / 1.4, max(dt) * 1.4)
+    ax.set_xlabel("step h (kyr)")
+    ax.grid(True, which="major", **GRID)
+    if tau_min:
+        top = ax.secondary_xaxis("top", functions=(lambda x: x / tau_min,
+                                                   lambda x: x * tau_min))
+        top.set_xticks(np.asarray(dt) / tau_min,
+                       [f"{d / tau_min:.2g}" for d in dt])
+        top.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
+        top.set_xlabel(f"h / shortest relaxation time ({tau_min:g} kyr)")
+
+
+def second_order(ax, x, anchor: float, label: str = "h$^2$") -> None:
+    """A guide of slope two through `anchor` at the smallest x."""
+    x = np.sort(np.asarray(x, dtype=float))
+    guide = anchor * (x / x[0]) ** 2
+    ax.plot(x, guide, color="0.55", lw=0.8, ls=":", zorder=1)
+    ax.annotate(label, (x[1], guide[1]), textcoords="offset points",
+                xytext=(4, -10), fontsize=8, color="0.4")
+
+
+def timestep_accuracy(study, result) -> None:
+    """accuracy.png: the errors against the step of the forward run (both
+    schemes), and of the derivatives of the measurements by both adjoints,
+    in ln eta uniformly (relative, and in metres beside the values') and
+    along the ice pulse, all against the truth from forward runs."""
+    steps, truth = result["steps"], result["truth"]
+    dt = [study.step_kyr(n) for n in steps]
+    fig, axes = plt.subplots(2, 2, figsize=(11.5, 9.0))
+    (ax_f, ax_r), (ax_m, ax_i) = axes
+    dates = list(study.MEASUREMENTS.items())
+    low = {"field": np.inf, "uniform": np.inf, "metres": np.inf,
+           "pulse": np.inf}
+    for (m, date), style in zip(dates, DATE_MARKS):
+        t = truth[m]
+        for scheme, color, label in (("et", FORWARD, "exponential trapezoid"),
+                                     ("be", EULER, "backward Euler")):
+            e = [result["field"][scheme][m][n] for n in steps]
+            ax_f.loglog(dt, e, color=color, ms=4,
+                        label=f"{label}, {date:g} ka", **style)
+            low["field"] = min(low["field"], *e)
+        for adjoint, (color, label) in ADJOINT_STYLE.items():
+            p = result["derivative"][adjoint][m]
+            curves = (
+                (ax_r, "uniform", [abs(p["uniform"][n] / t["uniform"][0] - 1)
+                                   for n in steps], label),
+                (ax_m, "metres", [abs(p["uniform"][n] - t["uniform"][0])
+                                  for n in steps], f"dJ/d ln η, {label}"),
+                (ax_i, "pulse", [abs(p["pulse"][n] / t["pulse"][0] - 1)
+                                 for n in steps], label))
+            for ax, key, e, name in curves:
+                ax.loglog(dt, e, color=color, ms=4,
+                          label=f"{name}, {date:g} ka", **style)
+                low[key] = min(low[key], *e)
+        e = [abs(result["value"][m][n] - t["value"][0]) for n in steps]
+        ax_m.loglog(dt, e, color=FORWARD, ms=4, mfc="white",
+                    label=f"J, the forward run, {date:g} ka", **style)
+    for ax, key in ((ax_f, "field"), (ax_r, "uniform"), (ax_m, "metres"),
+                    (ax_i, "pulse")):
+        second_order(ax, dt, 0.5 * low[key])
+    sizes = ", ".join(
+        f"{abs(truth[m]['uniform'][0] / truth[m]['value'][0]):.0%}"
+        for m, _ in dates)
+    when = ", ".join(f"{d:g}" for _, d in dates)
+    cap = study.PULSE["cap_thickness"]
+    knots = [k for k, _ in study.PULSE["history_kyr_bp"]]
+    titles = (
+        (ax_f, "(a) the forward run: the sea level at the measurement dates",
+         "relative L2 error over the sphere"),
+        (ax_r, "(b) dJ/d ln η, η changed uniformly", "relative error"),
+        (ax_m, "(c) the same in metres, beside the value J's error\n"
+               f"(dJ/d ln η is {sizes} of J at {when} ka)",
+         "error (m; per unit of ln η for dJ/d ln η)"),
+        (ax_i, f"(d) dJ along the ice pulse ({cap['thickness_m']:g} m over "
+               f"a {cap['width_deg']:g}° cap at Hudson Bay,\n"
+               f"{knots[0]:g}–{knots[-1]:g} ka)", "relative error"))
+    for ax, title, ylabel in titles:
+        step_axis(ax, dt, result["tau_min"])
         ax.set_ylabel(ylabel)
         ax.set_title(title, fontsize=10)
         ax.legend(fontsize=7, loc="lower right")
-        ax.grid(True, which="major", color="0.9", lw=0.5)
-        top = ax.secondary_xaxis(
-            "top", functions=(lambda x: x / tau_min, lambda x: x * tau_min))
-        top.set_xticks(dt / tau_min, [f"{d / tau_min:.2g}" for d in dt])
-        top.xaxis.set_minor_locator(matplotlib.ticker.NullLocator())
-        top.set_xlabel(f"step over the shortest Maxwell time "
-                       f"({tau_min:.2f} kyr)", fontsize=8)
-    # the kernels at a 1 kyr step against the reference
-    ax = fig.add_subplot(1, 3, 3)
-    measurement = f"hudson_bay_{study.END:g}ka"
-    found = study.runs_present()
-    one_kyr = int(round((study.START - study.END) / 1.0))
-    r0, k0 = study.kernel(found["discrete"][ref_kernels], measurement)
-    depth = (r0.max() - r0) / 1e3
-    scale = np.max(np.abs(k0))
-    ax.plot(k0 / scale, depth, color="k", lw=2.0,
-            label=f"reference ({study.step_kyr(ref_kernels):g} kyr)")
-    for adjoint in study.ADJOINTS:
-        if one_kyr in found.get(adjoint, {}):
-            _, kk = study.kernel(found[adjoint][one_kyr], measurement)
-            ax.plot(kk / scale, depth, color=styles[adjoint][0],
-                    label=f"{styles[adjoint][1]}, 1 kyr steps")
-    ax.set_ylim(2900.0, 0.0)
-    ax.axvline(0.0, color="0.7", lw=0.5)
-    ax.set_xlabel("viscosity kernel K(r), over the reference's largest")
-    ax.set_ylabel("depth (km)")
-    ax.set_title(f"(c) the kernel of the sea level at {study.END:g} ka",
+    fig.suptitle("sl3d: errors against the step, measured against the truth "
+                 "from forward runs (Richardson-extrapolated in the step; "
+                 "the derivatives\nby central differences in ln η): the "
+                 "synthetic deglaciation 16 to 6 ka on prem8 (1e21 Pa s), "
+                 "lmax 16, J the sea level\nover a 12° cap at Hudson Bay",
                  fontsize=10)
-    ax.legend(fontsize=7, loc="upper right")
-    fig.suptitle("sl3d: time-step accuracy on the radial viscoelastic Earth "
-                 "(prem8, 1e21 Pa s; Maxwell times "
-                 f"{tau_min:.2f} to {tau_max:.2f} kyr), the synthetic "
-                 "deglaciation 16 to 6 ka, Hudson Bay", fontsize=11)
     fig.tight_layout()
     save(fig, "timestep_study", "accuracy")
+
+
+def scaled_entries(study, result) -> list[tuple[float, dict]]:
+    """The decks of the study by viscosity scale, each with its uniform
+    derivative's truth, the kernels' pairings and the stated ratios."""
+    truth = result["truth"]
+    base = {"truth": {m: truth[m]["uniform"] for m in truth},
+            "derivative": {a: {m: result["derivative"][a][m]["uniform"]
+                               for m in truth} for a in study.ADJOINTS},
+            "ratio": result["ratio"], "tau_min": result["tau_min"]}
+    entries = [(1.0, base)] + [(entry["scale"], entry)
+                               for entry in result["scaled"].values()]
+    return sorted(entries, key=lambda item: item[0])
+
+
+def timestep_layers(study, result) -> None:
+    """layers.png: each adjoint's error in the derivative in ln eta layer
+    by layer at three steps, the layers in order of their shortest Maxwell
+    time; and the continuous kernel's error against the step over the
+    shortest relaxation time on the deck with its viscosity scaled."""
+    truth, layers = result["truth"], result["layers"]
+    first = next(iter(study.MEASUREMENTS))
+    layers = sorted((lay for lay in layers
+                     if f"layer{lay.index}" in truth[first]),
+                    key=lambda lay: lay.tau_kyr)
+    if not layers:
+        return
+    surface_r = max(lay.top for lay in study.deck_layers())
+    shown = [n for n in (10, 20, 40) if n in result["steps"]]
+    fig, axes = plt.subplots(1, 3, figsize=(15.5, 5.2))
+    x = np.arange(len(layers))
+    labels = [f"{(surface_r - lay.top) / 1e3:.0f}–"
+              f"{(surface_r - lay.bottom) / 1e3:.0f}\n{lay.tau_kyr:.3f}"
+              for lay in layers]
+    step_marks = dict(zip(shown, ({"marker": "o", "ls": "-"},
+                                  {"marker": "s", "ls": "--"},
+                                  {"marker": "^", "ls": ":"})))
+    for k, (ax, (m, date)) in enumerate(zip(axes[:2],
+                                            study.MEASUREMENTS.items())):
+        for adjoint, (color, label) in ADJOINT_STYLE.items():
+            row = result["derivative"][adjoint][m]
+            for n in shown:
+                e = [100.0 * (row[f"layer{lay.index}"][n]
+                              / truth[m][f"layer{lay.index}"][0] - 1.0)
+                     for lay in layers]
+                ratio = result["ratio"].get(n, np.nan)
+                ax.plot(x, e, color=color, ms=5, **step_marks[n],
+                        label=f"{label}, h = {study.step_kyr(n):g} kyr "
+                              f"({ratio:.2g} τ$_{{min}}$)")
+        ax.axhline(0.0, color="0.6", lw=0.6)
+        ax.set_xticks(x, labels, fontsize=8)
+        ax.set_xlabel("viscous layer: depth (km) and shortest Maxwell time "
+                      "(kyr)")
+        ax.set_ylabel("relative error of dJ/d ln η in the layer (%)")
+        ax.set_title(f"({'ab'[k]}) dJ/d ln η layer by layer, the sea level "
+                     f"at {date:g} ka", fontsize=10)
+        ax.grid(True, which="major", **GRID)
+    lo = min(ax.get_ylim()[0] for ax in axes[:2])
+    hi = max(ax.get_ylim()[1] for ax in axes[:2])
+    for ax in axes[:2]:
+        ax.set_ylim(lo, hi)
+    axes[0].legend(fontsize=7, loc="upper right")
+    ax = axes[2]
+    marks = {0.25: "v", 1.0: "o", 4.0: "^"}
+    low, taus = np.inf, []
+    for scale, entry in scaled_entries(study, result):
+        taus.append(entry.get("tau_min"))
+        for (m, date), style in zip(study.MEASUREMENTS.items(), DATE_MARKS):
+            series = entry["derivative"]["continuous"][m]
+            ns = [n for n in series if n in entry["ratio"]]
+            e = [abs(series[n] / entry["truth"][m][0] - 1.0) for n in ns]
+            low = min(low, *e)
+            ax.loglog([entry["ratio"][n] for n in ns], e, color=CONTINUOUS,
+                      marker=marks.get(scale, "o"), ls=style["ls"], ms=5,
+                      mfc=CONTINUOUS if style["ls"] == "-" else "white",
+                      label=f"η × {scale:g}, {date:g} ka")
+    second_order(ax, [0.29, 0.58, 4.0], 0.5 * low, "(h / τ$_{min}$)$^2$")
+    ax.set_xlabel("step over the shortest relaxation time, h / τ$_{min}$")
+    ax.set_ylabel("relative error of dJ/d ln η (uniform)")
+    ax.set_title("(c) the continuous adjoint against h / τ$_{min}$, the "
+                 "deck's viscosity\nscaled (τ$_{min}$ "
+                 + ", ".join(f"{t:g}" for t in taus if t) + " kyr)",
+                 fontsize=10)
+    ax.grid(True, which="major", **GRID)
+    ax.legend(fontsize=7, loc="lower right", ncol=2)
+    fig.suptitle("sl3d: the continuous adjoint's error is largest in the "
+                 "layers that relax fastest, and is set by the step over the "
+                 "shortest relaxation time (the problem of accuracy.png)",
+                 fontsize=10)
+    fig.tight_layout()
+    save(fig, "timestep_study", "layers")
+
+
+def timestep_convergence(study, result) -> None:
+    """convergence.png: the change of the derivative at each halving of the
+    step beside its error, for both adjoints (the rule: a change a quarter
+    of the one before); and the discrete derivative's error at 6 ka by cap
+    width."""
+    truth, steps = result["truth"], result["steps"]
+    m = f"hudson_bay_{study.END:g}ka"
+    best = truth[m]["uniform"][0]
+    dt = [study.step_kyr(n) for n in steps]
+    widths = result["widths"]
+    fig, axes = plt.subplots(1, 2 if widths else 1,
+                             figsize=(11.5 if widths else 6.0, 4.8),
+                             squeeze=False)
+    axes = axes[0]
+    ax = axes[0]
+    for adjoint, (color, label) in ADJOINT_STYLE.items():
+        p = result["derivative"][adjoint][m]["uniform"]
+        ax.loglog(dt, [abs(p[n] / best - 1.0) for n in steps], color=color,
+                  marker="o", ms=4, label=f"{label}: error at h")
+        changes = [abs(p[a] - p[b]) / abs(best)
+                   for a, b in zip(steps, steps[1:])]
+        ax.loglog(dt[1:], changes, color=color, marker="x", ms=6, ls="--",
+                  label=f"{label}: change from 2h to h")
+        for a, b, c, d in zip(dt[1:], dt[2:], changes, changes[1:]):
+            ax.annotate(f"{c / d:.1f}", (np.sqrt(a * b), np.sqrt(c * d)),
+                        textcoords="offset points",
+                        xytext=(0, 6 if adjoint == "continuous" else -11),
+                        fontsize=7, color=color, ha="center")
+    step_axis(ax, dt, result["tau_min"])
+    ax.set_ylabel("relative to dJ/d ln η")
+    ax.set_title(f"(a) dJ/d ln η at {study.END:g} ka: the change at each "
+                 "halving (numbers:\neach change over the next; 4 at second "
+                 "order) and the error", fontsize=10)
+    ax.legend(fontsize=7, loc="lower right")
+    if widths:
+        ax = axes[1]
+        colors = plt.cm.Blues(np.linspace(0.45, 0.95, len(widths)))
+        wsteps = sorted(next(iter(widths.values()))["pairing"])
+        wdt = [study.step_kyr(n) for n in wsteps]
+        for color, w in zip(colors, sorted(widths)):
+            truth_w = widths[w]["truth"][0]
+            e = [100.0 * (widths[w]["pairing"][n] / truth_w - 1.0)
+                 for n in wsteps]
+            ax.semilogx(wdt, e, color=color, marker="o", ms=4,
+                        label=f"{w}° cap")
+        ax.axhline(0.0, color="0.6", lw=0.6)
+        step_axis(ax, wdt, result["tau_min"])
+        ax.set_ylabel("relative error of dJ/d ln η (%)")
+        ax.set_title("(b) the discrete adjoint's dJ/d ln η at "
+                     f"{study.END:g} ka by the cap's width", fontsize=10)
+        ax.legend(fontsize=7, loc="lower left")
+    fig.suptitle("sl3d: judging a kernel's convergence by halvings of the "
+                 "step\n(the problem of accuracy.png)", fontsize=10)
+    fig.tight_layout()
+    save(fig, "timestep_study", "convergence")
+
+
+def timestep_study() -> None:
+    """The figures of timestep_study.py, from whatever of its runs exist:
+    accuracy.png, convergence.png and (the full study's per-layer and
+    scaled-deck runs) layers.png."""
+    import timestep_study as study
+
+    result = study.results()
+    if result is None or len(result["steps"]) < 3:
+        return
+    timestep_accuracy(study, result)
+    timestep_layers(study, result)
+    timestep_convergence(study, result)
 
 
 # -- seismic sources, and the problem without gravity ------------------------

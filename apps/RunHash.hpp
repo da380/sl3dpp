@@ -63,10 +63,14 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral);
 /// The trajectory store's run hash (io::TrajectoryStore::Description::
 /// hash): AddRunMembers with what checkpoints leave out because a
 /// checkpointed run cannot have it or need not mind it: the seismic
-/// sources whole (a fault file's contents, by its bytes, with its
-/// quadrature, placement and time origin; the onsets, which with the
-/// nodes fix the library's grid, StepGridOf), the static problem's dates of
-/// its terms, the file
+/// sources whole, as given (a point's moment tensor, or the strike, dip,
+/// rake and moment that form one, so that the two spellings of one
+/// source hash apart; a fault file's contents, by its bytes, with its
+/// quadrature, placement and time origin, not its `outside_span`, which
+/// cannot change a run that runs; the onsets, which with the nodes fix
+/// the library's grid, StepGridOf), the static problem's dates of its
+/// terms (a field load's resolved, StaticReadTimeOf, so that its
+/// `date_kyr_bp` and the same `date` in kyr hash alike), the file
 /// inputs' formats, and the memory points the operators carry their
 /// internal variables at. Not the rank count (the store checks the
 /// processes' parts itself), and nothing of the `kernels`, `output`,

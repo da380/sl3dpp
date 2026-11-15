@@ -1,8 +1,8 @@
 /**
  * @file ExampleViscosityKernels3D.cpp
  * @brief 3D sensitivity kernels: what two observations at one site know
- * about the mantle's viscosity, point by point, by the continuous adjoint
- * of the coupled 3D evolution.
+ * about the mantle's viscosity, point by point, by the adjoint of the
+ * coupled 3D evolution (the library's default, the discrete transpose).
  *
  * The forward problem is ExampleModelViscosity's: the 3D viscosity of
  * data/viscosity_log.nc under the state file's deglaciation from 21 ka,

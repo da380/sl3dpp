@@ -7,6 +7,7 @@
 #include <stdexcept>
 #include <string_view>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -184,6 +185,41 @@ PointMaterialDirection AtMemoryPoints(const MemoryPoints& points,
   return {.kappa = at(nodal.kappa), .mu = at(nodal.mu)};
 }
 
+double RelaxationSite::StepRatio(std::span<const double> times,
+                                 double unit) const {
+  if (!std::isfinite(time)) return 0.0;
+  auto longest = 0.0;
+  for (auto n = std::size_t{1}; n < times.size(); ++n) {
+    longest = std::max(longest, times[n] - times[n - 1]);
+  }
+  return longest * unit / time;
+}
+
+RelaxationSite ViscoelasticOperator::ShortestRelaxation() const {
+  const auto& mesh = rheology_->BaseMaterial().Mesh();
+  const auto np = static_cast<std::size_t>(points_->count);
+  const auto radii = points_->Radii(mesh);
+  auto site = RelaxationSite{};
+  auto largest = 0.0;
+  for (auto k = std::size_t{0}; k < pointItau_.size(); ++k) {
+    for (auto i = std::size_t{0}; i < pointItau_[k].size(); ++i) {
+      const auto itau = pointItau_[k][i];
+      // ties to the innermost point, as Viscoelastic3D's
+      const auto shorter =
+          itau > largest || (itau == largest && radii[i] < site.radius);
+      if (!(pointMu_[k][i] > 0.0) || !(itau > 0.0) || !shorter) continue;
+      largest = itau;
+      const auto e = static_cast<int>(i / np);
+      site.branch = k;
+      site.element = e;
+      site.layer = mesh.LayerOf(e);
+      site.radius = radii[i];
+    }
+  }
+  if (largest > 0.0) site.time = 1.0 / largest;
+  return site;
+}
+
 ViscoelasticOperator::~ViscoelasticOperator() = default;
 ViscoelasticOperator::ViscoelasticOperator(ViscoelasticOperator&&) noexcept =
     default;
@@ -212,9 +248,24 @@ ViscoelasticOperator::Degree& ViscoelasticOperator::Deg(int l) const {
   return *found->second;
 }
 
+namespace {
+/// The refusal of a multi-stage scheme where one set of step weights or
+/// one effective operator is asked for at a step of nonzero length.
+void RefuseMultiStage(Scheme scheme, double dt, std::string_view what) {
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(std::format(
+        "Sdirk2 has no {} at a step of nonzero length: it steps in two "
+        "backward Euler stages of length gamma dt (StepRecipe.hpp), each "
+        "BackwardEuler's at that length",
+        what));
+  }
+}
+}  // namespace
+
 const std::vector<ViscoelasticOperator::BranchWeights>&
 ViscoelasticOperator::WeightsOfOrder(Scheme scheme, double dt,
                                      int order) const {
+  RefuseMultiStage(scheme, dt, "the step weights");
   auto& cache = order == 0   ? weights_
                 : order == 1 ? weightDerivatives_
                              : weightSecondDerivatives_;
@@ -348,6 +399,7 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
   if (scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument("no effective operator for ExponentialEuler");
   }
+  RefuseMultiStage(scheme, dt, "one effective material");
   if (options_.memory_points != MemoryPointSet::Gll) {
     throw std::logic_error(
         "with internal variables away from the GLL nodes a step's "
@@ -558,6 +610,21 @@ int ColumnsOf(const ViscoelasticState& state, int l, std::size_t memory,
   return static_cast<int>(memory / perColumn);
 }
 }  // namespace
+
+ViscoelasticState CombinedState(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms) {
+  if (terms.empty()) {
+    throw std::invalid_argument("a combined state takes at least one state");
+  }
+  using Fields = std::map<int, std::vector<double>>;
+  auto fields = std::vector<std::pair<double, const Fields*>>{};
+  for (const auto& [a, state] : terms) fields.emplace_back(a, &state->m);
+  ViscoelasticState out;
+  out.m = CombineFields<Fields>(fields);
+  out.columns = terms.front().second->columns;
+  out.t = terms.front().second->t;
+  return out;
+}
 
 ViscoelasticState ViscoelasticOperator::ZeroState(
     const std::function<int(int)>& ncols) const {
@@ -948,9 +1015,16 @@ ViscoelasticStep ViscoelasticOperator::StartStep(
         "a two-phase step is implicit: ExponentialTrapezoid or "
         "BackwardEuler");
   }
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(
+        "an opened step is one stage, ExponentialTrapezoid or BackwardEuler: "
+        "Sdirk2 is opened stage by stage, each a BackwardEuler step "
+        "(StepRecipe.hpp)");
+  }
   // a zero-length step is the elastic solve with the memory held
   if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
-  return ViscoelasticStep(*this, state, dt, scheme, load, tide);
+  return ViscoelasticStep(*this, state, dt, ZeroLengthScheme(scheme), load,
+                          tide);
 }
 
 std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
@@ -994,6 +1068,23 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
     // the displacement is not consistent with the new state
     return {std::move(out), SolveElastic(state, load, tide)};
   }
+  if (IsMultiStage(scheme)) {
+    // stage by stage, each closed under the channels at its own end time
+    auto solutions = std::map<int, std::vector<double>>{};
+    auto out = StepByRecipe(
+        RecipeOf(scheme, dt), dt, state,
+        [&](const ViscoelasticState& from, const RecipeStage& stage,
+            double length, std::size_t) {
+          auto [next, x] =
+              ViscoelasticStep(*this, from, length, stage.family, load, tide)
+                  .Finish(load, tide);
+          solutions = std::move(x);
+          return std::move(next);
+        },
+        [](std::span<const std::pair<double, const ViscoelasticState*>> terms,
+           const RecipeStage&) { return CombinedState(terms); });
+    return {std::move(out), std::move(solutions)};
+  }
   return ViscoelasticStep(*this, state, dt, scheme, load, tide)
       .Finish(load, tide);
 }
@@ -1006,6 +1097,13 @@ ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
     throw std::invalid_argument(
         "a step inverts for ExponentialTrapezoid or BackwardEuler");
   }
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(
+        "a step of Sdirk2 has no explicit inverse (its first stage's strain "
+        "is not known from the step's end): a reverse sweep keeps every "
+        "node's state (record_stride 1)");
+  }
+  scheme = ZeroLengthScheme(scheme);
   if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   if (!state.HasStrain()) {
     throw std::invalid_argument(
@@ -1120,6 +1218,7 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
   RequireGravity(*this, "the Love numbers of the sea level equation");
   // a zero-length step's solid is the unrelaxed one
   if (dt == 0.0) return ElasticLoveNumbers();
+  RefuseMultiStage(scheme, dt, "one effective solid");
   const auto key = std::pair(static_cast<int>(scheme), dt);
   auto found = effectiveLove_.find(key);
   if (found == effectiveLove_.end()) {

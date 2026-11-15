@@ -35,6 +35,7 @@
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 

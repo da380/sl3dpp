@@ -532,11 +532,16 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
     };
     const auto u = direction(fieldU, [](double s) { return s; }, pU);
     const auto w = direction(fieldW, [](double s) { return (1.0 - s) * (1.0 - s); }, pW);
-    TangentLinearSolver3D tangent(
-        *evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12, .record = true});
+    TangentLinearSolver3D tangent(*evolution,
+                                  {.method = AdjointMethod::Continuous,
+                                   .rtol = 1e-12,
+                                   .coupled_rtol = 1e-12,
+                                   .record = true});
     const auto runU = tangent.Run(times, u.tangent, &trajectory);
     const auto runW = tangent.Run(times, w.tangent, &trajectory);
-    AdjointSolver3D adjoint(*evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    AdjointSolver3D adjoint(*evolution, {.method = AdjointMethod::Continuous,
+                                         .rtol = 1e-12,
+                                         .coupled_rtol = 1e-12});
     const auto first = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto [kernelsU, alongU] =
         adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory);
@@ -580,7 +585,9 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
       const auto movedTrajectory = ForwardTrajectory3D::FromSnapshots(
           movedEv->Run(times, FrozenLoad(scene, times, moved)));
       const auto kernels =
-          AdjointSolver3D(*movedEv, {.rtol = 1e-12, .coupled_rtol = 1e-12})
+          AdjointSolver3D(*movedEv, {.method = AdjointMethod::Continuous,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12})
               .FirstOrderKernels(times, measurements, &movedTrajectory);
       // w's itau direction at the moved operator: -itau(eps) p_w.
       Direction3D wAt = w;

@@ -290,8 +290,13 @@ TEST_F(AppsOverRanks, MigratingSolveUnderATideMatchesOneProcess) {
 }
 
 TEST_F(AppsOverRanks, KernelMatchesOneProcessAndSpillsPerRank) {
+  // The continuous 3-D sweep over the ranks: its kernels the one process's
+  // to the bound of another summation order, and from a store spilled per
+  // rank bitwise those of the run in memory on the same ranks (the
+  // discrete sweep's are KernelsOnTheRunsClockMatchOneProcess's and the
+  // tests after it).
   const auto measurement = std::string{R"(
-      "parameters": ["ice", "viscosity"],
+      "method": "continuous", "parameters": ["ice", "viscosity"],
       "measurements": [
         {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
          "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}])"};
@@ -1320,11 +1325,15 @@ TEST_F(AppsOverRanks, KernelsOfAChangeAtTheStartOverListedDatesMatchOneProcess) 
 
 TEST_F(AppsOverRanks, KernelRefusesOnRanksWhatOneProcessForms) {
   // On several ranks a 3-D kernel run refuses what the sweeps form on one
-  // process: the kernels about a run under seismic sources, and the tide
-  // kernels of the continuous sweep.
+  // process: the kernels about a run under seismic sources (by either
+  // sweep), and the tide kernels of the continuous sweep, the refusal
+  // naming the discrete sweep's, which are distributed.
   const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  // the kernels block's members before its parameters: the method, or
+  // nothing for the default
   const auto config = [&](const std::string& forcing,
-                          const std::string& parameters) {
+                          const std::string& parameters,
+                          const std::string& method) {
     return Write("bad.json", std::format(R"({{
       "problem": "quasi_static",
       "model": {{"deck": "{}/prem8.elastic.deck", "format": "elastic",
@@ -1332,12 +1341,14 @@ TEST_F(AppsOverRanks, KernelRefusesOnRanksWhatOneProcessForms) {
       "discretisation": {{"lmax": 8}},
       "times": {{"unit": "kyr", "end": 1, "nodes": 3}},
       "forcing": {}, "rotation": "none",
-      "kernels": {{"parameters": {},
+      "kernels": {{{}"parameters": {},
         "measurements": [{{"type": "potential_point", "latitude": 60,
                            "longitude": -80}}],
         "output": "k"}}}})",
-                                         data, data, forcing, parameters));
+                                         data, data, forcing, method,
+                                         parameters));
   };
+  constexpr auto kContinuous = R"("method": "continuous", )";
   const auto refused = [&](const fs::path& path, const std::string& member,
                            const std::string& what) {
     try {
@@ -1349,18 +1360,24 @@ TEST_F(AppsOverRanks, KernelRefusesOnRanksWhatOneProcessForms) {
       EXPECT_NE(message.find(what), std::string::npos) << message;
     }
   };
-  refused(config(R"({"seismic": [{"point": {"latitude": 30, "longitude": 40,
-                      "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
-                      "rake_deg": 90, "moment_nm": 1e21}}]})",
-                 R"(["viscosity"])"),
-          "forcing.seismic",
-          "the 3-D kernels about a run under them are formed on one process");
-  refused(config(R"({"tide": [{"degree": 2, "order": 1,
-                                "amplitude_m2_s2": 1.0}]})",
-                 R"(["tide"])"),
-          "kernels.parameters[0]",
+  for (const auto* method : {"", kContinuous}) {
+    refused(config(R"({"seismic": [{"point": {"latitude": 30, "longitude": 40,
+                        "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
+                        "rake_deg": 90, "moment_nm": 1e21}}]})",
+                   R"(["viscosity"])", method),
+            "forcing.seismic",
+            "the 3-D kernels about a run under them are formed on one "
+            "process");
+  }
+  const auto tide = config(R"({"tide": [{"degree": 2, "order": 1,
+                                          "amplitude_m2_s2": 1.0}]})",
+                           R"(["tide"])", kContinuous);
+  refused(tide, "kernels.parameters[0]",
           "asks the tide kernels of the continuous 3-D sweep, which are "
           "formed on one process");
+  refused(tide, "kernels.parameters[0]",
+          "take the discrete sweep's, which are distributed (`kernels.method` "
+          "\"discrete\", the default)");
 }
 
 }  // namespace

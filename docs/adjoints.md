@@ -8,12 +8,15 @@ path is sl3dpp's own. Sections 6a and 6b give the 3D continuous sweep
 and the design of the discrete 3D transpose; §8–§17 the tangent-linear
 runs, the second-order adjoints, the discrete 3D transpose (§12), the
 material derivatives and kernels, and their distribution over radius;
-§21 the kernels in lateral structure about a radial background.
-The overview is [design.md](design.md) §7.*
+§21 the kernels in lateral structure about a radial background; §1a the
+continuous sweep under Sdirk2 and what is not built for it. The overview
+is [design.md](design.md) §7.*
 
-## 1. Both formulations, continuous preferred
+## 1. Both formulations, and when each is accurate
 
-Two adjoints are implemented as options, as pyslfp and AdGIA carry:
+Two adjoints are implemented as options, as pyslfp and AdGIA carry,
+behind one interface and one result type so every gate runs on both
+alike:
 
 - **Discrete**: the exact transpose of the time-stepped forward map.
   Gradient identity to solver tolerance for any perturbation on the
@@ -29,14 +32,110 @@ Two adjoints are implemented as options, as pyslfp and AdGIA carry:
   (eq. 80). It never sees the stepper's internals, so it survives a
   change of scheme — and of discretisation.
 
-**The continuous adjoint is the preferred production path**: the
-discrete adjoint gives a numerically exact gradient, but not
-necessarily for the right problem — the two differ by the
-discretise/transpose commute error, which is large precisely when the
-run is under-resolved. For a good discretisation they agree to
-practical accuracy, so their DISAGREEMENT is a resolution diagnostic
-for the forward calculation itself, and both are kept callable behind
-one interface and one result type so every gate runs on both alike.
+**Accuracy.** Both kernels converge to the same limit, the derivative
+of the problem continuous in time, at second order in the time step,
+layer by layer; they differ in what their error at a given step is.
+
+The discrete kernel is the exact gradient of what the program computes:
+its error is the forward run's own time-discretisation error, at any
+step, rheology and shoreline treatment. Against the kernel it reads
+larger than against the value, a viscosity kernel being the derivative
+of the small part of a value that the viscosity sets (dJ / d ln eta is
+8–16% of J for the measurements below), the part the step's error lives
+in.
+
+The continuous kernel solves a second problem. Each measurement forces
+the adjoint impulsively, and after it the adjoint state relaxes on the
+model's SHORTEST relaxation time, which the forward run, forced
+smoothly, never has to resolve; and the kernel is a time quadrature of
+the product of the forward and adjoint fields, each discretised on its
+own. Under the default scheme — the exponential trapezoid, exact for a
+strain linear across a step, which acts as backward Euler on a mode
+whose relaxation time is short against the step — **the continuous
+kernel is accurate when the steps are short against the shortest
+relaxation time of the layers that matter**, and its error is set by
+their ratio. On the prem8 deck's 1e21 Pa s Maxwell mantle (its
+shortest relaxation time 0.108 kyr; the kernel paired with a uniform
+change of ln eta, for cap means of the sea level 6 and 10 kyr into a
+10 kyr deglaciation, against central differences of forward runs: the
+time-step study, examples/configs/README.md) it is 0.4–0.6% at a ratio
+of 1.2, 1.7–2.5% at 2.3 and 14–24% at 9.3, within about a factor of two of
+that at the same ratio with the viscosity scaled by 4 or by 1/4, and far
+larger in a weak layer (each layer's own kernel the further off the
+shorter its relaxation time: 33–41% at 9.3 in the layer at the base of
+the mantle), while at 9.3 the forward values are good to 0.2–0.5% and
+the discrete kernel to 1.7–4.0%.
+
+So `sl3d kernel` takes the discrete adjoint by default
+(`kernels.method`), and the continuous one where asked, as a full
+route: it is the continuum theory discretised and converges to the same
+kernels. When a continuous kernel is asked for through time, `sl3d
+kernel` states the run's longest step over the shortest relaxation time
+of the model as built, and where that time is (the layer, the depth
+and, under a lateral viscosity, the place;
+`ViscoelasticOperator::ShortestRelaxation`,
+`Viscoelastic3D::ShortestRelaxation`), as information. The library's
+sweeps take either method through `Options::method`, the discrete by
+default as in `sl3d kernel`.
+
+**Agreement of the two kernels is a check of the time discretisation.**
+They discretise the derivative differently and share its limit, so
+where they agree the step resolves both the forward run and the
+adjoint's relaxation; where they disagree the continuous kernel's steps
+are long against the shortest relaxation time, while the discrete
+kernel carries the forward run's error alone. A kernel's convergence is
+judged by halvings of the step that each change it about a quarter as
+much as the one before (second order), not by one small change: errors
+of opposite signs (in a cap's degrees, say) can cancel at coarse steps.
+
+## 1a. The continuous sweep under Sdirk2
+
+Under `Scheme::Sdirk2` (design.md §5: two backward Euler stages of
+length γ Δt, second order and damped) the continuous sweep steps the
+adjoint state through the reversed step by the same stages
+(`StepByRecipe`), each closed by the memory-only adjoint equilibrium,
+the toroidal adjoint beside it under the same recipe, in 1D and 3D; the
+jumps at the measurements, the equilibria and the kernels' node
+quadrature are the one-stage schemes' unchanged. About a migrating
+trajectory every stage of a reversed step closes under the ocean
+function of the step's end node, the trajectory holding the nodes'
+alone. On the same ramp as the forward gates at steps 9.3 times the
+shortest relaxation time, its viscosity kernel is 1.4% off against the
+trapezoid's continuous 3.4%, and converges at second order to the
+derivative central differences of the forward runs give (0.32% and
+0.077% at the next two halvings, TestAdjoint); its moment kernels, where
+the adjoint's relaxation after a measurement matters most, are 15 to 30
+times closer than the trapezoid's at the same steps. On the time-step
+study's problem (§1, examples/configs/README.md) at 1 kyr, 9.3 times
+the shortest relaxation time, its continuous kernel is +1.9 / −1.0% off
+uniformly (the trapezoid's +14 / +24%), 4.6 / 1.7% in its worst layer
+(33 / 41%) and −5.2 / −4.4% along the ice pulse (+25 / +41%), falling
+at second order.
+
+The kernels stay the node quadrature of the forward and adjoint fields.
+A quadrature consistent with the stages would integrate the product of
+the two sweeps' within-step trajectories, each given by its stages (for
+the stiffly accurate Sdirk2 the stage values and the step's end define
+its continuous extension); the forward's stages fall at tⁿ + γ Δt and
+the adjoint's at tⁿ⁺¹ − γ Δt, so it needs both sweeps' stage states and
+each interpolated to the other's times. It is not built.
+
+Not built under Sdirk2, each refused by name (`detail::
+RefuseDerivativeOfMultiStage`): the discrete sweep, the tangent-linear
+runs (1D and 3D) and the second-order sweeps. Their exact form is the
+derivative of the stepped map, which runs through each step's two stages:
+the transpose runs the stages backwards, each a backward Euler stage's
+transpose (the trapezoid code's own) plus the transposed constant
+combination, and reads the first stage's state, which the trajectory
+(the nodes' states) does not hold — kept by the forward run, one more
+state a step, or rebuilt by repeating the step's first stage from the
+node's state under the stage's recorded forcing; the tangent and the
+second-order runs drive each stage with the weights' derivatives at γ Δt
+in the same way. A reverse sweep about an Sdirk2 run also reads every
+node's state (a recording with gaps is refused): the gaps are rebuilt by
+exact backward steps, which a step of Sdirk2 has none of (its first
+stage's strain is not known from the step's end), or forward from the
+kept node under the recorded node loads, which are not its stages'.
 
 ## 2. Scope
 
@@ -220,9 +319,9 @@ dual by the dot product; densities/rates are per unit SLE time.
 
 ## 6. The 3D path
 
-- **Continuous first** (and preferred): the adjoint equations' form is
-  again the forward's, so the reversed sweep reuses the coupled
-  machinery of Evolution3D — zero-load reversed stepping with the
+- **Continuous**: the adjoint equations' form is again the forward's,
+  so the reversed sweep reuses the coupled machinery of Evolution3D —
+  zero-load reversed stepping with the
   within-step lateral iteration intact, jumps at observations through
   the unrelaxed 3D solve, the lateral term entering the fixed point
   exactly as forward. The viscosity kernel is the 3D form of Yu et al.
@@ -241,14 +340,14 @@ dual by the dot product; densities/rates are per unit SLE time.
   transpose of the converged within-step fixed point
   solved by the same Anderson-mixed iteration on the transposed
   system (as the SLE adjoint is). This is the machine-precision gate
-  for the 3D machinery, and an option of the sweeps beside the
-  continuous one (`AdjointMethod::Discrete`; in `sl3d kernel`,
-  `kernels.method`: `"discrete"`).
+  for the 3D machinery, and the sweeps' default beside the continuous
+  one (`AdjointMethod::Discrete`, `Options::method`'s default, as of
+  `kernels.method` in `sl3d kernel`).
 - Gate chain: zero-lateral limit — the 3D sweeps must reproduce the 1D
   sweeps' kernels (machine precision for the discrete, tight for the
   continuous); dot-product identity for the discrete 3D transpose; FD
   checks on the grid viscosity kernel; discrete-vs-continuous ladder
-  over lateral contrast (the resolution diagnostic in action — a
+  over lateral contrast (the check of the time discretisation, §1 — a
   research measurement alongside `lateral-coupling.md` §5a).
 
 ## 6a. The 3D continuous sweep as built
@@ -624,7 +723,8 @@ machine-grade Taylor test — |J(δ + h p) − J − h⟨K_δ, p⟩| falls at se
 order (rate in 1.9–2.1) at every h from 0.2 to 0.025, Richardson on
 central differences landing at 1e-7; and the continuous sweep's gap to
 the discrete one falling by > 2.5 as the steps halve, in the loads and
-in the log-viscosity kernel (the resolution diagnostic in 3D).
+in the log-viscosity kernel (the check of the time discretisation, §1,
+in 3D).
 
 ## 13. Material derivatives and kernels
 

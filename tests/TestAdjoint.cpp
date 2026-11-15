@@ -3,20 +3,29 @@
 // the baseline, the continuous adjoint's agreement with the discrete and
 // its convergence under step refinement, and the cross-validation of the
 // delta amplitudes — the structure of pyslfp's
-// test_continuous_adjoint_against_the_discrete.
+// test_continuous_adjoint_against_the_discrete; the continuous sweep
+// stepped by Sdirk2's stages against finite differences of its forward
+// runs, and the derivatives not built for it refused.
 
-#include <cstdlib>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <array>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <numbers>
 #include <optional>
 #include <random>
 #include <sstream>
+#include <string>
+#include <string_view>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -25,6 +34,7 @@
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/PointSource.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
@@ -1209,3 +1219,389 @@ TEST(Adjoint, MaterialGradientIsTheTransposeOfTheVariation) {
   }
 }
 
+namespace {
+
+/// The kernels' scene at a lower degree: prem8 at lmax 8, a Maxwell mantle
+/// of 1e21 Pa s, the analytic test state, a cap's load ramped on over the
+/// first half of 8 kyr and held, measured by the sea level under a cap at
+/// the kink and, at half the weight, at the end.
+struct RampScene {
+  static constexpr int lmax = 8;
+  EarthModel model;
+  Material material;
+  Rheology rheology;
+  GRDSolver solver;
+  GRDSolver::State state;
+  std::vector<double> load;
+  std::vector<double> cap;
+
+  static RampScene Make() {
+    auto deck =
+        Deck::Read(
+            std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
+            DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
+                       0))
+            .value();
+    auto model = EarthModel::FromDeck(deck).value();
+    auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
+    auto material = Material::Create(model, mesh).value();
+    const auto& scales = model.ModelScales();
+    auto viscosity = std::map<std::size_t, RadialValue>{};
+    const auto b = model.DimensionlessView().Boundaries();
+    for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
+      if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
+          b[i + 1] <= 6.1511e6 / scales.Length()) {
+        viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
+      }
+    }
+    auto rheology = Rheology::Maxwell(material, viscosity).value();
+    ViscoelasticOperator op(rheology, lmax);
+    GRDSolver solver(SurfaceGrid(lmax), op.ElasticLoveNumbers(),
+                     SeaLevelParameters{});
+    Fingerprint fingerprint(lmax, op.ElasticLoveNumbers());
+    fingerprint.SetAnalyticTestState(0.0);
+    const auto length = solver.SolverScales().Length();
+    auto toNd = [&](std::vector<double> si) {
+      for (auto& v : si) v /= length;
+      return si;
+    };
+    auto ice = toNd(fingerprint.IceThickness());
+    auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+    auto load = std::vector<double>(ice.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] =
+          solver.IceDensity() * (1.0 - state.oceanFunction[i]) * 0.3 * ice[i];
+    }
+    auto cap = solver.Grid().FromFunction(
+        [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+    return RampScene{std::move(model),    std::move(material),
+                     std::move(rheology), std::move(solver),
+                     std::move(state),    std::move(load),
+                     std::move(cap)};
+  }
+
+  [[nodiscard]] double Span() const {
+    return 8.0 * 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  }
+  [[nodiscard]] std::vector<double> Times(int n) const {
+    auto out = std::vector<double>{};
+    for (auto k = 0; k <= n; ++k) out.push_back(Span() * k / n);
+    return out;
+  }
+  [[nodiscard]] std::function<std::vector<double>(double)> Direct() const {
+    return [this](double t) {
+      auto out = load;
+      const auto f = std::min(t / (0.5 * Span()), 1.0);
+      for (auto& v : out) v *= f;
+      return out;
+    };
+  }
+  /// The measurements on an n-step grid, and the objective they define.
+  [[nodiscard]] std::map<std::size_t, Measurement> Measurements(int n) const {
+    const auto a2 = 1.0 / (solver.Radius() * solver.Radius());
+    auto out = std::map<std::size_t, Measurement>{};
+    for (const auto [node, weight] :
+         {std::pair{static_cast<std::size_t>(n / 2), 1.0},
+          std::pair{static_cast<std::size_t>(n), 0.5}}) {
+      out[node].relativeSeaLevelDual = cap;
+      for (auto& v : out[node].relativeSeaLevelDual) v *= weight * a2;
+    }
+    return out;
+  }
+  [[nodiscard]] double Objective(
+      const std::vector<Evolution::Snapshot>& snapshots, int n) const {
+    auto f = std::vector<double>(cap.size());
+    for (auto i = std::size_t{0}; i < f.size(); ++i) {
+      f[i] = cap[i] * (snapshots[n / 2].relativeSeaLevelChange[i] +
+                       0.5 * snapshots[n].relativeSeaLevelChange[i]);
+    }
+    return solver.Grid().Integrate(f);
+  }
+};
+
+}  // namespace
+
+TEST(Adjoint, Sdirk2ContinuousKernelAgainstFiniteDifferences) {
+  // The continuous viscosity kernel stepped by Sdirk2's stages (the
+  // reversed sweep's), paired with a smooth itau direction, against the
+  // derivative of the objective: central differences of Sdirk2 forward
+  // runs at 128 and 256 steps, Richardson-extrapolated, which the
+  // trapezoid's runs extrapolate to as well. From steps 9.3 times the
+  // shortest relaxation time down, Sdirk2's continuous derivative
+  // converges to it at second order, and at the longest steps its error
+  // is under half the trapezoid's continuous kernel's.
+  const auto scene = RampScene::Make();
+  const auto& mesh = scene.material.Mesh();
+  const auto& base = scene.rheology.BranchAt(0);
+  auto top = 0.0;
+  for (auto v : base.itau) top = std::max(top, v);
+  auto ditau = std::vector<double>(base.itau.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      if (base.itau[i] > 0.0) {
+        const auto r = mesh.Radius(e, q);
+        ditau[i] = (0.3 + 0.7 * r * r) * top;
+      }
+    }
+  }
+  auto objective = [&](Scheme scheme, int n, double eps) {
+    auto branch = base;
+    for (auto i = std::size_t{0}; i < branch.itau.size(); ++i) {
+      branch.itau[i] += eps * ditau[i];
+    }
+    const auto rheology =
+        Rheology::Create(scene.material, {std::move(branch)}).value();
+    ViscoelasticOperator op(rheology, RampScene::lmax);
+    Evolution evolution(op, scene.solver, scene.state,
+                        {.scheme = scheme, .rtol = 1e-13});
+    return scene.Objective(evolution.Run(scene.Times(n), scene.Direct()), n);
+  };
+  auto differences = [&](Scheme scheme) {
+    constexpr auto eps = 1e-3;
+    auto fd = std::array<double, 2>{};
+    for (auto k = 0; k < 2; ++k) {
+      const auto n = 128 << k;
+      fd[k] = (objective(scheme, n, eps) - objective(scheme, n, -eps)) /
+              (2.0 * eps);
+    }
+    return fd[1] + (fd[1] - fd[0]) / 3.0;
+  };
+  const ViscoelasticOperator op(scene.rheology, RampScene::lmax);
+  auto kernel = [&](Scheme scheme, int n) {
+    Evolution evolution(op, scene.solver, scene.state,
+                        {.scheme = scheme, .rtol = 1e-13, .record_stride = 1});
+    const auto times = scene.Times(n);
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, scene.Direct()));
+    const AdjointSolver adjoint(
+        evolution, {.method = AdjointMethod::Continuous, .rtol = 1e-13});
+    const auto kernels =
+        adjoint.FirstOrderKernels(times, scene.Measurements(n), &trajectory);
+    return VolumePairing(mesh, kernels.itauKernel[0], ditau);
+  };
+  const auto truth = differences(Scheme::Sdirk2);
+  const auto trapezoidTruth = differences(Scheme::ExponentialTrapezoid);
+  auto damped = std::map<int, double>{};
+  for (const auto n : {8, 16, 32}) {
+    damped[n] = (kernel(Scheme::Sdirk2, n) - truth) / truth;
+  }
+  const auto trapezoid =
+      (kernel(Scheme::ExponentialTrapezoid, 8) - truth) / truth;
+  const auto extrapolated = (damped[32] + (damped[32] - damped[16]) / 3.0);
+  std::cout << std::format(
+      "[sdirk2 continuous kernel] truths' gap {:.3e}; errors {:+.3e} {:+.3e} "
+      "{:+.3e}, Richardson {:+.3e}; the trapezoid's at 8 steps {:+.3e}\n",
+      (trapezoidTruth - truth) / truth, damped[8], damped[16], damped[32],
+      extrapolated, trapezoid);
+  // measured: the truths 5e-9 apart; errors +1.37, +0.32, +0.077 % and the
+  // Richardson value -4e-5; the trapezoid's continuous kernel +3.4 %
+  EXPECT_LT(std::abs(trapezoidTruth - truth), 1e-6 * std::abs(truth));
+  for (const auto n : {8, 16}) {
+    const auto order = std::log2(damped[n] / damped[2 * n]);
+    EXPECT_GT(order, 1.9) << n;
+    EXPECT_LT(order, 2.3) << n;
+  }
+  EXPECT_LT(std::abs(extrapolated), 1e-4);
+  EXPECT_LT(std::abs(damped[8]), 0.5 * std::abs(trapezoid));
+}
+
+TEST(Adjoint, Sdirk2MomentKernelsAgainstTheForwardRun) {
+  // The continuous sweep's kernels in point sources' moment tensors under
+  // Sdirk2: the adjoint displacement's strain at the sources, the toroidal
+  // adjoint stepped by the same stages beside the spheroidal. The run is
+  // linear in its sources, so the objective of a run under them alone is
+  // the derivative along them: Sdirk2's run at 128 steps, against which
+  // the kernels' pairing converges as the steps are halved, many times
+  // closer than the trapezoid's continuous kernels at the same steps; with
+  // an ocean and the rotational feedback and without either, measured in
+  // the sea level, the displacement and the tangential and toroidal
+  // potentials.
+  const auto scene = RampScene::Make();
+  const auto& grid = scene.solver.Grid();
+  const auto& sle = scene.solver.SolverScales();
+  const auto span = scene.Span();
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e21 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  const auto points =
+      std::vector<BodyPoint>{{.radius = surface - 400e3 / sle.Length(),
+                              .colatitude = 1.1,
+                              .longitude = 4.0},
+                             {.radius = surface - 800e3 / sle.Length(),
+                              .colatitude = 2.2,
+                              .longitude = 1.0}};
+  const auto patterns = std::vector<SphericalTensor>{{.rr = 0.9 * unit,
+                                                      .tt = -0.2 * unit,
+                                                      .pp = -0.7 * unit,
+                                                      .rt = 0.3 * unit,
+                                                      .rp = -0.7 * unit,
+                                                      .tp = 0.6 * unit},
+                                                     {.rr = -0.4 * unit,
+                                                      .tt = 0.8 * unit,
+                                                      .pp = -0.4 * unit,
+                                                      .rt = 0.5 * unit,
+                                                      .rp = 0.1 * unit,
+                                                      .tp = -0.3 * unit}};
+  const auto shape = [&](double t) {
+    return std::sin(0.5 * std::numbers::pi * t / span) + 0.3;
+  };
+  const auto sources = [&](double t) {
+    auto at = std::vector<PointSource>{};
+    for (auto p = std::size_t{0}; p < points.size(); ++p) {
+      auto M = patterns[p];
+      for (auto* c : {&M.rr, &M.tt, &M.pp, &M.rt, &M.rp, &M.tp}) *c *= shape(t);
+      at.push_back({.at = points[p], .moment = M});
+    }
+    return at;
+  };
+  const auto a2 = 1.0 / (scene.solver.Radius() * scene.solver.Radius());
+  auto field = [&](double colatitude, double longitude, double amplitude) {
+    return grid.FromFunction([&](double t, double p) {
+      return amplitude * a2 * Cap(t, p, colatitude, longitude, 0.6);
+    });
+  };
+  const auto gSea = field(1.2, 0.8, 1.0), gU = field(2.0, 3.0, 0.5),
+             gV = field(0.7, 5.0, 0.6), gW = field(1.6, 2.2, 0.8);
+  auto measurementsOf = [&](int n) {
+    auto out = std::map<std::size_t, Measurement>{};
+    out[n / 2].relativeSeaLevelDual = gSea;
+    out[n / 2].toroidalPotentialDual = gW;
+    out[n].displacementDual = gU;
+    out[n].tangentialPotentialDual = gV;
+    out[n].toroidalPotentialDual = gW;
+    return out;
+  };
+  auto objective = [&](const std::vector<Evolution::Snapshot>& snapshots,
+                       const std::map<std::size_t, Measurement>& measurements) {
+    auto total = 0.0;
+    auto add = [&](const std::vector<double>& dual,
+                   const std::vector<double>& x) {
+      if (dual.empty() || x.empty()) return;
+      auto f = std::vector<double>(x.size());
+      for (auto i = std::size_t{0}; i < f.size(); ++i) f[i] = dual[i] * x[i];
+      total += grid.Integrate(f) / a2;
+    };
+    for (const auto& [node, m] : measurements) {
+      const auto& snap = snapshots[node];
+      add(m.relativeSeaLevelDual, snap.relativeSeaLevelChange);
+      add(m.displacementDual, snap.displacement);
+      add(m.tangentialPotentialDual, snap.tangentialPotential);
+      add(m.toroidalPotentialDual, snap.toroidalPotential);
+    }
+    return total;
+  };
+  const ViscoelasticOperator op(scene.rheology, RampScene::lmax);
+  const auto dry = scene.solver.NoOceanState();
+  for (const auto* background : {&scene.state, &dry}) {
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean");
+    Evolution evolution(
+        op, scene.solver, *background,
+        {.scheme = Scheme::Sdirk2,
+         .rotation = background == &dry ? RotationalFeedback::None
+                                        : RotationalFeedback::Full,
+         .rtol = 1e-12});
+    const auto truth = objective(
+        evolution.Run(scene.Times(128), Evolution::Forcing{.sources = sources}),
+        measurementsOf(128));
+    auto gapOf = [&](Scheme scheme, int n) {
+      Evolution stepped(
+          op, scene.solver, *background,
+          {.scheme = scheme,
+           .rotation = background == &dry ? RotationalFeedback::None
+                                          : RotationalFeedback::Full,
+           .rtol = 1e-12});
+      const auto times = scene.Times(n);
+      const auto kernels =
+          AdjointSolver(stepped, {.method = AdjointMethod::Continuous,
+                                  .rtol = 1e-12,
+                                  .moment_points = points})
+              .FirstOrderKernels(times, measurementsOf(n));
+      auto paired = 0.0;
+      for (auto k = std::size_t{0}; k < times.size(); ++k) {
+        const auto at = sources(times[k]);
+        for (auto p = std::size_t{0}; p < points.size(); ++p) {
+          paired += kernels.momentKernels[k][p].Contract(at[p].moment);
+        }
+      }
+      return std::abs(paired - truth) / std::abs(truth);
+    };
+    auto gaps = std::vector<double>{};
+    for (const auto n : {8, 16, 32}) gaps.push_back(gapOf(Scheme::Sdirk2, n));
+    const auto trapezoid = gapOf(Scheme::ExponentialTrapezoid, 16);
+    std::cout << std::format(
+        "[sdirk2 moment kernels] {}: {:.3e} {:.3e} {:.3e}; the trapezoid's at "
+        "16 steps {:.3e}\n",
+        label, gaps[0], gaps[1], gaps[2], trapezoid);
+    // measured: with an ocean 1.06e-2, 2.47e-3, 5.96e-4 (the trapezoid's
+    // continuous kernels 3.8e-2 at 16 steps); without one 1.05e-2, 3.62e-3,
+    // 1.04e-3 (1.1e-1), Sdirk2's ratio rising to 3.7 at 64 steps
+    EXPECT_LT(gaps[2], 2e-3) << label;
+    EXPECT_GT(gaps[0] / gaps[1], 2.5) << label;
+    EXPECT_GT(gaps[1] / gaps[2], 2.5) << label;
+    EXPECT_LT(gaps[1], trapezoid / 8.0) << label;
+  }
+}
+
+TEST(Adjoint, Sdirk2RefusesTheDerivativesNotBuilt) {
+  // About a run under Sdirk2 the discrete sweep, the second-order sweep and
+  // the tangent-linear run are not built (their exact derivatives of the
+  // stepped map need each step's stage states), and the continuous sweep
+  // reads every node's state: each refused by name.
+  const auto scene = RampScene::Make();
+  const ViscoelasticOperator op(scene.rheology, RampScene::lmax);
+  const auto times = scene.Times(4);
+  const auto measurements = scene.Measurements(4);
+  auto named = [](const std::function<void()>& call, std::string_view what) {
+    try {
+      call();
+      ADD_FAILURE() << what << " ran under Sdirk2";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find("Sdirk2"), std::string::npos)
+          << what << ": " << error.what();
+    }
+  };
+  Evolution evolution(
+      op, scene.solver, scene.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto snapshots = evolution.Run(times, scene.Direct());
+  const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
+  named(
+      [&] {
+        const AdjointSolver adjoint(evolution,
+                                    {.method = AdjointMethod::Discrete});
+        static_cast<void>(
+            adjoint.FirstOrderKernels(times, measurements, &trajectory));
+      },
+      "the discrete sweep");
+  named(
+      [&] {
+        const AdjointSolver adjoint(evolution,
+                                    {.method = AdjointMethod::Continuous});
+        static_cast<void>(adjoint.SecondOrderKernels(
+            times, measurements, snapshots, {}, trajectory));
+      },
+      "the second-order sweep");
+  named([&] { const TangentLinearSolver tangent(evolution); },
+        "the tangent-linear run");
+  Evolution strided(
+      op, scene.solver, scene.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 2});
+  const auto gapped =
+      ForwardTrajectory::FromSnapshots(strided.Run(times, scene.Direct()));
+  named(
+      [&] {
+        const AdjointSolver adjoint(strided,
+                                    {.method = AdjointMethod::Continuous});
+        static_cast<void>(
+            adjoint.FirstOrderKernels(times, measurements, &gapped));
+      },
+      "the continuous sweep about a gapped trajectory");
+  // the continuous sweep about the whole trajectory, and without one
+  const AdjointSolver adjoint(evolution, {.method = AdjointMethod::Continuous});
+  EXPECT_FALSE(adjoint.FirstOrderKernels(times, measurements, &trajectory)
+                   .itauKernel.empty());
+  EXPECT_TRUE(
+      adjoint.FirstOrderKernels(times, measurements).itauKernel.empty());
+}

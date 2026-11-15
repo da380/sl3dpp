@@ -642,7 +642,8 @@ SolverBlock ReadSolverBlock(const Json& block, int lmax) {
     out.scheme =
         Choice<Scheme>(block.At("scheme"),
                        {{"exponential_trapezoid", Scheme::ExponentialTrapezoid},
-                        {"backward_euler", Scheme::BackwardEuler}});
+                        {"backward_euler", Scheme::BackwardEuler},
+                        {"sdirk2", Scheme::Sdirk2}});
   }
   if (Has(block, "step")) {
     using StepSolver = Viscoelastic3D::Options::StepSolver;

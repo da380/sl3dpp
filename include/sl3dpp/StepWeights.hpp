@@ -29,6 +29,28 @@
  * (the update at -dt with the start and end strains swapped), which a
  * checkpointing reverse sweep uses; dissipation then amplifies roundoff
  * by exp(|h|).
+ *
+ * Every scheme here but one steps in one stage with these weights. The
+ * exception, Sdirk2, steps in two backward Euler stages (StepRecipe.hpp);
+ * it has no weights of its own, and what takes a scheme's weights or its
+ * one effective operator refuses it at a step of nonzero length.
+ *
+ * Why two stages. Where a memory point's h is large, the trapezoid's e
+ * and alpha vanish and its update is backward Euler's, m+ = d+: the point
+ * is slaved to the end strain. The slow, buoyancy-driven modes that carry
+ * the observables involve such points (a weak layer, a fast branch), and
+ * at steps long against their relaxation times the trapezoid then decays
+ * those modes at backward Euler's rate, first order, most visibly after
+ * an abrupt change of the forcing (a seismic onset, an unloading, the
+ * continuous adjoint's impulse at a measurement). No one-solve scheme of
+ * this form is both second order on those modes and damped at the stiff
+ * points (second order forces e -> -1 there, an undamped sawtooth); two
+ * implicit stages are: Sdirk2 is second order, L-stable and stiffly
+ * accurate, at two solves of one effective operator a step. It is the
+ * scheme for steps long against the shortest relaxation time (the forward
+ * run after abrupt forcing, the continuous kernels); at steps short
+ * against it the trapezoid, exact for a strain linear in a step, is the
+ * closer at half the cost (docs/design.md §5).
  */
 
 #include <cmath>
@@ -36,8 +58,19 @@
 
 namespace sl3dpp {
 
-/// The implicit/exponential time-stepping schemes.
-enum class Scheme { ExponentialTrapezoid, BackwardEuler, ExponentialEuler };
+/// The time-stepping schemes. The first three are one-stage schemes with
+/// the weights below: the exponential trapezoid (second order, the
+/// default), backward Euler (first order) and the exponential Euler
+/// (explicit in the strain). Sdirk2 is Alexander's (1977) two-stage
+/// singly diagonally implicit Runge-Kutta scheme, gamma = 1 - 1/sqrt 2:
+/// second order, L-stable and stiffly accurate, its stages backward Euler
+/// steps of length gamma dt (StepRecipe.hpp).
+enum class Scheme {
+  ExponentialTrapezoid,
+  BackwardEuler,
+  ExponentialEuler,
+  Sdirk2
+};
 
 /// The (e, alpha, beta) of one node and branch; also carries the
 /// h-derivatives when asked for them.

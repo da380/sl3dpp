@@ -59,9 +59,9 @@ for i, (k, name) in enumerate(names):
     mark_sites(ax, gauge, ["C3"])
     fig.colorbar(mesh, ax=ax, shrink=0.7)
 
-# The radial viscosity kernels: the continuous adjoint (the preferred
-# path) against the exact discrete transpose — their agreement is the
-# resolution diagnostic.
+# The radial viscosity kernels: the continuous adjoint against the exact
+# discrete transpose — their agreement is a check of the time
+# discretisation.
 ax = fig.add_subplot(2, 3, 6)
 for tag, style in (("continuous", "-"), ("discrete", "--")):
     r = ex.column("viscosity_kernel_" + tag, "r_km")

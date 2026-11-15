@@ -5,6 +5,7 @@
 #include <span>
 #include <stdexcept>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -254,6 +255,19 @@ void ToroidalViscoelastic::SetStrain(State& state,
   }
 }
 
+ToroidalViscoelastic::State ToroidalViscoelastic::CombinedState(
+    std::span<const std::pair<double, const State*>> terms) {
+  if (terms.empty()) {
+    throw std::invalid_argument("a combined state takes at least one state");
+  }
+  auto fields = std::vector<std::pair<double, const Fields*>>{};
+  for (const auto& [a, state] : terms) fields.emplace_back(a, &state->m);
+  State out;
+  out.t = terms.front().second->t;
+  out.m = CombineFields<Fields>(fields);
+  return out;
+}
+
 std::pair<ToroidalViscoelastic::State, ToroidalViscoelastic::Fields>
 ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
                            const Fields& force, const Fields* memory) const {
@@ -262,6 +276,13 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
         "the toroidal step is implicit: ExponentialTrapezoid or "
         "BackwardEuler");
   }
+  if (IsMultiStage(scheme) && dt != 0.0) {
+    throw std::invalid_argument(
+        "a toroidal step is one stage under one force: Sdirk2 is stepped "
+        "stage by stage, each a BackwardEuler step under the force at its "
+        "time (StepRecipe.hpp)");
+  }
+  scheme = ZeroLengthScheme(scheme);
   // a zero-length step is the elastic solve with the memory held
   if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
   const auto& op = *op_;

@@ -26,7 +26,9 @@
  * Steppers: backward Euler, exponential Euler, and the exponential
  * trapezoid (default; second order, no stability limit, one solve per
  * step), with the weight algebra of StepWeights.hpp and one factorised
- * banded system per degree and (scheme, dt) flavour, cached and reused.
+ * banded system per degree and (scheme, dt) flavour, cached and reused;
+ * and Sdirk2 (second order, L-stable, two solves per step), stepped as
+ * two backward Euler stages of one flavour (StepRecipe.hpp).
  * Each degree's columns are independent right-hand sides: one column for
  * a Love-number history, 2 (l + 1) for the full set of spherical-harmonic
  * orders (the real and imaginary blocks of the m >= 0 coefficients).
@@ -45,12 +47,15 @@
  */
 
 #include <complex>
+#include <cstddef>
 #include <functional>
+#include <limits>
 #include <list>
 #include <map>
 #include <memory>
 #include <optional>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/DegreeOperator.hpp"
@@ -87,6 +92,13 @@ struct ViscoelasticState {
   void Invalidate() { strain.clear(); }
 };
 
+/// The state whose internal variables are sum_j a_j m_j over the terms
+/// (a_j, state_j), states of one layout: a multi-stage step's memory state
+/// (StepRecipe.hpp). It takes the first state's columns and time and has
+/// no strain cache.
+[[nodiscard]] ViscoelasticState CombinedState(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms);
+
 class ViscoelasticStep;
 
 /// A direction in the material for the time-stepped problem: the
@@ -109,6 +121,45 @@ struct PointMaterialDirection {
 /// element's basis (the nodal arrays themselves at the GLL points).
 [[nodiscard]] PointMaterialDirection AtMemoryPoints(
     const MemoryPoints& points, const MaterialDirection& nodal);
+
+/// The shortest relaxation time of an operator's rheology as the operator
+/// steps it (ViscoelasticOperator::ShortestRelaxation, Viscoelastic3D::
+/// ShortestRelaxation), and where it is: 1 / itau of the branch at the
+/// memory point where it is largest over every branch and every point the
+/// branch is active at (and, in 3D, every point of the memory node's
+/// angular grid, the lateral viscosity sampled), with the branch, the
+/// point's element, its layer and radius; of equal times, the innermost
+/// point's (in 3D then the least colatitude, then the least longitude),
+/// the earlier branch's at one point. Non-dimensional, in the
+/// operator's (material) time and length units; nothing relaxing, `time`
+/// infinite and the rest zero.
+///
+/// It is the scale the continuous adjoint's steps are held to: after each
+/// measurement the continuous adjoint state relaxes on it, and the
+/// continuous kernels are accurate once the steps are short against it
+/// (docs/adjoints.md §1). StepRatio gives a run's longest step against it.
+struct RelaxationSite {
+  double time = std::numeric_limits<double>::infinity();
+  std::size_t branch = 0;
+  int element = 0;
+  int layer = 0;
+  double radius = 0.0;
+  /// In 3D, whether the time varies over the memory node's angular grid
+  /// (a lateral viscosity), and then the colatitude and longitude
+  /// (radians) of the grid point where it is shortest; false and zero
+  /// where it is uniform there, and in 1D.
+  bool lateral = false;
+  double colatitude = 0.0;
+  double longitude = 0.0;
+
+  /// The longest step of an increasing time grid over `time`, the grid's
+  /// times multiplied by `unit` being in the operator's time unit (for
+  /// the sea level solver's grid, the solver's time scale over the
+  /// material's). A repeated node is a step of zero length. Zero when
+  /// nothing relaxes or the grid has fewer than two nodes.
+  [[nodiscard]] double StepRatio(std::span<const double> times,
+                                 double unit = 1.0) const;
+};
 
 class ViscoelasticOperator {
  public:
@@ -231,7 +282,9 @@ class ViscoelasticOperator {
   /// start-of-step solutions). dt >= 0: a step of zero length is, by every
   /// scheme, the elastic solve with the memory held (StepWeights.hpp at
   /// h = 0; its flavour's systems, unit responses and Love numbers the
-  /// unrelaxed ones), what a jump of the forcing takes.
+  /// unrelaxed ones), what a jump of the forcing takes. Under Sdirk2 the
+  /// step is its two backward Euler stages (StepRecipe.hpp), each closed
+  /// under the channels at its own end time.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
   Step(const ViscoelasticState& state, double dt,
        Scheme scheme = Scheme::ExponentialTrapezoid,
@@ -243,6 +296,8 @@ class ViscoelasticOperator {
   /// state must carry its strain cache. Dissipation runs the other way,
   /// so roundoff is amplified by exp(h) per branch and node; a
   /// checkpointing driver budgets the accumulated h between stores.
+  /// Sdirk2's step has none (its first stage's strain is not known from
+  /// the step's end), and is refused but at dt = 0.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
   StepBack(const ViscoelasticState& state, double dt,
            Scheme scheme = Scheme::ExponentialTrapezoid,
@@ -252,6 +307,9 @@ class ViscoelasticOperator {
   /// known: the sea-level driver reads the step's memory responses,
   /// closes its equilibrium with the matching effective Love numbers, and
   /// completes the step with ViscoelasticStep::Finish. dt >= 0, as Step's.
+  /// The step opened is one stage: a multi-stage scheme (Sdirk2) is opened
+  /// stage by stage by its driver (StepRecipe.hpp), and refused here but
+  /// at dt = 0, where every scheme's step is backward Euler's.
   [[nodiscard]] ViscoelasticStep StartStep(
       const ViscoelasticState& state, double dt,
       Scheme scheme = Scheme::ExponentialTrapezoid,
@@ -276,13 +334,15 @@ class ViscoelasticOperator {
 
   /// The material of a step's effective elastic solve: branch k weighted
   /// by 1/(1 + h_k) (backward Euler) or phi1(h_k) (trapezoid); at dt = 0,
-  /// every weight one, the unrelaxed material itself.
+  /// every weight one, the unrelaxed material itself. A multi-stage scheme
+  /// has none but at dt = 0 (its stages', BackwardEuler's at their length).
   [[nodiscard]] Material EffectiveMaterial(Scheme scheme, double dt) const;
 
   /// The Love numbers of the step's effective solid (SI, as
   /// ComputeLoveNumbers), cached per (scheme, dt), the unrelaxed solid's at
   /// dt = 0; and the unrelaxed solid's, cached once. Refused without
-  /// gravity.
+  /// gravity, and for a multi-stage scheme but at dt = 0, as
+  /// EffectiveMaterial.
   [[nodiscard]] const LoveNumbers& EffectiveLoveNumbers(Scheme scheme,
                                                         double dt) const;
   [[nodiscard]] const LoveNumbers& ElasticLoveNumbers() const;
@@ -300,6 +360,12 @@ class ViscoelasticOperator {
   [[nodiscard]] double MinRelaxationTime() const {
     return rheology_->MinRelaxationTime();
   }
+
+  /// The shortest relaxation time at the memory points (PointItau where
+  /// PointMu is positive), and where it is (RelaxationSite). At the GLL
+  /// points it is the rheology's MinRelaxationTime; at Gauss points the
+  /// branches' interpolated inverse times', which the steps use.
+  [[nodiscard]] RelaxationSite ShortestRelaxation() const;
 
   /// The memory points the internal variables live on.
   [[nodiscard]] const MemoryPoints& Points() const { return *points_; }

@@ -15,7 +15,6 @@
   "moments": "hydrostatic",
   "trajectory": {"record_stride": 6},
   "kernels": {
-    "method": "continuous",
     "parameters": ["ice", "viscosity"],
     "measurements": [
       {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",

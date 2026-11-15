@@ -4,7 +4,8 @@
 // thread, which checks the checkpoint bookkeeping; a run keeping no
 // snapshots hands out the same ones and returns none; a resumed run given
 // its checkpoint's node as the record offset keeps the uninterrupted
-// run's states.
+// run's states; and under Sdirk2 a node's internal variables alone restart
+// the run.
 
 #include <gtest/gtest.h>
 
@@ -355,6 +356,97 @@ TEST(EvolutionResume, AResumedRunAcrossAJumpIsTheUninterruptedOne) {
   const auto thrice = std::vector<double>{0.0, onset, onset, onset, 0.08};
   EXPECT_THROW(static_cast<void>(whole.Run(thrice, forcing)),
                std::invalid_argument);
+}
+
+TEST(EvolutionResume, AResumedSdirk2RunIsTheUninterruptedOne) {
+  // A step of Sdirk2 starts from the node's internal variables alone (two
+  // backward Euler stages, no start strain, no earlier node): a checkpoint
+  // at a node is a complete restart, and the resumed run is the
+  // uninterrupted one bitwise, from the checkpoint as written and from it
+  // with its strain dropped; under a growing point source and a load
+  // beside it, with an ocean, the toroidal systems stepped through the
+  // same stages.
+  const auto scene = Scene::Make();
+  const auto& grid = scene.solver.Grid();
+  const auto& sle = scene.solver.SolverScales();
+  ViscoelasticOperator op(scene.rheology, kLmax);
+  const auto mask = grid.FromFunction([](double theta, double phi) {
+    const auto c = std::cos(theta) * 0.5 +
+                   std::sin(theta) * std::sqrt(0.75) * std::cos(phi);
+    return std::exp(-8.0 * (1.0 - c));
+  });
+  auto times = std::vector<double>{};
+  for (auto n = 0; n < 9; ++n) times.push_back(0.02 * n);
+  const auto surface = scene.material.Radius() *
+                       scene.model.ModelScales().Length() / sle.Length();
+  const auto unit =
+      1e21 / sle.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
+  Evolution::Forcing loaded;
+  loaded.directLoad = [&](double t) {
+    auto load = std::vector<double>(mask.size());
+    for (auto i = std::size_t{0}; i < load.size(); ++i) {
+      load[i] = -1e-4 * (t / times.back()) * mask[i];
+    }
+    return load;
+  };
+  auto sourced = loaded;
+  sourced.sources = [&](double t) {
+    const auto s = unit * (0.3 + t / times.back());
+    return std::vector<PointSource>{
+        {.at = {.radius = surface - 400e3 / sle.Length(),
+                .colatitude = 1.1,
+                .longitude = 4.0},
+         .moment = {.rr = 0.9 * s,
+                    .tt = -0.2 * s,
+                    .pp = -0.7 * s,
+                    .rt = 0.3 * s,
+                    .rp = -0.7 * s,
+                    .tp = 0.6 * s}}};
+  };
+  for (const auto* forcing : {&loaded, &sourced}) {
+    const auto label = forcing == &sourced ? "sources" : "a load";
+    auto checkpoints = std::map<std::size_t, Evolution::Checkpoint>{};
+    auto options = Evolution::Options{.scheme = Scheme::Sdirk2};
+    options.checkpoint_stride = 3;
+    options.on_checkpoint = [&](std::size_t node,
+                                const Evolution::Checkpoint& cp) {
+      checkpoints.emplace(node, cp);
+    };
+    Evolution whole(op, scene.solver, scene.state, options);
+    const auto full = whole.Run(times, *forcing);
+    ASSERT_TRUE(checkpoints.contains(3)) << label;
+    auto bare = checkpoints.at(3);
+    bare.strain.clear();
+    if (bare.toroidal) bare.toroidal->strain.clear();
+    for (const auto* from : {&checkpoints.at(3), &bare}) {
+      Evolution resumed(op, scene.solver, scene.state,
+                        {.scheme = Scheme::Sdirk2});
+      if (forcing == &sourced && from == &bare) {
+        // a run under sources is resumed from a checkpoint holding the strain
+        EXPECT_THROW(
+            static_cast<void>(resumed.Resume(
+                *from, std::vector<double>(times.begin() + 3, times.end()),
+                *forcing)),
+            std::invalid_argument);
+        continue;
+      }
+      const auto tail = resumed.Resume(
+          *from, std::vector<double>(times.begin() + 3, times.end()), *forcing);
+      ASSERT_EQ(tail.size(), times.size() - 4) << label;
+      for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+        const auto& a = full[4 + k];
+        const auto& b = tail[k];
+        EXPECT_EQ(a.relativeSeaLevelChange, b.relativeSeaLevelChange)
+            << label << ", node " << 4 + k;
+        EXPECT_EQ(a.displacement, b.displacement)
+            << label << ", node " << 4 + k;
+        EXPECT_EQ(a.toroidalPotential, b.toroidalPotential)
+            << label << ", node " << 4 + k;
+        EXPECT_EQ(a.angularVelocity, b.angularVelocity)
+            << label << ", node " << 4 + k;
+      }
+    }
+  }
 }
 
 }  // namespace

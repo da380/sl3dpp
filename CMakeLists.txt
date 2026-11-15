@@ -196,6 +196,7 @@ add_library(sl3dpp STATIC
   src/Rheology.cpp
   src/SeaLevel.cpp
   src/Shorelines.cpp
+  src/StepRecipe.cpp
   src/ToroidalOperator.cpp
   src/Version.cpp
   src/Viscoelastic.cpp

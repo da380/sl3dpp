@@ -3,11 +3,13 @@
 /**
  * @file Adjoint3D.hpp
  * @brief Sensitivity kernels of the coupled 3D (lateral-viscosity)
- * evolution: by the CONTINUOUS adjoint — the preferred path for the
- * viscosity (docs/adjoints.md) — or by the DISCRETE transpose of the
- * coupled time-stepped map (AdjointDiscrete3D.cpp): ice-history kernels,
- * the full 3D inverse-relaxation-time kernel on the (memory node ×
- * angular grid) with its spherical reduction, and, on request, the
+ * evolution: by the CONTINUOUS adjoint or by the DISCRETE transpose of the
+ * coupled time-stepped map (AdjointDiscrete3D.cpp), each accurate as
+ * docs/adjoints.md §1 says (the discrete to the forward run's own error,
+ * the continuous once the steps are short against the shortest
+ * relaxation time, Viscoelastic3D::ShortestRelaxation): ice-history
+ * kernels, the full 3D inverse-relaxation-time kernel on the (memory
+ * node × angular grid) with its spherical reduction, and, on request, the
  * lateral bulk and shear modulus kernels in the same layout.
  *
  * The continuous adjoint equations have the forward problem's form, so
@@ -233,19 +235,25 @@ void KernelsToFields(const GridCoupling& coupling, Accumulated& kernels) {
 class AdjointSolver3D {
  public:
   struct Options {
-    /// Continuous (the default and preferred path) or Discrete: the
-    /// exact transpose of the coupled time-stepped map, the transposed
-    /// within-step fixed point solved by the same iteration (or, under
+    /// Discrete (the default, as AdjointSolver's): the exact transpose
+    /// of the coupled time-stepped map, the transposed within-step fixed
+    /// point solved by the same iteration (or, under
     /// Viscoelastic3D::Options::solver = ConjugateGradients, the sea
-    /// level adjoint nested over that solve). Both carry
+    /// level adjoint nested over that solve); or Continuous. Both carry
     /// the second-order sweep (SecondOrderKernels) and both are
-    /// distributed over radius (docs/adjoints.md §17).
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// distributed over radius (docs/adjoints.md §17). About an evolution
+    /// under Sdirk2 the continuous first-order sweep steps by its stages
+    /// and reads every node's recorded state; the discrete sweep and the
+    /// second-order sweeps refuse it, the continuous sweep then stated
+    /// here (docs/adjoints.md §1a).
+    AdjointMethod method = AdjointMethod::Discrete;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
     int anderson_memory = 5;
     /// The within-step lateral fixed point of the reversed steps (mixing
-    /// as Viscoelastic3D::IterationControl).
+    /// as Viscoelastic3D::IterationControl), its tolerance with a floor
+    /// as the forward's (Evolution3D::Options::coupled_rtol; the discrete
+    /// sweep's transposed fixed point measured at 2e-12 on node blocks).
     int max_coupled_iterations = 60;
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;

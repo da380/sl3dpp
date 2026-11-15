@@ -299,7 +299,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `out/kernel1d/`. About 5 s on four threads.
 - **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
   sea level and decay time, over a 15° cap at its lmax 12, with the
-  log-viscosity kernels of the 3D viscosity: `out/kernel/`. About 3 s on
+  log-viscosity kernels of the 3D viscosity: `out/kernel/`. About 4.5 s on
   four threads.
 - **`kernel1d_lateral.json`** (`sl3d kernel`) — the same two measurements
   about the radial Earth (`kernel.json`'s deck without its viscosity file),
@@ -311,7 +311,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `<name>_moduli_kernel.txt`): `out/kernel1d_lateral/`. The figure
   (`kernel1d_lateral/viscosity_kernels.png`) maps the log-viscosity
   kernel at the depth where it is largest, cuts a section through Hudson
-  Bay and draws its lateral mean and rms against radius. About 1.3 s on
+  Bay and draws its lateral mean and rms against radius. About 1 s on
   four threads.
 - **`kernel_static_moduli.json`** (`sl3d kernel`) — the static problem
   without an ocean on the radial `../data/prem8.elastic.deck` at lmax 32,
@@ -320,7 +320,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   centre and of the northward displacement 10° south of it (a vector
   displacement, through the tangential potential). Its `output` block is
   `solve`'s, so `sl3d solve` on the same config writes the response the
-  kernels are of: `out/kernel_static_moduli/`. About 0.15 s.
+  kernels are of: `out/kernel_static_moduli/`. About 0.2 s.
 - **`kernel_postseismic.json`** (`sl3d solve`, then `sl3d kernel`) —
   `sea_level_postseismic`'s thrust off northern Chile (as 6 by 2 patches,
   at lmax 32) on the post-seismic Earth, on the run's own clock in years,
@@ -345,9 +345,9 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   differently, and the tests hold the two bitwise within one process).
   The steps are long against the asthenosphere's Maxwell time: on 33
   nodes the measurements move by 0.4 to 2.1% and the viscosity kernels
-  by 4% (the GPS station's) and 9% (the gauge's), a kernel carrying more
-  of the time step's error than the field it is of (the time-step study,
-  below). The figure (`kernels.png`)
+  by 4% (the GPS station's) and 9% (the gauge's): how a step's error
+  reaches a kernel is the time-step study's (below). The figure
+  (`kernels.png`)
   draws the moment kernels per patch, held from the onset, and their
   contraction with the fault's own mechanism, which gives back each
   measurement's value with the fault's moment.
@@ -547,43 +547,12 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   comparing it with `no_ocean_load_cap`,
   `with_and_without_gravity/load.png`, draws. Under 1 s on four
   threads.
-- **The time-step study**, `timestep_{et,be}_n<N>.json` (solve) and
-  `timestep_{discrete,continuous}_n<N>.json` (kernel) — one problem at
-  several step sizes: the synthetic deglaciation from 16 to 6 ka on the
-  radial Earth of `../data/prem8.gia.deck` (Maxwell times 0.11 to
-  0.43 kyr) at lmax 16, without rotation, with the sea level averaged over
-  a 12° cap at Hudson Bay measured at 10 ka (mid-run) and at 6 ka (the
-  end). N is the number of steps over the 10 kyr window, each N putting a
-  node at 10 ka; `et` and `be` are the forward run by the exponential
-  trapezoid and by backward Euler, `discrete` and `continuous` the
-  kernels by each adjoint (the exponential trapezoid forward). The configs
-  here are the short family, N = 10, 20 and 40 against N = 160, which
-  `run_all.sh` runs (about 8 s on four threads); `timestep_study.py`, from
-  `build/examples`, writes and runs the whole study, N = 5 to 80 (2 kyr to
-  1/8 kyr) against N = 320 (1/32 kyr), in about 15 s, and prints its
-  errors; `plot_app.py` draws them. Against the converged reference, at
-  1 kyr steps (about nine of the shortest Maxwell times) the sea level is
-  wrong by 0.5–0.6% (relative L2 over the sphere) under the exponential
-  trapezoid and 0.7–1.0% under backward Euler, and the measured values by
-  0.2–0.5%; the viscosity kernel is wrong by 1.8–4.1% by the discrete
-  adjoint and 18–28% by the continuous one. The errors, at 2, 1, 1/2, 1/4
-  and 1/8 kyr: sea level by the exponential trapezoid 1.7e-2, 6.2e-3,
-  2.0e-3, 5.5e-4, 1.4e-4 (at 10 ka; 1.1e-2 to 1.1e-4 at 6 ka), by backward
-  Euler 2.1e-2, 1.0e-2, 5.5e-3, 2.8e-3, 1.4e-3 (1.4e-2 to 1.1e-3 at 6 ka);
-  the kernel at 6 ka by the discrete adjoint 1.7e-2, 1.8e-2, 1.3e-2,
-  5.0e-3, 1.4e-3 (at 10 ka 9.7e-2 to 1.0e-3), by the continuous 0.60,
-  0.28, 0.11, 3.5e-2, 9.5e-3.
-  Backward Euler is first order throughout; the exponential trapezoid and
-  both adjoints reach second order (1.9–2.0) only once the step comes down
-  to the Maxwell times, and converge more slowly above them. At the
-  reference step the two adjoints' kernels agree to 7e-4. The lesson: at
-  a given step the kernels are several times less accurate than the
-  fields they are kernels of (here, at 1 kyr steps, four to seven times
-  by the discrete adjoint and thirty to sixty by the continuous one). The discrete adjoint is the exact
-  gradient of the time-stepped model, not the exact gradient of the
-  Earth's: it inherits the time step's error, and more of it than the
-  fields carry. A step that serves the forward run may not serve the
-  kernels; refine it until the kernel stops changing.
+- **The time-step study**, the `timestep_*` configs — one problem run at
+  steps of 1 kyr and shorter, by `sl3d solve` and by `sl3d kernel` with
+  each adjoint, held against a truth taken from forward runs alone: what
+  the step does to the discrete and the continuous kernels (The time-step
+  study, below). The configs here are its short form, which `run_all.sh`
+  runs.
 
 `../data/prem8.gia.deck` is `../data/prem8.elastic.deck` in planetmodel's
 GIA format, with a Maxwell mantle of 1e21 Pa s (the solid layers between
@@ -617,6 +586,188 @@ take five elements each at lmax 96 and two at lmax 32. A viscosity
 contrast of three decades needs no care in the step: the schemes are
 implicit, and the post-seismic configs step from 0.1 to 100 years,
 across the Maxwell times, at second order (above).
+
+### The time-step study
+
+`timestep_study.py`, from `build/examples`, runs one problem at steps of
+1 to 1/32 kyr and holds the kernels of `sl3d kernel`'s two adjoints
+against the derivative of the problem continuous in time, taken from
+forward runs alone. It shows the two statements of docs/adjoints.md §1:
+**both kernels converge at second order in the step to the same limit**,
+and **at a given step the discrete kernel carries the forward run's error
+and nothing else, while the continuous kernel needs steps short against
+the model's shortest relaxation time.**
+
+The problem is the synthetic deglaciation from 16 to 6 ka
+(`../data/synthetic_earth.nc`, its ice a slice each kiloyear) on the
+radial Earth of `../data/prem8.gia.deck` (a 1e21 Pa s Maxwell mantle in
+six layers, its Maxwell times from 0.108 kyr at the base of the mantle to
+0.43 kyr at its top), at lmax 16, with frozen shorelines and no
+rotational feedback. J is the sea level averaged over a 12° cap at Hudson
+Bay, measured at 10 ka (mid-run) and at 6 ka (the end). A run takes N
+steps over the 10 kyr window, N = 10 to 320, so that every run has a node
+at each kiloyear: at each knot of the ice history, which every run steps
+alike, and at both measurement dates. The runs are named
+`timestep_<kind>_n<N>`: `et` and `be` the forward run by the exponential
+trapezoid and by backward Euler, `discrete` and `continuous` the ice and
+viscosity kernels by each adjoint, `up` and `down` the forward run with
+the viscosity raised and lowered, `pulse` the forward run under a change
+of the ice (below).
+
+**The truth, from forward runs.** The values J are read from `sl3d
+solve`'s sea level, as its mean over the cap the way `sl3d kernel` reads
+it (the kernel runs' own values agree with them to 4e-15). The
+derivatives dJ/d ln η in the logarithm of the viscosity, changed in every
+viscous layer at once and in each alone, are central differences of runs
+with η multiplied by e^(±ε), ε = 1e-3, on decks the script writes into
+`../data/` (`prem8_up.gia.deck`, `prem8_down.gia.deck`,
+`prem8_layer2_up.gia.deck`, ...). The derivative along a change of the ice, a pulse of 100 m of ice
+over a 12° cap at Hudson Bay, from nothing at 13 ka to its peak at 12 ka
+and gone by 11 ka, is the run under the pulse alone, the problem being
+linear in the ice under frozen shorelines. Each is Richardson-extrapolated
+from N = 160 and 320, its uncertainty the change from the extrapolation
+from N = 80 and 160:
+
+| J at | J (m) | dJ/d ln η (m) | dJ/d ln η over J | dJ along the pulse (m) |
+| --- | --- | --- | --- | --- |
+| 10 ka | −221.78812 ± 1e-7 | 35.5601 ± 1e-4 | 16.0% | 0.774554 ± 4e-6 |
+| 6 ka | −276.3410 ± 1e-4 | 21.1364 ± 3e-4 | 7.6% | 0.107322 ± 1e-6 |
+
+and the derivatives in the six layers alone each to 4e-5 of itself or
+better. The difference step is in the flat region: at N = 10 the central
+differences differ from the discrete kernel's pairing, that run's exact
+gradient, by 5e-4 and 1e-3 at ε = 1e-1, falling as ε² to 6e-8 and
+1e-7 at 1e-3, and rising, as rounding over ε, from 3e-7 at 1e-4 to 8e-6
+at 1e-6 (`timestep_eps<k>_up_n10`, `timestep_eps<k>_down_n10`,
+ε = 10^-k).
+
+**The discrete kernel is the stepped run's gradient.** Its pairing with
+each change equals the central difference of runs at the same N: to
+1.5e-7 for the uniform change at every N, to 1e-6 in each layer, and to
+7e-12 along the pulse.
+
+**The errors against the truth**, in per cent, at 10 ka / 6 ka, with h
+the step and h/τ_min its ratio to the shortest relaxation time as `sl3d
+kernel` states it for the continuous runs (τ_min = 0.108 kyr):
+
+| h (kyr) | h/τ_min | J | dJ/d ln η, discrete | continuous | along the pulse, discrete | continuous |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 9.3 | +0.22 / −0.50 | −4.0 / −1.7 | +14 / +24 | −11 / +8.9 | +25 / +41 |
+| 1/2 | 4.6 | +0.059 / −0.18 | −1.4 / −1.3 | +5.5 / +8.5 | −3.6 / +3.4 | +9.4 / +13 |
+| 1/4 | 2.3 | +0.015 / −0.051 | −0.40 / −0.49 | +1.7 / +2.5 | −0.98 / +1.0 | +2.8 / +3.8 |
+| 1/8 | 1.2 | +0.0038 / −0.013 | −0.10 / −0.14 | +0.44 / +0.64 | −0.25 / +0.26 | +0.72 / +0.97 |
+| 1/16 | 0.58 | +0.00094 / −0.0033 | −0.026 / −0.036 | +0.11 / +0.16 | −0.063 / +0.066 | +0.18 / +0.24 |
+| 1/32 | 0.29 | +0.00024 / −0.00083 | −0.0066 / −0.0089 | +0.028 / +0.041 | −0.016 / +0.017 | +0.046 / +0.061 |
+
+The sea level over the sphere (relative L2) is 0.62 / 0.48% off at 1 kyr
+under the exponential trapezoid, falling at second order, and 1.05 /
+0.75% under backward Euler, falling at first order
+(`timestep_study/accuracy.png`, (a)).
+
+*(1) The same limit, at second order.* Every error falls by four at each
+halving once the step is near the shortest relaxation time or below it:
+between 1/16 and 1/32 kyr the observed orders are 1.99 to 2.00 for the
+values and for both kernels' derivatives, uniform and along the pulse,
+and 1.94 to 2.01 layer by layer but for two of the continuous kernel's
+twelve (1.39 and 1.75, two layers at 6 ka whose error changes sign near
+1/8 kyr and ends near the truth's uncertainty). The Richardson
+extrapolation of each adjoint's own pairings from N = 160 and 320 is the
+truth to 1.2e-6 (discrete) and 1e-5 (continuous), within a tenth of the
+two extrapolations' uncertainties summed, in every direction.
+
+*(2) What each error is.* The discrete kernel's error is the forward
+run's, the kernel being that run's exact gradient. It reads larger than
+the value's (4.0% against 0.22% at 10 ka, 1 kyr) because dJ/d ln η is
+16% and 7.6% of J and the step's error lives in that part: in metres
+(per unit of ln η), at 1 kyr, the derivative is 1.4 m and 0.36 m off and
+the value 0.48 m and 1.4 m (`accuracy.png`, (c)). The continuous adjoint
+is a second problem: each measurement forces it impulsively, and it then
+relaxes on the model's shortest relaxation time, which the forward run,
+forced smoothly, never has to resolve; its kernel is a time quadrature of
+the forward and adjoint fields, each discretised on its own. Its error
+is 3.6 and 14 times the discrete kernel's at 1 kyr and 4.3 and 4.6 times
+at the finest steps, it is largest where the relaxation is fastest, and
+it is set by the step over the shortest relaxation time. Layer by layer
+at 1 kyr (`timestep_layer<l>_up_n<N>`, `_down_`; `layers.png`, (a) and
+(b)) the discrete kernel is off by about the same in every layer (−3.1
+to −4.2% at 10 ka, −1.2 to −3.0% at 6 ka), the continuous one by +33 /
++41% at the base of the mantle (2738 to 2888 km deep, τ from 0.108 kyr),
++16 / +27% through the lower mantle below 768 km (τ from 0.109 kyr), and
+in the four layers above (τ from 0.18, 0.26, 0.26 and 0.39 kyr) +2.5,
++1.1, +0.6 and −0.1% at 10 ka, in the order of their relaxation times,
+and +9.5, +6.2, +7.2 and +11% at 6 ka, the upper three out of it. With
+the deck's viscosity, and so every relaxation time, scaled by 1/4 and by
+4 (`timestep_x0.25_*`, `timestep_x4_*`; `layers.png`, (c)), the
+continuous kernel's error follows h/τ_min:
+
+| h/τ_min | η × 1/4 (τ_min 0.027 kyr) | η × 1 (0.108 kyr) | η × 4 (0.432 kyr) |
+| --- | --- | --- | --- |
+| 9.3 | +19 / −11 (h = 1/4) | +14 / +24 (h = 1) | |
+| 4.6 | +6.5 / −9.5 (1/8) | +5.5 / +8.5 (1/2) | |
+| 2.3 | | +1.7 / +2.5 (1/4) | +1.1 / +1.3 (1) |
+| 1.2 | | +0.44 / +0.64 (1/8) | +0.30 / +0.35 (1/2) |
+| 0.29 | | +0.028 / +0.041 (1/32) | +0.019 / +0.022 (1/8) |
+
+(at 6 ka on η × 1/4 the Earth has nearly relaxed and dJ/d ln η is
+2.4 m, so that both kernels' relative errors are large: the discrete
+one's +31% at 1 kyr). On η × 4, where 1 kyr is 2.3 τ_min, the continuous
+kernel is as accurate as the discrete one at every step, its error 0.6
+times the discrete one's at 10 ka and 1.3 times at 6 ka (+1.1 / +1.3%
+against +1.7 / −0.99% at 1 kyr).
+
+**Judging convergence.** A kernel has converged when each halving of the
+step changes it about a quarter as much as the one before (second order),
+its error then about a third of the last change, and not when one change
+is small (`convergence.png`, (a)). At 6 ka the discrete dJ/d ln η changes
+by 0.45% from 1 to 1/2 kyr, where it is still 1.3% off, and by 0.77%
+from 1/2 to 1/4: the successive changes' ratios are 0.58, 2.2, 3.4 and
+3.8, and the rule holds from 1/8 kyr on (at 10 ka 2.7, 3.4, 3.8 and 3.9;
+the continuous kernel's 2.3 to 3.9 and 2.6 to 3.9). At coarse steps the
+error differs in sign between the cap's degrees, and the cap's mean sums
+them: `timestep_widths_n<N>` measures the 6 ka sea level over caps of
+12° to 24° (a wider cap weighting the low degrees more, all of them
+positively), and at 1 kyr the discrete kernel is −1.7% off at 12°, −0.45%
+at 16°, +0.28% at 20° and +0.36% at 24°, at 1/4 kyr −0.49 to −0.33%,
+nearly independent of the width (`convergence.png`, (b)).
+
+**Sdirk2.** The full form runs the problem under `solver.scheme`
+`"sdirk2"` too (design.md §5: two backward Euler stages a step, second
+order and damped): the forward run (`timestep_sdirk2_n<N>`) and the
+continuous kernels stepped by its stages (`timestep_sdirk2_continuous_n<N>`;
+its discrete adjoint is not built), against the same truth, the
+exponential trapezoid's at the same step after the slash:
+
+| h (kyr) | h/τ_min | J | dJ/d ln η, continuous | along the pulse, continuous |
+| --- | --- | --- | --- | --- |
+| 1 | 9.3 | +0.015 / +0.043 (+0.22 / −0.50) | +1.9 / −1.0 (+14 / +24) | −5.2 / −4.4 (+25 / +41) |
+| 1/2 | 4.6 | +0.0023 / +0.010 (+0.059 / −0.18) | +0.52 / −0.24 (+5.5 / +8.5) | −2.0 / −1.1 (+9.4 / +13) |
+| 1/4 | 2.3 | +0.00052 / +0.0025 (+0.015 / −0.051) | +0.13 / −0.057 (+1.7 / +2.5) | −0.50 / −0.28 (+2.8 / +3.8) |
+| 1/8 | 1.2 | +0.00012 / +0.00063 (+0.0038 / −0.013) | +0.034 / −0.014 (+0.44 / +0.64) | −0.12 / −0.069 (+0.72 / +0.97) |
+
+in per cent at 10 ka / 6 ka, every series falling at second order from
+1/2 kyr on (the observed orders 1.92 to 2.14; 1.38 to 2.67 between 1 and
+1/2 kyr). At 1 kyr the sea level over the sphere is 0.042 / 0.035% off
+against 0.62 / 0.48%, and the continuous kernel's worst layer 4.6% at
+10 ka (the base of the mantle) and 1.7% at 6 ka against 33 / 41%. Its
+value is the more accurate by 15 and 12 times at 1 kyr and by 31 and 21
+times at 1/8 kyr, and its continuous kernel by 8 to 24 times in the
+viscosity and 5 to 9 along the pulse at 1 kyr, at twice the solves a
+step: the trapezoid acts as backward Euler on the slow modes the stiff
+points carry at steps long against τ_min, the damped second-order scheme
+does not.
+
+**Running it.** The configs here are the short form: the four kinds of
+run at N = 10, 20 and 40, `et` at 80 and 160, `pulse` at 10 to 160, and
+`up` and `down` at 10, 80 and 160. `run_all.sh` runs them, `up` and
+`down` only once their decks exist; `poetry run python timestep_study.py
+--short` writes the decks and the configs, runs them (about 10 s on four
+threads) and prints the tables above at N = 10 to 40 against a truth from
+N = 80 and 160 (to 3e-4 of the derivatives). `poetry run python
+timestep_study.py` runs the whole study, 133 runs (the Sdirk2 series
+twelve of them, about 45 s on two threads), in about two minutes on four
+threads (75 s with `--jobs 2` before the Sdirk2 series), and prints every
+number quoted here; `plot_app.py` draws `accuracy.png`, `layers.png` and
+`convergence.png` into `figures/sl3d/timestep_study/`.
 
 ### Convergence in lmax of the seismic examples
 

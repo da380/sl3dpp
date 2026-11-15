@@ -36,6 +36,7 @@
 
 #include "sl3dpp/Adjoint3D.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
@@ -66,6 +67,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
   const auto& ev = *evolution_;
+  detail::RefuseDerivativeOfMultiStage(
+      ev.options_.scheme,
+      second ? "the second-order adjoint"
+             : "the discrete adjoint (AdjointMethod::Discrete, "
+               "Options::method's default)");
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
@@ -1021,6 +1027,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
       auto iterate = op.SolveForces(b0s, b0t, sph, tor);
       auto previous = 0.0;
+      // how the iteration ended, its passes and its last change
+      auto info = Viscoelastic3D::StepInfo{.converged = false};
       for (auto pass = 0; pass < control.max_iterations; ++pass) {
         const auto [sigmaDual, psiDual] = channelDualsOfSolutions(iterate);
         auto [duals, synth] = engineDuals(sigmaDual, psiDual, n, measured);
@@ -1048,13 +1056,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         auto [solved, solveInfo] = step.Solve(surface, surfaceTor, &warm, 0.0,
                                               op.options_.solve_outer_factor);
         const auto change = solveInfo.initial;
+        info.iterations = pass + 1;
+        info.residual = change;
         if (!std::isfinite(change)) break;
         if (change <= control.rtol && solveInfo.converged) {
           out = {std::move(adj), std::move(synth), exit(solved, sph, tor),
                  material || hasMaterialV || moments ? std::move(solved)
                                           : Viscoelastic3D::Solutions{},
                  psiDual};
-          return true;
+          info.converged = true;
+          return info;
         }
         auto image = std::move(solved);
         combine(image, response, -1.0);
@@ -1070,25 +1081,26 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           iterate = std::move(image);
         }
       }
-      return false;
+      return info;
     };
     Last last;
     {
       const auto start = shaped(coupling.Analyse(de));
-      auto converged = false;
+      auto info = Viscoelastic3D::StepInfo{};
       if (nested) {
-        converged = nestWith(start, true, last);
+        info = nestWith(start, true, last);
       } else {
         const auto pass = passWith(de, true, last);
-        auto [zstar, info] = step.Converge(pass, control, &start);
-        converged = info.converged;
+        auto [zstar, stepInfo] = step.Converge(pass, control, &start);
+        info = stepInfo;
         // The byproducts at the converged dual itself.
-        if (converged) (void)pass(zstar);
+        if (info.converged) (void)pass(zstar);
       }
-      if (!converged) {
+      if (!info.converged) {
         throw std::runtime_error(std::format(
-            "the transposed lateral {} at node {} did not converge",
-            nested ? "nested solve" : "fixed point", n));
+            "the transposed lateral {} at node {} did not converge: {}",
+            nested ? "nested solve" : "fixed point", n,
+            info.Describe(control.rtol)));
       }
     }
     directLoadKernels[n] = loadDualOf(last.adj, last.synth);
@@ -1143,20 +1155,21 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
                                  hasMaterialV ? &extraTor : nullptr);
       src.scalars.clear();  // the source is deviatoric; the companions start at zero
       const auto start = shaped(coupling.Analyse(src));
-      auto converged = false;
+      auto info = Viscoelastic3D::StepInfo{};
       if (nested) {
-        converged = nestWith(start, false, dlast, hasMaterialV ? &extraSph : nullptr,
-                             hasMaterialV ? &extraTor : nullptr);
+        info = nestWith(start, false, dlast, hasMaterialV ? &extraSph : nullptr,
+                        hasMaterialV ? &extraTor : nullptr);
       } else {
-        auto [zstar, info] = step.Converge(pass, control, &start);
-        converged = info.converged;
-        if (converged) (void)pass(zstar);
+        auto [zstar, stepInfo] = step.Converge(pass, control, &start);
+        info = stepInfo;
+        if (info.converged) (void)pass(zstar);
       }
-      if (!converged) {
+      if (!info.converged) {
         throw std::runtime_error(std::format(
             "the transposed lateral {} of the derivative state at node {} did "
-            "not converge",
-            nested ? "nested solve" : "fixed point", n));
+            "not converge: {}",
+            nested ? "nested solve" : "fixed point", n,
+            info.Describe(control.rtol)));
       }
       dloadDuals[n] = loadDualOf(dlast.adj, dlast.synth);
       otherLoadKernels(dlast.adj, dloadDuals[n], dOutsideKernels[n],

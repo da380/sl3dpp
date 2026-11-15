@@ -548,8 +548,17 @@ std::unique_ptr<const GRDSolver> RadialSolverOf(
 
 /// The time step's word, as a config gives it.
 std::string_view SchemeName(Scheme scheme) {
-  return scheme == Scheme::BackwardEuler ? "backward_euler"
-                                         : "exponential_trapezoid";
+  switch (scheme) {
+    case Scheme::BackwardEuler:
+      return "backward_euler";
+    case Scheme::Sdirk2:
+      return "sdirk2";
+    case Scheme::ExponentialEuler:
+      return "exponential_euler";
+    case Scheme::ExponentialTrapezoid:
+      break;
+  }
+  return "exponential_trapezoid";
 }
 
 /// The surface loads a run through time applied at each node, SI: its
@@ -1831,7 +1840,10 @@ std::string Run3D(const std::filesystem::path& config,
         options.max_coupled_iterations = run.solver.step_max_iterations;
         return Evolution3D(op, solver, world.background, std::move(options));
       },
-      Check3D, trajectory ? &*trajectory : nullptr);
+      [&](const Evolution3D::Snapshot& snapshot, std::string_view when) {
+        Check3D(snapshot, when, run.solver.step_rtol);
+      },
+      trajectory ? &*trajectory : nullptr);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(reached.loads.get()));
   if (reached.stopped) return StoppedSummary(read, input, reached);

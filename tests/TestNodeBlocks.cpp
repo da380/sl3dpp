@@ -6,7 +6,7 @@
 // lateral viscosity, and to the quadrature of the lateral product with it
 // (the product's weights are resolved to each block's degree); and the 3D
 // adjoint's kernels, laid out per block, pair with a smooth direction as
-// the single grid's do.
+// the single grid's do, by either sweep.
 
 #include <gtest/gtest.h>
 
@@ -18,6 +18,8 @@
 #include <functional>
 #include <map>
 #include <span>
+#include <string>
+#include <utility>
 #include <vector>
 
 #include "sl3dpp/Adjoint3D.hpp"
@@ -316,7 +318,9 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
   // kernel, laid out per block, pairs with a smooth direction (each node
   // sampling it on its own grid) as the single grid's does, and its
   // spherical kernel and ice kernels are the single grid's; to round-off
-  // without lateral viscosity, to the forward's agreement with it.
+  // without lateral viscosity, to the forward's agreement with it. By the
+  // default (discrete) sweep, whose transposed fixed point on the blocks
+  // stops at about 2e-12 (so to 1e-11 here), and by the continuous one.
   const auto body = Body::Make(1e22);
   ViscoelasticOperator reference(body.rheology, kLmax);
   GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
@@ -358,7 +362,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     std::vector<double> loadDual;
   };
   auto run = [&](const std::function<double(double, double, double)>& delta,
-                 bool blocks) {
+                 bool blocks, const AdjointSolver3D::Options& sweep) {
     Viscoelastic3D op(
         body.rheology, kLmax, delta,
         {.eps = kEps,
@@ -369,7 +373,7 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
         {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto snapshots = evolution.Run(times, directLoad);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-    AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    AdjointSolver3D adjoint(evolution, sweep);
     const auto kernels =
         adjoint.FirstOrderKernels(times, measurements, &trajectory);
     const auto& coupling = op.Coupling();
@@ -394,9 +398,10 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     return diff / scale;
   };
   auto compare = [&](const std::function<double(double, double, double)>& delta,
-                     double tolerance, const char* label) {
-    const auto blocked = run(delta, true);
-    const auto single = run(delta, false);
+                     double tolerance, const std::string& label,
+                     const AdjointSolver3D::Options& sweep) {
+    const auto blocked = run(delta, true, sweep);
+    const auto single = run(delta, false, sweep);
     EXPECT_NE(single.pairing, 0.0) << label;
     const auto pairing =
         std::abs(blocked.pairing - single.pairing) / std::abs(single.pairing);
@@ -412,11 +417,21 @@ TEST(NodeBlocks, AdjointKernelsPairAsTheSingleGrids) {
     EXPECT_LT(spherical, tolerance) << label;
     EXPECT_LT(loadDual, tolerance) << label;
   };
-  // measured 4e-14 to 1.6e-13, and 3.4e-10 to 2.9e-9
-  compare([](double, double, double) { return 0.0; }, 1e-10, "zero_lateral");
-  compare(
-      [](double, double theta, double phi) {
-        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
-      },
-      1e-7, "smooth_lateral");
+  const auto smooth = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  using Sweep = std::pair<std::string, AdjointSolver3D::Options>;
+  const auto sweeps = std::vector<Sweep>{
+      {"discrete", {.rtol = 1e-12, .coupled_rtol = 1e-11}},
+      {"continuous",
+       {.method = AdjointMethod::Continuous,
+        .rtol = 1e-12,
+        .coupled_rtol = 1e-12}}};
+  for (const auto& [name, sweep] : sweeps) {
+    // measured: discrete 1.7e-14 to 4.3e-14, and 3.0e-10 to 2.0e-9;
+    // continuous 4.3e-14 to 1.6e-13, and 3.4e-10 to 2.9e-9
+    compare([](double, double, double) { return 0.0; }, 1e-10,
+            name + "_zero_lateral", sweep);
+    compare(smooth, 1e-7, name + "_smooth_lateral", sweep);
+  }
 }

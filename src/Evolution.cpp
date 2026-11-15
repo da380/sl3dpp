@@ -11,6 +11,7 @@
 #include <tuple>
 #include <type_traits>
 
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/detail/InteriorSources.hpp"
@@ -31,8 +32,8 @@ Evolution::Evolution(const ViscoelasticOperator& op,
   }
   if (options.scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument(
-        "the coupled loop steps implicitly: ExponentialTrapezoid or "
-        "BackwardEuler");
+        "the coupled loop steps implicitly: ExponentialTrapezoid, "
+        "BackwardEuler or Sdirk2");
   }
   const auto& material = op.BaseMaterial().ModelScales();
   const auto& sle = solver.SolverScales();
@@ -81,17 +82,27 @@ void CheckTimes(std::span<const double> times, bool resumed = false) {
 }
 
 /// The interior sources at a node: their left limits at the first node of
-/// a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere.
+/// a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere;
+/// at c < 1 the plain callbacks at that stage's time within the step
+/// ending at the node (detail::AtStage).
 std::vector<PointSource> PointSourcesAt(const Evolution::Forcing& forcing,
                                         std::span<const double> times,
-                                        std::size_t node) {
-  return detail::AtNode(times, node, forcing.sources, forcing.sourcesBefore);
+                                        std::size_t node, double c = 1.0) {
+  return detail::AtStage(times, node, c, forcing.sources,
+                         forcing.sourcesBefore);
 }
 std::vector<StressGlut> StressGlutsAt(const Evolution::Forcing& forcing,
                                       std::span<const double> times,
-                                      std::size_t node) {
-  return detail::AtNode(times, node, forcing.stressGluts,
-                        forcing.stressGlutsBefore);
+                                      std::size_t node, double c = 1.0) {
+  return detail::AtStage(times, node, c, forcing.stressGluts,
+                         forcing.stressGlutsBefore);
+}
+
+/// A stage's memory state of a 1D run (StepRecipe.hpp).
+ViscoelasticState Combined(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms,
+    const RecipeStage&) {
+  return CombinedState(terms);
 }
 
 /// The refusal of what a run without gravity cannot take.
@@ -312,21 +323,22 @@ std::vector<Evolution::Snapshot> Evolution::March(
     }
     return grid.Expand(total);
   };
-  // Solvers for the unrelaxed table and the per-dt effective tables, each
-  // under the caller's parameters; the Love tables themselves are cached
-  // by the operator, so a repeated dt costs a table conversion only.
-  auto flavours = std::map<double, GRDSolver>{};
-  auto solverFor = [&](double dt) -> const GRDSolver& {
-    auto found = flavours.find(dt);
+  // Solvers for the unrelaxed table and the effective tables of each
+  // (one-stage scheme, dt) a stage takes, each under the caller's
+  // parameters; the Love tables themselves are cached by the operator, so
+  // a repeated dt costs a table conversion only.
+  auto flavours = std::map<std::pair<Scheme, double>, GRDSolver>{};
+  auto solverFor = [&](Scheme family, double dt) -> const GRDSolver& {
+    const auto key = std::pair(family, dt);
+    auto found = flavours.find(key);
     if (found == flavours.end()) {
-      found =
-          flavours
-              .emplace(dt, GRDSolver(grid,
+      found = flavours
+                  .emplace(key, GRDSolver(grid,
                                           dt == 0.0 ? op.ElasticLoveNumbers()
                                                     : op.EffectiveLoveNumbers(
-                                                          options_.scheme, dt),
+                                                          family, dt),
                                           solver.Parameters()))
-              .first;
+                  .first;
     }
     return found->second;
   };
@@ -349,34 +361,39 @@ std::vector<Evolution::Snapshot> Evolution::March(
     options_.on_checkpoint(node, out);
   };
 
-  // Every term of the forcing is read at a node through detail::AtNode,
-  // the one place that decides which side of a repeated pair the node
-  // reads; the surface terms are continuous at every node and pass no left
-  // limit.
-  auto surfaceAt = [&](std::size_t node, const auto& term) {
+  // Every term of the forcing is read at a node, or at a stage of the step
+  // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
+  // place that decides which side of a repeated pair the node reads; the
+  // surface terms are continuous at every node and pass no left limit.
+  auto surfaceAt = [&](std::size_t node, const auto& term, double c = 1.0) {
     using Callback = std::decay_t<decltype(term)>;
-    return detail::AtNode(times, node, term, Callback{});
+    return detail::AtStage(times, node, c, term, Callback{});
   };
   // The direct load at a node (none given: none), and the potential the
   // radial steps see there: the centrifugal potential of the rotation the
   // node's closure found, and the prescribed tide.
-  auto directLoadAt = [&](std::size_t node) {
-    return directLoad != nullptr ? surfaceAt(node, *directLoad)
+  auto directLoadAt = [&](std::size_t node, double c = 1.0) {
+    return directLoad != nullptr ? surfaceAt(node, *directLoad, c)
                                  : std::vector<double>(fieldSize, 0.0);
   };
   // The load outside the water budget and the layer on the solid surface
   // at a node, where the forcing gives them (empty: none).
-  auto outsideAt = [&](std::size_t node) {
+  auto outsideAt = [&](std::size_t node, double c = 1.0) {
     return interior != nullptr
-               ? surfaceAt(node, interior->directLoadOutsideWaterBudget)
+               ? surfaceAt(node, interior->directLoadOutsideWaterBudget, c)
                : std::vector<double>{};
   };
-  auto layerAt = [&](std::size_t node) {
-    return interior != nullptr ? surfaceAt(node, interior->solidSurfaceChange)
-                               : std::vector<double>{};
+  auto layerAt = [&](std::size_t node, double c = 1.0) {
+    return interior != nullptr
+               ? surfaceAt(node, interior->solidSurfaceChange, c)
+               : std::vector<double>{};
   };
-  auto tideAt = [&](std::size_t node) { return surfaceAt(node, *tide); };
-  auto iceAt = [&](std::size_t node) { return surfaceAt(node, *iceThickness); };
+  auto tideAt = [&](std::size_t node, double c = 1.0) {
+    return surfaceAt(node, *tide, c);
+  };
+  auto iceAt = [&](std::size_t node, double c = 1.0) {
+    return surfaceAt(node, *iceThickness, c);
+  };
   // every direct load of a node, for the radial step's own load
   auto withOutside = [&](std::vector<double> load,
                          const std::vector<double>& outside) {
@@ -388,12 +405,13 @@ std::vector<Evolution::Snapshot> Evolution::March(
     for (auto i = std::size_t{0}; i < load.size(); ++i) load[i] += outside[i];
     return load;
   };
-  auto potentialAt = [&](std::size_t node, const std::array<double, 3>& omega) {
+  auto potentialAt = [&](std::size_t node, const std::array<double, 3>& omega,
+                         double c = 1.0) {
     auto psi = options_.rotation == RotationalFeedback::None
                    ? grid.ZeroCoefficients()
                    : solver.CentrifugalCoefficients(omega);
     if (tide != nullptr) {
-      const auto given = tideAt(node);
+      const auto given = tideAt(node, c);
       if (given.size() != psi.size()) {
         throw std::invalid_argument(
             "the tide is not a coefficient vector of the solver's grid");
@@ -428,11 +446,11 @@ std::vector<Evolution::Snapshot> Evolution::March(
     }
     twisted = &tstate;
   }
-  auto sourceForcesAt = [&](std::size_t node) {
+  auto sourceForcesAt = [&](std::size_t node, double c = 1.0) {
     return detail::ForcesOfSources(op, *toroidal, solver.SolverScales(),
                                    toNdLength_,
-                                   PointSourcesAt(*interior, times, node),
-                                   StressGlutsAt(*interior, times, node));
+                                   PointSourcesAt(*interior, times, node, c),
+                                   StressGlutsAt(*interior, times, node, c));
   };
   // The toroidal potential's coefficients of the node's toroidal solutions.
   auto toroidalCoefficients = [&] {
@@ -475,13 +493,16 @@ std::vector<Evolution::Snapshot> Evolution::March(
   // The forcing beside the ice of a migrating node: the loads, the layer
   // and the tide, changes from the background.
   auto movingLoadsAt = [&](std::size_t node,
-                           GRDSolver::NonlinearForcing& moving) {
-    if (directLoad != nullptr) moving.directLoad = directLoadAt(node);
-    moving.directLoadOutsideWaterBudget = outsideAt(node);
-    moving.solidSurfaceChange = layerAt(node);
-    if (tide != nullptr) moving.tide = tideAt(node);
-    // a land mask that changes in time: the node's own
-    if (options_.land_held) moving.forcedLand = options_.land_held(times[node]);
+                           GRDSolver::NonlinearForcing& moving,
+                           double c = 1.0) {
+    if (directLoad != nullptr) moving.directLoad = directLoadAt(node, c);
+    moving.directLoadOutsideWaterBudget = outsideAt(node, c);
+    moving.solidSurfaceChange = layerAt(node, c);
+    if (tide != nullptr) moving.tide = tideAt(node, c);
+    // a land mask that changes in time: the node's (the stage's) own
+    if (options_.land_held) {
+      moving.forcedLand = options_.land_held(detail::StageTime(times, node, c));
+    }
   };
   // every stride-th node of the whole run is kept, and the last
   auto kept = [&](std::size_t node) {
@@ -505,7 +526,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
     movingLoadsAt(0, moving);
     moving.rotation = options_.rotation;
     if (sourced) startSources(moving);
-    auto solved = solverFor(0.0).SolveNonlinear(state_, moving, nonlinearOptions);
+    auto solved = solverFor(options_.scheme, 0.0)
+                      .SolveNonlinear(state_, moving, nonlinearOptions);
     response = std::move(solved.response);
     sigma_ = std::move(solved.loadCoefficients);
     ocean = std::move(solved.finalState.oceanFunction);
@@ -524,7 +546,7 @@ std::vector<Evolution::Snapshot> Evolution::March(
     // The instantaneous elastic response at the start: the right limit,
     // so a load switched on at times[0] is stepped at full order.
     loadGrid = directLoadAt(0);
-    const auto& elasticSolver = solverFor(0.0);
+    const auto& elasticSolver = solverFor(options_.scheme, 0.0);
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = loadGrid;
     forcing.directLoadOutsideWaterBudget = outsideAt(0);
@@ -587,75 +609,99 @@ std::vector<Evolution::Snapshot> Evolution::March(
     checkpoint(0);
   }
 
+  // the toroidal systems' stage states in the step in hand (sources)
+  auto toroidalStages = std::vector<ToroidalViscoelastic::State>{};
+  auto toroidalCombined = ToroidalViscoelastic::State{};
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
-    auto step = op.StartStep(vstate_, dt, options_.scheme,
-                             Columns(sigma_, toMatDensity_),
-                             Columns(psi_, toMatPotential_));
-    const auto& effectiveSolver = solverFor(dt);
-    // the node's sources force the step; the toroidal systems are
-    // stepped under theirs
-    auto stepSources = [&](auto& forcing) {
-      nodeForces = sourceForcesAt(node);
-      const auto& forces = nodeForces;
-      step.AddForce(forces.spheroidal);
-      auto stepped =
-          toroidal->Step(tstate, dt, options_.scheme, forces.toroidal);
-      tstate = std::move(stepped.first);
-      twist = std::move(stepped.second);
-      forcing.toroidalResponse = toroidalCoefficients();
-    };
-    if (migrating) {
-      // The step's equilibrium is the nonlinear equation from the
-      // background, the memory field entering through the response
-      // channels (pyslfp's `_run_migrating`).
-      GRDSolver::NonlinearForcing moving;
-      moving.iceThicknessChange = iceAt(node);
-      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-        moving.iceThicknessChange[i] -= state_.iceThickness[i];
+    // One stage of the step (StepRecipe.hpp; the step's one stage under a
+    // one-stage scheme): opened from its memory state, closed by the sea
+    // level equation under the forcing at its time, finished.
+    auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
+                       double length, std::size_t) {
+      const auto c = stage.c;
+      auto step = op.StartStep(from, length, stage.family,
+                               Columns(sigma_, toMatDensity_),
+                               Columns(psi_, toMatPotential_));
+      const auto& effectiveSolver = solverFor(stage.family, length);
+      // the stage's sources force it; the toroidal systems are stepped
+      // through the same stage under theirs
+      auto stepSources = [&](auto& forcing) {
+        nodeForces = sourceForcesAt(node, c);
+        const auto& forces = nodeForces;
+        step.AddForce(forces.spheroidal);
+        const auto& twistFrom = StageStart(
+            stage, dt, tstate,
+            std::span<const ToroidalViscoelastic::State>(toroidalStages),
+            ToroidalViscoelastic::CombinedState, toroidalCombined);
+        auto stepped =
+            toroidal->Step(twistFrom, length, stage.family, forces.toroidal);
+        toroidalStages.push_back(std::move(stepped.first));
+        twist = std::move(stepped.second);
+        forcing.toroidalResponse = toroidalCoefficients();
+      };
+      if (migrating) {
+        // The stage's equilibrium is the nonlinear equation from the
+        // background, the memory field entering through the response
+        // channels (pyslfp's `_run_migrating`).
+        GRDSolver::NonlinearForcing moving;
+        moving.iceThicknessChange = iceAt(node, c);
+        for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+          moving.iceThicknessChange[i] -= state_.iceThickness[i];
+        }
+        movingLoadsAt(node, moving, c);
+        if (sourced) stepSources(moving);
+        moving.displacementResponse =
+            Coefficients(step.MemorySurface(Component::U), toNdLength_);
+        moving.potentialResponse =
+            Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
+        moving.tangentialResponse =
+            Coefficients(step.MemorySurface(Component::V), toNdLength_);
+        moving.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
+        moving.rotation = options_.rotation;
+        auto solved =
+            effectiveSolver.SolveNonlinear(state_, moving, nonlinearOptions);
+        response = std::move(solved.response);
+        // the load the converged state carries relative to the background,
+        // so the radial step finishes under the load its solution saw
+        sigma_ = std::move(solved.loadCoefficients);
+        ocean = std::move(solved.finalState.oceanFunction);
+      } else {
+        GRDSolver::GeneralisedForcing coupled;
+        loadGrid = directLoadAt(node, c);
+        coupled.directLoad = loadGrid;
+        coupled.directLoadOutsideWaterBudget = outsideAt(node, c);
+        coupled.solidSurfaceChange = layerAt(node, c);
+        if (tide != nullptr) coupled.tide = tideAt(node, c);
+        if (sourced) stepSources(coupled);
+        coupled.displacementResponse =
+            Coefficients(step.MemorySurface(Component::U), toNdLength_);
+        coupled.potentialResponse =
+            Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
+        coupled.tangentialResponse =
+            Coefficients(step.MemorySurface(Component::V), toNdLength_);
+        coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
+        coupled.rotation = options_.rotation;
+        response =
+            effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
+        sigma_ = totalLoadCoefficients(
+            withOutside(loadGrid, coupled.directLoadOutsideWaterBudget),
+            response.relativeSeaLevelChange);
       }
-      movingLoadsAt(node, moving);
-      if (sourced) stepSources(moving);
-      moving.displacementResponse =
-          Coefficients(step.MemorySurface(Component::U), toNdLength_);
-      moving.potentialResponse =
-          Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
-      moving.tangentialResponse =
-          Coefficients(step.MemorySurface(Component::V), toNdLength_);
-      moving.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
-      moving.rotation = options_.rotation;
-      auto solved =
-          effectiveSolver.SolveNonlinear(state_, moving, nonlinearOptions);
-      response = std::move(solved.response);
-      // the load the converged state carries relative to the background,
-      // so the radial step finishes under the load its solution saw
-      sigma_ = std::move(solved.loadCoefficients);
-      ocean = std::move(solved.finalState.oceanFunction);
-    } else {
-      GRDSolver::GeneralisedForcing coupled;
-      loadGrid = directLoadAt(node);
-      coupled.directLoad = loadGrid;
-      coupled.directLoadOutsideWaterBudget = outsideAt(node);
-      coupled.solidSurfaceChange = layerAt(node);
-      if (tide != nullptr) coupled.tide = tideAt(node);
-      if (sourced) stepSources(coupled);
-      coupled.displacementResponse =
-          Coefficients(step.MemorySurface(Component::U), toNdLength_);
-      coupled.potentialResponse =
-          Coefficients(step.MemorySurface(Component::Phi), toNdPotential_);
-      coupled.tangentialResponse =
-          Coefficients(step.MemorySurface(Component::V), toNdLength_);
-      coupled.inertiaMomentChange = step.InertiaMoment()[0] * toNdMoment_;
-      coupled.rotation = options_.rotation;
-      response = effectiveSolver.SolveGeneralised(state_, coupled, sleOptions);
-      sigma_ = totalLoadCoefficients(
-          withOutside(loadGrid, coupled.directLoadOutsideWaterBudget),
-          response.relativeSeaLevelChange);
+      psi_ = potentialAt(node, response.angularVelocity, c);
+      return step
+          .Finish(Columns(sigma_, toMatDensity_),
+                  Columns(psi_, toMatPotential_))
+          .first;
+    };
+    const auto twistStart = tstate.t;
+    vstate_ = StepByRecipe(RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
+                           Combined);
+    if (sourced) {
+      tstate = std::move(toroidalStages.back());
+      tstate.t = twistStart + dt;
+      toroidalStages.clear();
     }
-    psi_ = potentialAt(node, response.angularVelocity);
-    vstate_ = step.Finish(Columns(sigma_, toMatDensity_),
-                          Columns(psi_, toMatPotential_))
-                  .first;
     record(times[node], response, kept(node));
     checkpoint(node);
   }
@@ -669,6 +715,13 @@ std::vector<Evolution::Snapshot> Evolution::MarchFactored(
   const auto& grid = solver.Grid();
   const auto lmax = op.LMax();
   const auto nodes = times.size();
+  if (IsMultiStage(options_.scheme)) {
+    throw std::invalid_argument(
+        "factor_sources steps the sources' histories sampled at the nodes, "
+        "and Sdirk2's first stage reads the sources between them: take the "
+        "general route (factor_sources false), whose snapshots the factored "
+        "form's equal");
+  }
   if (state_.oceanArea > 0.0 || options_.rotation != RotationalFeedback::None ||
       forcing.directLoad || forcing.directLoadOutsideWaterBudget ||
       forcing.solidSurfaceChange || forcing.tide || options_.record_stride > 0 ||
@@ -1009,18 +1062,19 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   // removed: a net force, which nothing balances without gravity (the load
   // projected on the loads that exert none; a balanced load's part is grid
   // error).
-  // (every term read at a node through detail::AtNode, as March's; the
-  // surface terms pass no left limit)
-  auto surfaceAt = [&](std::size_t node, const auto& term) {
+  // (every term read at a node, or at a stage of the step ending there,
+  // through detail::AtStage, as March's; the surface terms pass no left
+  // limit)
+  auto surfaceAt = [&](std::size_t node, const auto& term, double c) {
     using Callback = std::decay_t<decltype(term)>;
-    return detail::AtNode(times, node, term, Callback{});
+    return detail::AtStage(times, node, c, term, Callback{});
   };
-  auto loadAt = [&](std::size_t node) {
+  auto loadAt = [&](std::size_t node, double c = 1.0) {
     auto total = std::vector<double>(fieldSize, 0.0);
     for (const auto* given :
          {&forcing.directLoad, &forcing.directLoadOutsideWaterBudget}) {
       if (!*given) continue;
-      const auto field = surfaceAt(node, *given);
+      const auto field = surfaceAt(node, *given, c);
       if (field.empty()) continue;
       if (field.size() != fieldSize) {
         throw std::invalid_argument("a direct load lives on the solver's grid");
@@ -1028,7 +1082,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       for (auto i = std::size_t{0}; i < fieldSize; ++i) total[i] += field[i];
     }
     if (forcing.solidSurfaceChange) {
-      const auto layer = surfaceAt(node, forcing.solidSurfaceChange);
+      const auto layer = surfaceAt(node, forcing.solidSurfaceChange, c);
       if (!layer.empty() && layer.size() != fieldSize) {
         throw std::invalid_argument(
             "a layer's height lives on the solver's grid");
@@ -1079,12 +1133,12 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
         "loads' coefficients at its node");
   }
   auto nodeForces = RadialSourceForces{};
-  auto forcesAt = [&](std::size_t node) {
+  auto forcesAt = [&](std::size_t node, double c = 1.0) {
     if (!sourced) return RadialSourceForces{};
     return detail::ForcesOfSources(op, toroidal, solver.SolverScales(),
                                    toNdLength_,
-                                   PointSourcesAt(forcing, times, node),
-                                   StressGlutsAt(forcing, times, node));
+                                   PointSourcesAt(forcing, times, node, c),
+                                   StressGlutsAt(forcing, times, node, c));
   };
 
   auto spheroidal = std::map<int, std::vector<double>>{};
@@ -1161,20 +1215,40 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
     op.PrimeStrain(vstate_, channel(sigma_));
   }
 
+  // the toroidal systems' stage states in the step in hand (sources)
+  auto toroidalStages = std::vector<ToroidalViscoelastic::State>{};
+  auto toroidalCombined = ToroidalViscoelastic::State{};
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
-    auto step = op.StartStep(vstate_, dt, options_.scheme, channel(sigma_));
-    nodeForces = forcesAt(node);
-    step.AddForce(nodeForces.spheroidal);
-    if (loaded) sigma_ = loadAt(node);
-    auto finished = step.Finish(channel(sigma_));
-    vstate_ = std::move(finished.first);
-    spheroidal = std::move(finished.second);
+    // one stage of the step (StepRecipe.hpp) under the loads and the
+    // sources at its time, the toroidal systems through the same stage
+    auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
+                       double length, std::size_t) {
+      auto step = op.StartStep(from, length, stage.family, channel(sigma_));
+      nodeForces = forcesAt(node, stage.c);
+      step.AddForce(nodeForces.spheroidal);
+      if (loaded) sigma_ = loadAt(node, stage.c);
+      auto finished = step.Finish(channel(sigma_));
+      spheroidal = std::move(finished.second);
+      if (sourced) {
+        const auto& twistFrom = StageStart(
+            stage, dt, tstate,
+            std::span<const ToroidalViscoelastic::State>(toroidalStages),
+            ToroidalViscoelastic::CombinedState, toroidalCombined);
+        auto stepped =
+            toroidal.Step(twistFrom, length, stage.family, nodeForces.toroidal);
+        toroidalStages.push_back(std::move(stepped.first));
+        twist = std::move(stepped.second);
+      }
+      return std::move(finished.first);
+    };
+    const auto twistStart = tstate.t;
+    vstate_ = StepByRecipe(RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
+                           Combined);
     if (sourced) {
-      auto stepped =
-          toroidal.Step(tstate, dt, options_.scheme, nodeForces.toroidal);
-      tstate = std::move(stepped.first);
-      twist = std::move(stepped.second);
+      tstate = std::move(toroidalStages.back());
+      tstate.t = twistStart + dt;
+      toroidalStages.clear();
     }
     record(times[node], kept(node));
     checkpoint(node);

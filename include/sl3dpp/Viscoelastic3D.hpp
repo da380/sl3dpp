@@ -64,6 +64,7 @@
 #include <mutex>
 #include <optional>
 #include <span>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -216,6 +217,16 @@ class Viscoelastic3D {
     return reference_;
   }
 
+  /// The shortest relaxation time over the volume as the operator holds
+  /// it, and where it is (RelaxationSite): every branch's inverse time at
+  /// every grid point of every memory node where the branch is active, the
+  /// lateral viscosity sampled. Distributed, over every process's nodes
+  /// (through the collectives' max): collective, the same on every
+  /// process. With no lateral viscosity it is the reference's
+  /// (ViscoelasticOperator::ShortestRelaxation), the coupling carrying
+  /// every element that relaxes.
+  [[nodiscard]] RelaxationSite ShortestRelaxation() const;
+
   /// The unrelaxed solid's Love numbers (SI), cached.
   [[nodiscard]] const LoveNumbers& ElasticLove() const {
     return reference_.ElasticLoveNumbers();
@@ -296,6 +307,16 @@ class Viscoelastic3D {
   };
   [[nodiscard]] State ZeroState() const;
 
+  /// A multi-stage step's memory state (StepRecipe.hpp): the memory
+  /// tensors sum_j a_j m_j over the terms (a_j, state_j), in arrays
+  /// recycled where there are any (Recycle), the first state's time, and
+  /// the last state's strain cache, where the stage's within-step
+  /// iteration starts: a backward Euler stage reads its start strain for
+  /// nothing else, and the latest stage's end strain is the nearest to its
+  /// own. Not a state consistent with its cache otherwise.
+  [[nodiscard]] State StageState(
+      std::span<const std::pair<double, const State*>> terms) const;
+
   /// Per-degree solutions: spheroidal complex m >= 0 columns
   /// (ndof x (l + 1), column-major) and toroidal likewise (degrees >= 1;
   /// degree 1 in the operator's pinned gauge, its rigid rotations being
@@ -343,6 +364,12 @@ class Viscoelastic3D {
     /// iterations in all (the step's one solve, or a nested closure's
     /// solves summed).
     int solveIterations = 0;
+    /// Where an iteration that missed its tolerance `rtol` stopped, for
+    /// its failure's message: "residual r after n passes, against the
+    /// tolerance rtol". The residual has a floor at the rounding of a
+    /// pass (Evolution3D::Options::coupled_rtol), which a tolerance below
+    /// it shows here as a residual stopped above it.
+    [[nodiscard]] std::string Describe(double rtol) const;
   };
 
   /// The within-step fixed point's controls: at most max_iterations
@@ -364,9 +391,12 @@ class Viscoelastic3D {
     double anderson_rate = 0.5;
   };
 
-  /// One implicit step (ExponentialTrapezoid or BackwardEuler) under the
-  /// load channels; returns the new state (with its strain cache), the
-  /// end-time solutions, and the iteration diagnostics.
+  /// One implicit step (ExponentialTrapezoid, BackwardEuler, or Sdirk2's
+  /// two backward Euler stages, each closed under the channels at its own
+  /// end time) under the load channels; returns the new state (with its
+  /// strain cache), the end-time solutions, and the iteration diagnostics
+  /// (under Sdirk2 the stages' iterations summed, converged when both
+  /// were, the last stage's residual).
   struct StepResult {
     State state;
     Solutions solutions;
@@ -624,7 +654,10 @@ class Viscoelastic3D {
   /// there (docs/adjoints.md §13k). Its grid-sized
   /// arrays (the decayed memory, the weights, the workspace) come from the
   /// arrays recycled since the last StartStep where there are any, and are
-  /// allocated otherwise.
+  /// allocated otherwise. The step opened is one stage: a multi-stage
+  /// scheme (Sdirk2) is opened stage by stage (StepRecipe.hpp), and
+  /// refused here but at dt = 0, where every scheme's step is backward
+  /// Euler's.
   [[nodiscard]] OpenStep StartStep(const State& state, double dt,
                                    Scheme scheme = Scheme::ExponentialTrapezoid,
                                    const LoadCallable3D& load = {},

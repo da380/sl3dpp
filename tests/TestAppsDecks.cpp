@@ -555,5 +555,41 @@ TEST_F(DecksTest, TheViscosityKernelsOfABurgersBodyAreItsBranches) {
   EXPECT_LT(branches, 1e-7);
 }
 
+TEST_F(DecksTest, TheContinuousKernelsNameTheFasterBranchesTime) {
+  // The continuous sweep's steps against the shortest relaxation time on
+  // the Burgers ball are against its faster branch's time (branch 1, the
+  // slower first), at every point of the interior alike: planetmodel's
+  // kTimes[0], to the rounding of the two codes' arithmetic, named in the
+  // summary with the interior layer, against the run's longest step,
+  // 800 yr.
+  WriteBurgers(dir_ / "ball.burgers.deck");
+  const auto summary = app::RunKernel(Solve(
+      "burgers", R"({"deck": "ball.burgers.deck", "format": "burgers"})",
+      R"(, "kernels": {"method": "continuous",
+        "parameters": ["load", "viscosity"],
+        "measurements": [{"type": "displacement_cap", "name": "uplift",
+          "latitude": 12, "longitude": 22, "width_deg": 15, "time": 50}],
+        "output": "out/burgers_kernels"})"));
+  const auto year = 365.25 * 86400.0;
+  EXPECT_NE(summary.find(std::format(
+                "(load, viscosity; continuous adjoint, its longest step {:.3g} "
+                "times the shortest relaxation time ({:.3g} yr, branch 1, at ",
+                800.0 * year / kTimes[0], kTimes[0] / year)),
+            std::string::npos)
+      << summary;
+  EXPECT_NE(summary.find("in layer 0, 100 to 6371 km deep))"),
+            std::string::npos)
+      << summary;
+  const auto file = pm::ReadSurfaceFile(dir_ / "out" / "burgers_kernels" /
+                                        "uplift_load_kernels.nc");
+  const auto time = std::get<std::vector<double>>(
+                        file.meta.at("shortest_relaxation_time_s"))
+                        .front();
+  // measured 4.7e-16
+  const auto gap = std::abs(time - kTimes[0]) / kTimes[0];
+  RecordProperty("time_gap", std::format("{:.2e}", gap));
+  EXPECT_LT(gap, 1e-12);
+}
+
 
 }  // namespace

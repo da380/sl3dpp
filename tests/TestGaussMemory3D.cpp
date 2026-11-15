@@ -333,7 +333,9 @@ TEST(GaussMemory3D, ZeroLateralCoupledRunAndKernelsMatchThe1DSweep) {
   const auto snapshots3 = evolution3.Run(times, directLoad);
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(snapshots3);
   const auto adjoint3 =
-      AdjointSolver3D(evolution3, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+      AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
+                                   .rtol = 1e-12,
+                                   .coupled_rtol = 1e-12});
   const auto kernels3 =
       adjoint3.FirstOrderKernels(times, measurements, &trajectory3);
 
@@ -437,7 +439,9 @@ TEST(GaussMemory3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     if (kernelsOut != nullptr) {
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       const auto adjoint =
-          AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+          AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                      .rtol = 1e-12,
+                                      .coupled_rtol = 1e-12});
       *kernelsOut = adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
     return scene.Surface(measurements[times.size() - 1].relativeSeaLevelDual,

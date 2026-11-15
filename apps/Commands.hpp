@@ -181,7 +181,11 @@ struct MeasurementSpec {
 /// sweep, and one set of kernel files, per measurement. How the forward
 /// run is recorded is the top-level `trajectory` block's.
 struct KernelsBlock {
-  AdjointMethod method = AdjointMethod::Continuous;
+  /// The discrete adjoint by default: the exact gradient of the stepped
+  /// run, its error the forward run's own at any step. The continuous
+  /// adjoint converges to the same kernels, accurate once the steps are
+  /// short against the shortest relaxation time (docs/adjoints.md §1).
+  AdjointMethod method = AdjointMethod::Discrete;
   /// The kernels written, each named once, in the order of
   /// KernelParameter.
   std::vector<KernelParameter> parameters;
@@ -198,7 +202,7 @@ struct KernelsBlock {
 };
 
 /// Reads a `kernels` block of a run, relative paths against `directory`,
-/// and holds it to the run: `method` (a word, default "continuous"),
+/// and holds it to the run: `method` (a word, default "discrete"),
 /// `parameters` (required, distinct words, each one the run gives; its
 /// absence refused, listing them), `lateral` (true or false; true refused
 /// unless the parameters name the viscosity or the moduli), `measurements` (required, at least

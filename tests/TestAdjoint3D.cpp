@@ -4,15 +4,21 @@
 // kernels under lateral moduli without lateral structure — and the
 // finite-difference check of the full 3D log-viscosity kernel with
 // lateral structure on, at the continuous formulation's (commute-error)
-// accuracy in the resolved regime.
+// accuracy in the resolved regime; under Sdirk2 the same, the sweep stepped
+// by its stages, and the derivatives not built for it refused.
 
 #include <gtest/gtest.h>
 
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <functional>
+#include <iostream>
 #include <map>
+#include <stdexcept>
+#include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 
@@ -27,6 +33,7 @@
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
@@ -153,8 +160,9 @@ TEST(Adjoint3D, ZeroLateralKernelsMatchThe1DSweep) {
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   auto snapshots3 = evolution3.Run(times, directLoad);
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(snapshots3);
-  AdjointSolver3D adjoint3(evolution3,
-                           {.rtol = 1e-12, .coupled_rtol = 1e-12});
+  AdjointSolver3D adjoint3(evolution3, {.method = AdjointMethod::Continuous,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12});
   const auto kernels3 =
       adjoint3.FirstOrderKernels(times, measurements, &trajectory3);
 
@@ -307,7 +315,9 @@ TEST(Adjoint3D, SavedAndRegeneratedStrainsAgree) {
       EXPECT_EQ(s.internalState->strain.has_value(), recordStrain);
     }
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-    AdjointSolver3D adjoint(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Continuous,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12});
     return adjoint.FirstOrderKernels(times, measurements, &trajectory)
         .itauKernel3D[0];
   };
@@ -361,8 +371,10 @@ TEST(Adjoint3D, CheckpointedRecordingsRebuildTheGaps) {
       EXPECT_EQ(snapshots[n].internalState.has_value(), kept) << "node " << n;
     }
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-    auto adjoint =
-        AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12});
+    auto adjoint = AdjointSolver3D(
+        evolution, {.method = AdjointMethod::Continuous,
+                    .rtol = 1e-12,
+                    .coupled_rtol = 1e-12});
     return adjoint.FirstOrderKernels(times, measurements, &trajectory);
   };
   const auto full = kernels(1);
@@ -436,7 +448,9 @@ TEST(Adjoint3D, LateralLogViscosityKernelAgainstFiniteDifferences) {
     if (kernelsOut != nullptr) {
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       AdjointSolver3D adjoint(evolution,
-                              {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                              {.method = AdjointMethod::Continuous,
+                               .rtol = 1e-12,
+                               .coupled_rtol = 1e-12});
       *kernelsOut =
           adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
@@ -524,7 +538,9 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
     if (kernelsOut != nullptr) {
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
       AdjointSolver3D adjoint(evolution,
-                              {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                              {.method = AdjointMethod::Continuous,
+                               .rtol = 1e-12,
+                               .coupled_rtol = 1e-12});
       *kernelsOut =
           adjoint.FirstOrderKernels(times, measurements, &trajectory);
     }
@@ -578,4 +594,228 @@ TEST(Adjoint3D, TaylorRemainderConvergence) {
       EXPECT_LT(r1[i], r1[i - 1]) << "R1 not decreasing at h " << hs[i];
     }
   }
+}
+
+TEST(Adjoint3D, Sdirk2ZeroLateralKernelsMatchThe1DSweep) {
+  // Under Sdirk2 the 3D continuous sweep with delta = 0 steps the same
+  // stages as the 1D one: ice kernels and the spherically reduced viscosity
+  // kernels to the pipeline's round-off, as under the trapezoid
+  // (ZeroLateralKernelsMatchThe1DSweep).
+  auto scene = Scene::Make(1e21);
+  const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 5; ++n) times.push_back(2.0 * n * kyr);
+  auto load = scene.MeltLoad(-0.1);
+  auto directLoad = [&](double t) {
+    auto out = std::vector<double>(load.size());
+    const auto ramp = t / times.back();
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] = ramp * load[i];
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[5].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  measurements[3].displacementDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return -0.6 * Cap(t, p, 2.2, 3.9, 0.6); });
+  ViscoelasticOperator op1(scene.rheology, kLmax,
+                           {.memory_points = MemoryPointSet::Gll});
+  Evolution evolution1(
+      op1, scene.solver, scene.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto trajectory1 =
+      ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
+  const AdjointSolver adjoint1(
+      evolution1, {.method = AdjointMethod::Continuous, .rtol = 1e-12});
+  const auto kernels1 =
+      adjoint1.FirstOrderKernels(times, measurements, &trajectory1);
+  Viscoelastic3D op3(scene.rheology, kLmax,
+                     [](double, double, double) { return 0.0; },
+                     {.memory_points = MemoryPointSet::Gll});
+  Evolution3D evolution3(op3, scene.solver, scene.state,
+                         {.scheme = Scheme::Sdirk2,
+                          .rtol = 1e-12,
+                          .coupled_rtol = 1e-12,
+                          .record_stride = 1});
+  const auto trajectory3 =
+      ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
+  const AdjointSolver3D adjoint3(evolution3,
+                                 {.method = AdjointMethod::Continuous,
+                                  .rtol = 1e-12,
+                                  .coupled_rtol = 1e-12});
+  const auto kernels3 =
+      adjoint3.FirstOrderKernels(times, measurements, &trajectory3);
+  auto scale = 0.0, worst = 0.0;
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    for (auto i = std::size_t{0}; i < kernels1.directLoadKernels[n].size();
+         ++i) {
+      scale = std::max(scale, std::abs(kernels1.directLoadKernels[n][i]));
+      worst = std::max(worst, std::abs(kernels3.ice.directLoadKernels[n][i] -
+                                       kernels1.directLoadKernels[n][i]));
+    }
+  }
+  const auto& coupling = op3.Coupling();
+  const auto ngll = scene.material.Mesh().NGll();
+  auto kScale = 0.0, kWorst = 0.0;
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    const auto full =
+        static_cast<std::size_t>(coupling.ElementOfNode(rn)) * ngll +
+        coupling.NodeInElementOf(rn);
+    kScale = std::max(kScale, std::abs(kernels1.itauKernel[0][full]));
+    kWorst = std::max(kWorst, std::abs(kernels3.itauKernelSpherical[0][rn] -
+                                       kernels1.itauKernel[0][full]));
+  }
+  std::cout << std::format("[sdirk2 3D kernels] ice {:.2e}, viscosity {:.2e}\n",
+                           worst / scale, kWorst / kScale);
+  // measured: 2e-15 and 1.7e-12
+  EXPECT_GT(scale, 0.0);
+  EXPECT_GT(kScale, 0.0);
+  EXPECT_LT(worst, 1e-6 * scale);
+  EXPECT_LT(kWorst, 1e-6 * kScale);
+}
+
+TEST(Adjoint3D, Sdirk2LateralLogViscosityKernelAgainstFiniteDifferences) {
+  // LateralLogViscosityKernelAgainstFiniteDifferences under Sdirk2: the
+  // full 3D log-viscosity kernel with lateral structure on, the continuous
+  // sweep stepped by Sdirk2's stages, against central differences of
+  // Sdirk2 forward runs at the same steps, closer as the steps halve.
+  auto scene = Scene::Make(1e22);
+  const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
+  auto baseDelta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  auto direction = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto load = scene.MeltLoad(-0.1);
+  auto run = [&](std::size_t npts, double eps, Kernels3D* kernelsOut) {
+    auto times = std::vector<double>{};
+    for (auto n = std::size_t{0}; n < npts; ++n) {
+      times.push_back(10.0 * static_cast<double>(n) /
+                      static_cast<double>(npts - 1) * kyr);
+    }
+    auto directLoad = [&](double t) {
+      auto out = std::vector<double>(load.size());
+      const auto ramp = t / times.back();
+      for (auto i = std::size_t{0}; i < out.size(); ++i)
+        out[i] = ramp * load[i];
+      return out;
+    };
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[npts - 1].relativeSeaLevelDual =
+        scene.solver.Grid().FromFunction(
+            [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+    Viscoelastic3D op(
+        scene.rheology, kLmax, [&](double r, double theta, double phi) {
+          return baseDelta(r, theta, phi) + eps * direction(theta, phi);
+        });
+    Evolution3D evolution(op, scene.solver, scene.state,
+                          {.scheme = Scheme::Sdirk2,
+                           .rtol = 1e-12,
+                           .coupled_rtol = 1e-12,
+                           .record_stride = kernelsOut != nullptr ? 1 : 0});
+    auto snapshots = evolution.Run(times, directLoad);
+    if (kernelsOut != nullptr) {
+      const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+      const AdjointSolver3D adjoint(evolution,
+                                    {.method = AdjointMethod::Continuous,
+                                     .rtol = 1e-12,
+                                     .coupled_rtol = 1e-12});
+      *kernelsOut = adjoint.FirstOrderKernels(times, measurements, &trajectory);
+    }
+    return scene.Surface(measurements[npts - 1].relativeSeaLevelDual,
+                         snapshots.back().relativeSeaLevelChange);
+  };
+  Viscoelastic3D probe(scene.rheology, kLmax,
+                       [](double, double, double) { return 0.0; });
+  const auto& coupling = probe.Coupling();
+  const auto p = coupling.Grid().FromFunction(direction);
+  auto atNodes = std::vector<double>(coupling.GridValueCount());
+  for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+    std::ranges::copy(p, atNodes.begin() + static_cast<std::ptrdiff_t>(
+                                               coupling.FieldOffset(rn)));
+  }
+  auto errors = std::vector<double>{};
+  for (const std::size_t npts : {5ul, 9ul}) {
+    Kernels3D kernels;
+    static_cast<void>(run(npts, 0.0, &kernels));
+    const auto predicted =
+        VolumePairing(coupling, kernels.logViscosityKernel3D[0], atNodes);
+    const auto eps = 0.1;
+    const double fd =
+        (run(npts, eps, nullptr) - run(npts, -eps, nullptr)) / (2.0 * eps);
+    errors.push_back(std::abs(fd - predicted) / std::abs(fd));
+  }
+  std::cout << std::format(
+      "[sdirk2 3D kernel] against differences {:.3e} {:.3e}\n", errors[0],
+      errors[1]);
+  // measured: 1.1 % at 2.5 kyr steps, 0.25 % at 1.25 kyr
+  EXPECT_LT(errors[0], 0.03);
+  EXPECT_LT(errors[1], 0.35 * errors[0]);
+}
+
+TEST(Adjoint3D, Sdirk2RefusesTheDerivativesNotBuilt) {
+  // About a 3D run under Sdirk2 the discrete sweep, the second-order sweep
+  // and the tangent-linear run are not built, and the continuous sweep
+  // reads every node's state: each refused by name.
+  auto scene = Scene::Make(1e21);
+  const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, kyr, 2.0 * kyr, 3.0 * kyr};
+  const auto load = scene.MeltLoad(-0.1);
+  auto directLoad = [&](double t) {
+    auto out = load;
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[3].relativeSeaLevelDual = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  Viscoelastic3D op(
+      scene.rheology, kLmax, [](double, double theta, double phi) {
+        return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  auto named = [](const std::function<void()>& call, std::string_view what) {
+    try {
+      call();
+      ADD_FAILURE() << what << " ran under Sdirk2";
+    } catch (const std::invalid_argument& error) {
+      EXPECT_NE(std::string(error.what()).find("Sdirk2"), std::string::npos)
+          << what << ": " << error.what();
+    }
+  };
+  Evolution3D evolution(
+      op, scene.solver, scene.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto snapshots = evolution.Run(times, directLoad);
+  const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+  named(
+      [&] {
+        const AdjointSolver3D adjoint(evolution,
+                                      {.method = AdjointMethod::Discrete});
+        static_cast<void>(
+            adjoint.FirstOrderKernels(times, measurements, &trajectory));
+      },
+      "the discrete sweep");
+  named(
+      [&] {
+        const AdjointSolver3D adjoint(evolution,
+                                      {.method = AdjointMethod::Continuous});
+        static_cast<void>(adjoint.SecondOrderKernels(
+            times, measurements, snapshots, {}, trajectory));
+      },
+      "the second-order sweep");
+  named([&] { const TangentLinearSolver3D tangent(evolution); },
+        "the tangent-linear run");
+  Evolution3D strided(
+      op, scene.solver, scene.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 2});
+  const auto gapped =
+      ForwardTrajectory3D::FromSnapshots(strided.Run(times, directLoad));
+  named(
+      [&] {
+        const AdjointSolver3D adjoint(strided,
+                                      {.method = AdjointMethod::Continuous});
+        static_cast<void>(
+            adjoint.FirstOrderKernels(times, measurements, &gapped));
+      },
+      "the continuous sweep about a gapped trajectory");
 }

@@ -43,7 +43,8 @@ of mantle viscosity using deglacial sea level observations;
   forward problem without self-gravitation, under surface loads (their
   weight, a normal traction; no degree-1 part) and seismic sources.
 - **Derivatives.** Adjoint kernels of sea-level, displacement, potential
-  and rotation measurements, continuous or exactly discrete, 1D and 3D,
+  and rotation measurements, exactly discrete (`sl3d kernel`'s default)
+  or continuous, 1D and 3D,
   in the ice history, surface loads, a tide, the initial sea level, the
   viscosity (in 3D the log-viscosity field), the moduli κ and μ and the
   sources' moment tensors; the kernels in lateral structure (the log

@@ -646,7 +646,7 @@ against the state's, and a run counting forwards has no such history.
 | `ocean.at` | word | required | the quasi-static problem: the end of the window the state belongs to, `"start"` (the initial state, its files read at `times.start_kyr_bp` where they have a time axis, or, counting forwards, at `ocean.date_kyr_bp`) or `"end"` (a dated run's alone: the state the run reaches at `times.end_kyr_bp`, against whose sea level the initial sea level is calibrated, its sea level's and ice's files reaching that date unless they hold their ends, `"outside_span": "hold"`; a land on a time axis is read there under frozen shorelines, and at every node's date under migrating ones); refused in the static problem |
 | `ocean.shorelines` | word | `"frozen"` | `"frozen"`, the state's ocean function throughout (the linear equation); `"migrating"`, the ocean function follows flotation (the nonlinear equation; solve, The static problem and The run through time) |
 | `ocean.calibration` | object | absent | the quasi-static problem with `"at": "end"`, the calibration's members, all optional (the calibration runs whenever the state is at the end, with these defaults when the block is absent); refused with `"at": "start"` |
-| `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one adjoint sweep per run); the same single step under frozen shorelines |
+| `ocean.calibration.method` | word | `"fixed_point"` | `"fixed_point"`: the classical update S0 <- S_f - xi(t_f; S0); `"gradient"`: steepest descent on the misfit with the adjoint gradient (one discrete adjoint sweep per run, so refused under migrating shorelines with `solver.scheme` `"sdirk2"`, below); the same single step under frozen shorelines |
 | `ocean.calibration.iterations` | integer >= 1 | 10 | the most runs under migrating shorelines; running out is an error |
 | `ocean.calibration.rtol` | number > 0 | 1e-4 | convergence under migrating shorelines: the largest update below this times the largest initial sea level (1e-4 is of order a metre) |
 
@@ -671,11 +671,11 @@ hold what they would.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | `solver.rtol` | number > 0 | 1e-9 | the relative tolerance of the sea level solves (and, for the kernels and the gradient calibration, of the adjoint solves); a sea level solve that misses it is an error. Without an ocean the solve closes in one pass and it has no effect |
-| `solver.step_rtol` | number > 0 | 1e-9 | the relative tolerance of a 3D step's closure: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the static problem's one zero-length step) |
+| `solver.step_rtol` | number > 0 | 1e-9 | the relative tolerance of a 3D step's closure: each step's combined fixed point of the strain, the ocean load and the rotation (in `kernel`, the reversed sweep's steps too; under lateral moduli, the zero-length step of the start too, and the static problem's one zero-length step). Its residual, the relative change of the strain between two passes, has a floor at the rounding of a pass (the lateral products' transforms and the degree solves), about 1e-13 to 1e-12 (measured 6e-14 to 3e-13 on the tests' small bodies under lateral moduli or viscosity, 3e-13 to 7e-13 in the library's lateral-moduli tests), and about 1e-11 under `"step": "conjugate_gradients"`, each pass's inner solve stopping at its own tolerance (measured 4e-12 to 9e-12): a tolerance below the floor is not met, and the step stops with an error stating the residual it reached, its passes and the tolerance asked for |
 | `solver.step_max_iterations` | integer >= 1 | 60 | its iteration budget; a step that runs out of it is an error |
 | `solver.transform_degrees` | integers in [2, lmax] | absent | the degrees the lateral coupling's transforms may be cut to with depth. Each memory node takes the least of these (or lmax) that covers every degree its solution carries, so nothing the degree systems keep is dropped; only the grid that forms the lateral products is coarser at depth, which resolves the lateral structure's pattern there to about that degree. Absent: every node at lmax. Below about lmax 30 every mantle node needs lmax and nothing is cut |
 | `solver.cache_mb` | integer >= 0 | 0 | the last-level cache every transform grid of the run blocks its work for, MiB per cache domain (32 on a server with 32 MiB per CCD); 0 takes GSHTrans's default (8 MiB). A server with large per-domain caches may gain at large lmax; a small cache loses by overstating it. The results are independent of it to rounding: it sets only how many fields a batched transform takes at a time, and the batches of another size are transformed under plans of their own |
-| `solver.scheme` | word | `"exponential_trapezoid"` | the quasi-static problem alone: the time step, `"exponential_trapezoid"` (second order) or `"backward_euler"` (first) |
+| `solver.scheme` | word | `"exponential_trapezoid"` | the quasi-static problem alone: the time step, `"exponential_trapezoid"` (second order, one solve a step), `"backward_euler"` (first) or `"sdirk2"` (second order and damped, two solves a step: below) |
 | `solver.step` | word | `"fixed_point"` | the quasi-static problem alone, but for the static problem on lateral moduli: how a 3D step's linear system is closed, `"fixed_point"` (the within-step iteration, Anderson-accelerated) or `"conjugate_gradients"` (preconditioned by the radial reference's solve; `Viscoelastic3D::Options::StepSolver`), the conjugate-gradient solves nested inside the step's combined fixed point, each one inexact, to the library's own inner tolerance (`Viscoelastic3D::Options::solve_rtol`) |
 
 The members of the 3D step (`step`, `step_rtol`, `step_max_iterations`,
@@ -689,6 +689,32 @@ lateral kernels (`kernels.lateral` true) takes the grids' two,
 the lateral kernels on the grids they set, and `solve` leaves them
 unused, as it does the `kernels` block, its run the run without them.
 `scheme` is refused in the static problem.
+
+`"sdirk2"` is Alexander's two-stage scheme (design.md §5): each step two
+backward Euler stages of length 0.29 times the step, the first ending
+inside the step and closed under the forcing there (the ice, the loads,
+the tide, the seismic sources and the land held at that time), the
+second at the node. It costs twice the trapezoid's solves a step (in 3D
+about twice the passes), and is the more accurate where the steps are
+long against the model's shortest relaxation time, which `kernel` states
+for a continuous kernel: on the time-step study's problem at steps 9.3
+times it (examples/configs/README.md) the values some 12 to 15 times
+closer, the continuous kernels 5 to 24 times; after an abrupt change of
+the forcing over a weak layer it is second order where the trapezoid is
+not, and damped where Crank–Nicolson rings. At steps short against that
+time the trapezoid is the closer.
+Under it `kernel` takes the continuous adjoint, stepped by the same
+stages: the discrete adjoint (`kernels.method` `"discrete"`, the
+default) is not built for it and is refused, naming the choices
+(`"continuous"`, or the scheme `"exponential_trapezoid"` or
+`"backward_euler"`); so is a recording with gaps,
+`trajectory.record_stride` other than 1 (the sweep reads every node's
+state). The
+gradient calibration (`ocean.calibration.method` `"gradient"`) under
+migrating shorelines takes its gradient from the discrete adjoint, in 1-D
+and 3-D alike, and is refused under it as not built, naming the choices
+(`"fixed_point"`, whose calibrated state is the same, or a scheme of one
+stage); under frozen shorelines it runs no sweep and is taken.
 
 ### The output block
 
@@ -751,7 +777,9 @@ problem has one node, recorded whole, and refuses `record_stride`; a run
 under seismic sources is recorded at every node it steps, both of an
 onset's pair (Seismic sources, below), each state with its strain (its
 states are not rebuilt without the sources' forces), and refuses a
-stride other than 1. Without a directory `solve` records nothing and
+stride other than 1; so does a run under `solver.scheme` `"sdirk2"`
+(a state between two kept ones is not rebuilt: its step has no exact
+backward step, and its stages' forcing is not recorded). Without a directory `solve` records nothing and
 `kernel` records in memory at the stride, as without the block.
 
 **solve.** With `trajectory.directory`, the run (static or through
@@ -825,13 +853,25 @@ and the seismic sources, the static problem's dates of its terms and the
 file inputs' formats beside them. The hash covers what determines the
 forward trajectory and nothing of the reverse sweep: the `kernels`,
 `output`, `checkpoint` and `trajectory` blocks, `restart`,
-`solver.cache_mb`, the file inputs' `outside_span` and the paths are left
+`solver.cache_mb`, the `outside_span` of the file inputs and of a
+`fault_file` term (which cannot change a run that runs: where `"refuse"`
+succeeds no read lay outside the span, and `"hold"` reads the same there)
+and the paths are left
 out, and so is `solver.transform_degrees` on a radial model, where the
 forward run has no 3D step and the member sets only the grids of the
 sweep's lateral kernels (`kernels.lateral`); so one store serves every
 kernel config of one run, at any `transform_degrees` of a radial run,
 and a run directory can move. The stride and the ranks are checked
-beside the hash, each with its own message.
+beside the hash, each with its own message. Two spellings of one input
+hash alike where they resolve to the same numbers: a static field load's
+`date_kyr_bp` and the same instant as `date` with its `unit` hash as the
+one time the file is read at (in kyr always, the date being its
+negation; in another unit where the product is the same double, as
+1250 yr for 1.25 kyr BP but not 17 yr for 0.017 kyr BP). A seismic
+source hashes as given: a point's `moment_tensor_nm` and the strike, dip,
+rake and moment that form it hash apart (a tensor written out differs
+from the one formed at rounding), so the store of one is not reused by
+the other, never read in its place.
 
 **Solve once, kernel many.** One config, the run and its `trajectory`
 block, with a `kernels` block per batch of measurements (or one config
@@ -1703,10 +1743,11 @@ branch moduli at the memory points rather than at the nodes (about 1e-11
 relative on the test decks under a load, 5e-10 under a point source's
 sharper forcing; under lateral moduli to the solves' tolerances). Each
 step then advances from one node to the next under the forcing AT the
-next node, the scheme's end-time loads being that node's: a load that is
-non-zero at the first node includes the elastic jump at the start (the
-run is the response to a load switched on there), while a load ramped up
-from zero has none.
+next node, the scheme's end-time loads being that node's (under
+`"sdirk2"` its first stage's, inside the step, the forcing at its own
+time): a load that is non-zero at the first node includes the elastic
+jump at the start (the run is the response to a load switched on there),
+while a load ramped up from zero has none.
 
 The output is a surface file on the run's Gauss–Legendre grid with one
 slice per time node, its time axis in seconds relative to the present
@@ -2679,11 +2720,23 @@ lateral viscosity, lateral moduli or both). Its states are recorded (in
 memory, or in the trajectory store of `trajectory.directory`, from which
 a later run sweeps without the forward run: The trajectory block, above),
 and then, for each measurement, one reverse (adjoint) sweep of the library's
-derivative classes gives the kernels the block names, by the continuous
-adjoint or by the exact discrete transpose of the time-stepped map
-(docs/adjoints.md). In the static problem the two methods agree to
-rounding, there being no step to commute; through time they differ by
-the commute error, which falls as the steps are refined.
+derivative classes gives the kernels the block names, by the exact
+discrete transpose of the time-stepped map (the default) or by the
+continuous adjoint (docs/adjoints.md §1). In the static problem the two
+methods agree to rounding, there being no step. Through time both
+converge to the same kernels at second order in the step. The discrete
+kernel is the exact gradient of what the program computes, its error
+the forward run's own at any step. The continuous adjoint relaxes after
+each measurement on the model's shortest relaxation time, which the
+forward run never has to resolve, and its kernel is accurate when the
+steps are short against the shortest relaxation time of the layers that
+matter: on a uniform 1e21 Pa s mantle (the time-step study,
+examples/configs/README.md) it is off by 0.4–0.6% at a ratio of 1.2,
+1.7–2.5% at 2.3 and 14–24% at 9.3, and by far more in a weak layer; at
+9.3 the forward values are good to 0.2–0.5% and the discrete kernel to
+1.7–4.0%. The summary states the ratio for a continuous
+kernel (Output, below), as information. The two kernels' agreement is a
+check of the time discretisation.
 
 With the state at the window's start the initial sea level is the
 state's; with it at the end (`"at": "end"`) it is calibrated first, as
@@ -2693,7 +2746,7 @@ level fixed.
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
 | the shared blocks | | | as for `solve` (The blocks, above); `output`, `checkpoint` and `restart` checked as `solve` checks them and not used |
-| `kernels.method` | word | `"continuous"` | `"continuous"` or `"discrete"` (the exact transpose of the time-stepped map) |
+| `kernels.method` | word | `"discrete"` | `"discrete"` (the exact transpose of the time-stepped map) or `"continuous"` (the continuum adjoint discretised; accurate with steps short against the shortest relaxation time, above) |
 | `kernels.parameters` | array of words | required | the kernels written, at least one, each where the run gives it (below) |
 | `kernels.lateral` | boolean | false on a radial model, true on one with lateral structure | the kernels in the viscosity and the moduli as fields over the Earth, whatever the background (Lateral kernels, below) |
 | `kernels.measurements` | array | required | the measurements, at least one (below) |
@@ -2740,7 +2793,7 @@ delta dV. Every kernel is SI: the measurement's unit (`measurement_unit`,
 or the `J in` line of a table) per unit of the perturbation and per
 square or cubic metre. Each file states the measurement, its type and
 unit, and the pairing, with the points and weights the pairing needs
-where the run has them.
+where the run has them, and the adjoint method (Output, below).
 
 **The ice and the state.** The ice at a node is the state's ice plus the
 ice change there (The state and the ice change, above). With the state
@@ -3036,8 +3089,10 @@ In `kernels.output`:
 
 - `measurements.txt`: under a header of `#` lines (program and version,
   creation time, config, the state's inputs as read, `ice` and
-  `sea_level`, or `ocean none`, and the forcing's terms, `ice_change`,
-  `load`, `tide` and `seismic`, as `solve`'s metadata give them), one row
+  `sea_level`, or `ocean none`, the forcing's terms, `ice_change`,
+  `load`, `tide` and `seismic`, as `solve`'s metadata give them, and
+  `adjoint` with the method, the continuous sweep's steps after it as
+  the summary states them), one row
   per measurement: `name type value_si`, the forward value in the SI unit
   of the table above; a `decay_time` row adds `tau amplitude_m offset_m`
   from the fit, tau in kyr in a dated run and in the run's unit in one
@@ -3050,11 +3105,30 @@ In `kernels.output`:
   `time_unit`) as `solve`'s surface file lists them, and the instants of
   `instantaneous_dual` are the measurement's own nodes.
 
+- The method in every kernel file's metadata: a surface file's
+  `adjoint_method` (`discrete` or `continuous`), and for a continuous
+  kernel through time `longest_step_over_shortest_relaxation_time`,
+  `shortest_relaxation_time_s`, `shortest_relaxation_radius_m` and
+  `shortest_relaxation_at` (where, as the summary states it); a field
+  file (`_viscosity_kernels.nc`, `_moduli_kernels.nc`) the three numbers.
+
+The shortest relaxation time is of the model as the run builds it: every
+branch's time (a Burgers body's faster, a prony deck's shortest) at
+every point the internal variables live at, the lateral viscosity
+sampled on each one's grid under a 3D model; where several points share
+it, the innermost.
+
 Summary: `<what the config was taken to mean>; <the inputs as read>;
 wrote <n> measurement(s) of kernels to <output> (<parameters>; <method>
 adjoint)` (`; the kernels in the Earth as fields` before the
 closing parenthesis with `kernels.lateral` true), the first two as in
-`solve`'s summary, then, with
+`solve`'s summary; for a continuous kernel through time `<method>
+adjoint` is followed by `, its longest step <r> times the shortest
+relaxation time (<t> <unit>, [branch <b>, ]at <d> km depth in layer <l>,
+<top> to <bottom> km deep[, at latitude <lat>, longitude <lon>])`, the
+step the library's longest, the time in the run's unit (kyr in a dated
+run), the branch given on a rheology of several, the place on the sphere
+under a lateral viscosity; then, with
 `trajectory.directory`, `; the forward run recorded to the trajectory
 store <directory> (<size>)` or `; the forward run read back from the
 trajectory store <directory> (<size>)`.

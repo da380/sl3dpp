@@ -4,11 +4,14 @@
 
 #include <gtest/gtest.h>
 
-#include <numeric>
-
+#include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <format>
+#include <iostream>
 #include <map>
+#include <numeric>
+#include <string>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -39,7 +42,7 @@ struct Setup {
   GRDSolver::State state;
   std::vector<double> iceNd;
 
-  static Setup Make() {
+  static Setup Make(int lmax = kLmax) {
     auto deck =
         Deck::Read(
             std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -47,7 +50,7 @@ struct Setup {
                        0))
             .value();
     auto model = EarthModel::FromDeck(deck).value();
-    auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
+    auto mesh = RadialMesh::Create(model, {.lmax = lmax}).value();
     auto material = Material::Create(model, mesh).value();
     const auto& scales = model.ModelScales();
     auto viscosity = std::map<std::size_t, RadialValue>{};
@@ -59,10 +62,10 @@ struct Setup {
       }
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
-    ViscoelasticOperator reference(rheology, kLmax);
-    GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
-                          SeaLevelParameters{});
-    Fingerprint fingerprint(kLmax, reference.ElasticLoveNumbers());
+    ViscoelasticOperator reference(rheology, lmax);
+    GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                     SeaLevelParameters{});
+    Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
     fingerprint.SetAnalyticTestState(0.0);
     const auto length = solver.SolverScales().Length();
     auto toNd = [&](std::vector<double> si) {
@@ -1963,4 +1966,248 @@ TEST(Lateral, AResumedRunAcrossAJumpIsTheUninterruptedOne) {
     }
   }
   EXPECT_GT(WorstDeparture(full[2].displacement, full[1].displacement), 1e-2);
+}
+
+TEST(PointSourceEvolution,
+     AnOnsetAtARepeatedNodeUnderSdirk2IsTheRunStartedThere) {
+  // AnOnsetAtARepeatedNodeIsTheRunStartedThere under Sdirk2: the step to
+  // the left limit takes its first stage under the sources there (none),
+  // the zero-length step is backward Euler's elastic solve with the memory
+  // held, and the stages after it the sources and the toroidal systems at
+  // their times. From the onset on every field at every node is the run
+  // started at the onset: radial without an ocean and with one and the
+  // rotational feedback, and in 3D under lateral viscosity and under
+  // lateral moduli beside it.
+  auto setup = Setup::Make();
+  const auto& solver = setup.solver;
+  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  const auto onset = 0.3 * kyr;
+  const auto jump =
+      std::vector<double>{0.0, onset, onset, 0.8 * kyr, 2.0 * kyr};
+  const auto started = std::vector<double>{onset, 0.8 * kyr, 2.0 * kyr};
+  const auto thrust = SourceAt(
+      setup, 400.0, 1.1, 4.0,
+      {.rr = 0.9, .tt = -0.2, .pp = -0.7, .rt = 0.3, .rp = -0.7, .tp = 0.6},
+      1e22);
+  auto sourcesAt = [&](double t) {
+    return t >= onset ? std::vector<PointSource>{thrust}
+                      : std::vector<PointSource>{};
+  };
+  auto before = [&](double t) {
+    return t > onset ? std::vector<PointSource>{thrust}
+                     : std::vector<PointSource>{};
+  };
+  const auto forcing =
+      Evolution::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+  const auto forcing3 =
+      Evolution3D::Forcing{.sources = sourcesAt, .sourcesBefore = before};
+  auto worst = 0.0;
+  auto compare = [&](const auto& got, const auto& want,
+                     const std::string& label) {
+    ASSERT_EQ(got.size(), jump.size()) << label;
+    ASSERT_EQ(want.size(), started.size()) << label;
+    const auto size = MaxAbsOf(got[2].displacement);
+    EXPECT_GT(size, 0.0) << label;
+    for (auto node : {std::size_t{0}, std::size_t{1}}) {
+      EXPECT_LE(MaxAbsOf(got[node].displacement), 1e-14 * size)
+          << label << ", node " << node;
+    }
+    for (auto k = std::size_t{0}; k < started.size(); ++k) {
+      EXPECT_TRUE(got[2 + k].converged) << label;
+      const auto departure = SnapshotDeparture(got[2 + k], want[k]);
+      worst = std::max(worst, departure);
+      EXPECT_LT(departure, 1e-11) << label << ", node " << 2 + k;
+    }
+  };
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  const auto dry = solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry}) {
+    const auto label = std::string(background == &dry ? "no ocean" : "ocean");
+    Evolution evolution(
+        op1, solver, *background,
+        {.scheme = Scheme::Sdirk2,
+         .rotation = background == &wet ? RotationalFeedback::Full
+                                        : RotationalFeedback::None,
+         .rtol = 1e-12});
+    compare(evolution.Run(jump, forcing), evolution.Run(started, forcing),
+            label);
+  }
+  const auto delta = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  Viscoelastic3D op3(setup.rheology, kLmax, delta);
+  Evolution3D evolution3(
+      op3, solver, wet,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12});
+  compare(evolution3.Run(jump, forcing3), evolution3.Run(started, forcing3),
+          "3D, lateral viscosity");
+  auto options = Viscoelastic3D::Options{};
+  options.solve_rtol = 1e-12;
+  options.moduli = Viscoelastic3D::Options::LateralModuli{
+      .shear =
+          [](double r, double theta, double phi) {
+            return 0.1 * (0.5 + r * r) * std::sin(theta) * std::cos(theta) *
+                   std::cos(phi);
+          },
+      .bulk = [](double r, double theta,
+                 double) { return 0.05 * (1.0 - 0.5 * r) * std::cos(theta); }};
+  Viscoelastic3D moduli(setup.rheology, kLmax, delta, options);
+  Evolution3D lateral(
+      moduli, solver, wet,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12});
+  compare(lateral.Run(jump, forcing3), lateral.Run(started, forcing3),
+          "3D, lateral viscosity and moduli");
+  // measured: bitwise in every case
+  std::cout << std::format("[sdirk2 onset] worst departure {:.2e}\n", worst);
+}
+
+TEST(LateralGate, Sdirk2ZeroLateralEvolutionMatchesThe1DLoop) {
+  // Under Sdirk2 the 3D loop with no lateral perturbation steps the same
+  // stages as the 1D loop, each closed under the forcing at its time:
+  // loads inside and outside the water budget, a layer and a tide growing
+  // in time, with the full rotational feedback; every field to the
+  // pipeline's round-off, as under the trapezoid
+  // (ZeroLateralForcedEvolutionMatchesThe1DLoop).
+  auto setup = Setup::Make();
+  const auto kyr = 1000.0 * 3.15576e7 / setup.solver.SolverScales().Time();
+  const auto times = std::vector<double>{0.0, 0.7 * kyr, 2.0 * kyr, 4.0 * kyr};
+  const auto forcing = LoadsThrough<Evolution::Forcing>(setup, kyr, 1.0);
+  const auto forcing3 = LoadsThrough<Evolution3D::Forcing>(setup, kyr, 1.0);
+  ViscoelasticOperator op1(setup.rheology, kLmax);
+  Evolution evolution1(op1, setup.solver, setup.state,
+                       {.scheme = Scheme::Sdirk2, .rtol = 1e-12});
+  const auto reference = evolution1.Run(times, forcing);
+  Viscoelastic3D op3(setup.rheology, kLmax,
+                     [](double, double, double) { return 0.0; });
+  Evolution3D evolution3(
+      op3, setup.solver, setup.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-11});
+  const auto coupled = evolution3.Run(times, forcing3);
+  ASSERT_EQ(coupled.size(), reference.size());
+  auto worst = 0.0;
+  for (auto node = std::size_t{0}; node < coupled.size(); ++node) {
+    EXPECT_TRUE(coupled[node].converged) << node;
+    const auto& a = coupled[node];
+    const auto& b = reference[node];
+    worst = std::max(
+        {worst,
+         WorstDeparture(a.relativeSeaLevelChange, b.relativeSeaLevelChange),
+         WorstDeparture(a.displacement, b.displacement),
+         WorstDeparture(a.potential, b.potential),
+         WorstDeparture(a.tangentialPotential, b.tangentialPotential)});
+    auto omega = 0.0, size = 0.0;
+    for (auto i = 0; i < 3; ++i) {
+      omega = std::max(omega,
+                       std::abs(a.angularVelocity[i] - b.angularVelocity[i]));
+      size = std::max(size, std::abs(b.angularVelocity[i]));
+    }
+    worst = std::max(worst, omega / size);
+  }
+  std::cout << std::format("[sdirk2 zero lateral] worst departure {:.2e}\n",
+                           worst);
+  // measured: 8e-15
+  EXPECT_LT(worst, 1e-8);
+}
+
+TEST(Lateral, Sdirk2ConvergesAtSecondOrderUnderLateralViscosity) {
+  // Under a lateral viscosity, at lmax 4, a cap's load ramped on over
+  // half of 8 kyr and held: Sdirk2's sea level at the end converges at second
+  // order, to the limit the trapezoid's runs extrapolate to, each stage's
+  // combined fixed point converged; and a run resumed from a checkpoint (the
+  // internal variables and their strain alone: a step of Sdirk2 starts from the
+  // node's state) is the uninterrupted one, bitwise.
+  constexpr auto lmax = 4;
+  auto setup = Setup::Make(lmax);
+  const auto kyr = 1000.0 * 3.15576e7 / setup.solver.SolverScales().Time();
+  const auto span = 8.0 * kyr;
+  // a cap of 1000 kg m^-2 at colatitude 1, longitude 2
+  const auto sigma = 1e3 / setup.solver.SolverScales().Factor(
+                               Dimensions{.mass = 1, .length = -2});
+  const auto load =
+      setup.solver.Grid().FromFunction([&](double theta, double phi) {
+        const auto c = std::cos(theta) * std::cos(1.0) +
+                       std::sin(theta) * std::sin(1.0) * std::cos(phi - 2.0);
+        return sigma * std::exp(-6.0 * (1.0 - c));
+      });
+  const auto direct = [&](double t) {
+    auto out = load;
+    const auto f = std::min(t / (0.5 * span), 1.0);
+    for (auto& v : out) v *= f;
+    return out;
+  };
+  Viscoelastic3D op(setup.rheology, lmax, [](double, double theta, double phi) {
+    return 1.15 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  auto grid = [&](int n) {
+    auto out = std::vector<double>{};
+    for (auto k = 0; k <= n; ++k) out.push_back(span * k / n);
+    return out;
+  };
+  auto passes = 0;
+  auto run = [&](Scheme scheme, int n) {
+    Evolution3D evolution(
+        op, setup.solver, setup.state,
+        {.scheme = scheme, .rtol = 1e-12, .coupled_rtol = 1e-12});
+    const auto snapshots = evolution.Run(grid(n), direct);
+    for (const auto& snapshot : snapshots) {
+      EXPECT_TRUE(snapshot.converged) << static_cast<int>(scheme) << ", " << n;
+      if (scheme == Scheme::Sdirk2 && n == 8)
+        passes += snapshot.coupledIterations;
+    }
+    return snapshots.back().relativeSeaLevelChange;
+  };
+  auto extrapolate = [](std::vector<double> fine,
+                        const std::vector<double>& coarse) {
+    for (auto i = std::size_t{0}; i < fine.size(); ++i) {
+      fine[i] += (fine[i] - coarse[i]) / 3.0;
+    }
+    return fine;
+  };
+  const auto limit =
+      extrapolate(run(Scheme::Sdirk2, 64), run(Scheme::Sdirk2, 32));
+  const auto trapezoid = extrapolate(run(Scheme::ExponentialTrapezoid, 128),
+                                     run(Scheme::ExponentialTrapezoid, 64));
+  auto errors = std::vector<double>{};
+  for (const auto n : {4, 8, 16}) {
+    errors.push_back(WorstDeparture(run(Scheme::Sdirk2, n), limit));
+  }
+  const auto apart = WorstDeparture(trapezoid, limit);
+  std::cout << std::format(
+      "[sdirk2 lateral] errors {:.3e} {:.3e} {:.3e}; the limits {:.2e} apart; "
+      "{:.1f} passes a step at 8 steps\n",
+      errors[0], errors[1], errors[2], apart, passes / 8.0);
+  // measured: errors 1.24e-3, 3.40e-4, 8.24e-5 (orders 1.87, 2.04), the
+  // limits 6.5e-7 apart, 43 passes a step (two stages) at 8 steps, the
+  // trapezoid's 21
+  EXPECT_GT(std::log2(errors[0] / errors[1]), 1.7);
+  EXPECT_GT(std::log2(errors[1] / errors[2]), 1.9);
+  EXPECT_LT(std::log2(errors[1] / errors[2]), 2.2);
+  EXPECT_LT(apart, 1e-5);
+
+  auto checkpoints = std::map<std::size_t, Evolution3D::Checkpoint>{};
+  auto options = Evolution3D::Options{
+      .scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12};
+  options.checkpoint_stride = 1;
+  options.on_checkpoint = [&](std::size_t node,
+                              const Evolution3D::Checkpoint& cp) {
+    checkpoints.emplace(node, cp);
+  };
+  const auto times = grid(4);
+  Evolution3D whole(op, setup.solver, setup.state, options);
+  const auto full = whole.Run(times, direct);
+  Evolution3D resumed(
+      op, setup.solver, setup.state,
+      {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12});
+  const auto tail = resumed.Resume(
+      checkpoints.at(2), std::vector<double>(times.begin() + 2, times.end()),
+      direct);
+  ASSERT_EQ(tail.size(), times.size() - 3);
+  for (auto k = std::size_t{0}; k < tail.size(); ++k) {
+    EXPECT_EQ(full[3 + k].relativeSeaLevelChange,
+              tail[k].relativeSeaLevelChange)
+        << "node " << 3 + k;
+    EXPECT_EQ(full[3 + k].coupledIterations, tail[k].coupledIterations)
+        << "node " << 3 + k;
+  }
 }

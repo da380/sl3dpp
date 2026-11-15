@@ -110,7 +110,9 @@ struct SecondOrderDirection3D {
 class TangentLinearSolver3D {
  public:
   struct Options {
-    AdjointMethod method = AdjointMethod::Continuous;
+    /// Discrete (the default, as AdjointSolver3D's) or Continuous, as
+    /// TangentLinearSolver's.
+    AdjointMethod method = AdjointMethod::Discrete;
     /// The SLE's own tolerance per pass, and the combined fixed point's
     /// controls (as Evolution3D::Options).
     double rtol = 1e-9;
@@ -125,6 +127,8 @@ class TangentLinearSolver3D {
     std::function<void(std::size_t node)> on_node{};
   };
 
+  /// Refused for an evolution under Sdirk2: not built (docs/adjoints.md
+  /// §1a).
   explicit TangentLinearSolver3D(const Evolution3D& evolution,
                                  Options options);
   explicit TangentLinearSolver3D(const Evolution3D& evolution)

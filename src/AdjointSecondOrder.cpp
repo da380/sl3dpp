@@ -14,12 +14,13 @@
 
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
-#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
+#include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
 namespace sl3dpp {
@@ -72,6 +73,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     const PointMaterialDirection& material) const {
   detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
+  detail::RefuseDerivativeOfMultiStage(ev.options_.scheme,
+                                       "the second-order adjoint");
   const auto& op = *ev.op_;
   const auto fieldSize = ev.solver_->Grid().FieldSize();
   for (const auto& [node, m] : measurements) {

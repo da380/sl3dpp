@@ -678,13 +678,9 @@ TermPattern PatternOf(const LoadTerm& term, const SurfaceGrid& grid,
         out.history.emplace(std::move(history));
         break;
       }
-      // a static run reads a file with a time axis at its date, kyr before
-      // present (minus that on the axis) or a time in the term's unit on
-      // the file's own axis; a static file is the same at every time
-      const auto date = term.field.date.value_or(0.0);
-      const auto time = timed                 ? 0.0
-                        : term.before_present ? -date * KYR
-                                              : date * term.unit.seconds;
+      // a static run reads a file with a time axis at its date; a static
+      // file is the same at every time
+      const auto time = timed ? 0.0 : StaticReadTimeOf(term);
       out.field = FieldValues(
           history, term, field, time,
           std::format("its date, `{}`, where it is read", term.date_member));
@@ -1192,6 +1188,14 @@ std::string Describe(const LoadTerm& term) {
   }
   if (!term.history.Empty()) out += History(term.history);
   return out;
+}
+
+double StaticReadTimeOf(const LoadTerm& term) {
+  const auto date = term.field.date.value_or(0.0);
+  const auto time =
+      term.before_present ? -date * KYR : date * term.unit.seconds;
+  // the present as one zero, whichever sign the spelling gives it
+  return time == 0.0 ? 0.0 : time;
 }
 
 std::string DescribeField(const LoadTerm& term, bool timeAxis, bool timed) {

@@ -587,7 +587,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 60);
+  EXPECT_EQ(read, 71);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -1648,6 +1648,84 @@ TEST_F(AppsTest, ViscoelasticResponseStartsFromTheElasticResponse) {
   EXPECT_TRUE(std::ranges::any_of(last, [](double v) { return v != 0.0; }));
 }
 
+TEST_F(AppsTest, AStepThatMissesItsToleranceSaysWhereItStopped) {
+  // A 3-D step's combined fixed point that misses `solver.step_rtol` is an
+  // error stating the residual it stopped at, its passes and the tolerance
+  // asked for, so that a tolerance below the iteration's floor shows as
+  // such, with no check of its own: under lateral moduli the static
+  // problem's one zero-length step at 1e-15, below the floor of its
+  // residual; and a step of a run through time under a lateral viscosity,
+  // stopped by its budget.
+  static_cast<void>(Deck());
+  const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
+  ASSERT_TRUE(io::WriteModuli(
+      dir_ / "moduli.nc", model, SurfaceGrid(8),
+      [](double, double theta, double) { return 0.1 * std::cos(theta); }, {},
+      {.name = "toy moduli", .elementMetres = 500e3}));
+  WriteViscosity(dir_ / "lateral.nc", model, 1e21, 0.5);
+  const auto message = [&](const std::string& name, const std::string& text) {
+    try {
+      static_cast<void>(app::RunSolve(Write(name + ".json", text)));
+      ADD_FAILURE() << name << ": a step that missed its tolerance ran";
+    } catch (const std::runtime_error& error) {
+      return std::string{error.what()};
+    }
+    return std::string{};
+  };
+  // the residual a message states
+  const auto residualOf = [](const std::string& text) {
+    const auto at = text.find("residual ");
+    return at == std::string::npos ? 0.0
+                                   : std::stod(text.substr(at + 9));
+  };
+
+  const auto floor = message(
+      "floor", std::format(R"({{"problem": "static",
+        "model": {{"deck": "ball.deck", "moduli": {{"file": "moduli.nc"}}}},
+        "discretisation": {{"lmax": 8}}, "forcing": {{"load": [{}]}},
+        "rotation": "none",
+        "solver": {{"step_rtol": 1e-15, "step_max_iterations": 40}},
+        "output": {{"surface": "out/floor.nc"}}}})",
+                           kCap));
+  EXPECT_NE(floor.find("the instantaneous coupled fixed point at the start "
+                       "did not converge: residual "),
+            std::string::npos)
+      << floor;
+  EXPECT_NE(floor.find(" after 40 passes, against the tolerance 1e-15; "
+                       "loosen solver.step_rtol or raise "
+                       "solver.step_max_iterations"),
+            std::string::npos)
+      << floor;
+  // the floor, a rounding level well above the tolerance and well below
+  // the default's 1e-9 (measured 6.3e-14; it wanders at that level, 1.4e-13
+  // after 200 passes)
+  const auto stalled = residualOf(floor);
+  RecordProperty("moduli_floor", std::format("{:.3g}", stalled));
+  EXPECT_GT(stalled, 1e-14) << floor;
+  EXPECT_LT(stalled, 1e-11) << floor;
+
+  const auto budget = message(
+      "budget", std::format(R"({{"problem": "quasi_static",
+        "model": {{"deck": "ball.deck", "viscosity": {{"file": "lateral.nc"}}}},
+        "discretisation": {{"lmax": 8}},
+        "times": {{"unit": "kyr", "end": 2, "nodes": 3}},
+        "forcing": {{"load": [{}]}}, "rotation": "none",
+        "solver": {{"step_rtol": 1e-15, "step_max_iterations": 2}},
+        "output": {{"surface": "out/budget.nc"}}}})",
+                            kCap));
+  EXPECT_NE(budget.find("the coupled fixed point or its sea level solve did "
+                        "not converge at 1 kyr"),
+            std::string::npos)
+      << budget;
+  EXPECT_NE(budget.find(": the fixed point's residual "), std::string::npos)
+      << budget;
+  EXPECT_NE(budget.find(" after 2 passes, against the tolerance 1e-15 "
+                        "(solver.step_rtol;"),
+            std::string::npos)
+      << budget;
+  EXPECT_GT(residualOf(budget), 1e-15) << budget;
+}
+
 TEST_F(AppsTest, ViscoelasticResponseMatchesTheLibraryStepper) {
   // A run without an ocean and without rotational feedback is the
   // library's stepper under the forcing at each node: a loop written here,
@@ -2416,6 +2494,111 @@ std::string Window(int nodes, const std::string& topography = "history.nc",
 std::string Calibrated(const std::string& shorelines) {
   return std::format(R"("shorelines": "{}", "calibration": {{"rtol": 1e-8}})",
                      shorelines);
+}
+
+TEST_F(AppsTest, Sdirk2IsTheDampedSchemeOfTheRunsAndTheContinuousKernels) {
+  // `solver.scheme` "sdirk2": a load switched on at the start and held
+  // converges at second order, as ViscoelasticResponseConvergesUnderStepHalving
+  // measures the trapezoid, the output naming the scheme; its kernels are
+  // the continuous sweep's, stepped by the same stages, the discrete
+  // adjoint (the default `kernels.method`) refused naming the choices, and
+  // so is a recording with gaps (a stride other than 1); the gradient
+  // calibration under migrating shorelines, whose sweep is the discrete
+  // adjoint, is refused naming the choices, and taken under frozen ones
+  // (no sweep), the fixed point calibrating under migrating ones.
+  static_cast<void>(Deck());
+  const auto final = [&](int nodes) {
+    const auto name = std::format("sdirk2_{}", nodes);
+    static_cast<void>(
+        Run(name, std::format(R"({}, "times": {{"unit": "kyr", "end": 1,
+                                               "nodes": {}}},
+            "forcing": {{"load": [{}]}},
+            "solver": {{"scheme": "sdirk2"}})",
+                              kBall, nodes, kCap)));
+    const auto file = Output(name);
+    EXPECT_EQ(std::get<std::string>(file.meta.at("scheme")), "sdirk2");
+    const auto last = Slice(file, "displacement", file.time->size() - 1);
+    return *std::ranges::max_element(
+        last, [](double a, double b) { return std::abs(a) < std::abs(b); });
+  };
+  auto values = std::vector<double>{};
+  for (const auto nodes : {9, 17, 33, 65}) values.push_back(final(nodes));
+  auto ratios = std::string{};
+  for (auto k = std::size_t{2}; k < values.size(); ++k) {
+    const auto ratio =
+        (values[k - 2] - values[k - 1]) / (values[k - 1] - values[k]);
+    ratios += std::format("{}{:.3f}", ratios.empty() ? "" : " ", ratio);
+    EXPECT_GT(ratio, 3.5) << k;
+    EXPECT_LT(ratio, 4.5) << k;
+  }
+  // measured: 4.03 and 4.01
+  RecordProperty("sdirk2_ratios", ratios);
+
+  WriteToyHistory(dir_ / "history.nc");
+  // a dated run's kernels under Sdirk2: the kernels block's method member
+  // and a top-level member, each where given
+  const auto kernels = [&](const std::string& method, const std::string& top) {
+    return std::format(R"({{{}, {}, "rotation": "none",
+        "solver": {{"scheme": "sdirk2"}}, {}
+        "kernels": {{"parameters": ["ice", "viscosity"], {}
+          "measurements": [{{"type": "relative_sea_level_cap", "name": "site",
+            "latitude": -30, "longitude": 10, "width_deg": 25}}],
+          "output": "out/sdirk2_kernels"}}}})",
+                       kBall, Window(5), top.empty() ? "" : top + ",",
+                       method.empty() ? "" : method + ",");
+  };
+  constexpr auto kContinuous = R"("method": "continuous")";
+  ExpectRefused(
+      app::ReadKernelInput, Write("bad.json", kernels("", "")), "kernels",
+      "the discrete adjoint (`method` \"discrete\", the default), the "
+      "exact transpose of the stepped map, which is not built for "
+      "`solver.scheme` \"sdirk2\": give `method` \"continuous\"");
+  ExpectRefused(app::ReadKernelInput,
+                Write("bad.json", kernels(R"("method": "discrete")", "")),
+                "kernels.method",
+                "or `solver.scheme` \"exponential_trapezoid\" or "
+                "\"backward_euler\" for the discrete adjoint");
+  ExpectRefused(
+      app::ReadKernelInput,
+      Write("bad.json",
+            kernels(kContinuous, R"("trajectory": {"record_stride": 2})")),
+      "trajectory.record_stride",
+      "a run under `solver.scheme` \"sdirk2\" is recorded at every node");
+  const auto summary =
+      app::RunKernel(Write("sdirk2_kernels.json", kernels(kContinuous, "")));
+  EXPECT_NE(summary.find("wrote 1 measurement(s) of kernels"),
+            std::string::npos)
+      << summary;
+  EXPECT_NE(summary.find("continuous"), std::string::npos) << summary;
+  // the calibrations under migrating and frozen shorelines, by `method`
+  const auto calibrating = [&](const std::string& shorelines,
+                               const std::string& method) {
+    return Write(
+        "sdirk2_calibrated.json",
+        std::format(R"({{{}, {}, "rotation": "none",
+                      "solver": {{"scheme": "sdirk2"}},
+                      "output": {{"surface": "out/sdirk2_calibrated.nc"}}}})",
+                    kBall,
+                    Window(3, "history.nc", "",
+                           std::format(R"("shorelines": "{}", "calibration":
+                            {{"method": "{}", "rtol": 1e-6}})",
+                                       shorelines, method),
+                           "end")));
+  };
+  ExpectRefused(app::ReadSolveInput, calibrating("migrating", "gradient"),
+                "ocean.calibration.method",
+                "is the gradient calibration, whose gradient under migrating "
+                "shorelines is the discrete adjoint's, which is not built for "
+                "`solver.scheme` \"sdirk2\" (its exact derivative runs "
+                "through each step's stages): give \"fixed_point\"");
+  ExpectRefused(app::ReadKernelInput, calibrating("migrating", "gradient"),
+                "ocean.calibration.method", "give \"fixed_point\"");
+  EXPECT_NO_THROW(static_cast<void>(
+      app::ReadSolveInput(calibrating("frozen", "gradient"))));
+  const auto calibrated =
+      app::RunSolve(calibrating("migrating", "fixed_point"));
+  EXPECT_NE(calibrated.find("initial sea level calibrated"), std::string::npos)
+      << calibrated;
 }
 
 TEST_F(AppsTest, SolveHoldsTheLandItIsTold) {
@@ -5159,7 +5342,8 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
   // A 3-D run of solve and the 3-D kernels take migrating shorelines as
   // the 1-D ones do: the calibrated run reaches the state file's present-day
   // sea level and records its ocean functions, through wall-time stops as
-  // uninterrupted, and the kernels come about its own shorelines. The
+  // uninterrupted, and the kernels, by either sweep, come about its own
+  // shorelines. The
   // history's polar ice sits in a basin below sea level and floats off as
   // it thins.
   namespace pm = planetmodel;
@@ -5228,19 +5412,26 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
         << name;
   }
 
-  const auto kernels = Write("kernels.json", "{" + body + R"(, "kernels": {
+  // by the default (discrete) sweep and by the continuous one
+  for (const auto& [name, method] :
+       {std::pair{std::string{"kernels"}, std::string{}},
+        std::pair{std::string{"continuous_kernels"},
+                  std::string{R"("method": "continuous", )"}}}) {
+    const auto kernels = Write(name + ".json", "{" + body + R"(, "kernels": {)" +
+                                                   method + R"(
               "parameters": ["ice", "viscosity"],
               "measurements": [{"type": "relative_sea_level_point", "name": "site",
                                 "latitude": -30.0, "longitude": 20.0,
                                 "date_kyr_bp": 0.0}],
-              "output": "out/kernels"}})");
-  summary = app::RunKernel(kernels);
-  const auto ice =
-      pm::ReadSurfaceFile(dir_ / "out" / "kernels" / "site_ice_kernels.nc");
-  // about moving shorelines the initial sea level kernel is not zero
-  const auto& dual = ice.variables.at("initial_sea_level_dual").values;
-  EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
-      << summary;
+              "output": "out/)" + name + R"("}})");
+    summary = app::RunKernel(kernels);
+    const auto ice =
+        pm::ReadSurfaceFile(dir_ / "out" / name / "site_ice_kernels.nc");
+    // about moving shorelines the initial sea level kernel is not zero
+    const auto& dual = ice.variables.at("initial_sea_level_dual").values;
+    EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
+        << summary;
+  }
 }
 
 TEST_F(AppsTest, Solve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
@@ -8458,6 +8649,170 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
   }
 }
 
+TEST_F(AppsTest, ContinuousKernelsStateTheirStepsAgainstTheShortestRelaxation) {
+  // `kernel` by the continuous sweep through time states the run's longest
+  // step over the shortest relaxation time of the model as built, and
+  // where that time is (RelaxationSite): in its summary, in the header of
+  // measurements.txt and in its kernel files' metadata. By the discrete
+  // sweep, the default, and in the static problem, which has no steps, it
+  // states the method alone. On the homogeneous ball (mu = 5500^3 Pa, eta
+  // = 1e21 Pa s) the time is eta / mu at every point, the ties going to the
+  // innermost, against steps of 0.5 kyr; on its own clock in years the soft
+  // ball's (1e19 Pa s) against 4 yr; under the prem8 deck's lateral
+  // viscosity the shortest over the volume, its place on the sphere named,
+  // the field files' metadata holding it too.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
+  WriteToyHistory(dir_ / "history.nc");
+  const auto mu = 5500.0 * 5500.0 * 5500.0;
+  const auto kernels = [](const std::string& method, const std::string& name,
+                          const std::string& parameters,
+                          const std::string& measurement) {
+    return std::format(
+        R"("kernels": {{{}"parameters": {}, "measurements": [{}],
+          "output": "out/{}"}})",
+        method.empty() ? std::string{}
+                       : std::format(R"("method": "{}", )", method),
+        parameters, measurement, name);
+  };
+  constexpr auto kSite = R"({"type": "relative_sea_level_cap", "name": "site",
+      "latitude": -30, "longitude": 10, "width_deg": 25})";
+  const auto config = [&](const std::string& name, const std::string& body,
+                          const std::string& method,
+                          const std::string& parameters,
+                          const std::string& measurement) {
+    return Write(name + ".json", "{" + body + ", " +
+                                     kernels(method, name, parameters,
+                                             measurement) +
+                                     "}");
+  };
+  const auto out = [&](const std::string& name, const std::string& file) {
+    return dir_ / "out" / name / file;
+  };
+  const auto number = [](const pm::SurfaceFile& file, const std::string& key) {
+    return std::get<std::vector<double>>(file.meta.at(key)).front();
+  };
+  const auto header = [&](const std::string& name) {
+    auto in = std::ifstream(out(name, "measurements.txt"));
+    for (std::string line; std::getline(in, line);) {
+      if (line.starts_with("# adjoint ")) return line;
+    }
+    return std::string{};
+  };
+  constexpr auto kRatio = "longest_step_over_shortest_relaxation_time";
+
+  // the ball, dated, 0.5 kyr steps
+  const auto ball =
+      std::string{kBall} + ", " + Window(5) + R"(, "rotation": "none")";
+  const auto summary = app::RunKernel(
+      config("continuous", ball, "continuous", R"(["ice", "viscosity"])", kSite));
+  const auto tau = 1e21 / mu;
+  const auto ratio = 0.5 * app::KYR / tau;
+  const auto clause = std::format(
+      "(ice, viscosity; continuous adjoint, its longest step {:.3g} times the "
+      "shortest relaxation time ({:.3g} kyr, at ",
+      ratio, tau / app::KYR);
+  EXPECT_NE(summary.find(clause), std::string::npos) << summary;
+  EXPECT_NE(summary.find("in layer 0, 0 to 6371 km deep))"), std::string::npos)
+      << summary;
+  EXPECT_EQ(summary.find("latitude"), std::string::npos) << summary;
+  const auto file = pm::ReadSurfaceFile(out("continuous", "site_ice_kernels.nc"));
+  EXPECT_EQ(std::get<std::string>(file.meta.at("adjoint_method")),
+            "continuous");
+  // the window's steps and the deck's velocities, each formed otherwise:
+  // to rounding (measured 5.1e-16 and 4.8e-16)
+  const auto ratioGap = Gap(number(file, kRatio), ratio);
+  const auto timeGap = Gap(number(file, "shortest_relaxation_time_s"), tau);
+  RecordProperty("ratio_gap", std::format("{:.2e}", ratioGap));
+  RecordProperty("time_gap", std::format("{:.2e}", timeGap));
+  EXPECT_LT(ratioGap, 1e-13);
+  EXPECT_LT(timeGap, 1e-13);
+  // the innermost memory point, in the element at the centre (measured
+  // 500 km from it: the graded mesh's elements widen with depth)
+  EXPECT_LT(number(file, "shortest_relaxation_radius_m"), 1e6);
+  EXPECT_NE(std::get<std::string>(file.meta.at("shortest_relaxation_at"))
+                .find("in layer 0, 0 to 6371 km deep"),
+            std::string::npos);
+  EXPECT_TRUE(header("continuous").starts_with(
+      "# adjoint continuous, its longest step "))
+      << header("continuous");
+
+  // the default: the discrete sweep, the method alone
+  const auto discrete = app::RunKernel(
+      config("discrete", ball, "", R"(["ice", "viscosity"])", kSite));
+  EXPECT_NE(discrete.find("(ice, viscosity; discrete adjoint)"),
+            std::string::npos)
+      << discrete;
+  const auto plain = pm::ReadSurfaceFile(out("discrete", "site_ice_kernels.nc"));
+  EXPECT_EQ(std::get<std::string>(plain.meta.at("adjoint_method")), "discrete");
+  EXPECT_FALSE(plain.meta.contains(kRatio));
+  EXPECT_EQ(header("discrete"), "# adjoint discrete");
+
+  // on its own clock in years: the soft ball's time against a step of 4 yr
+  constexpr auto kUplift = R"({"type": "displacement_point", "name": "uplift",
+      "latitude": 55, "longitude": -80, "time": 6})";
+  const auto clocked = std::format(
+      R"("problem": "quasi_static", "model": {{"deck": "soft.deck"}},
+      "discretisation": {{"lmax": 8}},
+      "times": {{"unit": "yr", "at": [0, 1, 2.5, 3, 6, 10]}},
+      "forcing": {{"load": [{}]}}, "rotation": "none")",
+      kCap);
+  const auto years =
+      app::RunKernel(config("clocked", clocked, "continuous", R"(["load"])",
+                            kUplift));
+  const auto soft = 1e19 / mu;
+  const auto year = app::KYR / 1e3;
+  EXPECT_NE(years.find(std::format("(load; continuous adjoint, its longest "
+                                   "step {:.3g} times the shortest relaxation "
+                                   "time ({:.3g} yr, at ",
+                                   4.0 * year / soft, soft / year)),
+            std::string::npos)
+      << years;
+  const auto load = pm::ReadSurfaceFile(out("clocked", "uplift_load_kernels.nc"));
+  // to rounding (measured 2.1e-16)
+  const auto clockedGap = Gap(number(load, kRatio), 4.0 * year / soft);
+  RecordProperty("clocked_gap", std::format("{:.2e}", clockedGap));
+  EXPECT_LT(clockedGap, 1e-13);
+
+  // the static problem: no steps
+  const auto still = app::RunKernel(config(
+      "static", std::string{kBall} + R"(, "problem": "static",
+        "forcing": {"load": [)" + std::string{kCap} + R"(]}, "rotation": "none")",
+      "continuous", R"(["load"])",
+      R"({"type": "displacement_point", "name": "uplift", "latitude": 55,
+          "longitude": -80})"));
+  EXPECT_NE(still.find("(load; continuous adjoint)"), std::string::npos)
+      << still;
+  EXPECT_FALSE(pm::ReadSurfaceFile(out("static", "uplift_load_kernels.nc"))
+                   .meta.contains(kRatio));
+
+  // 3-D, under the prem8 deck's lateral viscosity: 2/3 kyr steps against
+  // the shortest time over the volume, and where on the sphere
+  const auto lateral = app::RunKernel(config(
+      "lateral", Prem8() + ", " + Window(4) + R"(, "rotation": "none")",
+      "continuous", R"(["ice", "viscosity"])", kSite));
+  EXPECT_NE(lateral.find(", at latitude "), std::string::npos) << lateral;
+  const auto surface = pm::ReadSurfaceFile(out("lateral", "site_ice_kernels.nc"));
+  const auto steps = number(surface, kRatio);
+  // the ratio times the time is the longest step, to rounding (measured
+  // 0)
+  const auto lateralGap =
+      Gap(steps * number(surface, "shortest_relaxation_time_s"),
+          2.0 / 3.0 * app::KYR);
+  const auto& where =
+      std::get<std::string>(surface.meta.at("shortest_relaxation_at"));
+  RecordProperty("lateral_gap", std::format("{:.2e}", lateralGap));
+  RecordProperty("lateral_at", where);
+  EXPECT_LT(lateralGap, 1e-13);
+  EXPECT_NE(where.find(", at latitude "), std::string::npos) << where;
+  // the field file's numeric metadata, the same numbers
+  const auto field =
+      pm::ReadModelFile(out("lateral", "site_viscosity_kernels.nc"));
+  EXPECT_EQ(std::get<std::vector<double>>(field.Meta().at(kRatio)).front(),
+            steps);
+}
+
 // A measurement is held to the run when the config is read: a date off the
 // times grid, a coefficient beyond the band or a decay window too short for
 // the fit costs a read, not the forward run before the sweeps.
@@ -8642,13 +8997,13 @@ TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
   // `kernels.lateral` on a radial run: the kernels in the viscosity and the
   // moduli as fields over the memory nodes' grids, written as a 3-D run's
   // are, beside the radial profiles — which are, data line for data line,
-  // those of the run without the member; from a recording into the
-  // trajectory store, and swept again from it with the same values to the
-  // bit; the grids' members of `solver` taken, which a radial run refuses
-  // otherwise, and left out of the run's hashes, so that the store serves
-  // the sweep at other transforms (a lateral run's store, at its own
-  // alone). Refused: `lateral` true naming neither the viscosity nor the
-  // moduli, and false on a model with lateral structure.
+  // those of the run without the member, by either sweep; from a
+  // recording into the trajectory store, and swept again from it with the
+  // same values to the bit; the grids' members of `solver` taken, which a
+  // radial run refuses otherwise, and left out of the run's hashes, so
+  // that the store serves the sweep at other transforms (a lateral run's
+  // store, at its own alone). Refused: `lateral` true naming neither the
+  // viscosity nor the moduli, and false on a model with lateral structure.
   static_cast<void>(Deck());
   WriteToyHistory(dir_ / "history.nc");
   const auto body = std::string{R"("model": {"deck": "ball.deck"},
@@ -8687,6 +9042,27 @@ TEST_F(AppsTest, KernelOfARadialRunWritesLateralKernels) {
     }
   }
   EXPECT_EQ(held, (std::set<std::string>{"K_ln_eta_0", "K_kappa", "K_mu"}));
+  // by the continuous sweep (the runs in memory) likewise: its profiles
+  // its radial run's, data line for data line
+  static_cast<void>(app::RunKernel(Write(
+      "lateral_continuous.json",
+      "{" + body + R"(, "solver": {"transform_degrees": [3], "cache_mb": 1}, )" +
+          kernels(R"("lateral": true, "method": "continuous",)",
+                  "out_lateral_continuous") +
+          "}")));
+  static_cast<void>(app::RunKernel(Write(
+      "radial_continuous.json",
+      "{" + body + ", " +
+          kernels(R"("method": "continuous",)", "out_radial_continuous") +
+          "}")));
+  for (const auto* name : {"site_viscosity_kernel.txt", "site_moduli_kernel.txt"}) {
+    EXPECT_EQ(DataLines(dir_ / "out_lateral_continuous" / name),
+              DataLines(dir_ / "out_radial_continuous" / name))
+        << name;
+  }
+  EXPECT_FALSE(
+      KernelValues(dir_ / "out_lateral_continuous" / "site_viscosity_kernels.nc")
+          .empty());
   // swept again from the complete store, the same to the bit
   fs::rename(out, dir_ / "out_lateral_first");
   const auto again = app::RunKernel(lateral);
@@ -10229,8 +10605,9 @@ TEST_F(AppsTest, KernelsOfTheStaticProblemWithAnIceChange) {
   for (const auto* shorelines : {"frozen", "migrating"}) {
     const auto label = std::string{shorelines};
     const auto base = config(label, kChange, shorelines);
+    // the default method, the discrete sweep
     const auto summary = app::RunKernel(base);
-    EXPECT_NE(summary.find("(ice; continuous adjoint)"), std::string::npos)
+    EXPECT_NE(summary.find("(ice; discrete adjoint)"), std::string::npos)
         << summary;
     static_cast<void>(app::RunSolve(base));
     static_cast<void>(app::RunSolve(config(
@@ -11297,7 +11674,9 @@ TEST_F(AppsTest, ContinuousTideAndMomentKernelsConverge) {
     const auto tideRun = tag + "_tide";
     const auto summary =
         app::RunKernel(tide(tideRun, nodes, 1.0, 0.5, "continuous"));
-    EXPECT_TRUE(summary.ends_with("(tide; continuous adjoint)")) << summary;
+    EXPECT_NE(summary.find("(tide; continuous adjoint, its longest step "),
+              std::string::npos)
+        << summary;
     static_cast<void>(
         app::RunSolve(tide(tideRun, nodes, 1.0, 0.5, "continuous")));
     static_cast<void>(
@@ -11774,8 +12153,13 @@ TEST_F(AppsTest, ModuliKernelsOfARunThroughTime) {
     for (const auto& method : methods) {
       const auto summary =
           app::RunKernel(config(tag + "_" + method, "layered", nodes, method));
-      EXPECT_TRUE(
-          summary.ends_with(std::format("(moduli; {} adjoint)", method)))
+      // the continuous sweep states its steps against the shortest
+      // relaxation time
+      EXPECT_NE(summary.find(std::format("(moduli; {} adjoint{}", method,
+                                         method == "continuous"
+                                             ? ", its longest step "
+                                             : ")")),
+                std::string::npos)
           << summary;
     }
     static_cast<void>(app::RunSolve(config(tag, "layered", nodes, "discrete")));
@@ -12322,12 +12706,14 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
        std::string{kBall} + ", " +
            Window(5, "history.nc", "", Calibrated("migrating"), "end") +
            R"(, "rotation": "full", "moments": "hydrostatic")",
-       R"("parameters": ["ice", "viscosity"], "measurements": [
+       R"("method": "continuous", "parameters": ["ice", "viscosity"],
+        "measurements": [
           {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
            "longitude": 10, "width_deg": 25, "date_kyr_bp": 0.5}])",
        2},
       {"lateral", Prem8() + ", " + Window(4) + R"(, "rotation": "full")",
-       R"("parameters": ["ice", "viscosity"], "measurements": [
+       R"("method": "continuous", "parameters": ["ice", "viscosity"],
+        "measurements": [
           {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
            "longitude": 10, "width_deg": 25}])",
        2},
@@ -12379,7 +12765,8 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
         "times": {"unit": "yr", "at": [0, 1, 3, 6]},
         "forcing": {"seismic": [)" + point + R"(]}, "rotation": "none",
         "solver": {"step_rtol": 1e-12, "step_max_iterations": 200})",
-       R"("parameters": ["moment", "viscosity"], "measurements": [
+       R"("method": "continuous", "parameters": ["moment", "viscosity"],
+        "measurements": [
           {"type": "displacement_vector_point", "name": "drift",
            "latitude": 33, "longitude": 42,
            "direction": {"east": 1, "north": -0.5, "up": 0.3},
@@ -12401,7 +12788,8 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
                        R"(], "seismic": [)" + point.substr(0, point.rfind(',')) +
                        R"(}]}, "rotation": "none",
         "solver": {"step_rtol": 1e-12, "step_max_iterations": 200})",
-       R"("parameters": ["load", "moment", "moduli"], "measurements": [
+       R"("method": "continuous", "parameters": ["load", "moment", "moduli"],
+        "measurements": [
           {"type": "displacement_point", "name": "uplift", "latitude": 55,
            "longitude": -80}])",
        0}};
@@ -13405,13 +13793,16 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
   // a run cannot be checkpointed (the seismic sources, the static problem);
   // a member that steers the run, sets the reverse sweep or names what is
   // written changes neither (`kernels`, `output`, `checkpoint`,
-  // `trajectory`, `restart`, `solver.cache_mb`, a file input's
-  // `outside_span`, `solver.transform_degrees` on a radial run, and the
-  // paths). Two spellings of one run hash alike where its numbers are
-  // formed alike (a format's two names, a default given, a run's own clock
-  // listed at its evenly spaced times) and apart where they are formed
-  // otherwise (evenly spaced dates listed, a static field's date before
-  // present given on the file's own axis). The hashes read their files'
+  // `trajectory`, `restart`, `solver.cache_mb`, a file input's and a
+  // fault file's `outside_span`, `solver.transform_degrees` on a radial
+  // run, and the paths). Two spellings of one run hash alike where its
+  // numbers are formed alike (a format's two names, a default given, a
+  // run's own clock listed at its evenly spaced times, a static field's
+  // date before present given on the file's own axis in kyr, or in yr
+  // where the two products are one double) and apart where they are
+  // formed otherwise (evenly spaced dates listed, that date in yr where
+  // the products differ in the last bit, a point source's moment tensor
+  // given for its strike, dip and rake). The hashes read their files'
   // bytes alone: the files here are stand-ins, a line of text each.
   static_cast<void>(Deck());
   constexpr auto kFiles = std::array{
@@ -13506,6 +13897,17 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
   const auto staticLoadOwnAxis = std::string{
       R"({"field": {"file": "load.nc", "date": 3, "unit": "day"},
           "water_budget": true, "moves_solid_surface": false})"};
+  // the static family's point as the moment tensor its strike, dip, rake
+  // and moment form, each component to the bit
+  const auto staticTensor = [] {
+    const auto m = DoubleCouple(11.0, 45.0, 91.0);
+    const auto scaled = [](double v) { return std::format("{:.17g}", v * 1e20); };
+    return std::format(
+        R"("moment_tensor_nm": {{"rr": {}, "tt": {}, "pp": {}, "rt": {},
+           "rp": {}, "tp": {}}}}})",
+        scaled(m.rr), scaled(m.tt), scaled(m.pp), scaled(m.rt), scaled(m.rp),
+        scaled(m.tp));
+  }();
 
   // the families of base configs: the problem and the times' form, each
   // with the members it takes; `lateral` as the run's operator is
@@ -13913,11 +14315,21 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {in(staticLoadOwnAxis, R"("date": 3,)", R"("date": 3.5,)")}, store},
       {"static", "load field unit", {in(staticLoadOwnAxis, "day", "yr")},
        store},
+      // a date before present and the same instant on the file's own axis
+      // resolve to one time (StaticReadTimeOf): in kyr always (the
+      // negation is exact), in yr where the two products are one double
+      // (1.25 kyr and 1250 yr are exact; 0.017 kyr and 17 yr are not,
+      // below)
       {"static",
        "load field date_kyr_bp given as a date on the file's own axis in kyr",
        {in(staticLoadDated, R"("date_kyr_bp": 1.25)",
            R"("date": -1.25, "unit": "kyr")")},
-       store},
+       neither},
+      {"static",
+       "load field date_kyr_bp given as a date on the file's own axis in yr",
+       {in(staticLoadDated, R"("date_kyr_bp": 1.25)",
+           R"("date": -1250, "unit": "yr")")},
+       neither},
       // the tide
       {"dated", "tide degree", {in(tide, R"("degree": 2)", R"("degree": 3)")},
        both},
@@ -14000,6 +14412,15 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
       {"static", "seismic point strike_deg",
        {{R"("strike_deg": 11)", R"("strike_deg": 12)"}}, store},
       {"static", "seismic point moment_nm", {{"1e20", "1.0000001e20"}}, store},
+      // the sources hash as given: a moment tensor and the double couple
+      // that forms it are two spellings apart, even where the tensor is
+      // the double couple's to the bit (a store is then not reused, never
+      // misread)
+      {"static", "seismic point given as the moment tensor it forms",
+       {{R"("strike_deg": 11, "dip_deg": 45, "rake_deg": 91,
+           "moment_nm": 1e20})",
+         staticTensor}},
+       store},
       {"dated", "seismic fault latitude",
        {in(fault, R"("latitude": -20)", R"("latitude": -20.000001)")}, store},
       {"dated", "seismic fault longitude",
@@ -14050,13 +14471,16 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {in(forwardsFaultFile, R"("cells_down_dip": 1,)",
            R"("cells_down_dip": 1, "points": 1,)")},
        neither},
-      // a fault file's `outside_span` enters the store's hash, as how its
-      // time axis is read, although a run that runs reads its slip alike
-      // either way (a file input's does not)
+      // a fault file's `outside_span`, as a file input's: where "refuse"
+      // runs, no read lies outside the span and "hold" reads alike
       {"forwards", "seismic fault_file outside_span",
        {in(forwardsFaultFile, R"("outside_span": "hold")",
            R"("outside_span": "refuse")")},
-       store},
+       neither},
+      {"dated", "seismic fault_file outside_span dropped",
+       {in(faultFile, R"(,
+          "outside_span": "hold")", "")},
+       neither},
       {"dated", "seismic terms in another order",
        {{point + ", " + fault, fault + ", " + point}}, store},
       {"dated", "seismic a term dropped", {drop(faultFile)}, store},
@@ -14181,6 +14605,9 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {{R"("scheme": "exponential_trapezoid")",
          R"("scheme": "backward_euler")"}},
        both},
+      {"dated", "solver.scheme \"sdirk2\"",
+       {{R"("scheme": "exponential_trapezoid")", R"("scheme": "sdirk2")"}},
+       both},
       {"dated", "solver.scheme given as its default",
        {{R"(
          "scheme": "exponential_trapezoid",)",
@@ -14268,6 +14695,8 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {{R"("cache_mb": 3)", R"("cache_mb": 5)"}}, neither},
       {"calibrated", "kernels.method",
        {{R"("method": "discrete")", R"("method": "continuous")"}}, neither},
+      {"calibrated", "kernels.method dropped, its default",
+       {{R"("method": "discrete", )", ""}}, neither},
       {"calibrated", "kernels.parameters",
        {{R"(["ice", "viscosity", "moduli"])", R"(["ice", "viscosity"])"}},
        neither},
@@ -14339,6 +14768,25 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
         EXPECT_FALSE(storeMoved) << label << ": the store's hash";
         break;
     }
+  }
+  // a date before present and the same instant on the file's own axis in
+  // yr whose products differ in the last bit (0.017 kyr, 17 yr) are two
+  // runs, and hash apart; at 1.25 kyr and 1250 yr they are one (a row)
+  {
+    const auto& base = families.at("static");
+    const auto at = [&](std::string_view date) {
+      auto text = base.text;
+      const auto from = std::string_view{R"("date_kyr_bp": 1.25)"};
+      text.replace(text.find(from), from.size(), date);
+      return hashesOf(text, base.lateral);
+    };
+    const auto before = at(R"("date_kyr_bp": 0.017)");
+    const auto axis = at(R"("date": -17, "unit": "yr")");
+    EXPECT_NE(-0.017 * app::KYR, -17.0 * (app::KYR / 1000.0));
+    EXPECT_NE(before.second, axis.second);
+    // the present, its zero of either sign one time
+    EXPECT_EQ(at(R"("date_kyr_bp": 0)").second,
+              at(R"("date": 0, "unit": "yr")").second);
   }
   RecordProperty("rows", static_cast<int>(rows.size()));
 }

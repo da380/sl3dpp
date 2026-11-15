@@ -1,0 +1,19 @@
+{
+  "problem": "quasi_static",
+  "model": {"deck": "../data/prem8.gia.deck", "format": "maxwell"},
+  "discretisation": {"lmax": 16},
+  "times": {"start_kyr_bp": 16.0, "end_kyr_bp": 6.0, "nodes": 21},
+  "forcing": {
+    "ice_change": [{"cap_thickness": {"latitude": 60, "longitude": 275,
+                                    "width_deg": 12, "thickness_m": 100},
+                  "history_kyr_bp": [[13.0, 0.0], [12.0, 1.0], [11.0, 0.0]]}]
+  },
+  "ocean": {
+    "at": "start",
+    "topography": {"file": "../data/synthetic_earth.nc"},
+    "ice": {"file": "../data/synthetic_earth.nc"}
+  },
+  "rotation": "none",
+  "solver": {"scheme": "exponential_trapezoid"},
+  "output": {"surface": "out/timestep_pulse_n20/timestep_pulse_n20.nc"}
+}

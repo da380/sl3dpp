@@ -1178,7 +1178,9 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
   // flotation's 0/1: rounding changes it only at a cell on the threshold
   EXPECT_EQ(oceans3, OceanFunctionsOf(run1));
   const auto kernels3 =
-      AdjointSolver3D(evolution3, {.rtol = 1e-12, .coupled_rtol = 1e-12})
+      AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
+                                   .rtol = 1e-12,
+                                   .coupled_rtol = 1e-12})
           .FirstOrderKernels(times, measurements, &trajectory3, oceans3);
 
   // (the thickness kernels vanish once the cap is afloat: (1 - C_n) = 0)
@@ -1264,7 +1266,9 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
     };
     const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
     const auto kernels =
-        AdjointSolver3D(evolution, {.rtol = 1e-12, .coupled_rtol = 1e-12})
+        AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                    .rtol = 1e-12,
+                                    .coupled_rtol = 1e-12})
             .FirstOrderKernels(times, {{times.size() - 1, measurement}},
                                nullptr, oceans);
     auto predicted = 0.0;
@@ -1287,9 +1291,10 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
 
 TEST(Migrating3D, CalibrationRecoversTheTruth) {
   // Both methods recover a known initial sea level from the final one its
-  // lateral migrating run reached. The gradient method's continuous kernel
-  // is approximate, but it is linear in the residual, so the iteration's
-  // fixed point is still the truth.
+  // lateral migrating run reached: the fixed point, and the gradient by the
+  // default (discrete) sweep and by the continuous one, whose kernel is
+  // approximate, but linear in the residual, so the iteration's fixed
+  // point is still the truth.
   const auto setting = Marine3D{};
   const auto& body = setting.body;
   const auto& grid = body.solver.Grid();
@@ -1309,22 +1314,30 @@ TEST(Migrating3D, CalibrationRecoversTheTruth) {
   }
   const auto history = IceHistory::Migrating(setting.Thickness());
   const auto guess = body.solver.MakeState(truth.iceThickness, final);
-  for (const auto method :
-       {CalibrationMethod::FixedPoint, CalibrationMethod::Gradient}) {
+  using Case = std::pair<CalibrationMethod, AdjointSolver3D::Options>;
+  const auto cases = std::vector<Case>{
+      {CalibrationMethod::FixedPoint, {.rtol = 1e-11}},
+      {CalibrationMethod::Gradient, {.rtol = 1e-11}},
+      {CalibrationMethod::Gradient,
+       {.method = AdjointMethod::Continuous, .rtol = 1e-11}}};
+  for (const auto& [method, sweep] : cases) {
     Evolution3D evolution(op, body.solver, guess, {.rtol = 1e-11});
     const auto calibration =
         CalibrateInitialSeaLevel(evolution, setting.cap.times, history, final,
                                  {.method = method,
                                   .iterations = 15,
                                   .rtol = 1e-9,
-                                  .adjoint3D = {.rtol = 1e-11}});
+                                  .adjoint3D = sweep});
+    const auto label = std::format("method {} sweep {}",
+                                   static_cast<int>(method),
+                                   static_cast<int>(sweep.method));
     EXPECT_TRUE(calibration.converged)
-        << static_cast<int>(method) << " in " << calibration.updates.size();
+        << label << " in " << calibration.updates.size();
     EXPECT_LT(MaxDiff(calibration.state.seaLevel, truth.seaLevel),
               1e-7 * MaxAbs(truth.seaLevel))
-        << static_cast<int>(method);
+        << label;
     // flotation's 0/1: rounding changes it only at a cell on the threshold
-    EXPECT_EQ(calibration.state.oceanFunction, truth.oceanFunction);
+    EXPECT_EQ(calibration.state.oceanFunction, truth.oceanFunction) << label;
     EXPECT_EQ(evolution.BackgroundState().seaLevel, calibration.state.seaLevel);
     EXPECT_FALSE(calibration.snapshots.back().oceanFunction.empty());
   }

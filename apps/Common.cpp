@@ -224,6 +224,20 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
     }
     out.solver = ReadSolverBlock(solver, out.lmax);
   }
+  // the gradient calibration's gradient under migrating shorelines comes
+  // from the discrete adjoint, which a scheme of several stages has none
+  // of (StepRecipe.hpp); under frozen shorelines it runs no sweep
+  if (out.Calibrating() && out.Migrating() &&
+      out.ocean->calibration_method == CalibrationMethod::Gradient &&
+      IsMultiStage(out.solver.scheme)) {
+    Fail(top.At("ocean").At("calibration").At("method"),
+         "is the gradient calibration, whose gradient under migrating "
+         "shorelines is the discrete adjoint's, which is not built for "
+         "`solver.scheme` \"sdirk2\" (its exact derivative runs through "
+         "each step's stages): give \"fixed_point\", whose calibrated state "
+         "is the same, or a scheme of one stage, \"exponential_trapezoid\" "
+         "or \"backward_euler\"");
+  }
   return out;
 }
 
@@ -1137,6 +1151,8 @@ CalibrationOptions CalibrationOptionsOf(const Run& run) {
   options.method = run.ocean->calibration_method;
   options.iterations = run.ocean->calibration_iterations;
   options.rtol = run.ocean->calibration_rtol;
+  // the gradient's sweep is the library's default, the discrete adjoint
+  // (ReadRun refuses the gradient under a scheme of several stages)
   options.adjoint.rtol = run.solver.rtol;
   options.adjoint3D.rtol = run.solver.rtol;
   options.adjoint3D.coupled_rtol = run.solver.step_rtol;
@@ -1479,15 +1495,21 @@ void Check1D(const Evolution::Snapshot& snapshot, std::string_view when) {
   }
 }
 
-void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when) {
+void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when,
+             double stepRtol) {
   if (!snapshot.converged) {
+    // the step's own iteration as Viscoelastic3D::StepInfo::Describe
+    // states it
+    const auto info =
+        Viscoelastic3D::StepInfo{.iterations = snapshot.coupledIterations,
+                                 .residual = snapshot.coupledResidual};
     throw std::runtime_error(std::format(
         "the coupled fixed point or its sea level solve did not "
-        "converge at {} (residual {:.3g} after {} iterations; under "
+        "converge at {}: the fixed point's {} (solver.step_rtol; under "
         "migrating shorelines, cells flipping back and forth can "
         "defeat the tolerances); raise solver.step_max_iterations, or "
         "loosen solver.step_rtol or solver.rtol",
-        when, snapshot.coupledResidual, snapshot.coupledIterations));
+        when, info.Describe(stepRtol)));
   }
 }
 

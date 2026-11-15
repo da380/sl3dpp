@@ -9,6 +9,7 @@
 #include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources3D.hpp"
 #include "sl3dpp/detail/Shorelines.hpp"
@@ -28,8 +29,8 @@ Evolution3D::Evolution3D(const Viscoelastic3D& op,
   }
   if (options.scheme == Scheme::ExponentialEuler) {
     throw std::invalid_argument(
-        "the coupled loop steps implicitly: ExponentialTrapezoid or "
-        "BackwardEuler");
+        "the coupled loop steps implicitly: ExponentialTrapezoid, "
+        "BackwardEuler or Sdirk2");
   }
   const auto& material = op.GetRheology().BaseMaterial().ModelScales();
   const auto& sle = solver.SolverScales();
@@ -407,8 +408,8 @@ Viscoelastic3D::StepInfo Evolution3D::Start(Coupled& coupled, double t,
     if (!info.converged) {
       throw std::runtime_error(std::format(
           "the instantaneous coupled fixed point at the start did not "
-          "converge (residual {})",
-          info.residual));
+          "converge: {}",
+          info.Describe(options_.coupled_rtol)));
     }
     op.Recycle(
         std::exchange(vstate_, std::move(*coupled.step).Finish(std::move(strain))));
@@ -576,44 +577,47 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   Coupled coupled(*this, migrating);
   auto& response = coupled.response;
   auto& ocean = coupled.ocean;
-  // Every term of the forcing is read at a node through detail::AtNode,
-  // the one place that decides which side of a repeated pair the node
-  // reads; the surface terms are continuous at every node and pass no left
-  // limit.
-  auto surfaceAt = [&](std::size_t node, const auto& term) {
+  // Every term of the forcing is read at a node, or at a stage of the step
+  // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
+  // place that decides which side of a repeated pair the node reads; the
+  // surface terms are continuous at every node and pass no left limit.
+  auto surfaceAt = [&](std::size_t node, const auto& term, double c) {
     using Callback = std::decay_t<decltype(term)>;
-    return detail::AtNode(times, node, term, Callback{});
+    return detail::AtStage(times, node, c, term, Callback{});
   };
   // The forcing at a node: the direct load (none given: none) and the
   // prescribed tide, which the coupling carries through the node's passes.
-  auto directLoadAt = [&](std::size_t node) {
-    return directLoad != nullptr ? surfaceAt(node, *directLoad)
+  auto directLoadAt = [&](std::size_t node, double c = 1.0) {
+    return directLoad != nullptr ? surfaceAt(node, *directLoad, c)
                                  : std::vector<double>(fieldSize, 0.0);
   };
-  auto setTide = [&](std::size_t node) {
+  auto setTide = [&](std::size_t node, double c = 1.0) {
     if (tide != nullptr) {
-      coupled.tide = surfaceAt(node, *tide);
+      coupled.tide = surfaceAt(node, *tide, c);
       RequireTideDegrees(coupled.tide);
     }
     if (interior != nullptr && interior->directLoadOutsideWaterBudget) {
       coupled.outsideGrid =
-          surfaceAt(node, interior->directLoadOutsideWaterBudget);
+          surfaceAt(node, interior->directLoadOutsideWaterBudget, c);
     }
     if (interior != nullptr && interior->solidSurfaceChange) {
-      coupled.layerGrid = surfaceAt(node, interior->solidSurfaceChange);
+      coupled.layerGrid = surfaceAt(node, interior->solidSurfaceChange, c);
     }
   };
-  auto iceAt = [&](std::size_t node) { return surfaceAt(node, *iceThickness); };
+  auto iceAt = [&](std::size_t node, double c = 1.0) {
+    return surfaceAt(node, *iceThickness, c);
+  };
   // The interior sources at a node: their left limits at the first node of
-  // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere.
-  auto setSources = [&](std::size_t node) {
+  // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere
+  // and at a stage within a step.
+  auto setSources = [&](std::size_t node, double c = 1.0) {
     if (interior == nullptr || !(interior->sources || interior->stressGluts)) {
       return;
     }
-    coupled.SetSources(
-        detail::AtNode(times, node, interior->sources, interior->sourcesBefore),
-        detail::AtNode(times, node, interior->stressGluts,
-                       interior->stressGlutsBefore));
+    coupled.SetSources(detail::AtStage(times, node, c, interior->sources,
+                                       interior->sourcesBefore),
+                       detail::AtStage(times, node, c, interior->stressGluts,
+                                       interior->stressGlutsBefore));
   };
 
   const auto stride = options_.record_stride;
@@ -641,15 +645,17 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   // The forcing beside the ice of a migrating node, changes from the
   // background: the loads, the layer, the tide and the sources.
-  auto setMoving = [&](std::size_t node) {
+  auto setMoving = [&](std::size_t node, double c = 1.0) {
     auto& moving = coupled.moving;
     moving = GRDSolver::NonlinearForcing{};
     moving.rotation = options_.rotation;
-    // a land mask that changes in time: the node's own
-    if (options_.land_held) moving.forcedLand = options_.land_held(times[node]);
+    // a land mask that changes in time: the node's (the stage's) own
+    if (options_.land_held) {
+      moving.forcedLand = options_.land_held(detail::StageTime(times, node, c));
+    }
     if (interior == nullptr) return;
-    setTide(node);
-    if (directLoad != nullptr) moving.directLoad = directLoadAt(node);
+    setTide(node, c);
+    if (directLoad != nullptr) moving.directLoad = directLoadAt(node, c);
     moving.directLoadOutsideWaterBudget = coupled.outsideGrid;
     moving.solidSurfaceChange = coupled.layerGrid;
     moving.tide = coupled.tide;
@@ -710,35 +716,60 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
-    auto& step = coupled.step;
-    step.emplace(op.StartStep(vstate_, dt, options_.scheme,
-                              Columns(sigma_, toMatDensity_),
-                              Columns(psi_, toMatPotential_)));
-    coupled.effectiveSolver = &coupled.SolverFor(step->EffectiveLove());
-    // Under migrating shorelines each pass solves the nonlinear equation
-    // from the background, the memory and lateral responses entering
-    // through the response channels, so the ocean function follows the
-    // flotation condition inside the fixed point.
-    auto& moving = coupled.moving;
-    if (migrating) {
-      setMoving(node);
-      moving.iceThicknessChange = iceAt(node);
-      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-        moving.iceThicknessChange[i] -= state_.iceThickness[i];
+    // the node's diagnostics, over the step's stages
+    auto info = Viscoelastic3D::StepInfo{};
+    // One stage of the step (StepRecipe.hpp; the step's one stage under a
+    // one-stage scheme): opened from its memory state, its combined fixed
+    // point closed under the forcing at its time, finished.
+    auto stageOf = [&](const Viscoelastic3D::State& from,
+                       const RecipeStage& stage, double length, std::size_t) {
+      const auto c = stage.c;
+      auto& step = coupled.step;
+      step.emplace(op.StartStep(from, length, stage.family,
+                                Columns(sigma_, toMatDensity_),
+                                Columns(psi_, toMatPotential_)));
+      coupled.effectiveSolver = &coupled.SolverFor(step->EffectiveLove());
+      // Under migrating shorelines each pass solves the nonlinear equation
+      // from the background, the memory and lateral responses entering
+      // through the response channels, so the ocean function follows the
+      // flotation condition inside the fixed point.
+      auto& moving = coupled.moving;
+      if (migrating) {
+        setMoving(node, c);
+        moving.iceThicknessChange = iceAt(node, c);
+        for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+          moving.iceThicknessChange[i] -= state_.iceThickness[i];
+        }
+      } else {
+        coupled.loadGrid = directLoadAt(node, c);
+        setTide(node, c);
       }
-    } else {
-      coupled.loadGrid = directLoadAt(node);
-      setTide(node);
-    }
-    setSources(node);
-    coupled.ApplySources();
+      setSources(node, c);
+      coupled.ApplySources();
 
-    // The combined fixed point: strain, ocean load and rotation together.
-    auto [strain, info] = coupled.Close();
-    // the replaced state's tensors go to the next StartStep
-    op.Recycle(
-        std::exchange(vstate_, std::move(*step).Finish(std::move(strain))));
-    step.reset();
+      // The combined fixed point: strain, ocean load and rotation together.
+      auto [strain, stageInfo] = coupled.Close();
+      info.iterations += stageInfo.iterations;
+      info.mixedPasses += stageInfo.mixedPasses;
+      info.solveIterations += stageInfo.solveIterations;
+      info.residual = stageInfo.residual;
+      info.converged = info.converged && stageInfo.converged;
+      auto next = std::move(*step).Finish(std::move(strain));
+      step.reset();
+      return next;
+    };
+    // the replaced state's tensors (and a stage's spent ones) go to the
+    // next StartStep
+    op.Recycle(std::exchange(
+        vstate_,
+        StepByRecipe(
+            RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
+            [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
+                    terms,
+                const RecipeStage&) { return op.StageState(terms); },
+            [&](Viscoelastic3D::State&& spent) {
+              op.Recycle(std::move(spent));
+            })));
     record(times[node], response, info, info.converged, kept(node));
     checkpoint(node);
   }

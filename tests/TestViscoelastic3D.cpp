@@ -195,6 +195,47 @@ TEST(LateralGate, ZeroLateralStepMatchesTheDegreeBasisStepper) {
   }
 }
 
+TEST(Lateral, ShortestRelaxationIsOverTheVolume) {
+  // Viscoelastic3D::ShortestRelaxation over every memory node's grid.
+  // Without a lateral viscosity it is the reference's, to the bit (each
+  // inverse time the reference's times exp(-0) = 1), and not lateral.
+  // Under delta = 0.3 cos(theta), which depends on neither the radius nor
+  // the longitude, it is at the reference's node, at the largest
+  // colatitude of the node's grid (delta most negative there) and the
+  // least longitude (the ties' rule), exp(0.3 cos theta) times the
+  // reference's.
+  const auto body = Body::Make();
+  const Viscoelastic3D flat(body.rheology, kLmax,
+                            [](double, double, double) { return 0.0; });
+  const auto reference = flat.Reference().ShortestRelaxation();
+  const auto uniform = flat.ShortestRelaxation();
+  EXPECT_EQ(uniform.time, reference.time);
+  EXPECT_EQ(uniform.branch, reference.branch);
+  EXPECT_EQ(uniform.element, reference.element);
+  EXPECT_EQ(uniform.layer, reference.layer);
+  EXPECT_NEAR(uniform.radius, reference.radius, 1e-15);
+  EXPECT_FALSE(uniform.lateral);
+  EXPECT_EQ(uniform.colatitude, 0.0);
+
+  const Viscoelastic3D varying(
+      body.rheology, kLmax,
+      [](double, double theta, double) { return 0.3 * std::cos(theta); });
+  const auto site = varying.ShortestRelaxation();
+  EXPECT_TRUE(site.lateral);
+  EXPECT_EQ(site.element, reference.element);
+  EXPECT_NEAR(site.radius, reference.radius, 1e-15);
+  const auto& coupling = varying.Coupling();
+  auto node = 0;
+  while (coupling.RadiusOfNode(node) != site.radius) ++node;
+  const auto& grid = coupling.GridOf(node);
+  EXPECT_EQ(site.colatitude, grid.CoLatitudes().back());
+  EXPECT_EQ(site.longitude, grid.Longitudes().front());
+  EXPECT_NEAR(site.time,
+              reference.time * std::exp(0.3 * std::cos(site.colatitude)),
+              1e-14 * site.time);
+  EXPECT_LT(site.time, 0.8 * reference.time);
+}
+
 TEST(Lateral, KernelPairingsCarryTheVolumeWeights) {
   // A Kernels3D-layout field is a density per unit volume: VolumePairing
   // restores each node's radial weight and r^2 to the angular integral,

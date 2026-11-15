@@ -212,9 +212,18 @@ what only steers the run, what only a sweep reads, or what is checked
 beside it: the paths themselves (a run directory may move), the record
 stride and the processes' layout (the manifest states both, and a reader
 checks them as their own faults), output, checkpoints, the sweeps'
-measurements and methods, and on a radial run the transforms
+measurements and methods, what cannot change a run that runs (what a read
+outside a file's span does, `outside_span`, of the file inputs and of a
+fault file: where refusing succeeds no read lay outside, and holding
+reads the same), and on a radial run the transforms
 (`solver.transform_degrees`), which there set only the grids the reverse
-sweep expands its lateral kernels on (`kernels.lateral`).
+sweep expands its lateral kernels on (`kernels.lateral`). Two spellings
+of one input hash alike where they resolve to the same numbers, as a
+static field's date before present and on its file's axis (hashed as
+the one time the file is read at), and apart where they need not: a
+point source's moment tensor and the double couple that forms it hash
+as given, the two differing at rounding, so the store is not reused,
+never misread.
 
 `sl3d` writes `sl3d run fnv1a-64 <16 hexadecimal digits>`: FNV-1a over
 the members of `apps/RunHash.cpp` (AddRunMembers, which its checkpoints

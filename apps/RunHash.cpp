@@ -163,11 +163,13 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
   }
   // the forcing beside the ice, where there is one
   // (a term's description less its file's path, and the file's contents:
-  // a run directory may move)
+  // a run directory may move; less the static problem's date too, which
+  // the store's hash takes resolved, TrajectoryHashOf)
   for (const auto& term : run.forcing.load) {
     auto unplaced = term;
     unplaced.term.field.file.clear();
     unplaced.term.file.clear();
+    unplaced.term.field.date.reset();
     const auto described = Describe(unplaced);
     hash.Add(std::as_bytes(std::span(described)));
     // and its numbers whole, which the description rounds
@@ -245,7 +247,10 @@ std::string TrajectoryHashOf(const Run& run, bool lateral) {
       hash.AddValue(term.history.factors[k]);
     }
     // a fault file: its contents (as every file input's, by its bytes), its
-    // quadrature, its placement and how its time axis is read
+    // quadrature, its placement and how its time axis is read; not its
+    // `outside_span`, which cannot change a run that runs: where "refuse"
+    // succeeds no read lay outside the span, and "hold" reads the same
+    // rows there (it acts only beyond the span), as a file input's
     if (term.kind == SeismicTerm::Kind::FaultFile) {
       hash.AddFile(term.file);
       hash.AddValue(term.cellsAlongStrike);
@@ -255,11 +260,12 @@ std::string TrajectoryHashOf(const Run& run, bool lateral) {
       if (term.placement) hash.AddValue(*term.placement);
       hash.AddValue(term.time_origin);
       hash.AddValue(term.dated);
-      hash.AddValue(term.outside);
     }
   }
   // the dates the static problem reads its terms' files at, and every file
-  // input's format
+  // input's format; a field load's date as the one time its file is read
+  // at (StaticReadTimeOf), so that its two spellings (`date_kyr_bp`, or
+  // `date` with its `unit`) hash alike where they resolve alike
   for (const auto& term : run.forcing.ice_change) {
     hash.AddValue(term.file.format);
     hash.AddValue(term.file.date.has_value());
@@ -268,9 +274,12 @@ std::string TrajectoryHashOf(const Run& run, bool lateral) {
   for (const auto& term : run.forcing.load) {
     hash.AddValue(term.term.field.format);
     hash.AddValue(term.term.field.date.has_value());
-    if (term.term.field.date) hash.AddValue(*term.term.field.date);
-    hash.AddValue(term.term.before_present);
-    hash.AddValue(term.term.unit.seconds);
+    if (term.term.field.date) {
+      hash.AddValue(StaticReadTimeOf(term.term));
+    } else {
+      hash.AddValue(term.term.before_present);
+      hash.AddValue(term.term.unit.seconds);
+    }
   }
   if (run.ocean) {
     hash.AddValue(run.ocean->seaLevel.input.format);

@@ -56,11 +56,18 @@ namespace {
 /// reduces in rank order (the same result on every rank), then waits
 /// until all have read before overwriting its own. A rank that throws
 /// drops out and the others fail at their next collective rather than
-/// wait for it; Run rethrows the first failure.
+/// wait for it; Run rethrows the first failure. Whether a rank has
+/// failed is read once per rendezvous, by the barrier's completion
+/// before any rank is released: a rank that throws after a rendezvous
+/// (as every rank does on a failure they agreed on) is seen at the next
+/// one alone, never by a slower rank still leaving this one.
 class ThreadRanks {
  public:
   explicit ThreadRanks(int count)
-      : count_(count), slots_(count), errors_(count), barrier_(count) {}
+      : count_(count),
+        slots_(count),
+        errors_(count),
+        barrier_(count, Latch{this}) {}
 
   [[nodiscard]] Collectives For(int rank) {
     return {
@@ -94,9 +101,18 @@ class ThreadRanks {
  private:
   enum class Op { Sum, Max, Share };
 
+  /// The barrier's completion: latches the failures of the rendezvous
+  /// just completed, which every rank arrived at (or dropped out before).
+  struct Latch {
+    ThreadRanks* self;
+    void operator()() const noexcept {
+      self->failedAtRendezvous_ = self->failed_.load();
+    }
+  };
+
   void Wait() {
     barrier_.arrive_and_wait();
-    if (failed_) throw std::runtime_error("another rank failed");
+    if (failedAtRendezvous_) throw std::runtime_error("another rank failed");
   }
 
   void Reduce(int rank, std::span<double> v, Op op) {
@@ -126,7 +142,10 @@ class ThreadRanks {
   std::vector<std::span<double>> slots_;
   std::vector<std::exception_ptr> errors_;
   std::atomic<bool> failed_ = false;
-  std::barrier<> barrier_;
+  /// Written by the completion alone, read by the ranks it releases (the
+  /// barrier orders the two); the next completion waits for every rank.
+  bool failedAtRendezvous_ = false;
+  std::barrier<Latch> barrier_;
 };
 
 double Noise(std::size_t k) {
@@ -513,8 +532,11 @@ TEST(RadialRanks, AdjointKernelsMatchTheOneProcessSweep) {
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,
                                    .record_stride = 1};
-  const auto adjointOptions = AdjointSolver3D::Options{
-      .rtol = 1e-12, .max_coupled_iterations = 100, .coupled_rtol = 1e-11};
+  const auto adjointOptions =
+      AdjointSolver3D::Options{.method = AdjointMethod::Continuous,
+                               .rtol = 1e-12,
+                               .max_coupled_iterations = 100,
+                               .coupled_rtol = 1e-11};
 
   for (const auto migrating : {false, true}) {
     auto sweep = [&](const Viscoelastic3D& op, const GRDSolver& solver) {
@@ -1164,7 +1186,8 @@ TEST(RadialRanks, ASeaLevelSolveThatFailsOnOneRankFailsOnAll) {
                                .coupled_rtol = 1e-11});
         try {
           static_cast<void>(
-              AdjointSolver3D(evolution, {.rtol = rank == 1 ? -1.0 : 1e-12,
+              AdjointSolver3D(evolution, {.method = AdjointMethod::Continuous,
+                                          .rtol = rank == 1 ? -1.0 : 1e-12,
                                           .max_coupled_iterations = 100,
                                           .coupled_rtol = 1e-11})
                   .FirstOrderKernels(times, measurements));

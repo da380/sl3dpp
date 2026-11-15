@@ -1,9 +1,12 @@
 #!/usr/bin/env bash
 # Runs every example config through sl3d, from build/examples/configs (where the
 # build copies this directory), and stops at the first failure. The
-# synthetic Earth configs always run, the time-step study's short family
-# among them (python timestep_study.py, from build/examples, runs the whole
-# study); the ICE-7G ones run only once ../data/ice7g.nc exists (python
+# synthetic Earth configs always run, the time-step study's short form
+# among them, except its runs with the viscosity raised and lowered, which
+# run only once their decks ../data/prem8_up.gia.deck and
+# ../data/prem8_down.gia.deck exist (python timestep_study.py --short, from
+# build/examples, writes them and runs the short form, and without --short
+# the whole study); the ICE-7G ones run only once ../data/ice7g.nc exists (python
 # get_ice7g.py, from build/examples, writes it), those on the custom PREM
 # deck with S40RTS only once that deck and its lateral files exist too
 # (make_earth_deck.py and make_lateral_model.py write them), the toy
@@ -74,14 +77,27 @@ run solve no_ocean_cap_strong.json
 run solve no_ocean_load_cap.json
 run solve sea_level_no_ocean.json
 run solve no_gravity_load.json
-for n in 10 20 40; do  # the time-step study's short family
+for n in 10 20 40; do  # the time-step study's short form
   run solve timestep_et_n$n.json
   run solve timestep_be_n$n.json
   run kernel timestep_discrete_n$n.json
   run kernel timestep_continuous_n$n.json
 done
+for n in 10 20 40 80 160; do
+  run solve timestep_pulse_n$n.json
+done
+run solve timestep_et_n80.json
 run solve timestep_et_n160.json
-run kernel timestep_discrete_n160.json
+if all_exist ../data/prem8_up.gia.deck ../data/prem8_down.gia.deck; then
+  for n in 10 80 160; do
+    run solve timestep_up_n$n.json
+    run solve timestep_down_n$n.json
+  done
+else
+  echo "run_all.sh: no ../data/prem8_up.gia.deck or prem8_down.gia.deck, so" \
+       "the time-step study's differences in the viscosity are skipped" \
+       "(python timestep_study.py --short in build/examples writes them)"
+fi
 
 if [[ -f ../data/ice7g.nc ]]; then
   run solve sea_level_fingerprint_ice7g.json

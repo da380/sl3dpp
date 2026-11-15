@@ -34,9 +34,9 @@
  * Units are the evolution's: solver-unit fields on its grid, times
  * increasing in SLE units. The 3D evolution calibrates the same way under
  * either treatment; its gradient comes from the 3D sweep `adjoint3D`
- * selects (the continuous adjoint by default, exact as the time step goes
- * to zero). The gradient method's fixed point does not depend on the
- * sweep's accuracy: the kernel is
+ * selects (the discrete adjoint by default, as in 1D; the continuous one
+ * is exact as the time step goes to zero). The gradient method's fixed
+ * point does not depend on the sweep's accuracy: the kernel is
  * linear in the residual, so the update vanishes where the residual does.
  */
 
@@ -110,7 +110,7 @@ struct FinalSeaLevelMisfit {
     Evolution& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     std::span<const double> weights = {}, bool gradient = true,
-    AdjointSolver::Options adjoint = {.method = AdjointMethod::Discrete});
+    AdjointSolver::Options adjoint = {});
 
 /// The 3D misfit, as the 1D one.
 struct FinalSeaLevelMisfit3D {
@@ -122,7 +122,7 @@ struct FinalSeaLevelMisfit3D {
 
 /// The misfit of a 3D run, as the 1D one; under migrating shorelines the
 /// initial sea level kernel comes from the 3D sweep `adjoint` selects
-/// (continuous by default) about the run's C(t).
+/// (the discrete by default) about the run's C(t).
 [[nodiscard]] FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
     Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
@@ -148,10 +148,11 @@ struct CalibrationOptions {
   double rtol = 1e-4;
   /// The depth of the Anderson acceleration; 0 is the plain iteration.
   int anderson_memory = 5;
-  /// The adjoint sweep of the gradient method.
-  AdjointSolver::Options adjoint{.method = AdjointMethod::Discrete};
-  /// The 3D evolution's sweep for the gradient method (continuous by
-  /// default).
+  /// The adjoint sweep of the gradient method (the discrete by default,
+  /// which a scheme of several stages refuses: the continuous one is then
+  /// stated here).
+  AdjointSolver::Options adjoint{};
+  /// The 3D evolution's sweep for the gradient method, as `adjoint`.
   AdjointSolver3D::Options adjoint3D{};
   /// Called after each run with its iteration (from 1), its weighted rms
   /// misfit and the relative update it led to; empty by default.

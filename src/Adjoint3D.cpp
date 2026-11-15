@@ -10,6 +10,7 @@
 #include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
@@ -82,6 +83,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
     const ForwardTrajectory3D& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
     const MaterialDirection3D& material) const {
+  detail::RefuseDerivativeOfMultiStage(evolution_->options_.scheme,
+                                       "the second-order adjoint");
   const auto& op = *evolution_->op_;
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
@@ -152,6 +155,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
   const auto scheme = ev.options_.scheme;
+  if (second) {
+    detail::RefuseDerivativeOfMultiStage(scheme, "the second-order adjoint");
+  }
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
   // About a migrating-shoreline trajectory the adjoint stays linear with
@@ -208,6 +214,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           "coefficients (to regenerate each node's strain): build it from "
           "the recording run's snapshots");
     }
+    auto gaps = false;
+    for (auto node = std::size_t{0}; node < times.size(); ++node) {
+      gaps = gaps || !trajectory->Kept(node);
+    }
+    detail::RefuseGapsUnderMultiStage(scheme, gaps);
   }
   if (!oceanFunctions.empty()) {
     if (oceanFunctions.size() != times.size()) {
@@ -1189,10 +1200,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     Viscoelastic3D::Solutions full;
     std::vector<Tensor> memory;
   };
-  auto reversedStep = [&](Carried& carried, double dt, std::size_t to,
-                          const std::vector<GridCoupling::TensorField>* drive,
-                          const MaterialSource* source, MaterialSource* record) {
-    auto step = op.StartStep(carried.state, dt, scheme,
+  // One stage of it (StepRecipe.hpp; the step's one stage under a
+  // one-stage scheme) from the memory state `from`: returns the stage's end
+  // state, its sea level in `density`.
+  auto reversedStage = [&](Carried& carried, const Viscoelastic3D::State& from,
+                           double dt, Scheme family, std::size_t to,
+                           const std::vector<GridCoupling::TensorField>* drive,
+                           const MaterialSource* source, MaterialSource* record,
+                           std::vector<double>& density) {
+    auto step = op.StartStep(from, dt, family,
                              ev.Columns(carried.sigma, ev.toMatDensity_),
                              ev.Columns(carried.psi, ev.toMatPotential_));
     if (drive != nullptr) step.AddMemory(*drive);
@@ -1266,9 +1282,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                      control);
     if (!info.converged) {
       throw std::runtime_error(std::format(
-          "the reversed lateral fixed point at node {} did not converge "
-          "(residual {} after {} passes)",
-          to, info.residual, info.iterations));
+          "the reversed lateral fixed point at node {} did not converge: {}",
+          to, info.Describe(options_.coupled_rtol)));
     }
     // the fixed point's flag is the ranks' alike (its residual is reduced
     // over them); the last sea level solve's is each rank's own
@@ -1278,16 +1293,38 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           "(error {})",
           to, response.error));
     }
-    op.Recycle(std::exchange(carried.state,
-                             std::move(step).Finish(std::move(strain))));
+    carried.shift = response.uniformShift;
+    density = std::move(response.relativeSeaLevelChange);
+    return std::move(step).Finish(std::move(strain));
+  };
+  // The reversed step of a carried state by the scheme's stages, every
+  // stage closed under the ocean function of the step's end node (the
+  // trajectory holds the nodes' alone); returns its last stage's sea level
+  // (the late density at the node stepped to). A drive, a material source
+  // or a record (the second-order sweep's) is a one-stage step's.
+  auto reversedStep = [&](Carried& carried, double dt, std::size_t to,
+                          const std::vector<GridCoupling::TensorField>* drive,
+                          const MaterialSource* source,
+                          MaterialSource* record) {
+    auto density = std::vector<double>{};
+    auto next = StepByRecipe(
+        RecipeOf(scheme, dt), dt, carried.state,
+        [&](const Viscoelastic3D::State& from, const RecipeStage& stage,
+            double length, std::size_t) {
+          return reversedStage(carried, from, length, stage.family, to, drive,
+                               source, record, density);
+        },
+        [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
+                terms,
+            const RecipeStage&) { return op.StageState(terms); },
+        [&](Viscoelastic3D::State&& spent) { op.Recycle(std::move(spent)); });
+    op.Recycle(std::exchange(carried.state, std::move(next)));
     if (record != nullptr) {
       record->strain = *carried.state.strain;
       record->full = fullOf(carried);
     }
-    carried.shift = response.uniformShift;
-    return response.relativeSeaLevelChange;
+    return density;
   };
-
 
   // Under lateral moduli an instantaneous response is a coupled fixed
   // point too: a zero-length step from a zero state (Viscoelastic3D::
@@ -1365,9 +1402,16 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                      control);
     // the fixed point's flag is the ranks' alike (its residual is reduced
     // over them); the last sea level solve's is each rank's own
-    if (!info.converged || !everywhere(out.response.converged)) {
+    if (!info.converged) {
       throw std::runtime_error(std::format(
-          "the instantaneous adjoint fixed point at node {} did not converge",
+          "the instantaneous adjoint fixed point at node {} did not "
+          "converge: {}",
+          node, info.Describe(options_.coupled_rtol)));
+    }
+    if (!everywhere(out.response.converged)) {
+      throw std::runtime_error(std::format(
+          "the instantaneous adjoint fixed point at node {} did not "
+          "converge: its last sea level solve did not",
           node));
     }
     out.strain = coupling.Synthesise(strain);

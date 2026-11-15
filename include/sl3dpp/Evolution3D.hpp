@@ -15,7 +15,9 @@
  * and centrifugal channels from the SLE's answer, and updates the strain
  * through the step's reference solves. With no lateral perturbation the
  * channels are strain-independent, the loop converges on its first pass,
- * and the history equals the 1D coupled evolution's.
+ * and the history equals the 1D coupled evolution's. Under Sdirk2 a step
+ * is two such opened stages, each its own combined fixed point under the
+ * forcing at its time (StepRecipe.hpp).
  *
  * Units follow Evolution: times, the ice-load callable and the
  * returned fields are in the SLE solver's non-dimensional scheme; the
@@ -105,6 +107,8 @@ class Evolution3D {
   };
 
   struct Options {
+    /// The time step, as Evolution::Options::scheme: under Sdirk2 each
+    /// stage's combined fixed point closed under the forcing at its time.
     Scheme scheme = Scheme::ExponentialTrapezoid;
     RotationalFeedback rotation = RotationalFeedback::Full;
     /// The SLE's own tolerance per pass.
@@ -114,6 +118,17 @@ class Evolution3D {
     /// contracts by less than anderson_rate a pass (and the SLE's own
     /// iteration, at the same memory; Viscoelastic3D::IterationControl).
     int max_coupled_iterations = 60;
+    /// Its tolerance on the relative change of the strain between passes,
+    /// which has a floor: the rounding of a pass (its lateral products'
+    /// transforms and its degree solves) keeps two passes apart at about
+    /// 1e-13 to 1e-12 (measured 6e-14 to 3e-13 on the tests' small bodies,
+    /// 3e-13 to 7e-13 under their lateral moduli), and under
+    /// StepSolver::ConjugateGradients each pass's inner solve stops at its
+    /// own tolerance (Viscoelastic3D::Options::solve_rtol), at about 1e-11
+    /// (measured 4e-12 to 9e-12). A tolerance below the floor is not met:
+    /// the node reports unconverged with the residual it stopped at
+    /// (Snapshot::coupledResidual; the start's failure states it,
+    /// StepInfo::Describe).
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
     /// The most passes of each nonlinear sea level solve under migrating

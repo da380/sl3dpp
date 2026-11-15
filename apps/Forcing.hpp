@@ -330,6 +330,16 @@ class TimedLoads {
 [[nodiscard]] std::string DescribeField(const LoadTerm& term, bool timeAxis,
                                         bool timed);
 
+/// The time on its file's own axis, seconds, at which the static problem
+/// reads a `field` term's file: minus `date_kyr_bp` in kyr, or `date` in
+/// its `unit`, zero without either (a file without a time axis), the
+/// present one zero of either sign. The one resolved date the read and
+/// the run's hash both take, so that a date before present and the same
+/// date on the file's axis in kyr (its negation, exact) read and hash
+/// alike; in another unit the product may differ in the last bit, and the
+/// two are then two runs.
+[[nodiscard]] double StaticReadTimeOf(const LoadTerm& term);
+
 /// A site's `latitude` and `longitude`, degrees; a latitude outside
 /// [-90, 90] is refused.
 [[nodiscard]] GeographicPoint ReadSite(const Json& object);

@@ -1,16 +1,16 @@
 #include "sl3dpp/Adjoint.hpp"
 
-#include "sl3dpp/ToroidalViscoelastic.hpp"
-#include "sl3dpp/detail/InteriorSources.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <format>
 #include <stdexcept>
 
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
+#include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/detail/LateralKernels.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
@@ -24,6 +24,23 @@ using detail::CoefficientDualFromColumnDuals;
 using detail::ColumnDualsOf;
 using detail::NodeWeights;
 using detail::CheckGrids;
+
+namespace {
+
+/// A stage's memory state of the reversed sweep (StepRecipe.hpp).
+ViscoelasticState Combined(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms,
+    const RecipeStage&) {
+  return CombinedState(terms);
+}
+ToroidalViscoelastic::State CombinedTwist(
+    std::span<const std::pair<double, const ToroidalViscoelastic::State*>>
+        terms,
+    const RecipeStage&) {
+  return ToroidalViscoelastic::CombinedState(terms);
+}
+
+}  // namespace
 
 ForwardTrajectory ForwardTrajectory::FromSnapshots(
     std::span<const Evolution::Snapshot> snapshots) {
@@ -186,6 +203,10 @@ Kernels AdjointSolver::DiscreteSweep(
     std::span<const std::vector<double>> oceanFunctions,
     detail::LateralAccumulator* lateral) const {
   const auto& ev = *evolution_;
+  detail::RefuseDerivativeOfMultiStage(
+      ev.options_.scheme,
+      "the discrete adjoint (AdjointMethod::Discrete, Options::method's "
+      "default)");
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
@@ -993,17 +1014,18 @@ Kernels AdjointSolver::ContinuousSweep(
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
 
-  auto flavours = std::map<double, GRDSolver>{};
-  auto solverFor = [&](double dt) -> const GRDSolver& {
-    auto found = flavours.find(dt);
+  // the flavoured solvers of each (one-stage scheme, dt) a stage takes
+  auto flavours = std::map<std::pair<Scheme, double>, GRDSolver>{};
+  auto solverFor = [&](Scheme family, double dt) -> const GRDSolver& {
+    const auto key = std::pair(family, dt);
+    auto found = flavours.find(key);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, GRDSolver(
-                                   grid,
-                                   dt == 0.0 ? op.ElasticLoveNumbers()
-                                             : op.EffectiveLoveNumbers(
-                                                   ev.options_.scheme, dt),
-                                   solver.Parameters()))
+                  .emplace(key, GRDSolver(grid,
+                                          dt == 0.0 ? op.ElasticLoveNumbers()
+                                                    : op.EffectiveLoveNumbers(
+                                                          family, dt),
+                                          solver.Parameters()))
                   .first;
     }
     return found->second;
@@ -1102,7 +1124,8 @@ Kernels AdjointSolver::ContinuousSweep(
       }
       f.angularMomentumChange = avc;
     }
-    const auto resp = solverFor(0.0).SolveGeneralised(ev.state_, f, sleOptions);
+    const auto resp =
+        solverFor(scheme, 0.0).SolveGeneralised(ev.state_, f, sleOptions);
     if (!resp.converged) {
       throw std::runtime_error(
           "the instantaneous adjoint fingerprint did not converge");
@@ -1244,7 +1267,8 @@ Kernels AdjointSolver::ContinuousSweep(
                         ev.toNdPotential_);
     f.inertiaMomentChange =
         op.InertiaMoment(solutions.at(0), 2)[0] * ev.toNdMoment_;
-    const auto resp = solverFor(0.0).SolveGeneralised(ev.state_, f, sleOptions);
+    const auto resp =
+        solverFor(scheme, 0.0).SolveGeneralised(ev.state_, f, sleOptions);
     if (!resp.converged) {
       throw std::runtime_error(
           "the adjoint equilibrium solve did not converge");
@@ -1289,6 +1313,10 @@ Kernels AdjointSolver::ContinuousSweep(
   auto cursor = std::optional<TrajectoryCursor>{};
   auto itauKernel = std::vector<std::vector<double>>{};
   if (trajectory != nullptr) {
+    detail::RefuseGapsUnderMultiStage(
+        scheme, std::ranges::any_of(trajectory->states, [](const auto& state) {
+          return !state.has_value();
+        }));
     auto dts = std::vector<double>{};
     for (auto m = std::size_t{0}; m + 1 < times.size(); ++m) {
       dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);
@@ -1698,39 +1726,57 @@ Kernels AdjointSolver::ContinuousSweep(
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
-    const auto step =
-        op.StartStep(vstate, dt, scheme, ev.Columns(sigmaC, ev.toMatDensity_),
-                     ev.Columns(psiC, ev.toMatPotential_));
-    GRDSolver::GeneralisedForcing f;
-    f.rotation = rotation;
-    f.oceanFunctionOverride = overrideAt(n - 1);
-    f.displacementResponse = ev.Coefficients(
-        step.MemorySurface(Component::U), ev.toNdLength_);
-    f.potentialResponse = ev.Coefficients(
-        step.MemorySurface(Component::Phi), ev.toNdPotential_);
-    f.inertiaMomentChange = step.InertiaMoment()[0] * ev.toNdMoment_;
-    const auto resp = solverFor(dt).SolveGeneralised(ev.state_, f, sleOptions);
-    if (!resp.converged) {
-      throw std::runtime_error(std::format(
-          "the adjoint coupled solve at node {} did not converge", n - 1));
-    }
+    // The reversed step's stages (StepRecipe.hpp), each closed by the
+    // memory-only adjoint equilibrium, under the ocean function of the
+    // step's end node: the trajectory holds the nodes' alone.
+    auto resp = GRDSolver::Response{};
+    auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
+                       double length, std::size_t) {
+      const auto step = op.StartStep(from, length, stage.family,
+                                     ev.Columns(sigmaC, ev.toMatDensity_),
+                                     ev.Columns(psiC, ev.toMatPotential_));
+      GRDSolver::GeneralisedForcing f;
+      f.rotation = rotation;
+      f.oceanFunctionOverride = overrideAt(n - 1);
+      f.displacementResponse =
+          ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
+      f.potentialResponse = ev.Coefficients(step.MemorySurface(Component::Phi),
+                                            ev.toNdPotential_);
+      f.inertiaMomentChange = step.InertiaMoment()[0] * ev.toNdMoment_;
+      resp = solverFor(stage.family, length)
+                 .SolveGeneralised(ev.state_, f, sleOptions);
+      if (!resp.converged) {
+        throw std::runtime_error(std::format(
+            "the adjoint coupled solve at node {} did not converge", n - 1));
+      }
+      const auto& Cn = oceanAt(n - 1);
+      auto sig = std::vector<double>(fieldSize);
+      for (auto i = std::size_t{0}; i < fieldSize; ++i) {
+        sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
+      }
+      sigmaC = grid.Expand(sig);
+      psiC = rotation != RotationalFeedback::None
+                 ? solver.CentrifugalCoefficients(resp.angularVelocity)
+                 : grid.ZeroCoefficients();
+      return step
+          .Finish(ev.Columns(sigmaC, ev.toMatDensity_),
+                  ev.Columns(psiC, ev.toMatPotential_))
+          .first;
+    };
+    const auto recipe = RecipeOf(scheme, dt);
+    vstate = StepByRecipe(recipe, dt, vstate, stageOf, Combined);
     densityLate[n - 1] = resp.relativeSeaLevelChange;
     shiftLate[n - 1] = resp.uniformShift;
-    const auto& Cn = oceanAt(n - 1);
-    auto sig = std::vector<double>(fieldSize);
-    for (auto i = std::size_t{0}; i < fieldSize; ++i) {
-      sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
-    }
-    sigmaC = grid.Expand(sig);
-    psiC = rotation != RotationalFeedback::None
-               ? solver.CentrifugalCoefficients(resp.angularVelocity)
-               : grid.ZeroCoefficients();
     loadLate[n - 1] = grid.Synthesise(sigmaC);
-    auto [next, solutions] =
-        step.Finish(ev.Columns(sigmaC, ev.toMatDensity_),
-                    ev.Columns(psiC, ev.toMatPotential_));
-    vstate = std::move(next);
-    if (twisting) tadj = toroidal->Step(tadj, dt, scheme, {}).first;
+    if (twisting) {
+      tadj = StepByRecipe(
+          recipe, dt, tadj,
+          [&](const ToroidalViscoelastic::State& from, const RecipeStage& stage,
+              double length, std::size_t) {
+            return toroidal->Step(from, length, stage.family, {}).first;
+          },
+          CombinedTwist);
+    }
     accumulateItau(n - 1, wLate[n - 1] * perTime);
     accumulateMaterial(n - 1, wLate[n - 1] * perTime);
     // the lateral kernels' two sides of a node in one pass where the

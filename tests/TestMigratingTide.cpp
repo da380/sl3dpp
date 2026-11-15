@@ -8,8 +8,9 @@
 // sea surface the run reports, the ocean's water conserved and the run
 // converging as the solve's tolerance tightens; in the small the response
 // is linear in the tide while no cell flips; a zero tide is no tide; the
-// runs resume from their checkpoints as the uninterrupted ones; and a tide
-// below degree 2 is refused wherever a tide enters.
+// runs resume from their checkpoints as the uninterrupted ones; a tide
+// below degree 2 is refused wherever a tide enters; and Sdirk2's stages
+// close the nonlinear equation at their own times.
 
 #include <gtest/gtest.h>
 
@@ -19,6 +20,7 @@
 #include <filesystem>
 #include <format>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <span>
@@ -376,6 +378,113 @@ TEST(MigratingTide, WhereNoShorelineMovesTheRunIsTheFrozenOneIn3D) {
       EXPECT_LT(Worst(moving[n], frozen[n]), 1e-11) << label << ", node " << n;
     }
   }
+}
+
+TEST(MigratingTide, Sdirk2StagesSolveTheNonlinearEquationAtTheirTimes) {
+  // Sdirk2 closes each stage by the nonlinear sea level equation at the
+  // stage's time (the ice, the load, the tide and the land there). On the
+  // steep coasts no cell flips, and the migrating run is the frozen run
+  // under the same tide, ice and load, radial and under lateral viscosity,
+  // with and without the rotational feedback, to the solves' tolerance; on
+  // the shallow shelves a large tide moves the shorelines, and each node's
+  // ocean function is flotation's on the background's sea level plus the
+  // change the run reports, the ocean's water the background's.
+  const auto body = Body::Make(8);
+  const auto world = SteepWorld::Make(body);
+  const auto times = Times(body);
+  const auto span = times.back();
+  const auto tide = TideOf(body, 30.0, span);
+  const auto extra = LandLoad(body, 1e4, span);
+  const auto thickness = world.Thinning(span);
+  const auto& solver = body.solver;
+  const auto frozenLoad = [&](double t) {
+    auto change = thickness(t);
+    for (auto i = std::size_t{0}; i < change.size(); ++i) {
+      change[i] -= world.ice0[i];
+    }
+    auto out = solver.DirectLoadFromIceThicknessChange(world.state, change);
+    const auto given = extra(t);
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += given[i];
+    return out;
+  };
+  ViscoelasticOperator radial(body.rheology, body.lmax);
+  Viscoelastic3D lateral(
+      body.rheology, body.lmax, [](double, double theta, double phi) {
+        return 0.8 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+      });
+  for (const auto rotation :
+       {RotationalFeedback::None, RotationalFeedback::Full}) {
+    const auto label = std::format("rotation {}", static_cast<int>(rotation));
+    Evolution evolution(radial, solver, world.state,
+                        {.scheme = Scheme::Sdirk2,
+                         .rotation = rotation,
+                         .rtol = 1e-13,
+                         .max_nonlinear_iterations = 400});
+    const auto frozen = evolution.Run(
+        times, Evolution::Forcing{.directLoad = frozenLoad, .tide = tide});
+    const auto moving = evolution.RunMigrating(
+        times, thickness,
+        Evolution::Forcing{.directLoad = extra, .tide = tide});
+    Evolution3D evolution3(lateral, solver, world.state,
+                           {.scheme = Scheme::Sdirk2,
+                            .rotation = rotation,
+                            .rtol = 1e-13,
+                            .coupled_rtol = 1e-12,
+                            .max_nonlinear_iterations = 400});
+    const auto frozen3 = evolution3.Run(
+        times, Evolution3D::Forcing{.directLoad = frozenLoad, .tide = tide});
+    const auto moving3 = evolution3.RunMigrating(
+        times, thickness,
+        Evolution3D::Forcing{.directLoad = extra, .tide = tide});
+    ASSERT_EQ(moving.size(), times.size());
+    ASSERT_EQ(moving3.size(), times.size());
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      worst = std::max(
+          {worst, Worst(moving[n], frozen[n]), Worst(moving3[n], frozen3[n])});
+    }
+    std::cout << std::format("[sdirk2 migrating] {}: {:.2e}\n", label, worst);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      ASSERT_TRUE(moving[n].converged && moving3[n].converged)
+          << label << ", node " << n;
+      ASSERT_EQ(moving[n].oceanFunction, world.state.oceanFunction)
+          << label << ", node " << n;
+      ASSERT_EQ(moving3[n].oceanFunction, world.state.oceanFunction)
+          << label << ", node " << n;
+      // measured below 1e-13
+      EXPECT_LT(Worst(moving[n], frozen[n]), 1e-11) << label << ", node " << n;
+      EXPECT_LT(Worst(moving3[n], frozen3[n]), 1e-11)
+          << label << ", 3D, node " << n;
+    }
+  }
+
+  const auto shelf = ShelfWorld::Make(body);
+  const auto still = [&](double) { return shelf.ice0; };
+  Evolution shelves(radial, solver, shelf.state,
+                    {.scheme = Scheme::Sdirk2,
+                     .rtol = 1e-12,
+                     .max_nonlinear_iterations = 400});
+  const auto run = shelves.RunMigrating(
+      times, still, Evolution::Forcing{.tide = TideOf(body, 120.0, span)});
+  auto moved = std::size_t{0};
+  for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    const auto& node = run[n];
+    ASSERT_TRUE(node.converged) << "shelves, node " << n;
+    EXPECT_EQ(
+        node.oceanFunction,
+        Flotation(solver, shelf.sea0, node.relativeSeaLevelChange, shelf.ice0))
+        << "shelves, node " << n;
+    for (auto i = std::size_t{0}; i < node.oceanFunction.size(); ++i) {
+      if (node.oceanFunction[i] != shelf.state.oceanFunction[i]) ++moved;
+    }
+    const auto [water, scale] = WaterChange(
+        solver, shelf.state, node.oceanFunction, node.relativeSeaLevelChange);
+    EXPECT_LT(std::abs(water), 1e-13 * scale) << "shelves, node " << n;
+  }
+  std::cout << std::format("[sdirk2 migrating] shelves: {} cells moved\n",
+                           moved);
+  // measured: 24 cells moved, over the nodes
+  EXPECT_GT(moved, std::size_t{10});
 }
 
 TEST(MigratingTide, ALargeTideMovesTheShorelinesByFlotation) {

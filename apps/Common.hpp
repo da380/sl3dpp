@@ -636,8 +636,11 @@ template <class EvolutionT>
 /// A 1-D run's refusal of an unconverged node, `when` the node as the
 /// window labels it.
 void Check1D(const Evolution::Snapshot& snapshot, std::string_view when);
-/// A 3-D run's refusal of an unconverged node.
-void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when);
+/// A 3-D run's refusal of an unconverged node: the step's combined fixed
+/// point's last residual, its passes and the tolerance asked of it
+/// (`stepRtol`, solver.step_rtol), or its sea level solve's failure.
+void Check3D(const Evolution3D::Snapshot& snapshot, std::string_view when,
+             double stepRtol);
 
 /// The static problem's world on a run's grid: the state at its date
 /// (`ocean.ice` and `ocean.sea_level` or `ocean.topography`, each file

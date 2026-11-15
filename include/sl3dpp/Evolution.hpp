@@ -9,7 +9,9 @@
  * moment enter the sea level equation through the generalised response
  * channels, the SLE closes the step's equilibrium with the matching
  * per-(scheme, dt) effective Love numbers, and the step finishes under the
- * converged load and centrifugal channels.
+ * converged load and centrifugal channels. Under Sdirk2 a step is two such
+ * backward Euler stages, the first closed under the forcing at its own
+ * time inside the step (StepRecipe.hpp).
  *
  * Internal component, non-dimensional: the radial operator works in the
  * material's scheme and the sea level solver in its own, with the unit
@@ -136,6 +138,9 @@ class Evolution {
   };
 
   struct Options {
+    /// The time step (StepWeights.hpp): the exponential trapezoid,
+    /// backward Euler, or Sdirk2's two backward Euler stages, each closed
+    /// under the forcing at its own time (StepRecipe.hpp).
     Scheme scheme = Scheme::ExponentialTrapezoid;
     RotationalFeedback rotation = RotationalFeedback::Full;
     double rtol = 1e-9;
@@ -178,8 +183,10 @@ class Evolution {
     /// The snapshots are the general route's to rounding. An option for
     /// that problem alone: with an ocean, a load, a tide or the
     /// rotational feedback the loop carries every order anyway and the
-    /// run is refused, as is recording (record_stride) and a stress glut
-    /// whose history is not one factor of time times a pattern.
+    /// run is refused, as is recording (record_stride), a stress glut
+    /// whose history is not one factor of time times a pattern, and
+    /// Sdirk2 (the histories are sampled at the nodes, its first stage
+    /// reads between them).
     bool factor_sources = false;
     /// Hand every node's snapshot to on_snapshot as it is recorded, so a
     /// caller can stream outputs (and checkpoint them) without waiting

@@ -1,7 +1,5 @@
 #include "sl3dpp/TangentLinear3D.hpp"
 
-#include "sl3dpp/detail/InteriorSources3D.hpp"
-
 #include <complex>
 #include <format>
 #include <map>
@@ -11,8 +9,10 @@
 #include <utility>
 
 #include "sl3dpp/LoveNumbers.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/InteriorSources3D.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
 
@@ -198,9 +198,12 @@ void Accumulate(std::vector<GridCoupling::TensorField>& total,
 
 }  // namespace
 
-TangentLinearSolver3D::TangentLinearSolver3D(
-    const Evolution3D& evolution, Options options)
-    : evolution_(&evolution), options_(std::move(options)) {}
+TangentLinearSolver3D::TangentLinearSolver3D(const Evolution3D& evolution,
+                                             Options options)
+    : evolution_(&evolution), options_(std::move(options)) {
+  detail::RefuseDerivativeOfMultiStage(evolution.options_.scheme,
+                                       "the tangent-linear run");
+}
 
 std::vector<std::vector<double>> TangentLinearSolver3D::ItauOfLogViscosity(
     const Viscoelastic3D& op, std::span<const double> field) {
@@ -1271,8 +1274,9 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
           "the tangent-linear coupled fixed point at the start did not "
-          "converge (residual {})",
-          info.residual));
+          "converge: {}{}",
+          info.Describe(options_.coupled_rtol),
+          response.converged ? "" : "; its sea level solve did not"));
     }
     startInfo = info;
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
@@ -1370,8 +1374,9 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     if (!info.converged || !response.converged) {
       throw std::runtime_error(std::format(
           "the tangent-linear coupled fixed point at node {} did not "
-          "converge (residual {})",
-          node, info.residual));
+          "converge: {}{}",
+          node, info.Describe(options_.coupled_rtol),
+          response.converged ? "" : "; its sea level solve did not"));
     }
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
     step.reset();

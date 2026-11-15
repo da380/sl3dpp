@@ -2,8 +2,11 @@
 // Burgers body's Prony terms against its modulus and creep function, and
 // the bodies a model's fields state, planetmodel's prony and burgers decks
 // among them), the elastic and long-term limits, measured order of accuracy,
-// the exact inverse step, and the effective-operator limits. The pyslfp
-// comparison lives in TestFixtures.
+// the exact inverse step, and the effective-operator limits; the step
+// recipes (StepRecipe.hpp) and Sdirk2 through them: its tableau and
+// amplification on a scalar equation, its order, its zero-length step and
+// what it refuses. The pyslfp comparison lives in
+// TestFixtures.
 
 #include <gtest/gtest.h>
 
@@ -14,6 +17,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <stdexcept>
@@ -27,6 +31,7 @@
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
@@ -562,6 +567,103 @@ TEST(Viscoelastic, ElasticAndLongTermLimits) {
   EXPECT_GT(std::abs(hT - h0), 5.0 * std::abs(hT - hInf));
 }
 
+TEST(Viscoelastic, ShortestRelaxationIsWhereTheRheologyRelaxesFastest) {
+  // The shortest relaxation time an operator steps (RelaxationSite). At
+  // the GLL points it is the rheology's MinRelaxationTime, to the bit (the
+  // same largest inverse time, inverted), eta / mu at the base of the
+  // PREM-like body's uniform Maxwell mantle, where mu is largest; at the
+  // interior Gauss points the largest of the interpolated inverse times,
+  // a little longer, in the same element. A Burgers upper mantle's faster
+  // branch is shorter still, and is the one named; nothing relaxing, it
+  // is infinite. StepRatio is a grid's longest step over it.
+  auto body = TestBody::Make(4);
+  const auto& mesh = body.material.Mesh();
+  const auto& scales = body.model.ModelScales();
+  const auto eta = 1e21 / scales.Factor(ViscosityDimensions);
+  const auto cmb = 3.48e6 / scales.Length();
+  const ViscoelasticOperator gll(body.rheology, 4,
+                                 {.memory_points = MemoryPointSet::Gll});
+  const auto atNodes = gll.ShortestRelaxation();
+  EXPECT_EQ(atNodes.time, body.rheology.MinRelaxationTime());
+  auto muMax = 0.0;
+  for (auto i = std::size_t{0}; i < body.rheology.MuUnrelaxed().size(); ++i) {
+    if (body.rheology.IsActive(i)) {
+      muMax = std::max(muMax, body.rheology.MuUnrelaxed()[i]);
+    }
+  }
+  EXPECT_NEAR(atNodes.time, eta / muMax, 1e-14 * atNodes.time);
+  EXPECT_EQ(atNodes.branch, 0u);
+  EXPECT_EQ(atNodes.layer, mesh.LayerOf(atNodes.element));
+  EXPECT_NEAR(atNodes.radius, cmb, 1e-12);
+  EXPECT_FALSE(atNodes.lateral);
+
+  const ViscoelasticOperator gauss(body.rheology, 4);
+  const auto atPoints = gauss.ShortestRelaxation();
+  auto largest = 0.0;
+  for (auto i = std::size_t{0}; i < gauss.PointItau(0).size(); ++i) {
+    if (gauss.PointMu(0)[i] > 0.0) {
+      largest = std::max(largest, gauss.PointItau(0)[i]);
+    }
+  }
+  EXPECT_EQ(atPoints.time, 1.0 / largest);
+  EXPECT_EQ(atPoints.element, atNodes.element);
+  EXPECT_EQ(atPoints.layer, atNodes.layer);
+  EXPECT_GT(atPoints.radius, cmb);
+  std::cout << std::format(
+      "[shortest relaxation] Gauss points {:.6f} times the nodes', {:.3g} km "
+      "above the core\n",
+      atPoints.time / atNodes.time,
+      (atPoints.radius - cmb) * scales.Length() / 1e3);
+  // measured: 1.00045 times the nodes' (the first Gauss point 5.2 km above
+  // the core, mu falling upwards there)
+  EXPECT_GT(atPoints.time, atNodes.time);
+  EXPECT_LT(atPoints.time, 1.01 * atNodes.time);
+
+  // a Burgers upper mantle, its Kelvin element of the unrelaxed modulus and
+  // a tenth of the steady viscosity: the faster branch relaxes in 0.049 of
+  // the upper mantle's Maxwell time, and is the shortest (measured: 0.118
+  // times the Maxwell mantle's)
+  const auto b = body.model.DimensionlessView().Boundaries();
+  const auto d670 = 5.7011e6 / scales.Length();
+  auto viscosity = std::map<std::size_t, RadialValue>{};
+  auto kelvin = std::map<std::size_t, Rheology::Kelvin>{};
+  for (auto i = std::size_t{0}; i < body.model.LayerCount(); ++i) {
+    if (body.model.IsFluid(i) || b[i] < 3.4799e6 / scales.Length() ||
+        b[i + 1] > 6.1511e6 / scales.Length()) {
+      continue;
+    }
+    viscosity[i] = eta;
+    if (b[i] >= d670 - 1e-6) {
+      kelvin[i] =
+          Rheology::Kelvin{.modulus_fraction = 1.0, .viscosity = 0.1 * eta};
+    }
+  }
+  const auto burgers =
+      Rheology::Burgers(body.material, viscosity, kelvin).value();
+  const auto fast = ViscoelasticOperator(burgers, 4, {.memory_points =
+                                                          MemoryPointSet::Gll})
+                        .ShortestRelaxation();
+  EXPECT_EQ(fast.time, burgers.MinRelaxationTime());
+  EXPECT_EQ(fast.branch, 1u);
+  EXPECT_TRUE(kelvin.contains(static_cast<std::size_t>(fast.layer)));
+  EXPECT_LT(fast.time, 0.2 * atNodes.time);
+
+  // nothing relaxing: an elastic body
+  const auto elastic = Rheology::Create(body.material, {}).value();
+  const auto none = ViscoelasticOperator(elastic, 4).ShortestRelaxation();
+  EXPECT_EQ(none.time, std::numeric_limits<double>::infinity());
+  EXPECT_EQ(none.StepRatio(std::vector<double>{0.0, 1.0}), 0.0);
+
+  // the longest step, a repeated node a step of zero length, in the
+  // operator's unit: exact in binary
+  const auto half = RelaxationSite{.time = 0.5};
+  const auto times = std::vector<double>{0.0, 1.0, 1.0, 3.5, 4.0};
+  EXPECT_EQ(half.StepRatio(times), 5.0);
+  EXPECT_EQ(half.StepRatio(times, 2.0), 10.0);
+  EXPECT_EQ(half.StepRatio(std::vector<double>{3.0}), 0.0);
+  EXPECT_EQ(atNodes.StepRatio(std::vector<double>{0.0, atNodes.time}), 1.0);
+}
+
 TEST(Viscoelastic, MeasuredOrderOfAccuracy) {
   auto body = TestBody::Make(2);
   ViscoelasticOperator op(body.rheology, 2);
@@ -750,5 +852,199 @@ TEST(Viscoelastic, AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld) {
       // measured: bitwise
       EXPECT_LT(worst, 1e-13 * scale);
     }
+  }
+}
+
+TEST(StepRecipe, TheRecipesAndTheEngineOnAScalarEquation) {
+  // The one-stage schemes are one stage of themselves; any scheme's step
+  // of zero length is one stage of zero length; Sdirk2 is Alexander's
+  // tableau, two backward Euler stages of length gamma h (gamma^2 - 2 gamma
+  // + 1/2 = 0, L-stability), the second from (1 - r) m_n + r Y_1. On
+  // y' = k (g(t) - y), each stage a backward Euler step under g at its end
+  // time, the engine gives Sdirk2's amplification (1 + (1 - 2 gamma) z) /
+  // (1 - gamma z)^2 to rounding, vanishing as z -> -infinity, and its
+  // second order under a forcing.
+  constexpr auto g = kSdirk2Gamma;
+  EXPECT_NEAR(g, 1.0 - 1.0 / std::sqrt(2.0), 1e-16);
+  EXPECT_LT(std::abs(g * g - 2.0 * g + 0.5), 1e-16);
+  for (const auto scheme :
+       {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto one = RecipeOf(scheme, 0.7);
+    ASSERT_EQ(one.stages.size(), 1u);
+    EXPECT_EQ(one.stages[0].family, scheme);
+    EXPECT_EQ(one.stages[0].c, 1.0);
+    EXPECT_EQ(StageLength(one.stages[0], 0.7), 0.7);
+  }
+  const auto still = RecipeOf(Scheme::Sdirk2, 0.0);
+  ASSERT_EQ(still.stages.size(), 1u);
+  EXPECT_EQ(still.stages[0].family, Scheme::BackwardEuler);
+  const auto two = RecipeOf(Scheme::Sdirk2, 0.7);
+  ASSERT_EQ(two.stages.size(), 2u);
+  for (const auto& stage : two.stages) {
+    EXPECT_EQ(stage.family, Scheme::BackwardEuler);
+    EXPECT_EQ(stage.scale, g);
+  }
+  EXPECT_EQ(StageLength(two.stages[0], 0.7), StageLength(two.stages[1], 0.7));
+  EXPECT_EQ(two.stages[0].c, g);
+  EXPECT_EQ(two.stages[1].c, 1.0);
+  ASSERT_EQ(two.stages[1].start.size(), 2u);
+  const auto r = (1.0 - g) / g;
+  EXPECT_NEAR(two.stages[1].start[0].second, 1.0 - r, 1e-15);
+  EXPECT_NEAR(two.stages[1].start[1].second, r, 1e-15);
+  EXPECT_THROW((void)RecipeOf(Scheme::ExponentialEuler, 0.7),
+               std::invalid_argument);
+  EXPECT_THROW((void)RecipeOf(Scheme::Sdirk2, -0.7), std::invalid_argument);
+
+  struct Scalar {
+    double t = 0.0;
+    double y = 0.0;
+  };
+  const auto step = [](double k, const std::function<double(double)>& forcing,
+                       const Scalar& from, double h) {
+    return StepByRecipe(
+        RecipeOf(Scheme::Sdirk2, h), h, from,
+        [&](const Scalar& x, const RecipeStage&, double length, std::size_t) {
+          const auto t = x.t + length;
+          return Scalar{t,
+                        (x.y + length * k * forcing(t)) / (1.0 + length * k)};
+        },
+        [](std::span<const std::pair<double, const Scalar*>> terms,
+           const RecipeStage&) {
+          auto out = Scalar{terms.front().second->t, 0.0};
+          for (const auto& [a, x] : terms) out.y += a * x->y;
+          return out;
+        });
+  };
+  const auto none = [](double) { return 0.0; };
+  for (const auto z : {0.1, 1.0, 10.0, 1e3, 1e8}) {
+    const auto next = step(z, none, Scalar{0.25, 1.0}, 1.0);
+    const auto want =
+        (1.0 - (1.0 - 2.0 * g) * z) / ((1.0 + g * z) * (1.0 + g * z));
+    EXPECT_NEAR(next.y, want, 1e-15) << "z " << z;
+    EXPECT_EQ(next.t, 1.25);
+  }
+  EXPECT_LT(std::abs(step(1e8, none, Scalar{0.0, 1.0}, 1.0).y), 1e-7);
+  // y' = k (sin t - y) to t = 2 against its exact solution
+  const auto k = 3.0;
+  const auto exact = [&](double t) {
+    const auto c = 1.0 / (1.0 + k * k);
+    return k * c * (k * std::sin(t) - std::cos(t)) +
+           (1.0 + k * c) * std::exp(-k * t);
+  };
+  auto errors = std::vector<double>{};
+  for (const auto steps : {10, 20, 40}) {
+    auto x = Scalar{0.0, 1.0};
+    for (auto n = 0; n < steps; ++n) {
+      x = step(k, [](double t) { return std::sin(t); }, x, 2.0 / steps);
+    }
+    errors.push_back(std::abs(x.y - exact(2.0)));
+  }
+  for (auto i = std::size_t{1}; i < errors.size(); ++i) {
+    EXPECT_NEAR(std::log2(errors[i - 1] / errors[i]), 2.0, 0.15) << i;
+  }
+}
+
+TEST(Viscoelastic, Sdirk2StepsAtSecondOrder) {
+  // The operator's own step under Sdirk2 (two backward Euler stages, each
+  // closed under the load channels at its end time) is the composition of
+  // those stages by hand, bitwise, and converges at second order under a
+  // held load, where backward Euler is first order (MeasuredOrderOfAccuracy).
+  auto body = TestBody::Make(2);
+  ViscoelasticOperator op(body.rheology, 2);
+  const auto tau = body.rheology.MinRelaxationTime();
+  const LoadCallable rising = [](int, double t) {
+    return std::vector<double>{1.0 + 0.3 * t};
+  };
+
+  auto state = op.ZeroState();
+  state =
+      op.Step(state, 0.6 * tau, Scheme::ExponentialTrapezoid, UnitLoad()).first;
+  const auto h = 0.9 * tau;
+  const auto recipe = RecipeOf(Scheme::Sdirk2, h);
+  const auto length = StageLength(recipe.stages[0], h);
+  auto first = op.Step(state, length, Scheme::BackwardEuler, rising).first;
+  using Term = std::pair<double, const ViscoelasticState*>;
+  const auto terms = std::array{Term{recipe.stages[1].start[0].second, &state},
+                                Term{recipe.stages[1].start[1].second, &first}};
+  auto combined = CombinedState(terms);
+  combined.t = state.t + (1.0 - kSdirk2Gamma) * h;
+  const auto [byHand, handSolutions] =
+      op.Step(combined, length, Scheme::BackwardEuler, rising);
+  const auto [stepped, solutions] = op.Step(state, h, Scheme::Sdirk2, rising);
+  EXPECT_EQ(stepped.m, byHand.m);
+  EXPECT_EQ(solutions, handSolutions);
+  EXPECT_EQ(stepped.t, state.t + h);
+
+  const auto T = 4.0 * tau;
+  auto advance = [&](int steps) {
+    auto x = op.ZeroState();
+    auto at = std::map<int, std::vector<double>>{};
+    for (auto i = 0; i < steps; ++i) {
+      auto [next, sols] = op.Step(x, T / steps, Scheme::Sdirk2, UnitLoad());
+      x = std::move(next);
+      at = std::move(sols);
+    }
+    return SurfaceU(op, at, 2);
+  };
+  const auto x1 = advance(16), x2 = advance(32), x4 = advance(64);
+  const auto ratio = (x1 - x2) / (x2 - x4);
+  std::cout << std::format("[sdirk2] Richardson ratio {:.4f}\n", ratio);
+  // measured: 4.02
+  EXPECT_NEAR(ratio, 4.0, 0.2);
+}
+
+TEST(Viscoelastic, Sdirk2ZeroLengthStepAndWhatItRefuses) {
+  // A step of zero length under Sdirk2 is backward Euler's, the elastic
+  // solve with the memory held
+  // (AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld): by Step, by StartStep
+  // and back by StepBack, the toroidal partner alike. At a step of nonzero
+  // length what takes one stage or one set of weights refuses it: StartStep,
+  // StepBack, the effective solid and its Love numbers, the toroidal step.
+  auto body = TestBody::Make(4);
+  const auto tau = body.rheology.MinRelaxationTime();
+  const LoadCallable doubled = [](int, double) {
+    return std::vector<double>{2.0};
+  };
+  for (const auto points : {MemoryPointSet::Gauss, MemoryPointSet::Gll}) {
+    ViscoelasticOperator op(body.rheology, 4, {.memory_points = points});
+    auto state = op.ZeroState();
+    op.PrimeStrain(state, UnitLoad());
+    for (auto i = 0; i < 3; ++i) {
+      state = op.Step(state, 0.7 * tau, Scheme::Sdirk2, UnitLoad()).first;
+    }
+    const auto elastic = op.SolveElastic(state, doubled);
+    const auto [next, solutions] = op.Step(state, 0.0, Scheme::Sdirk2, doubled);
+    EXPECT_EQ(next.m, state.m);
+    auto worst = 0.0, scale = 0.0;
+    for (const auto& [l, x] : elastic) {
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
+        worst = std::max(worst, std::abs(solutions.at(l)[i] - x[i]));
+        scale = std::max(scale, std::abs(x[i]));
+      }
+    }
+    // measured: bitwise
+    EXPECT_LT(worst, 1e-13 * scale);
+    auto opened = op.StartStep(state, 0.0, Scheme::Sdirk2, UnitLoad());
+    EXPECT_EQ(opened.EffectiveLove().h_u, op.ElasticLoveNumbers().h_u);
+    const auto finished = opened.Finish(doubled).first;
+    EXPECT_EQ(finished.m, state.m);
+    EXPECT_EQ(op.StepBack(finished, 0.0, Scheme::Sdirk2, UnitLoad()).first.m,
+              state.m);
+    EXPECT_THROW((void)op.StartStep(state, tau, Scheme::Sdirk2, UnitLoad()),
+                 std::invalid_argument);
+    EXPECT_THROW((void)op.StepBack(finished, tau, Scheme::Sdirk2, UnitLoad()),
+                 std::invalid_argument);
+    EXPECT_THROW((void)op.EffectiveLoveNumbers(Scheme::Sdirk2, tau),
+                 std::invalid_argument);
+    if (points == MemoryPointSet::Gll) {
+      EXPECT_THROW((void)op.EffectiveMaterial(Scheme::Sdirk2, tau),
+                   std::invalid_argument);
+    }
+    const ToroidalViscoelastic toroidal(op);
+    auto tstate = toroidal.ZeroState();
+    toroidal.SetStrain(tstate, toroidal.SolveElastic(tstate, {}));
+    EXPECT_EQ(toroidal.Step(tstate, 0.0, Scheme::Sdirk2, {}).first.m, tstate.m);
+    EXPECT_THROW((void)toroidal.Step(tstate, tau, Scheme::Sdirk2, {}),
+                 std::invalid_argument);
   }
 }
