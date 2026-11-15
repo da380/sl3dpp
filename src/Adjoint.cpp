@@ -481,9 +481,7 @@ Kernels AdjointSolver::DiscreteSweep(
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
-    // The forward states this step's itau sensitivity pairs with, served
-    // before the step's flavour is taken: rebuilding a gap steps through
-    // the flavours of its own step sizes, of which the operator keeps few.
+    // The forward states this step's itau sensitivity pairs with.
     const ViscoelasticState* fwdPrev = nullptr;
     auto fwdN = std::optional<ViscoelasticState>{};
     const std::vector<ViscoelasticOperator::BranchWeights>* dweights = nullptr;
@@ -493,7 +491,9 @@ Kernels AdjointSolver::DiscreteSweep(
       dweights = &op.SchemeWeightDerivativesOf(scheme, dt);
     }
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
-    auto& flavour = op.FlavourOf(scheme, dt);
+    // held through the step: its systems and unit responses below are
+    // references into it
+    const auto flavour = op.FlavourOf(scheme, dt);
 
     // The duals of the end-of-step solve, through the strain transpose,
     // and their contraction with the unit responses: the duals of the
@@ -507,8 +507,8 @@ Kernels AdjointSolver::DiscreteSweep(
     auto dds = std::vector<std::vector<double>*>(lmax + 1);
     for (auto l = 0; l <= lmax; ++l) {
       degs[l] = &op.Deg(l);
-      unitsOf[l] = &op.UnitResponses(&flavour, l);
-      systems[l] = &op.EffectiveSystem(flavour, l);
+      unitsOf[l] = &op.UnitResponses(flavour.get(), l);
+      systems[l] = &op.EffectiveSystem(*flavour, l);
       mds[l] = &mdual.at(l);
       dds[l] = &ddual.at(l);
     }

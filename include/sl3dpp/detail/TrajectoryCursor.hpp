@@ -44,9 +44,9 @@ namespace sl3dpp::detail {
  * states until the sweep has passed below them: one gap at a time, so a
  * reverse sweep holds the kept states and at most a stride's worth more.
  * A request above advances forwards, holding the newest two. A request
- * may step through the flavours of a gap's step sizes, of which the
- * operator keeps few (ViscoelasticOperator::FlavourOf): a caller takes
- * its own step's flavour, and what the flavour owns, after the states.
+ * may step through the flavours of a gap's step sizes, evicting others
+ * from the operator's cache; a flavour a caller holds, and what it owns,
+ * stays alive, its ownership shared (ViscoelasticOperator::FlavourOf).
  */
 class TrajectoryCursor {
  public:

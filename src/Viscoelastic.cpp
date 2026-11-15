@@ -424,18 +424,18 @@ Material ViscoelasticOperator::EffectiveMaterial(Scheme scheme,
   return BaseMaterial().WithModuli(rheology_->EffectiveModuli(w)).value();
 }
 
-ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
+std::shared_ptr<ViscoelasticOperator::Flavour> ViscoelasticOperator::FlavourOf(
     Scheme scheme, double dt) const {
   const auto key = std::pair(static_cast<int>(scheme), dt);
   for (auto it = flavours_.begin(); it != flavours_.end(); ++it) {
     if (it->first == key) {
       flavours_.splice(flavours_.begin(), flavours_, it);
-      return *flavours_.front().second;
+      return flavours_.front().second;
     }
   }
   constexpr auto kFlavourCache = std::size_t{4};
   while (flavours_.size() >= kFlavourCache) flavours_.pop_back();
-  auto flavour = std::make_unique<Flavour>();
+  auto flavour = std::make_shared<Flavour>();
   if (options_.memory_points == MemoryPointSet::Gll) {
     flavour->material =
         std::make_unique<Material>(EffectiveMaterial(scheme, dt));
@@ -447,8 +447,8 @@ ViscoelasticOperator::Flavour& ViscoelasticOperator::FlavourOf(
     flavour->pointShear = {points_.get(), flavour->pointShearModulus,
                            pointBulk_};
   }
-  flavours_.emplace_front(key, std::move(flavour));
-  return *flavours_.front().second;
+  flavours_.emplace_front(key, flavour);
+  return flavour;
 }
 
 const DegreeOperator& ViscoelasticOperator::EffectiveSystem(Flavour& flavour,
@@ -778,7 +778,11 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
                                    const ViscoelasticState& state, double dt,
                                    Scheme scheme, const LoadCallable& load,
                                    const LoadCallable& tide)
-    : op_(&op), scheme_(scheme), dt_(dt), t_(state.t + dt) {
+    : op_(&op),
+      flavour_(op.FlavourOf(scheme, dt)),
+      scheme_(scheme),
+      dt_(dt),
+      t_(state.t + dt) {
   const auto& weights = op.SchemeWeightsOf(scheme, dt);
   auto dStart = std::map<int, std::vector<double>>{};
   if (scheme == Scheme::ExponentialTrapezoid) {
@@ -837,7 +841,7 @@ ViscoelasticStep::ViscoelasticStep(const ViscoelasticOperator& op,
 const std::map<int, std::vector<double>>& ViscoelasticStep::MemorySolutions()
     const {
   if (memorySolutions_.empty()) {
-    auto& flavour = op_->FlavourOf(scheme_, dt_);
+    auto& flavour = *flavour_;
     // One task per degree, the workspaces and effective systems resolved
     // first: the memory force through the effective system.
     auto inputs = std::vector<std::pair<int, const std::vector<double>*>>{};
@@ -929,7 +933,6 @@ ViscoelasticStep::Finish(const LoadCallable& load,
                          const LoadCallable& tide) const {
   const auto& op = *op_;
   const auto& weights = op.SchemeWeightsOf(scheme_, dt_);
-  auto& flavour = op.FlavourOf(scheme_, dt_);
   const auto& memory = MemorySolutions();
   const auto K = op.GetRheology().BranchCount();
 
@@ -954,7 +957,7 @@ ViscoelasticStep::Finish(const LoadCallable& load,
     task.deg = &op.Deg(l);
     task.ncols = ncols_.at(l);
     if (load || tide) {
-      task.units = &op.UnitResponses(&flavour, l);
+      task.units = &op.UnitResponses(flavour_.get(), l);
       task.load = LoadColumns(op, load, l, t_, task.ncols);
       task.tide = TideColumns(tide, l, t_, task.ncols);
     }
@@ -1171,13 +1174,13 @@ const LoveNumbers& ViscoelasticOperator::EffectiveLoveNumbers(Scheme scheme,
                                      .parallel = options_.parallel}))
                   .first;
     } else {
-      const auto& flavour = FlavourOf(scheme, dt);
+      const auto flavour = FlavourOf(scheme, dt);
       found = effectiveLove_
                   .emplace(key, ComputeLoveNumbers(
                                     NodalMaterial(), lmax_,
                                     {.eps = options_.eps,
                                      .truncation = options_.truncation,
-                                     .point_shear = &flavour.pointShear,
+                                     .point_shear = &flavour->pointShear,
                                      .parallel = options_.parallel}))
                   .first;
     }

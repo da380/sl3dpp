@@ -298,12 +298,12 @@ struct AdjointSolver::MaterialTools {
   /// v's force on a full solution and a decayed memory under the dt
   /// flavour: -(dK_eff) x plus the memory force's variation.
   [[nodiscard]] Fields Force(double dt, const Fields& full, const Fields& mem) {
-    auto& flavour = op->FlavourOf(ev->options_.scheme, dt);
+    const auto flavour = op->FlavourOf(ev->options_.scheme, dt);
     auto out = Fields{};
     for (const auto& [l, x] : full) {
       const auto& deg = op->Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = ApplyEffective(op->EffectiveSystem(flavour, l), dt, x, ncols);
+      auto force = ApplyEffective(op->EffectiveSystem(*flavour, l), dt, x, ncols);
       for (auto& v : force) v = -v;
       if (!direction.mu.empty()) {
         const auto mf = MemoryVariationForce(deg, ncols, mem.at(l));

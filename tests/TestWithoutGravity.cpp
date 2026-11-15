@@ -5,10 +5,10 @@
 // up, and of the homogeneous Burgers sphere under the point source (its
 // two Prony terms against the Burgers modulus); a static load against the
 // non-gravitating traction numbers times its weight; a body with a fluid core
-// against its shell above the core; a resumed run and the factored sources
-// against the general run; loads and sources together against the sum of their
-// runs; a load's degree-1 part removed; and what a run without gravity refuses;
-// under Sdirk2 the closed form at second order and an onset at a repeated node.
+// against its shell above the core; a resumed run against the uninterrupted
+// one; loads and sources together against the sum of their runs; a load's
+// degree-1 part removed; and what a run without gravity refuses; under Sdirk2
+// the closed form at second order and an onset at a repeated node.
 //
 // The oracle. By the correspondence principle the Laplace transform of the
 // response to a step source is the elastic closed form
@@ -1332,12 +1332,11 @@ TEST(WithoutGravity, AFluidCoreStopsTheSystemsAtItsTop) {
   EXPECT_GT(degreeZero, 1e-3);
 }
 
-TEST(WithoutGravity, AResumedRunAndTheFactoredSourcesAreTheGeneralRun) {
+TEST(WithoutGravity, AResumedRunUnderSourcesIsTheUninterruptedOne) {
   const auto earth = Earth::Make(false, kEarthLmax);
   const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
                                 ComputeLoveNumbers(earth.material, kEarthLmax),
                                 SeaLevelParameters{});
-  const auto& grid = solver.Grid();
   const ViscoelasticOperator op(earth.rheology, kEarthLmax,
                                 {.gravitating = false});
   const auto source = ThrustIn(solver, earth.material);
@@ -1374,26 +1373,6 @@ TEST(WithoutGravity, AResumedRunAndTheFactoredSourcesAreTheGeneralRun) {
     EXPECT_EQ(resumed[k].displacement, run[k + 3].displacement) << k;
     EXPECT_EQ(resumed[k].toroidalPotential, run[k + 3].toroidalPotential) << k;
   }
-
-  Evolution factored(
-      op, solver, solver.NoOceanState(),
-      {.rotation = RotationalFeedback::None, .factor_sources = true});
-  const auto units = factored.Run(times, forcing);
-  ASSERT_EQ(units.size(), run.size());
-  auto worst = 0.0;
-  for (auto n = std::size_t{0}; n < run.size(); ++n) {
-    EXPECT_TRUE(units[n].potential.empty());
-    EXPECT_TRUE(units[n].relativeSeaLevelChange.empty());
-    worst = std::max(
-        {worst, Departure(grid, units[n].displacement, run[n].displacement, 0),
-         Departure(grid, units[n].tangentialPotential,
-                   run[n].tangentialPotential, 0),
-         Departure(grid, units[n].toroidalPotential, run[n].toroidalPotential,
-                   0)});
-  }
-  RecordProperty("factored_departure", std::format("{:.3e}", worst));
-  // two routes' rounding: measured 2e-13
-  EXPECT_LT(worst, 1e-10);
 }
 
 TEST(WithoutGravity, AStaticLoadIsTheTractionNumbersTimesItsWeight) {
@@ -1472,8 +1451,7 @@ TEST(WithoutGravity, AStaticLoadIsTheTractionNumbersTimesItsWeight) {
 TEST(WithoutGravity, AnOnsetAtARepeatedNodeIsTheRunStartedThere) {
   // A thrust switched on at an interior node, the node repeated (its left
   // limit without the source, Forcing::sourcesBefore): from the onset on
-  // the run is the run started there, by the general route and the
-  // factored one, both schemes.
+  // the run is the run started there, both schemes.
   const auto earth = Earth::Make(false, kEarthLmax);
   const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
                                 ComputeLoveNumbers(earth.material, kEarthLmax),
@@ -1499,39 +1477,33 @@ TEST(WithoutGravity, AnOnsetAtARepeatedNodeIsTheRunStartedThere) {
       }};
   for (const auto scheme :
        {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    for (const auto factor : {false, true}) {
-      const auto options = Evolution::Options{.scheme = scheme,
-                                              .rotation = RotationalFeedback::None,
-                                              .factor_sources = factor};
-      Evolution evolution(op, solver, solver.NoOceanState(), options);
-      const auto run = evolution.Run(jump, forcing);
-      const auto reference = evolution.Run(started, forcing);
-      ASSERT_EQ(run.size(), jump.size());
-      for (auto n = std::size_t{0}; n < 3; ++n) {
-        for (auto v : run[n].displacement) EXPECT_EQ(v, 0.0) << n;
-      }
-      auto worst = 0.0;
-      for (auto k = std::size_t{0}; k < started.size(); ++k) {
-        worst = std::max(
-            {worst,
-             Departure(grid, run[3 + k].displacement, reference[k].displacement, 0),
-             Departure(grid, run[3 + k].tangentialPotential,
-                       reference[k].tangentialPotential, 0),
-             Departure(grid, run[3 + k].toroidalPotential,
-                       reference[k].toroidalPotential, 0)});
-      }
-      // measured: none (the zero-length step's systems are the unrelaxed
-      // ones, which the start solves)
-      EXPECT_LT(worst, 1e-11) << "scheme " << static_cast<int>(scheme)
-                              << (factor ? ", factored" : "");
+    const auto options = Evolution::Options{
+        .scheme = scheme, .rotation = RotationalFeedback::None};
+    Evolution evolution(op, solver, solver.NoOceanState(), options);
+    const auto run = evolution.Run(jump, forcing);
+    const auto reference = evolution.Run(started, forcing);
+    ASSERT_EQ(run.size(), jump.size());
+    for (auto n = std::size_t{0}; n < 3; ++n) {
+      for (auto v : run[n].displacement) EXPECT_EQ(v, 0.0) << n;
     }
+    auto worst = 0.0;
+    for (auto k = std::size_t{0}; k < started.size(); ++k) {
+      worst = std::max(
+          {worst,
+           Departure(grid, run[3 + k].displacement, reference[k].displacement, 0),
+           Departure(grid, run[3 + k].tangentialPotential,
+                     reference[k].tangentialPotential, 0),
+           Departure(grid, run[3 + k].toroidalPotential,
+                     reference[k].toroidalPotential, 0)});
+    }
+    // measured: none (the zero-length step's systems are the unrelaxed
+    // ones, which the start solves)
+    EXPECT_LT(worst, 1e-11) << "scheme " << static_cast<int>(scheme);
   }
 }
 
 TEST(WithoutGravity, AnOnsetAtARepeatedNodeUnderSdirk2IsTheRunStartedThere) {
-  // AnOnsetAtARepeatedNodeIsTheRunStartedThere under Sdirk2, by the general
-  // route (the factored one refuses it: its histories are sampled at the
-  // nodes, the first stage reads between them).
+  // AnOnsetAtARepeatedNodeIsTheRunStartedThere under Sdirk2.
   const auto earth = Earth::Make(false, kEarthLmax);
   const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
                                 ComputeLoveNumbers(earth.material, kEarthLmax),
@@ -1577,12 +1549,6 @@ TEST(WithoutGravity, AnOnsetAtARepeatedNodeUnderSdirk2IsTheRunStartedThere) {
   }
   // measured: none
   EXPECT_LT(worst, 1e-11);
-  Evolution factored(op, solver, solver.NoOceanState(),
-                     {.scheme = Scheme::Sdirk2,
-                      .rotation = RotationalFeedback::None,
-                      .factor_sources = true});
-  EXPECT_THROW(static_cast<void>(factored.Run(jump, forcing)),
-               std::invalid_argument);
 }
 
 TEST(WithoutGravity, LoadsAndSourcesTogetherAreTheSumOfTheirRuns) {
@@ -1646,8 +1612,7 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
   // checkpoint's loads); the snapshots handed to on_snapshot without being
   // kept are the kept ones; a resumed call given its checkpoint's node as
   // the record offset keeps the uninterrupted run's states; and a layer's
-  // height changes nothing. The factored sources take no load, as with
-  // gravity.
+  // height changes nothing.
   const auto earth = Earth::Make(false, kEarthLmax);
   const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
                                 ComputeLoveNumbers(earth.material, kEarthLmax),
@@ -1802,14 +1767,6 @@ TEST(WithoutGravity, ALoadedRunResumesRecordsAndStreamsAsTheGeneralRun) {
                                                    }}),
                  std::invalid_argument);
   }
-  // the factored sources take no load
-  Evolution factored(
-      op, solver, solver.NoOceanState(),
-      {.rotation = RotationalFeedback::None, .factor_sources = true});
-  EXPECT_THROW(
-      (void)factored.Run(times, Evolution::Forcing{.directLoad = load,
-                                                   .sources = sources}),
-      std::invalid_argument);
 }
 
 TEST(WithoutGravity, ALoadsDegreeOnePartIsRemoved) {

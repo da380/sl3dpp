@@ -454,12 +454,13 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
     const auto& dweights = op.SchemeWeightDerivativesOf(scheme, dt);
     const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
-    // served before the step's flavour is taken: rebuilding a gap steps
-    // through the flavours of its own step sizes, of which the operator
-    // keeps few
+    // the forward states the step pairs with (the later copied: the
+    // cursor's reference lasts until its next request)
     const ViscoelasticState fwdN = cursor.State(n);
     const ViscoelasticState& fwdPrev = cursor.State(n - 1);
-    auto& flavour = op.FlavourOf(scheme, dt);
+    // held through the step: its systems and unit responses below are
+    // references into it
+    const auto flavour = op.FlavourOf(scheme, dt);
     const ViscoelasticState& vN = *tangent[n].internalState;
     const ViscoelasticState& vPrev = *tangent[n - 1].internalState;
     // The material's base and tangent quantities at this step: the base
@@ -494,8 +495,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     auto systems = std::vector<const DegreeOperator*>(lmax + 1);
     for (auto l = 0; l <= lmax; ++l) {
       degs[l] = &op.Deg(l);
-      unitsOf[l] = &op.UnitResponses(&flavour, l);
-      systems[l] = &op.EffectiveSystem(flavour, l);
+      unitsOf[l] = &op.UnitResponses(flavour.get(), l);
+      systems[l] = &op.EffectiveSystem(*flavour, l);
     }
     auto triplesAt = [&](std::size_t k, std::size_t full) -> Triples {
       const auto& w = weights[k];

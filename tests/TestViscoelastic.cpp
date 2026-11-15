@@ -5,8 +5,8 @@
 // and the effective-operator limits; the step
 // recipes (StepRecipe.hpp) and Sdirk2 through them: its tableau and
 // amplification on a scalar equation, its order, its zero-length step and
-// what it refuses. The pyslfp comparison lives in
-// TestFixtures.
+// what it refuses; a step's flavour held through the cache's evictions.
+// The pyslfp comparison lives in TestFixtures.
 
 #include <gtest/gtest.h>
 
@@ -999,5 +999,75 @@ TEST(Viscoelastic, Sdirk2ZeroLengthStepAndWhatItRefuses) {
     EXPECT_EQ(toroidal.Step(tstate, 0.0, Scheme::Sdirk2, {}).first.m, tstate.m);
     EXPECT_THROW((void)toroidal.Step(tstate, tau, Scheme::Sdirk2, {}),
                  std::invalid_argument);
+  }
+}
+
+TEST(Viscoelastic, AStepHoldsItsFlavourThroughTheCachesEvictions) {
+  // A step holds its (scheme, dt) flavour, of which the operator's cache
+  // keeps the four most recently used: steps of five other sizes taken
+  // while it is open (between opening and finishing, and inside the load
+  // channel it is finished under, between its reads of the flavour's unit
+  // responses) evict the flavour from the cache and leave the step's
+  // memory solutions, end state and end solutions those of a step taken
+  // with nothing between, to rounding. By the opened step of each
+  // one-stage implicit scheme, and by Step under those and Sdirk2 (whose
+  // stages hold their own flavour); at the Gauss points and the GLL nodes.
+  auto body = TestBody::Make(4);
+  const auto tau = body.rheology.MinRelaxationTime();
+  using Fields = std::map<int, std::vector<double>>;
+  auto worst = [](const Fields& got, const Fields& want) {
+    auto error = 0.0, scale = 0.0;
+    for (const auto& [l, x] : want) {
+      for (auto i = std::size_t{0}; i < x.size(); ++i) {
+        error = std::max(error, std::abs(got.at(l)[i] - x[i]));
+        scale = std::max(scale, std::abs(x[i]));
+      }
+    }
+    return scale > 0.0 ? error / scale : error;
+  };
+  for (const auto points : {MemoryPointSet::Gauss, MemoryPointSet::Gll}) {
+    ViscoelasticOperator op(body.rheology, 4, {.memory_points = points});
+    for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler,
+                        Scheme::Sdirk2}) {
+      const auto label = std::format("scheme {}, {}", static_cast<int>(scheme),
+                                     points == MemoryPointSet::Gll ? "GLL" : "Gauss");
+      auto state = op.ZeroState();
+      op.PrimeStrain(state, UnitLoad());
+      state = op.Step(state, 0.7 * tau, scheme, UnitLoad()).first;
+      const auto dt = 0.3 * tau;
+      auto others = [&] {
+        for (auto k = 1; k <= 5; ++k) {
+          (void)op.Step(state, (0.3 + 0.11 * k) * tau, scheme, UnitLoad());
+        }
+      };
+      // a unit load whose first reading steps at the five other sizes
+      auto armed = true;
+      const LoadCallable evicting = [&](int l, double t) {
+        if (armed) {
+          armed = false;
+          others();
+        }
+        return UnitLoad()(l, t);
+      };
+
+      const auto [want, wantSolutions] = op.Step(state, dt, scheme, UnitLoad());
+      const auto [got, gotSolutions] = op.Step(state, dt, scheme, evicting);
+      EXPECT_FALSE(armed) << label;
+      EXPECT_LT(worst(got.m, want.m), 1e-12) << label;
+      EXPECT_LT(worst(gotSolutions, wantSolutions), 1e-12) << label;
+      if (scheme == Scheme::Sdirk2) continue;
+
+      const auto freshMemory =
+          op.StartStep(state, dt, scheme, UnitLoad()).MemorySolutions();
+      const auto held = op.StartStep(state, dt, scheme, UnitLoad());
+      others();
+      EXPECT_LT(worst(held.MemorySolutions(), freshMemory), 1e-12) << label;
+      others();
+      armed = true;
+      const auto [next, solutions] = held.Finish(evicting);
+      EXPECT_FALSE(armed) << label;
+      EXPECT_LT(worst(next.m, want.m), 1e-12) << label;
+      EXPECT_LT(worst(solutions, wantSolutions), 1e-12) << label;
+    }
   }
 }

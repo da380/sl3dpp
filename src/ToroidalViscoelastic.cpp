@@ -186,13 +186,8 @@ struct ToroidalViscoelastic::Degree {
 
 ToroidalViscoelastic::ToroidalViscoelastic(const ViscoelasticOperator& op)
     : op_(&op) {}
-ToroidalViscoelastic::ToroidalViscoelastic(const ViscoelasticOperator& op,
-                                           std::function<int(int)> columns)
-    : op_(&op), columns_(std::move(columns)) {}
 
-int ToroidalViscoelastic::Columns(int l) const {
-  return columns_ ? columns_(l) : 2 * (l + 1);
-}
+int ToroidalViscoelastic::Columns(int l) const { return 2 * (l + 1); }
 ToroidalViscoelastic::~ToroidalViscoelastic() = default;
 
 int ToroidalViscoelastic::LMax() const { return op_->LMax(); }
@@ -339,7 +334,7 @@ ToroidalViscoelastic::Step(const State& state, double dt, Scheme scheme,
       }
       for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f->second[i];
     }
-    auto x = Effective(scheme, dt, l).Solve(b, ncols);
+    auto x = Effective(scheme, dt, l)->Solve(b, ncols);
     auto d1 = deg.Strain(x, ncols);
     for (auto k = std::size_t{0}; k < K; ++k) {
       const auto& w = weights[k];
@@ -499,11 +494,11 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::Surface(
   return out;
 }
 
-const ToroidalOperator& ToroidalViscoelastic::Effective(Scheme scheme,
-                                                        double dt,
-                                                        int l) const {
+std::shared_ptr<const ToroidalOperator> ToroidalViscoelastic::Effective(
+    Scheme scheme, double dt, int l) const {
   const auto& op = *op_;
-  auto& flavour = op.FlavourOf(scheme, dt);
+  auto owner = op.FlavourOf(scheme, dt);
+  auto& flavour = *owner;
   auto system = flavour.toroidal.find(l);
   if (system == flavour.toroidal.end()) {
     system =
@@ -517,7 +512,8 @@ const ToroidalOperator& ToroidalViscoelastic::Effective(Scheme scheme,
                                                 : nullptr}))
             .first;
   }
-  return system->second;
+  // aliasing: owns the flavour, points at its system
+  return {std::move(owner), &system->second};
 }
 
 ToroidalViscoelastic::Dual ToroidalViscoelastic::ZeroDual() const {
@@ -572,7 +568,7 @@ ToroidalViscoelastic::BaseStep ToroidalViscoelastic::Redo(
     if (const auto f = force.find(l); f != force.end()) {
       for (auto i = std::size_t{0}; i < b.size(); ++i) b[i] += f->second[i];
     }
-    out.solutions.emplace(l, Effective(scheme, dt, l).Solve(b, ncols));
+    out.solutions.emplace(l, Effective(scheme, dt, l)->Solve(b, ncols));
     out.decayed.emplace(l, std::move(mem));
   }
   return out;
@@ -767,7 +763,7 @@ ToroidalViscoelastic::Fields ToroidalViscoelastic::StepTransposed(
         rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
       }
     }
-    auto y = Effective(scheme, dt, l).Solve(rhs, ncols);
+    auto y = Effective(scheme, dt, l)->Solve(rhs, ncols);
     const auto sy = deg.Strain(y, ncols);
     const double wc[2] = {deg.k2 * (deg.k2 - 2.0), deg.k2};
     if (material != nullptr) {
@@ -1008,15 +1004,15 @@ ToroidalViscoelastic::StepTransposedSecond(Dual& dual, Dual& ddual, double dt,
         rhs[static_cast<std::size_t>(c) * deg.ndof + dof] += g->second[c];
       }
     }
-    const auto& system = Effective(scheme, dt, l);
-    auto y = system.Solve(rhs, ncols);
+    const auto system = Effective(scheme, dt, l);
+    auto y = system->Solve(rhs, ncols);
     const auto sy = deg.Strain(y, ncols);
     auto drhs = deg.DualFromScalars(dsummed, ncols);
     {
       const auto moved = deg.WeightedDual(sy, variation, ncols);
       for (auto i = std::size_t{0}; i < drhs.size(); ++i) drhs[i] -= moved[i];
     }
-    auto dy = system.Solve(drhs, ncols);
+    auto dy = system->Solve(drhs, ncols);
     const auto dsy = deg.Strain(dy, ncols);
     if (shear) {
       const auto sx = deg.Strain(second.base->solutions.at(l), ncols);

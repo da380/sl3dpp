@@ -30,7 +30,6 @@
  * Everything is in the material's units.
  */
 
-#include <functional>
 #include <map>
 #include <memory>
 #include <span>
@@ -64,13 +63,8 @@ class ToroidalViscoelastic {
 
   /// The operator is borrowed and must outlive this.
   explicit ToroidalViscoelastic(const ViscoelasticOperator& op);
-  /// With another count of columns per degree than a real field's
-  /// 2 (l + 1): the unit solutions of a source, say (the pairings of the
-  /// continuous adjoint, which sum over orders, are not for these).
-  ToroidalViscoelastic(const ViscoelasticOperator& op,
-                       std::function<int(int)> columns);
   ~ToroidalViscoelastic();
-  /// The columns of a degree's arrays.
+  /// The columns of a degree's arrays: a real field's 2 (l + 1).
   [[nodiscard]] int Columns(int l) const;
 
   [[nodiscard]] int LMax() const;
@@ -293,12 +287,13 @@ class ToroidalViscoelastic {
   struct Degree;
   [[nodiscard]] const Degree& Deg(int l) const;
   /// The effective system of a degree for a (scheme, dt), kept on the
-  /// operator's flavour.
-  [[nodiscard]] const ToroidalOperator& Effective(Scheme scheme, double dt,
-                                                  int l) const;
+  /// operator's flavour (ViscoelasticOperator::FlavourOf): the pointer
+  /// shares the flavour's ownership, so the system lives as long as it is
+  /// held, whatever the operator's cache evicts meanwhile.
+  [[nodiscard]] std::shared_ptr<const ToroidalOperator> Effective(
+      Scheme scheme, double dt, int l) const;
 
   const ViscoelasticOperator* op_;
-  std::function<int(int)> columns_{};
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;
 };
 

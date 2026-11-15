@@ -295,12 +295,12 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     const auto scheme = ev->options_.scheme;
     const auto none = std::vector<double>{};
     const auto& effective = direction.mu.empty() ? none : EffectiveMuOf(dt);
-    auto& opFlavour = op.FlavourOf(scheme, dt);
+    const auto flavour = op.FlavourOf(scheme, dt);
     auto out = std::map<int, std::vector<double>>{};
     for (const auto& [l, x] : full) {
       const auto& deg = op.Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      const auto& system = op.EffectiveSystem(opFlavour, l);
+      const auto& system = op.EffectiveSystem(*flavour, l);
       auto force = ApplyVariation(system, effective, x, ncols);
       for (auto& v : force) v = -v;
       if (!direction.mu.empty()) {

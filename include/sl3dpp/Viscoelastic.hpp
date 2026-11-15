@@ -447,17 +447,28 @@ class ViscoelasticOperator {
   struct Flavour;
 
   [[nodiscard]] Degree& Deg(int l) const;
-  [[nodiscard]] Flavour& FlavourOf(Scheme scheme, double dt) const;
+  /// The (scheme, dt) flavour, from a cache of the four most recently used
+  /// (a variable-dt run would otherwise keep every dt's factorisations).
+  /// The cache and every holder share its ownership: what is taken from
+  /// it (EffectiveSystem, UnitResponses, SplitUnitResponses, the toroidal
+  /// partner's effective systems) lives as long as the flavour is held,
+  /// whatever the cache evicts meanwhile, so a caller holds the pointer
+  /// for as long as it uses any of it.
+  [[nodiscard]] std::shared_ptr<Flavour> FlavourOf(Scheme scheme,
+                                                   double dt) const;
+  /// The flavour's effective system of a degree, built on first use; a
+  /// reference into the flavour.
   [[nodiscard]] const DegreeOperator& EffectiveSystem(Flavour& flavour,
                                                       int l) const;
   /// The flavour's unit load and tide responses at one degree, columns
-  /// (load, tide); flavour nullptr means the unrelaxed system.
+  /// (load, tide); flavour nullptr means the unrelaxed system. A
+  /// reference into the flavour, or into the operator's unrelaxed cache.
   [[nodiscard]] const std::vector<double>& UnitResponses(Flavour* flavour,
                                                          int l) const;
   /// The flavour's responses to the SPLIT unit-load channels, columns
   /// (traction-only, attraction-only, the unit tangential traction):
   /// what the continuous adjoint's jump needs for displacement and
-  /// potential measurements.
+  /// potential measurements. Held as UnitResponses' are.
   [[nodiscard]] const std::vector<double>& SplitUnitResponses(Flavour* flavour,
                                                               int l) const;
   void AddChannels(std::vector<double>& x, int l, Flavour* flavour, double t,
@@ -512,7 +523,7 @@ class ViscoelasticOperator {
   /// themselves at the GLL points.
   std::vector<std::vector<double>> pointMu_, pointItau_;
   mutable std::map<int, std::unique_ptr<Degree>> degrees_;
-  mutable std::list<std::pair<std::pair<int, double>, std::unique_ptr<Flavour>>>
+  mutable std::list<std::pair<std::pair<int, double>, std::shared_ptr<Flavour>>>
       flavours_;  // LRU, most recent at front
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>> weights_;
   mutable std::map<std::pair<int, double>, std::vector<BranchWeights>>
@@ -578,6 +589,9 @@ class ViscoelasticStep {
                    const LoadCallable& load, const LoadCallable& tide);
 
   const ViscoelasticOperator* op_;
+  /// The step's flavour, held for the step's life: its effective systems
+  /// and unit responses whatever the operator's cache evicts meanwhile.
+  std::shared_ptr<ViscoelasticOperator::Flavour> flavour_;
   Scheme scheme_;
   double dt_;
   double t_;

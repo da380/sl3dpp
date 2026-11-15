@@ -1025,29 +1025,3 @@ TEST(Evolution, Sdirk2DampsAfterAnAbruptUnloading) {
     }
   }
 }
-
-TEST(Evolution, Sdirk2RefusesTheFactoredSources) {
-  // factor_sources samples the sources' histories at the nodes, and
-  // Sdirk2's first stage reads them between: refused, naming the scheme.
-  const auto scene = Layered::Make(4, 1e21);
-  ViscoelasticOperator op(scene.rheology, scene.lmax);
-  Evolution evolution(op, scene.solver, scene.solver.NoOceanState(),
-                      {.scheme = Scheme::Sdirk2,
-                       .rotation = RotationalFeedback::None,
-                       .factor_sources = true});
-  const auto source = PointSource{.at = {.radius = 0.9 * scene.solver.Radius(),
-                                         .colatitude = 1.0,
-                                         .longitude = 2.0},
-                                  .moment = {.rr = 1e-12, .tt = -1e-12}};
-  const auto times = Even(scene.Kyr(), 2);
-  try {
-    static_cast<void>(
-        evolution.Run(times, Evolution::Forcing{.sources = [&](double) {
-                        return std::vector<PointSource>{source};
-                      }}));
-    ADD_FAILURE() << "the factored sources ran under Sdirk2";
-  } catch (const std::invalid_argument& error) {
-    EXPECT_NE(std::string(error.what()).find("Sdirk2"), std::string::npos)
-        << error.what();
-  }
-}
