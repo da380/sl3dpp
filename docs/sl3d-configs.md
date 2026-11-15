@@ -748,9 +748,10 @@ a sweep, fewest near n = sqrt(N); in 3D each is large
 ([running.md](running.md), Memory), and with a directory the kept states
 live on disk, the sweep reading each back as it reaches it. The static
 problem has one node, recorded whole, and refuses `record_stride`; a run
-under seismic sources is recorded at every node, each state with its
-strain (its states are not rebuilt without the sources' forces), and
-refuses a stride other than 1. Without a directory `solve` records nothing and
+under seismic sources is recorded at every node it steps, both of an
+onset's pair (Seismic sources, below), each state with its strain (its
+states are not rebuilt without the sources' forces), and refuses a
+stride other than 1. Without a directory `solve` records nothing and
 `kernel` records in memory at the stride, as without the block.
 
 **solve.** With `trajectory.directory`, the run (static or through
@@ -1171,13 +1172,22 @@ response, however long the step before it, and the nodes after it the
 post-seismic relaxation; the outputs keep one record per node of the
 window, the co-seismic one there, and a measurement dated at the onset
 reads it. An onset at the window's start needs no repeat: the first node
-is the instantaneous response. An onset between nodes is no jump the
-nodes see: the source is absent at the nodes before it and acts at those
-after, so the scheme spreads the earthquake over the step that holds the
-onset, and the node after it holds part of the relaxation beside the
-co-seismic response; give the onset as a node. A source
-excites toroidal motion as well as spheroidal, and the surface file then
-holds `toroidal_potential`.
+is the instantaneous response. An onset between two nodes is taken at
+its own time: the run steps there a pair of nodes of its own, the left
+limit and the right, takes the jump between them as at a node, reads
+every other term there as at any time (by its history, its file's time
+rule), and steps on to the next node. The pair is not written: the
+nodes, the records, the summary's count and the measurements' dates are
+the window's, and every node of the window holds what the run whose
+window has a node at the onset holds there, to rounding. An onset within
+1e-12 (1 + |t|) of a node is that node, t the onset as given in a run
+counting forwards and in kyr from the window's start in a dated one;
+terms with one onset share its jump; an onset before the window's start
+acts from the start (the first node holds it), and one after its end
+never acts. `kernel` refuses an onset between nodes (The seismic
+sources, under The kernels below). A source excites toroidal motion as
+well as spheroidal, and the surface file then holds
+`toroidal_potential`.
 
 A `point` is a moment tensor at a point:
 
@@ -1322,9 +1332,9 @@ planetmodel combines the slices' slip (`FaultSliceQuadrature::SlipOf`):
 the moment of the slip the file reads at that time, its size and
 direction both. `linear` and `none` give a moment continuous in time
 between the nodes the run reads it at; `previous` jumps at each of the
-file's times, where the run takes no left limit (as it does at an
-onset): a jump at a node is spread over the step before it, as an onset
-between nodes is.
+file's times, where the run takes no left limit and steps no node of its
+own (as it does at an onset): a jump at a node is spread over the step
+before it, and one between nodes over the step that holds it.
 
 **Cost.** Each quadrature point is a point source. Sources at one radius,
 to 1e-12 (rounding, never a move of a source), are formed together, at
@@ -1392,11 +1402,12 @@ time outside it refused, or, with `"outside_span": "hold"` on the
 a static file is the same pattern at every node, and a history on a
 field term multiplies the field read. The forcing at a node is each
 term's pattern at the node's time times its factor there: the forcing
-enters a run through time at its nodes alone, and a history's or a field
-file's variation between two nodes is not seen. A fault file whose slip is
-on a time axis is read by the same rules, on the run's clock from its
-`time_origin` or by date, its span held before the run (Seismic sources,
-above).
+enters a run through time at the nodes it steps alone (the window's, and
+a pair at a seismic onset between two: Seismic sources, above), and a
+history's or a field file's variation between them is not seen. A fault
+file whose slip is on a time axis is read by the same rules, on the run's
+clock from its `time_origin` or by date, its span held before the run
+(Seismic sources, above).
 
 The names of the other form are refused, naming this form's: the dated
 names in a run counting forwards and the forwards names in a dated run
@@ -2696,7 +2707,9 @@ top-level `trajectory` block's (The trajectory block, above), which
 `solve` shares: `kernels.record_stride` and `kernels.trajectory` are
 refused, naming `trajectory.record_stride` and `trajectory.directory`. A
 run without gravity (`"gravity": "none"`) has no kernels: `kernel` refuses
-it at `gravity`, and `solve` a `kernels` block beside it.
+it at `gravity`, and `solve` a `kernels` block beside it. A seismic
+onset between two nodes of the window is refused at the onset (The
+seismic sources, below); `solve` takes it.
 
 ### The kernels
 
@@ -2822,7 +2835,14 @@ where the library steps a node twice, the two sides' kernels are summed
 for everything both read at that node's one time (the ice, the loads, the
 tide, every other term), and a term whose onset it is takes the right
 side's alone, its moment there the co-seismic one and the left side's its
-absence. Kernels in a fault
+absence. An onset between nodes is refused, at the term's `onset` or
+`onset_kyr_bp`, the earliest named: the run steps a pair of nodes of its
+own there (Seismic sources, above) and reads every term at that time by
+the term's own rule (an amplitude history between its knots, a file
+between its time slices, the onset's term its co-seismic moment), which
+no fixed combination of the term's values at the two nodes around it
+gives, so the kernels at the pair are not the window's nodes' and are
+not built; give the onset as a node. Kernels in a fault
 file's slip are not written: they follow from these, the moment at a
 quadrature point being w C : (s n) (Seismic sources, above), so that the
 derivative of J with respect to the slip there is w (C : K) n, K the

@@ -64,7 +64,8 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral);
 /// hash): AddRunMembers with what checkpoints leave out because a
 /// checkpointed run cannot have it or need not mind it: the seismic
 /// sources whole (a fault file's contents, by its bytes, with its
-/// quadrature, placement and time origin), the static problem's dates of
+/// quadrature, placement and time origin; the onsets, which with the
+/// nodes fix the library's grid, StepGridOf), the static problem's dates of
 /// its terms, the file
 /// inputs' formats, and the memory points the operators carry their
 /// internal variables at. Not the rank count (the store checks the

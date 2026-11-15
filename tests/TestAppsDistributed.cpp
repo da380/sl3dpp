@@ -2,7 +2,8 @@
 // SL3DPP_WITH_MPI and run under mpiexec: solve's 3-D run (a migrating one
 // under a tide among them), its fingerprint
 // on lateral moduli, its static problem there without an ocean and the
-// volume file it writes, its viscoelastic run without an ocean, and
+// volume file it writes, its viscoelastic run without an ocean, a run
+// under a seismic onset between two nodes, and
 // kernel's 3-D runs (through time
 // with an ocean, the static problem on lateral moduli without one, a run
 // on its own clock without one, a change at the start over listed dates),
@@ -771,6 +772,58 @@ TEST_F(AppsOverRanks, SolveWithoutAnOceanUnderLateralModuliMatchesOneProcess) {
   if (Rank() != 0) return;
   const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
   const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  for (const auto* name :
+       {"relative_sea_level_change", "displacement", "tangential_potential",
+        "toroidal_potential", "potential",
+        "relative_sea_level_change_radial_model", "displacement_radial_model",
+        "potential_radial_model"}) {
+    EXPECT_LT(Relative(distributed.variables.at(name).values,
+                       reference.variables.at(name).values),
+              kOverRanks)
+        << name;
+  }
+}
+
+TEST_F(AppsOverRanks, SolveUnderAnOnsetBetweenNodesMatchesOneProcess) {
+  // A 3-D run through time on the toy history under a point source whose
+  // onset (1 kyr BP) falls between two nodes of the window (4/3 and 2/3 kyr
+  // BP): the pair of nodes the program steps there is stepped over the
+  // ranks, the window's nodes alone are written, and the fields, the
+  // radial model's beside them, are the one-process run's to the solves'
+  // round-off.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static",
+      "model": {{"deck": "{0}/prem8.elastic.deck", "format": "elastic",
+                 "viscosity": {{"file": "{0}/viscosity_log.nc"}}}},
+      "discretisation": {{"lmax": 8}},
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}],
+        "seismic": [{{"point": {{"latitude": 30, "longitude": 40,
+                      "depth_km": 300, "strike_deg": 20, "dip_deg": 60,
+                      "rake_deg": 90, "moment_nm": 1e21}},
+                     "onset_kyr_bp": 1}}]}},
+      "ocean": {{"at": "start", "topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full",
+      "output": {{"surface": "out/{1}.nc"}}}})",
+                                             data, name));
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunSolve(one)); });
+  const auto summary = app::RunSolve(over);
+  if (Rank() == 0) {
+    EXPECT_TRUE(summary.starts_with(
+        "3-D (lateral viscosity), viscoelastic, 4 nodes 2 to 0 kyr BP"))
+        << summary;
+  }
+  Barrier();
+  if (Rank() != 0) return;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  ASSERT_EQ(distributed.time->size(), 4u);
   for (const auto* name :
        {"relative_sea_level_change", "displacement", "tangential_potential",
         "toroidal_potential", "potential",

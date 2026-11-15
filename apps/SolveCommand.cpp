@@ -853,8 +853,9 @@ Reached RunThrough(
   const auto& grid = solver.Grid();
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
-  // the library's grid, a node where the forcing jumps repeated; the
-  // history keeps the window's nodes, the right limit at a repeat
+  // the library's grid, a node where the forcing jumps repeated and a pair
+  // inserted at an onset between nodes; the history keeps the window's
+  // nodes, the right limit at a repeat
   const auto steps = StepGridOf(run, scales);
   const auto& times = steps.times;
   const auto migrating = run.Migrating();
@@ -910,10 +911,10 @@ Reached RunThrough(
   const auto& checkpoint = input.checkpoint;
   const auto checkpointing = !checkpoint.directory.empty();
   if (checkpointing && steps.Repeats()) {
-    // a repeat is a seismic onset, and such a run is not checkpointed
-    // (ReadSolveInput): its checkpoints count the window's nodes
-    throw std::logic_error(
-        "a run whose forcing jumps at a node is not checkpointed");
+    // a repeat or an inserted pair is a seismic onset, and such a run is
+    // not checkpointed (ReadSolveInput): its checkpoints count the window's
+    // nodes
+    throw std::logic_error("a run whose forcing jumps is not checkpointed");
   }
   const auto directory = RankDirectory(checkpoint.directory);
   const auto hash =
@@ -976,11 +977,15 @@ Reached RunThrough(
 
   const auto base_node = resumed ? resumed->node : std::size_t{0};
   // the evolution counts a resumed run's nodes from its checkpoint's; the
-  // left limit of a repeat is the library's alone
+  // left limit of a repeat and an inserted pair are the library's alone,
+  // checked as every node is and not kept
   options.on_snapshot = [&](std::size_t node,
                             const typename Evolution::Snapshot& s) {
     const auto k = base_node + node;
-    if (steps.Left(k)) return;
+    if (steps.Left(k) || steps.Inserted(k)) {
+      check(s, WhenOf(run, scales, s.t));
+      return;
+    }
     keep(steps.window[k], s);
   };
   options.keep_snapshots = false;

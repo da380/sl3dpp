@@ -3529,8 +3529,9 @@ TEST_F(AppsTest, SolveTakesLoadsAndSeismicSourcesBesideTheIce) {
     const auto& got = late.variables.at("displacement").values;
     const auto& ice = bare.variables.at("displacement").values;
     const auto fieldSize = grid.FieldSize();
-    // nodes at 2, 4/3, 2/3 and 0 kyr BP: the source acts at the last two,
-    // the run before them the ice's, to rounding
+    // nodes at 2, 4/3, 2/3 and 0 kyr BP, the onset between the second and
+    // the third (a pair of the library's own there): the source acts at the
+    // last two, the run before them the ice's, to rounding
     auto before = 0.0, after = 0.0, scale = 0.0;
     for (auto i = std::size_t{0}; i < 2 * fieldSize; ++i) {
       before = std::max(before, std::abs(got[i] - ice[i]));
@@ -10402,17 +10403,305 @@ TEST_F(AppsTest, AnOnsetAtANodeHoldsTheCoSeismicResponse) {
   }
 }
 
+TEST_F(AppsTest, AnOnsetBetweenNodesIsAPairOfTheLibrarysOwn) {
+  // A seismic onset strictly between two nodes of the window: the program
+  // steps a pair of nodes of its own at the onset (the left limit without
+  // the source, the right with it) and writes the window's nodes alone. At
+  // every node of the window the run is the run whose window has a node at
+  // the onset, which it repeats: the two step over one grid, to rounding
+  // (the onset's solver time formed from the clock or from the node); and
+  // from the onset on it is the run started at the onset, whose steps
+  // after it are the same. Over 1-D runs on their own clock without an
+  // ocean, under the source alone and beside a load and a tide; several
+  // terms (two onsets between one pair of nodes, one of them two terms',
+  // another between the next pair, one at a node, one before the window's
+  // start, which acts from the start, and one after its end, which never
+  // acts; the trajectory store holds the library's nodes); dated runs with
+  // an ocean, frozen and migrating under a land on a time axis, which the
+  // run reads at the onset's date too; a 3-D run; and a run without
+  // gravity. `kernel` refuses such a run, naming the earliest such onset,
+  // and an onset within the tolerance of a node is that node.
+  static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
+  // the largest departure over the response fields `names` of run `got`'s
+  // nodes from run `want`'s, each pair (got's node, want's node) over the
+  // largest magnitude of want's field there; a field zero in want there
+  // must be zero in got
+  const auto response =
+      std::vector<std::string>{"displacement", "tangential_potential",
+                               "potential", "toroidal_potential"};
+  const auto departure =
+      [&](const std::string& got, const std::string& want,
+          const std::vector<std::pair<std::size_t, std::size_t>>& nodes,
+          const std::vector<std::string>& names) {
+        const auto a = Output(got);
+        const auto b = Output(want);
+        auto out = 0.0;
+        for (const auto& [i, j] : nodes) {
+          for (const auto& name : names) {
+            const auto x = Slice(a, name, i);
+            const auto y = Slice(b, name, j);
+            auto diff = 0.0, size = 0.0;
+            for (auto k = std::size_t{0}; k < y.size(); ++k) {
+              diff = std::max(diff, std::abs(x[k] - y[k]));
+              size = std::max(size, std::abs(y[k]));
+            }
+            out = std::max(out, size > 0.0 ? diff / size
+                                : diff > 0.0
+                                    ? std::numeric_limits<double>::infinity()
+                                    : 0.0);
+          }
+        }
+        return out;
+      };
+  // a point source under the ball at a latitude, from an onset where given
+  const auto point = [](double latitude, std::optional<double> onset,
+                        std::string_view name = "onset") {
+    return std::format(
+        R"({{"point": {{"latitude": {}, "longitude": 40, "depth_km": 100,
+            "moment_tensor_nm": {{"rr": 9e20, "tt": -2e20, "pp": -7e20,
+            "rt": 3e20, "rp": -7e20, "tp": 6e20}}}}{}}})",
+        latitude, onset ? std::format(R"(, "{}": {:.17g})", name, *onset) : "");
+  };
+  // a run on its own clock in years without an ocean, its nodes `at`, on
+  // the soft ball with the model block's further members `model` (a 3-D
+  // run's viscosity file, its step's tolerances then given)
+  const auto clocked = [&](const std::string& name, const std::string& at,
+                           const std::string& seismic,
+                           const std::string& more = "",
+                           const std::string& model = "",
+                           const std::string& top = "") {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static",
+      "model": {{"deck": "soft.deck"{}}}, "discretisation": {{"lmax": 8}},
+      "times": {{"unit": "yr", "at": [{}]}},
+      "forcing": {{"seismic": [{}]{}}},
+      "rotation": "none",
+      "solver": {{"rtol": 1e-12{}}}{},
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             model, at, seismic, more,
+                                             model.empty()
+                                                 ? ""
+                                                 : R"(, "step_rtol": 1e-12,
+                                                   "step_max_iterations": 200)",
+                                             top, name));
+  };
+  const auto window = std::string{"0, 1, 3, 6, 10"};
+  const auto withNode = std::string{"0, 1, 2, 3, 6, 10"};
+  // the window's nodes against the run with a node at the onset (2 yr)
+  const auto shared = std::vector<std::pair<std::size_t, std::size_t>>{
+      {0, 0}, {1, 1}, {2, 3}, {3, 4}, {4, 5}};
+  const auto gate = [&](const std::string& label, double gap, double bound) {
+    std::cout << std::format("[onset between nodes, {}] {:.3e}\n", label, gap);
+    RecordProperty(label, std::format("{:.3e}", gap));
+    EXPECT_LT(gap, bound) << label;
+  };
+
+  // -- the source alone: the window's nodes alone written, nothing before
+  // the onset, the run with a node there, the run started at it
+  const auto summary =
+      app::RunSolve(clocked("between", window, point(30, 2.0)));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 5 nodes 0 to 10 yr on the run's clock"))
+      << summary;
+  const auto between = Output("between");
+  ASSERT_EQ(between.time->size(), 5u);
+  for (auto n = std::size_t{0}; n < 2; ++n) {
+    for (const auto v : Slice(between, "displacement", n)) {
+      EXPECT_EQ(v, 0.0) << n;
+    }
+  }
+  static_cast<void>(app::RunSolve(clocked("node", withNode, point(30, 2.0))));
+  static_cast<void>(
+      app::RunSolve(clocked("started", "2, 3, 6, 10", point(30, 2.0))));
+  // measured: 0 (one grid, the onset's solver time the node's to the bit
+  // here); the bound is rounding's, the two formed otherwise
+  gate("alone_against_node", departure("between", "node", shared, response),
+       1e-12);
+  // measured: 0 (the steps' lengths alike to the bit here)
+  gate("alone_against_started",
+       departure("between", "started", {{2, 1}, {3, 2}, {4, 3}}, response),
+       1e-10);
+
+  // -- beside a load and a tide, which the run reads at the onset too
+  const auto loads = std::string{R"(, "load": [{"cap": {"latitude": 35,
+      "longitude": 45, "width_deg": 15, "amplitude_kg_m2": 1e4},
+      "history": [[0, 0.5], [10, 1.5]]}],
+      "tide": [{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+      "imaginary_m2_s2": 0.5}])"};
+  static_cast<void>(
+      app::RunSolve(clocked("loaded", window, point(30, 2.0), loads)));
+  static_cast<void>(
+      app::RunSolve(clocked("loaded_node", withNode, point(30, 2.0), loads)));
+  gate("loaded_against_node",
+       departure("loaded", "loaded_node", shared, response), 1e-12);
+
+  // -- several terms: onsets at 1.5 and 2 yr between the nodes at 1 and 3
+  // (2 yr two terms'), at 4.5 yr between 3 and 6, at the node at 6, before
+  // the start and after the end
+  const auto several = [&](std::optional<double> before, bool late) {
+    auto out = point(10, 2.0) + ", " + point(20, 1.5) + ", " + point(30, 2.0) +
+               ", " + point(40, 4.5) + ", " + point(50, 6.0) + ", " +
+               point(60, before);
+    if (late) out += ", " + point(70, 12.0);
+    return out;
+  };
+  static_cast<void>(app::RunSolve(
+      clocked("several", window, several(-1.0, true), "", "",
+              R"(, "trajectory": {"directory": "store_several"})")));
+  static_cast<void>(app::RunSolve(clocked(
+      "several_node", "0, 1, 1.5, 2, 3, 4.5, 6, 10", several(-1.0, true))));
+  // measured: 1.2e-13 (the solver time of 1.5 yr one ulp from the node's)
+  gate("several_against_node",
+       departure("several", "several_node",
+                 {{0, 0}, {1, 1}, {2, 4}, {3, 6}, {4, 7}}, response),
+       1e-12);
+  // the library's grid: the window's five nodes, a pair at 1.5, 2 and 4.5
+  // yr each, the node at 6 yr repeated
+  const auto manifest = io::TrajectoryStore::ManifestOf(dir_ / "store_several");
+  ASSERT_EQ(manifest.times.size(), 12u);
+  const auto& t = manifest.times;
+  for (auto k = std::size_t{1}; k < t.size(); ++k) {
+    const auto pair = k == 3 || k == 5 || k == 8 || k == 10;
+    EXPECT_EQ(t[k] == t[k - 1], pair) << k;
+    EXPECT_GE(t[k], t[k - 1]) << k;
+  }
+  for (const auto& [k, yr] :
+       {std::pair{2, 1.5}, std::pair{4, 2.0}, std::pair{6, 3.0},
+        std::pair{7, 4.5}, std::pair{9, 6.0}}) {
+    EXPECT_NEAR(t[static_cast<std::size_t>(k)] / t[1], yr, 1e-12) << k;
+  }
+  // an onset before the start acts from it, one after the end never acts:
+  // the run without the onset and without the term
+  static_cast<void>(app::RunSolve(
+      clocked("several_plain", window, several(std::nullopt, false))));
+  gate("several_against_plain",
+       departure("several", "several_plain",
+                 {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}}, response),
+       1e-12);
+
+  // -- `kernel` refuses an onset between nodes, naming the earliest; an
+  // onset within the tolerance of a node is that node
+  const auto kernels = std::string{R"(, "kernels": {"parameters": ["moment"],
+      "measurements": [{"type": "displacement_point", "name": "uplift",
+        "latitude": 28, "longitude": 40}], "output": "out/kernels"})"};
+  ExpectRefused(
+      app::ReadKernelInput,
+      clocked("several_kernels", window, several(-1.0, true), "", "", kernels),
+      "forcing.seismic[1].onset",
+      "falls between the window's nodes 1 yr and 3 yr, where solve "
+      "takes the earthquake at a node of its own, and the kernels "
+      "about a run with an onset between nodes are not built");
+  ExpectRefused(app::ReadKernelInput,
+                clocked("outside_kernels", window, point(30, 3.0 + 1e-10), "",
+                        "", kernels),
+                "forcing.seismic[0].onset", "give the onset as a node");
+  const auto tolerant =
+      clocked("tolerant", window, point(30, 3.0 + 1e-12), "", "", kernels);
+  EXPECT_NO_THROW(static_cast<void>(app::ReadKernelInput(tolerant)));
+  static_cast<void>(app::RunSolve(tolerant));
+  static_cast<void>(app::RunSolve(clocked("at_node", window, point(30, 3.0))));
+  gate("tolerant_against_node",
+       departure("tolerant", "at_node",
+                 {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}}, response),
+       1e-12);
+
+  // -- 3-D, under a lateral viscosity
+  WriteViscosity(dir_ / "viscosity.nc",
+                 ModelOf(dir_ / "soft.deck", app::ModelFormat::Gia), 1e19,
+                 0.05);
+  const auto lateral =
+      std::string{R"(, "viscosity": {"file": "viscosity.nc"})"};
+  const auto summary3d =
+      app::RunSolve(clocked("lateral", window, point(30, 2.0), "", lateral));
+  EXPECT_TRUE(
+      summary3d.starts_with("3-D (lateral viscosity), viscoelastic, 5 "
+                            "nodes 0 to 10 yr on the run's clock"))
+      << summary3d;
+  static_cast<void>(app::RunSolve(
+      clocked("lateral_node", withNode, point(30, 2.0), "", lateral)));
+  // measured: 0 (the coupled iterations alike, one grid)
+  gate("lateral_against_node",
+       departure("lateral", "lateral_node", shared, response), 1e-10);
+
+  // -- without gravity: the displacement's fields, the body having no
+  // potential perturbation
+  static_cast<void>(app::RunSolve(clocked("weightless", window, point(30, 2.0),
+                                          "", "", R"(, "gravity": "none")")));
+  static_cast<void>(
+      app::RunSolve(clocked("weightless_node", withNode, point(30, 2.0), "", "",
+                            R"(, "gravity": "none")")));
+  gate(
+      "weightless_against_node",
+      departure("weightless", "weightless_node", shared,
+                {"displacement", "tangential_potential", "toroidal_potential"}),
+      1e-12);
+
+  // -- dated, with an ocean under the toy ice history: frozen, and
+  // migrating under a land that shrinks between 1.5 and 1 kyr BP, read at
+  // the onset's date (1.3 kyr BP) as at a node's
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc");
+  WriteToyNodes(dir_ / "shrinking.nc", "land", [](std::size_t k, double theta) {
+    const auto wide = theta > 1.9 && theta < 2.5;
+    const auto narrow = theta > 2.05 && theta < 2.35;
+    return (k <= 1 ? wide : narrow) ? 1.0 : 0.0;
+  });
+  const auto dated = [&](const std::string& name, const std::string& at,
+                         const std::string& ocean,
+                         const std::string& more = "") {
+    return Write(name + ".json", std::format(R"({{{},
+      "problem": "quasi_static", "times": {{"at_kyr_bp": [{}]}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}],
+        "seismic": [{}]}},
+      "ocean": {{"at": "start", {}"topography": {{"file": "history.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "rotation": "full", "moments": "hydrostatic",
+      "solver": {{"rtol": 1e-12}}{},
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             kBall, at,
+                                             point(30, 1.3, "onset_kyr_bp"),
+                                             ocean, more, name));
+  };
+  const auto ocean = std::vector<std::string>{
+      "displacement", "tangential_potential", "potential", "toroidal_potential",
+      "relative_sea_level_change"};
+  const auto datedShared = std::vector<std::pair<std::size_t, std::size_t>>{
+      {0, 0}, {1, 1}, {2, 3}, {3, 4}, {4, 5}};
+  for (const auto& [label, members] :
+       {std::pair{std::string{"frozen"}, std::string{}},
+        std::pair{std::string{"migrating"},
+                  std::string{R"("shorelines": "migrating",
+                    "land": {"file": "shrinking.nc"}, )"}}}) {
+    static_cast<void>(
+        app::RunSolve(dated(label, "2, 1.5, 1, 0.5, 0", members)));
+    static_cast<void>(app::RunSolve(
+        dated(label + "_node", "2, 1.5, 1.3, 1, 0.5, 0", members)));
+    auto names = ocean;
+    if (label == "migrating") names.push_back("ocean_function");
+    // measured: 4.2e-12 frozen, 4.8e-12 migrating (the onset's solver time
+    // from the clock, the listed node's from its date: a step's response
+    // moves with the last bit of its length)
+    gate(label + "_against_node",
+         departure(label, label + "_node", datedShared, names), 1e-10);
+  }
+  ExpectRefused(app::ReadKernelInput,
+                dated("dated_kernels", "2, 1.5, 1, 0.5, 0", "", kernels),
+                "forcing.seismic[0].onset_kyr_bp",
+                "falls between the window's nodes 1.5 kyr BP and 1 kyr BP");
+}
+
 TEST_F(AppsTest, KernelsOfAPostSeismicRunOnItsOwnClock) {
   // A point source under the ball of a 1e19 Pa s mantle without an ocean,
   // its relaxation over ten years on the run's own clock at uneven nodes:
   // the kernels in the source's moment tensor and in the viscosity of a
   // vector displacement at the surface at a time of the clock and of the
   // radial displacement at the last node. Their values are solve's. The
-  // run is linear in the source, which acts from its onset at every later
-  // node: a solve run with the tensor's member rt raised differs from the
-  // base run by the moment kernels' prediction. The viscosity kernels
-  // against central differences of solve on the ball with its viscosity
-  // scaled by 1 +- 1e-4.
+  // run is linear in the source, which acts from its onset, the node at 1
+  // yr (repeated by the library), at every node from there: a solve run
+  // with the tensor's member rt raised differs from the base run by the
+  // moment kernels' prediction. The viscosity kernels against central
+  // differences of solve on the ball with its viscosity scaled by
+  // 1 +- 1e-4, through the zero-length step at the onset.
   namespace pm = planetmodel;
   static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
   static_cast<void>(Write("thick.deck", BallDeck(0.0, 1e19 * (1.0 + 1e-4))));
@@ -10426,7 +10715,7 @@ TEST_F(AppsTest, KernelsOfAPostSeismicRunOnItsOwnClock) {
       "forcing": {{"seismic": [{{"point": {{"latitude": 30, "longitude": 40,
           "depth_km": 100, "moment_tensor_nm": {{"rr": 9e20, "tt": -2e20,
           "pp": -7e20, "rt": {:.17g}, "rp": -7e20, "tp": 6e20}}}},
-          "onset": 0.5}}]}},
+          "onset": 1}}]}},
       "rotation": "none", "solver": {{"rtol": 1e-12}},
       "output": {{"surface": "out/{}.nc"}},
       "kernels": {{"method": "discrete", "parameters": ["moment", "viscosity"],
@@ -10473,7 +10762,7 @@ TEST_F(AppsTest, KernelsOfAPostSeismicRunOnItsOwnClock) {
     auto predicted = 0.0;
     for (const auto& row : rows) {
       ASSERT_EQ(row.size(), 9u);
-      if (row[1] > 0.5) predicted += row[6] * 1e20;
+      if (row[1] >= 1.0) predicted += row[6] * 1e20;
     }
     const auto measured = valueOf(raised, name) - value;
     // the viscosity kernels against the deck's viscosity scaled
@@ -10505,8 +10794,9 @@ TEST_F(AppsTest, KernelsOfAPostSeismicRunOnItsOwnClock) {
 TEST_F(AppsTest, KernelsOfAPostSeismicRunIn3D) {
   // A point source under the ball of a 1e19 Pa s mantle with a lateral
   // log-viscosity of 0.05 cos(theta), without an ocean, over six years on
-  // the run's own clock: the 3-D kernels in the source's moment tensor and
-  // in the log viscosity of a vector displacement at a time of the clock.
+  // the run's own clock from its onset at the node at 1 yr (repeated by the
+  // library): the 3-D kernels in the source's moment tensor and in the log
+  // viscosity of a vector displacement at a time of the clock.
   // Its value is solve's; a solve run with the tensor's member rt raised
   // differs by the moment kernels' prediction; and the log-viscosity
   // kernels paired with a uniform perturbation (the file's
@@ -10542,7 +10832,7 @@ TEST_F(AppsTest, KernelsOfAPostSeismicRunIn3D) {
       "forcing": {{"seismic": [{{"point": {{"latitude": 30, "longitude": 40,
           "depth_km": 100, "moment_tensor_nm": {{"rr": 9e20, "tt": -2e20,
           "pp": -7e20, "rt": {:.17g}, "rp": -7e20, "tp": 6e20}}}},
-          "onset": 0.5}}]}},
+          "onset": 1}}]}},
       "rotation": "none",
       "solver": {{"rtol": 1e-12, "step_rtol": 1e-12,
                  "step_max_iterations": 200}},
@@ -10592,7 +10882,7 @@ TEST_F(AppsTest, KernelsOfAPostSeismicRunIn3D) {
     EXPECT_LT(Gap(MeasuredValue(out, "drift"), value), 1e-10) << method;
     auto predicted = 0.0;
     for (const auto& row : TableRows(out / "drift_moment_kernels.txt")) {
-      if (row[1] > 0.5) predicted += row[6] * 1e20;
+      if (row[1] >= 1.0) predicted += row[6] * 1e20;
     }
     const auto kernels = pm::ReadModelFile(out / "drift_viscosity_kernels.nc");
     const auto pairing = [&](const std::string& key) {
@@ -11754,7 +12044,7 @@ TEST_F(AppsTest, KernelRefusesWhatItCannotGive) {
   const auto sourced = [&](const std::string& members) {
     return std::format(R"({{{}, "problem": "quasi_static",
         "times": {{"unit": "yr", "at": [0, 1, 2, 4]}},
-        "forcing": {{"seismic": [{}"onset": 0.5}}]}}, "rotation": "none",
+        "forcing": {{"seismic": [{}"onset": 1}}]}}, "rotation": "none",
         "kernels": {{{}, "output": "k"}}}})",
                        kBall, kPointOpen, members);
   };
@@ -12012,8 +12302,8 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
   const auto point = std::string{R"({"point": {"latitude": 30,
       "longitude": 40, "depth_km": 100, "moment_tensor_nm": {"rr": 9e20,
       "tt": -2e20, "pp": -7e20, "rt": 3e20, "rp": -7e20, "tp": 6e20}},
-      "onset": 0.5})"};
-  const auto atNode = point.substr(0, point.rfind("0.5")) + "2.5}";
+      "onset": 1})"};
+  const auto atNode = point.substr(0, point.rfind('1')) + "2.5}";
   const auto cases = std::vector<Case>{
       {"dated",
        std::string{kBall} + ", " + Window(9) +
@@ -12070,7 +12360,9 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
            "latitude": 33, "longitude": 42,
            "direction": {"east": 1, "north": -0.5}, "time": 6}])",
        1},
-      // an onset at a node: the store holds the library's repeat
+      // the onsets at nodes (an onset between nodes has no kernels): the
+      // store holds the library's repeat; here the continuous sweep, and
+      // a measurement at the onset
       {"postseismic_onset", R"("problem": "quasi_static",
         "model": {"deck": "soft.deck"}, "discretisation": {"lmax": 8},
         "times": {"unit": "yr", "at": [0, 1, 2.5, 3, 6, 10]},
@@ -13700,6 +13992,9 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {in(forwardsPoint, "1e21", "1.0000001e21")}, store},
       {"forwards", "seismic point onset",
        {in(forwardsPoint, R"("onset": 5)", R"("onset": 6)")}, store},
+      // between nodes (the library's grid holds a pair at it) and at one
+      {"forwards", "seismic point onset moved onto a node",
+       {in(forwardsPoint, R"("onset": 5)", R"("onset": 25)")}, store},
       {"forwards", "seismic point history time",
        {in(forwardsPoint, "[50, 0.5]", "[51, 0.5]")}, store},
       {"static", "seismic point strike_deg",

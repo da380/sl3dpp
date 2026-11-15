@@ -139,7 +139,8 @@ surface file, and `examples/Common.hpp` reads one.
   times, loads and fields in the sea-level solver's units: convert with
   `solver.SolverScales()`. Their time grids increase, a time repeated
   once for a jump of the forcing (an earthquake's onset): its left limit,
-  then its right ([design.md](design.md) §5).
+  then its right ([design.md](design.md) §5); a caller whose own nodes
+  miss an onset steps a pair there beside them, as `sl3d` does.
 - Spherical harmonics are complex, fully normalised, with the Condon–Shortley
   phase (GSHTrans's convention); `ShConventions.hpp` converts to and from real
   coefficients.

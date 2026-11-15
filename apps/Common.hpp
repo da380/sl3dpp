@@ -448,27 +448,63 @@ void CheckStateDate(const Run& run, const Json& top,
 [[nodiscard]] std::vector<double> MakeTimes(const Run& run,
                                             const Scales& scales);
 
-/// The time grid the library steps a run over: the window's nodes, with
-/// each node after the first at which the forcing jumps repeated, its left
-/// limit then its right (Evolution::Run). The forcing jumps where a
-/// seismic term's onset falls on a node: the left limit is without the
-/// term (Evolution::Forcing::sourcesBefore), the right with it, and the
+/// The window's nodes on the terms' clock (SolverClock): kyr from the
+/// window's start in a dated run, the nodes as given in one counting
+/// forwards. Where a seismic onset falls against the nodes is decided on
+/// them (OnsetsBetweenNodes, StepGridOf).
+[[nodiscard]] std::vector<double> NodesOnTheClock(const Window& window);
+
+/// A seismic onset strictly between two nodes of a run's window: the
+/// first term (of `forcing.seismic`) with it, the onset on the terms'
+/// clock, and the window's node before it.
+struct OnsetBetween {
+  std::size_t term = 0;
+  double at = 0.0;
+  std::size_t node = 0;
+};
+
+/// The onsets of a run's seismic terms strictly between two nodes of its
+/// window, in time order, each time once: an onset within the tolerance
+/// SeismicTerm::OnsetAt reads it with of a node is that node's, and terms
+/// whose onsets fall within that tolerance of an earlier term's share it.
+/// An onset before the window's start (the term acts from the start) or
+/// after its end (it never acts) is none of them. Empty in the static
+/// problem.
+[[nodiscard]] std::vector<OnsetBetween> OnsetsBetweenNodes(const Run& run);
+
+/// The time grid the library steps a run over (Evolution::Run): the
+/// window's nodes, with a jump of the forcing at each seismic onset after
+/// the window's start held as a time repeated once, its left limit then
+/// its right. The left limit is without the terms whose onset it is
+/// (Evolution::Forcing::sourcesBefore), the right with them, and the
 /// zero-length step between is the static elastic solve with the internal
-/// variables held. The run's outputs keep one record per node of the
-/// window, the right limit at a repeat; the library's trajectory and its
-/// kernels keep both.
+/// variables held. An onset at a node repeats that node; an onset between
+/// two (OnsetsBetweenNodes) is a pair of the library's own, inserted
+/// between them at the onset, where every other term is read as at any
+/// time (by its history, its file's time rule). The run's outputs keep one
+/// record per node of the window, the right limit at a repeat, and nothing
+/// of an inserted pair; the library's trajectory keeps every node.
 struct StepGrid {
+  /// The window node of an inserted pair's nodes, which is none.
+  static constexpr auto kInserted = static_cast<std::size_t>(-1);
   /// The library's nodes, SLE units, zero at the window's start.
   std::vector<double> times;
-  /// Per library node, the window's node it belongs to.
+  /// Per library node, the window's node it is (both of a repeat's), or
+  /// kInserted.
   std::vector<std::size_t> window;
   /// Per window node, its library node: the right limit at a repeat.
   std::vector<std::size_t> library;
-  /// Whether library node k is the left limit of a repeat.
+  /// Whether library node k is the left limit of a pair, a node of the
+  /// window's repeated or an inserted one.
   [[nodiscard]] bool Left(std::size_t k) const {
-    return k + 1 < window.size() && window[k + 1] == window[k];
+    return k + 1 < times.size() && times[k + 1] == times[k];
   }
-  /// Whether any node is repeated.
+  /// Whether library node k is of an inserted pair, no node of the
+  /// window's.
+  [[nodiscard]] bool Inserted(std::size_t k) const {
+    return window[k] == kInserted;
+  }
+  /// Whether the library steps any node beside the window's one each.
   [[nodiscard]] bool Repeats() const { return times.size() > library.size(); }
 };
 [[nodiscard]] StepGrid StepGridOf(const Run& run, const Scales& scales);

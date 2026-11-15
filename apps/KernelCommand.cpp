@@ -498,6 +498,29 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
          "is \"none\", and the kernels of a run without gravity are not "
          "built");
   }
+  // The kernels are over the window's nodes, each the derivative with
+  // respect to a term's value at its node. An onset between two nodes is
+  // a pair of the library's own (StepGridOf), where the run reads every
+  // term by the term's own rule (a history's knots, a file's time slices,
+  // the onset's co-seismic moment), which no fixed combination of its
+  // values at the window's nodes gives: the kernels there are not carried
+  // onto the window's nodes, and such a run's are not built.
+  if (const auto between = OnsetsBetweenNodes(out.run); !between.empty()) {
+    const auto& first = between.front();
+    const auto& term = out.run.forcing.seismic[first.term];
+    const auto& window = *out.run.times;
+    Fail(top.At("forcing")
+             .At("seismic")
+             .At(first.term)
+             .At(term.start_kyr_bp ? "onset_kyr_bp" : "onset"),
+         std::format("falls between the window's nodes {} and {}, where "
+                     "solve takes the earthquake at a node of its own, and "
+                     "the kernels about a run with an onset between nodes "
+                     "are not built (they are over the window's nodes): give "
+                     "the onset as a node of `times`",
+                     window.Label(window.Axis(first.node)),
+                     window.Label(window.Axis(first.node + 1))));
+  }
   out.trajectory = ReadTrajectoryBlock(top, out.run, directory);
   if (!Has(top, "kernels")) {
     Fail(top,
@@ -1110,12 +1133,18 @@ void WriteMomentKernels(const std::filesystem::path& path, const Writing& w,
 /// its points take the right side's kernel alone. The quelled view's
 /// zero-length interval goes (no ice changes across it), the delta
 /// amplitudes are keyed by the window's node, and the density, per unit
-/// time, is the two sides' weighted by the half-steps each pairs with.
+/// time, is the two sides' weighted by the half-steps each pairs with. A
+/// pair inserted between nodes is refused before the run
+/// (ReadKernelInput).
 Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
   const auto& steps = w.steps;
   if (!steps.Repeats()) return kernels;
+  if (std::ranges::contains(steps.window, StepGrid::kInserted)) {
+    throw std::logic_error(
+        "the kernels about a run with an onset between nodes are not built");
+  }
   const auto& run = *w.run;
-  const auto clock = SolverClockOf(run, w.solver->SolverScales());
+  const auto onClock = NodesOnTheClock(*run.times);
   const auto nodes = steps.library.size();
   auto out = kernels;
   auto summed = [&](const auto& perNode) {
@@ -1151,7 +1180,8 @@ Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
     if (!kernels.momentKernels.empty()) {
       auto row = kernels.momentKernels[k];
       if (repeated) {
-        const auto t = clock.At(steps.times[k]);
+        // the node on the terms' clock, where StepGridOf found the onset
+        const auto t = onClock[n];
         for (auto p = std::size_t{0}; p < row.size(); ++p) {
           if (run.forcing.seismic[w.points[p].term].OnsetAt(t)) continue;
           const auto& left = kernels.momentKernels[k - 1][p];

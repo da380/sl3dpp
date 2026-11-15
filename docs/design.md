@@ -317,7 +317,11 @@ longer free, an unphysical effect.
   which side a node reads); the surface loads, the ice and the tide are
   continuous in every use and take none. The first node is the right
   limit at its time already (the instantaneous elastic response) and is
-  not repeated, except as a resumed run's checkpoint node.
+  not repeated, except as a resumed run's checkpoint node. `sl3d` puts
+  such a pair at every seismic onset after its window's start: a node of
+  its window at the onset repeated, or, at an onset between two nodes, a
+  pair of its own there, which it steps and records and does not write
+  (`StepGridOf` in `apps/Common.hpp`).
 
 ## 6. The 3D coupling
 
@@ -441,10 +445,10 @@ moment in the basis at the point where the angles are given.
 the sources acting at each time, and `Instantaneous(forcing)` the
 elastic response alone. Their forces join each step's fixed forces
 on the degree systems, and the first node's response is a zero-length
-step under them. A source switched on at a later node is a jump of the
-forcing there (§5): the node repeated, the source absent from its left
-limit, so the node holds the co-seismic response however long the step
-before it. The surface values of the forced solutions, the
+step under them. A source switched on at a later time is a jump of the
+forcing there (§5): a node at that time repeated, the source absent from
+its left limit, so the node holds the co-seismic response however long
+the step before it. The surface values of the forced solutions, the
 toroidal potential W among them, reach the sea level solve through its
 ready channels, so the ocean's load and the rotational feedback answer
 a source as they do a step's memory: no further coupling is needed.

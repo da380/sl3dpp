@@ -283,15 +283,10 @@ void PlaceSeismicSources(Run& run, const BuiltEarth& earth, const Json& top) {
       })) {
     return;
   }
-  // the nodes on the terms' clock: kyr from the window's start in a dated
-  // run, the run's own clock in one counting forwards
-  auto times = std::vector<double>{};
-  if (run.times) {
-    const auto& window = *run.times;
-    for (const auto node : window.nodes) {
-      times.push_back(window.Dated() ? window.Start() - node : node);
-    }
-  }
+  // the nodes on the terms' clock (an onset between two, where the run
+  // reads the file too, lies within the span they cover)
+  const auto times =
+      run.times ? NodesOnTheClock(*run.times) : std::vector<double>{};
   PlaceFaultFiles(run.forcing.seismic, earth.model.SurfaceRadius(),
                   ModuliOf(earth), top.At("forcing"), times);
 }
@@ -903,12 +898,14 @@ Loaded LoadWorld(const Run& run, const Json& top,
   static_cast<void>(CoveredTime(source.input, *sea, SeaLevelMember(run, top),
                                 state_si, StateReadOf(run)));
   auto ice = std::make_shared<const RunIce>(run, top, files, state_si);
-  // the ice at every node the run steps: no change takes more than the
-  // state holds
+  // the times the run reads the forcing at, each once: the library's grid
+  // (StepGridOf), an onset between nodes among them
+  auto steps = StepGridOf(run, scales).times;
+  steps.erase(std::ranges::unique(steps).begin(), steps.end());
+  // the ice at every one of them: no change takes more than the state
+  // holds
   auto nodes = std::vector<double>{};
-  for (const auto t : MakeTimes(run, scales)) {
-    nodes.push_back(start_si + t * scales.Time());
-  }
+  for (const auto t : steps) nodes.push_back(start_si + t * scales.Time());
   ice->CheckHeld(nodes, &window);
   // the change present at the start, where the state is there: a load at
   // the first node, or the ice the start's solve takes
@@ -943,10 +940,11 @@ Loaded LoadWorld(const Run& run, const Json& top,
     const auto& member = top.At("ocean").At("land");
     const auto file = files.Open(input, member);
     if (window.Dated() && run.Migrating() && OnTimeAxis(input, *file)) {
-      // every node's, read before the run: the run asks at its nodes alone
+      // every node's, read before the run: the run asks at the library's
+      // nodes alone
       auto masks = std::make_shared<
           std::vector<std::pair<double, std::vector<char>>>>();
-      for (const auto t : MakeTimes(run, scales)) {
+      for (const auto t : steps) {
         masks->emplace_back(
             t, LandAt(input, *file, member, start_si + t * scales.Time(),
                       "a node's date, where the run reads it"));
@@ -1010,24 +1008,66 @@ std::vector<double> MakeTimes(const Run& run, const Scales& scales) {
   return run.times->Times(scales.Time());
 }
 
+std::vector<double> NodesOnTheClock(const Window& window) {
+  auto out = std::vector<double>{};
+  for (const auto node : window.nodes) {
+    out.push_back(window.Dated() ? window.Start() - node : node);
+  }
+  return out;
+}
+
+std::vector<OnsetBetween> OnsetsBetweenNodes(const Run& run) {
+  auto out = std::vector<OnsetBetween>{};
+  if (!run.times) return out;
+  const auto nodes = NodesOnTheClock(*run.times);
+  const auto& seismic = run.forcing.seismic;
+  for (auto k = std::size_t{0}; k < seismic.size(); ++k) {
+    const auto& term = seismic[k];
+    if (!term.onset) continue;
+    const auto at = *term.onset;
+    const auto onset = [&term](double t) { return term.OnsetAt(t); };
+    const auto shared = std::ranges::any_of(
+        out, [&](const OnsetBetween& o) { return term.OnsetAt(o.at); });
+    if (std::ranges::any_of(nodes, onset) || shared || at < nodes.front() ||
+        at > nodes.back()) {
+      continue;
+    }
+    const auto after = std::ranges::upper_bound(nodes, at) - nodes.begin();
+    out.push_back(
+        {.term = k, .at = at, .node = static_cast<std::size_t>(after) - 1});
+  }
+  std::ranges::sort(out, {}, &OnsetBetween::at);
+  return out;
+}
+
 StepGrid StepGridOf(const Run& run, const Scales& scales) {
   auto out = StepGrid{};
   const auto times = MakeTimes(run, scales);
   const auto clock = SolverClockOf(run, scales);
+  const auto nodes = NodesOnTheClock(*run.times);
+  const auto between = OnsetsBetweenNodes(run);
+  auto next = between.begin();
+  const auto add = [&out](double t, std::size_t window) {
+    out.times.push_back(t);
+    out.window.push_back(window);
+  };
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
+    // the onsets between the node before and this one: a pair each, at the
+    // onset's solver time
+    for (; next != between.end() && next->node + 1 == n; ++next) {
+      const auto t = (next->at - clock.zero) / clock.rate;
+      add(t, StepGrid::kInserted);
+      add(t, StepGrid::kInserted);
+    }
     // a seismic term's onset at a node after the first: its left limit
     const auto jumps =
-        n > 0 && std::ranges::any_of(run.forcing.seismic,
-                                     [&](const SeismicTerm& term) {
-                                       return term.OnsetAt(clock.At(times[n]));
-                                     });
-    if (jumps) {
-      out.times.push_back(times[n]);
-      out.window.push_back(n);
-    }
+        n > 0 &&
+        std::ranges::any_of(run.forcing.seismic, [&](const SeismicTerm& term) {
+          return term.OnsetAt(nodes[n]);
+        });
+    if (jumps) add(times[n], n);
     out.library.push_back(out.times.size());
-    out.times.push_back(times[n]);
-    out.window.push_back(n);
+    add(times[n], n);
   }
   return out;
 }
@@ -1308,7 +1348,7 @@ EvolutionForcing ForcingOf(
     const auto energy =
         scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
     // the sources at a time and their left limits there, which differ at
-    // an onset alone (a node of StepGridOf's repeated)
+    // an onset alone (a pair of StepGridOf's)
     auto sourcesAt = [seismic = run.forcing.seismic, surfaceRadius, clock,
                       length, energy](double t, bool before) {
       auto sources =
