@@ -58,7 +58,8 @@ io::FieldHistory ReadFile(const FileInput& input, const SurfaceGrid& grid,
   auto out = std::optional<io::FieldHistory>{};
   switch (input.format) {
     case FileFormat::PlanetmodelSurface: {
-      auto read = io::FieldHistory::Read(input.file, grid);
+      auto read =
+          io::FieldHistory::Read(input.file, grid, {.time_rtol = kAxisRtol});
       if (!read) Fail(object.At("file"), read.error().message);
       out.emplace(std::move(*read));
       break;
@@ -144,10 +145,12 @@ double CoveredTime(const FileInput& input, const io::FieldHistory& file,
 std::vector<double> ReadValues(const FileInput& input,
                                const io::FieldHistory& file, const Json& object,
                                double time, std::string_view where,
-                               const std::optional<TimeUnit>& unit) {
+                               const std::optional<TimeUnit>& unit,
+                               bool before) {
   const auto at = CoveredTime(input, file, object, time, where, unit);
   try {
-    return file.Values(input.variable, at);
+    return before ? file.ValuesBefore(input.variable, at)
+                  : file.Values(input.variable, at);
   } catch (const std::runtime_error& error) {
     Fail(object.At("file"), error.what());
   }

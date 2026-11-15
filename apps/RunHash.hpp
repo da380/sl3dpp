@@ -51,11 +51,13 @@ class Fnv1a {
 /// its transforms (`transform_degrees`; on a radial run they set the
 /// reverse sweep's lateral kernels alone, and are left out), the
 /// shorelines and the state's end of the window, the loads and the tide
-/// whole, the calibration and the run's having no gravity (added only
-/// then, so that a run with gravity keeps its hash). The paths themselves
-/// are left out, so that a run directory may move. In the static problem,
-/// whose run has no window, the nodes' place holds the problem and the
-/// state's date instead.
+/// whole, each history's time rule where it is not `linear` (added so,
+/// that a run without one keeps its hash; a file's rule and stored times
+/// are in its contents), the calibration and the run's having no gravity
+/// (added only then, so that a run with gravity keeps its hash). The
+/// paths themselves are left out, so that a run directory may move. In
+/// the static problem, whose run has no window, the nodes' place holds the
+/// problem and the state's date instead.
 /// `solve`'s checkpoints hash these members alone (with, on several
 /// ranks, the rank count).
 void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral);

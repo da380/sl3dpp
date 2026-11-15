@@ -511,8 +511,8 @@ std::shared_ptr<const io::FieldHistory> InputFiles::Open(const FileInput& input,
 std::vector<double> IceThicknessAt(const FileInput& input,
                                    const io::FieldHistory& file,
                                    const Json& member, double time,
-                                   std::string_view where) {
-  auto thickness = ReadValues(input, file, member, time, where);
+                                   std::string_view where, bool before) {
+  auto thickness = ReadValues(input, file, member, time, where, {}, before);
   for (auto v : thickness) {
     if (!std::isfinite(v)) {
       Fail(member.At("file"),
@@ -623,26 +623,29 @@ RunIce::RunIce(const Run& run, const Json& top, InputFiles& files,
 }
 
 std::vector<double> RunIce::ValuesOf(const Term& term, double time,
-                                     std::string_view where) const {
-  return IceThicknessAt(term.term.file, *term.file, *term.member, time, where);
+                                     std::string_view where,
+                                     bool before) const {
+  return IceThicknessAt(term.term.file, *term.file, *term.member, time, where,
+                        before);
 }
 
-std::vector<double> RunIce::TermAt(const Term& term, double time) const {
+std::vector<double> RunIce::TermAt(const Term& term, double time,
+                                   bool before) const {
   if (!term.fixed.empty()) {
     const auto& history = term.term.history;
     if (history.Empty()) return term.fixed;
     // a cap's history scales its change, at the time's place on the terms'
     // clock: kyr from the window's start, its dates turned so (a dated
     // run's axis is the calendar's), or the run's own clock in its unit
-    const auto factor =
-        history.At(history.start_kyr_bp
-                       ? *history.start_kyr_bp + time / KYR
-                       : time / history.unit.value().seconds);
+    const auto clock = history.start_kyr_bp
+                           ? *history.start_kyr_bp + time / KYR
+                           : time / history.unit.value().seconds;
+    const auto factor = before ? history.Before(clock) : history.At(clock);
     auto out = term.fixed;
     for (auto& v : out) v *= factor;
     return out;
   }
-  auto values = ValuesOf(term, time, TermReadOf(term.term));
+  auto values = ValuesOf(term, time, TermReadOf(term.term), before);
   if (term.term.kind == IceChangeTerm::Kind::Thickness) {
     for (auto i = std::size_t{0}; i < values.size(); ++i) {
       values[i] -= term.reference[i];
@@ -651,11 +654,11 @@ std::vector<double> RunIce::TermAt(const Term& term, double time) const {
   return values;
 }
 
-std::vector<double> RunIce::ChangeAt(double time) const {
+std::vector<double> RunIce::ChangeAt(double time, bool before) const {
   auto out = std::vector<double>{};
   // the first term is taken as it stands, the others added to it
   for (const auto& term : terms_) {
-    auto change = TermAt(term, time);
+    auto change = TermAt(term, time, before);
     if (out.empty()) {
       out = std::move(change);
     } else {
@@ -666,20 +669,22 @@ std::vector<double> RunIce::ChangeAt(double time) const {
   return out;
 }
 
-std::vector<double> RunIce::ChangeSince(double time, double since) const {
+std::vector<double> RunIce::ChangeSince(double time, double since,
+                                        bool before) const {
   auto out = std::vector<double>{};
   for (const auto& term : terms_) {
     // a cap: the same at every time, but for its history
     if (!term.file && term.term.history.Empty()) continue;
-    auto change = term.file ? ValuesOf(term, time, TermReadOf(term.term))
-                            : TermAt(term, time);
-    const auto before =
+    auto change = term.file
+                      ? ValuesOf(term, time, TermReadOf(term.term), before)
+                      : TermAt(term, time, before);
+    const auto start =
         term.file ? ValuesOf(term, since,
                              "the window's start, from which the run's change "
                              "is measured")
                   : TermAt(term, since);
     for (auto i = std::size_t{0}; i < change.size(); ++i) {
-      change[i] -= before[i];
+      change[i] -= start[i];
     }
     if (out.empty()) {
       out = std::move(change);
@@ -703,13 +708,13 @@ double RunIce::Tolerance() const {
   return largest > 0.0 ? 1e-9 * largest : 1e-9;
 }
 
-void RunIce::CheckHeld(std::span<const double> times,
-                       const Window* window) const {
+void RunIce::CheckHeld(std::span<const double> times, const Window* window,
+                       std::span<const double> leftLimits) const {
   if (terms_.empty()) return;
   auto worst = 0.0, when = 0.0;
   auto where = std::size_t{0};
-  for (const auto time : times) {
-    const auto change = ChangeAt(time);
+  auto check = [&](double time, bool before) {
+    const auto change = ChangeAt(time, before);
     for (auto i = std::size_t{0}; i < change.size(); ++i) {
       const auto held = std::max(state_[i], 0.0) + change[i];
       if (held < worst) {
@@ -718,7 +723,9 @@ void RunIce::CheckHeld(std::span<const double> times,
         when = time;
       }
     }
-  }
+  };
+  for (const auto time : times) check(time, false);
+  for (const auto time : leftLimits) check(time, true);
   if (worst >= -Tolerance()) return;
   const auto degrees = 180.0 / std::numbers::pi;
   const auto nphi = grid_->Longitudes().size();
@@ -877,8 +884,10 @@ std::vector<double> StateSeaLevel(const Run& run, const Json& top,
 /// the state's own ice); with the state at its end, each term's change
 /// since the window's start (`start_si`).
 std::vector<double> ChangeFromStart(const RunIce& ice, bool stateAtStart,
-                                    double start_si, double time) {
-  return stateAtStart ? ice.ChangeAt(time) : ice.ChangeSince(time, start_si);
+                                    double start_si, double time,
+                                    bool before = false) {
+  return stateAtStart ? ice.ChangeAt(time, before)
+                      : ice.ChangeSince(time, start_si, before);
 }
 
 }  // namespace
@@ -913,14 +922,20 @@ Loaded LoadWorld(const Run& run, const Json& top,
                                 state_si, StateReadOf(run)));
   auto ice = std::make_shared<const RunIce>(run, top, files, state_si);
   // the times the run reads the forcing at, each once: the library's grid
-  // (StepGridOf), an onset between nodes among them
-  auto steps = StepGridOf(run, scales).times;
+  // (StepGridOf), a jump between nodes among them, and the left limits of
+  // its pairs
+  const auto grid_steps = StepGridOf(run, scales);
+  auto steps = grid_steps.times;
   steps.erase(std::ranges::unique(steps).begin(), steps.end());
-  // the ice at every one of them: no change takes more than the state
-  // holds
+  // the ice at every one of them, and at the left limits: no change takes
+  // more than the state holds
   auto nodes = std::vector<double>{};
   for (const auto t : steps) nodes.push_back(start_si + t * scales.Time());
-  ice->CheckHeld(nodes, &window);
+  auto lefts = std::vector<double>{};
+  for (const auto& [k, what] : grid_steps.jumps) {
+    lefts.push_back(start_si + grid_steps.times[k] * scales.Time());
+  }
+  ice->CheckHeld(nodes, &window, lefts);
   // the change present at the start, where the state is there: a load at
   // the first node, or the ice the start's solve takes
   auto changeAtStart = 0.0;
@@ -1030,27 +1045,114 @@ std::vector<double> NodesOnTheClock(const Window& window) {
   return out;
 }
 
-std::vector<OnsetBetween> OnsetsBetweenNodes(const Run& run) {
-  auto out = std::vector<OnsetBetween>{};
+namespace {
+
+/// What a jump of a surface load term jumps, by the kernels of the loads:
+/// in the water budget or outside it, and the layer where it moves the
+/// solid surface; without an ocean, whose loads have one kernel, the
+/// loads in the water budget's (the kernel file's `load_dual`).
+Jumping LoadJumping(const Run& run, const SurfaceLoadTerm& load) {
+  return {.inside = load.water_budget || !run.ocean,
+          .outside = !load.water_budget,
+          .layer = load.moves_solid_surface};
+}
+
+}  // namespace
+
+void Jumping::Join(const Jumping& other) {
+  ice = ice || other.ice;
+  inside = inside || other.inside;
+  outside = outside || other.outside;
+  layer = layer || other.layer;
+  tide = tide || other.tide;
+  for (const auto k : other.seismic) {
+    if (!std::ranges::contains(seismic, k)) seismic.push_back(k);
+  }
+}
+
+std::vector<ForcingJump> JumpsOf(const Run& run) {
+  auto out = std::vector<ForcingJump>{};
   if (!run.times) return out;
   const auto nodes = NodesOnTheClock(*run.times);
-  const auto& seismic = run.forcing.seismic;
-  for (auto k = std::size_t{0}; k < seismic.size(); ++k) {
-    const auto& term = seismic[k];
-    if (!term.onset) continue;
-    const auto at = *term.onset;
-    const auto onset = [&term](double t) { return term.OnsetAt(t); };
-    const auto shared = std::ranges::any_of(
-        out, [&](const OnsetBetween& o) { return term.OnsetAt(o.at); });
-    if (std::ranges::any_of(nodes, onset) || shared || at < nodes.front() ||
-        at > nodes.back()) {
-      continue;
+  const auto dated = run.times->Dated();
+  const auto historyName =
+      std::string{dated ? "history_kyr_bp" : "history"};
+  // a jump after the window's start (to its tolerance) and not after its
+  // end
+  const auto add = [&](double at, double tolerance, const Jumping& what,
+                       std::string_view list, std::size_t term,
+                       std::string member) {
+    if (at <= nodes.front() + tolerance || at > nodes.back() + tolerance) {
+      return;
     }
-    const auto after = std::ranges::upper_bound(nodes, at) - nodes.begin();
-    out.push_back(
-        {.term = k, .at = at, .node = static_cast<std::size_t>(after) - 1});
+    out.push_back({.at = at,
+                   .tolerance = tolerance,
+                   .what = what,
+                   .list = list,
+                   .term = term,
+                   .member = std::move(member)});
+  };
+  const auto ofHistory = [&](const AmplitudeHistory& history,
+                             const Jumping& what, std::string_view list,
+                             std::size_t term) {
+    for (const auto t : history.Jumps()) {
+      add(t, AmplitudeHistory::Tolerance(t), what, list, term, historyName);
+    }
+  };
+  const auto& forcing = run.forcing;
+  for (auto k = std::size_t{0}; k < forcing.ice_change.size(); ++k) {
+    ofHistory(forcing.ice_change[k].history, {.ice = true}, "ice_change", k);
   }
-  std::ranges::sort(out, {}, &OnsetBetween::at);
+  for (auto k = std::size_t{0}; k < forcing.load.size(); ++k) {
+    const auto& load = forcing.load[k];
+    ofHistory(load.term.history, LoadJumping(run, load), "load", k);
+  }
+  for (auto k = std::size_t{0}; k < forcing.tide.size(); ++k) {
+    ofHistory(forcing.tide[k].history, {.tide = true}, "tide", k);
+  }
+  for (auto k = std::size_t{0}; k < forcing.seismic.size(); ++k) {
+    const auto& term = forcing.seismic[k];
+    const auto what = Jumping{.seismic = {k}};
+    if (term.onset) {
+      add(*term.onset, AmplitudeHistory::Tolerance(*term.onset), what,
+          "seismic", k, dated ? "onset_kyr_bp" : "onset");
+    }
+    ofHistory(term.history, what, "seismic", k);
+  }
+  for (const auto& jump : run.fileJumps) {
+    add(jump.at, jump.tolerance, jump.what, jump.list, jump.term, jump.member);
+  }
+  std::ranges::stable_sort(out, {}, &ForcingJump::at);
+  return out;
+}
+
+namespace {
+
+/// The window's node a jump falls on (to its tolerance), after the first;
+/// none where it falls between two.
+std::optional<std::size_t> NodeOf(const ForcingJump& jump,
+                                  std::span<const double> nodes) {
+  for (auto n = std::size_t{1}; n < nodes.size(); ++n) {
+    if (std::abs(jump.at - nodes[n]) <= jump.tolerance) return n;
+  }
+  return std::nullopt;
+}
+
+}  // namespace
+
+std::vector<JumpBetween> JumpsBetweenNodes(const Run& run) {
+  auto out = std::vector<JumpBetween>{};
+  if (!run.times) return out;
+  const auto nodes = NodesOnTheClock(*run.times);
+  for (const auto& jump : JumpsOf(run)) {
+    if (NodeOf(jump, nodes)) continue;
+    const auto shared = std::ranges::any_of(out, [&](const JumpBetween& b) {
+      return std::abs(jump.at - b.jump.at) <= jump.tolerance;
+    });
+    if (shared) continue;
+    const auto after = std::ranges::upper_bound(nodes, jump.at) - nodes.begin();
+    out.push_back({.jump = jump, .node = static_cast<std::size_t>(after) - 1});
+  }
   return out;
 }
 
@@ -1059,31 +1161,109 @@ StepGrid StepGridOf(const Run& run, const Scales& scales) {
   const auto times = MakeTimes(run, scales);
   const auto clock = SolverClockOf(run, scales);
   const auto nodes = NodesOnTheClock(*run.times);
-  const auto between = OnsetsBetweenNodes(run);
+  // what jumps at each node of the window, and the jumps between two
+  // (each time once, those within a jump's tolerance of it sharing it)
+  auto atNode = std::map<std::size_t, Jumping>{};
+  auto between = std::vector<std::pair<JumpBetween, Jumping>>{};
+  for (const auto& jump : JumpsOf(run)) {
+    if (const auto n = NodeOf(jump, nodes)) {
+      atNode[*n].Join(jump.what);
+      continue;
+    }
+    const auto shared =
+        std::ranges::find_if(between, [&](const auto& b) {
+          return std::abs(jump.at - b.first.jump.at) <= jump.tolerance;
+        });
+    if (shared != between.end()) {
+      shared->second.Join(jump.what);
+      continue;
+    }
+    const auto after = std::ranges::upper_bound(nodes, jump.at) - nodes.begin();
+    between.push_back(
+        {{.jump = jump, .node = static_cast<std::size_t>(after) - 1},
+         jump.what});
+  }
   auto next = between.begin();
   const auto add = [&out](double t, std::size_t window) {
     out.times.push_back(t);
     out.window.push_back(window);
   };
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
-    // the onsets between the node before and this one: a pair each, at the
-    // onset's solver time
-    for (; next != between.end() && next->node + 1 == n; ++next) {
-      const auto t = (next->at - clock.zero) / clock.rate;
+    // the jumps between the node before and this one: a pair each, at the
+    // jump's solver time
+    for (; next != between.end() && next->first.node + 1 == n; ++next) {
+      const auto t = (next->first.jump.at - clock.zero) / clock.rate;
+      out.jumps.emplace(out.times.size(), next->second);
       add(t, StepGrid::kInserted);
       add(t, StepGrid::kInserted);
     }
-    // a seismic term's onset at a node after the first: its left limit
-    const auto jumps =
-        n > 0 &&
-        std::ranges::any_of(run.forcing.seismic, [&](const SeismicTerm& term) {
-          return term.OnsetAt(nodes[n]);
-        });
-    if (jumps) add(times[n], n);
+    // a jump at a node after the first: its left limit
+    if (const auto found = atNode.find(n); found != atNode.end()) {
+      out.jumps.emplace(out.times.size(), found->second);
+      add(times[n], n);
+    }
     out.library.push_back(out.times.size());
     add(times[n], n);
   }
   return out;
+}
+
+void FindFileJumps(Run& run) {
+  run.fileJumps.clear();
+  if (!run.times) return;
+  const auto& window = *run.times;
+  // a file's jumps (SI seconds on its axis) on the terms' clock, at
+  // `origin` + time / `unit` there
+  const auto add = [&run](const io::FieldJumps& jumps, double origin,
+                          double unit, const Jumping& what,
+                          std::string_view list, std::size_t term,
+                          std::string member) {
+    for (const auto time : jumps.times) {
+      run.fileJumps.push_back({.at = origin + time / unit,
+                               .tolerance = jumps.tolerance / unit,
+                               .what = what,
+                               .list = list,
+                               .term = term,
+                               .member = member});
+    }
+  };
+  // a file that cannot be read, or lacks its variable, is refused by the
+  // run's own reading of it (InputFiles, TimedLoads), which says what the
+  // file holds
+  const auto read = [](const FileInput& input) {
+    auto jumps = io::FieldHistory::JumpsIn(input.file, input.variable,
+                                           {.time_rtol = kAxisRtol});
+    return jumps ? *jumps : io::FieldJumps{};
+  };
+  // the ice change's files, read by date: the calendar's axis, the
+  // window's start the clock's zero
+  for (auto k = std::size_t{0}; k < run.forcing.ice_change.size(); ++k) {
+    const auto& term = run.forcing.ice_change[k];
+    if (term.file.file.empty() || !term.dated) continue;
+    const auto member = std::string{term.Member()};
+    add(read(term.file), window.Start(), KYR, {.ice = true}, "ice_change", k,
+        member);
+  }
+  // a `field` load's file, at (t - time_origin) in the term's unit
+  for (auto k = std::size_t{0}; k < run.forcing.load.size(); ++k) {
+    const auto& load = run.forcing.load[k];
+    const auto& term = load.term;
+    if (term.kind != LoadTerm::Kind::Field) continue;
+    add(read(term.field), term.time_origin, term.unit.seconds,
+        LoadJumping(run, load), "load", k, "field");
+  }
+  // a placed fault file's slip
+  for (auto k = std::size_t{0}; k < run.forcing.seismic.size(); ++k) {
+    const auto jumps = FaultFileJumps(run.forcing.seismic[k]);
+    for (const auto at : jumps.times) {
+      run.fileJumps.push_back({.at = at,
+                               .tolerance = jumps.tolerance,
+                               .what = {.seismic = {k}},
+                               .list = "seismic",
+                               .term = k,
+                               .member = "fault_file"});
+    }
+  }
 }
 
 SolverClock SolverClockOf(const Run& run, const Scales& scales) {
@@ -1095,7 +1275,8 @@ SolverClock SolverClockOf(const Run& run, const Scales& scales) {
 }
 
 std::function<std::vector<double>(double)> IceLoadOf(
-    const Run& run, const GRDSolver& solver, const Loaded& world) {
+    const Run& run, const GRDSolver& solver, const Loaded& world,
+    bool before) {
   const auto& grid = solver.Grid();
   const auto fieldSize = grid.FieldSize();
   const auto& scales = solver.SolverScales();
@@ -1104,10 +1285,10 @@ std::function<std::vector<double>(double)> IceLoadOf(
   const auto start_si = run.times->Axis(0);
   const auto atStart = run.ocean->at == WindowEnd::Start;
   const auto rho_ice = solver.IceDensity();
-  return [&world, atStart, fieldSize, length, time, start_si,
-          rho_ice](double t) {
-    const auto change =
-        ChangeFromStart(*world.ice, atStart, start_si, start_si + t * time);
+  return [&world, atStart, fieldSize, length, time, start_si, rho_ice,
+          before](double t) {
+    const auto change = ChangeFromStart(*world.ice, atStart, start_si,
+                                        start_si + t * time, before);
     const auto& C = world.background.oceanFunction;
     auto load = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1118,7 +1299,8 @@ std::function<std::vector<double>(double)> IceLoadOf(
 }
 
 std::function<std::vector<double>(double)> IceThicknessOf(
-    const Run& run, const GRDSolver& solver, const Loaded& world) {
+    const Run& run, const GRDSolver& solver, const Loaded& world,
+    bool before) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto time = scales.Time();
@@ -1126,9 +1308,9 @@ std::function<std::vector<double>(double)> IceThicknessOf(
   const auto atStart = run.ocean->at == WindowEnd::Start;
   // the background's ice plus the change from world.ice0, which the
   // frozen load is measured from too (IceLoadOf)
-  return [&world, atStart, length, time, start_si](double t) {
-    auto thickness =
-        ChangeFromStart(*world.ice, atStart, start_si, start_si + t * time);
+  return [&world, atStart, length, time, start_si, before](double t) {
+    auto thickness = ChangeFromStart(*world.ice, atStart, start_si,
+                                     start_si + t * time, before);
     const auto& background = world.background.iceThickness;
     for (auto i = std::size_t{0}; i < thickness.size(); ++i) {
       thickness[i] = background[i] + thickness[i] / length;
@@ -1139,9 +1321,15 @@ std::function<std::vector<double>(double)> IceThicknessOf(
 
 IceHistory HistoryOf(const Run& run, const GRDSolver& solver,
                      const Loaded& world) {
-  return run.ocean->shorelines == Shorelines::Frozen
-             ? IceHistory::Frozen(IceLoadOf(run, solver, world))
-             : IceHistory::Migrating(IceThicknessOf(run, solver, world));
+  const auto jumps = StepGridOf(run, solver.SolverScales()).Repeats();
+  if (run.ocean->shorelines == Shorelines::Frozen) {
+    return IceHistory::Frozen(
+        IceLoadOf(run, solver, world),
+        jumps ? IceLoadOf(run, solver, world, true) : nullptr);
+  }
+  return IceHistory::Migrating(
+      IceThicknessOf(run, solver, world),
+      jumps ? IceThicknessOf(run, solver, world, true) : nullptr);
 }
 
 namespace {
@@ -1290,25 +1478,32 @@ template <class EvolutionForcing>
 EvolutionForcing ForcingOf(
     const Run& run, const GRDSolver& solver,
     const std::function<std::vector<double>(double)>& iceLoad,
-    std::shared_ptr<const SurfaceLoads> loads) {
+    std::shared_ptr<const SurfaceLoads> loads,
+    const std::function<std::vector<double>(double)>& iceLoadBefore,
+    const std::function<std::vector<double>(double)>& thicknessBefore) {
   const auto& scales = solver.SolverScales();
   const auto length = scales.Length();
   const auto clock = SolverClockOf(run, scales);
   const auto toLoad = scales.Factor(Dimensions{.mass = 1, .length = -2});
   const auto ice = static_cast<bool>(iceLoad);
+  // where the forcing jumps, every channel's left limit beside it
+  const auto jumps = run.times && StepGridOf(run, scales).Repeats();
   auto forcing = EvolutionForcing{};
+  if (jumps && thicknessBefore) forcing.iceThicknessBefore = thicknessBefore;
   if (loads) {
-    // a node's loads are built once, whichever is asked first
+    // a node's loads are built once, whichever is asked first, and its
+    // left limits once
     struct Built {
-      std::optional<double> t;
+      std::optional<std::pair<double, bool>> key;
       SurfaceLoads::Node node;
     };
     const auto built = std::make_shared<Built>();
-    const auto at = [built, loads,
-                     clock](double t) -> const SurfaceLoads::Node& {
-      if (!built->t || *built->t != t) {
-        built->node = loads->At(clock.At(t));
-        built->t = t;
+    const auto at = [built, loads, clock](
+                        double t, bool before) -> const SurfaceLoads::Node& {
+      const auto key = std::pair{t, before};
+      if (!built->key || *built->key != key) {
+        built->node = loads->At(clock.At(t), before);
+        built->key = key;
       }
       return built->node;
     };
@@ -1322,49 +1517,83 @@ EvolutionForcing ForcingOf(
     const auto layered = any(
         [](const SurfaceLoadTerm& term) { return term.moves_solid_surface; });
     if (inside || ice) {
-      forcing.directLoad = [at, iceLoad, ice, inside, toLoad](double t) {
-        auto out = ice ? iceLoad(t) : std::vector<double>{};
+      // the ice's load (or its left limit) and the loads in the water
+      // budget
+      const auto direct = [at, ice, inside, toLoad](
+                              const std::function<std::vector<double>(
+                                  double)>& ofIce,
+                              double t, bool before) {
+        auto out = ice ? ofIce(t) : std::vector<double>{};
         if (!inside) return out;
-        const auto& given = at(t).inside;
+        const auto& given = at(t, before).inside;
         if (out.empty()) out.assign(given.size(), 0.0);
         for (auto i = std::size_t{0}; i < out.size(); ++i) {
           out[i] += given[i] / toLoad;
         }
         return out;
       };
+      forcing.directLoad = [direct, iceLoad](double t) {
+        return direct(iceLoad, t, false);
+      };
+      if (jumps) {
+        forcing.directLoadBefore = [direct, iceLoadBefore](double t) {
+          return direct(iceLoadBefore, t, true);
+        };
+      }
     }
     if (outside) {
-      forcing.directLoadOutsideWaterBudget = [at, toLoad](double t) {
-        auto out = at(t).outside;
+      const auto ofOutside = [at, toLoad](double t, bool before) {
+        auto out = at(t, before).outside;
         for (auto& v : out) v /= toLoad;
         return out;
       };
+      forcing.directLoadOutsideWaterBudget = [ofOutside](double t) {
+        return ofOutside(t, false);
+      };
+      if (jumps) {
+        forcing.directLoadOutsideWaterBudgetBefore = [ofOutside](double t) {
+          return ofOutside(t, true);
+        };
+      }
     }
     if (layered) {
-      forcing.solidSurfaceChange = [at, length](double t) {
-        auto out = at(t).layer;
+      const auto ofLayer = [at, length](double t, bool before) {
+        auto out = at(t, before).layer;
         for (auto& v : out) v /= length;
         return out;
       };
+      forcing.solidSurfaceChange = [ofLayer](double t) {
+        return ofLayer(t, false);
+      };
+      if (jumps) {
+        forcing.solidSurfaceChangeBefore = [ofLayer](double t) {
+          return ofLayer(t, true);
+        };
+      }
     }
   } else if (ice) {
     forcing.directLoad = iceLoad;
+    if (jumps) forcing.directLoadBefore = iceLoadBefore;
   }
   if (!run.forcing.tide.empty()) {
     const auto toPotential = scales.Factor(PotentialDimensions);
-    forcing.tide = [tide = run.forcing.tide, grid = &solver.Grid(), clock,
-                    toPotential](double t) {
-      auto out = TideAt(tide, *grid, clock.At(t));
+    const auto ofTide = [tide = run.forcing.tide, grid = &solver.Grid(), clock,
+                         toPotential](double t, bool before) {
+      auto out = TideAt(tide, *grid, clock.At(t), before);
       for (auto& c : out) c /= toPotential;
       return out;
     };
+    forcing.tide = [ofTide](double t) { return ofTide(t, false); };
+    if (jumps) {
+      forcing.tideBefore = [ofTide](double t) { return ofTide(t, true); };
+    }
   }
   if (!run.forcing.seismic.empty()) {
     const auto surfaceRadius = solver.Radius() * length;
     const auto energy =
         scales.Factor(Dimensions{.mass = 1, .length = 2, .time = -2});
-    // the sources at a time and their left limits there, which differ at
-    // an onset alone (a pair of StepGridOf's)
+    // the sources at a time and their left limits there, which differ
+    // where a term jumps (a pair of StepGridOf's)
     auto sourcesAt = [seismic = run.forcing.seismic, surfaceRadius, clock,
                       length, energy](double t, bool before) {
       auto sources =
@@ -1390,21 +1619,35 @@ EvolutionForcing ForcingOf(
 template Evolution::Forcing ForcingOf<Evolution::Forcing>(
     const Run&, const GRDSolver&,
     const std::function<std::vector<double>(double)>&,
-    std::shared_ptr<const SurfaceLoads>);
+    std::shared_ptr<const SurfaceLoads>,
+    const std::function<std::vector<double>(double)>&,
+    const std::function<std::vector<double>(double)>&);
 template Evolution3D::Forcing ForcingOf<Evolution3D::Forcing>(
     const Run&, const GRDSolver&,
     const std::function<std::vector<double>(double)>&,
-    std::shared_ptr<const SurfaceLoads>);
+    std::shared_ptr<const SurfaceLoads>,
+    const std::function<std::vector<double>(double)>&,
+    const std::function<std::vector<double>(double)>&);
 
 template <class EvolutionForcing>
 Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
                                 const GRDSolver& solver, const Loaded& world) {
   const auto migrating = run.Migrating();
   auto out = Drive<EvolutionForcing>{};
+  // where the forcing jumps, the ice's left limits too
+  const auto jumps = StepGridOf(run, solver.SolverScales()).Repeats();
+  auto iceBefore = std::function<std::vector<double>(double)>{};
+  auto thicknessBefore = std::function<std::vector<double>(double)>{};
   // the ice's grounded load under frozen shorelines; a body without an
   // ocean has no ice
-  if (run.ocean && !migrating) out.directLoad = IceLoadOf(run, solver, world);
-  if (migrating) out.thickness = IceThicknessOf(run, solver, world);
+  if (run.ocean && !migrating) {
+    out.directLoad = IceLoadOf(run, solver, world);
+    if (jumps) iceBefore = IceLoadOf(run, solver, world, true);
+  }
+  if (migrating) {
+    out.thickness = IceThicknessOf(run, solver, world);
+    if (jumps) thicknessBefore = IceThicknessOf(run, solver, world, true);
+  }
   // The forcing beside the ice: the surface loads by their properties, the
   // tide and the seismic sources. Under frozen shorelines the ice's load
   // joins the loads in the water budget; under migrating ones the ice is
@@ -1413,7 +1656,7 @@ Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
   // empty forcing), so that the start is solved. A run without an ocean
   // is forced beside the ice alone.
   out.forced = run.forcing.BesideTheIce() ||
-               (migrating && world.ChangedAtStart());
+               (migrating && world.ChangedAtStart()) || jumps;
   if (!run.forcing.load.empty()) {
     out.loads = std::make_shared<const SurfaceLoads>(run.forcing,
                                                      solver.Grid(),
@@ -1433,8 +1676,8 @@ Drive<EvolutionForcing> DriveOf(const Run& run, const Json& top,
     }
   }
   if (out.forced) {
-    out.forcing =
-        ForcingOf<EvolutionForcing>(run, solver, out.directLoad, out.loads);
+    out.forcing = ForcingOf<EvolutionForcing>(
+        run, solver, out.directLoad, out.loads, iceBefore, thicknessBefore);
   }
   return out;
 }
@@ -1485,13 +1728,15 @@ template std::vector<Evolution3D::Snapshot> ResumeDriven<Evolution3D>(
     Evolution3D&, const Evolution3D::Checkpoint&, std::span<const double>,
     const Drive<Evolution3D::Forcing>&, bool);
 
-void Check1D(const Evolution::Snapshot& snapshot, std::string_view when) {
+void Check1D(const Evolution::Snapshot& snapshot, std::string_view when,
+             double rtol) {
   if (!snapshot.converged) {
     throw std::runtime_error(std::format(
-        "the sea level solve did not converge at {} (shoreline cells "
-        "flipping back and forth defeat the migrating solve's "
-        "tolerance); loosen solver.rtol",
-        when));
+        "the sea level solve did not converge at {}: {} passes, the last "
+        "changing the sea level by {:.3g} of its size against solver.rtol "
+        "{:.3g} (shoreline cells flipping back and forth defeat the "
+        "migrating solve's tolerance); loosen solver.rtol",
+        when, snapshot.seaLevelIterations, snapshot.seaLevelResidual, rtol));
   }
 }
 

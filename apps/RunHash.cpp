@@ -18,6 +18,18 @@ constexpr auto kNoOcean = std::string_view{"none"};
 
 }  // namespace
 
+namespace {
+
+/// A history's time rule, added where it is not the default (`linear`),
+/// so that a run without one keeps its hash.
+void AddRule(Fnv1a& hash, const AmplitudeHistory& history) {
+  if (history.rule == planetmodel::TimeRule::Linear) return;
+  hash.AddText("time_interpolation");
+  hash.AddText(planetmodel::TimeRuleName(history.rule));
+}
+
+}  // namespace
+
 void Fnv1a::Add(std::span<const std::byte> bytes) {
   for (const auto b : bytes) {
     hash_ ^= static_cast<std::uint64_t>(b);
@@ -90,6 +102,7 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
         hash.AddValue(term.history.times[k]);
         hash.AddValue(term.history.factors[k]);
       }
+      AddRule(hash, term.history);
     }
   }
   if (run.times) {
@@ -183,6 +196,7 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
          {&term.term.history.times, &term.term.history.factors}) {
       for (const auto value : *values) hash.AddValue(value);
     }
+    AddRule(hash, term.term.history);
     if (term.term.kind == LoadTerm::Kind::Field) {
       hash.AddFile(term.term.field.file);
     } else if (term.term.kind == LoadTerm::Kind::Coefficients) {
@@ -202,6 +216,7 @@ void AddRunMembers(Fnv1a& hash, const Run& run, bool lateral) {
         hash.AddValue(term.history.times[k]);
         hash.AddValue(term.history.factors[k]);
       }
+      AddRule(hash, term.history);
     }
   }
   if (run.Calibrating()) {
@@ -246,6 +261,7 @@ std::string TrajectoryHashOf(const Run& run, bool lateral) {
       hash.AddValue(term.history.times[k]);
       hash.AddValue(term.history.factors[k]);
     }
+    AddRule(hash, term.history);
     // a fault file: its contents (as every file input's, by its bytes), its
     // quadrature, its placement and how its time axis is read; not its
     // `outside_span`, which cannot change a run that runs: where "refuse"

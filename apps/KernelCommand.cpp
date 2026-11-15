@@ -497,6 +497,47 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
   return out;
 }
 
+namespace {
+
+/// The kernels are over the window's nodes, each the derivative with
+/// respect to a term's value at its node (and, at a jump there, its left
+/// limit's: OnTheWindow). A jump of the forcing between two nodes is a
+/// pair of the library's own (StepGridOf), where the run reads every term
+/// by the term's own rule (a history's knots, a file's time slices, the
+/// onset's co-seismic moment), which no fixed combination of its values
+/// at the window's nodes gives: the kernels there are not carried onto
+/// the window's nodes, and such a run's are not built. Refused at the
+/// member the first such jump comes from.
+void RefuseJumpsBetweenNodes(const Run& run, const Json& top) {
+  const auto between = JumpsBetweenNodes(run);
+  if (between.empty()) return;
+  const auto& first = between.front();
+  const auto& jump = first.jump;
+  const auto& window = *run.times;
+  const auto onset = jump.member.starts_with("onset");
+  const auto what = onset ? std::string{"the earthquake"}
+                          : std::string{"the jump of the forcing"};
+  Fail(top.At("forcing").At(jump.list).At(jump.term).At(jump.member),
+       std::format("{} between the window's nodes {} and {}, where solve "
+                   "takes {} at a node of its own, and the kernels about a "
+                   "run with {} between nodes are not built (they are over "
+                   "the window's nodes): give {} as a node of `times`",
+                   onset ? "falls" : "jumps",
+                   window.Label(window.Axis(first.node)),
+                   window.Label(window.Axis(first.node + 1)), what,
+                   onset ? "an onset" : "a jump of the forcing",
+                   onset ? "the onset"
+                         : std::format(
+                               "its time, {},",
+                               window.Label(window.Dated()
+                                                ? window.Axis(0) +
+                                                      jump.at * KYR
+                                                : jump.at *
+                                                      window.unit.seconds))));
+}
+
+}  // namespace
+
 KernelInput ReadKernelInput(const std::filesystem::path& config) {
   const auto top = planetmodel::ReadJsonFile(config);
   if (Has(top, "output") && top.At("output").IsString()) {
@@ -519,29 +560,9 @@ KernelInput ReadKernelInput(const std::filesystem::path& config) {
          "is \"none\", and the kernels of a run without gravity are not "
          "built");
   }
-  // The kernels are over the window's nodes, each the derivative with
-  // respect to a term's value at its node. An onset between two nodes is
-  // a pair of the library's own (StepGridOf), where the run reads every
-  // term by the term's own rule (a history's knots, a file's time slices,
-  // the onset's co-seismic moment), which no fixed combination of its
-  // values at the window's nodes gives: the kernels there are not carried
-  // onto the window's nodes, and such a run's are not built.
-  if (const auto between = OnsetsBetweenNodes(out.run); !between.empty()) {
-    const auto& first = between.front();
-    const auto& term = out.run.forcing.seismic[first.term];
-    const auto& window = *out.run.times;
-    Fail(top.At("forcing")
-             .At("seismic")
-             .At(first.term)
-             .At(term.start_kyr_bp ? "onset_kyr_bp" : "onset"),
-         std::format("falls between the window's nodes {} and {}, where "
-                     "solve takes the earthquake at a node of its own, and "
-                     "the kernels about a run with an onset between nodes "
-                     "are not built (they are over the window's nodes): give "
-                     "the onset as a node of `times`",
-                     window.Label(window.Axis(first.node)),
-                     window.Label(window.Axis(first.node + 1))));
-  }
+  // the jumps the config itself gives (onsets, `previous` histories); a
+  // file's are refused once it is read (RunKernel)
+  RefuseJumpsBetweenNodes(out.run, top);
   out.trajectory = ReadTrajectoryBlock(top, out.run, directory);
   if (!Has(top, "kernels")) {
     Fail(top,
@@ -816,6 +837,27 @@ struct Writing {
   std::optional<StepsAgainstRelaxation> relaxation;
 };
 
+/// The left limits' kernels at the window's nodes (OnTheWindow): per kind
+/// of surface term, a row per node of the window, the left side's kernel
+/// at a node where a term of the kind jumps and zero elsewhere; empty for
+/// a kind no term of which jumps at a node. And `jump`, the quelled view's
+/// kernel of the ice's jump at each node (its right limit less its left;
+/// zero where the ice does not jump, empty where it never does).
+struct LeftKernels {
+  std::vector<std::vector<double>> thickness;
+  std::vector<std::vector<double>> directLoad;
+  std::vector<std::vector<double>> outside;
+  std::vector<std::vector<double>> layer;
+  std::vector<std::vector<std::complex<double>>> tide;
+  std::vector<std::vector<double>> jump;
+};
+
+/// The kernels over the window's nodes and the left limits' beside them.
+struct WindowKernels {
+  Kernels kernels;
+  LeftKernels before;
+};
+
 /// The method's word, as `kernels.method` names it.
 std::string_view MethodWord(AdjointMethod method) {
   return method == AdjointMethod::Discrete ? "discrete" : "continuous";
@@ -943,10 +985,12 @@ void WriteFile(const std::filesystem::path& path,
 /// the state held (a state at the window's start, the static problem's)
 /// the first node's thickness dual is the library's less its baseline, so
 /// that every node's is the derivative with respect to the ice change
-/// there.
+/// there. Where the ice jumps at a node (LeftKernels), the thickness dual
+/// there is its right limit's, `thickness_dual_before` its left limit's,
+/// and `jump_dual` the quelled view's of the jump.
 void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                      const MeasurementSpec& spec, const Kernels& kernels,
-                     const Built& built) {
+                     const LeftKernels& before, const Built& built) {
   const auto& run = *w.run;
   const auto L = w.solver->SolverScales().Length();
   // dJ_nd = a_nd^2 int K_nd dI_nd dOmega with dI_nd = dI_SI / L and
@@ -964,11 +1008,21 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
   }
   file.meta.emplace(
       "pairing",
-      std::string{
-          "dJ = sum_n int K_n dI_n dS over the nodes (thickness_dual), "
-          "dS in m^2 on the sphere of radius radius_m; the rates: dJ = "
-          "sum_k int K_k (I_{k+1} - I_k) dS over the intervals (rate_dual), "
-          "the first node's ice held"});
+      before.thickness.empty()
+          ? std::string{"dJ = sum_n int K_n dI_n dS over the nodes "
+                        "(thickness_dual), dS in m^2 on the sphere of radius "
+                        "radius_m; the rates: dJ = sum_k int K_k (I_{k+1} - "
+                        "I_k) dS over the intervals (rate_dual), the first "
+                        "node's ice held"}
+          : std::string{
+                "dJ = sum_n int (K_n dI_n + B_n dI_n^-) dS over the nodes, "
+                "K thickness_dual and B thickness_dual_before, dI_n^- the "
+                "change of the ice's left limit at node n (dI_n where the ice "
+                "is continuous), dS in m^2 on the sphere of radius radius_m; "
+                "the rates: dJ = sum_k int K_k (I^-_{k+1} - I_k) dS over the "
+                "intervals (rate_dual), the change up to the next node's left "
+                "limit, + sum_n int J_n (I_n - I^-_n) dS over the jumps "
+                "(jump_dual), the first node's ice held"});
   file.meta.emplace("ice_views", std::string{w.held ? "state_held"
                                                     : "run_start_moves"});
   const auto first = w.held
@@ -991,7 +1045,25 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
               dims,
               "dJ per metre of ice-thickness change across each interval per "
               "m^2, the first node's ice held (the quelled view: dJ = sum_k "
-              "h_k int K_k (dI/dt)_k dS)");
+              "h_k int K_k (dI/dt)_k dS)" +
+                  std::string{before.jump.empty()
+                                  ? ""
+                                  : "; an interval ending at a node where the "
+                                    "ice jumps up to the jump's left limit"});
+    if (!before.thickness.empty()) {
+      PutKernel(file, "thickness_dual_before",
+                Laid(before.thickness, toKernel), "node", dims,
+                "dJ per metre of grounded ice thickness at the left limit of "
+                "each node where the ice jumps per m^2 (thickness_dual there "
+                "the right limit's), zero at the other nodes; a change "
+                "continuous at a node pairs with the two summed");
+    }
+    if (!before.jump.empty()) {
+      PutKernel(file, "jump_dual", Laid(before.jump, toKernel), "node", dims,
+                "dJ per metre of the jump of the ice thickness at each node "
+                "(its right limit less its left) per m^2, the quelled "
+                "view's, zero where the ice does not jump");
+    }
     auto lumps = std::vector<std::vector<double>>{};
     for (const auto node : built.nodes) {
       const auto found = kernels.instantaneous.find(node);
@@ -1032,7 +1104,7 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
 /// water budget, and one load kernel.
 void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
                       const MeasurementSpec& spec, const Kernels& kernels,
-                      const Built& built) {
+                      const LeftKernels& before, const Built& built) {
   const auto& run = *w.run;
   const auto& scales = w.solver->SolverScales();
   const auto L = scales.Length();
@@ -1048,6 +1120,8 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
   const auto each = std::string{run.times ? " at each node" : ""};
   auto file =
       KernelSurfaceFile(w, spec, built, "surface-load sensitivity kernels");
+  const auto jumps = !before.directLoad.empty() || !before.outside.empty() ||
+                     !before.layer.empty();
   file.meta.emplace(
       "pairing",
       std::string{"dJ = sum_n int K_n delta_n dS over the nodes, delta_n the "
@@ -1055,11 +1129,34 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
                   "at node n, dS in m^2 on the sphere of radius radius_m; a "
                   "layer of density rho whose mass is outside the water "
                   "budget has the kernel rho load_outside_water_budget_dual + "
-                  "solid_surface_change_dual in its height"});
+                  "solid_surface_change_dual in its height"} +
+          (jumps ? std::string{"; at a node where a kind of load jumps, its "
+                               "<name> is the right limit's and <name>_before "
+                               "the left limit's (zero elsewhere), adding "
+                               "sum_n int B_n delta_n^- dS, delta_n^- the "
+                               "change of the left limit (delta_n where the "
+                               "load is continuous)"}
+                 : std::string{}));
+  // the left limit's companion of a kernel, where its kind jumps
+  const auto companion = [&](const std::string& name,
+                             const std::vector<std::vector<double>>& rows,
+                             double factor,
+                             const planetmodel::Dimensions& dims,
+                             const std::string& what) {
+    if (rows.empty()) return;
+    PutKernel(file, name + "_before", Laid(rows, factor), support, dims,
+              what + " at the left limit of each node where it jumps per "
+                     "m^2 (" +
+                  name +
+                  " there the right limit's), zero at the other nodes; a "
+                  "change continuous at a node pairs with the two summed");
+  };
   if (!run.ocean) {
     PutKernel(file, "load_dual", Laid(kernels.directLoadKernels, perLoad),
               support, loadDims,
               "dJ per kg m^-2 of surface load" + each + " per m^2");
+    companion("load_dual", before.directLoad, perLoad, loadDims,
+              "dJ per kg m^-2 of surface load");
     WriteFile(path, file);
     return;
   }
@@ -1084,6 +1181,13 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
             "dJ per metre of the height of a layer laid on the solid "
             "surface" +
                 each + " per m^2 (its mass a load beside it)");
+  companion("load_dual", before.directLoad, perLoad, loadDims,
+            "dJ per kg m^-2 of surface load in the water budget");
+  companion("load_outside_water_budget_dual", before.outside, perLoad,
+            loadDims,
+            "dJ per kg m^-2 of surface load outside the water budget");
+  companion("solid_surface_change_dual", before.layer, perHeight, heightDims,
+            "dJ per metre of the height of a layer laid on the solid surface");
   WriteFile(path, file);
 }
 
@@ -1093,7 +1197,7 @@ void WriteLoadKernels(const std::filesystem::path& path, const Writing& w,
 /// `amplitude_m2_s2` and `imaginary_m2_s2` of a `forcing.tide` term.
 void WriteTideKernels(const std::filesystem::path& path, const Writing& w,
                       const MeasurementSpec& spec, const Kernels& kernels,
-                      const Built& built) {
+                      const LeftKernels& before, const Built& built) {
   const auto& run = *w.run;
   const auto lmax = w.solver->Grid().LMax();
   // K_SI = f_J K_nd / toPotential: the pairing is over the unit sphere
@@ -1113,9 +1217,18 @@ void WriteTideKernels(const std::filesystem::path& path, const Writing& w,
          "# + dJ_dimaginary d Im psi_lm(t_n)); a term's coefficient at a "
          "node is its value times its history's factor\n"
          "# there; at m = 0 the imaginary part is zero, and so is its "
-         "column\n"
-      << std::format("# node {} l m dJ_damplitude dJ_dimaginary\n",
-                     NodeColumn(run));
+         "column\n";
+  const auto jumps = !before.tide.empty();
+  if (jumps) {
+    out << "# at a node where the tide jumps, the two columns are its right "
+           "limit's and the _before columns its left\n"
+           "# limit's (zero at the other nodes): dJ adds the _before columns "
+           "paired with the change of the left limit,\n"
+           "# and a change continuous at a node pairs with the two summed\n";
+  }
+  out << std::format("# node {} l m dJ_damplitude dJ_dimaginary{}\n",
+                     NodeColumn(run),
+                     jumps ? " dJ_damplitude_before dJ_dimaginary_before" : "");
   for (auto n = std::size_t{0}; n < kernels.tideKernels.size(); ++n) {
     const auto& K = kernels.tideKernels[n];
     for (auto l = 2; l <= lmax; ++l) {
@@ -1123,9 +1236,15 @@ void WriteTideKernels(const std::filesystem::path& path, const Writing& w,
         const auto k = K[SurfaceGrid::Index(l, m)] * factor;
         // the pairing of real fields counts the orders m > 0 twice
         const auto weight = m == 0 ? 1.0 : 2.0;
-        out << std::format("{} {:.17g} {} {} {:.17g} {:.17g}\n", n,
+        out << std::format("{} {:.17g} {} {} {:.17g} {:.17g}", n,
                            NodeLabel(run, n), l, m, weight * k.real(),
                            m == 0 ? 0.0 : weight * k.imag());
+        if (jumps) {
+          const auto b = before.tide[n][SurfaceGrid::Index(l, m)] * factor;
+          out << std::format(" {:.17g} {:.17g}", weight * b.real(),
+                             m == 0 ? 0.0 : weight * b.imag());
+        }
+        out << '\n';
       }
     }
   }
@@ -1182,50 +1301,81 @@ void WriteMomentKernels(const std::filesystem::path& path, const Writing& w,
 }
 
 /// Kernels over the library's nodes (Writing::steps) as kernels over the
-/// window's. At a repeated node both sides read the ice, the loads, the
-/// tide and every seismic term without its onset there at the node's one
-/// time, so a change of any of them there pairs with the sum of the two
-/// sides' kernels; a term whose onset falls there has, at the node, its
-/// co-seismic moment, the right side's (the left limit its absence), and
-/// its points take the right side's kernel alone. The quelled view's
-/// zero-length interval goes (no ice changes across it), the delta
+/// window's, and the left limits' beside them. At a repeated node the two
+/// sides read every term continuous there at the node's one time, so a
+/// change of such a term pairs with the sum of the two sides' kernels,
+/// which a node's record holds where no term of its kind jumps there. A
+/// kind of surface term (the ice, the loads in the water budget, outside
+/// it, the layers, the tide) that jumps at the node (StepGrid::jumps) has
+/// the right side's kernel in the record, the left side's in its companion
+/// (LeftKernels), zero away from such nodes; a change continuous there
+/// pairs with the two summed. A seismic term that jumps at the node (its
+/// onset, a `previous` history or fault file) has, at the node, the right
+/// side's moment, and its points take the right side's kernel alone. The
+/// quelled view's interval ending at a repeated node is the library's
+/// ending at the left limit, the change up to it; its zero-length
+/// interval, the jump's own, goes where the ice does not jump (no ice
+/// changes across it) and is the companion `jump` where it does. The delta
 /// amplitudes are keyed by the window's node, and the density, per unit
 /// time, is the two sides' weighted by the half-steps each pairs with. A
 /// pair inserted between nodes is refused before the run
-/// (ReadKernelInput).
-Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
+/// (RefuseJumpsBetweenNodes).
+WindowKernels OnTheWindow(const Kernels& kernels, const Writing& w) {
   const auto& steps = w.steps;
-  if (!steps.Repeats()) return kernels;
+  auto result = WindowKernels{.kernels = kernels, .before = {}};
+  if (!steps.Repeats()) return result;
   if (std::ranges::contains(steps.window, StepGrid::kInserted)) {
     throw std::logic_error(
-        "the kernels about a run with an onset between nodes are not built");
+        "the kernels about a run with a jump between nodes are not built");
   }
-  const auto& run = *w.run;
-  const auto onClock = NodesOnTheClock(*run.times);
   const auto nodes = steps.library.size();
-  auto out = kernels;
-  auto summed = [&](const auto& perNode) {
+  auto& out = result.kernels;
+  auto& left = result.before;
+  // whether a kind jumps at any node of the window
+  const auto anywhere = [&](auto kind) {
+    return std::ranges::any_of(steps.jumps, [&](const auto& pair) {
+      return kind(pair.second);
+    });
+  };
+  // the rows of a kind at the window's nodes: the right side's and the
+  // left's apart where it jumps, their sum where it does not
+  const auto split = [&](const auto& perNode, auto kind, auto& before) {
     using Row = std::decay_t<decltype(perNode.front())>;
     auto rows = std::vector<Row>{};
     if (perNode.empty()) return rows;
+    const auto companion = anywhere(kind);
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       const auto k = steps.library[n];
       auto row = perNode[k];
+      auto side = Row(row.size());
       if (k > 0 && steps.Left(k - 1)) {
-        for (auto i = std::size_t{0}; i < row.size(); ++i) {
-          row[i] += perNode[k - 1][i];
+        if (kind(steps.JumpingAt(k))) {
+          side = perNode[k - 1];
+        } else {
+          for (auto i = std::size_t{0}; i < row.size(); ++i) {
+            row[i] += perNode[k - 1][i];
+          }
         }
       }
+      if (companion) before.push_back(std::move(side));
       rows.push_back(std::move(row));
     }
     return rows;
   };
-  out.directLoadKernels = summed(kernels.directLoadKernels);
+  const auto ice = [](const Jumping& j) { return j.ice; };
+  out.directLoadKernels =
+      split(kernels.directLoadKernels,
+            [](const Jumping& j) { return j.inside; }, left.directLoad);
   out.directLoadOutsideWaterBudgetKernels =
-      summed(kernels.directLoadOutsideWaterBudgetKernels);
-  out.solidSurfaceChangeKernels = summed(kernels.solidSurfaceChangeKernels);
-  out.tideKernels = summed(kernels.tideKernels);
-  out.thickness = summed(kernels.thickness);
+      split(kernels.directLoadOutsideWaterBudgetKernels,
+            [](const Jumping& j) { return j.outside; }, left.outside);
+  out.solidSurfaceChangeKernels =
+      split(kernels.solidSurfaceChangeKernels,
+            [](const Jumping& j) { return j.layer; }, left.layer);
+  out.tideKernels = split(kernels.tideKernels,
+                          [](const Jumping& j) { return j.tide; }, left.tide);
+  out.thickness = split(kernels.thickness, ice, left.thickness);
+  const auto iceJumps = !kernels.rate.empty() && anywhere(ice);
   out.times.clear();
   out.momentKernels.clear();
   out.density.clear();
@@ -1233,21 +1383,22 @@ Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
   for (auto n = std::size_t{0}; n < nodes; ++n) {
     const auto k = steps.library[n];
     const auto repeated = k > 0 && steps.Left(k - 1);
+    const auto jumping = steps.JumpingAt(k);
     out.times.push_back(steps.times[k]);
     if (!kernels.momentKernels.empty()) {
       auto row = kernels.momentKernels[k];
       if (repeated) {
-        // the node on the terms' clock, where StepGridOf found the onset
-        const auto t = onClock[n];
         for (auto p = std::size_t{0}; p < row.size(); ++p) {
-          if (run.forcing.seismic[w.points[p].term].OnsetAt(t)) continue;
-          const auto& left = kernels.momentKernels[k - 1][p];
-          row[p].rr += left.rr;
-          row[p].tt += left.tt;
-          row[p].pp += left.pp;
-          row[p].rt += left.rt;
-          row[p].rp += left.rp;
-          row[p].tp += left.tp;
+          if (std::ranges::contains(jumping.seismic, w.points[p].term)) {
+            continue;
+          }
+          const auto& side = kernels.momentKernels[k - 1][p];
+          row[p].rr += side.rr;
+          row[p].tt += side.tt;
+          row[p].pp += side.pp;
+          row[p].rt += side.rt;
+          row[p].rp += side.rp;
+          row[p].tp += side.tp;
         }
       }
       out.momentKernels.push_back(std::move(row));
@@ -1271,6 +1422,11 @@ Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
     if (n > 0 && !kernels.rate.empty()) {
       out.rate.push_back(kernels.rate[k - (repeated ? 2 : 1)]);
     }
+    if (iceJumps) {
+      left.jump.push_back(repeated && jumping.ice
+                              ? kernels.rate[k - 1]
+                              : std::vector<double>(kernels.rate[0].size()));
+    }
   }
   out.instantaneous.clear();
   for (const auto& [k, lump] : kernels.instantaneous) {
@@ -1281,7 +1437,7 @@ Kernels OnTheWindow(const Kernels& kernels, const Writing& w) {
       for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += lump[i];
     }
   }
-  return out;
+  return result;
 }
 
 /// The kernel files every dimension shares, as the block names them: the
@@ -1291,21 +1447,25 @@ void WriteSurfaceKernels(const std::filesystem::path& stem, const Writing& w,
                          const KernelsBlock& block,
                          const MeasurementSpec& spec, const Kernels& library,
                          const Built& built) {
-  const auto kernels = OnTheWindow(library, w);
+  const auto window = OnTheWindow(library, w);
+  const auto& kernels = window.kernels;
+  const auto& before = window.before;
   const auto named = [&stem](std::string_view suffix) {
     return std::filesystem::path(stem.string() + std::string{suffix});
   };
   if (block.Writes(KernelParameter::Ice)) {
-    WriteIceKernels(named("_ice_kernels.nc"), w, spec, kernels, built);
+    WriteIceKernels(named("_ice_kernels.nc"), w, spec, kernels, before, built);
   }
   if (block.Writes(KernelParameter::Load)) {
-    WriteLoadKernels(named("_load_kernels.nc"), w, spec, kernels, built);
+    WriteLoadKernels(named("_load_kernels.nc"), w, spec, kernels, before,
+                     built);
   }
   if (block.Writes(KernelParameter::Tide)) {
     if (kernels.tideKernels.empty()) {
       throw std::logic_error("the sweep formed no tide kernels");
     }
-    WriteTideKernels(named("_tide_kernels.txt"), w, spec, kernels, built);
+    WriteTideKernels(named("_tide_kernels.txt"), w, spec, kernels, before,
+                     built);
   }
   if (block.Writes(KernelParameter::Moment)) {
     if (kernels.momentKernels.empty()) {
@@ -2040,7 +2200,8 @@ std::string Kernel1D(const std::filesystem::path& config,
       forward.read ? forward.store->Snapshots1D()
                    : RunDriven(evolution, times, drive, run.Migrating());
   for (const auto& snapshot : snapshots) {
-    Check1D(snapshot, WhenOf(run, solver.SolverScales(), snapshot.t));
+    Check1D(snapshot, WhenOf(run, solver.SolverScales(), snapshot.t),
+            run.solver.rtol);
   }
   if (forward.Records()) forward.store->Close();
   auto w = WritingOf(config, input, solver);
@@ -2136,6 +2297,8 @@ std::string RunKernel(const std::filesystem::path& config) {
   auto input = ReadKernelInput(config);
   const auto earth = BuildEarth(input.run, top);
   PlaceSeismicSources(input.run, earth, top);
+  FindFileJumps(input.run);
+  RefuseJumpsBetweenNodes(input.run, top);
   const auto& run = input.run;
   const auto meaning = Meaning(run, earth);
   const auto& ranks = TheRanks();

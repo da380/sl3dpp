@@ -142,9 +142,15 @@ surface file, and `examples/Common.hpp` reads one.
   `Evolution3D`, `AdjointSolver`, `AdjointSolver3D`) take and return
   times, loads and fields in the sea-level solver's units: convert with
   `solver.SolverScales()`. Their time grids increase, a time repeated
-  once for a jump of the forcing (an earthquake's onset): its left limit,
-  then its right ([design.md](design.md) §5); a caller whose own nodes
-  miss an onset steps a pair there beside them, as `sl3d` does.
+  once for a jump of the forcing (an earthquake's onset, a step load, a
+  step of the ice or the tide): its left limit, then its right
+  ([design.md](design.md) §5), the forcing's left limits its callbacks
+  `...Before` beside the plain ones (`Forcing::sourcesBefore`,
+  `directLoadBefore`, `directLoadOutsideWaterBudgetBefore`,
+  `solidSurfaceChangeBefore`, `tideBefore`, and under migrating
+  shorelines `iceThicknessBefore`, so that a run with a left limit takes
+  an overload with a forcing); a caller whose own nodes miss a jump steps
+  a pair there beside them, as `sl3d` does.
 - Spherical harmonics are complex, fully normalised, with the Condon–Shortley
   phase (GSHTrans's convention); `ShConventions.hpp` converts to and from real
   coefficients.

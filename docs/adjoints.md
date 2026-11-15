@@ -2249,7 +2249,10 @@ and the continuous Hessian converging to the discrete at second order,
 
 **A jump of the forcing.** A time repeated once in the grid, times[k + 1]
 = times[k], is a jump of the forcing there (an earthquake's onset,
-`Forcing::sourcesBefore` the left limits of the sources): node k the
+`Forcing::sourcesBefore` the left limits of the sources; a step of a
+surface term, `directLoadBefore`, `directLoadOutsideWaterBudgetBefore`,
+`solidSurfaceChangeBefore`, `tideBefore` and a migrating run's
+`iceThicknessBefore`): node k the
 left limit, node k + 1 the right, joined by a step of zero length. At
 h = 0 the weights are exact (e = 1, α = β = 0, every effective weight
 one), so the step is the static elastic solve with the internal
@@ -2268,7 +2271,19 @@ integrand that jumps there, and an observation at the right node takes
 its jump there as at any node; the checkpointed cursor steps back across
 the pair by the run's zero-length step (m held) under the pair's two
 recorded sides. A source at the left node
-and one at the right are two parameters, each with its moment kernel.
+and one at the right are two parameters, each with its moment kernel,
+and so are a surface term's two sides, each with its load, tide or
+thickness kernel (the derivative runs read the recorded per-node loads
+and the directions node by node, a migrating run's each side's own ocean
+function). By the continuous method each side is an end node of its
+interval, its quadrature the half step on its side alone: its smooth
+part tends to the discrete kernel at the scheme's order in absolute
+terms, at first order relative to its own size (O(h)), where no
+observation's lump at the node leads it; the two sides' sum, the kernel
+of a change continuous across the jump, at the scheme's order. The
+quelled view's zero-length interval, `rate[k]`, is the kernel of the
+jump of the ice there, I(t+) - I(t-), the limit of h_k (dI/dt)_k: the
+tail of the thickness duals from the right node on, by both methods.
 `TestTangentLinear` (DerivativesAcrossAnOnset, TheContinuousSweepAcross
 AnOnset, SecondOrderRunAcrossAnOnset), `TestSecondOrderAdjoint`,
 `TestDiscreteAdjoint3D`, `TestTangentLinear3D`, `TestSecondOrderAdjoint3D`,
@@ -2277,7 +2292,15 @@ interior node measured at both nodes of the pair: the discrete sweeps
 the tangents' transposes (1e-8), the tangents central differences'
 limits (Richardson at 1e-6), the discrete Hessian symmetric and the
 second-order run's (1e-8), and the continuous kernels and Hessian rows
-converging to the discrete at second order through the jump.
+converging to the discrete at second order through the jump. Their
+`...AcrossALoadJump` twins (`TestTangentLinear`, `TestSecondOrderAdjoint`,
+`TestDiscreteAdjoint3D`, `TestSecondOrderAdjoint3D`, `TestLateralKernels`)
+and `MigratingDerivatives.AcrossAnIceJump` hold the same with every
+surface term jumping at the pair, each side perturbed apart, the run
+recorded sparsely through it; `TestTrajectoryCursor` the sweeps about a
+sparse recording through a load and tide jump and a migrating ice step
+equal to the full recording's; `TestDistributed` the run and its sweeps
+under mpiexec through a load step and an onset.
 
 ## 21. Lateral kernels about a radial background
 

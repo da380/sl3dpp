@@ -109,8 +109,12 @@ class Evolution {
     /// The node's ocean function under migrating shorelines; empty when
     /// the shorelines are frozen at the background state's.
     std::vector<double> oceanFunction;
-    /// Whether the node's sea level solve met its tolerance.
+    /// Whether the node's sea level solve met its tolerance, its passes
+    /// and the relative change of its last (GRDSolver::Response::
+    /// iterations, error): the last stage's under Sdirk2.
     bool converged = true;
+    int seaLevelIterations = 0;
+    double seaLevelResidual = 0.0;
     /// Under interior sources, when recording: the toroidal systems'
     /// internal variables and strain at the node (ToroidalViscoelastic).
     std::optional<ToroidalViscoelastic::State> toroidalState;
@@ -209,14 +213,15 @@ class Evolution {
   /// state readable through FinalState().
   ///
   /// A time may be repeated once, times[k + 1] == times[k], for a jump of
-  /// the forcing there (Forcing::sourcesBefore): node k is its left limit,
-  /// node k + 1 its right, and the step between is of zero length, the
-  /// static elastic solve with the internal variables held (they are
-  /// continuous across a jump, the rest of the state jumps by that solve).
-  /// Both nodes are recorded, at the same time. The first node is not
-  /// repeated: it is the right limit at times[0] already. Every entry
-  /// takes such a grid, and so do the derivative runs about it, for which
-  /// the pair is an ordinary step of zero length.
+  /// the forcing there (Forcing::sourcesBefore, directLoadBefore and their
+  /// kin): node k is its left limit, node k + 1 its right, and the step
+  /// between is of zero length, the static elastic solve with the internal
+  /// variables held (they are continuous across a jump, the rest of the
+  /// state jumps by that solve). Both nodes are recorded, at the same
+  /// time. The first node is not repeated: it is the right limit at
+  /// times[0] already. Every entry takes such a grid, and so do the
+  /// derivative runs about it, for which the pair is an ordinary step of
+  /// zero length, each side's forcing a parameter of its own.
   [[nodiscard]] std::vector<Snapshot> Run(
       std::span<const double> times,
       const std::function<std::vector<double>(double)>& directLoad);
@@ -269,6 +274,26 @@ class Evolution {
     /// callback, the sources continuous there.
     std::function<std::vector<PointSource>(double)> sourcesBefore{};
     std::function<std::vector<StressGlut>(double)> stressGlutsBefore{};
+    /// The left limits of the surface terms at time t, read as
+    /// `sourcesBefore` is: a load put on at t (a step load) is absent from
+    /// `directLoadBefore` and present in `directLoad`, and the pair's
+    /// zero-length step takes the jump as the static elastic solve under
+    /// it, the sea level equation closing it as at any node (the nonlinear
+    /// one under migrating shorelines). Absent, the plain callback, the
+    /// term continuous there. A left limit given without its term is
+    /// refused. The overloads taking a direct load alone (Run, Resume) take
+    /// none: a direct load with a left limit is given here.
+    std::function<std::vector<double>(double)> directLoadBefore{};
+    std::function<std::vector<double>(double)>
+        directLoadOutsideWaterBudgetBefore{};
+    std::function<std::vector<double>(double)> solidSurfaceChangeBefore{};
+    std::function<std::vector<std::complex<double>>(double)> tideBefore{};
+    /// The left limit of a migrating run's ice thickness (RunMigrating's
+    /// `iceThickness`, which stays an argument of its own), read as the
+    /// others are: an ice history with a jump is run by the overloads
+    /// taking a forcing, with nothing else in it where nothing else acts.
+    /// Refused by a run under frozen shorelines, whose ice is a direct load.
+    std::function<std::vector<double>(double)> iceThicknessBefore{};
   };
 
   /// `Run` under a forcing: the start is the instantaneous elastic

@@ -43,6 +43,35 @@
 
 namespace sl3dpp::app {
 
+/// What jumps at a time of a run's forcing: the surface terms by the
+/// kernels they have (the ice; the loads in the water budget, outside it
+/// and the layers on the solid surface; the tide) and the seismic terms by
+/// their index in `forcing.seismic`.
+struct Jumping {
+  bool ice = false;
+  bool inside = false;
+  bool outside = false;
+  bool layer = false;
+  bool tide = false;
+  std::vector<std::size_t> seismic{};
+
+  /// Adds what another jump at the same time jumps.
+  void Join(const Jumping& other);
+};
+
+/// A jump of a run's forcing: its time on the terms' clock, the tolerance
+/// a time is read on it with there (a time that close is that time), what
+/// jumps, and the member of the config's `forcing` block it comes from
+/// (`forcing.<list>[term].<member>`), which a refusal names.
+struct ForcingJump {
+  double at = 0.0;
+  double tolerance = 0.0;
+  Jumping what;
+  std::string_view list;
+  std::size_t term = 0;
+  std::string member;
+};
+
 /// The members `solve` and `kernel` share, a run: the problem, the Earth,
 /// the degree, the window, the forcing, the ocean, the rotation and the
 /// solves.
@@ -71,6 +100,11 @@ struct Run {
   /// sustain less oblateness than the model's tidal response.
   bool hydrostatic_moments = false;
   SolverBlock solver;
+  /// The jumps of the terms read from files on a time axis (a field's or
+  /// a fault file's rule `previous`, an `interval` field), found once the
+  /// files are read (FindFileJumps); the onsets' and the `previous`
+  /// histories' are the forcing's own (JumpsOf).
+  std::vector<ForcingJump> fileJumps;
 
   /// Whether the shorelines migrate (never without an ocean).
   [[nodiscard]] bool Migrating() const {
@@ -186,6 +220,17 @@ struct BuiltEarth {
 /// nodes on the terms' clock. Nothing to do without one.
 void PlaceSeismicSources(Run& run, const BuiltEarth& earth, const Json& top);
 
+/// Finds the jumps of a run through time's terms read from files on a
+/// time axis (Run::fileJumps): a `thickness` or `change` term of the ice
+/// change read by date and a `field` load term whose field is read by
+/// `previous` or is of `interval` support (io::FieldHistory::JumpsIn, the
+/// files read without resampling), and a placed fault file read by
+/// `previous` (FaultFileJumps; after PlaceSeismicSources). A file that
+/// cannot be read, or lacks its variable, has none here: the run's own
+/// reading of it refuses it, saying what it holds. Nothing in the static
+/// problem.
+void FindFileJumps(Run& run);
+
 /// The rheology of a run through time: the viscosity file's radial
 /// reference where given (a Maxwell body); otherwise the deck's own
 /// (Rheology::FromModel: a Maxwell deck's viscosity, a burgers deck's
@@ -265,26 +310,31 @@ class RunIce {
   /// Whether there is a change at all (any term).
   [[nodiscard]] bool Changes() const { return !terms_.empty(); }
   /// The ice change at SI time `time`: the terms' sum, the first taken as
-  /// it stands (zero without terms).
-  [[nodiscard]] std::vector<double> ChangeAt(double time) const;
+  /// it stands (zero without terms). With `before`, its left limit there:
+  /// each file term's (ReadValues) and each cap's history's
+  /// (AmplitudeHistory::Before), the right limit being the plain read.
+  [[nodiscard]] std::vector<double> ChangeAt(double time,
+                                             bool before = false) const;
   /// The change from SI time `since` to `time`: each file term's value at
   /// `time` less its value at `since`, and a cap's change at the one less
   /// at the other (nothing without a history). It is ChangeAt(time) -
   /// ChangeAt(since), formed term by term, without passing through the
-  /// state's instant.
-  [[nodiscard]] std::vector<double> ChangeSince(double time,
-                                                double since) const;
+  /// state's instant; `before` reads `time`'s left limit.
+  [[nodiscard]] std::vector<double> ChangeSince(double time, double since,
+                                                bool before = false) const;
   /// The ice at SI time `time`: the state's plus ChangeAt(time).
   [[nodiscard]] std::vector<double> At(double time) const;
   /// The ice a change may take beyond what the state holds: 1e-9 times
   /// the state's largest thickness, or 1e-9 m without ice.
   [[nodiscard]] double Tolerance() const;
   /// Refuses, at `forcing.ice_change`, a change that removes more ice than
-  /// the state holds at any of the SI times given (beyond Tolerance), with
-  /// the worst deficit, its place and, in a run through time (`window`),
-  /// its time as the window labels it. Where the state's own thickness is
-  /// negative (a resampling's undershoot) it holds none.
-  void CheckHeld(std::span<const double> times, const Window* window) const;
+  /// the state holds at any of the SI times given (beyond Tolerance), and
+  /// at the left limits of `leftLimits`, with the worst deficit, its place
+  /// and, in a run through time (`window`), its time as the window labels
+  /// it. Where the state's own thickness is negative (a resampling's
+  /// undershoot) it holds none.
+  void CheckHeld(std::span<const double> times, const Window* window,
+                 std::span<const double> leftLimits = {}) const;
 
  private:
   struct Term {
@@ -296,13 +346,15 @@ class RunIce {
     /// The static problem's change, and a cap's, read or built once.
     std::vector<double> fixed;
   };
-  /// A file term's values at a time, read within its span (`where` the
-  /// read, IceThicknessAt), those that are not numbers refused.
+  /// A file term's values at a time, or their left limit there, read
+  /// within its span (`where` the read, IceThicknessAt), those that are
+  /// not numbers refused.
   [[nodiscard]] std::vector<double> ValuesOf(const Term& term, double time,
-                                             std::string_view where) const;
-  /// A term's change at a time.
-  [[nodiscard]] std::vector<double> TermAt(const Term& term,
-                                           double time) const;
+                                             std::string_view where,
+                                             bool before = false) const;
+  /// A term's change at a time, or its left limit there.
+  [[nodiscard]] std::vector<double> TermAt(const Term& term, double time,
+                                           bool before = false) const;
 
   const SurfaceGrid* grid_;
   const Json* block_ = nullptr;  ///< `forcing.ice_change`, where given
@@ -398,14 +450,16 @@ void CheckStateDate(const Run& run, const Json& top,
     const SeaLevelParameters& parameters);
 
 /// An ice field's input at a time (SI seconds of its file's axis), SI,
-/// read within its field's time span (ReadValues, `where` the read): a
-/// thickness or a change of it. Values that are not numbers are refused,
-/// at the input's `file` as a read outside the span is.
+/// read within its field's time span (ReadValues, `where` the read; with
+/// `before`, its left limit there): a thickness or a change of it. Values
+/// that are not numbers are refused, at the input's `file` as a read
+/// outside the span is.
 [[nodiscard]] std::vector<double> IceThicknessAt(const FileInput& input,
                                                  const io::FieldHistory& file,
                                                  const Json& member,
                                                  double time,
-                                                 std::string_view where);
+                                                 std::string_view where,
+                                                 bool before = false);
 
 /// Where the state's members are read, as a refusal of a read outside a
 /// file's span states it: the state's date in the static problem and a
@@ -450,40 +504,46 @@ void CheckStateDate(const Run& run, const Json& top,
 
 /// The window's nodes on the terms' clock (SolverClock): kyr from the
 /// window's start in a dated run, the nodes as given in one counting
-/// forwards. Where a seismic onset falls against the nodes is decided on
-/// them (OnsetsBetweenNodes, StepGridOf).
+/// forwards. Where a jump of the forcing falls against the nodes is
+/// decided on them (JumpsBetweenNodes, StepGridOf).
 [[nodiscard]] std::vector<double> NodesOnTheClock(const Window& window);
 
-/// A seismic onset strictly between two nodes of a run's window: the
-/// first term (of `forcing.seismic`) with it, the onset on the terms'
-/// clock, and the window's node before it.
-struct OnsetBetween {
-  std::size_t term = 0;
-  double at = 0.0;
+/// The jumps of a run's forcing after its window's start and not after
+/// its end, in time order: each seismic onset (read with SeismicTerm::
+/// OnsetAt's tolerance), each time after the first of a history read by
+/// `previous` (AmplitudeHistory::Tolerance), on any term that takes a
+/// history, and the jumps of its files (Run::fileJumps). A jump at the
+/// window's start (to its tolerance) or before it is none: the first node
+/// is the right limit there. Empty in the static problem.
+[[nodiscard]] std::vector<ForcingJump> JumpsOf(const Run& run);
+
+/// A jump of a run's forcing strictly between two nodes of its window:
+/// the jump (the first at its time) and the window's node before it.
+struct JumpBetween {
+  ForcingJump jump;
   std::size_t node = 0;
 };
 
-/// The onsets of a run's seismic terms strictly between two nodes of its
-/// window, in time order, each time once: an onset within the tolerance
-/// SeismicTerm::OnsetAt reads it with of a node is that node's, and terms
-/// whose onsets fall within that tolerance of an earlier term's share it.
-/// An onset before the window's start (the term acts from the start) or
-/// after its end (it never acts) is none of them. Empty in the static
-/// problem.
-[[nodiscard]] std::vector<OnsetBetween> OnsetsBetweenNodes(const Run& run);
+/// The jumps of a run's forcing (JumpsOf) strictly between two nodes of
+/// its window, in time order, each time once: a jump within its tolerance
+/// of a node is that node's, and jumps within the tolerance of an earlier
+/// one share its time.
+[[nodiscard]] std::vector<JumpBetween> JumpsBetweenNodes(const Run& run);
 
 /// The time grid the library steps a run over (Evolution::Run): the
-/// window's nodes, with a jump of the forcing at each seismic onset after
-/// the window's start held as a time repeated once, its left limit then
-/// its right. The left limit is without the terms whose onset it is
-/// (Evolution::Forcing::sourcesBefore), the right with them, and the
-/// zero-length step between is the static elastic solve with the internal
-/// variables held. An onset at a node repeats that node; an onset between
-/// two (OnsetsBetweenNodes) is a pair of the library's own, inserted
-/// between them at the onset, where every other term is read as at any
-/// time (by its history, its file's time rule). The run's outputs keep one
-/// record per node of the window, the right limit at a repeat, and nothing
-/// of an inserted pair; the library's trajectory keeps every node.
+/// window's nodes, with each jump of the forcing (JumpsOf: a seismic onset,
+/// a time of a `previous` history, a jump of a file read by `previous` or
+/// of `interval` support) held as a time repeated once, its left limit then
+/// its right. The left limit reads each term's left limit there
+/// (Evolution::Forcing::sourcesBefore, directLoadBefore and their kin;
+/// ForcingOf), the right its value, and the zero-length step between is
+/// the static elastic solve with the internal variables held. A jump at a
+/// node repeats that node; one between two (JumpsBetweenNodes) is a pair
+/// of the library's own, inserted between them at the jump, where every
+/// other term is read as at any time (by its history, its file's time
+/// rule); jumps at one time share one pair. The run's outputs keep one
+/// record per node of the window, the right limit at a repeat, and
+/// nothing of an inserted pair; the library's trajectory keeps every node.
 struct StepGrid {
   /// The window node of an inserted pair's nodes, which is none.
   static constexpr auto kInserted = static_cast<std::size_t>(-1);
@@ -504,8 +564,16 @@ struct StepGrid {
   [[nodiscard]] bool Inserted(std::size_t k) const {
     return window[k] == kInserted;
   }
+  /// What jumps at each pair, by the library node of its left limit.
+  std::map<std::size_t, Jumping> jumps{};
   /// Whether the library steps any node beside the window's one each.
   [[nodiscard]] bool Repeats() const { return times.size() > library.size(); }
+  /// What jumps at the pair whose right limit is library node k; nothing
+  /// where k is not one.
+  [[nodiscard]] Jumping JumpingAt(std::size_t k) const {
+    const auto found = k > 0 ? jumps.find(k - 1) : jumps.end();
+    return found == jumps.end() ? Jumping{} : found->second;
+  }
 };
 [[nodiscard]] StepGrid StepGridOf(const Run& run, const Scales& scales);
 
@@ -526,20 +594,24 @@ struct SolverClock {
 /// (world.ice0), as the drivers take it: a callable of SLE time over the
 /// solver grid. With the state at the window's start the change is the
 /// ice change itself, so a change present at the start loads the first
-/// node; with the state at its end it is the change since the start. The
-/// references must outlive it.
+/// node; with the state at its end it is the change since the start. With
+/// `before`, its left limit at each time (RunIce::ChangeAt), the left
+/// limits of a jump of the ice. The references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceLoadOf(
-    const Run& run, const GRDSolver& solver, const Loaded& world);
+    const Run& run, const GRDSolver& solver, const Loaded& world,
+    bool before = false);
 
 /// The ice thickness the migrating runs take, solver units: the
 /// background's ice plus the same change as IceLoadOf's, so that a change
-/// present at the window's start is ice the start's solve takes. The
-/// references must outlive it.
+/// present at the window's start is ice the start's solve takes; with
+/// `before`, its left limits. The references must outlive it.
 [[nodiscard]] std::function<std::vector<double>(double)> IceThicknessOf(
-    const Run& run, const GRDSolver& solver, const Loaded& world);
+    const Run& run, const GRDSolver& solver, const Loaded& world,
+    bool before = false);
 
 /// The run's ice history under its shorelines: IceLoadOf when frozen,
-/// IceThicknessOf when migrating.
+/// IceThicknessOf when migrating, with its left limits where the run's
+/// forcing jumps (StepGridOf repeats a node).
 [[nodiscard]] IceHistory HistoryOf(const Run& run,
                                    const GRDSolver& solver,
                                    const Loaded& world);
@@ -582,13 +654,19 @@ CalibrationSummary CalibrateWorld(const Run& run, const Json& top,
 /// without an ocean has none), joined by the surface loads in the water
 /// budget; the loads outside the water budget, the layer on the solid
 /// surface, the tide and the seismic sources. A channel no term gives is
-/// absent. `loads` are the run's surface loads (null without any), held
-/// by the forcing.
+/// absent. Where the run's forcing jumps (StepGridOf repeats a node) every
+/// channel given has its left limit beside it (`iceLoadBefore` the ice
+/// load's; the others' from their terms, TimedLoads::At, TideAt,
+/// SeismicSourcesAt), and under migrating shorelines the ice thickness's
+/// (`thicknessBefore`). `loads` are the run's surface loads (null without
+/// any), held by the forcing.
 template <class EvolutionForcing>
 [[nodiscard]] EvolutionForcing ForcingOf(
     const Run& run, const GRDSolver& solver,
     const std::function<std::vector<double>(double)>& iceLoad,
-    std::shared_ptr<const SurfaceLoads> loads);
+    std::shared_ptr<const SurfaceLoads> loads,
+    const std::function<std::vector<double>(double)>& iceLoadBefore = {},
+    const std::function<std::vector<double>(double)>& thicknessBefore = {});
 
 /// What drives a run through time on its world: the ice's grounded load
 /// under frozen shorelines (IceLoadOf; none without an ocean), its
@@ -598,7 +676,10 @@ template <class EvolutionForcing>
 /// seismic sources, and, under migrating shorelines, by an ice change
 /// present at the window's start, taken through the forcing's entries
 /// (with nothing beside the ice, an empty forcing) so that the start is
-/// solved. The world must outlive the drive.
+/// solved; and a run whose forcing jumps (StepGridOf repeats a node) is
+/// forced, its left limits in the forcing (the ice's among them, which the
+/// overloads taking the ice alone do not take). The world must outlive
+/// the drive.
 template <class EvolutionForcing>
 struct Drive {
   std::function<std::vector<double>(double)> directLoad;
@@ -634,8 +715,10 @@ template <class EvolutionT>
     const Drive<typename EvolutionT::Forcing>& drive, bool migrating);
 
 /// A 1-D run's refusal of an unconverged node, `when` the node as the
-/// window labels it.
-void Check1D(const Evolution::Snapshot& snapshot, std::string_view when);
+/// window labels it: the sea level solve's passes, its last relative
+/// change and the tolerance asked of it (`rtol`, solver.rtol).
+void Check1D(const Evolution::Snapshot& snapshot, std::string_view when,
+             double rtol);
 /// A 3-D run's refusal of an unconverged node: the step's combined fixed
 /// point's last residual, its passes and the tolerance asked of it
 /// (`stepRtol`, solver.step_rtol), or its sea level solve's failure.

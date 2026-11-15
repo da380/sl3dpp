@@ -576,23 +576,6 @@ const std::vector<double>& ViscoelasticOperator::SplitUnitResponses(
   return found->second;
 }
 
-void ViscoelasticOperator::AddChannels(std::vector<double>& x, int l,
-                                       Flavour* flavour, double t,
-                                       const LoadCallable& load,
-                                       const LoadCallable& tide,
-                                       int ncols) const {
-  if (!load && !tide) return;
-  RefuseTideWithoutGravity(*this, tide);
-  const auto& deg = Deg(l);
-  const auto& units = UnitResponses(flavour, l);
-  if (auto columns = LoadColumns(*this, load, l, t, ncols)) {
-    AddColumns(x, units, 0, deg.ndof, *columns, ncols);
-  }
-  if (auto columns = TideColumns(tide, l, t, ncols)) {
-    AddColumns(x, units, 1, deg.ndof, *columns, ncols);
-  }
-}
-
 namespace {
 /// A degree's column count in a state: the count it carries, or, of a
 /// state without one, the size of its memory over `perColumn`, the

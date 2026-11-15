@@ -3545,3 +3545,389 @@ TEST(TangentLinear, SecondOrderRunAcrossAnOnset) {
   EXPECT_NEAR(Objective(setup, swapped, measurements), predicted,
               1e-10 * std::abs(predicted));
 }
+
+namespace {
+
+using Complex = std::complex<double>;
+
+/// The surface terms node by node: a load in the water budget and one
+/// outside it, a layer's height and a tide, each node's its own, so that
+/// at a repeated node the two sides differ (a jump of every term there).
+struct SurfaceByNode {
+  std::vector<std::vector<double>> load, outside, layer;
+  std::vector<std::vector<Complex>> tide;
+
+  static SurfaceByNode Random(const Scene& setup, std::mt19937& rng,
+                              std::size_t nodes) {
+    std::normal_distribution<double> normal;
+    const auto& grid = setup.solver.Grid();
+    const auto a = 30.0 / setup.solver.SolverScales().Factor(PotentialDimensions);
+    auto out = SurfaceByNode{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      out.load.push_back(setup.Smooth(rng, 300.0 * setup.Sigma()));
+      out.outside.push_back(setup.Smooth(rng, 200.0 * setup.Sigma()));
+      out.layer.push_back(setup.Smooth(rng, 0.2 * setup.Metre()));
+      auto psi = grid.ZeroCoefficients();
+      psi[SurfaceGrid::Index(2, 0)] = a * normal(rng);
+      psi[SurfaceGrid::Index(2, 1)] = a * Complex(normal(rng), normal(rng));
+      psi[SurfaceGrid::Index(3, 2)] = a * Complex(normal(rng), normal(rng));
+      out.tide.push_back(std::move(psi));
+    }
+    return out;
+  }
+
+  /// The forcing reading them, each term's left limit the first node of a
+  /// pair's (ByNode).
+  [[nodiscard]] Evolution::Forcing Forcing(
+      const std::vector<double>& times) const {
+    const auto l = ByNode(times, load);
+    const auto o = ByNode(times, outside);
+    const auto s = ByNode(times, layer);
+    const auto p = ByNode(times, tide);
+    return {.directLoad = l.plain,
+            .directLoadOutsideWaterBudget = o.plain,
+            .solidSurfaceChange = s.plain,
+            .tide = p.plain,
+            .directLoadBefore = l.before,
+            .directLoadOutsideWaterBudgetBefore = o.before,
+            .solidSurfaceChangeBefore = s.before,
+            .tideBefore = p.before};
+  }
+
+  [[nodiscard]] TangentPerturbation Direction() const {
+    TangentPerturbation out;
+    out.directLoad = load;
+    out.directLoadOutsideWaterBudget = outside;
+    out.solidSurfaceChange = layer;
+    out.tide = tide;
+    return out;
+  }
+};
+
+}  // namespace
+
+TEST(TangentLinear, DerivativesAcrossALoadJump) {
+  // A jump of every surface term at an interior node (a load in the water
+  // budget and one outside it, a layer and a tide), the node repeated, its
+  // left limit the terms' values before the jump (Forcing::
+  // directLoadBefore and its kin), an ordinary step of zero length to the
+  // derivative runs. Measured at both nodes of the pair and around them.
+  // The terms as parameters, each side of the pair its own (perturbations
+  // node by node, the two sides apart): the tangent run is the forward run
+  // under them (the problem is linear in them), and the discrete sweep's
+  // kernels pair with them to the same number, with an ocean and the
+  // rotational feedback and without either, both schemes. The relaxation
+  // times and the moduli about the run with the jump, recorded at every
+  // second node (each side's strain regenerated under its recorded loads,
+  // the states between rebuilt by forward steps through the pair): the
+  // tangent run against central differences of the forward run (second
+  // order, Richardson to 1e-6), the discrete sweep's kernels against the
+  // tangent (1e-8), both schemes for the relaxation times.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(211);
+  const auto times = OnsetGrid(4, 2.0 * setup.Kyr(), 2);  // nodes 2, 3 at 1 kyr
+  const auto& grid = setup.solver.Grid();
+  const auto base = SurfaceByNode::Random(setup, rng, times.size());
+  const auto forcing = base.Forcing(times);
+  const auto perturbation = SurfaceByNode::Random(setup, rng, times.size());
+  auto measurements = FullMeasurements(setup, rng, times.size() - 1);
+  measurements[2].displacementDual = setup.Smooth(rng, 0.9);
+  measurements[2].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
+  for (auto& [node, m] : measurements) {
+    m.tangentialPotentialDual = setup.Smooth(rng, 0.6);
+  }
+  ASSERT_TRUE(measurements.contains(3));  // the right node
+  auto pair = [&](const std::vector<Complex>& a, const std::vector<Complex>& b) {
+    // the coefficients' L2 pairing (Kernels::tideKernels)
+    const auto fa = grid.Synthesise(a);
+    const auto fb = grid.Synthesise(b);
+    auto product = std::vector<double>(fa.size());
+    for (auto i = std::size_t{0}; i < fa.size(); ++i) product[i] = fa[i] * fb[i];
+    return grid.Integrate(product);
+  };
+
+  // -- the surface terms as parameters
+  const auto dry = setup.solver.NoOceanState();
+  const auto& wet = setup.state;
+  for (const auto* background : {&wet, &dry})
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto rotation = background == &wet ? RotationalFeedback::Full
+                                             : RotationalFeedback::None;
+    const auto label =
+        std::string(background == &dry ? "no ocean" : "ocean") + ", scheme " +
+        std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    Evolution evolution(op, setup.solver, *background,
+                        {.scheme = scheme, .rotation = rotation, .rtol = 1e-12});
+    const auto forward = Objective(
+        setup, evolution.Run(times, perturbation.Forcing(times)), measurements);
+    ASSERT_NE(forward, 0.0) << label;
+    const auto along = Objective(
+        setup,
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .Run(times, perturbation.Direction()),
+        measurements);
+    EXPECT_NEAR(along, forward, 1e-9 * std::abs(forward)) << label;
+    const auto kernels =
+        AdjointSolver(evolution,
+                      {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .FirstOrderKernels(times, measurements);
+    auto paired = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      paired += setup.Surface(kernels.directLoadKernels[n], perturbation.load[n]) +
+                setup.Surface(kernels.directLoadOutsideWaterBudgetKernels[n],
+                              perturbation.outside[n]) +
+                setup.Surface(kernels.solidSurfaceChangeKernels[n],
+                              perturbation.layer[n]) +
+                pair(kernels.tideKernels[n], perturbation.tide[n]);
+    }
+    EXPECT_NEAR(paired, along, 1e-8 * std::abs(along)) << label;
+  }
+
+  // -- the relaxation times about the run with the jump
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto& branch = setup.rheology.BranchAt(0);
+  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    const auto label = "itau, scheme " + std::to_string(static_cast<int>(scheme));
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    Evolution evolution(op, setup.solver, setup.state,
+                        {.scheme = scheme, .rtol = 1e-12, .record_stride = 2});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+    ASSERT_FALSE(trajectory.states[3].has_value()) << label;
+    TangentPerturbation direction;
+    direction.itau = ditau;
+    const auto along = Objective(
+        setup,
+        TangentLinearSolver(evolution,
+                            {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .Run(times, direction, &trajectory),
+        measurements);
+    ASSERT_NE(along, 0.0) << label;
+    auto objectiveAt = [&](double eps) {
+      auto b = branch;
+      for (auto i = std::size_t{0}; i < b.itau.size(); ++i) {
+        b.itau[i] += eps * ditau[0][i];
+      }
+      auto rheology = Rheology::Create(setup.material, {std::move(b)}).value();
+      ViscoelasticOperator moved(rheology, kLmax);
+      Evolution movedEvolution(moved, setup.solver, setup.state,
+                               {.scheme = scheme, .rtol = 1e-12});
+      return Objective(setup, movedEvolution.Run(times, forcing), measurements);
+    };
+    // steps large enough that the differences' error is their own and not
+    // the solves' (backward Euler's is small: measured 2.3e-14 and 1.4e-14
+    // of the derivative's 4.4e-7 at 0.02 and 0.01)
+    auto fd = std::map<double, double>{};
+    for (double eps : {0.2, 0.1}) {
+      fd[eps] = (objectiveAt(eps) - objectiveAt(-eps)) / (2.0 * eps);
+    }
+    const auto r1 = std::abs(fd[0.2] - along);
+    const auto r2 = std::abs(fd[0.1] - along);
+    EXPECT_GT(r1 / r2, 3.0) << label << ": " << r1 << " " << r2;
+    EXPECT_LT(r1 / r2, 5.0) << label << ": " << r1 << " " << r2;
+    EXPECT_NEAR((4.0 * fd[0.1] - fd[0.2]) / 3.0, along, 1e-6 * std::abs(along))
+        << label;
+    const auto kernels =
+        AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+            .FirstOrderKernels(times, measurements, &trajectory);
+    EXPECT_NEAR(VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]),
+                along, 1e-8 * std::abs(along))
+        << label;
+  }
+
+  // -- the moduli about the run with the jump, a solver whose body is held
+  const auto baseTable =
+      ViscoelasticOperator(setup.rheology, kLmax).ElasticLoveNumbers();
+  SeaLevelParameters held;
+  held.body_from_table = false;
+  held.mean_sea_floor_radius = baseTable.radius;
+  held.gravitational_acceleration = baseTable.surface_gravity;
+  const GRDSolver solver(SurfaceGrid(kLmax), baseTable, held);
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      const auto profile = 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+      d.kappa[i] = 0.5 * profile * k0[i];
+      d.mu[i] = profile * m0[i];
+    }
+  }
+  auto rheologyAt = [&](double eps) {
+    const auto shifted = material.Shifted(d, eps);
+    const auto muU = setup.rheology.MuUnrelaxed();
+    const auto [kappa, mu] = shifted.Moduli().KappaMu();
+    auto branches = std::vector<Rheology::Branch>{};
+    for (auto k = std::size_t{0}; k < setup.rheology.BranchCount(); ++k) {
+      auto b = setup.rheology.BranchAt(k);
+      for (auto i = std::size_t{0}; i < b.mu.size(); ++i) {
+        b.mu[i] = muU[i] > 0.0 ? b.mu[i] / muU[i] * mu[i] : 0.0;
+      }
+      branches.push_back(std::move(b));
+    }
+    return Rheology::Create(shifted, branches).value();
+  };
+  ViscoelasticOperator op(setup.rheology, kLmax,
+                          {.memory_points = MemoryPointSet::Gll});
+  Evolution evolution(op, solver, setup.state,
+                      {.rotation = RotationalFeedback::None,
+                       .rtol = 1e-12,
+                       .record_stride = 2});
+  const auto trajectory =
+      ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+  TangentPerturbation direction;
+  direction.material = AtGll(d);
+  const auto predicted = Objective(
+      setup,
+      TangentLinearSolver(evolution,
+                          {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+          .Run(times, direction, &trajectory),
+      measurements);
+  ASSERT_NE(predicted, 0.0);
+  auto functional = [&](double eps) {
+    const auto rheology = rheologyAt(eps);
+    ViscoelasticOperator moved(rheology, kLmax,
+                               {.memory_points = MemoryPointSet::Gll});
+    Evolution movedEvolution(moved, solver, setup.state,
+                             {.rotation = RotationalFeedback::None, .rtol = 1e-12});
+    return Objective(setup, movedEvolution.Run(times, forcing), measurements);
+  };
+  auto fd = std::map<double, double>{};
+  for (double eps : {0.1, 0.05}) {
+    fd[eps] = (functional(eps) - functional(-eps)) / (2.0 * eps);
+  }
+  const auto r1 = std::abs(fd[0.1] - predicted);
+  const auto r2 = std::abs(fd[0.05] - predicted);
+  EXPECT_GT(r1 / r2, 3.0) << fd[0.1] << " " << fd[0.05] << " " << predicted;
+  EXPECT_LT(r1 / r2, 5.0);
+  EXPECT_NEAR((4.0 * fd[0.05] - fd[0.1]) / 3.0, predicted, 1e-6 * std::abs(predicted));
+  const auto kernels =
+      AdjointSolver(evolution, {.method = AdjointMethod::Discrete,
+                                .rtol = 1e-12,
+                                .material_kernels = true})
+          .FirstOrderKernels(times, measurements, &trajectory);
+  const auto paired =
+      VolumePairing(op.Points(), mesh, kernels.kappaKernel, direction.material.kappa) +
+      VolumePairing(op.Points(), mesh, kernels.muKernel, direction.material.mu);
+  EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted));
+}
+
+TEST(TangentLinear, TheContinuousSweepAcrossALoadJump) {
+  // The continuous sweep about a run with a step load and a step of the
+  // tide at a repeated node halfway (their left limits without the steps),
+  // where the forward strain jumps: the quadrature pairs each side of the
+  // pair with its own interval, so the load kernels at the pair's two
+  // nodes (each side a parameter) and the kernels in the relaxation times
+  // and the moduli tend to the discrete sweep's as the steps are halved,
+  // at the scheme's second order, measured at the pair's two nodes and at
+  // the end. The quelled view's zero-length interval is the kernel of the
+  // ice's jump there, the tail of the thickness kernels from the right
+  // node on, by both methods.
+  auto setup = Scene::Make(1e22);
+  std::mt19937 fields(31);
+  const auto span = 10.0 * setup.Kyr();
+  const auto gU = setup.Smooth(fields, 0.5);
+  const auto gV = setup.Smooth(fields, 0.6);
+  const auto gLeft = setup.Smooth(fields, 0.7);
+  const auto gRight = setup.Smooth(fields, 0.4);
+  const auto stepLoad = setup.Smooth(fields, 400.0 * setup.Sigma());
+  const auto rampLoad = setup.Smooth(fields, 200.0 * setup.Sigma());
+  const auto probe = setup.Smooth(fields, 1.0);
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto [k0, m0] = material.Moduli().KappaMu();
+  MaterialDirection d;
+  d.kappa.assign(k0.size(), 0.0);
+  d.mu.assign(m0.size(), 0.0);
+  for (auto e = 0; e < mesh.ElementCount(); ++e) {
+    if (material.IsFluid(e)) continue;
+    for (auto q = 0; q < mesh.NGll(); ++q) {
+      const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+      const auto r = mesh.Radius(e, q);
+      d.kappa[i] = 0.05 * (1.0 - 0.5 * r) * k0[i];
+      d.mu[i] = 0.1 * (0.5 + r * r) * m0[i];
+    }
+  }
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto atPoints = AtMemoryPoints(op.Points(), d);
+  const auto onset = 0.5 * span;
+  const auto loadAt = [&](double t, bool stepped) {
+    auto out = rampLoad;
+    for (auto i = std::size_t{0}; i < out.size(); ++i) {
+      out[i] = out[i] * t / span + (stepped ? stepLoad[i] : 0.0);
+    }
+    return out;
+  };
+  const auto forcing = Evolution::Forcing{
+      .directLoad = [&](double t) { return loadAt(t, t >= onset); },
+      .directLoadBefore = [&](double t) { return loadAt(t, t > onset); }};
+
+  auto gaps = std::map<std::string, std::vector<double>>{};
+  for (const auto steps : {8, 16, 32}) {
+    const auto times = OnsetGrid(steps, span, steps / 2);
+    const auto left = static_cast<std::size_t>(steps / 2);
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].displacementDual = gU;
+    measurements[times.size() - 1].tangentialPotentialDual = gV;
+    measurements[left].displacementDual = gLeft;
+    measurements[left + 1].displacementDual = gRight;
+    Evolution evolution(op, setup.solver, setup.state,
+                        {.rtol = 1e-12, .record_stride = 1});
+    const auto trajectory =
+        ForwardTrajectory::FromSnapshots(evolution.Run(times, forcing));
+    auto results = std::map<AdjointMethod, std::map<std::string, double>>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto kernels =
+          AdjointSolver(evolution, {.method = method,
+                                    .rtol = 1e-12,
+                                    .material_kernels = true})
+              .FirstOrderKernels(times, measurements, &trajectory);
+      // the zero-length interval's quelled kernel is the thickness
+      // kernels' tail from the right node on
+      auto tail = std::vector<double>(probe.size(), 0.0);
+      for (auto n = left + 1; n < times.size(); ++n) {
+        for (auto i = std::size_t{0}; i < tail.size(); ++i) {
+          tail[i] += kernels.thickness[n][i];
+        }
+      }
+      EXPECT_LT(MaxDiff(kernels.rate[left], tail), 1e-12 * MaxAbs(tail));
+      results[method] = {
+          {"itau", VolumePairing(mesh, kernels.itauKernel[0], ditau[0])},
+          {"kappa",
+           VolumePairing(op.Points(), mesh, kernels.kappaKernel, atPoints.kappa)},
+          {"mu", VolumePairing(op.Points(), mesh, kernels.muKernel, atPoints.mu)},
+          {"load left", setup.Surface(kernels.directLoadKernels[left], probe)},
+          {"load right",
+           setup.Surface(kernels.directLoadKernels[left + 1], probe)},
+          {"jump", setup.Surface(kernels.rate[left], probe)}};
+    }
+    for (const auto& [what, exact] : results[AdjointMethod::Discrete]) {
+      ASSERT_NE(exact, 0.0) << what;
+      gaps[what].push_back(
+          std::abs(results[AdjointMethod::Continuous][what] - exact) /
+          std::abs(exact));
+    }
+  }
+  for (const auto& [what, g] : gaps) {
+    std::cout << std::format("[continuous across a load jump] {}: {:.2e} "
+                             "{:.2e} {:.2e}\n",
+                             what, g[0], g[1], g[2]);
+    // second order through the jump: measured 1.5e-3, 3.9e-4, 9.8e-5
+    // (itau), 3.6e-4 to 2.3e-5 (kappa), 1.0e-4 to 6.6e-6 (mu), 6.4e-3 to
+    // 5.3e-4 and 3.7e-2 to 1.8e-3 (the load's left and right sides, each
+    // led by its measurement's lump), 1.4e-3 to 9.1e-5 (the jump's
+    // quelled kernel)
+    EXPECT_LT(g[2], 0.01) << what;
+    EXPECT_GT(g[0] / g[1], 3.0) << what << ": " << g[0] << " " << g[1];
+    EXPECT_GT(g[1] / g[2], 3.0) << what << ": " << g[1] << " " << g[2];
+  }
+}

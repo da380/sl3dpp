@@ -27,7 +27,7 @@ elastic moduli (3D), forward and adjoint.
 | Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
 | Second-order adjoints, 1D and 3D: the Hessian's action on a direction, as the derivatives of the kernels | `Adjoint.hpp`, `Adjoint3D.hpp` (`SecondOrderKernels`) |
 | The 3D static problem as a program: `sl3d solve` without an `ocean` block solves an elastic Earth's response, radial or laterally heterogeneous, to a prescribed load (a sum of caps, disks, surface-file fields and coefficient tables) and tide, with no ocean and the rotational feedback as asked (the lateral moduli read from a planetmodel model file's `mu` and `kappa` by `io::ModelModuli`, written from a radial model by `io::WriteModuli`), as a run of one node of the evolutions over MPI ranks, and writes the surface response, the radial model's beside it, the surface coefficients as a cross-code exchange table and the response inside the body as a model file (`io::WriteNodeFields`, with `io::ResponseFieldsAtNodes`) for planetmodel's cutaways | `apps/SolveCommand.cpp`, `apps/Forcing.hpp`, `apps/Outputs.hpp`, `io/ModelModuli.hpp`, `io/KernelWriter.hpp` |
-| The viscoelastic response to a prescribed forcing as a program: `sl3d solve` in the quasi-static problem (a `times` block) without an `ocean` block steps a radial or laterally heterogeneous Maxwell Earth (the 3D viscosity read from a model file by `io::ModelViscosity`, the lateral moduli as above) through time, with no ocean, under loads, a tide and seismic sources given as sums of terms with piecewise-linear amplitude histories and surface-file fields on a time axis, its nodes dates before present or times on the run's own clock in a unit, by the radial evolution or by `Evolution3D` over MPI ranks, and writes the surface response at every node, the radial reference model's beside it, and an exchange table per node | `apps/SolveCommand.cpp`, `apps/Forcing.hpp`, `apps/Blocks.hpp` |
+| The viscoelastic response to a prescribed forcing as a program: `sl3d solve` in the quasi-static problem (a `times` block) without an `ocean` block steps a radial or laterally heterogeneous Maxwell Earth (the 3D viscosity read from a model file by `io::ModelViscosity`, the lateral moduli as above) through time, with no ocean, under loads, a tide and seismic sources given as sums of terms with amplitude histories (piecewise linear, or steps read by `previous`) and surface-file fields on a time axis, its nodes dates before present or times on the run's own clock in a unit, by the radial evolution or by `Evolution3D` over MPI ranks, and writes the surface response at every node, the radial reference model's beside it, and an exchange table per node | `apps/SolveCommand.cpp`, `apps/Forcing.hpp`, `apps/Blocks.hpp` |
 | The sea level equation as a program: `sl3d solve` takes a state, the sea level and the ice on the body at one instant (the `ocean` block, optional: without it the body has no ocean, `GRDSolver::NoOceanState`, and the run is the solid body's response of the two rows above), and a forcing of any mix of an ice change, the sum of terms of thickness histories, thickness-change files and Gaussian caps (`forcing.ice_change`, the ice at a time the state's plus the change there; with an ocean alone), surface loads that state their place in the water budget and whether they move the solid surface, a prescribed tide and seismic sources, under frozen or migrating shorelines; it solves, in the static problem, the problem at the state's date on the elastic Earth as a run of one node of the evolutions on a rheology with no relaxation (on the radial model, or, under lateral moduli, in 3D over MPI ranks with the radial model's answer beside it), or, in the quasi-static problem (a `times` block), GIA through time from the state at an end of the window (the initial sea level read or, under the ice alone, calibrated), on the radial model or, under a lateral viscosity or lateral moduli (`Viscoelastic3D::Options::moduli`), in 3D over MPI ranks, restartable from disk checkpoints; `kernel` reads the same config, with a `kernels` block, for its forward run and writes the measurements' kernels in the ice, surface loads, a tide, the seismic sources' moments, the viscosity and the moduli by the library's derivative classes | `apps/SolveCommand.cpp`, `apps/Common.hpp`, `apps/KernelCommand.cpp`, `apps/Blocks.hpp` |
 | Material derivatives and kernels in κ and μ: the static problem's variation operator, Love-number derivatives and kernels; its first-order (Born) response to lateral δμ(x), δκ(x), the full solve of the laterally heterogeneous static problem (loads and body tides, preconditioned conjugate gradients on the reference systems) and the lateral kernels of a surface measurement at the heterogeneous model; the time-stepped tangent-linear runs along the moduli; the κ and μ kernels of the evolutions by both sweeps (discrete exact, continuous at the commute level), and their derivatives in the second-order sweeps | `Material.hpp` (`MaterialDirection`, `Variation`), `DegreeOperator.hpp` (`ApplyVariation`, `MaterialGradient`), `LoveNumbers.hpp` (`ComputeLoveNumberDerivatives`, `ComputeLoveNumberKernels`), `ElasticPerturbation3D.hpp` (`SolveLateral`, `TideForces`), `TangentLinear.hpp`, `TangentLinear3D.hpp` (`material`), `Adjoint.hpp`, `Adjoint3D.hpp` (`Options::material_kernels`) |
 | The 3D evolution (its steps' lateral solves and the static problem on lateral moduli among it), its continuous adjoint and discrete transpose, its tangent-linear runs and the material kernels distributed over contiguous radial segments, one per MPI rank (optional) | `Collectives.hpp`, `Distributed.hpp`, [radial-partitioning.md](radial-partitioning.md) |
@@ -376,15 +376,29 @@ longer free, an unphysical effect.
   forcing's left limit, takes the jump, and integrates on; both nodes are
   recorded, and the derivative runs take the pair as an ordinary step
   (adjoints.md §20). The forcing's left limits are callbacks beside its
-  plain ones (`Forcing::sourcesBefore`, `stressGlutsBefore`), read at the
-  first node of a pair (`detail::AtNode`, the one place a march decides
-  which side a node reads); the surface loads, the ice and the tide are
-  continuous in every use and take none. The first node is the right
-  limit at its time already (the instantaneous elastic response) and is
-  not repeated, except as a resumed run's checkpoint node. `sl3d` puts
-  such a pair at every seismic onset after its window's start: a node of
-  its window at the onset repeated, or, at an onset between two nodes, a
-  pair of its own there, which it steps and records and does not write
+  plain ones, read at the first node of a pair (`detail::AtNode`, the one
+  place a march decides which side a node reads): the sources'
+  (`Forcing::sourcesBefore`, `stressGlutsBefore`) and the surface terms'
+  (`directLoadBefore`, `directLoadOutsideWaterBudgetBefore`,
+  `solidSurfaceChangeBefore`, `tideBefore`, and a migrating run's
+  `iceThicknessBefore`, its ice thickness itself an argument of
+  `RunMigrating` of its own: a left limit goes through the forcing, and a
+  run with one takes the overloads that take a forcing). A left limit
+  absent is its term continuous there; one without its term, or the ice
+  thickness's under frozen shorelines, is refused. A jump of the ice under
+  migrating shorelines is the nonlinear sea level equation on the
+  unrelaxed body with m held, as at any node; it may fail to converge,
+  which the node's snapshot reports (its passes and last change). Under
+  Sdirk2 a stage inside a step reads the plain callbacks at its time,
+  where the forcing is continuous, and the step's end node its read: the
+  left limit at a pair's first node, the right at its second. The first
+  node is the right limit at its time already (the instantaneous elastic
+  response) and is not repeated, except as a resumed run's checkpoint
+  node. `sl3d` puts such a pair at every jump of its forcing after its
+  window's start: a seismic onset, a time of a history read by
+  `previous`, a stored time of a file read by `previous` or of `interval`
+  support; a node of its window there repeated, or, between two nodes, a
+  pair of its own, which it steps and records and does not write
   (`StepGridOf` in `apps/Common.hpp`).
 
 ## 6. The 3D coupling

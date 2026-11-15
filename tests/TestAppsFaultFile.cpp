@@ -364,6 +364,103 @@ TEST_F(FaultFileTest, SlipOnATimeAxisIsItsHistory) {
   EXPECT_EQ(before, 0.0);
 }
 
+TEST_F(FaultFileTest, PreviousSlipJumpsAtItsStoredTimes) {
+  // A file whose slip is read by `previous` (the twin's slip none from 0
+  // yr, whole from 300 yr, doubled from 1000 yr, held after its span):
+  // each stored time inside
+  // the window is a jump of the forcing, the node repeated where one falls
+  // there and a pair of the library's own between nodes. The run is the
+  // static twin under the same factors as a history read by `previous`, to
+  // rounding; it is the same at the window's nodes wherever they fall
+  // against the stored times, where reading the slip at the nodes alone
+  // spread each jump over the step that holds it (the factors linear
+  // between the straddling nodes); the same slip read as `linear` is
+  // another history.
+  static_cast<void>(Ball());
+  namespace f = test::fault_fixtures;
+  const auto years = pm::Scales(
+      {.length = 1.0, .mass = 1.0, .time = f::kYear, .temperature = 1.0});
+  for (const auto& [name, rule] : {std::pair{"steps", pm::TimeRule::Previous},
+                                   std::pair{"ramps", pm::TimeRule::Linear}}) {
+    f::Write(dir_ / (std::string{"fault_"} + name + ".nc"),
+             pm::Fault({f::Plane(f::RakeSlip(
+                           {{90.0, 0.0}, {90.0, f::kSlip}, {90.0, 2.0 * f::kSlip}}))},
+                       pm::TimeSupport::Node, rule,
+                       std::vector<double>{0.0, 300.0, 1000.0}, years),
+             "the twin plane, its slip stepping at 300 and 1000 yr");
+  }
+  const auto run = [&](const std::string& name, const std::string& at,
+                       const std::string& term) {
+    const auto config = Write(name + ".json", std::format(R"({{
+        "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+        "discretisation": {{"lmax": 8}}, "rotation": "none",
+        "times": {{"unit": "yr", "at": [{}]}},
+        "forcing": {{"seismic": [{{{}}}]}}, "output": {{"surface": "out/{}.nc"}}}})",
+                                                          at, term, name));
+    static_cast<void>(app::RunSolve(config));
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  // the largest departure of two runs' fields at pairs of nodes
+  const auto departure = [](const pm::SurfaceFile& a, const pm::SurfaceFile& b,
+                            const std::vector<std::pair<std::size_t, std::size_t>>& nodes) {
+    auto out = 0.0;
+    for (const auto& [i, j] : nodes) {
+      for (const auto* name : {"displacement", "potential", "toroidal_potential"}) {
+        const auto x = Node(a, name, i);
+        const auto y = Node(b, name, j);
+        auto diff = 0.0, scale = 0.0;
+        for (auto k = std::size_t{0}; k < y.size(); ++k) {
+          diff = std::max(diff, std::abs(x[k] - y[k]));
+          scale = std::max(scale, std::abs(y[k]));
+        }
+        out = std::max(out, scale > 0.0 ? diff / scale : diff);
+      }
+    }
+    return out;
+  };
+  const auto onNodes = std::string{"0, 100, 300, 600, 1000, 1500"};
+  const auto straddling = std::string{"0, 100, 600, 1500"};
+  const auto hold = std::string{R"(, "outside_span": "hold")"};
+  const auto steps =
+      run("steps", onNodes, FileTerm("fault_steps.nc", "4, 2", hold));
+  const auto factor =
+      run("factor", onNodes,
+          FileTerm("fault_plane.nc") +
+              R"(, "history": [[0, 0], [300, 1], [1000, 2]], "time_interpolation": "previous")");
+  const auto straddled = run("straddled", straddling,
+                             FileTerm("fault_steps.nc", "4, 2", hold));
+  const auto spread =
+      run("spread", straddling,
+          FileTerm("fault_plane.nc") + R"(, "history": [[100, 0], [600, 1], [1500, 2]])");
+  const auto ramps =
+      run("ramps", onNodes, FileTerm("fault_ramps.nc", "4, 2", hold));
+  ASSERT_EQ(steps.time->size(), 6u);
+  ASSERT_EQ(straddled.time->size(), 4u);
+  const auto every = std::vector<std::pair<std::size_t, std::size_t>>{
+      {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}};
+  const auto common = std::vector<std::pair<std::size_t, std::size_t>>{
+      {1, 1}, {2, 3}, {3, 5}};
+  const auto twin = departure(factor, steps, every);
+  const auto after = departure(straddled, steps, common);
+  const auto before = departure(spread, steps, common);
+  const auto linear = departure(ramps, steps, {{2, 2}, {3, 3}, {4, 4}, {5, 5}});
+  std::cout << std::format(
+      "[previous slip] the twin's history {:.3e}; nodes straddling the stored "
+      "times {:.3e}; spread over their steps {:.3e}; read as linear {:.3e}\n",
+      twin, after, before, linear);
+  // measured 0 (the twin), 0 (straddling), 0.13 spread, 1.5 linear
+  RecordProperty("twin", std::format("{:.3e}", twin));
+  RecordProperty("straddled", std::format("{:.3e}", after));
+  RecordProperty("spread", std::format("{:.3e}", before));
+  RecordProperty("linear", std::format("{:.3e}", linear));
+  EXPECT_LT(twin, 1e-11);
+  EXPECT_LT(after, 1e-10);
+  EXPECT_GT(before, 1e-2);
+  EXPECT_GT(linear, 1e-2);
+  // nothing moves before the first slip
+  for (const auto v : Node(steps, "displacement", 1)) EXPECT_EQ(v, 0.0);
+}
+
 TEST_F(FaultFileTest, StoredTimesAreReadThroughTheRunsUnits) {
   // A file served at its stored times alone (time rule `none`, its axis in
   // years: no slip at -1000 yr, the twin's at -999 yr) is read at them by a

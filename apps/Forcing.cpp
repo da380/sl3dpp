@@ -109,20 +109,54 @@ void RefuseOtherClock(const Json& item, const TermClock& clock, bool timed,
   }
 }
 
+/// The member stating how a term's amplitude history is read between its
+/// times, named as a file's time rule is (`time_interpolation`).
+constexpr auto kHistoryRule = std::string_view{"time_interpolation"};
+
+/// A history's time rule (kHistoryRule), planetmodel's names
+/// (planetmodel::TIME_METHODS): `linear`, the default, or `previous`; its
+/// third, `none` (values at the stored times alone), is not built for a
+/// history, and any other word is refused.
+planetmodel::TimeRule ReadHistoryRule(const Json& item) {
+  if (!Has(item, kHistoryRule)) return planetmodel::TimeRule::Linear;
+  const auto& member = item.At(kHistoryRule);
+  const auto rule = planetmodel::TimeRuleNamed(String(item, kHistoryRule));
+  if (!rule) {
+    Fail(member, "is not a time rule: \"linear\" (the default) or "
+                 "\"previous\"");
+  }
+  if (*rule == planetmodel::TimeRule::None) {
+    Fail(member,
+         "is \"none\", a rule serving a history at its listed times alone, "
+         "which an amplitude history does not take (not built): give "
+         "\"linear\" or \"previous\"");
+  }
+  return *rule;
+}
+
 /// A term's amplitude history under its form's name (`history_kyr_bp` or
-/// `history`): refused without a `times` block (`timed`), which a forcing
-/// fixed in time cannot take.
+/// `history`), read by its rule (kHistoryRule): refused without a `times`
+/// block (`timed`), which a forcing fixed in time cannot take.
 AmplitudeHistory ReadHistory(const Json& item, bool timed,
                              const TermClock& clock = {}) {
   auto out = AmplitudeHistory{};
   RefuseOtherClock(item, clock, timed);
   const auto name = NamesOf(clock.form).history;
-  if (!Has(item, name)) return out;
+  if (!Has(item, name)) {
+    if (Has(item, kHistoryRule)) {
+      Fail(item.At(kHistoryRule),
+           std::format("says how an amplitude history is read, and the term "
+                       "gives none (`{}`): drop it",
+                       name));
+    }
+    return out;
+  }
   const auto& history = item.At(name);
   if (!timed) {
     Fail(history,
          std::format("is an amplitude history, which {}", kNeedsQuasiStatic));
   }
+  out.rule = ReadHistoryRule(item);
   if (clock.form == Form::Dated) {
     const auto start = clock.start_kyr_bp.value();
     out.start_kyr_bp = start;
@@ -186,6 +220,7 @@ LoadTerm ReadLoadTerm(const Json& item, const std::filesystem::path& directory,
   auto members =
       std::vector<std::string_view>(kTermKinds.begin(), kTermKinds.end());
   members.push_back(NamesOf(clock.form).history);
+  members.push_back(kHistoryRule);
   members.insert(members.end(), extra.begin(), extra.end());
   Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
@@ -355,7 +390,7 @@ TideTerm ReadTideTerm(const Json& item, int lmax, bool timed,
                       const TermClock& clock = {}) {
   auto history = ReadHistory(item, timed, clock);
   Allow(item, {"degree", "order", "amplitude_m2_s2", "imaginary_m2_s2",
-               NamesOf(clock.form).history});
+               NamesOf(clock.form).history, kHistoryRule});
   auto term = TideTerm{};
   term.history = std::move(history);
   term.degree = Integer(item, "degree");
@@ -505,7 +540,8 @@ SeismicTerm ReadSeismicTerm(const Json& item,
                             bool timed = true, const TermClock& clock = {}) {
   RefuseOtherClock(item, clock, timed);
   const auto names = NamesOf(clock.form);
-  Allow(item, {"point", "fault", "fault_file", names.onset, names.history});
+  Allow(item, {"point", "fault", "fault_file", names.onset, names.history,
+               kHistoryRule});
   const auto kinds = static_cast<int>(Has(item, "point")) +
                      static_cast<int>(Has(item, "fault")) +
                      static_cast<int>(Has(item, "fault_file"));
@@ -633,9 +669,10 @@ std::string_view NodeReadOf(const LoadTerm& term) {
 std::vector<double> FieldValues(const io::FieldHistory& history,
                                 const LoadTerm& term, const Json& field,
                                 double time, std::string_view where,
-                                std::string_view when = {}) {
+                                std::string_view when = {},
+                                bool before = false) {
   auto values = ReadValues(term.field, history, field, time, where,
-                           AxisUnitOf(term));
+                           AxisUnitOf(term), before);
   if (!std::ranges::all_of(values, [](double v) { return std::isfinite(v); })) {
     Fail(field.At("file"),
          std::format("holds a field \"{}\" that is not finite everywhere on "
@@ -710,13 +747,19 @@ std::string Pairs(const AmplitudeHistory& history) {
 /// where it was given as dates, and on a run's own clock with the clock's
 /// unit where it was given on one.
 std::string History(const AmplitudeHistory& history) {
+  // the rule where it is not the default
+  const auto rule =
+      history.rule == planetmodel::TimeRule::Linear
+          ? std::string{}
+          : std::format(", {} {}", kHistoryRule,
+                        planetmodel::TimeRuleName(history.rule));
   if (history.unit) {
-    return std::format(", history in {} {}", history.unit->name,
-                       Pairs(history));
+    return std::format(", history in {} {}{}", history.unit->name,
+                       Pairs(history), rule);
   }
   auto dated = history;
   for (auto& t : dated.times) t = history.start_kyr_bp.value_or(0.0) - t;
-  return ", history_kyr_bp " + Pairs(dated);
+  return ", history_kyr_bp " + Pairs(dated) + rule;
 }
 
 /// The words of a line, split at white space.
@@ -750,8 +793,21 @@ std::optional<T> Parse(std::string_view word) {
 
 }  // namespace
 
+double AmplitudeHistory::Tolerance(double t) {
+  return 1e-12 * (1.0 + std::abs(t));
+}
+
 double AmplitudeHistory::At(double t) const {
   if (times.empty()) return 1.0;
+  if (rule == planetmodel::TimeRule::Previous) {
+    // the latest time not after t, a time within the tolerance of a listed
+    // one being that one
+    auto i = std::size_t{0};
+    for (auto k = std::size_t{1}; k < times.size(); ++k) {
+      if (t >= times[k] - Tolerance(times[k])) i = k;
+    }
+    return factors[i];
+  }
   if (t <= times.front()) return factors.front();
   if (t >= times.back()) return factors.back();
   // times[i] <= t < times[i + 1]
@@ -759,6 +815,20 @@ double AmplitudeHistory::At(double t) const {
       std::ranges::upper_bound(times, t) - times.begin() - 1);
   const auto w = (t - times[i]) / (times[i + 1] - times[i]);
   return factors[i] + w * (factors[i + 1] - factors[i]);
+}
+
+double AmplitudeHistory::Before(double t) const {
+  if (rule == planetmodel::TimeRule::Previous) {
+    for (auto k = std::size_t{1}; k < times.size(); ++k) {
+      if (std::abs(t - times[k]) <= Tolerance(times[k])) return factors[k - 1];
+    }
+  }
+  return At(t);
+}
+
+std::vector<double> AmplitudeHistory::Jumps() const {
+  if (rule != planetmodel::TimeRule::Previous || times.size() < 2) return {};
+  return {times.begin() + 1, times.end()};
 }
 
 namespace {
@@ -773,7 +843,7 @@ double SeismicTerm::FactorAt(double t) const {
 
 double SeismicTerm::FactorBefore(double t) const {
   if (onset && t <= *onset + OnsetTolerance(*onset)) return 0.0;
-  return history.At(t);
+  return history.Before(t);
 }
 
 bool SeismicTerm::OnsetAt(double t) const {
@@ -820,13 +890,24 @@ double FileDateOf(const SeismicTerm& term, const planetmodel::Fault& fault,
 /// within the tolerance the program reads every file's time axis with
 /// (SpanTolerance, planetmodel's `time_rtol` being kAxisRtol) of a stored
 /// time read as that time, beyond the span held or refused as the term
-/// says. Throws planetmodel::Error where the file refuses the time.
-planetmodel::TimeRows RowsOf(const SeismicTerm& term, double t) {
+/// says. With `before`, the left limit: at a jump of a `previous` file
+/// (FaultFileJumps), the slice of the stored time before. Throws
+/// planetmodel::Error where the file refuses the time.
+planetmodel::TimeRows RowsOf(const SeismicTerm& term, double t,
+                             bool before = false) {
   const auto& fault = PlacedOf(term).fault;
   if (fault.Support() != planetmodel::TimeSupport::Node) {
     return fault.Rows(std::nullopt);
   }
-  return fault.Rows(FileDateOf(term, fault, t),
+  auto date = FileDateOf(term, fault, t);
+  if (before && fault.TimeInterpolation() == planetmodel::TimeRule::Previous) {
+    const auto& axis = *fault.Time();
+    const auto tolerance = planetmodel::detail::TimeTolerance(axis, kAxisRtol);
+    for (auto k = std::size_t{1}; k < axis.size(); ++k) {
+      if (std::abs(date - axis[k]) <= tolerance) date = axis[k - 1];
+    }
+  }
+  return fault.Rows(date,
                     {.extrapolation = term.outside == OutsideSpan::Hold
                                           ? planetmodel::Extrapolation::Hold
                                           : planetmodel::Extrapolation::Refuse,
@@ -835,12 +916,14 @@ planetmodel::TimeRows RowsOf(const SeismicTerm& term, double t) {
 
 /// A fault file term's sources at time t of the terms' clock: at each
 /// point the slices' tensors under the weights the file's reading at that
-/// time gives them (FaultSources::MomentsAt).
-std::vector<PointSource> FileSourcesOf(const SeismicTerm& term, double t) {
+/// time gives them (FaultSources::MomentsAt); with `before`, their left
+/// limits (RowsOf).
+std::vector<PointSource> FileSourcesOf(const SeismicTerm& term, double t,
+                                       bool before = false) {
   const auto& sources = PlacedOf(term).sources;
   const auto moments = [&] {
     try {
-      return sources.MomentsAt(RowsOf(term, t));
+      return sources.MomentsAt(RowsOf(term, t, before));
     } catch (const planetmodel::Error& error) {
       throw std::runtime_error(
           std::format("{}: the run reads it at {:g} {} on the terms' clock: {}",
@@ -875,6 +958,25 @@ std::vector<BodyPoint> SeismicPointsOf(const SeismicTerm& term,
     case SeismicTerm::Kind::FaultFile:
       out = PlacedOf(term).sources.points;
       break;
+  }
+  return out;
+}
+
+ClockJumps FaultFileJumps(const SeismicTerm& term) {
+  auto out = ClockJumps{};
+  if (term.kind != SeismicTerm::Kind::FaultFile) return out;
+  const auto& fault = PlacedOf(term).fault;
+  if (fault.Support() != planetmodel::TimeSupport::Node ||
+      fault.TimeInterpolation() != planetmodel::TimeRule::Previous) {
+    return out;
+  }
+  // the file's axis on the terms' clock: FileDateOf's inverse
+  const auto& axis = *fault.Time();
+  const auto toClock = fault.GetScales().Time() / term.unit.seconds;
+  out.tolerance =
+      planetmodel::detail::TimeTolerance(axis, kAxisRtol) * toClock;
+  for (auto k = std::size_t{1}; k < axis.size(); ++k) {
+    out.times.push_back(term.time_origin + axis[k] * toClock);
   }
   return out;
 }
@@ -965,7 +1067,7 @@ std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
     } else if (term.kind == SeismicTerm::Kind::Fault) {
       sources = PlanarSourcesOf(term, surfaceRadius);
     } else {
-      sources = FileSourcesOf(term, t);
+      sources = FileSourcesOf(term, t, before);
     }
     for (auto& source : sources) {
       for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
@@ -1113,7 +1215,7 @@ void TimedLoads::CheckCovers(std::span<const double> times) const {
   }
 }
 
-BuiltLoads TimedLoads::At(double t) const {
+BuiltLoads TimedLoads::At(double t, bool before) const {
   const auto& grid = *grid_;
   auto out = BuiltLoads{.terms = {}, .load = grid.ZeroField()};
   for (auto k = std::size_t{0}; k < terms_.size(); ++k) {
@@ -1126,14 +1228,15 @@ BuiltLoads TimedLoads::At(double t) const {
                           block_->At("load").At(k).At("field"),
                           (t - term.time_origin) * term.unit.seconds,
                           NodeReadOf(term),
-                          std::format(" at {:g} {}", t, term.unit.name));
+                          std::format(" at {:g} {}", t, term.unit.name),
+                          before);
       coefficients = grid.Expand(field);
     } else {
       field = pattern.field;
       coefficients = pattern.coefficients;
     }
     if (!term.history.Empty()) {
-      const auto factor = term.history.At(t);
+      const auto factor = before ? term.history.Before(t) : term.history.At(t);
       for (auto& v : field) v *= factor;
       for (auto& c : coefficients) c *= factor;
     }
@@ -1314,6 +1417,7 @@ IceChangeTerm ReadIceChangeTerm(const Json& item,
   auto members = std::vector<std::string_view>(kIceChangeKinds.begin(),
                                                kIceChangeKinds.end());
   members.push_back(history);
+  members.push_back(kHistoryRule);
   Allow(item, std::span(members));
   const auto kinds = std::ranges::count_if(
       kIceChangeKinds,
@@ -1334,6 +1438,12 @@ IceChangeTerm ReadIceChangeTerm(const Json& item,
       Fail(item.At(history),
            "is an amplitude history, which a cap of ice change alone takes: "
            "a `thickness` or `change` term's change is its file's");
+    }
+    if (Has(item, kHistoryRule)) {
+      Fail(item.At(kHistoryRule),
+           "is the time rule of an amplitude history, which a cap of ice "
+           "change alone takes: a `thickness` or `change` file is read by "
+           "its field's own rule");
     }
     const auto& file = item.At(term.Member());
     if (thickness && forwards) {
@@ -1577,11 +1687,13 @@ std::string Describe(const SurfaceLoadTerm& term) {
 }
 
 std::vector<std::complex<double>> TideAt(std::span<const TideTerm> tide,
-                                         const SurfaceGrid& grid, double t) {
+                                         const SurfaceGrid& grid, double t,
+                                         bool before) {
   auto out = grid.ZeroCoefficients();
   for (const auto& term : tide) {
+    const auto factor = before ? term.history.Before(t) : term.history.At(t);
     out[SurfaceGrid::Index(term.degree, term.order)] +=
-        term.history.At(t) * Complex{term.amplitude, term.imaginary};
+        factor * Complex{term.amplitude, term.imaginary};
   }
   return out;
 }
@@ -1607,9 +1719,9 @@ void SurfaceLoads::CheckCovers(std::span<const double> times) const {
   timed_.CheckCovers(times);
 }
 
-SurfaceLoads::Node SurfaceLoads::At(double t) const {
+SurfaceLoads::Node SurfaceLoads::At(double t, bool before) const {
   const auto& grid = *grid_;
-  auto built = timed_.At(t);
+  auto built = timed_.At(t, before);
   auto inside = std::vector<Complex>{}, outside = std::vector<Complex>{};
   auto layer = std::vector<Complex>{};
   auto add = [&](std::vector<Complex>& to, const std::vector<Complex>& term,

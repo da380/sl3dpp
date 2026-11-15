@@ -2258,3 +2258,128 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
   EXPECT_LT(coarse.second, 0.5);
   EXPECT_GT(coarse.second / fine.second, 2.0);
 }
+
+TEST(MigratingDerivatives, AcrossAnIceJump) {
+  // A melting marine cap whose melt steps at a repeated node, its left
+  // limit the ice before the step (Forcing::iceThicknessBefore), the start
+  // solved: the zero-length step is the nonlinear equation as at any node,
+  // and the derivative runs take it as an ordinary step of zero length
+  // about each side's own ocean function. The discrete tangent along the
+  // relaxation times is the migrating run's derivative (central
+  // differences flipping no cell, Richardson to 1e-6) and the discrete
+  // sweep's kernel pairs with it (1e-8); along the ice thickness node by
+  // node, the pair's two sides apart, the discrete thickness kernels pair
+  // with the tangent run (1e-8); and the discrete second-order sweep along
+  // directions u and w in the thickness and the relaxation times gives
+  // <H u, w> = <H w, u> = the second-order run's <g, F''[u, w]>.
+  auto setup = Scene::Make(1e21);
+  ViscoelasticOperator op(setup.rheology, kLmax);
+  const auto cap = MarineCap::Make(setup, 5);
+  auto times = cap.times;
+  times.insert(times.begin() + 2, times[1]);  // node 1 repeated
+  const auto nodes = times.size();
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  // the cap's ice, two fifths of the initial cap gone at a stroke at the
+  // pair
+  auto ice = std::vector<std::vector<double>>{};
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    auto at = cap.Thickness(times[n]);
+    if (n >= 2) {
+      for (auto i = std::size_t{0}; i < at.size(); ++i) {
+        at[i] = std::max(0.0, at[i] - 0.4 * cap.ice0[i]);
+      }
+    }
+    ice.push_back(std::move(at));
+  }
+  const auto sides = ByNode(times, ice);
+  const auto forcing = Evolution::Forcing{.iceThicknessBefore = sides.before};
+  std::mt19937 rng(149);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[1].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
+  measurements[2].displacementDual = setup.Smooth(rng, 0.7);
+  measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  const Evolution::Options options{
+      .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
+  Evolution evolution(op, setup.solver, state, options);
+  const auto run = evolution.RunMigrating(times, sides.plain, forcing);
+  const auto oceans = OceanFunctionsOf(run);
+  ASSERT_NE(oceans[2], oceans[1]);  // the step moves the shorelines
+  const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+  auto objective = [&](const ViscoelasticOperator& at) {
+    Evolution trial(at, setup.solver, state, options);
+    const auto snaps = trial.RunMigrating(times, sides.plain, forcing);
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      EXPECT_TRUE(snaps[n].converged) << "node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+    }
+    return Objective(setup, snaps, measurements);
+  };
+  const auto ditau = setup.DeltaItau(0.1);
+  const auto kernels =
+      AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
+          .FirstOrderKernels(times, measurements, &trajectory, oceans);
+  TangentLinearSolver tangent(
+      evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+  const auto alongItau = Objective(
+      setup, tangent.Run(times, TangentPerturbation{.itau = ditau}, &trajectory, oceans),
+      measurements);
+  const auto fd = Difference(
+      [&](double e) { return objective(MovedItau(setup, e, ditau)); }, 0.004,
+      alongItau);
+  std::cout << std::format("[ice jump] itau: ratio {:.3f}, Richardson gap {:.2e}\n",
+                           fd.ratio, Gap(fd.richardson, alongItau));
+  EXPECT_NEAR(fd.richardson, alongItau, 1e-6 * std::abs(alongItau));
+  EXPECT_NEAR(VolumePairing(setup.material.Mesh(), kernels.itauKernel[0], ditau[0]),
+              alongItau, 1e-8 * std::abs(alongItau));
+
+  // the ice thickness node by node, zero at the first
+  auto perNode = [&](double amplitude) {
+    auto out = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < nodes; ++n) {
+      out.push_back(setup.Smooth(rng, amplitude));
+      if (n == 0) out.back().assign(out.back().size(), 0.0);
+    }
+    return out;
+  };
+  TangentPerturbation u, w;
+  u.iceThickness = perNode(0.1 * setup.Metre());
+  u.itau = ditau;
+  w.iceThickness = perNode(0.1 * setup.Metre());
+  w.itau = setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+  const auto alongIce = Objective(
+      setup,
+      tangent.Run(times, TangentPerturbation{.iceThickness = u.iceThickness},
+                  &trajectory, oceans),
+      measurements);
+  auto paired = 0.0;
+  for (auto n = std::size_t{0}; n < nodes; ++n) {
+    paired += setup.Surface(kernels.thickness[n], u.iceThickness[n]);
+  }
+  ASSERT_NE(alongIce, 0.0);
+  EXPECT_NEAR(paired, alongIce, 1e-8 * std::abs(alongIce));
+
+  // second order
+  const auto runU = tangent.Run(times, u, &trajectory, oceans);
+  const auto runW = tangent.Run(times, w, &trajectory, oceans);
+  AdjointSolver adjoint(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12});
+  const auto alongU =
+      adjoint.SecondOrderKernels(times, measurements, runU, u.itau, trajectory, oceans)
+          .second;
+  const auto alongW =
+      adjoint.SecondOrderKernels(times, measurements, runW, w.itau, trajectory, oceans)
+          .second;
+  const auto uw = PairingOf(setup, op, alongU, w);
+  const auto wu = PairingOf(setup, op, alongW, u);
+  SecondOrderDirection direction;
+  direction.itauU = u.itau;
+  direction.itauV = w.itau;
+  const auto forward = Objective(
+      setup, tangent.RunSecondOrder(times, runU, runW, direction, &trajectory, oceans),
+      measurements);
+  std::cout << std::format(
+      "[ice jump] Hessian: symmetry gap {:.2e}, against the second-order run {:.2e}\n",
+      Gap(wu, uw), Gap(uw, forward));
+  ASSERT_NE(forward, 0.0);
+  EXPECT_NEAR(uw, wu, 1e-9 * std::abs(uw));
+  EXPECT_NEAR(uw, forward, 1e-9 * std::abs(forward));
+}

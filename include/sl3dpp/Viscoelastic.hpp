@@ -471,9 +471,6 @@ class ViscoelasticOperator {
   /// potential measurements. Held as UnitResponses' are.
   [[nodiscard]] const std::vector<double>& SplitUnitResponses(Flavour* flavour,
                                                               int l) const;
-  void AddChannels(std::vector<double>& x, int l, Flavour* flavour, double t,
-                   const LoadCallable& load, const LoadCallable& tide,
-                   int ncols) const;
   [[nodiscard]] std::map<int, std::vector<double>> StartStrain(
       const ViscoelasticState& state, const LoadCallable& load,
       const LoadCallable& tide) const;

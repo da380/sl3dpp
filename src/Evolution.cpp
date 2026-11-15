@@ -156,6 +156,7 @@ std::vector<Evolution::Snapshot> Evolution::Run(
 std::vector<Evolution::Snapshot> Evolution::Run(std::span<const double> times,
                                                 const Forcing& forcing) {
   CheckTimes(times);
+  detail::CheckLeftLimits(forcing, false);
   if (!op_->Gravitating()) return MarchWithoutGravity(times, forcing, false);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, false,
@@ -166,6 +167,7 @@ std::vector<Evolution::Snapshot> Evolution::Resume(
     const Checkpoint& from, std::span<const double> times,
     const Forcing& forcing) {
   Restore(from, times);
+  detail::CheckLeftLimits(forcing, false);
   if ((forcing.sources || forcing.stressGluts) &&
       (!from.toroidal.has_value() || from.strain.empty())) {
     throw std::invalid_argument(
@@ -192,6 +194,7 @@ std::vector<Evolution::Snapshot> Evolution::RunMigrating(
     const Forcing& forcing) {
   CheckTimes(times);
   RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
+  detail::CheckLeftLimits(forcing, true);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                &iceThickness, forcing.tide ? &forcing.tide : nullptr, false,
                &forcing);
@@ -203,6 +206,7 @@ std::vector<Evolution::Snapshot> Evolution::ResumeMigrating(
     const Forcing& forcing) {
   RefuseWithoutGravity(*op_, "a run under migrating shorelines (an ocean)");
   Restore(from, times);
+  detail::CheckLeftLimits(forcing, true);
   if ((forcing.sources || forcing.stressGluts) &&
       (!from.toroidal.has_value() || from.strain.empty())) {
     throw std::invalid_argument(
@@ -261,15 +265,35 @@ std::vector<Evolution::Snapshot> Evolution::March(
   const auto stride = options_.record_stride;
   const auto lastNode = times.size() - 1;
   const bool migrating = iceThickness != nullptr;
-  // the prescribed tide, refused at any node where it has a part below
-  // degree 2 (RequireTideDegrees)
-  auto checkedTide = std::function<std::vector<std::complex<double>>(double)>{};
+  using Field = std::function<std::vector<double>(double)>;
+  using TideField = std::function<std::vector<std::complex<double>>(double)>;
+  // the surface terms' left limits (Forcing::directLoadBefore and its
+  // kin), absent where the forcing gives none
+  const auto noField = Field{};
+  const auto& loadBefore =
+      interior != nullptr ? interior->directLoadBefore : noField;
+  const auto& outsideBefore =
+      interior != nullptr ? interior->directLoadOutsideWaterBudgetBefore
+                          : noField;
+  const auto& layerBefore =
+      interior != nullptr ? interior->solidSurfaceChangeBefore : noField;
+  const auto& iceBefore =
+      interior != nullptr ? interior->iceThicknessBefore : noField;
+  // the prescribed tide and its left limit, refused at any node where
+  // either has a part below degree 2 (RequireTideDegrees)
+  auto checked = [](TideField given) {
+    return given ? TideField{[given = std::move(given)](double t) {
+      auto value = given(t);
+      RequireTideDegrees(value);
+      return value;
+    }}
+                 : TideField{};
+  };
+  auto checkedTide = TideField{};
+  const auto tideBefore =
+      checked(interior != nullptr ? interior->tideBefore : TideField{});
   if (tide != nullptr) {
-    checkedTide = [tide](double t) {
-      auto given = (*tide)(t);
-      RequireTideDegrees(given);
-      return given;
-    };
+    checkedTide = checked(*tide);
     tide = &checkedTide;
   }
 
@@ -360,36 +384,38 @@ std::vector<Evolution::Snapshot> Evolution::March(
 
   // Every term of the forcing is read at a node, or at a stage of the step
   // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
-  // place that decides which side of a repeated pair the node reads; the
-  // surface terms are continuous at every node and pass no left limit.
-  auto surfaceAt = [&](std::size_t node, const auto& term, double c = 1.0) {
-    using Callback = std::decay_t<decltype(term)>;
-    return detail::AtStage(times, node, c, term, Callback{});
+  // place that decides which side of a repeated pair the node reads: a
+  // surface term's left limit (Forcing::directLoadBefore and its kin) at
+  // the first node of a pair, where the forcing gives one.
+  auto surfaceAt = [&](std::size_t node, const auto& term, const auto& before,
+                       double c = 1.0) {
+    return detail::AtStage(times, node, c, term, before);
   };
   // The direct load at a node (none given: none), and the potential the
   // radial steps see there: the centrifugal potential of the rotation the
   // node's closure found, and the prescribed tide.
   auto directLoadAt = [&](std::size_t node, double c = 1.0) {
-    return directLoad != nullptr ? surfaceAt(node, *directLoad, c)
+    return directLoad != nullptr ? surfaceAt(node, *directLoad, loadBefore, c)
                                  : std::vector<double>(fieldSize, 0.0);
   };
   // The load outside the water budget and the layer on the solid surface
   // at a node, where the forcing gives them (empty: none).
   auto outsideAt = [&](std::size_t node, double c = 1.0) {
     return interior != nullptr
-               ? surfaceAt(node, interior->directLoadOutsideWaterBudget, c)
+               ? surfaceAt(node, interior->directLoadOutsideWaterBudget,
+                           outsideBefore, c)
                : std::vector<double>{};
   };
   auto layerAt = [&](std::size_t node, double c = 1.0) {
     return interior != nullptr
-               ? surfaceAt(node, interior->solidSurfaceChange, c)
+               ? surfaceAt(node, interior->solidSurfaceChange, layerBefore, c)
                : std::vector<double>{};
   };
   auto tideAt = [&](std::size_t node, double c = 1.0) {
-    return surfaceAt(node, *tide, c);
+    return surfaceAt(node, *tide, tideBefore, c);
   };
   auto iceAt = [&](std::size_t node, double c = 1.0) {
-    return surfaceAt(node, *iceThickness, c);
+    return surfaceAt(node, *iceThickness, iceBefore, c);
   };
   // every direct load of a node, for the radial step's own load
   auto withOutside = [&](std::vector<double> load,
@@ -575,6 +601,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
     snapshot.toroidalPotential = std::move(r.toroidalPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
+    snapshot.seaLevelIterations = r.iterations;
+    snapshot.seaLevelResidual = r.error;
     snapshot.oceanFunction = std::move(ocean);
     // The internal variables, and the strain only on request: an adjoint
     // otherwise regenerates it by one elastic solve under the recorded
@@ -735,18 +763,20 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   // projected on the loads that exert none; a balanced load's part is grid
   // error).
   // (every term read at a node, or at a stage of the step ending there,
-  // through detail::AtStage, as March's; the surface terms pass no left
-  // limit)
-  auto surfaceAt = [&](std::size_t node, const auto& term, double c) {
-    using Callback = std::decay_t<decltype(term)>;
-    return detail::AtStage(times, node, c, term, Callback{});
+  // through detail::AtStage, as March's, a surface term's left limit at
+  // the first node of a pair where the forcing gives one)
+  auto surfaceAt = [&](std::size_t node, const auto& term, const auto& before,
+                       double c) {
+    return detail::AtStage(times, node, c, term, before);
   };
   auto loadAt = [&](std::size_t node, double c = 1.0) {
     auto total = std::vector<double>(fieldSize, 0.0);
-    for (const auto* given :
-         {&forcing.directLoad, &forcing.directLoadOutsideWaterBudget}) {
+    for (const auto& [given, before] :
+         {std::pair{&forcing.directLoad, &forcing.directLoadBefore},
+          std::pair{&forcing.directLoadOutsideWaterBudget,
+                    &forcing.directLoadOutsideWaterBudgetBefore}}) {
       if (!*given) continue;
-      const auto field = surfaceAt(node, *given, c);
+      const auto field = surfaceAt(node, *given, *before, c);
       if (field.empty()) continue;
       if (field.size() != fieldSize) {
         throw std::invalid_argument("a direct load lives on the solver's grid");
@@ -754,7 +784,8 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       for (auto i = std::size_t{0}; i < fieldSize; ++i) total[i] += field[i];
     }
     if (forcing.solidSurfaceChange) {
-      const auto layer = surfaceAt(node, forcing.solidSurfaceChange, c);
+      const auto layer = surfaceAt(node, forcing.solidSurfaceChange,
+                                   forcing.solidSurfaceChangeBefore, c);
       if (!layer.empty() && layer.size() != fieldSize) {
         throw std::invalid_argument(
             "a layer's height lives on the solver's grid");

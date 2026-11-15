@@ -97,6 +97,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Run(
 std::vector<Evolution3D::Snapshot> Evolution3D::Run(
     std::span<const double> times, const Forcing& forcing) {
   CheckTimes(times);
+  detail::CheckLeftLimits(forcing, false);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, false,
                &forcing);
@@ -106,6 +107,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::Resume(
     const Checkpoint& from, std::span<const double> times,
     const Forcing& forcing) {
   Restore(from, times);
+  detail::CheckLeftLimits(forcing, false);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                nullptr, forcing.tide ? &forcing.tide : nullptr, true,
                &forcing);
@@ -123,6 +125,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::RunMigrating(
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   CheckTimes(times);
+  detail::CheckLeftLimits(forcing, true);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                &iceThickness, forcing.tide ? &forcing.tide : nullptr, false,
                &forcing);
@@ -133,6 +136,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::ResumeMigrating(
     const std::function<std::vector<double>(double)>& iceThickness,
     const Forcing& forcing) {
   Restore(from, times);
+  detail::CheckLeftLimits(forcing, true);
   return March(times, forcing.directLoad ? &forcing.directLoad : nullptr,
                &iceThickness, forcing.tide ? &forcing.tide : nullptr, true,
                &forcing);
@@ -579,33 +583,45 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   auto& ocean = coupled.ocean;
   // Every term of the forcing is read at a node, or at a stage of the step
   // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
-  // place that decides which side of a repeated pair the node reads; the
-  // surface terms are continuous at every node and pass no left limit.
-  auto surfaceAt = [&](std::size_t node, const auto& term, double c) {
-    using Callback = std::decay_t<decltype(term)>;
-    return detail::AtStage(times, node, c, term, Callback{});
+  // place that decides which side of a repeated pair the node reads: a
+  // surface term's left limit (Forcing::directLoadBefore and its kin) at
+  // the first node of a pair, where the forcing gives one.
+  using Field = std::function<std::vector<double>(double)>;
+  using TideField = std::function<std::vector<std::complex<double>>(double)>;
+  const auto noField = Field{};
+  const auto noTide = TideField{};
+  const auto& loadBefore =
+      interior != nullptr ? interior->directLoadBefore : noField;
+  const auto& tideBefore = interior != nullptr ? interior->tideBefore : noTide;
+  const auto& iceBefore =
+      interior != nullptr ? interior->iceThicknessBefore : noField;
+  auto surfaceAt = [&](std::size_t node, const auto& term, const auto& before,
+                       double c) {
+    return detail::AtStage(times, node, c, term, before);
   };
   // The forcing at a node: the direct load (none given: none) and the
   // prescribed tide, which the coupling carries through the node's passes.
   auto directLoadAt = [&](std::size_t node, double c = 1.0) {
-    return directLoad != nullptr ? surfaceAt(node, *directLoad, c)
+    return directLoad != nullptr ? surfaceAt(node, *directLoad, loadBefore, c)
                                  : std::vector<double>(fieldSize, 0.0);
   };
   auto setTide = [&](std::size_t node, double c = 1.0) {
     if (tide != nullptr) {
-      coupled.tide = surfaceAt(node, *tide, c);
+      coupled.tide = surfaceAt(node, *tide, tideBefore, c);
       RequireTideDegrees(coupled.tide);
     }
     if (interior != nullptr && interior->directLoadOutsideWaterBudget) {
       coupled.outsideGrid =
-          surfaceAt(node, interior->directLoadOutsideWaterBudget, c);
+          surfaceAt(node, interior->directLoadOutsideWaterBudget,
+                    interior->directLoadOutsideWaterBudgetBefore, c);
     }
     if (interior != nullptr && interior->solidSurfaceChange) {
-      coupled.layerGrid = surfaceAt(node, interior->solidSurfaceChange, c);
+      coupled.layerGrid = surfaceAt(node, interior->solidSurfaceChange,
+                                    interior->solidSurfaceChangeBefore, c);
     }
   };
   auto iceAt = [&](std::size_t node, double c = 1.0) {
-    return surfaceAt(node, *iceThickness, c);
+    return surfaceAt(node, *iceThickness, iceBefore, c);
   };
   // The interior sources at a node: their left limits at the first node of
   // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere

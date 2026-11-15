@@ -114,8 +114,9 @@ void CheckOutsideSpan(const FileInput& input, const io::FieldHistory& file,
 /// The tolerance the program reads every file's time axis with, relative
 /// to the larger of the axis's span and its end times' magnitudes: the
 /// scale planetmodel's readings of a time axis take their `time_rtol` on
-/// (planetmodel::TimeRowsAt, planetmodel::Fault::Rows), which is handed
-/// this value.
+/// (planetmodel::TimeRowsAt, planetmodel::Fault::Rows, io::FieldHistory),
+/// which is handed this value: a time that close to a stored time is that
+/// time, under every rule.
 inline constexpr double kAxisRtol = 1e-9;
 
 /// The tolerance at the ends of a time span (SI seconds): 1e-9 of the
@@ -148,11 +149,14 @@ inline constexpr double kAxisRtol = 1e-9;
 
 /// The input's variable at SI time `time` of its file's axis, SI, read at
 /// CoveredTime; a refusal of the file's own (a field held at its stored
-/// times alone, at another) is made at `object`'s `file`.
+/// times alone, at another) is made at `object`'s `file`. With `before`,
+/// its left limit there (io::FieldHistory::ValuesBefore): where the field
+/// jumps at the time (a `previous` rule, an `interval` field), the slice
+/// before; the right limit is the plain read.
 [[nodiscard]] std::vector<double> ReadValues(
     const FileInput& input, const io::FieldHistory& file, const Json& object,
     double time, std::string_view where,
-    const std::optional<TimeUnit>& unit = {});
+    const std::optional<TimeUnit>& unit = {}, bool before = false);
 
 /// Whether two inputs name one file of one type, which is then read once.
 [[nodiscard]] bool SameFile(const FileInput& a, const FileInput& b);

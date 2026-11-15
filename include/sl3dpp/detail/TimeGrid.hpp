@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <span>
 #include <stdexcept>
+#include <string>
 #include <type_traits>
 #include <utility>
 
@@ -67,6 +68,41 @@ template <class Callback, class Value = std::invoke_result_t<Callback, double>>
   const auto t = times[n];
   if (before && IsLeftLimit(times, n)) return before(t);
   return plain ? plain(t) : std::move(fallback);
+}
+
+/// Refuses a forcing's left limit given without its term (Evolution::
+/// Forcing, Evolution3D::Forcing), which would be read at the first node
+/// of a pair alone, and the ice thickness's under frozen shorelines
+/// (`migrating` false), whose ice is a direct load.
+template <class Forcing>
+void CheckLeftLimits(const Forcing& forcing, bool migrating) {
+  const auto refuse = [](bool given, bool term, const char* name) {
+    if (given && !term) {
+      throw std::invalid_argument(std::string{name} +
+                                  " is a left limit of a term the forcing "
+                                  "does not give");
+    }
+  };
+  refuse(static_cast<bool>(forcing.directLoadBefore),
+         static_cast<bool>(forcing.directLoad), "directLoadBefore");
+  refuse(static_cast<bool>(forcing.directLoadOutsideWaterBudgetBefore),
+         static_cast<bool>(forcing.directLoadOutsideWaterBudget),
+         "directLoadOutsideWaterBudgetBefore");
+  refuse(static_cast<bool>(forcing.solidSurfaceChangeBefore),
+         static_cast<bool>(forcing.solidSurfaceChange),
+         "solidSurfaceChangeBefore");
+  refuse(static_cast<bool>(forcing.tideBefore),
+         static_cast<bool>(forcing.tide), "tideBefore");
+  refuse(static_cast<bool>(forcing.sourcesBefore),
+         static_cast<bool>(forcing.sources), "sourcesBefore");
+  refuse(static_cast<bool>(forcing.stressGlutsBefore),
+         static_cast<bool>(forcing.stressGluts), "stressGlutsBefore");
+  if (forcing.iceThicknessBefore && !migrating) {
+    throw std::invalid_argument(
+        "iceThicknessBefore is the left limit of a migrating run's ice "
+        "thickness; under frozen shorelines the ice is a direct load, its "
+        "left limit directLoadBefore");
+  }
 }
 
 /// The time of a stage that ends at fraction c of the step ending at node

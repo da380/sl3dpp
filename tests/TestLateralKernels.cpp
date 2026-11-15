@@ -210,8 +210,12 @@ struct Case {
   std::function<std::vector<double>(double)> directLoad, outside, layer;
   std::function<std::vector<std::complex<double>>(double)> tide;
   std::function<std::vector<PointSource>(double)> sources, sourcesBefore;
-  /// A migrating run's ice thickness history (empty: frozen shorelines).
-  std::function<std::vector<double>(double)> iceThickness;
+  /// The surface terms' left limits at a repeated node (empty: none).
+  std::function<std::vector<double>(double)> directLoadBefore;
+  std::function<std::vector<std::complex<double>>(double)> tideBefore;
+  /// A migrating run's ice thickness history (empty: frozen shorelines)
+  /// and its left limit.
+  std::function<std::vector<double>(double)> iceThickness, iceThicknessBefore;
   int stride = 1;
   /// The kernels asked for; a branchless rheology has no viscosity's.
   bool viscosity = true;
@@ -227,6 +231,9 @@ Forcing ForcingOf(const Case& c) {
   f.tide = c.tide;
   f.sources = c.sources;
   f.sourcesBefore = c.sourcesBefore;
+  f.directLoadBefore = c.directLoadBefore;
+  f.tideBefore = c.tideBefore;
+  f.iceThicknessBefore = c.iceThicknessBefore;
   return f;
 }
 
@@ -484,6 +491,93 @@ TEST(LateralKernels, ZeroLateralGateAcrossAnOnset) {
   c.label = "an onset at a repeated node";
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     Gate(scene, c, method);
+  }
+}
+
+TEST(LateralKernels, ZeroLateralGateAcrossALoadJump) {
+  // A step load and a step of the tide at a repeated node beside a ramped
+  // load, their left limits without the steps (Forcing::directLoadBefore,
+  // tideBefore), the run recorded at every second node: the radial route
+  // and the 3D sweep pair each side of the jump with its own interval,
+  // measured at both nodes of the pair and at the end. And a marine ice
+  // cap whose melt steps at a repeated node under migrating shorelines
+  // (Forcing::iceThicknessBefore), the start solved.
+  auto scene = Scene::Make(1e21);
+  const auto& grid = scene.solver.Grid();
+  std::mt19937 rng(67);
+  const auto kyr = scene.Kyr();
+  {
+    Case c;
+    c.times = {0.0, kyr, kyr, 2.0 * kyr, 3.0 * kyr};
+    c.state = scene.state;
+    c.rotation = RotationalFeedback::Full;
+    c.stride = 2;
+    const auto ramp = Ramp(scene.MeltLoad(-0.05), c.times.back());
+    const auto step = scene.Smooth(rng, 300.0 * scene.Sigma());
+    const auto stepped = [ramp, step](double t, bool on) {
+      auto out = ramp(t);
+      if (on) {
+        for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += step[i];
+      }
+      return out;
+    };
+    c.directLoad = [stepped, kyr](double t) { return stepped(t, t >= kyr); };
+    c.directLoadBefore = [stepped, kyr](double t) { return stepped(t, t > kyr); };
+    const auto a = 30.0 / scene.solver.SolverScales().Factor(PotentialDimensions);
+    const auto tide = [&grid, a, kyr](double t, bool on) {
+      auto psi = grid.ZeroCoefficients();
+      psi[SurfaceGrid::Index(2, 1)] = a * std::complex<double>(0.4, on ? 0.5 : -0.3);
+      psi[SurfaceGrid::Index(3, 2)] = a * (on ? 1.0 : 0.2);
+      return psi;
+    };
+    c.tide = [tide, kyr](double t) { return tide(t, t >= kyr); };
+    c.tideBefore = [tide, kyr](double t) { return tide(t, t > kyr); };
+    c.measurements[4] = EveryField(scene, rng, true);
+    c.measurements[2] = EveryField(scene, rng, false);
+    c.measurements[1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+    c.label = "a step load and tide at a repeated node";
+    for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      Gate(scene, c, method);
+    }
+  }
+  {
+    const auto metre = 1.0 / scene.solver.SolverScales().Length();
+    Case c;
+    for (auto n = 0; n <= 3; ++n) {
+      c.times.push_back(10.0 * n / 3.0 * kyr);
+      if (n == 2) c.times.push_back(c.times.back());
+    }
+    const auto ice0 = grid.Synthesise(grid.Expand(grid.FromFunction([&](double theta, double phi) {
+      const auto theta0 = 30.0 * std::numbers::pi / 180.0;
+      const auto phi0 = 275.0 * std::numbers::pi / 180.0;
+      const auto radius = 20.0 * std::numbers::pi / 180.0;
+      const auto cosd = std::cos(theta) * std::cos(theta0) +
+                        std::sin(theta) * std::sin(theta0) * std::cos(phi - phi0);
+      const auto d = std::acos(std::clamp(cosd, -1.0, 1.0));
+      if (d >= radius) return 0.0;
+      const auto taper = std::cos(0.5 * std::numbers::pi * d / radius);
+      return 5000.0 * metre * taper * taper;
+    })));
+    c.state = scene.solver.MakeState(
+        ice0, std::vector<double>(grid.FieldSize(), 3000.0 * metre));
+    const auto span = c.times.back();
+    const auto at = c.times[2];
+    // the cap melting, a quarter of what is left gone at a stroke at `at`
+    const auto ice = [ice0, span, at](double t, bool stepped) {
+      auto out = ice0;
+      const auto left = std::clamp(1.0 - t / span, 0.0, 1.0);
+      for (auto& v : out) v *= left * (stepped ? 0.75 : 1.0);
+      return out;
+    };
+    c.iceThickness = [ice, at](double t) { return ice(t, t >= at); };
+    c.iceThicknessBefore = [ice, at](double t) { return ice(t, t > at); };
+    c.rotation = RotationalFeedback::Full;
+    c.measurements[4].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
+    c.measurements[3].displacementDual = scene.Smooth(rng, 0.5);
+    c.label = "migrating shorelines, an ice step at a repeated node";
+    for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      Gate(scene, c, method);
+    }
   }
 }
 

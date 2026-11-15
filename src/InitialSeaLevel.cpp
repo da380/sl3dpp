@@ -187,20 +187,41 @@ void CheckIterations(const CalibrationOptions& options) {
 
 }  // namespace
 
+namespace {
+
+/// The run of an ice history by either evolution: its left limit, where
+/// given, through the evolution's forcing.
+template <class EvolutionT>
+std::vector<typename EvolutionT::Snapshot> RunHistory(
+    EvolutionT& evolution, std::span<const double> times,
+    const IceHistory& history) {
+  const auto frozen = history.shorelines == Shorelines::Frozen;
+  if (!history.before) {
+    return frozen ? evolution.Run(times, history.field)
+                  : evolution.RunMigrating(times, history.field);
+  }
+  auto forcing = typename EvolutionT::Forcing{};
+  if (frozen) {
+    forcing.directLoad = history.field;
+    forcing.directLoadBefore = history.before;
+    return evolution.Run(times, forcing);
+  }
+  forcing.iceThicknessBefore = history.before;
+  return evolution.RunMigrating(times, history.field, forcing);
+}
+
+}  // namespace
+
 std::vector<Evolution::Snapshot> RunIceHistory(
     Evolution& evolution, std::span<const double> times,
     const IceHistory& history) {
-  return history.shorelines == Shorelines::Frozen
-             ? evolution.Run(times, history.field)
-             : evolution.RunMigrating(times, history.field);
+  return RunHistory(evolution, times, history);
 }
 
 std::vector<Evolution3D::Snapshot> RunIceHistory(
     Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history) {
-  return history.shorelines == Shorelines::Frozen
-             ? evolution.Run(times, history.field)
-             : evolution.RunMigrating(times, history.field);
+  return RunHistory(evolution, times, history);
 }
 
 FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
@@ -244,7 +265,7 @@ InitialSeaLevelCalibration CalibrateInitialSeaLevel(
     // the run from it is the run already made.
     return CalibrateFrozen<Evolution, InitialSeaLevelCalibration>(
         evolution, finalSeaLevel, options.weights,
-        [&] { return evolution.Run(times, history.field); });
+        [&] { return RunIceHistory(evolution, times, history); });
   }
   return CalibrateMigrating<InitialSeaLevelCalibration>(
       evolution, finalSeaLevel, options, [&](bool gradient) {
@@ -262,7 +283,7 @@ InitialSeaLevelCalibration3D CalibrateInitialSeaLevel(
   if (history.shorelines == Shorelines::Frozen) {
     return CalibrateFrozen<Evolution3D, InitialSeaLevelCalibration3D>(
         evolution, finalSeaLevel, options.weights,
-        [&] { return evolution.Run(times, history.field); });
+        [&] { return RunIceHistory(evolution, times, history); });
   }
   return CalibrateMigrating<InitialSeaLevelCalibration3D>(
       evolution, finalSeaLevel, options, [&](bool gradient) {

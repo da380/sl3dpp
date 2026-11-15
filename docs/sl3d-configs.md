@@ -263,7 +263,14 @@ named by all three.
   their declared dimensions (a field declaring none is used as it stands).
 - A field on a time axis is read at any date within the file's span by
   the file's own rule: a `node` field with linear time interpolation (what
-  pyslfp writes) between its stored dates. A read at a date outside the
+  pyslfp writes) between its stored dates, or with `previous` time
+  interpolation the latest stored date's values, or an `interval` field
+  the values of the interval holding the date. The last two are step
+  functions of time, and a run through time takes their stored dates
+  inside its window as jumps of the forcing (solve, Jumps of the forcing,
+  below). A date within 1e-9 of a stored date (of the larger of the
+  axis's span and its ends' magnitudes) is read as that date, under every
+  rule, as a fault file's times are. A read at a date outside the
   span is refused, every read alike (the state at its instant, the
   calibration's target at a calibrated run's end among them, a term at a
   node's date, the land), the error naming the member, the file's span,
@@ -1078,12 +1085,14 @@ conserved. Without an ocean there is no ice to change, and
 | `forcing.ice_change[k].cap_thickness` | object | one of the four | a Gaussian cap of `thickness_m` metres of ice at its centre (`latitude`, `longitude`, `width_deg`, `thickness_m`, negative to melt: a melting cap takes at each point no more than the ice the state holds). Refused with the state at the window's end |
 | `forcing.ice_change[k].cap_fraction` | object | one of the four | a Gaussian cap of a fraction of the state's ice (`latitude`, `longitude`, `width_deg`, `fraction`, negative to melt). Refused with the state at the window's end |
 | `forcing.ice_change[k].history_kyr_bp`, `forcing.ice_change[k].history` | list of pairs | absent | the quasi-static problem, beside a cap: the cap's amplitude history, as a surface load's (below), dated in a dated run and on the run's clock in one counting forwards; without one the cap is held through the run, and so is present at its start. Refused beside a `thickness` or a `change` term, and in the static problem |
+| `forcing.ice_change[k].time_interpolation` | word | `"linear"` | beside a cap's history: how it is read between its times, `"linear"` or `"previous"` (a step at each time after the first: Times of the terms, below). Refused without a history and beside a `thickness` or a `change` term, whose file is read by its field's own rule |
 | `forcing.load` | list | absent | surface loads: each a load term (one of `cap`, `disk`, `field`, `coefficients`, below) with the properties below; without gravity the loads summed act less their degree-1 part (Without gravity, below) |
 | `forcing.load[k].water_budget` | true or false | required with an ocean; `false` without one | whether the load's mass is exchanged with the ocean: `true` for water held on land (hydrology), whose mass the ocean loses; `false` for any other mass (sediment), which moves no water. Without an ocean there is no water to exchange, and it has no effect |
 | `forcing.load[k].moves_solid_surface` | true or false | required with an ocean; `false` without one | whether the load is a layer laid on the solid surface: the sea level, measured from the solid surface, then falls by the layer's thickness, the water it displaces going elsewhere, and under migrating shorelines the shorelines move with it. Without an ocean the relative sea level change falls by the layer's thickness, and nothing more; without gravity, which forms no sea level change, the layer acts by its weight alone, as any load |
 | `forcing.load[k].density_kg_m3` | number > 0 | required of a load that moves the solid surface, refused otherwise | the layer's density: its thickness is its mass over this |
 | `forcing.load[k].history_kyr_bp` | list of pairs | absent | a dated run: the term's amplitude history, pairs `[date_kyr_bp, factor]` from the oldest date (the dates strictly decreasing) |
 | `forcing.load[k].history` | list of pairs | absent | a run counting forwards: the term's amplitude history, pairs `[time, factor]` on the run's clock in its unit, the times strictly increasing |
+| `forcing.load[k].time_interpolation` | word | `"linear"` | how the history is read between its times: `"linear"`, or `"previous"`, a step at each time after the first (Times of the terms, below); refused without a history. A tide coefficient and a seismic source take it beside their histories alike |
 | `forcing.tide` | list | absent | the tide: coefficients of an external potential (below), summed |
 | `forcing.seismic` | list | absent | seismic sources (below) |
 
@@ -1374,9 +1383,12 @@ planetmodel combines the slices' slip (`FaultSliceQuadrature::SlipOf`):
 the moment of the slip the file reads at that time, its size and
 direction both. `linear` and `none` give a moment continuous in time
 between the nodes the run reads it at; `previous` jumps at each of the
-file's times, where the run takes no left limit and steps no node of its
-own (as it does at an onset): a jump at a node is spread over the step
-before it, and one between nodes over the step that holds it.
+file's stored times after the first, and each such time inside the
+window is a jump of the forcing, taken as an onset is (Jumps of the
+forcing, below): at a node of the window the node repeated, its left
+limit the slip of the stored time before; between two nodes a pair of
+the run's own there. The run is then the same at every node of the
+window wherever the nodes fall against the stored times.
 
 **Cost.** Each quadrature point is a point source. Sources at one radius,
 to 1e-12 (rounding, never a move of a source), are formed together, at
@@ -1414,11 +1426,21 @@ factor]` from the oldest (the dates strictly decreasing), and an onset
 `onset_kyr_bp`. In a run COUNTING FORWARDS they are times on the run's
 own clock in its unit, `times.unit`: a history is `history`, pairs
 `[time, factor]` (the times strictly increasing), and an onset `onset`.
-A history's factor at a time is the piecewise-LINEAR interpolant of its
-factors between the pairs' times, held CONSTANT at the first factor
-before the first time and at the last after the last; a single pair is a
-constant factor, and a term without a history has the factor 1
-throughout. A `field` load's file is read
+A history's factor at a time is read by its time rule,
+`"time_interpolation"` beside the history, named as a file states its
+rule (planetmodel's names): `"linear"`, the default, the piecewise-LINEAR
+interpolant of its factors between the pairs' times; `"previous"`, the
+factor of the latest time not after the time (a time within 1e-12 (1 +
+|t|) of a listed time t being that time), a STEP function jumping at each
+listed time after the first. Either holds the factor CONSTANT at the
+first before the first time and at the last after the last; a single
+pair is a constant factor, and a term without a history has the factor 1
+throughout. Any term that takes a history takes the rule (a load, a cap
+of the ice change, a tide coefficient, a seismic source); a rule without
+a history is refused, and so is `"none"` (planetmodel's rule of values at
+the stored times alone), which a history does not take. A `previous`
+history's times inside the window are jumps of the forcing (Jumps of the
+forcing, below). A `field` load's file is read
 
 - in the static problem: a file with a time axis at the term's
   `date_kyr_bp`, kyr before present (the file read at minus that on its
@@ -1437,19 +1459,49 @@ throughout. A `field` load's file is read
   from its date -D at the run's start by `"time_origin": D`.
 
 A file with a time axis is read by its own rule (a `node` field with
-linear time interpolation between its stored times) and expanded at
-each time, every node's time held to its span before the run steps (a
-time outside it refused, or, with `"outside_span": "hold"` on the
-`field` input, its first or last field held there: File inputs, above);
-a static file is the same pattern at every node, and a history on a
-field term multiplies the field read. The forcing at a node is each
-term's pattern at the node's time times its factor there: the forcing
-enters a run through time at the nodes it steps alone (the window's, and
-a pair at a seismic onset between two: Seismic sources, above), and a
-history's or a field file's variation between them is not seen. A fault
-file whose slip is on a time axis is read by the same rules, on the run's
-clock from its `time_origin` or by date, its span held before the run
-(Seismic sources, above).
+linear time interpolation between its stored times, or `previous`, or an
+`interval` field) and expanded at each time, every node's time held to
+its span before the run steps (a time outside it refused, or, with
+`"outside_span": "hold"` on the `field` input, its first or last field
+held there: File inputs, above); a static file is the same pattern at
+every node, and a history on a field term multiplies the field read. The
+forcing at a node is each term's pattern at the node's time times its
+factor there: the forcing enters a run through time at the nodes it
+steps (the window's, and a pair of the run's own at a jump between two),
+and a continuous history's or file's variation between them is not seen.
+A fault file whose slip is on a time axis is read by the same rules, on
+the run's clock from its `time_origin` or by date, its span held before
+the run (Seismic sources, above).
+
+**Jumps of the forcing.** A step function of time jumps, and the run
+takes each jump inside its window as a jump: the static elastic solve
+with the relaxation so far held, the sea level equation closing it as at
+any node (the nonlinear equation under migrating shorelines), the
+continuum's statement (the internal variables continuous, everything
+else jumping by that solve). The jumps are a seismic onset (Seismic
+sources, above), each listed time after the first of a history read by
+`previous`, and each stored time after the first of a file read by
+`previous` (a field's `time_interpolation`, a fault file's) and each
+stored time between the first and the last of an `interval` field: a
+thickness or change file of the ice change, a `field` load's file, a
+fault file. A jump at a node of the window after its start repeats the
+node: its left limit, every term read there by its value before the jump
+(the slice or factor before; a term continuous there as at the time),
+then its right; the node's records are the right limit's. A jump
+between two nodes is a pair of the run's own at its time, stepped and
+not written. Jumps at one time share their pair (a time within a jump's
+tolerance of another's, or of a node: a history's and an onset's 1e-12
+(1 + |t|) on the terms' clock, a file's its axis's, File inputs, above);
+a jump at the window's start is none (the first node is the right limit
+there already), and one after its end never acts. So a run under a
+`previous` history or file is the same at every node of its window
+wherever the nodes fall against the jumps: the factor or the slice of a
+step does not spread over the step that holds it. Every node's ice,
+the left limits' too, is held to what the state holds. A failure of the
+sea level solve at a left limit or a pair of the run's own is refused as
+at any node, naming its date, the passes made, the last change and the
+tolerance (`solver.rtol`; in 3-D the step's fixed point,
+`solver.step_rtol`).
 
 The names of the other form are refused, naming this form's: the dated
 names in a run counting forwards and the forwards names in a dated run
@@ -2247,7 +2299,10 @@ refused in the static problem.
 
 Without a `checkpoint` block nothing is written until the run finishes.
 With one, the run writes a checkpoint after every `checkpoint.every`-th
-node it steps and after the last node. Each is a file `node_NNNNNN.ckpt`
+node it steps and after the last node: the nodes it steps, a jump's left
+limit and a pair of its own among them (Jumps of the forcing, above), so
+that a checkpoint may be a left limit, from which the resumed run takes
+the jump. Each is a file `node_NNNNNN.ckpt`
 in `checkpoint.directory`, named by its node, holding the run's state
 there and the histories so far (the response's fields, the angular
 velocity and the step's closure at each node; the loads applied and a
@@ -2762,9 +2817,13 @@ top-level `trajectory` block's (The trajectory block, above), which
 `solve` shares: `kernels.record_stride` and `kernels.trajectory` are
 refused, naming `trajectory.record_stride` and `trajectory.directory`. A
 run without gravity (`"gravity": "none"`) has no kernels: `kernel` refuses
-it at `gravity`, and `solve` a `kernels` block beside it. A seismic
-onset between two nodes of the window is refused at the onset (The
-seismic sources, below); `solve` takes it.
+it at `gravity`, and `solve` a `kernels` block beside it. A jump of the
+forcing between two nodes of the window (a seismic onset, a time of a
+`previous` history, a stored time of a file read so: solve, Jumps of the
+forcing) is refused at its member, saying to give its time as a node:
+the kernels are over the window's nodes, and no fixed combination of
+the terms' values there gives the run's at a pair of its own; `solve`
+takes it.
 
 ### The kernels
 
@@ -2854,6 +2913,32 @@ A layer of density rho whose mass is outside the water budget has the
 kernel rho `load_outside_water_budget_dual` + `solid_surface_change_dual`
 in its height; one in the budget, rho `load_dual` +
 `solid_surface_change_dual`.
+
+**At a jump.** Where a term jumps at a node of the window (Jumps of the
+forcing, under solve), its two sides are parameters of their own. Each
+surface kernel of the kind of a term that jumps there (the ice; a load
+in the water budget, outside it, or a layer; the tide) holds at that
+node the derivative with respect to the term's RIGHT limit, the value the
+node's records hold, and a companion holds the derivative with respect
+to its LEFT limit: `<name>_before` beside a field (`thickness_dual_before`,
+`load_dual_before`, `load_outside_water_budget_dual_before`,
+`solid_surface_change_dual_before`) and the columns `dJ_damplitude_before
+dJ_dimaginary_before` beside the tide's. A companion is present only when
+its kind jumps at a node of the window, and is zero at every other node,
+where the record holds the derivative with respect to the term's value
+there; a kind continuous at a jump's node keeps there the sum of the two
+sides, the derivative with respect to its value. So dJ = sum_n int (K_n
+delta_n + B_n delta_n^-) dS for any change, delta_n^- the change of the
+left limit at node n (delta_n where the change is continuous). The
+quelled view's interval ending at a node where the ice jumps pairs with
+the change up to the jump's left limit, and `jump_dual` (present when the
+ice jumps) with the jump itself, the right limit less the left: the
+kernel of a change of the ice that holds from the jump on, the
+thickness kernels' tail from the right limit. By the continuous method
+each side is an end node of its interval, paired with its half step
+alone. The moment kernels are as at an onset: a source that jumps at a
+node (its onset, its `previous` history, its file's slip) has the right
+side's kernel there.
 
 **The tide.** `<name>_tide_kernels.txt` is a table of rows `node <time>
 l m dJ_damplitude dJ_dimaginary` for every degree 2 to `lmax` and order

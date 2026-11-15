@@ -223,6 +223,17 @@ class Evolution3D {
     /// pair, as Evolution::Forcing's: absent, the plain callbacks.
     std::function<std::vector<PointSource>(double)> sourcesBefore{};
     std::function<std::vector<StressGlut>(double)> stressGlutsBefore{};
+    /// The left limits of the surface terms and of a migrating run's ice
+    /// thickness, as Evolution::Forcing's: absent, the plain callbacks; a
+    /// left limit without its term refused, and the ice thickness's under
+    /// frozen shorelines. The pair's zero-length step takes the jump as
+    /// the combined fixed point of a zero-length step under it.
+    std::function<std::vector<double>(double)> directLoadBefore{};
+    std::function<std::vector<double>(double)>
+        directLoadOutsideWaterBudgetBefore{};
+    std::function<std::vector<double>(double)> solidSurfaceChangeBefore{};
+    std::function<std::vector<std::complex<double>>(double)> tideBefore{};
+    std::function<std::vector<double>(double)> iceThicknessBefore{};
   };
 
   /// `Run` under a forcing, as Evolution's: on a background state without

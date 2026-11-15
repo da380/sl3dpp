@@ -59,17 +59,24 @@ enum class Shorelines { Frozen, Migrating };
 /// shorelines the non-ocean surface load at t (`Run`'s directLoad, built
 /// against the background state's ocean function), under migrating ones
 /// the ice thickness at t (`RunMigrating`'s iceThickness). Solver units.
+/// `before`, where given, is its left limit at a jump, a node repeated in
+/// the time grid (Evolution::Forcing::directLoadBefore under frozen
+/// shorelines, iceThicknessBefore under migrating ones, whose run then
+/// takes a forcing and solves its start).
 struct IceHistory {
   Shorelines shorelines = Shorelines::Frozen;
   std::function<std::vector<double>(double)> field;
+  std::function<std::vector<double>(double)> before{};
 
   [[nodiscard]] static IceHistory Frozen(
-      std::function<std::vector<double>(double)> directLoad) {
-    return {Shorelines::Frozen, std::move(directLoad)};
+      std::function<std::vector<double>(double)> directLoad,
+      std::function<std::vector<double>(double)> before = {}) {
+    return {Shorelines::Frozen, std::move(directLoad), std::move(before)};
   }
   [[nodiscard]] static IceHistory Migrating(
-      std::function<std::vector<double>(double)> iceThickness) {
-    return {Shorelines::Migrating, std::move(iceThickness)};
+      std::function<std::vector<double>(double)> iceThickness,
+      std::function<std::vector<double>(double)> before = {}) {
+    return {Shorelines::Migrating, std::move(iceThickness), std::move(before)};
   }
 };
 

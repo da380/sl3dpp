@@ -587,7 +587,7 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     }
     ++read;
   }
-  EXPECT_EQ(read, 71);
+  EXPECT_EQ(read, 72);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -14263,6 +14263,12 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {in(iceCap, "[1.5, 0]", "[1.5, 1e-7]")}, both},
       {"dated", "ice_change cap_thickness history dropped",
        {in(iceCap, R"(, "history_kyr_bp": [[1.9, 1], [1.5, 0]])", "")}, both},
+      {"dated", "ice_change cap_thickness history read by `previous`",
+       {in(iceCap, "[1.5, 0]]", R"([1.5, 0]], "time_interpolation": "previous")")},
+       both},
+      {"dated", "ice_change cap_thickness history rule given as its default",
+       {in(iceCap, "[1.5, 0]]", R"([1.5, 0]], "time_interpolation": "linear")")},
+       neither},
       {"dated", "ice_change cap_thickness as cap_fraction",
        {in(iceCap, R"("cap_thickness")", R"("cap_fraction")"),
         {R"("thickness_m": 10})", R"("fraction": 10})"}},
@@ -14295,6 +14301,9 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        both},
       {"dated", "load cap history factor",
        {in(loadCap, "[1.2, 1]", "[1.2, 1.0000001]")}, both},
+      {"dated", "load cap history read by `previous`",
+       {in(loadCap, "[1.2, 1]]", R"([1.2, 1]], "time_interpolation": "previous")")},
+       both},
       {"dated", "load cap history dropped",
        {in(loadCap, R"( "history_kyr_bp": [[1.8, 0], [1.2, 1]],)", "")}, both},
       {"dated", "load cap water_budget",
@@ -14396,6 +14405,9 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        both},
       {"dated", "tide history factor", {in(tide, "[0.7, 1]", "[0.7, 1.5]")},
        both},
+      {"dated", "tide history read by `previous`",
+       {in(tide, "[0.7, 1]]", R"([0.7, 1]], "time_interpolation": "previous")")},
+       both},
       {"dated", "tide history dropped",
        {in(tide, R"(, "history_kyr_bp": [[1.7, 0], [0.7, 1]])", "")},
        both},
@@ -14444,6 +14456,9 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        store},
       {"dated", "seismic point history factor",
        {in(point, "[0.6, 2]", "[0.6, 3]")}, store},
+      {"dated", "seismic point history read by `previous`",
+       {in(point, "[0.6, 2]]", R"([0.6, 2]], "time_interpolation": "previous")")},
+       store},
       {"dated", "seismic point history dropped",
        {in(point, R"(, "history_kyr_bp": [[1.6, 1], [0.6, 2]])", "")}, store},
       {"forwards", "seismic point strike_deg",
@@ -14845,3 +14860,410 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
 }
 
 }  // namespace
+
+TEST_F(AppsTest, APreviousHistoryJumpsAtItsTimes) {
+  // A cap load and a tide coefficient whose amplitude histories are read
+  // by `previous` ("time_interpolation"), each a step at 2.5 yr, on the
+  // ball of a 1e19 Pa s mantle without an ocean, on its own clock in
+  // years. The step is a jump of the forcing: at a node the library
+  // repeats it (its left limit the factor before the step), between two
+  // it steps a pair of its own, and the outputs hold the window's nodes
+  // alone. The run is then the same at every node of the window wherever
+  // the nodes fall against the step (the run whose nodes straddle it
+  // against the run with a node there), where reading the steps at the
+  // nodes alone spread each over the step that holds it (the run under
+  // the same factors linear between the straddling nodes); the same data
+  // read as `linear` is another forcing. The kernels: at the step's node
+  // the load's and the tide's records hold the right limit's kernel and
+  // the companions (`load_dual_before`, the tide's `_before` columns) the
+  // left's, zero elsewhere, and each predicts a solve run with the factor
+  // on its side of the step raised; `kernel` refuses the run whose nodes
+  // straddle the step, naming the history.
+  namespace pm = planetmodel;
+  static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
+  const auto config = [&](const std::string& name, const std::string& times,
+                          const std::string& history, const std::string& rule,
+                          const std::string& tideHistory,
+                          double measured = 2.5) {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static", "model": {{"deck": "soft.deck"}},
+      "discretisation": {{"lmax": 8}},
+      "times": {{"unit": "yr", "at": [{}]}},
+      "forcing": {{"load": [{{"cap": {{"latitude": 35, "longitude": 45,
+          "width_deg": 15, "amplitude_kg_m2": 1e4}},
+          "history": {}{}}}],
+        "tide": [{{"degree": 2, "order": 1, "amplitude_m2_s2": 1.0,
+          "imaginary_m2_s2": 0.5, "history": {}{}}}]}},
+      "rotation": "none", "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"method": "discrete", "parameters": ["load", "tide"],
+        "measurements": [
+          {{"type": "displacement_point", "name": "at_step",
+            "latitude": 28, "longitude": 40, "time": {}}},
+          {{"type": "displacement_point", "name": "after",
+            "latitude": 33, "longitude": 42, "time": 6}}],
+        "output": "out/{}_kernels"}}}})",
+                                             times, history, rule, tideHistory,
+                                             rule, name, measured, name));
+  };
+  const auto previous = std::string{R"(, "time_interpolation": "previous")"};
+  const auto steps = std::string{"[[0, 0.5], [2.5, 1.5]]"};
+  const auto tideSteps = std::string{"[[0, 1], [2.5, 2]]"};
+  const auto onNode = std::string{"0, 1, 2.5, 3, 6, 10"};
+  const auto straddling = std::string{"0, 1, 3, 6, 10"};
+  const auto read = [&](const std::string& name) {
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  // the largest departure of a run's response at the window's nodes from
+  // another's, each pair (node of a, node of b)
+  const auto departure =
+      [&](const std::string& a, const std::string& b,
+          const std::vector<std::pair<std::size_t, std::size_t>>& nodes) {
+        const auto x = read(a);
+        const auto y = read(b);
+        auto out = 0.0;
+        for (const auto& [i, j] : nodes) {
+          for (const auto* name : {"displacement", "tangential_potential",
+                                   "potential"}) {
+            out = std::max(out, Departure(Slice(x, name, i), Slice(y, name, j)));
+          }
+        }
+        return out;
+      };
+  const auto summary = app::RunSolve(
+      config("stepped", onNode, steps, previous, tideSteps));
+  EXPECT_TRUE(summary.starts_with(
+      "1-D, viscoelastic, 6 nodes 0 to 10 yr on the run's clock"))
+      << summary;
+  ASSERT_EQ(read("stepped").time->size(), 6u);
+  const auto described = std::get<std::string>(read("stepped").meta.at("load"));
+  EXPECT_NE(described.find("time_interpolation previous"), std::string::npos)
+      << described;
+  static_cast<void>(app::RunSolve(
+      config("straddled", straddling, steps, previous, tideSteps, 3.0)));
+  ASSERT_EQ(read("straddled").time->size(), 5u);
+  // the factors linear between the straddling nodes: the steps spread
+  // over the step that holds them
+  static_cast<void>(app::RunSolve(config("spread", straddling,
+                                         "[[1, 0.5], [3, 1.5]]", "",
+                                         "[[1, 1], [3, 2]]", 3.0)));
+  static_cast<void>(
+      app::RunSolve(config("linear", onNode, steps, "", tideSteps)));
+  const auto common = std::vector<std::pair<std::size_t, std::size_t>>{
+      {0, 0}, {1, 1}, {2, 3}, {3, 4}, {4, 5}};
+  const auto after = departure("straddled", "stepped", common);
+  const auto before = departure("spread", "stepped", common);
+  const auto linear = departure("linear", "stepped",
+                                {{0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}});
+  std::cout << std::format(
+      "[previous history] nodes straddling the step against a node there: "
+      "{:.3e}; spread over its step {:.3e}; read as linear {:.3e}\n",
+      after, before, linear);
+  RecordProperty("straddled", std::format("{:.3e}", after));
+  RecordProperty("spread", std::format("{:.3e}", before));
+  RecordProperty("linear", std::format("{:.3e}", linear));
+  // measured: 0 (the pair's solver time the node's to the bit), 5.1e-2
+  // spread, 0.80 linear
+  EXPECT_LT(after, 1e-10);
+  EXPECT_GT(before, 1e-2);
+  EXPECT_GT(linear, 1e-2);
+
+  // -- the kernels, against solve runs with a side's factor raised
+  static_cast<void>(app::RunKernel(
+      config("stepped", onNode, steps, previous, tideSteps)));
+  static_cast<void>(app::RunSolve(config("right", onNode,
+                                         "[[0, 0.5], [2.5, 1.75]]", previous,
+                                         "[[0, 1], [2.5, 2.5]]")));
+  static_cast<void>(app::RunSolve(config("left", onNode,
+                                         "[[0, 0.75], [2.5, 1.5]]", previous,
+                                         "[[0, 1.5], [2.5, 2]]")));
+  const auto base = read("stepped");
+  const auto out = dir_ / "out" / "stepped_kernels";
+  // the loads written (the right limits) and the cap's pattern
+  auto applied = [&](const pm::SurfaceFile& file) {
+    auto rows = std::vector<std::vector<double>>{};
+    for (auto n = std::size_t{0}; n < 6; ++n) rows.push_back(FieldAt(file, "load", n));
+    return rows;
+  };
+  const auto at = applied(base);
+  for (const auto* label : {"at_step", "after"}) {
+    const auto name = std::string{label};
+    const auto loads = pm::ReadSurfaceFile(out / (name + "_load_kernels.nc"));
+    ASSERT_TRUE(loads.variables.contains("load_dual_before")) << name;
+    // the companion is zero away from the step's node
+    for (const auto n : {0u, 1u, 3u, 4u, 5u}) {
+      for (const auto v : Slice(loads, "load_dual_before", n)) {
+        ASSERT_EQ(v, 0.0) << name << ", node " << n;
+      }
+    }
+    const auto rows = TableRows(out / (name + "_tide_kernels.txt"));
+    ASSERT_FALSE(rows.empty());
+    ASSERT_EQ(rows.front().size(), 8u) << name;  // the _before columns
+    const auto value = PointValueOf(base, "displacement", name == "at_step" ? 2 : 4,
+                                    name == "at_step" ? GeographicPoint{28.0, 40.0}
+                                                      : GeographicPoint{33.0, 42.0});
+    EXPECT_LT(Gap(MeasuredValue(out, name), value), 1e-10) << name;
+    for (const auto* side : {"right", "left"}) {
+      const auto moved = read(side);
+      const auto changed = applied(moved);
+      // the change of the loads at each node, its right limit, and of its
+      // left limit at the step's node (the load at the node before)
+      auto delta = std::vector<std::vector<double>>{};
+      auto deltaBefore = std::vector<std::vector<double>>{};
+      for (auto n = std::size_t{0}; n < 6; ++n) {
+        auto d = changed[n];
+        for (auto i = std::size_t{0}; i < d.size(); ++i) d[i] -= at[n][i];
+        delta.push_back(std::move(d));
+      }
+      for (auto n = std::size_t{0}; n < 6; ++n) {
+        deltaBefore.push_back(n == 2 ? delta[1] : delta[n]);
+      }
+      const auto load = NodePairing(loads, "load_dual", delta) +
+                        NodePairing(loads, "load_dual_before", deltaBefore);
+      // the tide's coefficient (2, 1): its real part's factor change times
+      // 1, its imaginary part's times 0.5, at each node and at the step's
+      // left limit
+      auto tide = 0.0;
+      for (const auto& row : rows) {
+        if (row[2] != 2.0 || row[3] != 1.0) continue;
+        const auto node = static_cast<std::size_t>(row[0]);
+        const auto right = std::string{side} == "right";
+        const auto raised = right ? (node >= 2 ? 0.5 : 0.0) : (node < 2 ? 0.5 : 0.0);
+        const auto raisedBefore = right ? 0.0 : (node <= 2 ? 0.5 : 0.0);
+        tide += raised * (row[4] * 1.0 + row[5] * 0.5) +
+                raisedBefore * (row[6] * 1.0 + row[7] * 0.5);
+      }
+      const auto predicted = load + tide;
+      const auto measured =
+          PointValueOf(moved, "displacement", name == "at_step" ? 2 : 4,
+                       name == "at_step" ? GeographicPoint{28.0, 40.0}
+                                         : GeographicPoint{33.0, 42.0}) -
+          value;
+      ASSERT_NE(measured, 0.0) << name << ", " << side;
+      RecordProperty(name + "_" + side, std::format("{:.3e}", Gap(predicted, measured)));
+      // the problem is linear in the factors: rounding
+      EXPECT_LT(Gap(predicted, measured), 1e-8) << name << ", " << side;
+    }
+  }
+
+  // -- `kernel` refuses the steps between nodes, naming the history
+  try {
+    static_cast<void>(app::RunKernel(
+        config("straddled", straddling, steps, previous, tideSteps, 3.0)));
+    ADD_FAILURE() << "a jump between nodes was not refused";
+  } catch (const std::exception& error) {
+    const auto message = std::string{error.what()};
+    EXPECT_NE(message.find("forcing.load[0].history"), std::string::npos) << message;
+    EXPECT_NE(message.find("jumps between the window's nodes 1 yr and 3 yr"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("give its time, 2.5 yr, as a node of `times`"),
+              std::string::npos)
+        << message;
+  }
+}
+
+TEST_F(AppsTest, APreviousIceHistoryFileJumpsAtItsStoredTimes) {
+  // An ice history file read by `previous` (the toy cap at 1, 0.7 and 0.4
+  // of itself from 2, 1 and 0.25 kyr BP, and at the present), the state
+  // its first slice at
+  // the window's start, under frozen shorelines: its stored times inside
+  // the window are jumps of the forcing, at a node (1 kyr BP) the node
+  // repeated, between two (0.25 kyr BP) a pair of the library's own. The
+  // run is the same history given as inline steps (a cap of the state's
+  // ice read by `previous`), to rounding; it is the same at the window's
+  // nodes wherever they fall against the stored times (nodes straddling
+  // 0.25 kyr BP against a node there), where reading the file at the nodes
+  // alone spread each jump over the step that holds it (the file's values
+  // at the nodes, linear between them); the same data read as `linear` is
+  // another history. Under migrating shorelines a jump the sea level solve
+  // cannot close to its tolerance (a marine cap nine tenths gone at 1 kyr
+  // BP, its file's last stored time the window's end, which the run
+  // repeats) is refused naming its date, the passes, the last change and
+  // the tolerance.
+  namespace pm = planetmodel;
+  static_cast<void>(Write("ball.deck", BallDeck(0.0)));
+  constexpr auto kyr = 1.0e3 * 365.25 * 86400.0;
+  // a history of the toy cap at `fractions` of itself at `dates` (kyr BP),
+  // read by `rule`
+  const auto history = [&](const std::string& name,
+                           const std::vector<double>& dates,
+                           const std::vector<double>& fractions,
+                           const std::string& rule, bool marine = false) {
+    const auto grid = pm::Equiangular(19, 36);
+    auto ice = std::vector<double>{}, topo = std::vector<double>{};
+    auto time = std::vector<double>{};
+    for (auto k = std::size_t{0}; k < dates.size(); ++k) {
+      time.push_back(-dates[k] * kyr);
+      for (const auto theta : grid.Colatitudes()) {
+        for (auto j = std::size_t{0}; j < grid.NPhi(); ++j) {
+          // a marine history: the ice in a basin below sea level
+          topo.push_back(3000.0 * std::cos(theta) -
+                         (marine ? 3500.0 * std::exp(-std::pow(theta / 0.3, 2))
+                                 : 0.0));
+          ice.push_back(theta < 0.45 ? fractions[k] * 1500.0 *
+                                           std::exp(-std::pow(theta / 0.3, 2))
+                                     : 0.0);
+        }
+      }
+    }
+    auto file = pm::SurfaceFile{};
+    file.grid = grid;
+    file.source = "sl3dpp tests";
+    file.time = time;
+    auto options = pm::SurfaceFieldOptions{};
+    options.support = "node";
+    options.time_interpolation = rule;
+    options.dimensions = pm::units::LENGTH;
+    file.variables.emplace("ice_thickness",
+                           pm::SurfaceField("ice_thickness", ice, options));
+    file.variables.emplace("topography",
+                           pm::SurfaceField("topography", topo, options));
+    pm::WriteSurfaceFile(dir_ / name, file);
+  };
+  history("steps.nc", {2.0, 1.0, 0.25, 0.0}, {1.0, 0.7, 0.4, 0.4},
+          "previous");
+  history("linear.nc", {2.0, 1.0, 0.25, 0.0}, {1.0, 0.7, 0.4, 0.4}, "linear");
+  history("spread.nc", {2.0, 1.5, 1.0, 0.5, 0.0}, {1.0, 1.0, 0.7, 0.7, 0.4},
+          "linear");
+  history("marine.nc", {2.0, 1.0, 0.0}, {1.0, 0.1, 0.1}, "previous", true);
+  const auto config = [&](const std::string& name, const std::string& times,
+                          const std::string& file, const std::string& change,
+                          const std::string& more = "") {
+    return Write(name + ".json", std::format(R"({{
+      "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+      "discretisation": {{"lmax": 8}}, "times": {},
+      "ocean": {{"at": "start", "topography": {{"file": "{}"}},
+                 "ice": {{"file": "{}"}}{}}},
+      "forcing": {{"ice_change": [{}]}},
+      "rotation": "none", "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}}}})",
+                                             times, file, file, more, change,
+                                             name));
+  };
+  const auto thickness = [](const std::string& file) {
+    return std::format(R"({{"thickness": {{"file": "{}"}}}})", file);
+  };
+  const auto onNodes = std::string{R"({"at_kyr_bp": [2, 1.5, 1, 0.5, 0.25, 0]})"};
+  const auto straddling =
+      std::string{R"({"start_kyr_bp": 2, "end_kyr_bp": 0, "nodes": 5})"};
+  // the state's ice, all of it in a cap as wide as the sphere
+  const auto inline_ = std::string{
+      R"({"cap_fraction": {"latitude": 90, "longitude": 0, "width_deg": 1e9,
+          "fraction": -1}, "history_kyr_bp": [[2, 0], [1, 0.3], [0.25, 0.6]],
+          "time_interpolation": "previous"})"};
+  const auto read = [&](const std::string& name) {
+    return pm::ReadSurfaceFile(dir_ / "out" / (name + ".nc"));
+  };
+  const auto departure =
+      [&](const std::string& a, const std::string& b,
+          const std::vector<std::pair<std::size_t, std::size_t>>& nodes) {
+        const auto x = read(a);
+        const auto y = read(b);
+        auto out = 0.0;
+        for (const auto& [i, j] : nodes) {
+          for (const auto* name : {"relative_sea_level_change", "displacement",
+                                   "potential"}) {
+            out = std::max(out, Departure(Slice(x, name, i), Slice(y, name, j)));
+          }
+        }
+        return out;
+      };
+  static_cast<void>(app::RunSolve(
+      config("file", onNodes, "steps.nc", thickness("steps.nc"))));
+  static_cast<void>(
+      app::RunSolve(config("inline", onNodes, "steps.nc", inline_)));
+  static_cast<void>(app::RunSolve(
+      config("straddled", straddling, "steps.nc", thickness("steps.nc"))));
+  static_cast<void>(app::RunSolve(
+      config("spread", straddling, "steps.nc", thickness("spread.nc"))));
+  static_cast<void>(app::RunSolve(
+      config("linear", onNodes, "steps.nc", thickness("linear.nc"))));
+  ASSERT_EQ(read("file").time->size(), 6u);
+  ASSERT_EQ(read("straddled").time->size(), 5u);
+  const auto every = std::vector<std::pair<std::size_t, std::size_t>>{
+      {0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 4}, {5, 5}};
+  const auto common = std::vector<std::pair<std::size_t, std::size_t>>{
+      {0, 0}, {1, 1}, {2, 2}, {3, 3}, {4, 5}};
+  const auto inlined = departure("inline", "file", every);
+  const auto after = departure("straddled", "file", common);
+  const auto before = departure("spread", "file", common);
+  // (before the first jump the file's run is the state's, unmoved)
+  const auto linear = departure(
+      "linear", "file", {{2, 2}, {3, 3}, {4, 4}, {5, 5}});
+  std::cout << std::format(
+      "[previous ice file] inline steps {:.3e}; nodes straddling a stored "
+      "time {:.3e}; spread over its step {:.3e}; read as linear {:.3e}\n",
+      inlined, after, before, linear);
+  // measured 1.7e-12 inline, 1.7e-13 straddling, 0.35 spread, 0.86 linear
+  RecordProperty("inline", std::format("{:.3e}", inlined));
+  RecordProperty("straddled", std::format("{:.3e}", after));
+  RecordProperty("spread", std::format("{:.3e}", before));
+  RecordProperty("linear", std::format("{:.3e}", linear));
+  EXPECT_LT(inlined, 1e-10);
+  EXPECT_LT(after, 1e-10);
+  EXPECT_GT(before, 1e-2);
+  EXPECT_GT(linear, 1e-2);
+
+  // -- checkpointed at every second node the run steps, its left limits
+  // among them, stopped by a wall-time limit at the first checkpoint
+  // (node 0), then at the next (the library's node 2, the left limit of
+  // the jump at 1 kyr BP), and resumed from there to the end: the
+  // uninterrupted run, bitwise in one process
+  const auto checkpointed = [&](const std::string& limit) {
+    return Write("checkpointed.json",
+                 std::format(R"({{
+      "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+      "discretisation": {{"lmax": 8}}, "times": {},
+      "ocean": {{"at": "start", "topography": {{"file": "steps.nc"}},
+                 "ice": {{"file": "steps.nc"}}}},
+      "forcing": {{"ice_change": [{}]}},
+      "rotation": "none", "solver": {{"rtol": 1e-12}},
+      "checkpoint": {{"directory": "ckpt", "every": 2{}}},
+      "output": {{"surface": "out/checkpointed.nc"}}}})",
+                             onNodes, thickness("steps.nc"), limit));
+  };
+  const auto limited = std::string{R"(, "max_walltime_min": 1e-9)"};
+  // the summary counts the window's nodes
+  const auto first = app::RunSolve(checkpointed(limited));
+  EXPECT_NE(first.find("checkpointed node 0 of 5 to"), std::string::npos)
+      << first;
+  const auto second = app::RunSolve(checkpointed(limited));
+  EXPECT_NE(second.find(
+                "checkpointed node 2 of 5 (the left limit of a jump there)"),
+            std::string::npos)
+      << second;
+  const auto resumed = app::RunSolve(checkpointed(""));
+  EXPECT_NE(resumed.find("resumed"), std::string::npos) << resumed;
+  for (const auto* name : {"relative_sea_level_change", "displacement"}) {
+    EXPECT_EQ(read("checkpointed").variables.at(name).values,
+              read("file").variables.at(name).values)
+        << name;
+  }
+
+  // -- a jump the migrating sea level solve does not close
+  try {
+    static_cast<void>(app::RunSolve(Write(
+        "unclosed.json",
+        std::format(R"({{
+      "problem": "quasi_static", "model": {{"deck": "ball.deck"}},
+      "discretisation": {{"lmax": 8}}, "times": {},
+      "ocean": {{"at": "start", "topography": {{"file": "marine.nc"}},
+                 "ice": {{"file": "marine.nc"}}, "shorelines": "migrating"}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "marine.nc"}}}}]}},
+      "rotation": "none", "solver": {{"rtol": 1e-300}},
+      "output": {{"surface": "out/unclosed.nc"}}}})",
+                    onNodes))));
+    ADD_FAILURE() << "an unclosed jump was not refused";
+  } catch (const std::exception& error) {
+    const auto message = std::string{error.what()};
+    EXPECT_NE(message.find("the sea level solve did not converge at 0 kyr BP"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("passes, the last changing the sea level by"),
+              std::string::npos)
+        << message;
+    EXPECT_NE(message.find("against solver.rtol 1e-300"), std::string::npos)
+        << message;
+  }
+}

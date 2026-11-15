@@ -104,7 +104,7 @@ field:
 | hash | `text` | the run hash (below) |
 | writer | `text` | the program that wrote it, for provenance (`sl3dpp <version>`) |
 | dimension | `u64` | 1 (`Evolution`) or 3 (`Evolution3D`) |
-| times | `vec` | the N node times of the library's grid, increasing, a node repeated once where the forcing jumps (a seismic onset: its left limit, then its right; both recorded; `sl3d` repeats a node of its window at an onset there and steps a pair of its own at an onset between two) (one, at zero, for the static problem) |
+| times | `vec` | the N node times of the library's grid, increasing, a node repeated once where the forcing jumps (a seismic onset, a time of a `previous` history, a stored time of a file read by `previous` or of `interval` support: its left limit, then its right; both recorded; `sl3d` repeats a node of its window at a jump there and steps a pair of its own at a jump between two) (one, at zero, for the static problem) |
 | stride | `u64` | s >= 1 |
 | kept | N `u64` | 1 where the node is kept (n mod s = 0, or n = N - 1), 0 elsewhere |
 | migrating | `flag` | the shorelines migrate: every surface record holds an ocean function |
@@ -202,7 +202,8 @@ that one recorded run serves every sweep of it. It must cover the model
 (the deck's and any lateral files' contents and how they are read), the
 degree, the nodes (in the form that fixes their times to the bit), the
 forcing (every term's numbers whole and its files' contents, the seismic
-onsets among them, which with the nodes fix `sl3d`'s grid), the
+onsets, the histories' time rules and the files' rules and stored times
+among them, which with the nodes fix `sl3d`'s grid), the
 ocean's state and its files, the shorelines, the initial sea level's
 calibration, the rotation and the moments, the solves' tolerances and
 budgets, the time step, the 3D step's solver and, where the forward run

@@ -1262,3 +1262,167 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
     }
   }
 }
+
+TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
+  // About a run with a step load at a repeated node (its left limit
+  // without the step, Evolution::Forcing::directLoadBefore), recorded at
+  // every second node, with directions in the inverse relaxation times and
+  // the moduli: <H u, w> = <H w, u> = <g, F''[u, w]> from the second-order
+  // tangent-linear run, measured at both nodes of the pair and after, with
+  // the rotational feedback. And the continuous second-order sweep's rows
+  // tend to the discrete sweep's at second order as the steps are halved,
+  // the repeat held halfway.
+  auto setup = Scene::Make(1e21);
+  std::mt19937 rng(113);
+  const auto& material = setup.material;
+  const auto& mesh = material.Mesh();
+  const auto kappaMu = material.Moduli().KappaMu();
+  auto nodal = [&](const std::function<double(double)>& profile) {
+    MaterialDirection d;
+    d.kappa.assign(kappaMu.first.size(), 0.0);
+    d.mu.assign(kappaMu.second.size(), 0.0);
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      if (material.IsFluid(e)) continue;
+      for (auto q = 0; q < mesh.NGll(); ++q) {
+        const auto i = static_cast<std::size_t>(e) * mesh.NGll() + q;
+        const auto p = 0.1 * profile(mesh.Radius(e, q));
+        d.kappa[i] = 0.5 * p * kappaMu.first[i];
+        d.mu[i] = p * kappaMu.second[i];
+      }
+    }
+    return d;
+  };
+  const auto nodalU = nodal(
+      [](double r) { return 0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r); });
+  const auto nodalW = nodal([](double r) { return 1.0 - 0.5 * r; });
+  const auto ramp = setup.Smooth(rng, 200.0 * setup.Sigma());
+  const auto step = setup.Smooth(rng, 400.0 * setup.Sigma());
+  // the ramp throughout, the step from the jump at `onset` on
+  auto loadsOn = [&](double onset, double span) {
+    const auto loadAt = [&, onset, span](double t, bool stepped) {
+      auto out = ramp;
+      for (auto i = std::size_t{0}; i < out.size(); ++i) {
+        out[i] = out[i] * t / span + (stepped ? step[i] : 0.0);
+      }
+      return out;
+    };
+    return Evolution::Forcing{
+        .directLoad = [loadAt, onset](double t) { return loadAt(t, t >= onset); },
+        .directLoadBefore = [loadAt, onset](double t) {
+          return loadAt(t, t > onset);
+        }};
+  };
+
+  // -- the Hessian's symmetry and the second-order run
+  {
+    ViscoelasticOperator op(setup.rheology, kLmax);
+    const auto times = OnsetGrid(4, 2.0 * setup.Kyr(), 2);
+    auto measured = std::map<std::size_t, Measurement>{};
+    measured[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+    measured[times.size() - 1].displacementDual = setup.Smooth(rng, 0.5);
+    measured[2].potentialDual = setup.Smooth(rng, 0.7);
+    measured[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
+    measured[3].displacementDual = setup.Smooth(rng, 0.9);
+    Evolution evolution(op, setup.solver, setup.state,
+                        {.rotation = RotationalFeedback::Full,
+                         .rtol = 1e-12,
+                         .record_stride = 2});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, loadsOn(times[2], times.back())));
+    TangentPerturbation u, w;
+    u.itau = setup.DeltaItau(0.1);
+    u.material = AtMemoryPoints(op.Points(), nodalU);
+    w.itau = setup.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+    w.material = AtMemoryPoints(op.Points(), nodalW);
+    TangentLinearSolver tangent(
+        evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
+    AdjointSolver adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                      .rtol = 1e-12,
+                                      .material_kernels = true});
+    const auto runU = tangent.Run(times, u, &trajectory);
+    const auto runW = tangent.Run(times, w, &trajectory);
+    const auto alongU =
+        adjoint.SecondOrderKernels(times, measured, runU, u.itau, trajectory, {},
+                                   u.material)
+            .second;
+    const auto alongW =
+        adjoint.SecondOrderKernels(times, measured, runW, w.itau, trajectory, {},
+                                   w.material)
+            .second;
+    const auto uw = Pairing(setup, op.Points(), alongU, w);
+    const auto wu = Pairing(setup, op.Points(), alongW, u);
+    SecondOrderDirection direction;
+    direction.itauU = u.itau;
+    direction.itauV = w.itau;
+    direction.materialU = u.material;
+    direction.materialV = w.material;
+    const auto forward = Objective(
+        setup, tangent.RunSecondOrder(times, runU, runW, direction, &trajectory),
+        measured);
+    ASSERT_NE(forward, 0.0);
+    EXPECT_NEAR(uw, wu, 1e-8 * std::abs(uw));
+    EXPECT_NEAR(uw, forward, 1e-8 * std::abs(forward));
+  }
+
+  // -- the continuous rows against the discrete, on a mantle that relaxes
+  // over several of the coarsest steps
+  const auto slow = Scene::Make(1e22);
+  const auto span = 10.0 * slow.Kyr();
+  const auto gU = setup.Smooth(rng, 0.5);
+  const auto gPhi = setup.Smooth(rng, 0.7);
+  const auto gRight = setup.Smooth(rng, 0.6);
+  ViscoelasticOperator slowOp(slow.rheology, kLmax);
+  TangentPerturbation u;
+  u.itau = slow.DeltaItau(0.1);
+  u.material = AtMemoryPoints(slowOp.Points(), nodalU);
+  const auto itauW = slow.DeltaItau(0.1, [](double r) { return 0.8 - 0.5 * r; });
+  const auto materialW = AtMemoryPoints(slowOp.Points(), nodalW);
+  auto gaps = std::map<std::string, std::vector<double>>{};
+  for (const auto steps : {4, 8, 16}) {
+    const auto times = OnsetGrid(steps, span, steps / 2);
+    const auto right = static_cast<std::size_t>(steps / 2 + 1);
+    Evolution evolution(slowOp, slow.solver, slow.state,
+                        {.rotation = RotationalFeedback::Full,
+                         .rtol = 1e-12,
+                         .record_stride = 1});
+    const auto trajectory = ForwardTrajectory::FromSnapshots(
+        evolution.Run(times, loadsOn(times[right], span)));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].displacementDual = gU;
+    measurements[times.size() - 1].potentialDual = gPhi;
+    measurements[right].displacementDual = gRight;
+    auto rows = std::map<AdjointMethod, std::map<std::string, double>>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto run =
+          TangentLinearSolver(evolution,
+                              {.method = method, .rtol = 1e-12, .record = true})
+              .Run(times, u, &trajectory);
+      const auto derivatives =
+          AdjointSolver(evolution, {.method = method,
+                                    .rtol = 1e-12,
+                                    .material_kernels = true})
+              .SecondOrderKernels(times, measurements, run, u.itau, trajectory,
+                                  {}, u.material)
+              .second;
+      rows[method] = {
+          {"itau", VolumePairing(mesh, derivatives.itauKernel[0], itauW[0])},
+          {"kappa", VolumePairing(slowOp.Points(), mesh, derivatives.kappaKernel,
+                                  materialW.kappa)},
+          {"mu", VolumePairing(slowOp.Points(), mesh, derivatives.muKernel,
+                               materialW.mu)}};
+    }
+    for (const auto& [what, exact] : rows[AdjointMethod::Discrete]) {
+      gaps[what].push_back(std::abs(rows[AdjointMethod::Continuous][what] - exact) /
+                           std::abs(exact));
+    }
+  }
+  for (const auto& [what, g] : gaps) {
+    std::cout << std::format("[hessian across a load jump] {}: {:.2e} {:.2e} "
+                             "{:.2e}\n",
+                             what, g[0], g[1], g[2]);
+    // second order through the jump: measured 3.3e-2, 1.2e-2, 3.2e-3
+    // (itau), 2.2e-3 to 1.6e-4 (kappa), 1.8e-2 to 1.5e-3 (mu)
+    EXPECT_LT(g[2], 0.05) << what;
+    EXPECT_GT(g[1] / g[2], 3.0) << what << ": " << g[1] << " " << g[2];
+  }
+}

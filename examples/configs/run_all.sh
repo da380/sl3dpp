@@ -58,6 +58,7 @@ run solve no_ocean_postseismic.json
 run solve no_gravity_postseismic.json
 run solve sea_level_1d.json
 run solve sea_level_1d_calibrated.json
+run solve sea_level_1d_steps.json
 run solve sea_level_tide_migrating.json
 run solve sea_level_3d.json
 run solve sea_level_3d_calibrated.json

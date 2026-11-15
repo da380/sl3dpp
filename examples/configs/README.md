@@ -245,6 +245,18 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc`, which also holds
   the calibrated `initial_sea_level` and the `ocean_function` at every node.
   The marine margins of the synthetic ice sheets flood as they melt.
+- **`sea_level_1d_steps.json`** — a deglaciation in four steps: the
+  state's ice (the synthetic Earth's at 21 ka, `"at": "start"`) melted a
+  quarter at a stroke at 16, 12, 8 and 4 ka, a `cap_fraction` of it as wide
+  as the sphere whose amplitude history is read by `"time_interpolation":
+  "previous"`, a step function. Each step's date is a node of the window,
+  which the run repeats (the step's left limit, then its right), and the
+  jump between is the static elastic solve with the relaxation so far
+  held: each step's node holds the elastic response to the step, and the
+  nodes after it the relaxation. Dropping the member reads the same
+  factors as `linear`, the melt ramped between the dates instead:
+  `out/sea_level_1d_steps/sea_level_1d_steps.nc`. Under a second on four
+  threads.
 - **`sea_level_tide_migrating.json`** — that deglaciation with migrating
   shorelines from the state at 21 ka (`"at": "start"`) under a degree-2
   zonal tidal potential beside the ice (`forcing.tide`), switched on over

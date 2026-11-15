@@ -455,6 +455,10 @@ struct Reached {
   bool resumed = false;
   std::size_t replaced = 0;
   std::optional<std::size_t> stopped;
+  /// The node stopped at as the summary states it, of the window's nodes:
+  /// `node <n> of <last>`, a jump's left limit there said so, a pair of
+  /// the run's own between nodes by its date.
+  std::string stoppedAt;
   std::shared_ptr<const SurfaceLoads> loads;
   std::string trajectory;
 };
@@ -917,14 +921,10 @@ Reached RunThrough(
   // subdirectory, and they resume from the newest node all of them have;
   // each keeps its own history in its checkpoints, the fields the first
   // rank's alone.
+  // A checkpoint is of a node of the library's grid (its left limits and
+  // inserted pairs among them), with the window's records kept so far.
   const auto& checkpoint = input.checkpoint;
   const auto checkpointing = !checkpoint.directory.empty();
-  if (checkpointing && steps.Repeats()) {
-    // a repeat or an inserted pair is a seismic onset, and such a run is
-    // not checkpointed (ReadSolveInput): its checkpoints count the window's
-    // nodes
-    throw std::logic_error("a run whose forcing jumps is not checkpointed");
-  }
   const auto directory = RankDirectory(checkpoint.directory);
   const auto hash =
       checkpointing ? RunHashOf(input, std::is_same_v<Evolution, Evolution3D>)
@@ -1004,7 +1004,7 @@ Reached RunThrough(
                                 const typename Evolution::Checkpoint& cp) {
       WriteCheckpoint(directory, hash, base_node + node, cp, history,
                       migrating);
-      const auto done = base_node + node + 1 >= window.Size();
+      const auto done = base_node + node + 1 >= times.size();
       if (checkpoint.max_walltime_min > 0.0 && !done) {
         const auto minutes = std::chrono::duration<double>(
                                  std::chrono::steady_clock::now() - started)
@@ -1037,6 +1037,19 @@ Reached RunThrough(
     }
   } catch (const WalltimeReached& at) {
     out.stopped = at.node;
+    const auto last = window.Size() - 1;
+    if (steps.Inserted(at.node)) {
+      out.stoppedAt = std::format(
+          "the run's own node at {} (a jump between the window's nodes) of "
+          "nodes 0 to {}",
+          WhenOf(run, scales, times[at.node]), last);
+    } else {
+      out.stoppedAt = std::format("node {} of {}{}", steps.window[at.node],
+                                  last,
+                                  steps.Left(at.node)
+                                      ? " (the left limit of a jump there)"
+                                      : "");
+    }
     if (store) {
       out.trajectory = std::format(
           "the trajectory store {} left incomplete at node {}, the "
@@ -1072,8 +1085,8 @@ std::string StoppedSummary(std::string_view read, const SolveInput& input,
                            const Reached& reached) {
   // with restart false, the same config would start over again
   return std::format(
-      "{}; checkpointed node {} of {} to {} at the wall-time limit{}; {}{}",
-      read, *reached.stopped, input.run.times->Size() - 1,
+      "{}; checkpointed {} to {} at the wall-time limit{}; {}{}",
+      read, reached.stoppedAt,
       input.checkpoint.directory.string(), Replaced(reached),
       input.restart ? "rerun the same config to resume"
                     : "set \"restart\": true (the default) to resume",
@@ -1777,7 +1790,10 @@ std::string Run1D(const std::filesystem::path& config,
       [&](Evolution::Options options) {
         return Evolution(op, solver, world.background, std::move(options));
       },
-      Check1D, trajectory ? &*trajectory : nullptr);
+      [&run](const Evolution::Snapshot& snapshot, std::string_view when) {
+        Check1D(snapshot, when, run.solver.rtol);
+      },
+      trajectory ? &*trajectory : nullptr);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(reached.loads.get()));
   if (reached.stopped) return StoppedSummary(read, input, reached);
@@ -1807,7 +1823,10 @@ std::vector<Node> RadialReference(const SolveInput& input, const Json& top,
                return Evolution(op, solver, world.background,
                                 std::move(options));
              },
-             Check1D)
+             [&run](const Evolution::Snapshot& snapshot,
+                    std::string_view when) {
+               Check1D(snapshot, when, run.solver.rtol);
+             })
       .history;
 }
 
@@ -1932,6 +1951,7 @@ std::string RunSolve(const std::filesystem::path& config) {
   auto input = ReadSolveInput(config);
   const auto earth = BuildEarth(input.run, top);
   PlaceSeismicSources(input.run, earth, top);
+  FindFileJumps(input.run);
   const auto& run = input.run;
   if (!run.gravitating && earth.Lateral()) {
     const auto& model = top.At("model");

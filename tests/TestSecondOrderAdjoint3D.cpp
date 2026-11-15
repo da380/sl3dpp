@@ -2505,3 +2505,180 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
         << what << ": " << gaps[1].*row << " " << gaps[2].*row;
   }
 }
+
+TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
+  // About a run under lateral viscosity with a step load at a repeated
+  // node (its left limit without the step, Evolution3D::Forcing::
+  // directLoadBefore), recorded at every second node: along directions in
+  // the viscosity and the moduli, the discrete second-order sweep gives
+  // <H u, w> = <H w, u> = <g, F''[u, w]> from the second-order
+  // tangent-linear run, measured at the pair's two nodes and at the end,
+  // with the rotational feedback. And the continuous second-order row in
+  // the viscosity tends to the discrete one at second order as the steps
+  // are halved, the repeat held halfway.
+  auto scene = Scene::Make(1e22);
+  std::mt19937 rng(139);
+  const auto span = 10.0 * scene.Kyr();
+  auto onsetGrid = [&](int steps) {
+    auto times = std::vector<double>{};
+    for (auto n = 0; n <= steps; ++n) {
+      times.push_back(span * n / steps);
+      if (2 * n == steps) times.push_back(times.back());
+    }
+    return times;
+  };
+  const auto gU = scene.Smooth(rng, 0.5);
+  const auto gRight = scene.Smooth(rng, 0.6);
+  const auto gLeft = scene.Smooth(rng, 0.7);
+  const auto ramp = scene.MeltLoad(-0.1);
+  auto step = scene.MeltLoad(-0.2);
+  std::ranges::reverse(step);
+  Viscoelastic3D op(scene.rheology, kLmax, [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  const auto& coupling = op.Coupling();
+  const auto kappaMu = scene.material.Moduli().KappaMu();
+  auto moduli = [&](const std::function<double(double, double)>& angular) {
+    MaterialDirection3D d;
+    d.kappa = LateralModulus(
+        coupling, scene.material, kappaMu.first,
+        [](double r) { return 0.05 * (1.0 - 0.5 * r); }, angular);
+    d.mu = LateralModulus(
+        coupling, scene.material, kappaMu.second,
+        [](double r) { return 0.1 * (0.5 + r * r); }, angular);
+    return d;
+  };
+  auto pU = [](double theta, double phi) {
+    return Cap(theta, phi, 1.9, 4.4, 0.7) - Cap(theta, phi, 0.9, 1.1, 0.6);
+  };
+  auto pW = [](double theta, double phi) {
+    return 0.5 * Cap(theta, phi, 2.4, 2.0, 0.8) + 0.3 * std::cos(theta);
+  };
+  const auto itauU =
+      TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, pU));
+  const auto itauW =
+      TangentLinearSolver3D::ItauOfLogViscosity(op, OnCoupling(coupling, pW));
+  const auto materialU = moduli([](double theta, double phi) {
+    return 1.0 + 0.7 * std::cos(theta) + 0.5 * std::sin(theta) * std::sin(phi);
+  });
+  const auto materialW = moduli([](double theta, double phi) {
+    return 1.0 + 0.3 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  });
+  // the ramp throughout, the step from the jump at `onset` on
+  auto loadsOn = [&](double onset) {
+    const auto loadAt = [&ramp, &step, span](double t, bool stepped) {
+      auto out = ramp;
+      for (auto i = std::size_t{0}; i < out.size(); ++i) {
+        out[i] = out[i] * t / span + (stepped ? step[i] : 0.0);
+      }
+      return out;
+    };
+    return Evolution3D::Forcing{
+        .directLoad = [loadAt, onset](double t) { return loadAt(t, t >= onset); },
+        .directLoadBefore = [loadAt, onset](double t) {
+          return loadAt(t, t > onset);
+        }};
+  };
+
+  // -- the Hessian's identities
+  {
+    const auto times = onsetGrid(6);
+    const auto right = std::size_t{4};
+    Evolution3D evolution(
+        op, scene.solver, scene.state,
+        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 2});
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(
+        evolution.Run(times, loadsOn(times[right])));
+    ASSERT_FALSE(trajectory.Kept(right - 1));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].displacementDual = gU;
+    measurements[right].displacementDual = gRight;
+    measurements[right - 1].displacementDual = gLeft;
+    auto objective = [&](const std::vector<Evolution3D::Snapshot>& run) {
+      return scene.Surface(gU, run.back().displacement) +
+             scene.Surface(gRight, run[right].displacement) +
+             scene.Surface(gLeft, run[right - 1].displacement);
+    };
+    TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = 1e-12,
+                                              .record = true});
+    AdjointSolver3D adjoint(evolution, {.method = AdjointMethod::Discrete,
+                                        .rtol = 1e-12,
+                                        .coupled_rtol = 1e-12,
+                                        .material_kernels = true});
+    TangentPerturbation3D u, w;
+    u.itau = itauU;
+    u.material = materialU;
+    w.itau = itauW;
+    w.material = materialW;
+    const auto runU = tangent.Run(times, u, &trajectory);
+    const auto runW = tangent.Run(times, w, &trajectory);
+    auto pairing = [&](const KernelDerivatives3D& along,
+                       const TangentPerturbation3D& d) {
+      return GridPairing(coupling, along.itauKernel3D, d.itau) +
+             VolumePairing(coupling, along.kappaKernel3D, d.material.kappa) +
+             VolumePairing(coupling, along.muKernel3D, d.material.mu);
+    };
+    const auto alongU = adjoint
+                            .SecondOrderKernels(times, measurements, runU, u.itau,
+                                                trajectory, {}, u.material)
+                            .second;
+    const auto alongW = adjoint
+                            .SecondOrderKernels(times, measurements, runW, w.itau,
+                                                trajectory, {}, w.material)
+                            .second;
+    const auto uw = pairing(alongU, w);
+    const auto wu = pairing(alongW, u);
+    SecondOrderDirection3D uv;
+    uv.itauU = u.itau;
+    uv.itauV = w.itau;
+    uv.materialU = u.material;
+    uv.materialV = w.material;
+    const auto forward =
+        objective(tangent.RunSecondOrder(times, runU, runW, uv, &trajectory));
+    ASSERT_NE(forward, 0.0);
+    EXPECT_NEAR(uw, wu, 1e-8 * std::abs(uw));
+    EXPECT_NEAR(uw, forward, 1e-8 * std::abs(forward));
+  }
+
+  // -- the continuous row against the discrete
+  auto gaps = std::vector<double>{};
+  for (const auto steps : {4, 8, 16}) {
+    const auto times = onsetGrid(steps);
+    const auto right = static_cast<std::size_t>(steps / 2 + 1);
+    Evolution3D evolution(
+        op, scene.solver, scene.state,
+        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(
+        evolution.Run(times, loadsOn(times[right])));
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].displacementDual = gU;
+    measurements[right].displacementDual = gRight;
+    TangentPerturbation3D u;
+    u.itau = itauU;
+    auto rows = std::map<AdjointMethod, double>{};
+    for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+      const auto run = TangentLinearSolver3D(evolution, {.method = method,
+                                                         .rtol = 1e-12,
+                                                         .coupled_rtol = 1e-12,
+                                                         .record = true})
+                           .Run(times, u, &trajectory);
+      const auto along = AdjointSolver3D(evolution, {.method = method,
+                                                     .rtol = 1e-12,
+                                                     .coupled_rtol = 1e-12})
+                             .SecondOrderKernels(times, measurements, run, u.itau,
+                                                 trajectory)
+                             .second;
+      rows[method] = GridPairing(coupling, along.itauKernel3D, itauW);
+    }
+    gaps.push_back(std::abs(rows[AdjointMethod::Continuous] -
+                            rows[AdjointMethod::Discrete]) /
+                   std::abs(rows[AdjointMethod::Discrete]));
+  }
+  std::cout << std::format("[3D hessian across a load jump] {:.2e} {:.2e} {:.2e}\n",
+                           gaps[0], gaps[1], gaps[2]);
+  // measured 1.7e-1, 4.9e-2, 1.3e-2
+  EXPECT_LT(gaps[2], 0.05);
+  EXPECT_GT(gaps[1] / gaps[2], 3.0) << gaps[1] << " " << gaps[2];
+}

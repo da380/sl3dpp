@@ -845,8 +845,9 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
 
 TEST(Distributed, AcrossAJumpTheRunAndItsSweepsMatchTheOneProcess) {
   // An earthquake at a repeated node under lateral viscosity beside a
-  // melting load, its left limit without the source: the zero-length step
-  // under mpiexec as on one process, the run and the tangent along a
+  // melting load that steps there, its left limit without the source and
+  // the step (Forcing::sourcesBefore, directLoadBefore): the zero-length
+  // step under mpiexec as on one process, the run and the tangent along a
   // lateral log viscosity on every rank, and the first-order sweeps of
   // both methods (the ice views on every rank, each rank's slice of the
   // log-viscosity kernel), measured at the pair's right node and after.
@@ -884,22 +885,25 @@ TEST(Distributed, AcrossAJumpTheRunAndItsSweepsMatchTheOneProcess) {
              .longitude = 4.0},
       .moment = {.rr = 0.9 * unit, .tt = -0.2 * unit, .pp = -0.7 * unit,
                  .rt = 0.3 * unit, .rp = -0.7 * unit, .tp = 0.6 * unit}};
+  // the melt ramped, a fifth more of it at a stroke at the onset
+  const auto meltAt = [&](double t, bool stepped) {
+    auto out = melt;
+    for (auto& v : out) v *= t / times.back() + (stepped ? 0.2 : 0.0);
+    return out;
+  };
   const auto forcing = Evolution3D::Forcing{
-      .directLoad =
-          [&](double t) {
-            auto out = melt;
-            for (auto& v : out) v *= t / times.back();
-            return out;
-          },
+      .directLoad = [&](double t) { return meltAt(t, t >= onset); },
       .sources =
           [&](double t) {
             return t >= onset ? std::vector<PointSource>{source}
                               : std::vector<PointSource>{};
           },
-      .sourcesBefore = [&](double t) {
-        return t > onset ? std::vector<PointSource>{source}
-                         : std::vector<PointSource>{};
-      }};
+      .sourcesBefore =
+          [&](double t) {
+            return t > onset ? std::vector<PointSource>{source}
+                             : std::vector<PointSource>{};
+          },
+      .directLoadBefore = [&](double t) { return meltAt(t, t > onset); }};
   auto measurements = std::map<std::size_t, Measurement>{};
   const auto cap = solver.Grid().FromFunction([](double theta, double phi) {
     return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));

@@ -2,11 +2,13 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <format>
 #include <limits>
 #include <map>
 #include <planetmodel/rules.hpp>
 #include <planetmodel/surfacefile.hpp>
+#include <planetmodel/time.hpp>
 #include <planetmodel/units.hpp>
 #include <span>
 #include <stdexcept>
@@ -47,6 +49,30 @@ double FactorOf(const pm::FileVariable& var, const pm::Scales& scales) {
                                           static_cast<int>((*exps)[3])});
 }
 
+/// Where a variable on an axis (in its stored unit, `second` seconds
+/// each) jumps, SI (FieldJumps), at a tolerance relative to the axis's
+/// scale.
+FieldJumps JumpsOf(const pm::FileVariable& var,
+                   const std::optional<std::vector<double>>& axis,
+                   double second, double rtol) {
+  auto out = FieldJumps{};
+  if (!axis || axis->empty()) return out;
+  out.tolerance = pm::detail::TimeTolerance(*axis, rtol) * second;
+  const auto support = var.Text("time_support");
+  const auto rule = var.Text("time_interpolation");
+  const auto steps = support && *support == "node" && rule &&
+                     *rule == pm::TimeRuleName(pm::TimeRule::Previous);
+  const auto intervals = support && *support == "interval";
+  if (!steps && !intervals) return out;
+  // a `previous` field takes each stored time's values from it on; an
+  // interval field its interval's, the last closed at its end
+  const auto last = intervals ? axis->size() - 1 : axis->size();
+  for (auto k = std::size_t{1}; k < last; ++k) {
+    out.times.push_back((*axis)[k] * second);
+  }
+  return out;
+}
+
 }  // namespace
 
 struct FieldHistory::Impl {
@@ -55,6 +81,7 @@ struct FieldHistory::Impl {
   std::optional<std::pair<double, double>> span;
   std::string source;
   pm::Extrapolation extrapolation = pm::Extrapolation::Hold;
+  double time_rtol = pm::TIME_RTOL;
 };
 
 std::expected<FieldHistory, IoError> FieldHistory::Read(
@@ -159,7 +186,8 @@ std::expected<FieldHistory, IoError> FieldHistory::Read(
         .span = {},
         .source = file.source,
         .extrapolation = options.hold_outside ? pm::Extrapolation::Hold
-                                              : pm::Extrapolation::Refuse});
+                                              : pm::Extrapolation::Refuse,
+        .time_rtol = options.time_rtol});
     if (const auto& time = impl->history.File().time) {
       impl->span = std::pair{time->front(), time->back()};
     }
@@ -192,9 +220,53 @@ bool FieldHistory::Static(std::string_view name) const {
 std::vector<double> FieldHistory::Values(std::string_view name,
                                          double time) const {
   try {
-    return impl_->history.Values(name, time, impl_->extrapolation);
+    return impl_->history.Values(name, time, impl_->extrapolation,
+                                 impl_->time_rtol);
   } catch (const pm::Error& error) {
     throw std::runtime_error(error.what());
+  }
+}
+
+FieldJumps FieldHistory::Jumps(std::string_view name) const {
+  if (!Has(name)) {
+    throw std::runtime_error(
+        std::format("{} is not a field of the file", name));
+  }
+  const auto& file = impl_->history.File();
+  // the axis is held in SI seconds already (Read)
+  return JumpsOf(file.variables.at(std::string{name}), file.time, 1.0,
+                 impl_->time_rtol);
+}
+
+std::vector<double> FieldHistory::ValuesBefore(std::string_view name,
+                                               double time) const {
+  const auto jumps = Jumps(name);
+  for (auto k = std::size_t{0}; k < jumps.times.size(); ++k) {
+    if (std::abs(time - jumps.times[k]) > jumps.tolerance) continue;
+    // the stored time before the jump's: its slice, read alone
+    const auto& axis = *impl_->history.File().time;
+    const auto at = std::ranges::lower_bound(
+        axis, jumps.times[k] - jumps.tolerance);
+    return Values(name, *(at - 1));
+  }
+  return Values(name, time);
+}
+
+std::expected<FieldJumps, IoError> FieldHistory::JumpsIn(
+    const std::filesystem::path& path, std::string_view name,
+    const FieldHistoryOptions& options) {
+  try {
+    const auto file = pm::ReadSurfaceFile(path);
+    const auto found = file.variables.find(std::string{name});
+    if (name.ends_with("_poles") || found == file.variables.end()) {
+      return std::unexpected(IoError{
+          std::format("{}: {} is not a field of the file", path.string(),
+                      name)});
+    }
+    return JumpsOf(found->second, file.time, file.scales.Time(),
+                   options.time_rtol);
+  } catch (const pm::Error& error) {
+    return std::unexpected(IoError{error.what()});
   }
 }
 

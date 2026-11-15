@@ -257,6 +257,33 @@ inline Evolution::Forcing SourcesByNode(
           }};
 }
 
+/// A term given node by node on a grid with a repeated node, as
+/// SourcesByNode: `plain` reads the last node at a time, `before` (its left
+/// limit, Forcing::directLoadBefore and its kin) the first.
+template <class T>
+struct ByNode {
+  std::function<T(double)> plain;
+  std::function<T(double)> before;
+
+  ByNode(std::vector<double> times, std::vector<T> perNode) {
+    auto find = [times](double t, bool first) {
+      auto found = times.size();
+      for (auto n = std::size_t{0}; n < times.size(); ++n) {
+        if (std::abs(t - times[n]) <= 1e-12 * std::abs(times.back())) {
+          found = n;
+          if (first) break;
+        }
+      }
+      if (found == times.size()) {
+        throw std::runtime_error("the test history is read off its nodes");
+      }
+      return found;
+    };
+    plain = [find, perNode](double t) { return perNode[find(t, false)]; };
+    before = [find, perNode](double t) { return perNode[find(t, true)]; };
+  }
+};
+
 /// pyslfp's marine-grounded cap on a uniform ocean (the initial-sea-level
 /// tests' scene): a 5 km cap at 60N 85W on a 3000 m ocean, complete at
 /// 10 ka and melting linearly to nothing.

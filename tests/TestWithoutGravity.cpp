@@ -1551,6 +1551,82 @@ TEST(WithoutGravity, AnOnsetAtARepeatedNodeUnderSdirk2IsTheRunStartedThere) {
   EXPECT_LT(worst, 1e-11);
 }
 
+TEST(WithoutGravity, AStepLoadAtARepeatedNodeIsTheRunStartedThere) {
+  // A load inside the water budget and one outside it switched on at an
+  // interior node, the node repeated (their left limits without them,
+  // Forcing::directLoadBefore and directLoadOutsideWaterBudgetBefore),
+  // under a load ramped through it: the run is linear, and from the right
+  // node on it is the run under the ramp plus the run started there under
+  // the steps, before it the ramp's; the three schemes.
+  const auto earth = Earth::Make(false, kEarthLmax);
+  const auto solver = GRDSolver(SurfaceGrid(kEarthLmax),
+                                ComputeLoveNumbers(earth.material, kEarthLmax),
+                                SeaLevelParameters{});
+  const auto& grid = solver.Grid();
+  const ViscoelasticOperator op(earth.rheology, kEarthLmax,
+                                {.gravitating = false});
+  const auto year = 3.15576e7 / solver.SolverScales().Time();
+  const auto onset = 50.0 * year;
+  const auto jump = std::vector<double>{0.0,   20.0 * year,  onset,
+                                        onset, 100.0 * year, 400.0 * year};
+  const auto started = std::vector<double>{onset, 100.0 * year, 400.0 * year};
+  const auto field = grid.Synthesise(LoadWithoutDegreeOne(grid));
+  auto other = field;
+  std::ranges::reverse(other);
+  const auto ramp = [&](double t) {
+    auto out = field;
+    for (auto& v : out) v *= 0.2 + t / (400.0 * year);
+    return out;
+  };
+  const auto step = [](const std::vector<double>& base,
+                       const std::vector<double>& by, bool on) {
+    auto out = base;
+    if (on) {
+      for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += by[i];
+    }
+    return out;
+  };
+  const auto none = std::vector<double>(field.size(), 0.0);
+  const auto both = Evolution::Forcing{
+      .directLoad = [&](double t) { return step(ramp(t), field, t >= onset); },
+      .directLoadOutsideWaterBudget =
+          [&](double t) { return step(none, other, t >= onset); },
+      .directLoadBefore = [&](double t) { return step(ramp(t), field, t > onset); },
+      .directLoadOutsideWaterBudgetBefore =
+          [&](double t) { return step(none, other, t > onset); }};
+  const auto steps = Evolution::Forcing{
+      .directLoad = [&](double) { return field; },
+      .directLoadOutsideWaterBudget = [&](double) { return other; }};
+  for (const auto scheme : {Scheme::ExponentialTrapezoid,
+                            Scheme::BackwardEuler, Scheme::Sdirk2}) {
+    Evolution evolution(op, solver, solver.NoOceanState(),
+                        {.scheme = scheme,
+                         .rotation = RotationalFeedback::None,
+                         .rtol = 1e-12});
+    const auto run = evolution.Run(jump, both);
+    const auto ramped =
+        evolution.Run(jump, Evolution::Forcing{.directLoad = ramp});
+    const auto reference = evolution.Run(started, steps);
+    ASSERT_EQ(run.size(), jump.size());
+    auto worst = 0.0;
+    for (auto n = std::size_t{0}; n < jump.size(); ++n) {
+      for (const auto member : {&Evolution::Snapshot::displacement,
+                                &Evolution::Snapshot::tangentialPotential}) {
+        auto want = ramped[n].*member;
+        if (n >= 3) {
+          const auto& added = reference[n - 3].*member;
+          for (auto i = std::size_t{0}; i < want.size(); ++i) {
+            want[i] += added[i];
+          }
+        }
+        worst = std::max(worst, Departure(grid, run[n].*member, want, 0));
+      }
+    }
+    // measured: rounding
+    EXPECT_LT(worst, 1e-11) << "scheme " << static_cast<int>(scheme);
+  }
+}
+
 TEST(WithoutGravity, LoadsAndSourcesTogetherAreTheSumOfTheirRuns) {
   // The problem is linear: a run under a load and a source is the sum of
   // the run under the load and the run under the source, to rounding, on

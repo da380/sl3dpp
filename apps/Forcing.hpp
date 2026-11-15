@@ -33,10 +33,13 @@
  * problem a `field` term's file with a time axis is read at the term's
  * date (`date_kyr_bp`, or `date` with its `unit` on the file's own axis).
  * In the quasi-static problem (a run stepped through time) a term may
- * carry an amplitude history (`history_kyr_bp` or `history`), the
- * piecewise-linear factor its pattern is scaled by at each time, and a
- * `field` term may come from a file with a time axis, read at each time by
- * the file's own time rule (TimedLoads). Coefficients throughout are the
+ * carry an amplitude history (`history_kyr_bp` or `history`), the factor
+ * its pattern is scaled by at each time, piecewise linear or a step
+ * function (`time_interpolation`: AmplitudeHistory), and a `field` term
+ * may come from a file with a time axis, read at each time by the file's
+ * own time rule (TimedLoads); a step function's jumps are jumps of the
+ * forcing, whose left limits the readers serve beside the values (the
+ * `before` reads). Coefficients throughout are the
  * grid's (SurfaceGrid.hpp): complex, orthonormal, with the Condon-Shortley
  * phase, Y_lm = sqrt((2l+1)/4pi) d^l_0m(theta) e^{i m phi}, the m >= 0 ones
  * of a real field (f_(l,-m) = (-1)^m conj(f_lm)), in SI.
@@ -47,6 +50,7 @@
 #include <functional>
 #include <memory>
 #include <optional>
+#include <planetmodel/time.hpp>
 #include <span>
 #include <string>
 #include <string_view>
@@ -88,13 +92,18 @@ struct TermClock {
 };
 
 /// A term's amplitude history: factors at strictly increasing times on the
-/// terms' clock (TermClock), in its unit. The factor at a time is their
-/// piecewise-linear interpolant, held at the first factor before the first
-/// time and at the last after the last; without a history it is 1
-/// throughout.
+/// terms' clock (TermClock), in its unit, read by a time rule of
+/// planetmodel's (`time_interpolation`, the name a file states its rule
+/// by): `linear`, the default, their piecewise-linear interpolant, or
+/// `previous`, the factor of the latest time not after the time asked, a
+/// step function jumping at each time after the first. Either holds the
+/// first factor before the first time and the last after the last;
+/// without a history the factor is 1 throughout. A time within
+/// Tolerance of a listed time is that time.
 struct AmplitudeHistory {
   std::vector<double> times;
   std::vector<double> factors;
+  planetmodel::TimeRule rule = planetmodel::TimeRule::Linear;
   /// Where the history was given as dates before present
   /// (`history_kyr_bp`, a dated run), the date of the clock's zero, kyr BP:
   /// the times above are then this less the dates, in kyr.
@@ -104,8 +113,16 @@ struct AmplitudeHistory {
   std::optional<TimeUnit> unit;
 
   [[nodiscard]] bool Empty() const { return times.empty(); }
-  /// The factor at time t of the terms' clock.
+  /// The factor at time t of the terms' clock: the right limit at a jump.
   [[nodiscard]] double At(double t) const;
+  /// Its left limit at t: the factor before a jump at t, At's elsewhere.
+  [[nodiscard]] double Before(double t) const;
+  /// The times at which the factor jumps (`previous`: every time after the
+  /// first); none under `linear`.
+  [[nodiscard]] std::vector<double> Jumps() const;
+  /// The tolerance a time is read on a listed time with, the onsets' (on
+  /// the terms' clock): 1e-12 (1 + |t|) about the listed time t.
+  [[nodiscard]] static double Tolerance(double t);
 };
 
 /// One term of a surface load: a surface mass density, kg m^-2.
@@ -213,8 +230,9 @@ struct SeismicTerm {
   /// the onset.
   [[nodiscard]] double FactorAt(double t) const;
   /// Its left limit at t: zero up to the onset, the onset included (the
-  /// term absent just before it), FactorAt's after. The two differ at the
-  /// onset alone, where the term jumps on.
+  /// term absent just before it), and after it its history's left limit
+  /// (AmplitudeHistory::Before). The two differ where the term jumps: at
+  /// the onset, where it jumps on, and at a `previous` history's times.
   [[nodiscard]] double FactorBefore(double t) const;
   /// Whether the term's onset falls at time t of the terms' clock, to the
   /// tolerance FactorAt reads it with.
@@ -233,12 +251,26 @@ struct SeismicTerm {
 /// function (`linear`: piecewise linear between the file's times, one at
 /// its own and zero at the others; `previous`: one from its time to the
 /// next), which is the moment of the slip the file reads at every time.
-/// With `before`, their left limits at t: a term absent at its onset
-/// (SeismicTerm::FactorBefore), every other as at t, its time dependence
-/// continuous there.
+/// With `before`, their left limits at t: a term absent at its onset and
+/// a `previous` history's factor before its jump (SeismicTerm::
+/// FactorBefore), a `previous` fault file's slip the slice before a jump
+/// at t (FaultFileJumps); every other term as at t, continuous there.
 [[nodiscard]] std::vector<PointSource> SeismicSourcesAt(
     std::span<const SeismicTerm> seismic, double t, double surfaceRadius,
     bool before = false);
+
+/// Times on the terms' clock at which a term jumps, with the tolerance a
+/// time is read on one with (on the clock).
+struct ClockJumps {
+  std::vector<double> times;
+  double tolerance = 0.0;
+};
+
+/// Where a placed fault file term's slip jumps on the terms' clock: a file
+/// on a time axis read by `previous`, at each stored time after the first
+/// (each slice's slip held from its time to the next); none otherwise.
+/// The tolerance is the one every file's axis is read with (kAxisRtol).
+[[nodiscard]] ClockJumps FaultFileJumps(const SeismicTerm& term);
 
 /// A seismic term's points, SI (radius in metres): a point source's one, a
 /// planar fault's patches' centres within the body (PlanarFaultSources), a
@@ -296,8 +328,10 @@ class TimedLoads {
   TimedLoads(std::vector<LoadTerm> terms, const SurfaceGrid& grid,
              const Json& block, bool timed = true);
 
-  /// The terms at time t of the terms' clock, SI, each times its factor.
-  [[nodiscard]] BuiltLoads At(double t) const;
+  /// The terms at time t of the terms' clock, SI, each times its factor;
+  /// with `before`, their left limits there (a `previous` history's
+  /// factor, a file's field: AmplitudeHistory::Before, ReadValues).
+  [[nodiscard]] BuiltLoads At(double t, bool before = false) const;
 
   /// Refuses, as At would, a time of the terms' clock outside the span of
   /// a `field` term's file read through time, before the run reads it.
@@ -516,7 +550,10 @@ struct Forcing {
 /// In a run COUNTING FORWARDS they are times on the run's own clock in its
 /// unit: a history is `history`, pairs `[time, factor]` (the times strictly
 /// increasing), an onset `onset`, and a `field` file with a time axis is
-/// read at t - `time_origin` (default 0) at the clock's time t. The names
+/// read at t - `time_origin` (default 0) at the clock's time t. Either
+/// form's history is read by `time_interpolation` beside it
+/// (AmplitudeHistory: `linear`, the default, or `previous`), refused
+/// without a history and beside an ice change's file term. The names
 /// of the other form are refused, naming this form's, and so are times in
 /// kyr without a unit (`history_kyr`, `onset_kyr`, `time_origin_kyr`, a
 /// field's `date_kyr`), and the members of the other problem: a history or
@@ -533,9 +570,10 @@ struct Forcing {
 
 /// The tide's coefficients on `grid` at time `t` of the terms' clock,
 /// m^2 s^-2: each coefficient times its amplitude history's factor there,
-/// summed.
+/// summed; with `before`, their left limits (AmplitudeHistory::Before).
 [[nodiscard]] std::vector<std::complex<double>> TideAt(
-    std::span<const TideTerm> tide, const SurfaceGrid& grid, double t);
+    std::span<const TideTerm> tide, const SurfaceGrid& grid, double t,
+    bool before = false);
 
 /// One line describing a term of an ice change, for provenance: its kind,
 /// its file and variable and when they are read, or its cap.
@@ -570,7 +608,8 @@ class SurfaceLoads {
     std::vector<double> layer;    ///< the layer's thickness, m
     std::vector<double> given;    ///< every term summed as given, kg m^-2
   };
-  [[nodiscard]] Node At(double t) const;
+  /// With `before`, the loads' left limits at t (TimedLoads::At).
+  [[nodiscard]] Node At(double t, bool before = false) const;
 
   /// Refuses a time outside the span of a `field` term's file read
   /// through time (TimedLoads::CheckCovers).
