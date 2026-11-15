@@ -264,7 +264,6 @@ TEST(PointSourcesForces, AreTheSumOfEachSourcesForces) {
   EXPECT_TRUE(PointSourcesForces(material, kLmax, sph, tor, {}).spheroidal.empty());
 }
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 namespace {
 
@@ -490,4 +489,3 @@ TEST(FaultSources, ArePlacedAndRefusedByName) {
   }
 }
 
-#endif

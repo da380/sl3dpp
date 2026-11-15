@@ -56,9 +56,7 @@
  * planetmodel reading of it takes (`planetmodel::Fault::Rows`) are combined
  * under their weights (FaultSources::MomentsAt), as planetmodel combines
  * the slices' slip (`FaultSliceQuadrature::SlipOf`): the moment being
- * linear in the slip, the moments of the slip at that date. The parts that
- * read planetmodel's fault are compiled where planetmodel's C++ library
- * holds it (SL3DPP_HAVE_FAULT_FILE defined).
+ * linear in the slip, the moments of the slip at that date.
  *
  * Lengths and the moment are in the caller's units (the evolution's
  * solver units, for Evolution3D::Forcing::sources); angles are degrees.
@@ -75,17 +73,14 @@
 #include "sl3dpp/Geography.hpp"
 #include "sl3dpp/PointSource.hpp"
 
-#if __has_include(<planetmodel/faultfile.hpp>) && \
-    defined(SL3DPP_PLANETMODEL_1_6)
 #include <planetmodel/fault.hpp>
 #include <planetmodel/time.hpp>
-/// Defined where planetmodel's C++ library reads, evaluates and writes the
-/// fault file (planetmodel.fault/1) with the interfaces of its 1.6.0
-/// release, the slice quadrature and the date tolerance among them
-/// (SL3DPP_PLANETMODEL_1_6, which the build defines where they compile):
-/// FaultSourcesOf, and the sl3d program's `fault_file` term, are compiled
-/// then.
-#define SL3DPP_HAVE_FAULT_FILE 1
+#include <planetmodel/version.hpp>
+
+#ifndef PLANETMODEL_VERSION_AT_LEAST
+#error "sl3dpp needs planetmodel 1.6.0 or later"
+#elif !PLANETMODEL_VERSION_AT_LEAST(1, 6, 0)
+#error "sl3dpp needs planetmodel 1.6.0 or later"
 #endif
 
 namespace sl3dpp {
@@ -153,7 +148,6 @@ enum class FaultPlacement { Depth, Radius };
 /// model's surface radius, its positions then taken as stored.
 inline constexpr double kSameSurface = 1e-9;
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 /// What FaultSourcesOf lays over a fault, and on what model.
 struct FaultSourceOptions {
@@ -198,6 +192,5 @@ struct FaultSources {
 [[nodiscard]] FaultSources FaultSourcesOf(const planetmodel::Fault& fault,
                                           const FaultSourceOptions& options);
 
-#endif
 
 }  // namespace sl3dpp

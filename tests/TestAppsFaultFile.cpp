@@ -39,9 +39,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/io/ModelModuli.hpp"
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 #include <planetmodel/faultfile.hpp>
-#endif
 
 namespace {
 
@@ -60,9 +58,7 @@ class FaultFileTest : public ::testing::Test {
                             ->name()});
     fs::remove_all(dir_);
     fs::create_directories(dir_);
-#ifdef SL3DPP_HAVE_FAULT_FILE
     test::WriteFaultFixtures(dir_);
-#endif
   }
   void TearDown() override { fs::remove_all(dir_); }
 
@@ -96,7 +92,6 @@ class FaultFileTest : public ::testing::Test {
   fs::path dir_;
 };
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 /// The twin plane as a planar `fault` term, 4 by 2 patches.
 constexpr auto kFault = R"("fault": {"latitude": -40, "longitude": 150,
@@ -676,32 +671,5 @@ TEST_F(FaultFileTest, ItsRunHashesTheFilesContents) {
   EXPECT_NE(hash("planar", kFault), base);
 }
 
-#else
-
-TEST_F(FaultFileTest, IsRefusedWithoutPlanetmodelsFaultFile) {
-  // A build whose planetmodel has no fault file refuses the term, naming
-  // the planetmodel it needs.
-  static_cast<void>(Ball());
-  const auto config = Write("fault.json", std::format(R"({{
-      "problem": "static", "model": {{"deck": "ball.deck"}},
-      "discretisation": {{"lmax": 8}}, "rotation": "none",
-      "forcing": {{"seismic": [{{"fault_file": {{"file": "fault_plane.nc",
-          "cells_along_strike": 4, "cells_down_dip": 2}}}}]}},
-      "output": {{"surface": "out/fault.nc"}}}})"));
-  try {
-    static_cast<void>(app::RunSolve(config));
-    ADD_FAILURE() << "the fault file was not refused";
-  } catch (const pm::Error& error) {
-    const auto message = std::string{error.what()};
-    EXPECT_NE(message.find("forcing.seismic[0].fault_file"), std::string::npos) << message;
-    EXPECT_NE(message.find("this build of sl3d does not read"), std::string::npos)
-        << message;
-    EXPECT_NE(message.find("planetmodel.fault/1"), std::string::npos) << message;
-    EXPECT_NE(message.find("planetmodel 1.6.0 or later"), std::string::npos)
-        << message;
-  }
-}
-
-#endif
 
 }  // namespace

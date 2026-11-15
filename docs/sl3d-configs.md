@@ -151,11 +151,9 @@ All values are SI. Blank lines and lines starting with `#` in the table are
 skipped. A prony or burgers deck is read by planetmodel's own reader of
 it, its column line and naming lines and its values held to planetmodel's
 checks (a prony deck's strengths in [0, 1] summing to at most one, its
-times positive; a burgers deck's layers one of its three bodies), and
-needs a build against planetmodel 1.6.0 or later, which reads them; an
-older one refuses the format at `model.deck`. The elastic structure always
-comes from the deck, a prony or burgers deck's elastic values being the
-unrelaxed ones. The quasi-static problem (`solve`, `kernel`) takes the
+times positive; a burgers deck's layers one of its three bodies). The
+elastic structure always comes from the deck, a prony or burgers deck's
+elastic values being the unrelaxed ones. The quasi-static problem (`solve`, `kernel`) takes the
 viscosity from the model file of `model.viscosity` when given, ignoring
 any viscosity column, and from the deck otherwise, which then needs a
 deck that states a rheology (`"maxwell"`, `"prony"` or `"burgers"`): a
@@ -1321,12 +1319,6 @@ revolution about the circle's pole) at a quadrature symmetric about the
 arc's middle; points whose radii differ by more, as a curved patch's along
 strike otherwise do, are formed one by one. In a run through time the
 sources are formed at every node.
-
-**The build.** The term needs planetmodel's C++ library with the fault
-file and its slice quadrature (`<planetmodel/faultfile.hpp>`, planetmodel
-1.6.0 or later); a build of sl3d against an older planetmodel reads the
-config but refuses the term when it runs, naming the planetmodel it was
-built with (docs/building.md).
 
 **What the seismic forcing resolves.** sl3d is a global code: a source's
 field is carried to degree `lmax`, a wavelength of about 40 000 km /

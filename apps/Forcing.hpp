@@ -155,8 +155,7 @@ struct TideTerm {
 };
 
 /// A fault file's fault as read and, once the Earth is built, its point
-/// sources (PlaceFaultFiles): defined where the build reads fault files
-/// (SL3DPP_HAVE_FAULT_FILE).
+/// sources (PlaceFaultFiles).
 struct FaultFileState;
 
 /// One seismic source: a point moment tensor, a planar fault of uniform

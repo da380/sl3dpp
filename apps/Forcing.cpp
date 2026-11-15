@@ -17,22 +17,16 @@
 #include "sl3dpp/io/FieldHistory.hpp"
 
 #include <planetmodel/version.hpp>
-#ifdef SL3DPP_HAVE_FAULT_FILE
 #include <planetmodel/faultfile.hpp>
-#endif
 
 namespace sl3dpp::app {
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 struct FaultFileState {
   planetmodel::Fault fault;
   /// The sources, once placed (PlaceFaultFiles).
   FaultSources sources{};
   bool placed = false;
 };
-#else
-struct FaultFileState {};
-#endif
 
 namespace {
 
@@ -443,7 +437,6 @@ void ReadFaultFileTerm(SeismicTerm& term, const Json& item,
   }
 }
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 /// A fault file term's file, read whole and checked as planetmodel reads
 /// it, and held to the term's members and the run (`item`, the term in
@@ -503,7 +496,6 @@ std::shared_ptr<FaultFileState> ReadFault(const SeismicTerm& term,
       FaultFileState{.fault = std::move(file.fault)});
 }
 
-#endif
 
 /// One seismic source: a point moment tensor, a planar fault or a fault
 /// file (`directory` resolving its path); `timed`, a run through time's,
@@ -794,7 +786,6 @@ std::vector<PointSource> PlanarSourcesOf(const SeismicTerm& term,
                             surfaceRadius, term.alongStrike, term.downDip);
 }
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 /// A fault file term's state once placed.
 const FaultFileState& PlacedOf(const SeismicTerm& term) {
@@ -854,7 +845,6 @@ std::vector<PointSource> FileSourcesOf(const SeismicTerm& term, double t) {
   return out;
 }
 
-#endif
 
 }  // namespace
 
@@ -873,9 +863,7 @@ std::vector<BodyPoint> SeismicPointsOf(const SeismicTerm& term,
       }
       break;
     case SeismicTerm::Kind::FaultFile:
-#ifdef SL3DPP_HAVE_FAULT_FILE
       out = PlacedOf(term).sources.points;
-#endif
       break;
   }
   return out;
@@ -889,20 +877,6 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
     if (term.kind != SeismicTerm::Kind::FaultFile) continue;
     const auto& item = block.At("seismic").At(k);
     const auto& member = item.At("fault_file");
-#ifndef SL3DPP_HAVE_FAULT_FILE
-    static_cast<void>(surfaceRadius);
-    static_cast<void>(moduli);
-    static_cast<void>(times);
-    Fail(
-        member,
-        std::format("is a fault file, which this build of sl3d does not read: "
-                    "it needs planetmodel's C++ library with the fault file "
-                    "(planetmodel.fault/1, <planetmodel/faultfile.hpp>) and "
-                    "its slice quadrature, planetmodel 1.6.0 or later, and was "
-                    "built with planetmodel {}. Build sl3d against such a "
-                    "planetmodel (docs/building.md)",
-                    planetmodel::Version()));
-#else
     term.fault = ReadFault(term, item);
     auto& state = *term.fault;
     const auto& fault = state.fault;
@@ -965,7 +939,6 @@ void PlaceFaultFiles(std::span<SeismicTerm> seismic, double surfaceRadius,
                          error.what()));
       }
     }
-#endif
   }
 }
 
@@ -981,9 +954,7 @@ std::vector<PointSource> SeismicSourcesAt(std::span<const SeismicTerm> seismic,
     } else if (term.kind == SeismicTerm::Kind::Fault) {
       sources = PlanarSourcesOf(term, surfaceRadius);
     } else {
-#ifdef SL3DPP_HAVE_FAULT_FILE
       sources = FileSourcesOf(term, t);
-#endif
     }
     for (auto& source : sources) {
       for (auto* c : {&source.moment.rr, &source.moment.tt, &source.moment.pp,
@@ -1251,7 +1222,6 @@ std::string Describe(const SeismicTerm& term) {
         term.scalarMoment, term.alongStrike, term.downDip);
   } else {
     out = std::format("fault file {}", term.file.string());
-#ifdef SL3DPP_HAVE_FAULT_FILE
     if (term.fault) {
       const auto& fault = term.fault->fault;
       const auto patches = fault.Patches().size();
@@ -1261,7 +1231,6 @@ std::string Describe(const SeismicTerm& term) {
                                fault.TimeInterpolation())
                  : std::string{"static)"};
     }
-#endif
     out += std::format(", {} by {} cells a patch, {} Gauss point{} each way a "
                        "cell",
                        term.cellsAlongStrike, term.cellsDownDip, term.points,
@@ -1271,9 +1240,7 @@ std::string Describe(const SeismicTerm& term) {
                                                      : ", placed by radius";
     }
     auto onAxis = false;
-#ifdef SL3DPP_HAVE_FAULT_FILE
     onAxis = term.fault && term.fault->fault.Support() == planetmodel::TimeSupport::Node;
-#endif
     if (onAxis && term.dated) {
       out += ", read by date";
     } else if (onAxis && term.time_origin != 0.0) {

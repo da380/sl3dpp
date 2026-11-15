@@ -224,11 +224,9 @@ TEST(EarthModel, ViscoelasticColumnsAreJoinedAsPlanetmodelJoinsThem) {
   // (2.5e-15 each here: the two joins' rounding)
   EXPECT_LT(worst, 1e-13);
   EXPECT_LT(worstSlope, 1e-13);
-#ifdef SL3DPP_PLANETMODEL_1_6
   // geometric between knots
   EXPECT_NEAR(model.EvaluateInLayer("viscosity", 1, 4.5e6),
               std::sqrt(3e20 * 2e22), 1e-14 * std::sqrt(3e20 * 2e22));
-#endif
   for (const auto r : {0.0, 0.7e6, 2.3e6, 3e6}) {
     // a deterministic evaluation of a constant: to the last bits
     EXPECT_DOUBLE_EQ(model.EvaluateInLayer("viscosity", 0, r), 1e21);
@@ -257,11 +255,9 @@ TEST(EarthModel, ViscoelasticColumnsAreJoinedAsPlanetmodelJoinsThem) {
   negative[5] = -1.0;
   const auto refused =
       EarthModel::FromDeck(Deck::Create(radius, columns(negative)).value());
-#ifdef SL3DPP_PLANETMODEL_1_6
   ASSERT_FALSE(refused.has_value());
   EXPECT_NE(refused.error().message.find("viscosity"), std::string::npos)
       << refused.error().message;
-#endif
   const auto byRho = EarthModel::FromDeck(
       deck, {.kinds = std::map<std::string, std::string>{{"rho", "linear"}}});
   ASSERT_FALSE(byRho.has_value());

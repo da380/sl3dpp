@@ -76,12 +76,10 @@ std::map<std::string, std::string> ViscoelasticDeckKinds() {
   for (const auto& [name, kind] : planetmodel::MAXWELL_KINDS) {
     out.emplace(name, kind);
   }
-#ifdef SL3DPP_PLANETMODEL_1_6
   for (const auto* kinds :
        {&planetmodel::PRONY_KINDS, &planetmodel::BURGERS_KINDS}) {
     for (const auto& [name, kind] : *kinds) out.emplace(name, kind);
   }
-#endif
   return out;
 }
 

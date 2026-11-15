@@ -39,7 +39,6 @@
 
 #include "sl3dpp/Fault.hpp"
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 #include <planetmodel/faultfile.hpp>
 
@@ -207,4 +206,3 @@ inline void WriteFaultFixtures(const std::filesystem::path& directory) {
 
 }  // namespace sl3dpp::test
 
-#endif

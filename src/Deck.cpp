@@ -86,17 +86,8 @@ std::expected<Deck, DeckError> Deck::Read(const std::filesystem::path& path,
     // checks of the header and the values.
     const auto planetmodelFormat = [&]() -> planetmodel::DeckFormat {
       if (format.rules == DeckFormat::Rules::Columns) return Translated(format);
-#ifdef SL3DPP_PLANETMODEL_1_6
       return format.rules == DeckFormat::Rules::Prony ? planetmodel::PRONY()
                                                       : planetmodel::BURGERS();
-#else
-      throw planetmodel::Error(
-          path.string(), "",
-          std::format("is read as a {} deck, which planetmodel's C++ library "
-                      "reads from its 1.6.0 release on: this build's "
-                      "planetmodel, {}, reads none",
-                      format.name, planetmodel::Version()));
-#endif
     }();
     const auto read = planetmodel::ReadDeck(path, planetmodelFormat);
     auto columns = std::vector<std::pair<std::string, std::vector<double>>>{};

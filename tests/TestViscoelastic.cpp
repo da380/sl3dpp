@@ -30,9 +30,7 @@
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 
-#ifdef SL3DPP_PLANETMODEL_1_6
 #include <planetmodel/deck.hpp>
-#endif
 
 using namespace sl3dpp;
 
@@ -471,7 +469,6 @@ TEST(Rheology, FromModelReadsTheBodiesItsFieldsState) {
           "strength or time without the other");
 }
 
-#ifdef SL3DPP_PLANETMODEL_1_6
 
 TEST(Rheology, PlanetmodelsDecksAreReadWithTheirChecks) {
   // planetmodel's prony and burgers decks, written by its own writer, read
@@ -529,7 +526,6 @@ TEST(Rheology, PlanetmodelsDecksAreReadWithTheirChecks) {
   std::filesystem::remove_all(dir);
 }
 
-#endif
 
 TEST(Viscoelastic, ElasticAndLongTermLimits) {
   auto body = TestBody::Make(4);

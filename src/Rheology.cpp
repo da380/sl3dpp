@@ -9,9 +9,7 @@
 #include <string_view>
 #include <utility>
 
-#ifdef SL3DPP_PLANETMODEL_1_6
 #include <planetmodel/deck.hpp>
-#endif
 
 namespace sl3dpp {
 
@@ -283,11 +281,7 @@ std::expected<std::pair<LayerBody, std::size_t>, RheologyError> BodyOf(
 
 /// How far, per branch, a prony deck's strengths may sum past one: the
 /// rounding of the eight significant digits planetmodel writes them with.
-#ifdef SL3DPP_PLANETMODEL_1_6
 constexpr auto kStrengthRounding = planetmodel::STRENGTH_ROUNDING;
-#else
-constexpr auto kStrengthRounding = 1e-8;
-#endif
 
 }  // namespace
 

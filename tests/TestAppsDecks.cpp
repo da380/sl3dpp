@@ -124,7 +124,6 @@ fs::path PostseismicDeck() {
          "prem8.postseismic.deck";
 }
 
-#ifdef SL3DPP_PLANETMODEL_1_6
 
 /// The lidded ball: a viscous interior under an elastic lid 100 km thick,
 /// its elastic values homogeneous (rho 5500 kg m^-3, vp 10000 m/s, vs 5500
@@ -556,24 +555,5 @@ TEST_F(DecksTest, TheViscosityKernelsOfABurgersBodyAreItsBranches) {
   EXPECT_LT(branches, 1e-7);
 }
 
-#else
-
-TEST_F(DecksTest, AreRefusedWithoutPlanetmodelsDecks) {
-  // A build whose planetmodel has no prony or burgers deck refuses the
-  // formats, naming the planetmodel it needs.
-  Write("ball.deck",
-        "lidded ball\nr rho vpv vsv vph vsh eta viscosity\n"
-        "0 5500 10000 5500 10000 5500 1 1e21\n"
-        "6371000 5500 10000 5500 10000 5500 1 1e21\n");
-  for (const auto* format : {"prony", "burgers"}) {
-    ExpectRefused(
-        app::RunSolve,
-        Solve(format, std::format(R"({{"deck": "ball.deck", "format": "{}"}})",
-                                  format)),
-        "model.deck", "1.6.0");
-  }
-}
-
-#endif
 
 }  // namespace

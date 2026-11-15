@@ -94,9 +94,7 @@ struct DeckFormat {
 /// the column line; a layer NaN in every branch column (elastic) or a
 /// number in each, the strengths in [0, 1] summing to at most one (to the
 /// rounding of the eight digits the format writes) and the times positive.
-/// planetmodel's reader reads it, with its checks: it needs planetmodel
-/// 1.6.0 or later (SL3DPP_PLANETMODEL_1_6), Deck::Read refusing the format
-/// otherwise.
+/// planetmodel's reader reads it, with its checks.
 [[nodiscard]] DeckFormat PronyFormat();
 
 /// planetmodel's burgers deck (planetmodel::BURGERS(), its

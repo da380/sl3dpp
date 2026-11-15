@@ -72,11 +72,9 @@ enum class SplineKind { Cubic, Natural };
 enum class Side { Below, Above };
 
 /// planetmodel's kinds for the columns of its viscoelastic decks, by
-/// column name or family stem, of the planetmodel the library is built
-/// with: its MAXWELL_KINDS, and with its prony and burgers decks
-/// (SL3DPP_PLANETMODEL_1_6) its PRONY_KINDS and BURGERS_KINDS too (the
-/// viscosities and the relaxation times `log-linear`, the strengths and
-/// the Kelvin modulus fraction `linear`).
+/// column name or family stem: its MAXWELL_KINDS, PRONY_KINDS and
+/// BURGERS_KINDS (the viscosities and the relaxation times `log-linear`,
+/// the strengths and the Kelvin modulus fraction `linear`).
 [[nodiscard]] std::map<std::string, std::string> ViscoelasticDeckKinds();
 
 class EarthModel {

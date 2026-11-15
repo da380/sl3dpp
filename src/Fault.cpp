@@ -177,7 +177,6 @@ SphericalTensor SlipMoment(const LoveModuli& moduli, const BodyPoint& at,
           .tp = area * 2.0 * N * e(1, 2)};
 }
 
-#ifdef SL3DPP_HAVE_FAULT_FILE
 
 FaultSources FaultSourcesOf(const planetmodel::Fault& fault,
                             const FaultSourceOptions& options) {
@@ -287,6 +286,5 @@ std::vector<SphericalTensor> FaultSources::MomentsAt(
   return out;
 }
 
-#endif
 
 }  // namespace sl3dpp

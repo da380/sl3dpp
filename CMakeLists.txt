@@ -77,7 +77,7 @@ set(SL3DPP_GAUSSQUAD_PIN "bd4f51c2330dfd4901b141e61f8a136f70e96d2a")
 set(SL3DPP_INTERPOLATION_PIN "0935579fbfc69fea3ddf9850abb691d56a5514b9")
 set(SL3DPP_FFTWPP_PIN "aca248ba98cd3e4e73cb3713c6da5882678003b5")
 set(SL3DPP_GSHTRANS_PIN "c71313c52cd22a53b48b25302ab4afc20e158e32")
-set(SL3DPP_PLANETMODEL_PIN "744a6da0d3d1bc960188a876321992778ff6e41e")
+set(SL3DPP_PLANETMODEL_PIN "90fbadc622fb927a08af0be625b86e1109eb2502")
 
 # The revision each library is fetched at: the override when one is set,
 # else the pin.
@@ -149,92 +149,6 @@ FetchContent_Declare(
 
 FetchContent_MakeAvailable(NumericConcepts GaussQuad Interpolation FFTWpp
                            GSHTrans planetmodel)
-
-# Whether planetmodel holds the C++ interfaces of its 1.6.0 release that the
-# library uses: the fault's slice quadrature and its date tolerance, the
-# enumerations of time supports and rules, the prony and burgers decks and
-# their kinds, and the knots joined in their logarithm. planetmodel states
-# no feature macros and its version is a string (planetmodel::Version()), so
-# the interfaces are probed by compiling them, on the include directories its
-# target and those it links carry, at every configure. Where they compile,
-# SL3DPP_PLANETMODEL_1_6 is defined for the library and its users.
-include(CheckCXXSourceCompiles)
-function(_sl3dpp_interface_includes out)
-  set(dirs "")
-  set(pending ${ARGN})
-  set(seen "")
-  while(pending)
-    list(POP_FRONT pending name)
-    if(NOT TARGET ${name} OR name IN_LIST seen)
-      continue()
-    endif()
-    list(APPEND seen ${name})
-    get_target_property(real ${name} ALIASED_TARGET)
-    if(real)
-      set(name ${real})
-    endif()
-    get_target_property(entries ${name} INTERFACE_INCLUDE_DIRECTORIES)
-    if(entries)
-      foreach(entry IN LISTS entries)
-        if(entry MATCHES "^\\$<INSTALL_INTERFACE:")
-          continue()
-        endif()
-        string(REGEX REPLACE "^\\$<BUILD_INTERFACE:(.*)>$" "\\1" entry
-               "${entry}")
-        list(APPEND dirs "${entry}")
-      endforeach()
-    endif()
-    get_target_property(links ${name} INTERFACE_LINK_LIBRARIES)
-    if(links)
-      foreach(link IN LISTS links)
-        if(NOT link MATCHES "^\\$<")
-          list(APPEND pending ${link})
-        endif()
-      endforeach()
-    endif()
-  endwhile()
-  set(${out} ${dirs} PARENT_SCOPE)
-endfunction()
-_sl3dpp_interface_includes(_sl3dpp_planetmodel_includes
-                           planetmodel::planetmodel)
-set(CMAKE_REQUIRED_INCLUDES ${_sl3dpp_planetmodel_includes})
-set(CMAKE_REQUIRED_QUIET ON)
-if(CMAKE_CXX_COMPILER_ID STREQUAL "Clang"
-   AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS 19)
-  set(CMAKE_REQUIRED_DEFINITIONS -D__cpp_concepts=202002L
-                                 -Wno-builtin-macro-redefined)
-endif()
-unset(SL3DPP_PLANETMODEL_1_6 CACHE)
-check_cxx_source_compiles([=[
-#include <cstddef>
-#include <optional>
-#include <planetmodel/deck.hpp>
-#include <planetmodel/fault.hpp>
-#include <planetmodel/time.hpp>
-void Probe(const planetmodel::Fault& fault) {
-  const auto rows = fault.Rows(
-      std::nullopt, {.extrapolation = planetmodel::Extrapolation::Refuse,
-                     .time_rtol = planetmodel::TIME_RTOL});
-  static_cast<void>(fault.SliceQuadrature(std::size_t{1}, std::size_t{1}).SlipOf(rows));
-  static_cast<void>(fault.Support() == planetmodel::TimeSupport::Node);
-  static_cast<void>(fault.TimeInterpolation() == planetmodel::TimeRule::Linear);
-  static_cast<void>(planetmodel::PRONY().name + planetmodel::BURGERS().name);
-  static_cast<void>(planetmodel::PRONY_KINDS.size() + planetmodel::BURGERS_KINDS.size());
-  static_cast<void>(&planetmodel::PronyBranches);
-  static_cast<void>(planetmodel::KnotKind::LogLinear);
-}
-int main() { return 0; }
-]=] SL3DPP_PLANETMODEL_1_6)
-unset(CMAKE_REQUIRED_INCLUDES)
-unset(CMAKE_REQUIRED_QUIET)
-unset(CMAKE_REQUIRED_DEFINITIONS)
-if(SL3DPP_PLANETMODEL_1_6)
-  message(STATUS "sl3dpp: planetmodel holds the 1.6.0 interfaces (the fault "
-                 "file, the prony and burgers decks)")
-else()
-  message(STATUS "sl3dpp: planetmodel lacks the 1.6.0 interfaces: the fault "
-                 "file and the prony and burgers decks are refused")
-endif()
 
 find_package(OpenMP REQUIRED COMPONENTS CXX)
 find_package(BLAS REQUIRED)
@@ -311,9 +225,6 @@ target_link_libraries(sl3dpp PUBLIC
 # Version() reports the project version, so that the two cannot drift apart.
 target_compile_definitions(sl3dpp PRIVATE
   SL3DPP_VERSION="${PROJECT_VERSION}")
-if(SL3DPP_PLANETMODEL_1_6)
-  target_compile_definitions(sl3dpp PUBLIC SL3DPP_PLANETMODEL_1_6)
-endif()
 
 target_compile_options(sl3dpp PRIVATE
   $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall -Wextra>)
