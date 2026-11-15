@@ -227,19 +227,19 @@ inline void RefuseDerivativeOfMultiStage(Scheme scheme, std::string_view what) {
       what));
 }
 
-/// The refusal of a recording with gaps for a reverse sweep about a run
-/// under a multi-stage scheme: a state between two kept ones is rebuilt by
-/// an exact backward step, which a step of Sdirk2 has none of (its first
-/// stage's strain is not known from the step's end), or by forward steps
-/// under the recorded node loads, which are not its stages' loads.
+/// The refusal of a recording with gaps for a sweep about a run under a
+/// multi-stage scheme: a state between two kept ones is rebuilt by forward
+/// steps under the recorded node coefficients, and a step of Sdirk2 closes
+/// its first stage under the forcing at its own time, which the recording
+/// does not hold.
 inline void RefuseGapsUnderMultiStage(Scheme scheme, bool gaps) {
   if (!IsMultiStage(scheme) || !gaps) return;
   throw std::invalid_argument(
-      "a reverse sweep about a run under Sdirk2 reads the forward state at "
-      "every node: record it at every node (record_stride 1). A state "
-      "between kept ones is not rebuilt: Sdirk2's step has no exact "
-      "backward step, and a forward one needs its stages' forcing, which "
-      "the trajectory does not hold");
+      "a sweep about a run under Sdirk2 reads the forward state at every "
+      "node: record it at every node (record_stride 1). A state between "
+      "kept ones is rebuilt by forward steps under the recorded node loads, "
+      "and Sdirk2's step closes its first stage under the forcing at its "
+      "own time, which the trajectory does not hold");
 }
 
 }  // namespace detail

@@ -101,7 +101,10 @@ The other entry points follow the same pattern:
   `sl3d solve` solves it.
 - **3D.** `Viscoelastic3D(rheology, lmax, delta)`, with `delta(r, theta, phi)`
   the log-viscosity perturbation, driven by `Evolution3D` as above.
-- **Kernels.** Run the evolution with `{.record_stride = n}`, build a
+- **Kernels.** Run the evolution with `{.record_stride = n}` (every n-th
+  state kept, the sweeps rebuilding those between by forward steps from
+  the kept ones, to rounding at any n; of N nodes a sweep holds about
+  N/n + n states, fewest near n = √N), build a
   `ForwardTrajectory` (or `ForwardTrajectory3D`) from the snapshots
   (`FromSnapshots`), and call
   `AdjointSolver(evolution).FirstOrderKernels(times, measurements, &trajectory)`

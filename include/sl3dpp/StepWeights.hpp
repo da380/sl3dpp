@@ -25,10 +25,10 @@
  * An elastic node is h = 0 (tau infinite, stored as itau = 0): e = 1,
  * alpha = beta = 0, both effective weights 1. The weights lie in (0, 1]
  * where evaluated; anything interpolating them between nodes must clamp
- * to that interval. Negative h gives the EXACT inverse trapezoid step
- * (the update at -dt with the start and end strains swapped), which a
- * checkpointing reverse sweep uses; dissipation then amplifies roundoff
- * by exp(|h|).
+ * to that interval. Every step runs forwards, h >= 0: a step at -dt
+ * would invert the update exactly, but amplify rounding by exp(h), so a
+ * sweep that needs a state between two recorded ones rebuilds it by
+ * forward steps from the earlier one (detail/TrajectoryCursor.hpp).
  *
  * Every scheme here but one steps in one stage with these weights. The
  * exception, Sdirk2, steps in two backward Euler stages (StepRecipe.hpp);
@@ -114,9 +114,10 @@ inline double D2Phi1(double h, double e, double dphi1) {
 
 }  // namespace detail
 
-/// The exponential trapezoid weights at h = dt / tau; negative h gives the
-/// exact inverse step's. The effective-modulus weight is 1 - beta = phi1.
+/// The exponential trapezoid weights at h = dt / tau >= 0. The
+/// effective-modulus weight is 1 - beta = phi1.
 [[nodiscard]] inline TrapezoidWeights ExponentialTrapezoidWeights(double h) {
+  if (h < 0.0) throw std::invalid_argument("h = dt / tau must be >= 0");
   const auto e = std::exp(-h);
   const auto phi1 = detail::Phi1(h, e);
   return {e, phi1 - e, 1.0 - phi1};

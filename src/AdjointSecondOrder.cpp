@@ -85,12 +85,14 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     detail::CheckGrids(m, fieldSize, node);
   }
   if (trajectory.states.size() != times.size() ||
-      !trajectory.states.back().has_value() ||
+      !trajectory.states.front().has_value() ||
       trajectory.loads.size() != times.size() ||
       trajectory.tides.size() != times.size()) {
     throw std::invalid_argument(
         "the trajectory must be recorded forward states, one entry per "
-        "time node with the recorded load and centrifugal coefficients");
+        "time node with the recorded load and centrifugal coefficients, "
+        "the first node's state kept (the states between kept ones are "
+        "rebuilt forward from the kept one below)");
   }
   if (tangent.size() != times.size()) {
     throw std::invalid_argument(
@@ -452,9 +454,12 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
     const auto& dweights = op.SchemeWeightDerivativesOf(scheme, dt);
     const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
-    auto& flavour = op.FlavourOf(scheme, dt);
+    // served before the step's flavour is taken: rebuilding a gap steps
+    // through the flavours of its own step sizes, of which the operator
+    // keeps few
     const ViscoelasticState fwdN = cursor.State(n);
     const ViscoelasticState& fwdPrev = cursor.State(n - 1);
+    auto& flavour = op.FlavourOf(scheme, dt);
     const ViscoelasticState& vN = *tangent[n].internalState;
     const ViscoelasticState& vPrev = *tangent[n - 1].internalState;
     // The material's base and tangent quantities at this step: the base

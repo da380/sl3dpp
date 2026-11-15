@@ -157,10 +157,11 @@ void AdjointSolver::CheckArguments(
       throw std::invalid_argument(
           "the trajectory must give one entry per time node");
     }
-    if (!trajectory->states.back().has_value()) {
+    if (!trajectory->states.front().has_value()) {
       throw std::invalid_argument(
-          "the trajectory must be recorded forward states (a run with "
-          "record_stride)");
+          "the trajectory must keep the first node's state (a run with "
+          "record_stride keeps it): the states between kept ones are "
+          "rebuilt forward from the kept one below");
     }
     // The recorded loads regenerate the strains and fill the gaps.
     if (trajectory->loads.size() != times.size() ||
@@ -480,6 +481,17 @@ Kernels AdjointSolver::DiscreteSweep(
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
+    // The forward states this step's itau sensitivity pairs with, served
+    // before the step's flavour is taken: rebuilding a gap steps through
+    // the flavours of its own step sizes, of which the operator keeps few.
+    const ViscoelasticState* fwdPrev = nullptr;
+    auto fwdN = std::optional<ViscoelasticState>{};
+    const std::vector<ViscoelasticOperator::BranchWeights>* dweights = nullptr;
+    if (cursor.has_value()) {
+      fwdN = cursor->State(n);  // copied before the cursor moves on
+      fwdPrev = &cursor->State(n - 1);
+      dweights = &op.SchemeWeightDerivativesOf(scheme, dt);
+    }
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
     auto& flavour = op.FlavourOf(scheme, dt);
 
@@ -570,15 +582,6 @@ Kernels AdjointSolver::DiscreteSweep(
     otherLoadKernels(adj, directLoadKernels[n], n);
     tideKernels[n] = tideKernelOf(adj, psiDual);
 
-    // The forward states this step's itau sensitivity pairs with.
-    const ViscoelasticState* fwdPrev = nullptr;
-    auto fwdN = std::optional<ViscoelasticState>{};
-    const std::vector<ViscoelasticOperator::BranchWeights>* dweights = nullptr;
-    if (cursor.has_value()) {
-      fwdN = cursor->State(n);  // copied before the cursor moves on
-      fwdPrev = &cursor->State(n - 1);
-      dweights = &op.SchemeWeightDerivativesOf(scheme, dt);
-    }
     // The base full solutions the material pairing needs: the unrelaxed
     // solve under the node's memory and recorded loads (a step's
     // solution satisfies it), and the effective modulus's factor
@@ -1313,10 +1316,6 @@ Kernels AdjointSolver::ContinuousSweep(
   auto cursor = std::optional<TrajectoryCursor>{};
   auto itauKernel = std::vector<std::vector<double>>{};
   if (trajectory != nullptr) {
-    detail::RefuseGapsUnderMultiStage(
-        scheme, std::ranges::any_of(trajectory->states, [](const auto& state) {
-          return !state.has_value();
-        }));
     auto dts = std::vector<double>{};
     for (auto m = std::size_t{0}; m + 1 < times.size(); ++m) {
       dts.push_back((times[m + 1] - times[m]) * ev.toMatTime_);

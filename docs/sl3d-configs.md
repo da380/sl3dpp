@@ -778,9 +778,11 @@ under seismic sources is recorded at every node it steps, both of an
 onset's pair (Seismic sources, below), each state with its strain (its
 states are not rebuilt without the sources' forces), and refuses a
 stride other than 1; so does a run under `solver.scheme` `"sdirk2"`
-(a state between two kept ones is not rebuilt: its step has no exact
-backward step, and its stages' forcing is not recorded). Without a directory `solve` records nothing and
-`kernel` records in memory at the stride, as without the block.
+(a state between two kept ones is rebuilt by forward steps under the
+recorded node loads, and its first stage closes under the forcing at its
+own time, which is not recorded). Without a directory `solve` records
+nothing and `kernel` records in memory at the stride, as without the
+block.
 
 **solve.** With `trajectory.directory`, the run (static or through
 time, 1D or 3D, over any number of ranks) is recorded into the store

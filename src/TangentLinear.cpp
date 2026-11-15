@@ -8,6 +8,7 @@
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
+#include "sl3dpp/detail/TrajectoryCursor.hpp"
 #include "sl3dpp/detail/ToroidalSecondOrder.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -17,67 +18,7 @@ namespace {
 
 using Complex = std::complex<double>;
 
-/// Serves the forward internal states to a forward sweep, in order:
-/// stored states where the recording kept them (their strain regenerated
-/// by one elastic solve under the recorded loads), exact forward steps
-/// under the recorded loads between — which amplify nothing, unlike the
-/// reverse sweeps' backward reconstruction.
-class ForwardCursor {
- public:
-  ForwardCursor(
-      const ViscoelasticOperator& op, const ForwardTrajectory& trajectory,
-      std::vector<double> dts, Scheme scheme,
-      std::function<LoadCallable(const std::vector<Complex>&)> loadOf,
-      std::function<LoadCallable(const std::vector<Complex>&)> tideOf)
-      : op_(&op),
-        trajectory_(&trajectory),
-        dts_(std::move(dts)),
-        scheme_(scheme),
-        loadOf_(std::move(loadOf)),
-        tideOf_(std::move(tideOf)),
-        node_(0),
-        state_(*trajectory.states.front()) {
-    Prime();
-  }
-
-  /// The forward state at a node, reconstructing as needed; the reference
-  /// stays valid until the next call.
-  const ViscoelasticState& State(std::size_t node) {
-    if (node < node_) {
-      throw std::logic_error("the forward cursor moves forwards");
-    }
-    while (node_ < node) {
-      const auto target = node_ + 1;
-      if (trajectory_->states[target].has_value()) {
-        state_ = *trajectory_->states[target];
-        node_ = target;
-        Prime();
-      } else {
-        auto [next, solutions] =
-            op_->Step(state_, dts_[node_], scheme_,
-                      loadOf_(trajectory_->loads[target]),
-                      tideOf_(trajectory_->tides[target]));
-        state_ = std::move(next);
-        node_ = target;
-      }
-    }
-    return state_;
-  }
-
- private:
-  void Prime() {
-    op_->PrimeStrain(state_, loadOf_(trajectory_->loads[node_]),
-                     tideOf_(trajectory_->tides[node_]));
-  }
-
-  const ViscoelasticOperator* op_;
-  const ForwardTrajectory* trajectory_;
-  std::vector<double> dts_;
-  Scheme scheme_;
-  std::function<LoadCallable(const std::vector<Complex>&)> loadOf_, tideOf_;
-  std::size_t node_;
-  ViscoelasticState state_;
-};
+using detail::TrajectoryCursor;
 
 void CheckTimes(std::span<const double> times) { detail::CheckTimeGrid(times); }
 
@@ -283,7 +224,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
   // The effective shear's variation per dt at the points, delta mu scaled
   // by (1 - sum_k f_k (1 - w_k)) there.
   std::map<double, std::vector<double>> effectiveMu;
-  std::optional<ForwardCursor> cursor;
+  std::optional<TrajectoryCursor> cursor;
 
   const std::vector<double>& EffectiveMuOf(double dt) {
     auto found = effectiveMu.find(dt);
@@ -473,7 +414,7 @@ struct TangentLinearSolver::MaterialSecondDrive
   AdjointMethod method = AdjointMethod::Continuous;
   const ForwardTrajectory* trajectory = nullptr;
   std::vector<Part> parts;
-  std::optional<ForwardCursor> cursor;
+  std::optional<TrajectoryCursor> cursor;
 
   LoadCallable Loads(const std::vector<Complex>& c) const {
     return ev->Columns(c, ev->toMatDensity_);
@@ -696,7 +637,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
 
   // The relaxation-time drive: the forward trajectory served forwards,
   // the perturbation carried to the memory points.
-  auto cursor = std::optional<ForwardCursor>{};
+  auto cursor = std::optional<TrajectoryCursor>{};
   auto ditauPoints = std::vector<std::vector<double>>{};
   Drive drive{};
   if (!direction.itau.empty()) {
@@ -812,7 +753,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   if (!direction.itauUV.empty()) {
     parts.push_back({{}, op.ItauPerturbationAtPoints(direction.itauUV)});
   }
-  auto cursor = std::optional<ForwardCursor>{};
+  auto cursor = std::optional<TrajectoryCursor>{};
   Drive drive{};
   const bool materialU =
       !direction.materialU.kappa.empty() || !direction.materialU.mu.empty();

@@ -296,7 +296,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   degree-2 zonal Stokes coefficient J2, and the decay time of the Hudson
   Bay series over the last 7 kyr (the same cap; 2.8 kyr). Each gets its ice-history kernels and
   its radial viscosity kernel (`"parameters": ["ice", "viscosity"]`):
-  `out/kernel1d/`. About 5 s on four threads.
+  `out/kernel1d/`. About 6 s on four threads.
 - **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
   sea level and decay time, over a 15° cap at its lmax 12, with the
   log-viscosity kernels of the 3D viscosity: `out/kernel/`. About 4.5 s on

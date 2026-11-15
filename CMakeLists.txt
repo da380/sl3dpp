@@ -198,6 +198,7 @@ add_library(sl3dpp STATIC
   src/Shorelines.cpp
   src/StepRecipe.cpp
   src/ToroidalOperator.cpp
+  src/TrajectoryCursor.cpp
   src/Version.cpp
   src/Viscoelastic.cpp
   src/Viscoelastic3D.cpp)

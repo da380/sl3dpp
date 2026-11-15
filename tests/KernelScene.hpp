@@ -37,7 +37,8 @@ constexpr auto kYear = 3.15576e7;  // s
 
 /// The prem8 deck's body with a Maxwell mantle of the given viscosity
 /// (Pa s) between the CMB and 220 km depth, its elastic solver and the
-/// analytic test state (the adjoint tests' scene).
+/// analytic test state (the adjoint tests' scene). With `weakSI`, the
+/// layers between 400 and 220 km depth take that viscosity instead.
 struct Scene {
   EarthModel model;
   Material material;
@@ -45,7 +46,7 @@ struct Scene {
   GRDSolver solver;
   GRDSolver::State state;
 
-  static Scene Make(double viscositySI) {
+  static Scene Make(double viscositySI, double weakSI = 0.0) {
     auto deck =
         Deck::Read(
             std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -61,8 +62,9 @@ struct Scene {
     for (auto i = std::size_t{0}; i < model.LayerCount(); ++i) {
       if (!model.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
           b[i + 1] <= 6.1511e6 / scales.Length()) {
-        viscosity.emplace(i,
-                          viscositySI / scales.Factor(ViscosityDimensions));
+        const auto weak = weakSI > 0.0 && b[i] >= 5.9709e6 / scales.Length();
+        viscosity.emplace(i, (weak ? weakSI : viscositySI) /
+                                 scales.Factor(ViscosityDimensions));
       }
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();

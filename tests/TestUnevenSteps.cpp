@@ -551,14 +551,12 @@ TEST(UnevenSteps, TheDiscreteSweepIsTheTangentsTranspose) {
       EXPECT_NEAR(paired, want, 1e-8 * std::abs(want)) << label << ", " << name;
     }
 
-    // A stride-2 recording: the gaps rebuilt by backward steps of their
-    // own sizes (the reverse cursor) and forward ones (the tangent's). A
-    // backward trapezoid step amplifies rounding by exp(h), here about 800
-    // on the rebuilt 3 kyr step against the 450-year relaxation time, so
-    // the reverse cursor keeps fewer digits than the forward one; a step
-    // of the wrong size would miss by order one. The trapezoid's rebuilt
-    // kernel departs from the full recording's by 6e-6, rounding so
-    // amplified.
+    // A stride-2 recording: the gaps rebuilt by forward steps of their own
+    // sizes from the kept state below, for the sweep and for the tangent
+    // alike (a step of the wrong size would miss by order one), here a
+    // 3 kyr step against the 450-year relaxation time. The rebuilt kernel
+    // departs from the full recording's by 4e-13 (trapezoid) and 1e-13
+    // (backward Euler).
     Evolution sparse(op, setup.solver, setup.state,
                      {.scheme = scheme, .rtol = 1e-12, .record_stride = 2});
     const auto sparseTrajectory =
@@ -570,7 +568,7 @@ TEST(UnevenSteps, TheDiscreteSweepIsTheTangentsTranspose) {
     const auto itauSparse = VolumePairing(mesh, again.itauKernel[0], ditau[0]);
     std::cout << std::format("[uneven 1D transpose, {}] stride 2: itau gap {:.2e}\n", label,
                              Gap(itauSparse, itauFull));
-    EXPECT_NEAR(itauSparse, itauFull, 1e-4 * std::abs(itauFull)) << label;
+    EXPECT_NEAR(itauSparse, itauFull, 1e-10 * std::abs(itauFull)) << label;
     const auto viaSparse =
         Objective(setup, tangent.Run(times, pItau, &sparseTrajectory), measurements);
     EXPECT_NEAR(viaSparse, along(pItau), 1e-10 * std::abs(viaSparse)) << label;

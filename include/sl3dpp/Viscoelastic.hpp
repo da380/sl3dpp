@@ -290,19 +290,6 @@ class ViscoelasticOperator {
        Scheme scheme = Scheme::ExponentialTrapezoid,
        const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
 
-  /// The exact algebraic inverse of Step for the trapezoid and backward
-  /// Euler: the state one dt EARLIER with consistent solutions and
-  /// strain cache (the load channels given are the earlier time's). The
-  /// state must carry its strain cache. Dissipation runs the other way,
-  /// so roundoff is amplified by exp(h) per branch and node; a
-  /// checkpointing driver budgets the accumulated h between stores.
-  /// Sdirk2's step has none (its first stage's strain is not known from
-  /// the step's end), and is refused but at dt = 0.
-  [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
-  StepBack(const ViscoelasticState& state, double dt,
-           Scheme scheme = Scheme::ExponentialTrapezoid,
-           const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
-
   /// Opens an implicit or trapezoid step before the end-time loads are
   /// known: the sea-level driver reads the step's memory responses,
   /// closes its equilibrium with the matching effective Love numbers, and

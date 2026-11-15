@@ -39,8 +39,9 @@ TrajectoryBlock ReadTrajectoryBlock(const Json& top, const Run& run,
       Fail(member,
            std::format("is {}, and a run under `solver.scheme` \"sdirk2\" "
                        "is recorded at every node: the states between kept "
-                       "ones are not rebuilt (its step has no exact backward "
-                       "step, and its stages' forcing is not recorded): give "
+                       "ones are rebuilt by forward steps under the recorded "
+                       "node loads, and its first stage closes under the "
+                       "forcing at its own time, which is not recorded: give "
                        "1",
                        out.record_stride));
     }

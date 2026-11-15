@@ -96,12 +96,10 @@ int main(int argc, char** argv) {
     return load;
   };
   // Checkpointed: every other state is kept, and each sweep rebuilds the
-  // one between by an exact backward step (ViscoelasticOperator::
-  // StepBack). A backward step runs the dissipation the other way, so it
-  // amplifies the forward solves' error by exp(h) per step, h = dt / tau;
-  // here h is about 2, so one step per gap rather than the sqrt(N) of
-  // examples::CheckpointStride (which suits the 3D sweep, whose rebuilt
-  // steps go forward).
+  // one between by the run's own forward step from the kept state below,
+  // the kernels the full recording's to rounding at any stride. At 11
+  // nodes a sweep holds as many states at stride 2 as at the sqrt(N) of
+  // examples::CheckpointStride, eight.
   constexpr auto stride = 2;
   examples::Say(std::format(
       "the forward run, {} steps, one state in {} kept:", nodes - 1, stride));

@@ -559,10 +559,9 @@ TEST(LateralKernels, ZeroLateralGateTheStaticProblem) {
 
 TEST(LateralKernels, ACheckpointedRecordingAsTheRadialKernels) {
   // A recording kept at every second node: the radial sweeps rebuild the
-  // gaps by exact backward steps, and the lateral kernels come from the
-  // rebuilt states as the radial ones do, equal to the full recording's to
-  // the reconstruction's roundoff (exp(sum h) across a gap; here the
-  // steps are a quarter of the relaxation time).
+  // gaps by forward steps from the kept states, and the lateral kernels
+  // come from the rebuilt states as the radial ones do, equal to the full
+  // recording's to rounding (measured 1e-12 and below).
   auto scene = Scene::Make(1e22);
   std::mt19937 rng(67);
   auto times = std::vector<double>{};

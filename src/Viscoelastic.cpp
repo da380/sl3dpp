@@ -1089,67 +1089,6 @@ ViscoelasticOperator::Step(const ViscoelasticState& state, double dt,
       .Finish(load, tide);
 }
 
-std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
-ViscoelasticOperator::StepBack(const ViscoelasticState& state, double dt,
-                               Scheme scheme, const LoadCallable& load,
-                               const LoadCallable& tide) const {
-  if (scheme == Scheme::ExponentialEuler) {
-    throw std::invalid_argument(
-        "a step inverts for ExponentialTrapezoid or BackwardEuler");
-  }
-  if (IsMultiStage(scheme) && dt != 0.0) {
-    throw std::invalid_argument(
-        "a step of Sdirk2 has no explicit inverse (its first stage's strain "
-        "is not known from the step's end): a reverse sweep keeps every "
-        "node's state (record_stride 1)");
-  }
-  scheme = ZeroLengthScheme(scheme);
-  if (dt < 0.0) throw std::invalid_argument("dt must be non-negative");
-  if (!state.HasStrain()) {
-    throw std::invalid_argument(
-        "the state must carry its strain cache; reconstruct from a "
-        "recorded state or a completed step");
-  }
-  if (scheme == Scheme::ExponentialTrapezoid) {
-    // the same update at -dt with the start and end strains swapped
-    return ViscoelasticStep(*this, state, -dt, scheme, {}, {})
-        .Finish(load, tide);
-  }
-  // backward Euler inverts explicitly: m^n = (1 + h) m^{n+1} - h d^{n+1}
-  const auto K = rheology_->BranchCount();
-  ViscoelasticState prev;
-  prev.t = state.t - dt;
-  prev.columns = state.columns;
-  for (const auto& [l, m] : state.m) {
-    const auto& deg = Deg(l);
-    const int ncols = ColumnsOf(state, l, m.size(), K * 3 * deg.ne * deg.np);
-    const std::size_t block = deg.NodalSize(ncols);
-    const auto& d1 = state.strain.at(l);
-    auto mPrev = std::vector<double>(m.size());
-    for (auto k = std::size_t{0}; k < K; ++k) {
-      for (auto s = 0; s < 3; ++s) {
-        for (auto e = 0; e < deg.ne; ++e) {
-          for (auto q = 0; q < deg.np; ++q) {
-            const double h =
-                dt * deg.itau[k][static_cast<std::size_t>(e) * deg.np + q];
-            const std::size_t node =
-                (static_cast<std::size_t>(e) * deg.np + q) * ncols;
-            const std::size_t at = (k * 3 + s) * block + node;
-            for (auto c = 0; c < ncols; ++c) {
-              mPrev[at + c] =
-                  (1.0 + h) * m[at + c] - h * d1[s * block + node + c];
-            }
-          }
-        }
-      }
-    }
-    prev.m.emplace(l, std::move(mPrev));
-  }
-  auto solutions = SolveElastic(prev, load, tide);
-  prev.strain = Strain(solutions);
-  return {std::move(prev), std::move(solutions)};
-}
-
 ViscoelasticOperator::AdaptiveResult ViscoelasticOperator::AdaptiveStep(
     ViscoelasticState& state, double dt, double rtol, const LoadCallable& load,
     const LoadCallable& tide) const {

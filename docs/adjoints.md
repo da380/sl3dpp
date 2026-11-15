@@ -131,19 +131,21 @@ combination, and reads the first stage's state, which the trajectory
 state a step, or rebuilt by repeating the step's first stage from the
 node's state under the stage's recorded forcing; the tangent and the
 second-order runs drive each stage with the weights' derivatives at γ Δt
-in the same way. A reverse sweep about an Sdirk2 run also reads every
-node's state (a recording with gaps is refused): the gaps are rebuilt by
-exact backward steps, which a step of Sdirk2 has none of (its first
-stage's strain is not known from the step's end), or forward from the
-kept node under the recorded node loads, which are not its stages'.
+in the same way. A sweep about an Sdirk2 run also reads every node's
+recorded state (a recording with gaps is refused): a gap is rebuilt by
+forward steps from the kept node below under the recorded node loads
+(§3), and a step of Sdirk2 closes its first stage under the forcing at
+its own time, which the recording does not hold (each step's
+first-stage load and centrifugal coefficients, two coefficient vectors
+a node beside the nodes' own, would let it).
 
 ## 2. Scope
 
 1. **1D kernels** (the pyslfp port): ice-history kernels for objectives
    J = Σ_i ∫ g_i · (ξ, u, φ)(t_i) dS + g_ω·ω(t_i), by both sweeps;
    inverse-relaxation-time (itau) kernels, both ways, with the
-   viscosity mapping; checkpointing (record stride + exact backward
-   steps); the kernel views of §4.
+   viscosity mapping; checkpointing (record stride + forward rebuilds
+   of the gaps); the kernel views of §4.
 2. **3D kernels**: the continuous adjoint of the coupled 3D
    evolution and the grid viscosity kernel μ_k m†:(d − m)/itau (§6,
    §6a), and the discrete transpose of the reduced pipeline, designed in
@@ -199,15 +201,43 @@ code; what follows fixes the sl3dpp mapping only.
   energy form, so the carried radial state is g × the true multiplier —
   hence a division by g in material units). `Kernels::Viscosity`
   maps to dJ/dη via dη = −η² d(itau)/μ per branch, as pyslfp.
-- **Checkpointing.** The forward `record_stride` already stores the
-  internal state every stride-th node and the per-node load/tide
-  coefficients always; a `TrajectoryCursor` serves states strictly
-  backwards, reconstructing gaps by `StepBack` under the recorded
-  loads. Recordings keep the internal variables only, as in pyslfp and
+- **Checkpointing.** The forward `record_stride` stores the internal
+  state every stride-th node (the first and the last always) and the
+  per-node load/tide coefficients; a `TrajectoryCursor`
+  (`detail/TrajectoryCursor.hpp`) serves the states to every 1D
+  derivative run, the reverse sweeps (first and second order, discrete
+  and continuous, the lateral kernels' too) and the tangent-linear runs
+  (§8). Recordings keep the internal variables only, as in pyslfp and
   AdGIA; the cursor regenerates each stored state's strain by one elastic
   solve under that node's recorded loads, and the 3D sweep does the same
-  per node. Roundoff grows as exp(Σh) across a gap — the stride buys
-  memory at the price of trailing digits (pyslfp `_TrajectoryCursor`).
+  per node. A state between two kept ones is rebuilt by the run's own
+  steps forward from the kept state below, each finished under its end
+  node's recorded total-load and centrifugal coefficients, which are all
+  the radial step consumed: the sea level solve, a migrating run's ocean
+  functions, the rotation and a tide reach it only through them, and a
+  jump's two nodes are a step of zero length between their recorded
+  sides. Forward steps damp, so the rebuilt states are the run's to
+  rounding at any stride (the step at −dt would invert a step exactly,
+  but amplify rounding by exp(h) per step, h = dt/τ, without bound
+  across a gap on a weak layer). A reverse sweep entering a gap rebuilds
+  it up to the node it asks for and holds those states until it has
+  passed below them, so it holds the kept states and at most a stride's
+  more, about N/stride + stride of N nodes, fewest near stride √N; it
+  pays one step per state of a gap (one effective solve a degree, as
+  the run), once. Not rebuilt: a step of Sdirk2 (§1a) and a run under
+  interior sources, whose states are not the loads' alone (§19); both
+  are recorded at every node, a stride other than 1 refused.
+  `TestTrajectoryCursor` holds it on a layer of 1e19 Pa s, 254 of its
+  relaxation times a 1 kyr step, at strides 2, 6 and 5 (an uneven last
+  gap) with a repeated node in the gaps, under loads and a tide and about
+  a migrating run: every kernel of both first-order sweeps, the
+  second-order sweeps' kernel derivatives and the tangent-linear runs
+  they read equal the full recording's within 1.4e-11 (discrete) and
+  1.2e-10 (continuous), the departure the kept states' regenerated
+  strain alone (their elastic solve against the run's step, a rounding
+  the layer's relaxed d − m amplifies): with the strain kept
+  (`record_strain`) the kernels are the full recording's to the bit.
+  `sl3d kernel` on a ball of a 1e19 Pa s mantle likewise (TestApps).
 
 ## 4. Result type and views
 
@@ -293,9 +323,10 @@ dual by the dot product; densities/rates are per unit SLE time.
   solver, state and unit ratios the sweeps need). Its
   `FirstOrderKernels` runs either 1D sweep by `Options::method`
   (`Adjoint.cpp`); its `SecondOrderKernels` the second-order sweeps
-  (`AdjointSecondOrder.cpp`, §9). The pieces they share (the reverse
-  trajectory cursor, the dual packers, the node weights, the measurement
-  check) are in `detail/AdjointInternals.hpp`.
+  (`AdjointSecondOrder.cpp`, §9). The pieces they share (the dual
+  packers, the node weights, the measurement check) are in
+  `detail/AdjointInternals.hpp`, and the trajectory cursor, which the
+  tangent-linear runs read too, in `detail/TrajectoryCursor.hpp` (§3).
 - `Adjoint3D.hpp`: `ForwardTrajectory3D`, `Kernels3D`,
   `KernelDerivatives3D` and `AdjointSolver3D` over a
   `Evolution3D`. `FirstOrderKernels` and `SecondOrderKernels` run
@@ -450,8 +481,8 @@ b. **Continuous 1D sweep**. GATES: agreement with (a) at
    singular-part separation and quelled-view identities (pyslfp's
    `test_kernel_singular_parts_are_separated`, `test_quelled_rate_kernels`).
 c. **itau/viscosity kernels + checkpointing**, both sweeps. GATES: FD
-   kernel checks; checkpointed == full-record to the exp(Σh) budget;
-   pyslfp fixtures.
+   kernel checks; checkpointed == full-record to rounding at strides
+   whose gaps span many relaxation times; pyslfp fixtures.
 d. **3D continuous sweep + grid viscosity kernel** (§6). GATES:
    zero-lateral limit; FD checks; Δt refinement.
 e. **3D discrete transpose** (§12). GATES: dot-product at machine
@@ -486,11 +517,11 @@ problem once more:
     like the strain, whose transpose is the continuous sweep.
 
 The two coincide in the loads and differ in itau by the order of the
-scheme. The forward trajectory is served forwards by `ForwardCursor`:
-stored states where the recording kept them (strain regenerated by one
-elastic solve under the recorded loads), exact forward steps under the
-recorded loads between — which amplify nothing, unlike the reverse
-cursor's backward reconstruction. With `Options::record` every snapshot
+scheme. The forward trajectory is served forwards by the sweeps'
+`TrajectoryCursor` (§3): stored states where the recording kept them
+(strain regenerated by one elastic solve under the recorded loads), the
+run's forward steps under the recorded loads between, the newest two
+held. With `Options::record` every snapshot
 keeps the tangent-linear state with its strain and the node's load and
 centrifugal coefficients: what the second-order runs read.
 
@@ -585,8 +616,9 @@ the kernels.
   sweep's (split node weights, lumps on the kernels only).
 
 The shoreline terms of pyslfp's smoothed flotation rule are not ported.
-The sweeps' shared pieces (the trajectory cursor, dual packers, node
-weights, measurement check) are in `detail/AdjointInternals.hpp`.
+The sweeps' shared pieces (dual packers, node weights, measurement
+check) are in `detail/AdjointInternals.hpp`, the trajectory cursor in
+`detail/TrajectoryCursor.hpp`.
 
 GATES (`TestSecondOrderAdjoint`): the kernels the second-order sweep
 carries equal the first-order sweep's at 1e-12, both methods, about
@@ -2181,8 +2213,8 @@ relaxation times (the log viscosity in 3D) and the moduli the
 derivative of the run, central differences at second order with
 Richardson at 1e-6; the discrete sweeps the tangents' transposes at
 1e-8 (every kernel, and a stride-2 recording: in 3D at 1e-9, in 1D the
-relaxation-time kernel at 1e-4 of the full recording's, its rebuilt
-backward trapezoid steps amplifying rounding by about 800); the
+relaxation-time kernel at 1e-10 of the full recording's, measured
+4e-13); the
 distributional and
 quelled views equal to the thickness view; the discrete Hessian
 symmetric and equal to the second-order run (1e-9 in 1D, 1e-8 in 3D,
@@ -2234,7 +2266,8 @@ zero-length interval no weight, so each side of the jump pairs with its
 own interval through its own recorded state, one-sided values of an
 integrand that jumps there, and an observation at the right node takes
 its jump there as at any node; the checkpointed cursor steps back across
-the pair exactly (StepBack at dt = 0 holds m). A source at the left node
+the pair by the run's zero-length step (m held) under the pair's two
+recorded sides. A source at the left node
 and one at the right are two parameters, each with its moment kernel.
 `TestTangentLinear` (DerivativesAcrossAnOnset, TheContinuousSweepAcross
 AnOnset, SecondOrderRunAcrossAnOnset), `TestSecondOrderAdjoint`,

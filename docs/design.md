@@ -337,12 +337,14 @@ longer free, an unphysical effect.
   strain and no earlier node, so a checkpoint at a node restarts it, and
   its zero-length step is backward Euler's, the elastic solve with m held.
   What takes one stage, one set of weights or one effective operator
-  (`StartStep`, `StepBack`, the effective solid and its Love numbers, the
-  toroidal `Step`) refuses a multi-stage scheme at a step of nonzero
-  length; the reverse cursor's exact backward step has no Sdirk2 form, so
-  a sweep about an Sdirk2 run reads every node's recorded state
-  (record_stride 1), and the factored sources (histories sampled at the
-  nodes) are refused under it.
+  (`StartStep`, the effective solid and its Love numbers, the toroidal
+  `Step`) refuses a multi-stage scheme at a step of nonzero length. A
+  sweep about an Sdirk2 run reads every node's recorded state
+  (record_stride 1): a state between kept ones is rebuilt by forward
+  steps under the recorded node loads, and Sdirk2's first stage closes
+  under the forcing at its own time, which the recording does not hold.
+  The factored sources (histories sampled at the nodes) are refused under
+  it.
 - **The step.** The implicit step eliminates m⁺ into equilibrium, giving
   an effective operator per (scheme, Δt), forced by the load channels and
   the memory force of m̃ = e m + α dⁿ, finished through cached unit load
@@ -792,12 +794,13 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
 - **Forward recordings.** A forward run keeps every stride-th node's
   internal variables (`record_stride`) and every node's loads; the
   adjoints regenerate a stored node's strain by one elastic solve
-  (`record_strain` keeps it instead). In 1D the sweep rebuilds the gaps by
-  exact backward steps (`StepBack`), whose round-off grows like exp(Σh)
-  across a gap. In 3D it rebuilds them by forward steps from the kept
-  states, holding N/stride + stride states, with no stability limit on the
-  stride; the recorded states can be handed to a store as they are made
-  (`on_state`) and fetched back during the sweep.
+  (`record_strain` keeps it instead). The sweeps, 1D and 3D, rebuild the
+  gaps by the run's own forward steps from the kept states under the
+  recorded loads (in 1D `detail::TrajectoryCursor`, which the
+  tangent-linear runs read too), holding N/stride + stride states, with
+  no stability limit on the stride; in 3D the recorded states can be
+  handed to a store as they are made (`on_state`) and fetched back during
+  the sweep.
 
 ## 8. Degree one
 

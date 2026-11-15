@@ -12826,6 +12826,59 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
   }
 }
 
+TEST_F(AppsTest, ASparseRecordingOverAWeakMantleKeepsItsKernels) {
+  // `kernel` through time with `trajectory.record_stride` over the ball of
+  // a 1e19 Pa s mantle, its relaxation time eta / mu 1.9 yr against steps
+  // of 167 yr (13 nodes over the toy history's 2 kyr, 88 relaxation times
+  // a step): the states between kept ones are rebuilt by forward steps, so
+  // at stride 6 (kept nodes 0, 6, 12) and 5 (0, 5, 10, 12) the viscosity
+  // kernel is stride 1's to rounding by both sweeps (measured: within 6e-13
+  // discrete, 4e-11 continuous), its value and the volume weights the
+  // same. A step at -dt would amplify rounding by e^88 a step.
+  static_cast<void>(Write("soft.deck", BallDeck(0.0, 1e19)));
+  WriteToyHistory(dir_ / "history.nc");
+  constexpr auto kSite = R"({"type": "relative_sea_level_cap", "name": "site",
+      "latitude": 60, "longitude": 0, "width_deg": 25})";
+  const auto config = [&](const std::string& name, const std::string& method,
+                          int stride) {
+    return Write(
+        name + ".json",
+        std::format(R"({{"model": {{"deck": "soft.deck"}},
+                   "discretisation": {{"lmax": 8}}, {}, "rotation": "none",
+                   "trajectory": {{"record_stride": {}}},
+                   "kernels": {{"method": "{}",
+                   "parameters": ["ice", "viscosity"], "measurements": [{}],
+                   "output": "out/{}"}}}})",
+                    Window(13), stride, method, kSite, name));
+  };
+  for (const auto* method : {"discrete", "continuous"}) {
+    const auto full = std::format("{}_1", method);
+    static_cast<void>(app::RunKernel(config(full, method, 1)));
+    const auto want = TableRows(dir_ / "out" / full / "site_viscosity_kernel.txt");
+    auto top = 0.0;
+    for (const auto& row : want) top = std::max(top, std::abs(row[1]));
+    ASSERT_GT(top, 0.0) << method;
+    for (const auto stride : {6, 5}) {
+      const auto name = std::format("{}_{}", method, stride);
+      static_cast<void>(app::RunKernel(config(name, method, stride)));
+      EXPECT_DOUBLE_EQ(MeasuredValue(dir_ / "out" / name, "site"),
+                       MeasuredValue(dir_ / "out" / full, "site"))
+          << name;
+      const auto got = TableRows(dir_ / "out" / name / "site_viscosity_kernel.txt");
+      ASSERT_EQ(got.size(), want.size()) << name;
+      auto worst = 0.0;
+      for (auto i = std::size_t{0}; i < got.size(); ++i) {
+        EXPECT_DOUBLE_EQ(got[i][2], want[i][2]) << name << " row " << i;
+        worst = std::max(worst, std::abs(got[i][1] - want[i][1]));
+      }
+      std::cout << std::format("[weak mantle, {}] stride {}: viscosity kernel {:.1e}\n",
+                               method, stride, worst / top);
+      EXPECT_LT(worst, (std::string_view{method} == "discrete" ? 1e-10 : 1e-9) * top)
+          << name;
+    }
+  }
+}
+
 TEST_F(AppsTest, KernelRecordsItsTrajectoryAndSweepsItAgain) {
   // `kernel` with `trajectory.directory` naming nothing yet runs the
   // forward problem, records it there and leaves the store; a second

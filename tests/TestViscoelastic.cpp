@@ -2,7 +2,7 @@
 // Burgers body's Prony terms against its modulus and creep function, and
 // the bodies a model's fields state, planetmodel's prony and burgers decks
 // among them), the elastic and long-term limits, measured order of accuracy,
-// the exact inverse step, and the effective-operator limits; the step
+// and the effective-operator limits; the step
 // recipes (StepRecipe.hpp) and Sdirk2 through them: its tableau and
 // amplification on a scalar equation, its order, its zero-length step and
 // what it refuses. The pyslfp comparison lives in
@@ -108,15 +108,11 @@ TEST(StepWeights, AlgebraAndSeries) {
   EXPECT_DOUBLE_EQ(w0.beta, 0.0);
   EXPECT_DOUBLE_EQ(BackwardEulerWeight(0.0), 1.0);
 
-  // The inverse step: composing the update at h with the update at -h
-  // (strains swapped) is the identity, for any strains.
-  const auto h = 0.7, m0 = 0.3, d0 = -1.1, d1 = 0.8;
-  const auto f = ExponentialTrapezoidWeights(h);
-  const auto r = ExponentialTrapezoidWeights(-h);
-  const auto m1 = f.e * m0 + f.alpha * d0 + f.beta * d1;
-  EXPECT_NEAR(r.e * m1 + r.alpha * d1 + r.beta * d0, m0, 1e-14);
+  // Every step runs forwards: a negative h is refused.
+  EXPECT_THROW((void)ExponentialTrapezoidWeights(-0.7), std::invalid_argument);
 
   // Derivatives by central differences.
+  const auto h = 0.7;
   const auto eps = 1e-6;
   const auto dw = ExponentialTrapezoidWeightDerivatives(h);
   const auto plus = ExponentialTrapezoidWeights(h + eps);
@@ -698,42 +694,6 @@ TEST(Viscoelastic, MeasuredOrderOfAccuracy) {
   }
 }
 
-TEST(Viscoelastic, ExactInverseStep) {
-  auto body = TestBody::Make(2);
-  ViscoelasticOperator op(body.rheology, 2);
-  const auto tau = body.rheology.MinRelaxationTime();
-
-  for (auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
-    auto state = op.ZeroState();
-    op.PrimeStrain(state, UnitLoad());
-    // March a few steps so the state is non-trivial, then invert them.
-    auto history = std::vector<ViscoelasticState>{state};
-    const auto dt = 0.8 * tau;
-    for (auto i = 0; i < 3; ++i) {
-      auto [next, sols] = op.Step(history.back(), dt, scheme, UnitLoad());
-      history.push_back(std::move(next));
-    }
-    auto current = history.back();
-    for (auto i = 2; i >= 0; --i) {
-      auto [previous, sols] = op.StepBack(current, dt, scheme, UnitLoad());
-      auto scale = 0.0, diff = 0.0;
-      for (const auto& [l, m] : history.back().m) {
-        for (double v : m) scale = std::max(scale, std::abs(v));
-      }
-      for (const auto& [l, m] : history[i].m) {
-        const auto& mBack = previous.m.at(l);
-        for (auto j = std::size_t{0}; j < m.size(); ++j) {
-          diff = std::max(diff, std::abs(m[j] - mBack[j]));
-        }
-      }
-      EXPECT_LT(diff, 1e-9 * std::max(scale, 1e-30))
-          << "node " << i << ", scheme " << static_cast<int>(scheme);
-      EXPECT_NEAR(previous.t, history[i].t, 1e-12 * tau);
-      current = std::move(previous);
-    }
-  }
-}
-
 TEST(Viscoelastic, EffectiveLoveNumberLimits) {
   auto body = TestBody::Make(2);
   ViscoelasticOperator op(body.rheology, 2);
@@ -768,9 +728,9 @@ TEST(Viscoelastic, AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld) {
   // start's: its memory is the start's, bitwise, its solutions those of
   // the unrelaxed systems under the memory and the new load, and its Love
   // numbers the unrelaxed ones; by the two-phase step of each implicit
-  // scheme, by Step under all three, and back by StepBack. The memory
-  // points at the Gauss points and at the GLL nodes. The toroidal partner
-  // likewise under a force.
+  // scheme and by Step under all three. The memory points at the Gauss
+  // points and at the GLL nodes. The toroidal partner likewise under a
+  // force.
   auto body = TestBody::Make(4);
   const auto tau = body.rheology.MinRelaxationTime();
   const LoadCallable doubled = [](int, double) { return std::vector<double>{2.0}; };
@@ -810,9 +770,6 @@ TEST(Viscoelastic, AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld) {
       auto [opened, opens] = step.Finish(doubled);
       EXPECT_EQ(opened.m, state.m) << label;
       compare(opens);
-      // back across it: the memory again, the solutions under the earlier load
-      auto [back, backSolutions] = op.StepBack(opened, 0.0, scheme, UnitLoad());
-      EXPECT_EQ(back.m, state.m) << label;
       // measured: bitwise (the zero-length step's systems are the
       // unrelaxed ones, assembled alike)
       EXPECT_LT(worst, 1e-13 * scale) << label;
@@ -996,10 +953,10 @@ TEST(Viscoelastic, Sdirk2StepsAtSecondOrder) {
 TEST(Viscoelastic, Sdirk2ZeroLengthStepAndWhatItRefuses) {
   // A step of zero length under Sdirk2 is backward Euler's, the elastic
   // solve with the memory held
-  // (AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld): by Step, by StartStep
-  // and back by StepBack, the toroidal partner alike. At a step of nonzero
-  // length what takes one stage or one set of weights refuses it: StartStep,
-  // StepBack, the effective solid and its Love numbers, the toroidal step.
+  // (AZeroLengthStepIsTheElasticSolveWithTheMemoryHeld): by Step and by
+  // StartStep, the toroidal partner alike. At a step of nonzero length what
+  // takes one stage or one set of weights refuses it: StartStep, the
+  // effective solid and its Love numbers, the toroidal step.
   auto body = TestBody::Make(4);
   const auto tau = body.rheology.MinRelaxationTime();
   const LoadCallable doubled = [](int, double) {
@@ -1028,11 +985,7 @@ TEST(Viscoelastic, Sdirk2ZeroLengthStepAndWhatItRefuses) {
     EXPECT_EQ(opened.EffectiveLove().h_u, op.ElasticLoveNumbers().h_u);
     const auto finished = opened.Finish(doubled).first;
     EXPECT_EQ(finished.m, state.m);
-    EXPECT_EQ(op.StepBack(finished, 0.0, Scheme::Sdirk2, UnitLoad()).first.m,
-              state.m);
     EXPECT_THROW((void)op.StartStep(state, tau, Scheme::Sdirk2, UnitLoad()),
-                 std::invalid_argument);
-    EXPECT_THROW((void)op.StepBack(finished, tau, Scheme::Sdirk2, UnitLoad()),
                  std::invalid_argument);
     EXPECT_THROW((void)op.EffectiveLoveNumbers(Scheme::Sdirk2, tau),
                  std::invalid_argument);

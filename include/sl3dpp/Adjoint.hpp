@@ -65,13 +65,15 @@ class LateralAccumulator;
 }  // namespace detail
 
 /**
- * @brief A recorded forward trajectory, for the viscosity kernels: the
- * internal states at every node or at sparse checkpoints, and the
- * per-node load and tide coefficients that let a reverse sweep rebuild
- * the gaps by exact backward steps (ViscoelasticOperator::StepBack).
- * Reconstruction amplifies roundoff by exp(h) per branch and node across
- * a gap, so the recording stride buys memory at the price of trailing
- * digits.
+ * @brief A recorded forward trajectory, for the viscosity and moduli
+ * kernels: the internal states at every node or at sparse checkpoints
+ * (the first node's always), and the per-node load and tide coefficients
+ * that let a sweep rebuild a gap by the run's own steps forward from the
+ * kept state below (detail/TrajectoryCursor.hpp). Forward steps damp, so
+ * the rebuilt states are the run's to rounding at any stride, and the
+ * stride trades memory for the solves of the rebuild: a reverse sweep
+ * holds the kept states and one gap's, about N / stride + stride states
+ * of N nodes, fewest near stride sqrt(N).
  */
 struct ForwardTrajectory {
   std::vector<std::optional<ViscoelasticState>> states;

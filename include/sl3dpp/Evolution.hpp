@@ -150,8 +150,9 @@ class Evolution {
     int max_nonlinear_iterations = 50;
     /// Keep every stride-th node's internal state on its snapshot (and
     /// the last; 0 keeps none); the per-node load and centrifugal
-    /// coefficients are kept whenever the stride is set, so a reverse
-    /// sweep can reconstruct the gaps by exact backward steps.
+    /// coefficients are kept whenever the stride is set, so a sweep can
+    /// rebuild the gaps by forward steps from the kept state below
+    /// (ForwardTrajectory).
     int record_stride = 0;
     /// The nodes of the whole run before a call's first, which the record
     /// stride counts with the call's own: a resumed call (Resume,
