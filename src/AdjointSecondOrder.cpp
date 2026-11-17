@@ -13,6 +13,7 @@
 #include <stdexcept>
 
 #include "sl3dpp/Adjoint.hpp"
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -77,6 +78,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     const {
   detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
+  if (ev.Calibrated() && !oceanFunctions.empty() &&
+      !options_.initial_sea_level_held) {
+    RefuseCalibratedSecondOrderKernels();
+  }
   const bool discrete = options_.method == AdjointMethod::Discrete;
   if (IsMultiStage(ev.options_.scheme) && !discrete) {
     throw std::invalid_argument(

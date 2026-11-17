@@ -378,6 +378,13 @@ class AdjointSolver {
     /// sweep, where they cost one unrelaxed solve per node side; the
     /// discrete sweep forms them always.
     bool tide_kernels = false;
+    /// SecondOrderKernels about an evolution whose background state is
+    /// marked calibrated under migrating shorelines (Evolution::Calibrated)
+    /// holds the initial sea level: it gives the derivative of the partial
+    /// kernels, where the calibrated run's own (of its total kernels,
+    /// InitialSeaLevel.hpp) is not built. It is refused there unless this
+    /// states that the partial ones are wanted.
+    bool initial_sea_level_held = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.
@@ -438,7 +445,12 @@ class AdjointSolver {
    * discrete method this is the exact derivative of the exact gradient,
    * so the Hessian it gives is symmetric to rounding; by the continuous
    * method it discretises the second-order adjoint equations with the
-   * ocean functions held (the terms of shoreline motion omitted).
+   * ocean functions held (the terms of shoreline motion omitted). The
+   * initial sea level is a parameter here: about a calibrated migrating
+   * run these are the derivatives of its partial kernels, and those of
+   * its total ones are not built (InitialSeaLevel.hpp). About an
+   * evolution marked so (Evolution::Calibrated) with ocean functions
+   * given, refused by name unless Options::initial_sea_level_held.
    *
    * @param tangent v's tangent-linear run about the forward run, recorded
    * at every node (TangentLinearSolver::Options::record), by the same

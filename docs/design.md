@@ -21,7 +21,7 @@ elastic moduli (3D), forward and adjoint.
 | The sea level equation: linear, generalised (extra channels), nonlinear (migrating shorelines), with rotational feedback, and its exact adjoint | `SeaLevel.hpp` |
 | Elastic sea-level fingerprints, SI at the interface; on laterally varying elastic moduli, the 3D evolution's instantaneous response; the static problem under any forcing, frozen or migrating, as a run of one node of either evolution | `Fingerprint.hpp`, `Evolution3D.hpp` (`Instantaneous`), `Evolution.hpp` |
 | 1D viscoelastic evolution under an ice history, frozen or migrating shorelines | `Viscoelastic.hpp`, `Evolution.hpp` |
-| The initial sea level calibrated against a final one (the classical update or the adjoint gradient) | `InitialSeaLevel.hpp` |
+| The initial sea level calibrated against a final one (the classical update or the adjoint gradient), and the total kernels of a calibrated run, the initial sea level calibrated again (adjoints.md §22) | `InitialSeaLevel.hpp` |
 | 3D evolution under an ice history, on a lateral viscosity, lateral moduli or both, frozen or migrating shorelines | `Viscoelastic3D.hpp`, `GridCoupling.hpp`, `Evolution3D.hpp` |
 | Sensitivity kernels with respect to the ice history and viscosity, by the continuous adjoint or the exact discrete transpose (1D and 3D) | `Adjoint.hpp`, `Adjoint3D.hpp`, `Measurements.hpp` |
 | Tangent-linear runs, 1D and 3D: the derivative of the responses along a direction in the loads, the ice thickness, the initial sea level and the inverse relaxation times (laterally varying, or a log-viscosity field, in 3D), and the second-order run along two directions | `TangentLinear.hpp`, `TangentLinear3D.hpp` |
@@ -96,7 +96,13 @@ Deliberately out of scope:
   run gives it exactly, the shorelines kept as a prescribed ocean
   function; under migrating ones it iterates, by the classical update
   (Kendall et al. 2005) or steepest descent with the adjoint gradient (Yu
-  et al. 2025, §3.9), Anderson-mixed.
+  et al. 2025, §3.9), Anderson-mixed. A calibrated run's kernels are by
+  default total derivatives, the initial sea level calibrated again as a
+  parameter changes: the converged condition gives the constraint's
+  multiplier as a linear fixed point of sweeps, and one sweep forced by
+  the measurements less the multiplier at the last node gives every
+  kernel (`SolveCalibrationMultiplier`, `ComputeCalibratedKernels`;
+  adjoints.md §22).
 - **Lateral viscosity.** η(r, θ, φ) = η̄(r) exp(δ(r, θ, φ)) about a radial
   reference, so the inverse relaxation time is itau(x) = itau_ref(r)
   exp(−δ(x)), positive whatever δ is.

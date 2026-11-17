@@ -132,6 +132,7 @@ double DegreeOneShare(std::span<const std::complex<double>> coefficients,
 }
 
 void Evolution::SetBackgroundState(GRDSolver::State state) {
+  calibrated_ = false;
   const auto fieldSize = solver_->Grid().FieldSize();
   if (state.iceThickness.size() != fieldSize ||
       state.seaLevel.size() != fieldSize ||

@@ -38,9 +38,37 @@
  * is exact as the time step goes to zero). The gradient method's fixed
  * point does not depend on the sweep's accuracy: the kernel is
  * linear in the residual, so the update vanishes where the residual does.
+ *
+ * The derivatives of a calibrated run. A calibrated run's initial sea level
+ * is not a parameter: it follows the run's parameters p (the ice history,
+ * the relaxation times, the moduli) and the target through the converged
+ * condition S0 + xi(t_f; p, S0) = S_f on the points P where the weights are
+ * positive (S0 held elsewhere). With A = d xi(t_f) / d S0, that condition
+ * gives (I + A) dS0 = dS_f - (d xi(t_f) / dp) dp on P, whatever the method
+ * that reached it, so for an objective J with the initial sea level kernel
+ * k0 = dJ / dS0 (the parameters held)
+ *
+ *   dJ = (dJ / dp) dp - <lambda, (d xi(t_f) / dp) dp> + <lambda, dS_f>,
+ *   lambda = P (k0 - A^T lambda),
+ *
+ * <.,.> the surface pairing of the duals (Adjoint.hpp). A^T lambda is the
+ * initial sea level kernel of a sea level measurement lambda at the last
+ * node, so the sweep forced by J's measurements less that measurement gives
+ * at once every kernel of the calibrated run (the TOTAL derivatives, where
+ * the sweep forced by J's alone gives the PARTIAL ones, the initial sea
+ * level held) and, as its initial sea level kernel on P, lambda again: Yu
+ * et al. 2025, eqs. (89)-(92), the multiplier SL0-dagger of the constraint
+ * entering the adjoint load at the time-reversed present. lambda is the
+ * kernel of J in the target S_f. Under frozen shorelines k0 and A vanish,
+ * lambda is zero and the partial kernels are the total ones.
+ * SolveCalibrationMultiplier finds lambda by iterating that relation, and
+ * ComputeCalibratedKernels follows it with the one full sweep. The
+ * relation is of the converged state: the kernels are the calibrated
+ * run's as far as the calibration's own tolerance holds the condition.
  */
 
 #include <functional>
+#include <map>
 #include <span>
 #include <vector>
 
@@ -193,7 +221,8 @@ struct InitialSeaLevelCalibration {
  * iteration stops at the tolerance, returning the last state it ran with
  * that run (`converged` false if the iterations ran out first). On return
  * the evolution's background state is the calibrated one, so later runs
- * and adjoints use it.
+ * and adjoints use it, and under migrating shorelines it is marked so
+ * (Evolution::Calibrated).
  *
  * The evolution's options apply to every run: its recording stride keeps
  * the returned run's trajectory, but its streaming callbacks fire for
@@ -222,5 +251,154 @@ struct InitialSeaLevelCalibration3D {
     Evolution3D& evolution, std::span<const double> times,
     const IceHistory& history, std::span<const double> finalSeaLevel,
     const CalibrationOptions& options = {});
+
+/// The iteration for the calibration's multiplier.
+struct CalibrationMultiplierOptions {
+  /// The calibration's weights (CalibrationOptions::weights): the
+  /// multiplier lives where they are positive, the points whose initial
+  /// sea level the calibration set. Empty: every point.
+  std::vector<double> weights;
+  /// The most sweeps of the iteration.
+  int iterations = 20;
+  /// Convergence: the largest change of the multiplier between two sweeps
+  /// below rtol times its largest value.
+  double rtol = 1e-8;
+  /// The depth of the Anderson acceleration of the iteration (the mixing
+  /// the calibration uses). 0 is the plain iteration, which contracts at
+  /// the rate of A, the dependence of the final sea level on the initial
+  /// one through the shorelines that move; the relation is linear and A
+  /// acts through the cells that flooded or grounded alone, so the mixed
+  /// iteration ends in a few sweeps where the plain one takes tens.
+  int anderson_memory = 5;
+  /// Called after each sweep with its number (from 1) and the relative
+  /// change of the multiplier it gave; empty by default.
+  std::function<void(int sweep, double update)> on_iteration{};
+};
+
+/// The multiplier of a calibrated run's constraint for one objective.
+struct CalibrationMultiplier {
+  /// lambda, in the duals' surface pairing: dJ / dS_f, the kernel of the
+  /// objective in the final sea level the run is calibrated to, zero where
+  /// the weights vanish (and everywhere under frozen shorelines).
+  std::vector<double> multiplier;
+  /// The objective's measurements less a sea level measurement lambda at
+  /// the last node: the forcing of the sweep whose kernels are the
+  /// calibrated run's.
+  std::map<std::size_t, Measurement> measurements;
+  /// The relative change of the multiplier at each sweep.
+  std::vector<double> updates;
+  /// The sweeps run (none under frozen shorelines).
+  int sweeps = 0;
+  bool converged = false;
+};
+
+/**
+ * @brief The multiplier lambda = P (k0 - A^T lambda) of the constraint that
+ * the run about `evolution`'s background state reaches its target at the
+ * last node, for the objective `measurements` define.
+ *
+ * `oceanFunctions` and `stageOceanFunctions` are the calibrated migrating
+ * run's (OceanFunctionsOf and StageOceanFunctionsOf its snapshots); empty
+ * ocean functions are a frozen run's, whose multiplier is zero and takes no
+ * sweep. Each sweep is one of `adjoint`'s method forced by the
+ * measurements less the current multiplier at the last node, formed
+ * without a trajectory and with the material, tide and moment kernels off
+ * (the initial sea level kernel needs none of them): the first, from zero,
+ * gives the initial sea level kernel k0 of the objective. By the discrete
+ * method the multiplier is that of the stepped run, under every scheme; by
+ * the continuous one, of the continuous sweep's approximation to k0 and
+ * A^T. `converged` is false when the sweeps ran out first, the last
+ * iterate returned.
+ */
+[[nodiscard]] CalibrationMultiplier SolveCalibrationMultiplier(
+    const Evolution& evolution, std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    AdjointSolver::Options adjoint = {});
+
+/// The multiplier about a 3D run, as the 1D one; collective over the
+/// evolution's ranks as the 3D sweeps are, every rank's result alike.
+[[nodiscard]] CalibrationMultiplier SolveCalibrationMultiplier(
+    const Evolution3D& evolution, std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    AdjointSolver3D::Options adjoint = {});
+
+/// The kernels of a calibrated run: the total derivatives of the
+/// objective, the initial sea level re-calibrated as the parameters
+/// change.
+struct CalibratedKernels {
+  /// The kernels of the sweep forced by the measurements less the
+  /// multiplier at the last node. Every kernel in a parameter of the run
+  /// is the total one. `initialSeaLevel` is the multiplier again where the
+  /// weights are positive, to the iteration's tolerance, and the total
+  /// derivative in the initial sea level where they vanish (the points
+  /// the calibration holds).
+  Kernels kernels;
+  std::vector<double> multiplier;  ///< CalibrationMultiplier::multiplier
+  std::vector<double> updates;     ///< CalibrationMultiplier::updates
+  /// The sweeps run: the multiplier's and the one that formed the kernels.
+  int sweeps = 0;
+  bool converged = false;
+};
+
+/**
+ * @brief The total kernels of the objective about a calibrated run:
+ * SolveCalibrationMultiplier, then AdjointSolver::FirstOrderKernels with
+ * `adjoint` under the measurements it returns (with `trajectory`, the
+ * kernels in the relaxation times and the moduli too). Under frozen
+ * shorelines (empty ocean functions) the one sweep of the measurements,
+ * whose kernels are already the calibrated run's.
+ */
+[[nodiscard]] CalibratedKernels ComputeCalibratedKernels(
+    const Evolution& evolution, std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    AdjointSolver::Options adjoint = {});
+
+/// The 3D total kernels, as the 1D ones.
+struct CalibratedKernels3D {
+  Kernels3D kernels;
+  std::vector<double> multiplier;
+  std::vector<double> updates;
+  int sweeps = 0;
+  bool converged = false;
+};
+
+/// The total kernels about a calibrated 3D run, as the 1D ones; collective
+/// as the 3D sweeps are.
+[[nodiscard]] CalibratedKernels3D ComputeCalibratedKernels(
+    const Evolution3D& evolution, std::span<const double> times,
+    const std::map<std::size_t, Measurement>& measurements,
+    const ForwardTrajectory3D* trajectory,
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const CalibrationMultiplierOptions& options = {},
+    const AdjointSolver3D::Options& adjoint = {});
+
+/**
+ * @brief The second-order kernels of a calibrated migrating run, the
+ * derivative along a direction of its total kernels: NOT BUILT, and
+ * refused (std::logic_error) naming what is. They need the derivative of
+ * the multiplier along the direction, a second linear problem of the
+ * first's form forced by the second-order sweep. What is built is the
+ * second-order sweep with the initial sea level held
+ * (AdjointSolver::SecondOrderKernels, AdjointSolver3D::SecondOrderKernels
+ * about the calibrated state), whose kernel derivatives are those of the
+ * partial kernels (and, under frozen shorelines, the calibrated run's
+ * own: only a migrating run's are refused). Those sweeps call this about
+ * an evolution whose state is marked calibrated (Evolution::Calibrated;
+ * CalibrateInitialSeaLevel marks it under migrating shorelines) and given
+ * ocean functions, unless their Options::initial_sea_level_held states
+ * that the partial ones are wanted.
+ */
+[[noreturn]] void RefuseCalibratedSecondOrderKernels();
 
 }  // namespace sl3dpp

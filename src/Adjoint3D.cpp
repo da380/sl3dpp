@@ -9,6 +9,7 @@
 #include <type_traits>
 #include <utility>
 
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/detail/StepStages3D.hpp"
@@ -118,6 +119,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
     const MaterialDirection3D& material,
     std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
     const {
+  if (evolution_->Calibrated() && !oceanFunctions.empty() &&
+      !options_.initial_sea_level_held) {
+    RefuseCalibratedSecondOrderKernels();
+  }
   if (IsMultiStage(evolution_->options_.scheme) &&
       options_.method != AdjointMethod::Discrete) {
     throw std::invalid_argument(

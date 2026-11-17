@@ -4874,7 +4874,8 @@ TEST_F(AppsTest, KernelsOfACalibratedRunAgainstTheRunsOfItsIce) {
   // A calibrated run (the state at the window's end, `"at": "end"`) of the
   // toy history whose polar ice floats off as it thins, under frozen and
   // under migrating shorelines (the equator's ring of cells flooded by the
-  // end, checked), its kernels in the ice: the views `run_start_moves`.
+  // end, checked), its PARTIAL kernels in the ice (`kernels.calibration`
+  // with `"derivative": "partial"`): the views `run_start_moves`.
   // Each field is a derivative with the initial sea level HELD, and a
   // solve run re-calibrates it, so the change of J between two solve runs
   // is the thickness kernels paired with the change of the ice plus
@@ -4950,6 +4951,7 @@ TEST_F(AppsTest, KernelsOfACalibratedRunAgainstTheRunsOfItsIce) {
       "solver": {{"rtol": 1e-12}},
       "output": {{"surface": "out/{}.nc"}},
       "kernels": {{"method": "discrete", "parameters": ["ice"],
+        "calibration": {{"derivative": "partial"}},
         "measurements": [
           {{"type": "relative_sea_level_cap", "name": "site",
             "latitude": -30, "longitude": 10, "width_deg": 25}},
@@ -5102,6 +5104,342 @@ TEST_F(AppsTest, KernelsOfACalibratedRunAgainstTheRunsOfItsIce) {
       }
     }
   }
+}
+
+TEST_F(AppsTest, KernelsOfACalibratedRunAreItsTotalDerivatives) {
+  // The calibrated run of KernelsOfACalibratedRunAgainstTheRunsOfItsIce,
+  // its kernels as `kernel` writes them by default: the TOTAL derivatives,
+  // the initial sea level calibrated again as a parameter changes, which
+  // is what two solve runs differ by. Under migrating shorelines (the
+  // equator's ring of cells flooded by the end, no cell flipped between
+  // the runs, checked), against the base run, solve runs of:
+  // - the ice at the first node alone and at 1 kyr BP alone:
+  //   `thickness_dual` there, with no other term (the partial kernels, the
+  //   option stated, miss the first by a visible margin for the sea level
+  //   at the end);
+  // - the state's ice raised with the ice change held, and the
+  //   calibration's target alone: the thickness kernels summed over the
+  //   nodes, and `target_sea_level_dual` paired with the change of the
+  //   sea level the run reaches at its end (the solve files' initial sea
+  //   level plus the last node's change, which the calibration holds to
+  //   the target);
+  // - the viscosity raised and lowered through the ball: the viscosity
+  //   kernel paired with a uniform change of ln eta, against the central
+  //   difference.
+  // The files say which derivatives they hold, and the total ones have no
+  // `initial_sea_level_dual`. Under frozen shorelines the total kernels
+  // are the partial ones and the target's dual is zero. The block's
+  // `calibration` is held to the run.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  WriteToyHistory(dir_ / "history.nc", 0.0, true);
+  const auto topography = [](double depth) {
+    return [depth](std::size_t, double theta) {
+      const auto basin = std::exp(-std::pow(theta / 0.3, 2));
+      const auto equator =
+          std::exp(-std::pow((theta - std::numbers::pi / 2) / 0.15, 2));
+      return 3000.0 * std::cos(theta) - 3500.0 * basin - depth * equator;
+    };
+  };
+  WriteToyNodes(dir_ / "topography.nc", "topography", topography(1.0));
+  WriteToyNodes(dir_ / "target.nc", "topography", topography(2.0));
+  constexpr auto kBand = 10.0;
+  const auto band = [](double theta) {
+    return kBand * std::exp(-std::pow((theta - 0.6) / 0.2, 2));
+  };
+  for (const auto& [name, node] : {std::pair{"first.nc", std::size_t{0}},
+                                   std::pair{"middle.nc", std::size_t{2}}}) {
+    WriteToyNodes(dir_ / name, "ice_thickness",
+                  [&, node](std::size_t k, double theta) {
+                    return k == node ? band(theta) : 0.0;
+                  });
+  }
+  WriteToyHistory(dir_ / "state.nc", kBand, true, sl3dpp::test::ToyFields::Ice);
+  constexpr auto kEps = 1e-3;
+  static_cast<void>(Write("up.deck", BallDeck(0.0, 1e21 * std::exp(kEps))));
+  static_cast<void>(Write("down.deck", BallDeck(0.0, 1e21 * std::exp(-kEps))));
+  struct Case {
+    std::string name, shorelines = "migrating", deck = "ball.deck", extra = "",
+                      ice = "history.nc", topography = "topography.nc",
+                      calibration = "";
+  };
+  const auto config = [&](const Case& c) {
+    return Write(c.name + ".json", std::format(R"({{
+      "model": {{"deck": "{}"}}, "discretisation": {{"lmax": 8}},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}{}]}},
+      "ocean": {{"at": "end", "shorelines": "{}",
+                "calibration": {{"rtol": 1e-12, "iterations": 60}},
+                "topography": {{"file": "{}"}}, "ice": {{"file": "{}"}}}},
+      "rotation": "full", "moments": "hydrostatic",
+      "solver": {{"rtol": 1e-12}},
+      "output": {{"surface": "out/{}.nc"}},
+      "kernels": {{"parameters": ["ice", "viscosity"]{},
+        "measurements": [
+          {{"type": "relative_sea_level_cap", "name": "site",
+            "latitude": -30, "longitude": 10, "width_deg": 25}},
+          {{"type": "displacement_point", "name": "uplift", "latitude": 55,
+            "longitude": 10, "date_kyr_bp": 1}}],
+        "output": "out/{}_kernels"}}}})",
+                                               c.deck, c.extra, c.shorelines,
+                                               c.topography, c.ice, c.name,
+                                               c.calibration, c.name));
+  };
+  const auto term = [](const std::string& file) {
+    return std::format(R"(, {{"thickness": {{"file": "{}"}}}})", file);
+  };
+  constexpr auto kPartial = R"(, "calibration": {"derivative": "partial"})";
+  const auto grid = SurfaceGrid(8);
+  const auto size = grid.FieldSize();
+  const auto first = io::FieldHistory::Read(dir_ / "first.nc", grid);
+  const auto middle = io::FieldHistory::Read(dir_ / "middle.nc", grid);
+  const auto state = io::FieldHistory::Read(dir_ / "state.nc", grid);
+  const auto history = io::FieldHistory::Read(dir_ / "history.nc", grid);
+  ASSERT_TRUE(first && middle && state && history);
+  auto stateBand = state->Values("ice_thickness", 0.0);
+  {
+    const auto plain = history->Values("ice_thickness", 0.0);
+    for (auto i = std::size_t{0}; i < stateBand.size(); ++i) {
+      stateBand[i] -= plain[i];
+    }
+  }
+  const auto valueOf = [](const pm::SurfaceFile& file,
+                          const std::string& name) {
+    return name == "site" ? CapMeanOf(file, "relative_sea_level_change", 4,
+                                      {-30.0, 10.0}, 25.0)
+                          : PointValueOf(file, "displacement", 2, {55.0, 10.0});
+  };
+  // the sea level a solve run reaches at its end
+  const auto reached = [&](const pm::SurfaceFile& file) {
+    auto out = file.variables.at("initial_sea_level").values;
+    const auto last = Slice(file, "relative_sea_level_change", 4);
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += last[i];
+    return out;
+  };
+  const auto solved = [&](const Case& c) {
+    static_cast<void>(app::RunSolve(config(c)));
+    return pm::ReadSurfaceFile(dir_ / "out" / (c.name + ".nc"));
+  };
+
+  // -- migrating shorelines
+  const auto base = config({.name = "total"});
+  const auto summary = app::RunKernel(base);
+  EXPECT_NE(summary.find("; discrete adjoint; total derivatives, the initial "
+                         "sea level calibrated again, the multiplier in at "
+                         "most "),
+            std::string::npos)
+      << summary;
+  const auto partialSummary =
+      app::RunKernel(config({.name = "partial", .calibration = kPartial}));
+  EXPECT_TRUE(partialSummary.ends_with(
+      "; discrete adjoint; partial derivatives, the calibrated initial sea "
+      "level held)"))
+      << partialSummary;
+  const auto run = solved({.name = "total"});
+  ASSERT_NE(Slice(run, "ocean_function", 0), Slice(run, "ocean_function", 4))
+      << "no cell flipped through the run";
+  const auto moved = [&](const Case& c) {
+    auto file = solved(c);
+    EXPECT_EQ(file.variables.at("ocean_function").values,
+              run.variables.at("ocean_function").values)
+        << c.name << ": a cell flipped";
+    return file;
+  };
+  const auto byFirst = moved({.name = "t_first", .extra = term("first.nc")});
+  const auto byMiddle = moved({.name = "t_middle", .extra = term("middle.nc")});
+  const auto byState = moved({.name = "t_state", .ice = "state.nc"});
+  const auto byTarget = moved({.name = "t_target", .topography = "target.nc"});
+  const auto up = moved({.name = "t_up", .deck = "up.deck"});
+  const auto down = moved({.name = "t_down", .deck = "down.deck"});
+  const auto out = dir_ / "out" / "total_kernels";
+  const auto held = dir_ / "out" / "partial_kernels";
+  {
+    auto values = std::ifstream(out / "measurements.txt");
+    const auto text = std::string(std::istreambuf_iterator<char>(values), {});
+    EXPECT_NE(text.find("\n# calibration total\n"), std::string::npos) << text;
+  }
+  const auto target = reached(run);
+  const auto changeOf = [&](const pm::SurfaceFile& file) {
+    auto out = reached(file);
+    for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] -= target[i];
+    return out;
+  };
+  for (const auto* name : {"site", "uplift"}) {
+    const auto measurement = std::string{name};
+    const auto value = valueOf(run, measurement);
+    EXPECT_LT(Gap(MeasuredValue(out, measurement), value), 1e-10) << measurement;
+    const auto kernels =
+        pm::ReadSurfaceFile(out / (measurement + "_ice_kernels.nc"));
+    const auto partial =
+        pm::ReadSurfaceFile(held / (measurement + "_ice_kernels.nc"));
+    EXPECT_EQ(std::get<std::string>(kernels.meta.at("calibration_derivative")),
+              "total");
+    EXPECT_EQ(std::get<std::string>(partial.meta.at("calibration_derivative")),
+              "partial");
+    EXPECT_EQ(std::get<std::string>(kernels.meta.at("ice_views")),
+              "run_start_moves");
+    EXPECT_FALSE(kernels.variables.contains("initial_sea_level_dual"));
+    EXPECT_FALSE(partial.variables.contains("target_sea_level_dual"));
+    ASSERT_TRUE(kernels.meta.contains("calibration_multiplier_sweeps"));
+    EXPECT_FALSE(partial.meta.contains("calibration_multiplier_sweeps"));
+    const auto& lambda = kernels.variables.at("target_sea_level_dual").values;
+    const auto thicknessAt = [&](std::size_t n) {
+      return FieldAt(kernels, "thickness_dual", n);
+    };
+    const auto& rates = kernels.variables.at("rate_dual").values;
+    const auto rateAt = [&](std::size_t k) {
+      return std::vector<double>(
+          rates.begin() + static_cast<std::ptrdiff_t>(k * size),
+          rates.begin() + static_cast<std::ptrdiff_t>((k + 1) * size));
+    };
+    // a change that vanishes held to 1e-9 of J (the rounding of pairings
+    // of J's order that cancel)
+    const auto check = [&](const std::string& what, double predicted,
+                           const pm::SurfaceFile& file, double tolerance) {
+      const auto measured = valueOf(file, measurement) - value;
+      const auto scale = std::max(std::abs(measured), 1e-9 * std::abs(value));
+      const auto gap = std::abs(predicted - measured) / scale;
+      std::cout << std::format(
+          "[calibrated, total, {}, {}] change {:.3e} against J {:.3e}; the "
+          "kernels {:.3e} from it\n",
+          measurement, what, measured, value, gap);
+      RecordProperty("total_" + measurement + "_" + what + "_gap",
+                     std::format("{:.3e}", gap));
+      EXPECT_LT(gap, tolerance) << measurement << " " << what;
+      return measured;
+    };
+    const auto bandFirst = first->Values("ice_thickness", -2.0 * app::KYR);
+    const auto bandMiddle = middle->Values("ice_thickness", -1.0 * app::KYR);
+    const auto measuredFirst =
+        check("first", SurfacePairing(kernels, thicknessAt(0), bandFirst),
+              byFirst, 1e-6);
+    check("middle", SurfacePairing(kernels, thicknessAt(2), bandMiddle),
+          byMiddle, 1e-6);
+    check("middle_rates",
+          SurfacePairing(kernels, rateAt(1), bandMiddle) -
+              SurfacePairing(kernels, rateAt(2), bandMiddle),
+          byMiddle, 1e-6);
+    auto alongState = SurfacePairing(kernels, lambda, changeOf(byState));
+    for (auto n = std::size_t{0}; n < 5; ++n) {
+      alongState += SurfacePairing(kernels, thicknessAt(n), stateBand);
+    }
+    check("state", alongState, byState, 1e-6);
+    check("target", SurfacePairing(kernels, lambda, changeOf(byTarget)),
+          byTarget, 1e-6);
+    // the partial kernel of the first node's ice, alone, is not the
+    // derivative of the re-calibrated run where the measurement feels the
+    // shorelines that moved (the uplift at 1 kyr BP is read before any
+    // cell floods: its initial sea level kernel is zero, and its total
+    // kernels are its partial ones)
+    const auto late = measurement == "site";
+    const auto alone = SurfacePairing(
+        partial, FieldAt(partial, "thickness_dual", 0), bandFirst);
+    if (late) {
+      EXPECT_GT(std::abs(alone - measuredFirst),
+                1e-2 * std::abs(measuredFirst));
+      EXPECT_TRUE(std::ranges::any_of(lambda, [](double v) { return v != 0.0; }));
+    } else {
+      EXPECT_TRUE(std::ranges::all_of(lambda, [](double v) { return v == 0.0; }));
+    }
+    // the viscosity: a row holds the radius, the kernel per unit viscosity
+    // and volume, and the volume weight; the ball's viscosity 1e21 Pa s
+    const auto paired = [](const fs::path& table) {
+      auto sum = 0.0;
+      for (const auto& row : TableRows(table)) sum += 1e21 * row[1] * row[2];
+      return sum;
+    };
+    const auto difference =
+        (valueOf(up, measurement) - valueOf(down, measurement)) / (2.0 * kEps);
+    const auto whole = paired(out / (measurement + "_viscosity_kernel.txt"));
+    const auto part = paired(held / (measurement + "_viscosity_kernel.txt"));
+    std::cout << std::format(
+        "[calibrated, total, {}, viscosity] dJ/dln(eta) {:.3e}: the total "
+        "kernel {:.3e} from it, the partial {:.3e}\n",
+        measurement, difference, Gap(whole, difference), Gap(part, difference));
+    RecordProperty("total_" + measurement + "_viscosity_gap",
+                   std::format("{:.3e}", Gap(whole, difference)));
+    EXPECT_LT(Gap(whole, difference), 1e-5) << measurement;
+    if (late) EXPECT_GT(Gap(part, difference), 1e-2);
+  }
+
+  // -- frozen shorelines: one sweep, the partial kernels, a zero multiplier
+  const auto frozen =
+      app::RunKernel(config({.name = "frozen", .shorelines = "frozen"}));
+  EXPECT_TRUE(frozen.ends_with("; discrete adjoint; total derivatives, the "
+                               "initial sea level calibrated again)"))
+      << frozen;
+  static_cast<void>(app::RunKernel(config({.name = "frozen_partial",
+                                           .shorelines = "frozen",
+                                           .calibration = kPartial})));
+  for (const auto* name : {"site", "uplift"}) {
+    const auto file = std::string{name} + "_ice_kernels.nc";
+    const auto kernels =
+        pm::ReadSurfaceFile(dir_ / "out" / "frozen_kernels" / file);
+    const auto partial =
+        pm::ReadSurfaceFile(dir_ / "out" / "frozen_partial_kernels" / file);
+    EXPECT_TRUE(std::ranges::all_of(
+        kernels.variables.at("target_sea_level_dual").values,
+        [](double v) { return v == 0.0; }))
+        << name;
+    EXPECT_EQ(std::get<std::vector<double>>(
+                  kernels.meta.at("calibration_multiplier_sweeps")),
+              std::vector<double>{0.0});
+    const auto& got = kernels.variables.at("thickness_dual").values;
+    const auto& want = partial.variables.at("thickness_dual").values;
+    ASSERT_EQ(got.size(), want.size());
+    auto top = 0.0, worst = 0.0;
+    for (auto i = std::size_t{0}; i < want.size(); ++i) {
+      top = std::max(top, std::abs(want[i]));
+      worst = std::max(worst, std::abs(got[i] - want[i]));
+    }
+    EXPECT_LE(worst, 1e-14 * top) << name;
+  }
+
+  // -- the block's member, held to the run
+  const auto refused = [&](const std::string& name, const Case& c,
+                           const std::string& member, const std::string& what) {
+    auto named = c;
+    named.name = name;
+    ExpectRefused(app::RunKernel, config(named), member, what);
+  };
+  refused("bad_word", {.calibration = R"(, "calibration": {"derivative": "all"})"},
+          "kernels.calibration.derivative", "none of \"total\", \"partial\"");
+  refused("bad_member", {.calibration = R"(, "calibration": {"total": true})"},
+          "kernels.calibration.total", "not a recognised member");
+  refused("bad_iterations",
+          {.calibration = R"(, "calibration": {"iterations": 0})"},
+          "kernels.calibration.iterations", "fewer than one sweep");
+  refused("bad_rtol", {.calibration = R"(, "calibration": {"rtol": 0})"},
+          "kernels.calibration.rtol", "not a positive tolerance");
+  refused("partial_iterations",
+          {.calibration =
+               R"(, "calibration": {"derivative": "partial", "iterations": 5})"},
+          "kernels.calibration.iterations",
+          "the partial kernels (`derivative`: \"partial\") do not take");
+  // an iteration that runs out is refused, not written
+  refused("short", {.calibration = R"(, "calibration": {"iterations": 2})"},
+          "kernels.calibration",
+          "did not find the calibration's multiplier for the measurement "
+          "\"site\" in 2 sweeps");
+  EXPECT_FALSE(fs::exists(dir_ / "out" / "short_kernels" /
+                          "site_ice_kernels.nc"));
+  // and a run that does not calibrate has no such choice
+  const auto started = Write("started.json", std::format(R"({{{},
+      "problem": "quasi_static",
+      "times": {{"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 5}},
+      "forcing": {{"ice_change": [{{"thickness": {{"file": "history.nc"}}}}]}},
+      "ocean": {{"at": "start", "shorelines": "migrating",
+                "topography": {{"file": "topography.nc"}},
+                "ice": {{"file": "history.nc"}}}},
+      "kernels": {{"parameters": ["ice"],
+        "calibration": {{"derivative": "total"}},
+        "measurements": [{{"type": "relative_sea_level_cap", "name": "site",
+          "latitude": -30, "longitude": 10, "width_deg": 25}}],
+        "output": "out/started_kernels"}}}})",
+                                                         kBall));
+  ExpectRefused(app::RunKernel, started, "kernels.calibration",
+                "this run does not calibrate");
 }
 
 TEST_F(AppsTest, Solve1DRunsAndARestartedRunMatchesAnUninterruptedOne) {
@@ -5481,7 +5819,8 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
         << name;
   }
 
-  // by the default (discrete) sweep and by the continuous one
+  // by the default (discrete) sweep and by the continuous one, the
+  // partial kernels (the calibrated initial sea level held)
   for (const auto& [name, method] :
        {std::pair{std::string{"kernels"}, std::string{}},
         std::pair{std::string{"continuous_kernels"},
@@ -5489,6 +5828,7 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
     const auto kernels = Write(name + ".json", "{" + body + R"(, "kernels": {)" +
                                                    method + R"(
               "parameters": ["ice", "viscosity"],
+              "calibration": {"derivative": "partial"},
               "measurements": [{"type": "relative_sea_level_point", "name": "site",
                                 "latitude": -30.0, "longitude": 20.0,
                                 "date_kyr_bp": 0.0}],
@@ -5501,6 +5841,25 @@ TEST_F(AppsTest, The3DRunsCalibrateUnderMigratingShorelines) {
     EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
         << summary;
   }
+  // and the total kernels, the default: the multiplier of the calibration
+  // in place of the initial sea level's kernel
+  const auto total = Write("total_kernels.json", "{" + body + R"(, "kernels": {
+              "parameters": ["ice", "viscosity"],
+              "measurements": [{"type": "relative_sea_level_point", "name": "site",
+                                "latitude": -30.0, "longitude": 20.0,
+                                "date_kyr_bp": 0.0}],
+              "output": "out/total_kernels"}})");
+  summary = app::RunKernel(total);
+  EXPECT_NE(summary.find("total derivatives, the initial sea level calibrated "
+                         "again, the multiplier in at most "),
+            std::string::npos)
+      << summary;
+  const auto ice = pm::ReadSurfaceFile(dir_ / "out" / "total_kernels" /
+                                       "site_ice_kernels.nc");
+  EXPECT_FALSE(ice.variables.contains("initial_sea_level_dual"));
+  const auto& dual = ice.variables.at("target_sea_level_dual").values;
+  EXPECT_TRUE(std::ranges::any_of(dual, [](double v) { return v != 0.0; }))
+      << summary;
 }
 
 TEST_F(AppsTest, Solve3DRunsAndARestartedRunMatchesAnUninterruptedOne) {
@@ -14915,6 +15274,16 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {{R"("method": "discrete")", R"("method": "continuous")"}}, neither},
       {"calibrated", "kernels.method dropped, its default",
        {{R"("method": "discrete", )", ""}}, neither},
+      {"calibrated", "kernels.calibration, the partial derivatives",
+       {{R"("output": "out_kernels")",
+         R"("output": "out_kernels",
+         "calibration": {"derivative": "partial"})"}},
+       neither},
+      {"calibrated", "kernels.calibration, the multiplier's iteration",
+       {{R"("output": "out_kernels")",
+         R"("output": "out_kernels",
+         "calibration": {"iterations": 30, "rtol": 1e-6})"}},
+       neither},
       {"calibrated", "kernels.parameters",
        {{R"(["ice", "viscosity", "moduli"])", R"(["ice", "viscosity"])"}},
        neither},

@@ -77,6 +77,7 @@ void CheckTimes(std::span<const double> times, bool resumed = false) {
 }  // namespace
 
 void Evolution3D::SetBackgroundState(GRDSolver::State state) {
+  calibrated_ = false;
   const auto fieldSize = solver_->Grid().FieldSize();
   if (state.iceThickness.size() != fieldSize ||
       state.seaLevel.size() != fieldSize ||

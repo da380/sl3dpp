@@ -8,7 +8,8 @@ level problems, with an ocean (but `sea_level_no_ocean.json`); the
 the `timestep_*` configs are the time-step study (below); the `kernel*`
 and `timestep_{discrete,continuous}_*` configs, which hold a `kernels`
 block, run as `sl3d kernel`. Every other one but `love_numbers.json` runs
-as `sl3d solve`. The build
+as `sl3d solve`, and `sea_level_1d_calibrated.json`, which holds a
+`kernels` block beside its `output`, as both. The build
 copies this directory to `build/examples/configs`, and copies a file again
 when its source has changed and its copy has not been edited, so the
 copies there are yours to edit and experiment with (an edited copy is
@@ -231,6 +232,19 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc`, which also holds
   the calibrated `initial_sea_level` and the `ocean_function` at every node.
   The marine margins of the synthetic ice sheets flood as they melt.
+  The config holds a `kernels` block too, and `sl3d kernel` on it writes
+  the adjoint kernels about the calibrated run, in the ice and the
+  viscosity, of the present sea level over Hudson Bay (an 8° cap) and of
+  the far-field sea level at 10 ka: `out/sea_level_1d_calibrated/kernels/`.
+  The initial sea level of such a run is not an input, and is calibrated
+  again whenever a parameter changes, so the kernels written are the total
+  derivatives (`"calibration": {"derivative": "total"}` in the `kernels`
+  block, the default, stated here): beside each measurement's sweep the
+  program finds the multiplier of the calibration's constraint by a few
+  sweeps more, and writes it as `target_sea_level_dual`, the kernel in the
+  present-day sea level the run is calibrated to. `"partial"` there writes
+  the kernels with the calibrated initial sea level held instead, in one
+  sweep each (docs/sl3d-configs.md, "kernel", Calibrated runs).
 - **`sea_level_1d_steps.json`** — a deglaciation in four steps: the
   state's ice (the synthetic Earth's at 21 ka, `"at": "start"`) melted a
   quarter at a stroke at 16, 12, 8 and 4 ka, a `cap_fraction` of it as wide
@@ -278,7 +292,8 @@ truncation. A narrower cap is still read exactly (docs/sl3d-configs.md,
 Measurements), but what it reads is the truncated field smoothed by a
 cap the band cuts off. The caps here: 8° at lmax 24 (`kernel1d`, at
 least 7.5°), 15° at lmax 12 (`kernel`, `kernel1d_lateral`, at least
-15°), 6° at lmax 32 (`kernel_static_moduli`, at least 5.6°) and 12° at
+15°), 6° and 8° at lmax 32 (`kernel_static_moduli` and
+`sea_level_1d_calibrated`, at least 5.6°) and 12° at
 lmax 16 (the time-step study, at least 11.25°); the drivers'
 (`ExampleViscosityKernels3D`, `ExampleModelViscosity`,
 `ExampleSeismic`) follow the same rule at their default degrees

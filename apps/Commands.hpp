@@ -197,6 +197,16 @@ struct KernelsBlock {
   std::optional<bool> lateral;
   std::vector<MeasurementSpec> measurements;
   std::filesystem::path output;  ///< the directory the files land in
+  /// `calibration`, a calibrated run's alone (`"at": "end"`): which
+  /// derivatives its kernels are. `derivative` "total" (the default): the
+  /// initial sea level re-calibrated as the parameters change, the
+  /// calibration's multiplier found by sweeps beside each measurement's
+  /// (InitialSeaLevel.hpp), at most `iterations` of them to `rtol`; or
+  /// "partial": the calibrated initial sea level held, one sweep. Under
+  /// frozen shorelines the two are one and no multiplier's sweep runs.
+  bool total = true;
+  int calibration_iterations = 20;
+  double calibration_rtol = 1e-8;
 
   [[nodiscard]] bool Writes(KernelParameter parameter) const;
 };
@@ -207,7 +217,9 @@ struct KernelsBlock {
 /// absence refused, listing them), `lateral` (true or false; true refused
 /// unless the parameters name the viscosity or the moduli), `measurements` (required, at least
 /// one, each located on the run's nodes and held to its band and its
-/// ocean) and `output` (required, the directory). The
+/// ocean), `output` (required, the directory) and `calibration` (an object
+/// of `derivative`, `iterations` and `rtol`, refused on a run that does not
+/// calibrate, and its iteration's members beside "partial"). The
 /// recording's members, `record_stride` and `trajectory`, are refused,
 /// naming the top-level `trajectory` block's. The block is refused without
 /// gravity, which has no kernels.

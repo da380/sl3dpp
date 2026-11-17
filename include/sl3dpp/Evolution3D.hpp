@@ -372,6 +372,16 @@ class Evolution3D {
   /// its fields must live on the solver's grid.
   void SetBackgroundState(GRDSolver::State state);
 
+  /// Whether the background state is marked as one calibrated under
+  /// migrating shorelines: CalibrateInitialSeaLevel marks the state it
+  /// leaves (and a caller who builds an evolution on such a state marks
+  /// it), SetBackgroundState clears the mark. The initial sea level of
+  /// such a state is not a parameter of the run, and the second-order
+  /// sweeps about it, which would hold it, are refused unless they say so
+  /// (AdjointSolver3D::Options::initial_sea_level_held; InitialSeaLevel.hpp).
+  [[nodiscard]] bool Calibrated() const { return calibrated_; }
+  void MarkCalibrated() { calibrated_ = true; }
+
   /// The sea level solver the evolution was built with.
   [[nodiscard]] const GRDSolver& Solver() const { return *solver_; }
   /// The operator the evolution steps.
@@ -436,6 +446,7 @@ class Evolution3D {
   const Viscoelastic3D* op_;
   const GRDSolver* solver_;
   GRDSolver::State state_;
+  bool calibrated_ = false;
   Options options_;
   Viscoelastic3D::State vstate_;
   // The running node's total-load and centrifugal coefficients

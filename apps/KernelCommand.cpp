@@ -408,7 +408,7 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
          "`measurements` and `output`");
   }
   Allow(block, {"method", "parameters", "lateral", "measurements",
-                "record_stride", "trajectory", "output"});
+                "record_stride", "trajectory", "output", "calibration"});
   if (!run.gravitating) {
     Fail(block,
          "asks for kernels, which a run without gravity (`gravity`: "
@@ -473,6 +473,37 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
     }
   }
   out.output = PathOf(block, "output", directory);
+  if (Has(block, "calibration")) {
+    const auto& calibration = block.At("calibration");
+    if (!run.Calibrating()) {
+      Fail(calibration,
+           "chooses the derivatives of a calibrated run, the initial sea "
+           "level re-calibrated or held, and this run does not calibrate: "
+           "its state is not at the window's end (`ocean.at`: \"end\")");
+    }
+    Allow(calibration, {"derivative", "iterations", "rtol"});
+    if (Has(calibration, "derivative")) {
+      out.total = Choice<bool>(calibration.At("derivative"),
+                               {{"total", true}, {"partial", false}});
+    }
+    if (!out.total) {
+      for (const auto* name : {"iterations", "rtol"}) {
+        if (Has(calibration, name)) {
+          Fail(calibration.At(name),
+               "is of the iteration for the calibration's multiplier, which "
+               "the partial kernels (`derivative`: \"partial\") do not take");
+        }
+      }
+    }
+    out.calibration_iterations = Integer(calibration, "iterations", 20);
+    if (out.calibration_iterations < 1) {
+      Fail(calibration.At("iterations"), "is fewer than one sweep");
+    }
+    out.calibration_rtol = Number(calibration, "rtol", 1e-8);
+    if (!(out.calibration_rtol > 0.0)) {
+      Fail(calibration.At("rtol"), "is not a positive tolerance");
+    }
+  }
   return out;
 }
 
@@ -784,7 +815,9 @@ std::vector<SourcePoint> SourcePointsOf(const Run& run,
 /// in the static problem), whether the ice views read with the state held
 /// (a state at the window's start, or the static problem's), the seismic
 /// sources' points, the adjoint method and, for the continuous sweep
-/// through time, its steps against the shortest relaxation time.
+/// through time, its steps against the shortest relaxation time; and, of a
+/// calibrated run, which derivatives its kernels are (the block's
+/// `calibration`).
 struct Writing {
   std::filesystem::path config;
   const Run* run = nullptr;
@@ -797,6 +830,24 @@ struct Writing {
   StepGrid steps;
   AdjointMethod method = AdjointMethod::Discrete;
   std::optional<StepsAgainstRelaxation> relaxation;
+  /// A calibrated run's alone: whether its kernels are the total
+  /// derivatives (the initial sea level re-calibrated) or the partial ones
+  /// (it held).
+  std::optional<bool> total;
+
+  /// The word for `total`, as `kernels.calibration.derivative` names it.
+  [[nodiscard]] std::string_view Derivative() const {
+    return *total ? "total" : "partial";
+  }
+};
+
+/// The calibration's multiplier for one measurement of a calibrated run
+/// whose kernels are the total derivatives (SolveCalibrationMultiplier):
+/// the kernel in the sea level the run is calibrated to, and its sweeps.
+struct Multiplier {
+  std::vector<double> lambda;  ///< solver units, the duals' pairing
+  int sweeps = 0;
+  double update = 0.0;  ///< the last sweep's relative change
 };
 
 /// The left limits' kernels at the window's nodes (OnTheWindow): per kind
@@ -830,9 +881,11 @@ std::string_view MethodWord(AdjointMethod method) {
 std::string TableHeader(const Writing& w, const MeasurementSpec& spec,
                         const Built& built) {
   return std::format(
-      "# sl3d kernel (sl3dpp {})\n# config {}\n# measurement {} ({}), J in "
-      "{}\n",
-      Version(), w.config.string(), spec.name, spec.word, built.unit);
+             "# sl3d kernel (sl3dpp {})\n# config {}\n# measurement {} ({}), "
+             "J in {}\n",
+             Version(), w.config.string(), spec.name, spec.word, built.unit) +
+         (w.total ? std::format("# calibration {}\n", w.Derivative())
+                  : std::string{});
 }
 
 /// A node's label in a kernel table: its date (kyr BP) in a dated run, its
@@ -869,6 +922,9 @@ planetmodel::SurfaceFile KernelSurfaceFile(const Writing& w,
                                     w.solver->Radius() *
                                     w.solver->SolverScales().Length()});
   file.meta.emplace("adjoint_method", std::string{MethodWord(w.method)});
+  if (w.total) {
+    file.meta.emplace("calibration_derivative", std::string{w.Derivative()});
+  }
   if (w.relaxation) {
     const auto& steps = *w.relaxation;
     file.meta.emplace("longest_step_over_shortest_relaxation_time",
@@ -949,10 +1005,16 @@ void WriteFile(const std::filesystem::path& path,
 /// that every node's is the derivative with respect to the ice change
 /// there. Where the ice jumps at a node (LeftKernels), the thickness dual
 /// there is its right limit's, `thickness_dual_before` its left limit's,
-/// and `jump_dual` the quelled view's of the jump.
+/// and `jump_dual` the quelled view's of the jump. The total kernels of a
+/// calibrated run (`multiplier`) have no initial sea level to hold: in its
+/// place `target_sea_level_dual`, the multiplier, the kernel in the sea
+/// level the run is calibrated to, with the multiplier's sweeps in the
+/// metadata; their distributional view has a delta at the window's end,
+/// where the multiplier forces the sweep, beside the measurement's.
 void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                      const MeasurementSpec& spec, const Kernels& kernels,
-                     const LeftKernels& before, const Built& built) {
+                     const LeftKernels& before, const Built& built,
+                     const Multiplier* multiplier) {
   const auto& run = *w.run;
   const auto L = w.solver->SolverScales().Length();
   // dJ_nd = a_nd^2 int K_nd dI_nd dOmega with dI_nd = dI_SI / L and
@@ -991,10 +1053,11 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                          ? std::string{"the state's ice held, so that it is "
                                        "the derivative with respect to the "
                                        "ice change at each node"}
-                         : std::string{"the ice at the other nodes held, the "
-                                       "ice the run starts from moving with "
-                                       "the first node's, the initial sea "
-                                       "level held"};
+                         : std::format(
+                               "the ice at the other nodes held, the ice the "
+                               "run starts from moving with the first node's, "
+                               "the initial sea level {}",
+                               multiplier ? "calibrated again" : "held");
   if (!run.times) {
     PutKernel(file, "thickness_dual", Laid(thickness, toKernel), "static",
               dims,
@@ -1026,21 +1089,30 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                 "(its right limit less its left) per m^2, the quelled "
                 "view's, zero where the ice does not jump");
     }
+    // the instants of the deltas: the measurement's, and the window's end
+    // for a total kernel, whose sweep the multiplier forces there
+    auto instantNodes = built.nodes;
+    if (multiplier && !std::ranges::contains(instantNodes, w.axis.size() - 1)) {
+      instantNodes.push_back(w.axis.size() - 1);
+    }
     auto lumps = std::vector<std::vector<double>>{};
-    for (const auto node : built.nodes) {
+    for (const auto node : instantNodes) {
       const auto found = kernels.instantaneous.find(node);
       lumps.push_back(found == kernels.instantaneous.end()
                           ? std::vector<double>(thickness[0].size(), 0.0)
                           : found->second);
     }
     auto instants = std::vector<double>{};
-    for (const auto node : built.nodes) instants.push_back(w.axis[node]);
+    for (const auto node : instantNodes) instants.push_back(w.axis[node]);
     file.instant = instants;
     PutKernel(file, "instantaneous_dual", Laid(lumps, toKernel), "instant",
               dims,
-              "the delta amplitude at each measurement instant of the "
-              "thickness kernel's distributional view, per metre of ice "
-              "thickness per m^2");
+              std::string{"the delta amplitude at each measurement instant "
+                          "of the thickness kernel's distributional view, "
+                          "per metre of ice thickness per m^2"} +
+                  (multiplier ? "; and at the window's end, where the "
+                                "calibration's multiplier acts"
+                              : ""));
   }
   PutKernel(file, "thickness_baseline_dual",
             Laid(std::span(&kernels.baseline, 1), toKernel), "static", dims,
@@ -1048,14 +1120,30 @@ void WriteIceKernels(const std::filesystem::path& path, const Writing& w,
                      "ice at every node held"
                    : "dJ per metre of the ice the run starts from per m^2, "
                      "the ice at every node held");
-  PutKernel(file, "initial_sea_level_dual",
-            Laid(std::span(&kernels.initialSeaLevel, 1), toKernel), "static",
-            dims,
-            "dJ per metre of the initial sea level per m^2, the ice held "
-            "(zero under frozen shorelines); the other fields hold the "
-            "initial sea level, which a calibrated run re-calibrates: a "
-            "change of its ice changes J by them and by this paired with "
-            "the calibrated initial sea level's change");
+  if (multiplier) {
+    PutKernel(file, "target_sea_level_dual",
+              Laid(std::span(&multiplier->lambda, 1), toKernel), "static",
+              dims,
+              "dJ per metre of the sea level the run is calibrated to (the "
+              "state's, at the window's end) per m^2, the ice held: the "
+              "multiplier of the calibration's constraint (zero under frozen "
+              "shorelines). Every field is a total derivative, the initial "
+              "sea level calibrated again");
+    file.meta.emplace("calibration_multiplier_sweeps",
+                      std::vector<double>{
+                          static_cast<double>(multiplier->sweeps)});
+    file.meta.emplace("calibration_multiplier_update",
+                      std::vector<double>{multiplier->update});
+  } else {
+    PutKernel(file, "initial_sea_level_dual",
+              Laid(std::span(&kernels.initialSeaLevel, 1), toKernel), "static",
+              dims,
+              "dJ per metre of the initial sea level per m^2, the ice held "
+              "(zero under frozen shorelines); the other fields hold the "
+              "initial sea level, which a calibrated run re-calibrates: a "
+              "change of its ice changes J by them and by this paired with "
+              "the calibrated initial sea level's change");
+  }
   WriteFile(path, file);
 }
 
@@ -1408,7 +1496,7 @@ WindowKernels OnTheWindow(const Kernels& kernels, const Writing& w) {
 void WriteSurfaceKernels(const std::filesystem::path& stem, const Writing& w,
                          const KernelsBlock& block,
                          const MeasurementSpec& spec, const Kernels& library,
-                         const Built& built) {
+                         const Built& built, const Multiplier* multiplier) {
   const auto window = OnTheWindow(library, w);
   const auto& kernels = window.kernels;
   const auto& before = window.before;
@@ -1416,7 +1504,8 @@ void WriteSurfaceKernels(const std::filesystem::path& stem, const Writing& w,
     return std::filesystem::path(stem.string() + std::string{suffix});
   };
   if (block.Writes(KernelParameter::Ice)) {
-    WriteIceKernels(named("_ice_kernels.nc"), w, spec, kernels, before, built);
+    WriteIceKernels(named("_ice_kernels.nc"), w, spec, kernels, before, built,
+                    multiplier);
   }
   if (block.Writes(KernelParameter::Load)) {
     WriteLoadKernels(named("_load_kernels.nc"), w, spec, kernels, before,
@@ -1531,12 +1620,15 @@ void WriteModuliKernel1D(const std::filesystem::path& path, const Writing& w,
 /// measurements' values: `sweep` forms one measurement's kernels and
 /// writes their files under its stem (every rank sweeps, the first alone
 /// writes). Returns the summary, `read` saying what the config was taken
-/// to mean with the inputs as read.
+/// to mean with the inputs as read; of a calibrated run it says which
+/// derivatives were written, and for the total ones the most sweeps a
+/// measurement's multiplier took (`multiplierSweeps`, set by `sweep`).
 template <class Snapshot>
 std::string SweepEach(
     const KernelInput& input, const Writing& w,
     std::span<const Snapshot> snapshots, std::string_view iceRead,
     std::string_view seaLevelRead, std::string_view read,
+    const int& multiplierSweeps,
     const std::function<void(const MeasurementSpec&, const Built&,
                              const std::filesystem::path& stem)>& sweep) {
   const auto& run = input.run;
@@ -1569,6 +1661,7 @@ std::string SweepEach(
   // relaxation time
   const auto steps = w.relaxation ? ", " + w.relaxation->text : std::string{};
   values << std::format("# adjoint {}{}\n", MethodWord(w.method), steps);
+  if (w.total) values << std::format("# calibration {}\n", w.Derivative());
   const auto unit =
       run.times && !run.times->Dated() ? run.times->unit.name : "kyr";
   values << std::format(
@@ -1592,12 +1685,69 @@ std::string SweepEach(
     if (!names.empty()) names += ", ";
     names += NameOf(parameter);
   }
+  // of a calibrated run, the derivatives written
+  auto derivatives = std::string{};
+  if (w.total && !*w.total) {
+    derivatives = "; partial derivatives, the calibrated initial sea level "
+                  "held";
+  } else if (w.total) {
+    derivatives =
+        "; total derivatives, the initial sea level calibrated again" +
+        (run.Migrating()
+             ? std::format(", the multiplier in at most {} sweeps",
+                           multiplierSweeps)
+             : std::string{});
+  }
   return std::format(
-      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{}{})",
+      "{}; wrote {} measurement(s) of kernels to {} ({}; {} adjoint{}{}{})",
       read, block.measurements.size(), block.output.string(), names,
-      MethodWord(w.method), steps,
+      MethodWord(w.method), steps, derivatives,
       block.lateral.value_or(false) ? "; the kernels in the Earth as fields"
                                     : "");
+}
+
+/// The forcing of one measurement's sweep about a run. A calibrated run's
+/// total kernels (the default, `kernels.calibration`) are those of the
+/// sweep forced by the measurement less the calibration's multiplier at
+/// the window's end, found here by the sweeps of the library's iteration
+/// about the run's own shorelines (none under frozen ones, whose
+/// multiplier is zero): `measurements` is that forcing and the multiplier
+/// is returned. Otherwise the measurement's own duals, and nothing. An
+/// iteration that runs out of sweeps is refused at the block's member.
+template <class EvolutionT, class Options>
+std::optional<Multiplier> CalibratedForcing(
+    const KernelInput& input, const Json& top, const Writing& w,
+    const EvolutionT& evolution, std::span<const double> times,
+    const MeasurementSpec& spec, const Built& built,
+    std::span<const std::vector<double>> oceans,
+    std::span<const std::vector<std::vector<double>>> stageOceans,
+    const Options& adjoint, std::map<std::size_t, Measurement>& measurements,
+    int& mostSweeps) {
+  measurements = built.measurements;
+  if (!w.total || !*w.total) return std::nullopt;
+  const auto& block = input.kernels;
+  auto options = CalibrationMultiplierOptions{};
+  options.iterations = block.calibration_iterations;
+  options.rtol = block.calibration_rtol;
+  auto solved = SolveCalibrationMultiplier(evolution, times,
+                                           built.measurements, oceans,
+                                           stageOceans, options, adjoint);
+  if (!solved.converged) {
+    const auto& kernels = top.At("kernels");
+    Fail(Has(kernels, "calibration") ? kernels.At("calibration") : kernels,
+         std::format("did not find the calibration's multiplier for the "
+                     "measurement \"{}\" in {} sweeps (relative update "
+                     "{:.3g}, tolerance {:.3g}); raise "
+                     "kernels.calibration.iterations",
+                     spec.name, solved.sweeps, solved.updates.back(),
+                     block.calibration_rtol));
+  }
+  measurements = std::move(solved.measurements);
+  mostSweeps = std::max(mostSweeps, solved.sweeps);
+  return Multiplier{
+      .lambda = std::move(solved.multiplier),
+      .sweeps = solved.sweeps,
+      .update = solved.updates.empty() ? 0.0 : solved.updates.back()};
 }
 
 /// The adjoint's options of the kernels asked for: the method and the
@@ -1634,7 +1784,10 @@ Writing WritingOf(const std::filesystem::path& config,
                    .points = {},
                    .steps = {.times = {0.0}, .window = {0}, .library = {0}},
                    .method = input.kernels.method,
-                   .relaxation = std::nullopt};
+                   .relaxation = std::nullopt,
+                   .total = run.Calibrating()
+                                ? std::optional<bool>{input.kernels.total}
+                                : std::nullopt};
   if (run.times) {
     for (auto n = std::size_t{0}; n < run.times->Size(); ++n) {
       w.axis.push_back(run.times->Axis(n));
@@ -1692,11 +1845,11 @@ double PairedOverRanks(const GridCoupling& coupling,
 /// wherever the coupling carries nodes), and the moduli kernels, with
 /// their pairing against the run's own lateral moduli (empty where it has
 /// none), in the metadata, with the continuous sweep's steps against the
-/// shortest relaxation time (`relaxation`, where given). The values in SI
-/// under the model's scales.
+/// shortest relaxation time (where the run has them) and, of a calibrated
+/// run, which derivatives they are. The values in SI under the model's
+/// scales.
 void WriteFieldKernels(const std::filesystem::path& stem,
-                       const KernelsBlock& block,
-                       const std::optional<StepsAgainstRelaxation>& relaxation,
+                       const KernelsBlock& block, const Writing& w,
                        const MeasurementSpec& spec,
                        const Built& built, const Kernels3D& kernels,
                        const GridCoupling& coupling, const GridCoupling* whole,
@@ -1713,6 +1866,11 @@ void WriteFieldKernels(const std::filesystem::path& stem,
                          std::vector<io::NodeField> fields,
                          io::KernelFileOptions file) {
     if (!ranks.First()) return;
+    // of a calibrated run: 1 for the total derivatives, 0 for the partial
+    if (w.total) {
+      file.meta.emplace("calibration_total_derivative", *w.total ? 1.0 : 0.0);
+    }
+    const auto& relaxation = w.relaxation;
     if (relaxation) {
       file.meta.emplace("longest_step_over_shortest_relaxation_time",
                         relaxation->ratio);
@@ -1797,8 +1955,8 @@ void WriteFieldKernels(const std::filesystem::path& stem,
 /// kernels, and with `kernels.lateral` their fields over the memory nodes'
 /// grids too (LateralKernelSolver's radial route), written as a 3-D run's
 /// are, the run's own lateral structure none.
-std::string Sweep1D(const KernelInput& input, const Writing& w,
-                    const Evolution& evolution,
+std::string Sweep1D(const KernelInput& input, const Json& top,
+                    const Writing& w, const Evolution& evolution,
                     std::span<const Evolution::Snapshot> snapshots,
                     std::span<const double> times,
                     const ViscoelasticOperator& op, const Rheology& rheology,
@@ -1833,20 +1991,28 @@ std::string Sweep1D(const KernelInput& input, const Writing& w,
       lateral && block.Writes(KernelParameter::Viscosity)
           ? io::SampleNodeField(lateral->Coupling(), DeltaOf(earth))
           : std::vector<double>{};
+  auto mostSweeps = 0;
   return SweepEach<Evolution::Snapshot>(
-      input, w, snapshots, iceRead, seaLevelRead, read,
+      input, w, snapshots, iceRead, seaLevelRead, read, mostSweeps,
       [&](const MeasurementSpec& spec, const Built& built,
           const std::filesystem::path& stem) {
+        // a calibrated run's total kernels: the measurement less the
+        // calibration's multiplier at the window's end
+        auto measurements = std::map<std::size_t, Measurement>{};
+        const auto multiplier = CalibratedForcing(
+            input, top, w, evolution, times, spec, built, oceans, stageOceans,
+            options, measurements, mostSweeps);
         auto fields = std::optional<Kernels3D>{};
         if (lateral) {
-          fields = lateral->FirstOrderKernels(times, built.measurements, trajectory,
+          fields = lateral->FirstOrderKernels(times, measurements, trajectory,
                                               oceans, stageOceans);
         }
         const auto kernels =
             fields ? fields->ice
-                   : adjoint.FirstOrderKernels(times, built.measurements, &trajectory,
+                   : adjoint.FirstOrderKernels(times, measurements, &trajectory,
                                                oceans, stageOceans);
-        WriteSurfaceKernels(stem, w, block, spec, kernels, built);
+        WriteSurfaceKernels(stem, w, block, spec, kernels, built,
+                            multiplier ? &*multiplier : nullptr);
         if (block.Writes(KernelParameter::Viscosity)) {
           WriteViscosityKernel1D(stem.string() + "_viscosity_kernel.txt", w,
                                  spec, built, kernels, rheology, material);
@@ -1856,7 +2022,7 @@ std::string Sweep1D(const KernelInput& input, const Writing& w,
                               built, kernels, op, material);
         }
         if (fields) {
-          WriteFieldKernels(stem, block, w.relaxation, spec, built, *fields,
+          WriteFieldKernels(stem, block, w, spec, built, *fields,
                             lateral->Coupling(), nullptr,
                             op.BaseMaterial().Mesh(), earth, delta, {}, {});
         }
@@ -1869,8 +2035,8 @@ std::string Sweep1D(const KernelInput& input, const Writing& w,
 /// nodes (gathered to the first rank on several), each with its pairing
 /// against the run's own lateral structure (the log viscosity's against a
 /// uniform perturbation too) in the metadata.
-std::string Sweep3D(const KernelInput& input, const Writing& w,
-                    const Evolution3D& evolution,
+std::string Sweep3D(const KernelInput& input, const Json& top,
+                    const Writing& w, const Evolution3D& evolution,
                     std::span<const Evolution3D::Snapshot> snapshots,
                     const ForwardTrajectory3D& trajectory,
                     std::span<const double> times, const Viscoelastic3D& op,
@@ -1895,16 +2061,24 @@ std::string Sweep3D(const KernelInput& input, const Writing& w,
   const auto delta = block.Writes(KernelParameter::Viscosity)
                          ? io::SampleNodeField(coupling, DeltaOf(earth))
                          : std::vector<double>{};
+  auto mostSweeps = 0;
   return SweepEach<Evolution3D::Snapshot>(
-      input, w, snapshots, iceRead, seaLevelRead, read,
+      input, w, snapshots, iceRead, seaLevelRead, read, mostSweeps,
       [&](const MeasurementSpec& spec, const Built& built,
           const std::filesystem::path& stem) {
+        // a calibrated run's total kernels, as the radial run's (collective:
+        // every rank sweeps for the multiplier)
+        auto measurements = std::map<std::size_t, Measurement>{};
+        const auto multiplier = CalibratedForcing(
+            input, top, w, evolution, times, spec, built, oceans, stageOceans,
+            options, measurements, mostSweeps);
         const auto kernels = adjoint.FirstOrderKernels(
-            times, built.measurements, &trajectory, oceans, stageOceans);
+            times, measurements, &trajectory, oceans, stageOceans);
         if (ranks.First()) {
-          WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built);
+          WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built,
+                              multiplier ? &*multiplier : nullptr);
         }
-        WriteFieldKernels(stem, block, w.relaxation, spec, built, kernels,
+        WriteFieldKernels(stem, block, w, spec, built, kernels,
                           coupling, whole ? &*whole : nullptr, mesh, earth,
                           delta, op.UnrelaxedShearPerturbation(),
                           op.BulkPerturbation());
@@ -2018,7 +2192,7 @@ std::string KernelStatic1D(const std::filesystem::path& config,
   const auto w = WritingOf(config, input, solver);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(loads.get()));
-  return Sweep1D(input, w, evolution, snapshots, times, op, rheology, earth,
+  return Sweep1D(input, top, w, evolution, snapshots, times, op, rheology, earth,
                  world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }
@@ -2074,7 +2248,7 @@ std::string KernelStatic3D(const std::filesystem::path& config,
   const auto w = WritingOf(config, input, solver);
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(loads.get()));
-  return Sweep3D(input, w, evolution, snapshots, trajectory, times, op, earth,
+  return Sweep3D(input, top, w, evolution, snapshots, trajectory, times, op, earth,
                  world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }
@@ -2118,6 +2292,10 @@ std::string Kernel1D(const std::filesystem::path& config,
     forward.store->Attach(options);
   }
   Evolution evolution(op, solver, world.background, options);
+  // the state calibrated under migrating shorelines, here or by the run
+  // the store holds: marked, so that a sweep that would hold the initial
+  // sea level where the library has no total derivative is refused
+  if (run.Calibrating() && run.Migrating()) evolution.MarkCalibrated();
   const auto drive = DriveOf<Evolution::Forcing>(run, top, solver, world);
   const auto snapshots =
       forward.read ? forward.store->Snapshots1D()
@@ -2136,7 +2314,7 @@ std::string Kernel1D(const std::filesystem::path& config,
   }
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(drive.loads.get()));
-  return Sweep1D(input, w, evolution, snapshots, times, op, rheology, earth,
+  return Sweep1D(input, top, w, evolution, snapshots, times, op, rheology, earth,
                  world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }
@@ -2188,6 +2366,8 @@ std::string Kernel3D(const std::filesystem::path& config,
     forward.store->Attach(options);
   }
   Evolution3D evolution(op, solver, world.background, options);
+  // the calibrated state marked, as the radial run's
+  if (run.Calibrating() && run.Migrating()) evolution.MarkCalibrated();
   const auto drive = DriveOf<Evolution3D::Forcing>(run, top, solver, world);
   const auto snapshots =
       forward.read ? forward.store->Snapshots3D()
@@ -2210,7 +2390,7 @@ std::string Kernel3D(const std::filesystem::path& config,
   }
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(drive.loads.get()));
-  return Sweep3D(input, w, evolution, snapshots, trajectory, times, op, earth,
+  return Sweep3D(input, top, w, evolution, snapshots, trajectory, times, op, earth,
                  world.iceRead, world.seaLevelRead, read) +
          forward.Note();
 }

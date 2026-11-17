@@ -15,5 +15,16 @@
   },
   "rotation": "full",
   "moments": "hydrostatic",
-  "output": {"surface": "out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc"}
+  "output": {"surface": "out/sea_level_1d_calibrated/sea_level_1d_calibrated.nc"},
+  "kernels": {
+    "parameters": ["ice", "viscosity"],
+    "calibration": {"derivative": "total"},
+    "measurements": [
+      {"type": "relative_sea_level_cap", "name": "hudson_bay_sea_level",
+       "latitude": 60, "longitude": 275, "width_deg": 8, "date_kyr_bp": 0},
+      {"type": "relative_sea_level_point", "name": "far_field_sea_level",
+       "latitude": -17.5, "longitude": 210.5, "date_kyr_bp": 10}
+    ],
+    "output": "out/sea_level_1d_calibrated/kernels"
+  }
 }

@@ -28,6 +28,7 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <iostream>
 #include <iterator>
 #include <map>
 #include <planetmodel/error.hpp>
@@ -1155,6 +1156,68 @@ double ValuesDeparture(const fs::path& mine, const fs::path& theirs) {
   EXPECT_EQ(a.size(), b.size()) << theirs;
   EXPECT_FALSE(b.empty()) << theirs;
   return a.size() == b.size() ? Relative(a, b) : 1.0;
+}
+
+TEST_F(AppsOverRanks, TotalKernelsOfACalibratedRunMatchOneProcess) {
+  // The kernels of a calibrated migrating 3-D run are by default its total
+  // derivatives: beside each measurement's sweep the multiplier of the
+  // calibration's constraint is found by sweeps of its own, collective
+  // over the ranks, every rank deciding alike when they have converged.
+  // The ice kernels, the multiplier (`target_sea_level_dual`, not zero:
+  // the toy's marine ice floods) and the log-viscosity kernels over the
+  // ranks are the one process's.
+  if (Rank() == 0) test::WriteToyHistory(dir_ / "marine.nc", 0.0, true);
+  Barrier();
+  auto body =
+      Body(R"("shorelines": "migrating", "calibration": {"rtol": 1e-10})");
+  for (auto at = body.find("history.nc"); at != std::string::npos;
+       at = body.find("history.nc", at + 1)) {
+    body.replace(at, std::string_view{"history.nc"}.size(), "marine.nc");
+  }
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", "{" + body + R"(,
+      "solver": {"step_rtol": 1e-10, "step_max_iterations": 200},
+      "kernels": {"parameters": ["ice", "viscosity"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+           "longitude": 10.0, "width_deg": 25.0, "date_kyr_bp": 0.0}],
+        "output": "out_)" + name + R"("}})");
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] { static_cast<void>(app::RunKernel(one)); });
+  const auto summary = app::RunKernel(over);
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_NE(summary.find("total derivatives, the initial sea level calibrated "
+                         "again, the multiplier in at most "),
+            std::string::npos)
+      << summary;
+  const auto ice = pm::ReadSurfaceFile(dir_ / "out_over" / "site_ice_kernels.nc");
+  const auto reference =
+      pm::ReadSurfaceFile(dir_ / "out_one" / "site_ice_kernels.nc");
+  EXPECT_EQ(std::get<std::string>(ice.meta.at("calibration_derivative")),
+            "total");
+  EXPECT_EQ(std::get<std::vector<double>>(
+                ice.meta.at("calibration_multiplier_sweeps")),
+            std::get<std::vector<double>>(
+                reference.meta.at("calibration_multiplier_sweeps")));
+  const auto& multiplier = ice.variables.at("target_sea_level_dual").values;
+  EXPECT_TRUE(
+      std::ranges::any_of(multiplier, [](double v) { return v != 0.0; }));
+  const auto surface =
+      SurfaceKernelDeparture(dir_ / "out_over" / "site_ice_kernels.nc",
+                             dir_ / "out_one" / "site_ice_kernels.nc");
+  const auto viscosity =
+      KernelFileDeparture(dir_ / "out_over" / "site_viscosity_kernels.nc",
+                          dir_ / "out_one" / "site_viscosity_kernels.nc");
+  std::cout << std::format(
+      "[calibrated, total, over the ranks] ice kernels and multiplier {:.1e}, "
+      "viscosity {:.1e}\n",
+      surface, viscosity);
+  EXPECT_LT(ValuesDeparture(dir_ / "out_over", dir_ / "out_one"), 1e-8);
+  EXPECT_LT(surface, 1e-7);
+  EXPECT_LT(viscosity, 1e-7);
 }
 
 TEST_F(AppsOverRanks, StaticKernelsOnLateralModuliMatchOneProcess) {

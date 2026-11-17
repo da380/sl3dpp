@@ -39,6 +39,7 @@
 #include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/GridCoupling.hpp"
+#include "sl3dpp/InitialSeaLevel.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
@@ -1303,4 +1304,130 @@ TEST(RadialRanks, InstantaneousResponsesMatchTheOneProcess) {
       EXPECT_LT(worst, 1e-9) << label;
     }
   }
+}
+
+namespace {
+
+/// A marine cap on a 3 km ocean (9 km at its peak, so that its band-limited
+/// thickness grounds at degree 8), solver units: its melting floods its
+/// cells, and the run's initial sea level kernel is not zero.
+std::vector<double> MarineCapOn(const GRDSolver& solver) {
+  const auto& grid = solver.Grid();
+  const auto metre = 1.0 / solver.SolverScales().Length();
+  return grid.Synthesise(
+      grid.Expand(grid.FromFunction([&](double theta, double phi) {
+        const auto c = std::cos(theta) * std::cos(0.5236) +
+                       std::sin(theta) * std::sin(0.5236) * std::cos(phi - 4.8);
+        const auto d = std::acos(std::clamp(c, -1.0, 1.0));
+        if (d >= 0.349) return 0.0;
+        const auto taper = std::cos(0.5 * 3.14159265358979323846 * d / 0.349);
+        return 9000.0 * metre * taper * taper;
+      })));
+}
+
+}  // namespace
+
+TEST(RadialRanks, CalibratedKernelsMatchTheOneProcess) {
+  // The total kernels of a calibrated run (ComputeCalibratedKernels) on
+  // three ranks, about a migrating run of a marine cap that floods: the
+  // multiplier's sweeps and the final one collective as every 3D sweep.
+  // Against one process: the multiplier and the ice kernels on every rank,
+  // each rank's slice of the log-viscosity kernel, and the sweeps taken.
+  constexpr auto lmax = 8;
+  constexpr auto count = 3;
+  const auto body = Body::Make(lmax, 1e21);
+  ViscoelasticOperator reference(body.rheology, lmax);
+  auto solvers = std::vector<GRDSolver>{};
+  for (auto rank = 0; rank <= count; ++rank) {
+    solvers.emplace_back(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                         SeaLevelParameters{});
+  }
+  const auto ice = MarineCapOn(solvers[0]);
+  const auto state = solvers[0].MakeState(
+      ice, std::vector<double>(ice.size(),
+                               3000.0 / solvers[0].SolverScales().Length()));
+  const auto kyr = 1000.0 * 3.15576e7 / solvers[0].SolverScales().Time();
+  const auto times = std::vector<double>{0.0, 3.0 * kyr, 6.0 * kyr, 10.0 * kyr};
+  const auto thickness = [&](double t) {
+    auto out = ice;
+    for (auto& v : out) v *= 1.0 - t / times.back();
+    return out;
+  };
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].relativeSeaLevelDual =
+      solvers[0].Grid().FromFunction([](double theta, double phi) {
+        return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+      });
+  measurements[1].displacementDual =
+      measurements[times.size() - 1].relativeSeaLevelDual;
+  const auto cuts = body.material.Mesh().BalancedCuts(
+      count, GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ASSERT_EQ(cuts.size(), static_cast<std::size_t>(count - 1));
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .radial_cuts = cuts};
+  const auto evolutionOptions =
+      Evolution3D::Options{.rtol = 1e-12,
+                           .max_coupled_iterations = 100,
+                           .coupled_rtol = 1e-11,
+                           .record_stride = 1};
+  const auto adjointOptions =
+      AdjointSolver3D::Options{.rtol = 1e-12,
+                               .max_coupled_iterations = 100,
+                               .coupled_rtol = 1e-11};
+  auto run = [&](const Viscoelastic3D& op, const GRDSolver& solver) {
+    Evolution3D evolution(op, solver, state, evolutionOptions);
+    const auto snapshots = evolution.RunMigrating(times, thickness);
+    const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+    return ComputeCalibratedKernels(evolution, times, measurements,
+                                    &trajectory, OceanFunctionsOf(snapshots),
+                                    StageOceanFunctionsOf(snapshots),
+                                    {.rtol = 1e-10}, adjointOptions);
+  };
+  const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+  const auto want = run(whole, solvers[count]);
+  EXPECT_TRUE(want.converged);
+  EXPECT_GT(want.sweeps, 2);
+  auto scale = 0.0;
+  for (const auto v : want.multiplier) scale = std::max(scale, std::abs(v));
+  EXPECT_GT(scale, 0.0);
+
+  ThreadRanks ranks(count);
+  auto ops = std::vector<std::unique_ptr<Viscoelastic3D>>{};
+  for (auto rank = 0; rank < count; ++rank) {
+    auto mine = options;
+    mine.segments = {rank};
+    mine.collectives = ranks.For(rank);
+    ops.push_back(
+        std::make_unique<Viscoelastic3D>(body.rheology, lmax, Peaked, mine));
+  }
+  auto got = std::vector<CalibratedKernels3D>(count);
+  ranks.Run([&](int rank) { got[rank] = run(*ops[rank], solvers[rank]); });
+  auto worstMultiplier = 0.0, worstIce = 0.0, worstViscosity = 0.0;
+  for (auto rank = 0; rank < count; ++rank) {
+    const auto& mine = got[rank];
+    EXPECT_TRUE(mine.converged) << rank;
+    EXPECT_EQ(mine.sweeps, want.sweeps) << rank;
+    worstMultiplier =
+        std::max(worstMultiplier, Relative(mine.multiplier, want.multiplier));
+    for (auto n = std::size_t{0}; n < want.kernels.ice.thickness.size(); ++n) {
+      worstIce = std::max(worstIce, Relative(mine.kernels.ice.thickness[n],
+                                             want.kernels.ice.thickness[n]));
+    }
+    worstViscosity = std::max(
+        worstViscosity,
+        FieldSliceDifference(ops[rank]->Coupling(),
+                             mine.kernels.logViscosityKernel3D[0],
+                             whole.Coupling(),
+                             want.kernels.logViscosityKernel3D[0]));
+  }
+  RecordProperty("multiplier", std::format("{:.3e}", worstMultiplier));
+  RecordProperty("ice", std::format("{:.3e}", worstIce));
+  RecordProperty("viscosity", std::format("{:.3e}", worstViscosity));
+  std::cout << std::format(
+      "[calibrated on thread ranks] {} sweeps: multiplier {:.1e}, ice "
+      "kernels {:.1e}, viscosity {:.1e}\n",
+      want.sweeps, worstMultiplier, worstIce, worstViscosity);
+  EXPECT_LT(worstMultiplier, 1e-9);
+  EXPECT_LT(worstIce, 1e-9);
+  EXPECT_LT(worstViscosity, 1e-9);
 }

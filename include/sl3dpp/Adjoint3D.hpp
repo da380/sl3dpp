@@ -295,6 +295,13 @@ class AdjointSolver3D {
     /// AdjointSolver::Options::tide_kernels (the discrete sweep forms
     /// them always); on one process.
     bool tide_kernels = false;
+    /// SecondOrderKernels about an evolution whose background state is
+    /// marked calibrated under migrating shorelines (Evolution3D::Calibrated)
+    /// holds the initial sea level: it gives the derivative of the partial
+    /// kernels, where the calibrated run's own (of its total kernels,
+    /// InitialSeaLevel.hpp) is not built. It is refused there unless this
+    /// states that the partial ones are wanted.
+    bool initial_sea_level_held = false;
     /// Called at the start of each step of the reversed sweep, with the
     /// node it steps back from (the last node first, down to 1): a hook for
     /// progress reports, since a sweep can take as long as the forward run.
@@ -348,6 +355,9 @@ class AdjointSolver3D {
    * Options::material_kernels the material kernels and their
    * derivatives along v are formed too, and v may have a direction in
    * the moduli (`material`; docs/adjoints.md §15), by either method.
+   * About a calibrated migrating run, the derivatives of its partial
+   * kernels, as AdjointSolver's, and refused alike unless
+   * Options::initial_sea_level_held.
    *
    * @param tangent v's tangent-linear run about the forward run, recorded
    * at every node (TangentLinearSolver3D::Options::record), by the SAME

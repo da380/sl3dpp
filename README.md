@@ -50,6 +50,9 @@ of mantle viscosity using deglacial sea level observations;
   sources' moment tensors; the kernels in lateral structure (the log
   viscosity and the moduli as fields) about a radial Earth by the radial
   sweeps alone, with no 3D solve, as about a 3D one by the 3D sweeps;
+  the kernels of a run with a calibrated initial sea level as total
+  derivatives, the calibration followed (with the kernel in the
+  present-day sea level it is held to);
   tangent-linear runs and second-order adjoints (Hessian-vector
   products). None is taken in the density
   ([docs/adjoints.md](docs/adjoints.md) §13l).

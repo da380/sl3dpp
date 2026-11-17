@@ -8,7 +8,8 @@ path is sl3dpp's own. Sections 6a and 6b give the 3D continuous sweep
 and the design of the discrete 3D transpose; §8–§17 the tangent-linear
 runs, the second-order adjoints, the discrete 3D transpose (§12), the
 material derivatives and kernels, and their distribution over radius;
-§21 the kernels in lateral structure about a radial background; §1a the
+§21 the kernels in lateral structure about a radial background; §22 the
+derivatives of a run whose initial sea level is calibrated; §1a the
 derivatives under Sdirk2, the scheme of two stages. The overview is
 [design.md](design.md) §7; choosing a step and a scheme for a run and
 its kernels is in [running.md](running.md), "Choosing a step and
@@ -2604,3 +2605,175 @@ at once; a dedicated route would save that fixed point's second pass and
 the 3D forward run (the base fields synthesised from the radial
 trajectory, as here), not the tangent's own transforms. The second-order
 sweeps along such a direction need that run.
+
+## 22. The derivatives of a calibrated run
+
+A run may be CALIBRATED (`InitialSeaLevel.hpp`): its initial sea level
+S0 is not given but found, so that the run reaches a given sea level
+S_f at its last node (the present day's, usually). The sweeps of the
+sections above take S0 as a parameter: their kernels are the PARTIAL
+derivatives of an objective J, the initial sea level held, with the
+initial sea level kernel k0 = ∂J/∂S0 beside them. A calibrated run's S0
+is found again when a parameter changes, so the derivative of what the
+run computes is the TOTAL one, with the change of S0 in it. Under
+frozen shorelines the run does not depend on S0 at all (k0 ≡ 0), and
+the two are one. Under migrating shorelines they are not: S0 places the
+initial shorelines and, through the cells that flood or ground, every
+later load. This section is Yu et al. 2025, §3.9, eqs. (85)–(92), in
+the discrete setting.
+
+**The converged condition.** Write the final sea level as S0 + ξ(t_f; p,
+S0), p the run's parameters (the ice thickness at the nodes, the
+relaxation times, the moduli, any other forcing) and ξ the sea level
+change. The calibration weights the misfit by w ≥ 0, sets S0 on the
+points P where w > 0 and holds it elsewhere (with no weights, P is the
+sphere). Its converged state satisfies
+
+    S0 + ξ(t_f; p, S0) = S_f   on P                                (22.1)
+
+whichever method reached it, the classical update (eq. 85) or steepest
+descent on the misfit (eqs. 86–88), mixed or not: the derivative below
+is of (22.1), not of an iteration. With A = ∂ξ(t_f)/∂S0 and 𝒫 the
+restriction to P (as a projection: zero off P),
+
+    𝒫 (I + A) 𝒫 δS0 = 𝒫 (δS_f − (∂ξ(t_f)/∂p) δp),   δS0 = 0 off P.   (22.2)
+
+**The multiplier.** With ⟨·,·⟩ the surface pairing of the duals (§4,
+∫ · dS on the solver's sphere), δJ = (∂J/∂p) δp + ⟨k0, δS0⟩, and (22.2)
+gives
+
+    δJ = (∂J/∂p) δp − ⟨λ, (∂ξ(t_f)/∂p) δp⟩ + ⟨λ, δS_f⟩,
+    λ = 𝒫 (k0 − Aᵀ λ).                                             (22.3)
+
+λ is the multiplier of the constraint (22.1), SL0† of eq. (89), a field
+in the duals' pairing, supported on P. Two things follow from the
+sweeps as built. First, ⟨λ, ξ(t_f)⟩ is a sea level measurement at the
+last node with the dual λ (`Measurement::relativeSeaLevelDual`, which
+pairs with the node's ξ by ∫ · dS: no weight or factor between them),
+so Aᵀλ is that measurement's initial sea level kernel and −(∂ξ(t_f)/∂p)ᵀλ
+its kernels in p, negated. Second, the sweeps are linear in their
+measurements. So ONE sweep, forced by J's measurements less the sea
+level measurement λ at the last node, gives
+
+- in every parameter of the run, the total kernel
+  ∂J/∂p − (∂ξ(t_f)/∂p)ᵀ λ: the thickness views, the load kernels, the
+  tide and moment kernels, the relaxation-time (viscosity) and moduli
+  kernels, each in its own layout and pairing, nothing about them
+  changed;
+- as its initial sea level kernel, k0 − Aᵀλ, which on P is λ again by
+  (22.3), and off P the total derivative in the initial sea level held
+  there.
+
+That sweep's forcing is the adjoint load of eq. (92): the measurements'
+and, at the time-reversed present, a singular load proportional to the
+multiplier, which depends on the adjoint sea level over the whole
+window (eq. 91) and so closes by iteration. And λ = ∂J/∂S_f on P: the
+kernel of the objective in the sea level the run is calibrated to.
+
+**The iteration.** (22.3) is a linear fixed point for λ. From λ = 0 the
+first sweep gives k0 on P, the partial run's; each sweep after it,
+forced by the measurements less the current λ at the last node, returns
+𝒫 (k0 − Aᵀλ), and the iteration stops when the largest change of λ is
+below a tolerance times its largest value
+(`SolveCalibrationMultiplier`, `CalibrationMultiplierOptions`). These
+sweeps need the initial sea level kernel alone, which is assembled from
+the load kernels and the run's ocean functions (§4): they take no
+recorded trajectory and form no relaxation-time, moduli, tide or moment
+kernel, so each costs about one forward run. The full sweep, with the
+trajectory, runs once, at the end (`ComputeCalibratedKernels`). The
+plain iteration contracts at the rate of A, which acts only through the
+cells whose ocean function changes along the run: measured 0.25 per
+sweep on the tests' marine cap (1D and 3D; 21 sweeps to 1e-12) and 0.10
+to 0.16 on the synthetic deglaciation of the examples (9 to 10 sweeps
+to 1e-8). The relation is linear and A of low rank, so Anderson mixing
+(the calibration's own mixer, `detail/AndersonMixer.hpp`, depth 5 by
+default) ends it sooner: 5 sweeps to 1e-12 on the marine cap, 6 to 7 to
+1e-8 on the examples. An iteration that runs out of sweeps returns its
+last iterate with `converged` false, and `sl3d kernel` refuses it.
+
+**Conventions.**
+
+- *Pairings.* λ, k0 and the measurement duals are non-dimensional
+  solver-unit densities on the surface grid, paired by ∫ · dS (§4).
+  The calibration's weights do not enter the pairing: they choose P,
+  and nothing else of them is in (22.1).
+- *The ice.* The parameters p are the run's own: the thickness at each
+  node, in the thickness view of §4 (the first node's moving the ice
+  the run starts from, its baseline folded in), which is what
+  ∂ξ(t_f)/∂p is taken in, so the total thickness kernels are in that
+  view, and the baseline of the total sweep is the total derivative in
+  the ice the run starts from with every node's held. The constraint is
+  on the sea level alone. A calibrated run's state also holds the ice
+  at the last node, but that is the history's own value there, not a
+  condition solved for: it brings no second multiplier, and changes
+  ∂ξ(t_f)/∂p in no way. A state's ice raised with the history's changes
+  held moves every node and the start alike, leaves the loads as they
+  were, and acts through the target alone (where the target is a
+  topography converted with that ice), by ⟨λ, δS_f⟩.
+- *The scheme.* By the discrete method k0 and Aᵀ are the exact
+  transposes of the stepped run under every scheme. Under Sdirk2 each
+  step's first stage has its own shorelines, about which the sweep
+  grounds that stage's part of the initial sea level kernel (§1a,
+  `stageOceanFunctions`); the multiplier's measurement sits at the last
+  node, a node value like any other. The total kernels are then the
+  derivative of the calibrated run as the program computes it, to the
+  calibration's and the iteration's tolerances. By the continuous
+  method k0 and Aᵀ are the continuous sweep's approximations (it reads
+  the nodes' ocean functions alone), λ is the fixed point of that
+  approximate relation, and the total kernels converge to the discrete
+  ones at second order in the step. A total kernel is the partial one
+  less a correction of comparable size, so it keeps fewer of the
+  continuous sweep's digits than either: on the tests' stiff mantle,
+  37%, 8.4% and 2.1% at 5, 9 and 17 nodes where the discrete ones hold
+  1e-7.
+- *The calibration's tolerance.* (22.1) is assumed to hold. A
+  calibration stopped at `rtol` leaves a residual of that order, and
+  the kernels are the calibrated run's to that order: tighten the
+  calibration to tighten them.
+- *Flotation.* As every kernel about a migrating run, these are
+  derivatives while no cell's flotation flips, the calibrated start's
+  included.
+
+**Second order.** The second-order kernels of a calibrated migrating
+run would be the derivative along a direction of the total kernels,
+with the derivative of λ in it: not built. `SecondOrderKernels` (§9,
+§11, §14) takes the initial sea level as a parameter and gives the
+derivative of the partial kernels. So that this is not taken for the
+calibrated run's, an evolution carries a mark of a state calibrated
+under migrating shorelines (`Evolution::Calibrated`:
+`CalibrateInitialSeaLevel` sets it, `SetBackgroundState` clears it, and
+`sl3d kernel` sets it on the evolutions it builds about such a state),
+and the second-order sweeps about a marked evolution, given ocean
+functions, are refused naming what is not built
+(`RefuseCalibratedSecondOrderKernels`) unless their
+`Options::initial_sea_level_held` states that the partial kernels'
+derivative is what is wanted. Under frozen shorelines the sweep is the
+calibrated run's, and nothing is marked.
+
+**Over ranks.** The multiplier's sweeps are the 3D sweeps, collective
+as they are (§17); every rank holds the same surface fields, and
+iterates alike.
+
+**Gates** (`TestCalibratedKernels`; every difference between runs
+calibrated afresh to 1e-13 of the sea level that flip no cell, the
+start's included). 1D, the marine cap melting over five steps, discrete
+sweeps, Sdirk2 and the exponential trapezoid: the total kernels against
+the difference in the thickness at every node 8e-13 and 6e-13, in the
+target (the multiplier) 1e-11 and 4e-13, in the relaxation times 4e-8
+and 5e-8 and in the moduli 4e-8 and 8e-8 (Richardson's value of two
+central differences; its remainder and the solves' noise are what is
+left); the partial kernels miss the same differences by 21%, 25% and
+22%. The final sweep's initial sea level kernel is the multiplier to
+1e-10. A calibration weighted on half the cap: the thickness 8e-12, and
+the initial sea level kernel off the weighted points against runs
+calibrated from a guess moved there, 1e-11. Frozen shorelines: no sweep
+for the multiplier, the kernels the one sweep's, 1e-12 against the
+re-calibrated frozen runs. 3D under lateral viscosity, Sdirk2, four
+nodes: the thickness 2e-10 and a lateral direction of the log viscosity
+2e-9, where the partial kernels miss by 104% and 14%. Over radial
+segments (`TestDistributed`, `TestRadialRanks`) the multiplier, the
+total ice kernels and each rank's log-viscosity kernel are the one
+process's to 1e-11. Through the program (`TestApps`): the total kernels
+of `sl3d kernel` against pairs of `sl3d solve` runs, each calibrating
+again, in the ice at a node 4e-14, in the target 2e-13, in a uniform
+change of ln η 1e-6.

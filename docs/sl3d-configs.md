@@ -1756,7 +1756,9 @@ The `ocean` block changes the start and the equation, as pyslfp's
   (`kernel`) linearise about the run's own shorelines, its start's
   included (each node's land held among what placed them, the land being
   data and not a parameter), and their `initial_sea_level_dual` is not
-  zero, as it is under frozen shorelines.
+  zero, as it is under frozen shorelines (a calibrated run's kernels
+  are by default its total derivatives, with `target_sea_level_dual` in
+  that field's place: kernel, Calibrated runs).
 - `"at": "end"` makes the state the one the run reaches at
   `times.end_kyr_bp` (usually the present day), and calibrates the
   initial sea level against its sea level (`ocean.calibration`): the
@@ -1781,7 +1783,9 @@ The `ocean` block changes the start and the equation, as pyslfp's
   shorelines kept; under migrating shorelines the calibration iterates,
   by the classical update or by steepest descent with the adjoint
   gradient, each accelerated by Anderson mixing. The calibration runs
-  before the run proper, which then costs one more run.
+  before the run proper, which then costs one more run. The kernels of
+  a calibrated run (`kernel`) are those of the run as far as the
+  calibration holds its target: `ocean.calibration.rtol` bounds them.
 
 A sea level solve that misses `solver.rtol` is an error, and in 3D so is
 a node whose combined fixed point does not converge within
@@ -2819,8 +2823,12 @@ scheme").
 
 With the state at the window's start the initial sea level is the
 state's; with it at the end (`"at": "end"`) it is calibrated first, as
-`solve` calibrates it, and the kernels hold the calibrated initial sea
-level fixed.
+`solve` calibrates it. A calibrated run's initial sea level is not an
+input: `solve` finds it again for every run, so the kernels written are
+by default the TOTAL derivatives, the initial sea level calibrated again
+as the parameter changes, which is what two `solve` runs differ by
+(Calibrated runs, below); `kernels.calibration` asks for the partial
+ones instead, the calibrated initial sea level held.
 
 | Member | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -2830,6 +2838,10 @@ level fixed.
 | `kernels.lateral` | boolean | false on a radial model, true on one with lateral structure | the kernels in the viscosity and the moduli as fields over the Earth, whatever the background (Lateral kernels, below) |
 | `kernels.measurements` | array | required | the measurements, at least one (below) |
 | `kernels.output` | path | required | the directory the kernel files go into |
+| `kernels.calibration` | object | absent | a calibrated run's alone (`"at": "end"`; refused on any other run): which derivatives its kernels are, and the iteration for the total ones (Calibrated runs, below) |
+| `kernels.calibration.derivative` | word | `"total"` | `"total"`: the initial sea level calibrated again as the parameter changes; `"partial"`: the calibrated initial sea level held |
+| `kernels.calibration.iterations` | integer >= 1 | 20 | the most sweeps for the calibration's multiplier, per measurement; running out is an error; refused beside `"partial"` |
+| `kernels.calibration.rtol` | number > 0 | 1e-8 | the multiplier's convergence: its largest change between two sweeps below this times its largest value; refused beside `"partial"` |
 
 The members of the block given at the top level (`adjoint`,
 `measurements`, `parameters`, `method`) are refused, naming the block's
@@ -2890,8 +2902,12 @@ baseline is this one; docs/adjoints.md §20). With the state at the
 window's end, the run starts from the ice at the window's start, and the
 first node's `thickness_dual` moves that start with it, the ice at the
 other nodes held. The surface file's `ice_views` says which
-(`state_held` or `run_start_moves`). Every field holds the initial sea
-level, and `initial_sea_level_dual` holds the ice. The fields:
+(`state_held` or `run_start_moves`). With the state at the start, and in
+a calibrated run's partial kernels, every field holds the initial sea
+level, and `initial_sea_level_dual` holds the ice; in a calibrated run's
+total kernels every field has the initial sea level calibrated again,
+and `target_sea_level_dual` stands in that field's place (Calibrated
+runs, below). The fields:
 
 | Field | Support | Meaning |
 | --- | --- | --- |
@@ -2899,7 +2915,8 @@ level, and `initial_sea_level_dual` holds the ice. The fields:
 | `rate_dual` | interval | through time: the quelled view, dJ = sum_k integral of K_k (I_{k+1} - I_k) dS (= sum_k h_k integral of K_k (dI/dt)_k dS), the first node's ice held |
 | `instantaneous_dual` | instant | through time: the delta amplitude at each measurement instant of the thickness kernel's distributional view, per metre of ice |
 | `thickness_baseline_dual` | static | dJ per metre of the state's ice (with the state at the end, of the ice the run starts from), the ice at every node held; with the state at the end no config moves it alone (the run starts from the first node's ice, whose `thickness_dual` folds it in) |
-| `initial_sea_level_dual` | static | dJ per metre of the initial sea level, the ice held; zero under frozen shorelines |
+| `initial_sea_level_dual` | static | dJ per metre of the initial sea level, the ice held; zero under frozen shorelines; not in a calibrated run's total kernels, whose initial sea level is no parameter |
+| `target_sea_level_dual` | static | a calibrated run's total kernels alone: dJ per metre of the sea level the run is calibrated to (the state's, at the window's end), the ice held; zero under frozen shorelines |
 
 With the state held, the ice change at the first node with the later
 nodes' ice held pairs with `thickness_dual` there, and a change of the
@@ -2911,16 +2928,61 @@ at every node and the run's start alike, and so leaves the run's loads
 of `thickness_dual` over the nodes, which is zero, and acts through the
 calibration's target alone (below).
 
-A calibrated run's initial sea level (`"at": "end"`) is not an input: it
-follows the run's ice and its target, the state's sea level at the end,
-and solve re-calibrates it for every run. A change of a calibrated run's
-ice therefore changes J by the thickness kernels paired with the change
-of the ice plus `initial_sea_level_dual` paired with the change of the
-calibrated initial sea level (solve's `initial_sea_level`), and a change
-of its target by the second term alone. Under frozen shorelines that
-dual is zero, and the thickness kernels alone are the derivative of the
-re-calibrated run; under migrating ones it lives on the cells whose
-shorelines moved, and the second term is part of the derivative.
+**Calibrated runs.** A calibrated run's initial sea level (`"at":
+"end"`) is not an input: it follows the run's ice, its Earth and its
+target, the state's sea level at the end, and `solve` calibrates it
+again for every run. So the derivative of what `solve` computes has the
+change of the calibrated initial sea level in it, and that is what
+`kernel` writes by default, for every kernel the block names (the ice,
+the loads, the tide, the viscosity, the moduli; profiles and fields):
+
+- `"derivative": "total"` (the default). Each kernel is the derivative
+  of J between runs that each calibrate: a change of the ice changes J
+  by the thickness kernels paired with it and nothing more, a change of
+  the viscosity by the viscosity kernel, and a change of the target by
+  `target_sea_level_dual` paired with the change of the target's sea
+  level (a target given as a topography is converted with the state's
+  ice, as the state is). The program finds, per measurement, the
+  multiplier of the calibration's constraint, the field
+  `target_sea_level_dual`, by sweeps beside the measurement's own: each
+  is a sweep forced by the measurement less the current multiplier at
+  the window's end, formed for the ice alone (no recorded state is
+  read, no viscosity or moduli kernel formed), iterated with Anderson
+  mixing until the multiplier's change is below
+  `kernels.calibration.rtol`; then one full sweep writes the kernels
+  (docs/adjoints.md §22; Yu et al. 2025, §3.9). A kernel run so costs,
+  per measurement, the one sweep of a partial kernel and the
+  multiplier's (6 to 7 at the default tolerance on the example
+  deglaciations, each about a forward run's cost); an iteration that
+  does not converge within `kernels.calibration.iterations` is refused
+  at the block, with its last change, and nothing is written for that
+  measurement. The distributional view's `instantaneous_dual` has an
+  instant at the window's end beside the measurement's own, where the
+  multiplier forces the sweep.
+- `"derivative": "partial"`. Each kernel holds the calibrated initial
+  sea level, in one sweep, and `initial_sea_level_dual` is its kernel:
+  a change of the ice then changes J by the thickness kernels paired
+  with it plus `initial_sea_level_dual` paired with the change of the
+  calibrated initial sea level (solve's `initial_sea_level`), and a
+  change of the target by the second term alone.
+
+Under frozen shorelines the run does not depend on its initial sea
+level: the two are the same kernels, no sweep runs for the multiplier,
+`initial_sea_level_dual` (partial) and `target_sea_level_dual` (total)
+are zero, and the iteration's members are taken and not used. Under
+migrating shorelines the initial sea level's kernel lives on the cells
+whose shorelines moved, and the partial kernels alone are not the
+derivative of the re-calibrated run. The total kernels are those of the
+calibrated run as far as the calibration holds its target
+(`ocean.calibration.rtol`): a loose calibration leaves them that loose.
+By the discrete method they are otherwise the exact derivative of what
+`solve` computes while no cell's flotation flips; by the continuous one
+the multiplier is the continuous sweep's own, and they converge with
+the step as its other kernels do, keeping fewer digits at a given step
+(the total kernel is the partial one less a correction of its size).
+Every kernel file says which derivatives it holds (Output, below).
+`kernels.calibration` is the sweeps' alone: it is out of the run's
+hash, so one recorded run (The trajectory block, above) serves both.
 
 **The load.** `<name>_load_kernels.nc` holds, at each node (static
 fields in the static problem):
@@ -3220,6 +3282,14 @@ In `kernels.output`:
   `shortest_relaxation_time_s`, `shortest_relaxation_radius_m` and
   `shortest_relaxation_at` (where, as the summary states it); a field
   file (`_viscosity_kernels.nc`, `_moduli_kernels.nc`) the three numbers.
+- Of a calibrated run, the derivatives in every kernel file: a surface
+  file's `calibration_derivative` (`total` or `partial`), a table's
+  header line `# calibration <total|partial>` (and `measurements.txt`'s),
+  a field file's number `calibration_total_derivative` (1 or 0). The ice
+  file of a total kernel also holds `calibration_multiplier_sweeps` (the
+  sweeps its multiplier took, 0 under frozen shorelines) and
+  `calibration_multiplier_update` (the last sweep's relative change).
+  A run that does not calibrate has none of these.
 
 The shortest relaxation time is of the model as the run builds it: every
 branch's time (a Burgers body's faster, a prony deck's shortest) at
@@ -3230,7 +3300,11 @@ it, the innermost.
 Summary: `<what the config was taken to mean>; <the inputs as read>;
 wrote <n> measurement(s) of kernels to <output> (<parameters>; <method>
 adjoint)` (`; the kernels in the Earth as fields` before the
-closing parenthesis with `kernels.lateral` true), the first two as in
+closing parenthesis with `kernels.lateral` true; before that, of a
+calibrated run, `; total derivatives, the initial sea level calibrated
+again[, the multiplier in at most <n> sweeps]`, the sweeps the most a
+measurement took and given under migrating shorelines, or `; partial
+derivatives, the calibrated initial sea level held`), the first two as in
 `solve`'s summary; for a continuous kernel through time `<method>
 adjoint` is followed by `, its longest step <r> times the shortest
 relaxation time (<t> <unit>, [branch <b>, ]at <d> km depth in layer <l>,

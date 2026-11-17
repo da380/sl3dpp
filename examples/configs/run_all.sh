@@ -58,6 +58,9 @@ run solve no_ocean_postseismic.json
 run solve no_gravity_postseismic.json
 run solve sea_level_1d.json
 run solve sea_level_1d_calibrated.json
+# the same config's kernels block: the kernels about the calibrated run, the
+# total derivatives
+run kernel sea_level_1d_calibrated.json
 run solve sea_level_1d_steps.json
 run solve sea_level_tide_migrating.json
 run solve sea_level_3d.json
