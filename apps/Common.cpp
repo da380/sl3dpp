@@ -224,20 +224,6 @@ Run ReadRun(const Json& top, const std::filesystem::path& directory) {
     }
     out.solver = ReadSolverBlock(solver, out.lmax);
   }
-  // the gradient calibration's gradient under migrating shorelines comes
-  // from the discrete adjoint, which a scheme of several stages has none
-  // of (StepRecipe.hpp); under frozen shorelines it runs no sweep
-  if (out.Calibrating() && out.Migrating() &&
-      out.ocean->calibration_method == CalibrationMethod::Gradient &&
-      IsMultiStage(out.solver.scheme)) {
-    Fail(top.At("ocean").At("calibration").At("method"),
-         "is the gradient calibration, whose gradient under migrating "
-         "shorelines is the discrete adjoint's, which is not built for "
-         "`solver.scheme` \"sdirk2\" (its exact derivative runs through "
-         "each step's stages): give \"fixed_point\", whose calibrated state "
-         "is the same, or a scheme of one stage, \"exponential_trapezoid\" "
-         "or \"backward_euler\"");
-  }
   return out;
 }
 
@@ -1911,6 +1897,45 @@ std::string WithInputs(std::string_view meaning, const Run& run,
 
 std::vector<std::string> InputsOf(const SurfaceLoads* loads) {
   return loads != nullptr ? loads->Inputs() : std::vector<std::string>{};
+}
+
+StepsAgainstRelaxation StepsAgainst(const Run& run, const GRDSolver& solver,
+                                    std::span<const double> times,
+                                    const RelaxationSite& site,
+                                    const BuiltEarth& earth,
+                                    std::size_t branches) {
+  const auto& scales = earth.material.ModelScales();
+  const auto& window = *run.times;
+  auto out = StepsAgainstRelaxation{};
+  if (!std::isfinite(site.time)) {
+    out.where = "nowhere";
+    out.text = "nothing in the model relaxing";
+    return out;
+  }
+  out.ratio =
+      site.StepRatio(times, solver.SolverScales().Time() / scales.Time());
+  out.time_s = site.time * scales.Time();
+  out.radius_m = site.radius * scales.Length();
+  const auto surface = earth.model.SurfaceRadius();
+  const auto b = earth.model.Boundaries();
+  const auto layer = static_cast<std::size_t>(site.layer);
+  const auto km = [&](double r) { return (surface - r) / 1e3; };
+  out.where = std::format(
+      "{}at {:.4g} km depth in layer {}, {:g} to {:g} km deep",
+      branches > 1 ? std::format("branch {}, ", site.branch) : std::string{},
+      km(out.radius_m), layer, km(b[layer + 1]), km(b[layer]));
+  if (site.lateral) {
+    const auto degrees = 180.0 / std::numbers::pi;
+    out.where += std::format(", at latitude {:.4g}, longitude {:.4g}",
+                             90.0 - site.colatitude * degrees,
+                             site.longitude * degrees);
+  }
+  out.text = std::format(
+      "its longest step {:.3g} times the shortest relaxation time ({:.3g} {}, "
+      "{})",
+      out.ratio, out.time_s / window.unit.seconds, window.unit.name,
+      out.where);
+  return out;
 }
 
 }  // namespace sl3dpp::app

@@ -256,6 +256,9 @@ Gaps RunGate(const Scene& scene, const Case& c, AdjointMethod method,
   const auto trajectory1 = ForwardTrajectory::FromSnapshots(run1);
   const auto oceans1 =
       migrating ? OceanFunctionsOf(run1) : std::vector<std::vector<double>>{};
+  // (under Sdirk2, each step's first stage's shorelines too)
+  const auto stageOceans1 =
+      migrating ? StageOceanFunctionsOf(run1) : StageOceanFunctions{};
 
   const auto zero = [](double, double, double) { return 0.0; };
   auto options3 = Viscoelastic3D::Options{.memory_points = c.points};
@@ -273,17 +276,21 @@ Gaps RunGate(const Scene& scene, const Case& c, AdjointMethod method,
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(run3);
   const auto oceans3 =
       migrating ? OceanFunctionsOf(run3) : std::vector<std::vector<double>>{};
+  const auto stageOceans3 =
+      migrating ? StageOceanFunctionsOf(run3) : StageOceanFunctions{};
 
   const LateralKernelSolver radial(evolution1, {.method = method, .rtol = 1e-12},
                                    {.viscosity = c.viscosity, .moduli = true});
   EXPECT_EQ(radial.GetRoute(), LateralKernelSolver::Route::Radial);
   const auto viaRadial =
-      radial.FirstOrderKernels(c.times, c.measurements, trajectory1, oceans1);
+      radial.FirstOrderKernels(c.times, c.measurements, trajectory1, oceans1,
+                               stageOceans1);
   const auto via3D = AdjointSolver3D(evolution3, {.method = method,
                                                   .rtol = 1e-12,
                                                   .coupled_rtol = 1e-12,
                                                   .material_kernels = true})
-                         .FirstOrderKernels(c.times, c.measurements, &trajectory3, oceans3);
+                         .FirstOrderKernels(c.times, c.measurements, &trajectory3, oceans3,
+                                            stageOceans3);
   const auto gaps = Compare(viaRadial, c.viscosity ? via3D : [&] {
     auto out = via3D;
     out.itauKernel3D.clear();
@@ -455,6 +462,11 @@ TEST(LateralKernels, ZeroLateralGateUnderASeismicSource) {
       Gate(scene, c, method);
     }
   }
+  // under Sdirk2 the discrete sweeps transpose each step's two stages, the
+  // first about the stage's own forward fields (the stage repeated)
+  c.scheme = Scheme::Sdirk2;
+  c.label = "a seismic source, every field, Sdirk2";
+  Gate(scene, c, AdjointMethod::Discrete);
   // without the toroidal measurement: the toroidal forward fields against
   // the spheroidal adjoint alone
   c.measurements[3].toroidalPotentialDual.clear();
@@ -619,6 +631,10 @@ TEST(LateralKernels, ZeroLateralGateMigratingShorelines) {
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     Gate(scene, c, method);
   }
+  // under Sdirk2, each step's first stage about its own shorelines
+  c.scheme = Scheme::Sdirk2;
+  c.label = "migrating shorelines, a solved start, Sdirk2";
+  Gate(scene, c, AdjointMethod::Discrete);
 }
 
 TEST(LateralKernels, ZeroLateralGateTheStaticProblem) {

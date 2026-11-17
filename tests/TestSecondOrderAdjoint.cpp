@@ -382,8 +382,11 @@ TEST(SecondOrderAdjoint, ContinuousConvergesToDiscrete) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                                {.rotation = RotationalFeedback::None,
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rotation = RotationalFeedback::None,
                                  .rtol = 1e-12,
                                  .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -919,8 +922,11 @@ TEST(SecondOrderAdjoint, ContinuousRowsConvergeAboutASourceDrivenRun) {
     for (const auto nodes : {5, 9, 17}) {
       auto times = std::vector<double>{};
       for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
       Evolution evolution(op, setup.solver, setup.state,
-                          {.rotation = RotationalFeedback::Full,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .record_stride = 1});
       const auto trajectory =
@@ -1111,8 +1117,11 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
     measured[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
     measured[3].displacementDual = setup.Smooth(rng, 0.9);
     measured[3].toroidalPotentialDual = setup.Smooth(rng, 0.5);
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.rotation = RotationalFeedback::Full,
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 1});
     const auto trajectory =
@@ -1187,7 +1196,8 @@ TEST(SecondOrderAdjoint, HessianAcrossAnOnset) {
       const auto times = OnsetGrid(steps, span, steps / 2);
       const auto right = static_cast<std::size_t>(steps / 2 + 1);
       Evolution evolution(slowOp, slow.solver, slow.state,
-                          {.rotation = RotationalFeedback::Full,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .record_stride = 1});
       const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -1323,8 +1333,11 @@ TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
     measured[2].potentialDual = setup.Smooth(rng, 0.7);
     measured[2].tangentialPotentialDual = setup.Smooth(rng, 0.6);
     measured[3].displacementDual = setup.Smooth(rng, 0.9);
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                        {.rotation = RotationalFeedback::Full,
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 2});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
@@ -1382,7 +1395,8 @@ TEST(SecondOrderAdjoint, HessianAcrossALoadJump) {
     const auto times = OnsetGrid(steps, span, steps / 2);
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution evolution(slowOp, slow.solver, slow.state,
-                        {.rotation = RotationalFeedback::Full,
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rotation = RotationalFeedback::Full,
                          .rtol = 1e-12,
                          .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(

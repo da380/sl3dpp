@@ -714,7 +714,10 @@ TEST(RadialRanks, DerivativesMatchTheOneProcess) {
       .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = cuts};
   const auto evolutionOptions =
-      Evolution3D::Options{.rotation = RotationalFeedback::Full,
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
+      Evolution3D::Options{.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,

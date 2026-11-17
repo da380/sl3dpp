@@ -81,8 +81,8 @@ void CheckTimes(std::span<const double> times, bool resumed = false) {
 
 /// The interior sources at a node: their left limits at the first node of
 /// a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere;
-/// at c < 1 the plain callbacks at that stage's time within the step
-/// ending at the node (detail::AtStage).
+/// at c < 1 the sources of the two nodes of the step ending at the node,
+/// their moments times 1 - c and c (detail::AtStage).
 std::vector<PointSource> PointSourcesAt(const Evolution::Forcing& forcing,
                                         std::span<const double> times,
                                         std::size_t node, double c = 1.0) {
@@ -386,7 +386,9 @@ std::vector<Evolution::Snapshot> Evolution::March(
   // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
   // place that decides which side of a repeated pair the node reads: a
   // surface term's left limit (Forcing::directLoadBefore and its kin) at
-  // the first node of a pair, where the forcing gives one.
+  // the first node of a pair, where the forcing gives one. A stage inside
+  // the step takes the step's two nodes' values combined, no callback
+  // being called between nodes.
   auto surfaceAt = [&](std::size_t node, const auto& term, const auto& before,
                        double c = 1.0) {
     return detail::AtStage(times, node, c, term, before);
@@ -522,9 +524,10 @@ std::vector<Evolution::Snapshot> Evolution::March(
     moving.directLoadOutsideWaterBudget = outsideAt(node, c);
     moving.solidSurfaceChange = layerAt(node, c);
     if (tide != nullptr) moving.tide = tideAt(node, c);
-    // a land mask that changes in time: the node's (the stage's) own
+    // a land mask that changes in time: the node's own, which a stage
+    // inside the step ending there holds too (a mask is not combined)
     if (options_.land_held) {
-      moving.forcedLand = options_.land_held(detail::StageTime(times, node, c));
+      moving.forcedLand = options_.land_held(times[node]);
     }
   };
   // every stride-th node of the whole run is kept, and the last
@@ -591,6 +594,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
 
   auto snapshots = std::vector<Snapshot>{};
   auto recorded = std::size_t{0};
+  // the closures of the inner stages of the step in hand (Snapshot::Stage)
+  auto innerStages = std::vector<Snapshot::Stage>{};
   auto record = [&](double t, GRDSolver::Response& r, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
@@ -624,6 +629,8 @@ std::vector<Evolution::Snapshot> Evolution::March(
       snapshot.loadCoefficients = sigma_;
       snapshot.tideCoefficients = psi_;
     }
+    snapshot.stages = std::move(innerStages);
+    innerStages.clear();
     snapshots.push_back(std::move(snapshot));
     const auto node = ++recorded - (resumed ? 0 : 1);
     if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
@@ -639,11 +646,12 @@ std::vector<Evolution::Snapshot> Evolution::March(
   auto toroidalCombined = ToroidalViscoelastic::State{};
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
+    const auto recipe = RecipeOf(options_.scheme, dt);
     // One stage of the step (StepRecipe.hpp; the step's one stage under a
     // one-stage scheme): opened from its memory state, closed by the sea
-    // level equation under the forcing at its time, finished.
+    // level equation under its forcing (detail::AtStage), finished.
     auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
-                       double length, std::size_t) {
+                       double length, std::size_t index) {
       const auto c = stage.c;
       auto step = op.StartStep(from, length, stage.family,
                                Columns(sigma_, toMatDensity_),
@@ -714,14 +722,25 @@ std::vector<Evolution::Snapshot> Evolution::March(
             response.relativeSeaLevelChange);
       }
       psi_ = potentialAt(node, response.angularVelocity, c);
+      if (index + 1 < recipe.stages.size()) {
+        // an inner stage's closure, for the derivative runs about the step
+        // and the rebuild of a state between kept ones (Snapshot::Stage)
+        auto inner = Snapshot::Stage{};
+        if (stride > 0) {
+          inner.loadCoefficients = sigma_;
+          inner.tideCoefficients = psi_;
+        }
+        if (migrating) inner.oceanFunction = ocean;
+        if (sourced && kept(node)) inner.sourceForces = nodeForces;
+        innerStages.push_back(std::move(inner));
+      }
       return step
           .Finish(Columns(sigma_, toMatDensity_),
                   Columns(psi_, toMatPotential_))
           .first;
     };
     const auto twistStart = tstate.t;
-    vstate_ = StepByRecipe(RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
-                           Combined);
+    vstate_ = StepByRecipe(recipe, dt, vstate_, stageOf, Combined);
     if (sourced) {
       tstate = std::move(toroidalStages.back());
       tstate.t = twistStart + dt;
@@ -848,6 +867,8 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   auto twist = ToroidalViscoelastic::Fields{};
   auto snapshots = std::vector<Snapshot>{};
   auto recorded = std::size_t{0};
+  // the closures of the inner stages of the step in hand (Snapshot::Stage)
+  auto innerStages = std::vector<Snapshot::Stage>{};
   auto record = [&](double t, bool keepState) {
     Snapshot snapshot;
     snapshot.t = t;
@@ -876,6 +897,8 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       snapshot.loadCoefficients = sigma_;
       snapshot.tideCoefficients = psi_;
     }
+    snapshot.stages = std::move(innerStages);
+    innerStages.clear();
     snapshots.push_back(std::move(snapshot));
     const auto node = ++recorded - (resumed ? 0 : 1);
     if (options_.on_snapshot) options_.on_snapshot(node, snapshots.back());
@@ -923,14 +946,25 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
   auto toroidalCombined = ToroidalViscoelastic::State{};
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
+    const auto recipe = RecipeOf(options_.scheme, dt);
     // one stage of the step (StepRecipe.hpp) under the loads and the
-    // sources at its time, the toroidal systems through the same stage
+    // sources it takes, the toroidal systems through the same stage
     auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
-                       double length, std::size_t) {
+                       double length, std::size_t index) {
       auto step = op.StartStep(from, length, stage.family, channel(sigma_));
       nodeForces = forcesAt(node, stage.c);
       step.AddForce(nodeForces.spheroidal);
       if (loaded) sigma_ = loadAt(node, stage.c);
+      if (index + 1 < recipe.stages.size()) {
+        // an inner stage's closure (Snapshot::Stage)
+        auto inner = Snapshot::Stage{};
+        if (stride > 0) {
+          inner.loadCoefficients = sigma_;
+          inner.tideCoefficients = psi_;
+        }
+        if (sourced && kept(node)) inner.sourceForces = nodeForces;
+        innerStages.push_back(std::move(inner));
+      }
       auto finished = step.Finish(channel(sigma_));
       spheroidal = std::move(finished.second);
       if (sourced) {
@@ -946,8 +980,7 @@ std::vector<Evolution::Snapshot> Evolution::MarchWithoutGravity(
       return std::move(finished.first);
     };
     const auto twistStart = tstate.t;
-    vstate_ = StepByRecipe(RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
-                           Combined);
+    vstate_ = StepByRecipe(recipe, dt, vstate_, stageOf, Combined);
     if (sourced) {
       tstate = std::move(toroidalStages.back());
       tstate.t = twistStart + dt;

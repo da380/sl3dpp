@@ -493,7 +493,11 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
   ViscoelasticOperator op(body.rheology, kLmax);
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  Evolution evolution(op, body.solver, state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
   auto measurement = Measurement{};
   measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
   const auto measurements =
@@ -525,7 +529,11 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  Evolution evolution(op, body.solver, state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   auto measurement = Measurement{};
   measurement.relativeSeaLevelDual = body.Smooth(1.0, 12);
@@ -539,7 +547,9 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
 
   auto functional = [&](const GRDSolver::State& start,
                         const std::function<std::vector<double>(double)>& ice) {
-    Evolution trial(op, body.solver, start, {.rtol = 1e-12});
+    Evolution trial(op, body.solver, start,
+                    {.scheme = Scheme::ExponentialTrapezoid,
+                     .rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, ice);
     auto product = g;
     for (auto i = std::size_t{0}; i < g.size(); ++i) {
@@ -609,7 +619,11 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
     ViscoelasticOperator op(body.rheology, kLmax);
     const auto cap = MarineCap::Make(body, nodes);
     const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-    Evolution evolution(op, body.solver, state, {.rtol = 1e-12});
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    Evolution evolution(op, body.solver, state,
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12});
     const auto thickness = [&](double t) { return cap.Thickness(t); };
     const auto run = evolution.RunMigrating(cap.times, thickness);
     const auto oceans = OceanFunctionsOf(run);
@@ -629,7 +643,9 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
       return &deltaAt.at(static_cast<int>(n / per));
     };
     auto functional = [&](double sign) {
-      Evolution trial(op, body.solver, state, {.rtol = 1e-12});
+      Evolution trial(op, body.solver, state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
       const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
         auto out = cap.Thickness(t);
         for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
@@ -932,7 +948,10 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
     return out;
   };
 
-  Evolution evolution(op, body.solver, truth, {.rtol = 1e-10});
+  // the exponential trapezoid stated: the pyslfp fixture is that scheme's run
+  Evolution evolution(op, body.solver, truth,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-10});
   const auto run = evolution.RunMigrating(times, thickness);
   const auto frequency =
       body.solver.SolverScales().Factor(Dimensions{.time = -1});
@@ -986,7 +1005,9 @@ TEST(MigratingGate, RunMisfitAndCalibrationMatchPyslfp) {
        {std::pair{"fixed_point", CalibrationMethod::FixedPoint},
         std::pair{"gradient", CalibrationMethod::Gradient}}) {
     const auto guess = body.solver.MakeState(ice0, final);
-    Evolution calibrating(op, body.solver, guess, {.rtol = 1e-10});
+    Evolution calibrating(op, body.solver, guess,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rtol = 1e-10});
     const auto calibration = CalibrateInitialSeaLevel(
         calibrating, times, history, final,
         {.method = method,
@@ -1223,8 +1244,11 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
     const auto& body = setting.body;
     const auto& times = setting.cap.times;
     const auto op = setting.Operator(1.15);
+    // the exponential trapezoid stated: the continuous kernel under Sdirk2 at
+    // four steps is outside the bound below, and converges with the step
     Evolution3D evolution(op, body.solver, setting.state,
-                                  {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                                  {.scheme = Scheme::ExponentialTrapezoid,
+                                   .rtol = 1e-12, .coupled_rtol = 1e-12});
     const auto run = evolution.RunMigrating(times, setting.Thickness());
     const auto oceans = OceanFunctionsOf(run);
     EXPECT_NE(oceans.back(), oceans.front()) << "no cell flipped";
@@ -1242,7 +1266,8 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
     };
     auto functional = [&](double sign) {
       Evolution3D trial(op, body.solver, setting.state,
-                                {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rtol = 1e-12, .coupled_rtol = 1e-12});
       const auto snaps = trial.RunMigrating(times, [&, sign](double t) {
         auto out = setting.cap.Thickness(t);
         for (auto n = std::size_t{0}; n < times.size(); ++n) {

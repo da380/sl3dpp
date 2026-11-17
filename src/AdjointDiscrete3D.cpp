@@ -19,6 +19,12 @@
 // forced by the derivative of the step's lateral weight acting on the first
 // dual strain, and the itau pairing and the weight recursion are
 // differentiated along v.
+//
+// A step is transposed stage by stage (StepRecipe.hpp, detail/
+// StepStages.hpp): under a one-stage scheme the step's one stage, under
+// Sdirk2 its second stage and then its first, each about the forward
+// stage's own states (detail/StepStages3D.hpp), the duals handed through
+// the transposed combination between them.
 
 #include <algorithm>
 #include <array>
@@ -43,6 +49,7 @@
 #include "sl3dpp/detail/AdjointInternals.hpp"
 #include "sl3dpp/detail/AndersonMixer.hpp"
 #include "sl3dpp/detail/Parallel.hpp"
+#include "sl3dpp/detail/StepStages3D.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -53,6 +60,7 @@ namespace {
 using Complex = std::complex<double>;
 using Forces = std::map<int, std::vector<Complex>>;
 using Tensor = GridCoupling::TensorField;
+using detail::StageRef;
 
 }  // namespace
 
@@ -61,32 +69,33 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
     std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau,
     const MaterialDirection3D* materialV) const {
   const bool second = ditau != nullptr;
   const bool hasMaterialV = materialV != nullptr && !materialV->Empty();
   const auto& ev = *evolution_;
-  detail::RefuseDerivativeOfMultiStage(
-      ev.options_.scheme,
-      second ? "the second-order adjoint"
-             : "the discrete adjoint (AdjointMethod::Discrete, "
-               "Options::method's default)");
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
   const auto scheme = ev.options_.scheme;
-  const bool implicit = scheme == Scheme::BackwardEuler;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return oceanFunctions.empty() ? C : oceanFunctions[node];
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage, an inner stage's own before (StepRecipe.hpp)
+  const bool migrating = !oceanFunctions.empty();
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
-  auto overrideAt = [&](std::size_t node) {
-    return oceanFunctions.empty() ? std::vector<double>{}
-                                  : oceanFunctions[node];
+  auto overrideAt = [&](const StageRef& ref) {
+    return migrating ? oceanAt(ref) : std::vector<double>{};
   };
+  // a node as a stage of its own, ending there
+  auto nodeRef = [](std::size_t node) { return StageRef{.node = node}; };
   const auto rhoW = solver.WaterDensity();
   const auto r2 = solver.Radius() * solver.Radius();
   const auto fieldSize = grid.FieldSize();
@@ -96,6 +105,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const auto nodeCount = static_cast<std::size_t>(coupling.NodeCount());
 
   detail::CheckTimeGrid(times);
+  detail::CheckStageOceanFunctions(scheme, times, migrating,
+                                   stageOceanFunctions, fieldSize);
   // Distributed over radius (Viscoelastic3D::Options::collectives): each
   // rank transposes its own memory nodes' part of every pass, the duals
   // of the load and centrifugal coefficients are the ranks' partial
@@ -132,10 +143,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       throw std::invalid_argument(
           "the second-order sweep needs the recorded forward trajectory");
     }
-    if (tangent.size() != times.size()) {
-      throw std::invalid_argument(
-          "the tangent-linear run must give one snapshot per time node");
-    }
+    detail::CheckRecordedTangent3D(tangent, scheme, times);
   }
   if (material) {
     if (trajectory == nullptr) {
@@ -213,6 +221,27 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   auto tidesAt = [&](std::size_t node) {
     return ev.Columns(trajectory->tides[node], ev.toMatPotential_);
   };
+  // (a state between kept ones, and one inside a step, is the run's stage
+  // again under its recorded closure: detail/StepStages3D.hpp)
+  auto redo = detail::ForwardStages3D{
+      &op, trajectory, scheme,
+      {.max_iterations = ev.options_.max_coupled_iterations,
+       .rtol = ev.options_.coupled_rtol,
+       .anderson_memory = ev.options_.anderson_memory,
+       .anderson_rate = ev.options_.anderson_rate},
+      [&ev](const std::vector<Complex>& c) {
+        return ev.Columns(c, ev.toMatDensity_);
+      },
+      [&ev](const std::vector<Complex>& c) {
+        return ev.Columns(c, ev.toMatPotential_);
+      }};
+  if (trajectory != nullptr) {
+    auto dts = std::vector<double>{};
+    for (auto n = std::size_t{1}; n < times.size(); ++n) {
+      dts.push_back((times[n] - times[n - 1]) * ev.toMatTime_);
+    }
+    redo.Check(dts);
+  }
   auto rebuilt = std::map<std::size_t, Viscoelastic3D::State>{};
   auto forwardState = [&](std::size_t node) -> const Viscoelastic3D::State& {
     if (trajectory->states[node].has_value()) return *trajectory->states[node];
@@ -235,20 +264,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
                                : &(rebuilt[start] = trajectory->fetch(start));
     for (auto j = start + 1; j <= node; ++j) {
       const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
-      auto step =
-          op.StartStep(*previous, dt, scheme, loadsAt(j - 1), tidesAt(j - 1));
-      auto [strain, info] = step.Close(
-          loadsAt(j), tidesAt(j),
-          {.max_iterations = ev.options_.max_coupled_iterations,
-           .rtol = ev.options_.coupled_rtol,
-           .anderson_memory = ev.options_.anderson_memory,
-           .anderson_rate = ev.options_.anderson_rate});
-      if (!info.converged) {
-        throw std::runtime_error(std::format(
-            "rebuilding the forward state at node {} did not converge", j));
-      }
+      auto next = redo.Step(j, dt, *previous);
       if (j > start + 1) rebuilt.at(j - 1).strain.reset();
-      previous = &(rebuilt[j] = std::move(step).Finish(std::move(strain)));
+      previous = &(rebuilt[j] = std::move(next));
     }
     return rebuilt.at(node);
   };
@@ -327,11 +345,13 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   // total-load and centrifugal coefficients, plus the measurement's.
   auto engineDuals = [&](const std::vector<Complex>& sigmaDual,
                          const std::vector<Complex>& psiDual,
-                         std::size_t node, bool measured) {
+                         const StageRef& ref, bool measured) {
+    const auto node = ref.node;
+    measured = measured && ref.Last();
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
-    duals.oceanFunctionOverride = overrideAt(node);
-    const auto& Cn = oceanAt(node);
+    duals.oceanFunctionOverride = overrideAt(ref);
+    const auto& Cn = oceanAt(ref);
     auto synth = grid.Synthesise(sigmaDual);
     duals.relativeSeaLevelDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -737,17 +757,24 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const auto unrelaxedTor = [&](int l) -> const ToroidalOperator& {
     return op.Toroidal(l);
   };
-  auto tangentSolution = [&](std::size_t node, const Tensor& baseStrain,
+  // (at a stage's end: a node's snapshot, or an inner stage's record)
+  auto tangentSolution = [&](const StageRef& ref, const Tensor& baseStrain,
                              const Viscoelastic3D::Solutions& baseX,
                              const std::vector<Tensor>* baseMemory) {
-    const auto& snap = tangent[node];
-    auto x = op.SolveElastic(*snap.internalState,
-                             ev.Columns(snap.loadCoefficients, ev.toMatDensity_),
-                             ev.Columns(snap.tideCoefficients, ev.toMatPotential_));
-    if (snap.sourceForces) {
+    const auto& snap = tangent[ref.node];
+    const auto& state =
+        ref.Last() ? *snap.internalState : *snap.stages[ref.index].internalState;
+    const auto& load = ref.Last() ? snap.loadCoefficients
+                                  : snap.stages[ref.index].loadCoefficients;
+    const auto& tide = ref.Last() ? snap.tideCoefficients
+                                  : snap.stages[ref.index].tideCoefficients;
+    const auto& forces =
+        ref.Last() ? snap.sourceForces : snap.stages[ref.index].sourceForces;
+    auto x = op.SolveElastic(state, ev.Columns(load, ev.toMatDensity_),
+                             ev.Columns(tide, ev.toMatPotential_));
+    if (forces) {
       // v perturbs the sources: its solution is under their forces too
-      addSolutions(x, op.SolveUnrelaxed(snap.sourceForces->spheroidal,
-                                        snap.sourceForces->toroidal));
+      addSolutions(x, op.SolveUnrelaxed(forces->spheroidal, forces->toroidal));
     }
     if (hasMaterialV) {
       auto memoryForce = std::optional<Tensor>{};
@@ -765,9 +792,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
 
   // About a source-driven trajectory a node's full forward solution is
   // under the sources' forces too (the unrelaxed solve is linear).
-  auto withSources = [&](Viscoelastic3D::Solutions x, std::size_t node) {
-    if (trajectory == nullptr || trajectory->sourceForces.empty()) return x;
-    const auto& forces = trajectory->sourceForces[node];
+  auto withSources = [&](Viscoelastic3D::Solutions x,
+                         const DegreeFields* given) {
+    if (given == nullptr) return x;
+    const auto& forces = *given;
     const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
     // (none where no source acts at the node)
     for (auto* pair : {&x.spheroidal, &x.toroidal}) {
@@ -780,20 +808,123 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     return x;
   };
 
+  // the sources' forces at a node of a source-driven trajectory
+  auto nodeForces = [&](std::size_t node) -> const DegreeFields* {
+    return trajectory == nullptr || trajectory->sourceForces.empty()
+               ? nullptr
+               : &trajectory->sourceForces[node];
+  };
+  // The duals of a step's memory state and their derivatives, as the
+  // stages hand them on (detail::TransposeByRecipe).
+  struct StepDual {
+    std::vector<Tensor> m, dm;
+  };
+  const auto ScaledDual = [](double a, const StepDual& d) {
+    auto out = d;
+    for (auto* tensors : {&out.m, &out.dm}) {
+      for (auto& t : *tensors) {
+        for (auto& v : t.c[0]) v *= a;
+        for (auto& v : t.c[1]) v *= a;
+        for (auto& v : t.r) v *= a;
+      }
+    }
+    return out;
+  };
+  const auto AddDual = [](StepDual& to, double a, const StepDual& d) {
+    for (const auto& [from, sum] :
+         {std::pair{&d.m, &to.m}, std::pair{&d.dm, &to.dm}}) {
+      for (auto k = std::size_t{0}; k < from->size(); ++k) {
+        const auto& t = (*from)[k];
+        auto& total = (*sum)[k];
+        for (auto i = std::size_t{0}; i < t.r.size(); ++i) {
+          total.c[0][i] += a * t.c[0][i];
+          total.c[1][i] += a * t.c[1][i];
+          total.r[i] += a * t.r[i];
+        }
+      }
+    }
+  };
+  // The kernels in the surface forcing at an inner stage of a step and
+  // their derivatives: those of the forcing the stage took,
+  // handed to the step's two nodes after the sweep (detail/StepStages.hpp).
+  struct InnerKernels {
+    std::size_t node = 0;
+    double c = 1.0;
+    const std::vector<double>* ocean = nullptr;
+    std::vector<double> load, outside, layer, dload, doutside, dlayer;
+    std::vector<Complex> tide, dtide;
+    std::vector<SphericalTensor> moments, dmoments;
+  };
+  auto innerKernels = std::vector<InnerKernels>{};
+
   const std::size_t lowest = op.HasLateralModuli() ? 0 : 1;
   for (std::size_t n = N + 1; n-- > lowest;) {
     if (options_.on_node) options_.on_node(n);
     // Under lateral moduli the start is the transposed zero-length step
     // at node 0 (the instantaneous coupled fixed point's transpose).
     const auto prev = n == 0 ? std::size_t{0} : n - 1;
-    const double dt = n == 0 ? 0.0 : (times[n] - times[n - 1]) * ev.toMatTime_;
-    // The step the forward took, opened on its start state (its weight
-    // field, effective systems and unit responses are what the transpose
-    // needs; the start state itself only feeds the itau pairing).
-    const auto& startState =
+    const double h = n == 0 ? 0.0 : (times[n] - times[n - 1]) * ev.toMatTime_;
+    const auto recipe = RecipeOf(scheme, h);
+    const auto refs = detail::StagesOf(recipe, h, n);
+    // The forward states of the step's stages: the step's start state, its
+    // end strain and (for the material pairing) its end state, and under a
+    // multi-stage scheme the inner stages' states, each the stage again
+    // from its memory state. Both of the nodes' strains copied: the
+    // regenerated one lives in a buffer the next regeneration overwrites.
+    const auto& stepStart =
         trajectory != nullptr ? forwardState(prev) : zeroState;
+    Tensor startStrain, endStrain;
+    auto stepEnd = std::optional<Viscoelastic3D::State>{};
+    if (trajectory != nullptr) {
+      endStrain = forwardStrain(n);
+      // (a copy: the cache may drop it below)
+      if (material) stepEnd = forwardState(n);
+      startStrain = forwardStrain(prev);
+    }
+    auto forward = detail::StagePointers3D{};
+    if (trajectory != nullptr) {
+      forward = redo.Stages(recipe, refs, h, stepStart,
+                            stepEnd ? *stepEnd : zeroState);
+    }
+    // and v's tangent run's, from its record
+    auto along = detail::StagePointers3D{};
+    if (second) {
+      along = detail::ForwardStages3D::PointersOfStages(
+          op, recipe, h, tangentState(prev), tangentState(n),
+          [&](std::size_t index, const Viscoelastic3D::State&,
+              detail::StagePointers3D::Owned&) {
+            return &*tangent[n].stages[index].internalState;
+          });
+    }
+    // The transpose of one stage of the step (StepRecipe.hpp; the step's
+    // one stage under a one-stage scheme): the dual of the stage's end
+    // state in, the dual of its memory state out.
+    auto stageOf = [&](const StageRef& ref, StepDual& carried) {
+    mdual = std::move(carried.m);
+    if (second) dmdual = std::move(carried.dm);
+    const double dt = ref.length;
+    const auto family = ref.family;
+    const bool implicit = family == Scheme::BackwardEuler;
+    const bool last = ref.Last();
+    // The stage the forward took, opened on its memory state (its weight
+    // field, effective systems and unit responses are what the transpose
+    // needs; the memory state itself only feeds the itau pairing).
+    const auto& startState =
+        trajectory != nullptr ? *forward.starts[ref.index] : zeroState;
+    // what closed the stage on the recorded run
+    const auto closure = trajectory != nullptr
+                             ? detail::ClosureOf(*trajectory, ref)
+                             : detail::StageClosure3D{};
+    // the stage's kernels in the surface forcing: the node's at the step's
+    // last stage, an inner stage's kept apart
+    auto* inner = last ? nullptr : &innerKernels.emplace_back();
+    if (inner != nullptr) {
+      inner->node = n;
+      inner->c = ref.c;
+      inner->ocean = &oceanAt(ref);
+    }
     auto step = op.StartStep(
-        startState, dt, scheme,
+        startState, dt, family,
         trajectory != nullptr ? loadsAt(prev) : Viscoelastic3D::LoadCallable3D{},
         trajectory != nullptr ? tidesAt(prev) : Viscoelastic3D::LoadCallable3D{});
     const auto sph = [&](int l) -> const DegreeOperator& {
@@ -881,7 +1012,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           }
         }
         const auto [sigmaDual, psiDual] = channelDuals(sphForces, units);
-        auto [duals, synth] = engineDuals(sigmaDual, psiDual, n, measured);
+        auto [duals, synth] = engineDuals(sigmaDual, psiDual, ref, measured);
         auto adj = effectiveSolver.SolveAdjoint(ev.state_, duals, sleOptions);
         agreeAdjoint(adj);
         if (!adj.converged) {
@@ -1031,7 +1162,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       auto info = Viscoelastic3D::StepInfo{.converged = false};
       for (auto pass = 0; pass < control.max_iterations; ++pass) {
         const auto [sigmaDual, psiDual] = channelDualsOfSolutions(iterate);
-        auto [duals, synth] = engineDuals(sigmaDual, psiDual, n, measured);
+        auto [duals, synth] = engineDuals(sigmaDual, psiDual, ref, measured);
         auto adj = effectiveSolver.SolveAdjoint(ev.state_, duals, sleOptions);
         agreeAdjoint(adj);
         if (!adj.converged) {
@@ -1083,14 +1214,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       }
       return info;
     };
-    Last last;
+    Last first;
     {
       const auto start = shaped(coupling.Analyse(de));
       auto info = Viscoelastic3D::StepInfo{};
       if (nested) {
-        info = nestWith(start, true, last);
+        info = nestWith(start, true, first);
       } else {
-        const auto pass = passWith(de, true, last);
+        const auto pass = passWith(de, true, first);
         auto [zstar, stepInfo] = step.Converge(pass, control, &start);
         info = stepInfo;
         // The byproducts at the converged dual itself.
@@ -1103,11 +1234,17 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             info.Describe(control.rtol)));
       }
     }
-    directLoadKernels[n] = loadDualOf(last.adj, last.synth);
-    otherLoadKernels(last.adj, directLoadKernels[n], outsideKernels[n],
-                     layerKernels[n]);
-    tideKernels[n] = tideKernelOf(last.adj, last.psiDual);
-    if (moments) momentKernels[n] = momentKernelsOf(last.xdag);
+    auto& loadKernel = inner != nullptr ? inner->load : directLoadKernels[n];
+    loadKernel = loadDualOf(first.adj, first.synth);
+    otherLoadKernels(first.adj, loadKernel,
+                     inner != nullptr ? inner->outside : outsideKernels[n],
+                     inner != nullptr ? inner->layer : layerKernels[n]);
+    (inner != nullptr ? inner->tide : tideKernels[n]) =
+        tideKernelOf(first.adj, first.psiDual);
+    if (moments) {
+      (inner != nullptr ? inner->moments : momentKernels[n]) =
+          momentKernelsOf(first.xdag);
+    }
     // The effective modulus's factor 1 - sum_k f_k beta_k(x) at the grid
     // values (the material pairings' and v's effective shear weight's).
     auto factor = std::vector<double>{};
@@ -1128,7 +1265,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     }
     Last dlast;
     if (second) {
-      auto src = last.e;
+      auto src = first.e;
       coupling.Multiply(src, dW);
       detail::ForEach(op.options_.parallel, values, [&](std::size_t i) {
         src.c[0][i] += dde.c[0][i];
@@ -1149,7 +1286,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           }
         }
         std::tie(extraSph, extraTor) =
-            materialForcesOf(last.e, &last.xdag, effShear, nullptr, sph, tor);
+            materialForcesOf(first.e, &first.xdag, effShear, nullptr, sph, tor);
       }
       const auto pass = passWith(src, false, dlast, hasMaterialV ? &extraSph : nullptr,
                                  hasMaterialV ? &extraTor : nullptr);
@@ -1171,11 +1308,17 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             nested ? "nested solve" : "fixed point", n,
             info.Describe(control.rtol)));
       }
-      dloadDuals[n] = loadDualOf(dlast.adj, dlast.synth);
-      otherLoadKernels(dlast.adj, dloadDuals[n], dOutsideKernels[n],
-                       dLayerKernels[n]);
-      dTideKernels[n] = tideKernelOf(dlast.adj, dlast.psiDual);
-      if (moments) dMomentKernels[n] = momentKernelsOf(dlast.xdag);
+      auto& dloadKernel = inner != nullptr ? inner->dload : dloadDuals[n];
+      dloadKernel = loadDualOf(dlast.adj, dlast.synth);
+      otherLoadKernels(dlast.adj, dloadKernel,
+                       inner != nullptr ? inner->doutside : dOutsideKernels[n],
+                       inner != nullptr ? inner->dlayer : dLayerKernels[n]);
+      (inner != nullptr ? inner->dtide : dTideKernels[n]) =
+          tideKernelOf(dlast.adj, dlast.psiDual);
+      if (moments) {
+        (inner != nullptr ? inner->dmoments : dMomentKernels[n]) =
+            momentKernelsOf(dlast.xdag);
+      }
     }
 
     // The dual of the decayed memory: its own plus the fixed memory
@@ -1183,48 +1326,55 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     // and the recursion closing m-dagger and d-dagger pointwise.
     // Both strains copied: the regenerated one lives in a buffer the next
     // regeneration overwrites.
+    // (the stage's start and end strains: the nodes' at the step's ends; a
+    // combined memory state's is an earlier stage's cache, which a backward
+    // Euler stage's weights multiply by zero)
     const auto* mPrev = trajectory != nullptr ? &startState.m : nullptr;
-    Tensor d0Copy, d1Copy;
+    const Tensor* d0 = nullptr;
+    const Tensor* d1 = nullptr;
     if (trajectory != nullptr) {
-      d1Copy = forwardStrain(n);
-      d0Copy = forwardStrain(prev);
+      d0 = ref.index == 0 ? &startStrain : &*startState.strain;
+      d1 = last ? &endStrain : &*forward.ends[ref.index]->strain;
     }
-    const Tensor* d0 = &d0Copy;
-    const auto& e = last.e;
+    const auto& e = first.e;
     const auto& ed = dlast.e;
-    const auto* vmPrev = second ? &tangentState(prev).m : nullptr;
-    const Tensor* vd0 = second ? &*tangentState(prev).strain : nullptr;
-    const Tensor* vd1 = second ? &*tangentState(n).strain : nullptr;
+    const auto* vStart = second ? along.starts[ref.index] : nullptr;
+    const auto* vEnd = second ? along.ends[ref.index] : nullptr;
+    const auto* vmPrev = second ? &vStart->m : nullptr;
+    const Tensor* vd0 = second ? &*vStart->strain : nullptr;
+    const Tensor* vd1 = second ? &*vEnd->strain : nullptr;
     if (material) {
       // The step's material pairing: the dual solution against the base
       // full solution at the node (one unrelaxed solve, whose dilatation
       // the bulk term needs; its strain is the recorded one) with the
       // step's effective factor 1 - sum_k f_k beta_k(x), and against the
       // base decayed memory the step holds.
-      auto fwdN = forwardState(n);  // a copy: the cache may drop it below
-      const auto xn =
-          withSources(op.SolveElastic(fwdN, loadsAt(n), tidesAt(n)), n);
-      const auto Dy = dilatationOf(last.xdag, sph);
+      auto fwdN = last ? *stepEnd : *forward.ends[ref.index];
+      const auto xn = withSources(
+          op.SolveElastic(fwdN, ev.Columns(*closure.load, ev.toMatDensity_),
+                          ev.Columns(*closure.tide, ev.toMatPotential_)),
+          closure.forces);
+      const auto Dy = dilatationOf(first.xdag, sph);
       const auto Dx = dilatationOf(xn, unrelaxedSph);
-      addMaterialPairing(Dy, Dx, e, d1Copy, factor, &step.memory_, kappaKernel,
+      addMaterialPairing(Dy, Dx, e, *d1, factor, &step.memory_, kappaKernel,
                          muKernel);
       if (second) {
         // Their derivative along v: the derivative dual against the base,
         // and the first dual against v's tangent solution (its strain the
         // recorded one) and v's decayed tangent memory with v's drive.
-        const auto xvn = tangentSolution(n, d1Copy, xn, &fwdN.m);
-        const auto& d1v = *tangentState(n).strain;
+        const auto xvn = tangentSolution(ref, *d1, xn, &fwdN.m);
+        const auto& d1v = *vEnd->strain;
         auto prevState = Viscoelastic3D::State{};
         prevState.m = startState.m;
-        prevState.strain = d0Copy;
-        fwdN.strain = d1Copy;
+        prevState.strain = *d0;
+        fwdN.strain = *d1;
         auto vstep = op.StartStep(
-            tangentState(prev), dt, scheme,
+            *vStart, dt, family,
             ev.Columns(tangent[prev].loadCoefficients, ev.toMatDensity_),
             ev.Columns(tangent[prev].tideCoefficients, ev.toMatPotential_));
         vstep.AddMemory(TangentLinearSolver3D::FirstOrderDrive(
-            op, AdjointMethod::Discrete, scheme, dt, prevState, fwdN, *ditau));
-        addMaterialPairing(dilatationOf(dlast.xdag, sph), Dx, ed, d1Copy, factor,
+            op, AdjointMethod::Discrete, family, dt, prevState, fwdN, *ditau));
+        addMaterialPairing(dilatationOf(dlast.xdag, sph), Dx, ed, *d1, factor,
                            &step.memory_, dKappaKernel, dMuKernel);
         addMaterialPairing(Dy, dilatationOf(xvn, unrelaxedSph), e, d1v, factor,
                            &vstep.memory_, dKappaKernel, dMuKernel);
@@ -1298,9 +1448,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
             // m~-dagger in the energy pairing: an angular density with
             // the node's radial quadrature folded in.
             const auto& m = (*mPrev)[k];
-            const Complex t2 = dE * m.c[0][i] + dA * d0->c[0][i] + dB * d1Copy.c[0][i];
-            const Complex t1 = dE * m.c[1][i] + dA * d0->c[1][i] + dB * d1Copy.c[1][i];
-            const double t0 = dE * m.r[i] + dA * d0->r[i] + dB * d1Copy.r[i];
+            const Complex t2 = dE * m.c[0][i] + dA * d0->c[0][i] + dB * d1->c[0][i];
+            const Complex t1 = dE * m.c[1][i] + dA * d0->c[1][i] + dB * d1->c[1][i];
+            const double t0 = dE * m.r[i] + dA * d0->r[i] + dB * d1->r[i];
             (*kernel)[i] +=
                 dt * wq * rr * rr * contraction(mt2, mt1, mt0, t2, t1, t0);
             if (second) {
@@ -1315,10 +1465,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
                   dE * vm.c[1][i] + dA * vd0->c[1][i] + dB * vd1->c[1][i];
               const double vt0 = dE * vm.r[i] + dA * vd0->r[i] + dB * vd1->r[i];
               const Complex s2 =
-                  d2E * m.c[0][i] + d2A * d0->c[0][i] + d2B * d1Copy.c[0][i];
+                  d2E * m.c[0][i] + d2A * d0->c[0][i] + d2B * d1->c[0][i];
               const Complex s1 =
-                  d2E * m.c[1][i] + d2A * d0->c[1][i] + d2B * d1Copy.c[1][i];
-              const double s0 = d2E * m.r[i] + d2A * d0->r[i] + d2B * d1Copy.r[i];
+                  d2E * m.c[1][i] + d2A * d0->c[1][i] + d2B * d1->c[1][i];
+              const double s0 = d2E * m.r[i] + d2A * d0->r[i] + d2B * d1->r[i];
               (*dkernel)[i] +=
                   dt * wq * rr * rr *
                   (contraction(dmt2, dmt1, dmt0, t2, t1, t0) +
@@ -1359,6 +1509,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         }
       });
     }
+    carried.m = std::move(mdual);
+    if (second) carried.dm = std::move(dmdual);
+    };
+    auto carried = StepDual{std::move(mdual), std::move(dmdual)};
+    detail::TransposeByRecipe(recipe, refs, carried, stageOf, ScaledDual,
+                              AddDual);
+    mdual = std::move(carried.m);
+    dmdual = std::move(carried.dm);
   }
 
   // The start: the transposed instantaneous elastic solve at times[0]
@@ -1377,7 +1535,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     };
     auto [sphForces, torForces] = entry(coupling.Analyse(ddual), sph, tor);
     const auto [sigmaDual, psiDual] = channelDuals(sphForces, units);
-    auto [duals, synth] = engineDuals(sigmaDual, psiDual, 0, true);
+    auto [duals, synth] = engineDuals(sigmaDual, psiDual, nodeRef(0), true);
     auto adj =
         solverFor(op.ElasticLove()).SolveAdjoint(ev.state_, duals, sleOptions);
     agreeAdjoint(adj);
@@ -1419,7 +1577,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         }
       }
       const auto [dsigmaDual, dpsiDual] = channelDuals(dsph, units);
-      auto [dduals, dsynth] = engineDuals(dsigmaDual, dpsiDual, 0, false);
+      auto [dduals, dsynth] =
+          engineDuals(dsigmaDual, dpsiDual, nodeRef(0), false);
       auto dadj = solverFor(op.ElasticLove())
                       .SolveAdjoint(ev.state_, dduals, sleOptions);
       agreeAdjoint(dadj);
@@ -1441,9 +1600,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         const auto dy0 = op.SolveUnrelaxed(dsph, dtor);
         if (moments) dMomentKernels[0] = momentKernelsOf(dy0);
         const auto x0 = withSources(
-            op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)), 0);
+            op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)),
+            nodeForces(0));
         const auto ex0 = exit(x0, sph, tor);
-        const auto xv0 = tangentSolution(0, ex0, x0, nullptr);
+        const auto xv0 = tangentSolution(nodeRef(0), ex0, x0, nullptr);
         addMaterialPairing(dilatationOf(dy0, sph), dilatationOf(x0, sph),
                            exit(dy0, sph, tor), ex0, {}, nullptr, dKappaKernel,
                            dMuKernel);
@@ -1457,7 +1617,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
       // response duals, against the base start solution: every weight
       // one, no memory.
       const auto x0 = withSources(
-          op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)), 0);
+          op.SolveElastic(forwardState(0), loadsAt(0), tidesAt(0)),
+          nodeForces(0));
       addMaterialPairing(dilatationOf(y0, sph), dilatationOf(x0, sph), e0,
                          exit(x0, sph, tor), {}, nullptr, kappaKernel, muKernel);
     }
@@ -1470,7 +1631,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   for (const auto& [node, m] : measurements) {
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
-    duals.oceanFunctionOverride = overrideAt(node);
+    duals.oceanFunctionOverride = overrideAt(nodeRef(node));
     duals.relativeSeaLevelDual = m.relativeSeaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
@@ -1486,6 +1647,33 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     }
     lumps.emplace(node, adj.directLoadDual);
   }
+  // The inner stages' kernels and their derivatives on the step's nodes,
+  // the forcing linear in time across a step (detail/StepStages.hpp); the
+  // load kernel's views in the ice thickness and the initial sea level
+  // ground each stage by its own shorelines (AssembleIceViews).
+  auto stageLoads = std::vector<detail::StageLoadKernel>{};
+  auto dStageLoads = std::vector<detail::StageLoadKernel>{};
+  for (auto& inner : innerKernels) {
+    const auto node = inner.node;
+    const auto c = inner.c;
+    detail::FoldOnNodes(outsideKernels, node, c, inner.outside);
+    detail::FoldOnNodes(layerKernels, node, c, inner.layer);
+    detail::FoldOnNodes(tideKernels, node, c, inner.tide);
+    if (moments) detail::FoldMomentsOnNodes(momentKernels, node, c, inner.moments);
+    detail::FoldOnNodes(directLoadKernels, node, c, inner.load);
+    const auto* ocean = migrating ? inner.ocean : nullptr;
+    stageLoads.push_back({node, c, std::move(inner.load), ocean});
+    if (second) {
+      detail::FoldOnNodes(dOutsideKernels, node, c, inner.doutside);
+      detail::FoldOnNodes(dLayerKernels, node, c, inner.dlayer);
+      detail::FoldOnNodes(dTideKernels, node, c, inner.dtide);
+      if (moments) {
+        detail::FoldMomentsOnNodes(dMomentKernels, node, c, inner.dmoments);
+      }
+      detail::FoldOnNodes(dloadDuals, node, c, inner.dload);
+      dStageLoads.push_back({node, c, std::move(inner.dload), ocean});
+    }
+  }
   const auto w = detail::NodeWeights(times);
   auto densityLoad = std::vector<std::vector<double>>(times.size());
   for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -1500,7 +1688,8 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   Kernels3D out;
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
-      std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
+      std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW,
+      stageLoads);
   out.ice.tideKernels = std::move(tideKernels);
   out.ice.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.ice.solidSurfaceChangeKernels = std::move(layerKernels);
@@ -1543,7 +1732,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         C, solver.IceDensity(), times, std::move(dloadDuals),
         std::vector<std::vector<double>>(times.size(),
                                          std::vector<double>(fieldSize, 0.0)),
-        {}, oceanFunctions, rhoW);
+        {}, oceanFunctions, rhoW, dStageLoads);
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
     derivatives.ice.tideKernels = std::move(dTideKernels);

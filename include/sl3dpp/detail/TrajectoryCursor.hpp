@@ -11,11 +11,15 @@
 #include <complex>
 #include <cstddef>
 #include <deque>
+#include <map>
 #include <functional>
+#include <span>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
+#include "sl3dpp/detail/StepStages.hpp"
 
 namespace sl3dpp::detail {
 
@@ -34,10 +38,20 @@ namespace sl3dpp::detail {
  * their recorded sides). Forward steps damp, so a rebuilt state is the
  * run's to rounding at any stride. What that needs of the recording: the
  * first node's state and every node's coefficients, which a run with
- * record_stride keeps. A step of a multi-stage scheme closes its first
- * stage under the forcing at its own time, which the recording does not
- * hold, and a recording with gaps is refused under one; a run under
- * interior sources is recorded at every node (Evolution::Forcing).
+ * record_stride keeps. A step of a multi-stage scheme (StepRecipe.hpp) is
+ * rebuilt stage by stage, each inner stage finished under its own
+ * recorded coefficients (ForwardTrajectory::stages, which a recording run
+ * under such a scheme keeps beside the nodes'); a trajectory without them
+ * is refused under one. A run under interior sources is recorded at every
+ * node (Evolution::Forcing).
+ *
+ * The states of a step's stages (Step): the derivative runs about a step
+ * under a multi-stage scheme pair and drive each stage with the forward
+ * stage's own states, which the recording does not hold. An inner stage's
+ * end state is the stage repeated from its memory state under its
+ * recorded coefficients and sources' forces, one stage solve: the forward
+ * run's own operations on the same numbers, so the state is the run's to
+ * rounding.
  *
  * A request below what is held (a reverse sweep entering a gap) rebuilds
  * from the kept state at or below the node up to it and holds those
@@ -65,6 +79,15 @@ class TrajectoryCursor {
   /// valid until the next call.
   [[nodiscard]] const ViscoelasticState& State(std::size_t node);
 
+  /// The forward states of the stages of the step ending at a node >= 1,
+  /// in the stages' order: each stage's memory state (the first the start
+  /// node's, with its strain; a combined one with a zero strain in its
+  /// place, which a backward Euler stage's weights multiply by zero) and
+  /// its end state with its strain (the last the node's own). One of each
+  /// under a one-stage scheme: the two nodes' states.
+  using StepStates = StageStates<ViscoelasticState>;
+  [[nodiscard]] StepStates Step(std::size_t node);
+
  private:
   [[nodiscard]] std::size_t Last() const { return first_ + held_.size() - 1; }
   /// The kept state at a node, its strain regenerated where not kept.
@@ -72,6 +95,13 @@ class TrajectoryCursor {
   /// Steps from the newest held state up to the node; `hold` keeps every
   /// state stepped, else the newest two.
   void Advance(std::size_t node, bool hold);
+  /// One stage of the step ending at a node again, from its memory state:
+  /// finished under the stage's recorded coefficients and forces (the
+  /// node's own for the step's last stage).
+  [[nodiscard]] ViscoelasticState Stage(std::size_t node, std::size_t index,
+                                        const RecipeStage& stage, double length,
+                                        bool last,
+                                        const ViscoelasticState& from) const;
 
   const ViscoelasticOperator* op_;
   const ForwardTrajectory* trajectory_;
@@ -81,6 +111,53 @@ class TrajectoryCursor {
   /// The held states, of the nodes first_, first_ + 1, ... .
   std::size_t first_ = 0;
   std::deque<ViscoelasticState> held_;
+  /// The inner stages' end states of the steps a gap's rebuild took while
+  /// holding its states, by the step's end node: Step hands them on in
+  /// place of taking the stages again.
+  std::map<std::size_t, std::vector<ViscoelasticState>> inner_;
 };
+
+/// What closed a stage of the step ending at a node on the recorded run:
+/// the node's own coefficients and sources' forces at the step's last
+/// stage, an inner stage's recorded ones before (ForwardTrajectory::
+/// stages). `forces` is null where the run has no sources.
+struct StageClosure {
+  const std::vector<std::complex<double>>* load = nullptr;
+  const std::vector<std::complex<double>>* tide = nullptr;
+  const RadialSourceForces* forces = nullptr;
+};
+[[nodiscard]] StageClosure ClosureOf(const ForwardTrajectory& trajectory,
+                                     const StageRef& ref);
+
+/// A recorded tangent-linear run's record at a stage's end: its state
+/// there with its strain, its coefficients and its own sources' forces
+/// (the node's snapshot at the step's last stage, Evolution::Snapshot::
+/// stages before).
+struct TangentRecord {
+  const ViscoelasticState* state = nullptr;
+  const std::vector<std::complex<double>>* load = nullptr;
+  const std::vector<std::complex<double>>* tide = nullptr;
+  const RadialSourceForces* forces = nullptr;
+};
+[[nodiscard]] TangentRecord TangentRecordOf(
+    std::span<const Evolution::Snapshot> tangent, const StageRef& ref);
+/// Its states of the stages of the step ending at a node (as
+/// TrajectoryCursor::Step gives the forward run's), from its record.
+[[nodiscard]] StageStates<ViscoelasticState> TangentStepStates(
+    std::span<const Evolution::Snapshot> tangent, const StepRecipe& recipe,
+    double dt, std::size_t node);
+/// Refuses a tangent-linear run that is not recorded at every node with
+/// its strain and, under a multi-stage scheme, at every inner stage
+/// (TangentLinearSolver::Options::record).
+void CheckRecordedTangent(std::span<const Evolution::Snapshot> tangent,
+                          Scheme scheme, std::span<const double> times);
+
+/// A combined memory state for a derivative run (StatesOfStages): the
+/// internal variables combined, and a zero strain in the layout of
+/// `like`'s, in place of the start strain a backward Euler stage does not
+/// read.
+[[nodiscard]] ViscoelasticState CombinedWithZeroStrain(
+    std::span<const std::pair<double, const ViscoelasticState*>> terms,
+    const ViscoelasticState& like);
 
 }  // namespace sl3dpp::detail

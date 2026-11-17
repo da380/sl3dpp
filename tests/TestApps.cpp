@@ -588,6 +588,18 @@ TEST_F(AppsTest, TheExampleConfigsAreRead) {
     ++read;
   }
   EXPECT_EQ(read, 72);
+  // a config that states no scheme runs the default, Sdirk2; one that
+  // states the exponential trapezoid runs it
+  EXPECT_EQ(app::ReadSolveInput(configs / "sea_level_1d.json").run.solver.scheme,
+            Scheme::Sdirk2);
+  EXPECT_EQ(app::ReadSolveInput(configs / "sea_level_3d.json").run.solver.scheme,
+            Scheme::Sdirk2);
+  EXPECT_EQ(app::ReadSolveInput(configs / "sea_level_postseismic.json")
+                .run.solver.scheme,
+            Scheme::Sdirk2);
+  EXPECT_EQ(app::ReadSolveInput(configs / "no_ocean_viscoelastic.json")
+                .run.solver.scheme,
+            Scheme::ExponentialTrapezoid);
 }
 
 TEST_F(AppsTest, LoveNumbersWritesItsTable) {
@@ -1558,7 +1570,9 @@ TEST_F(AppsTest, ViscoelasticResponseStartsFromTheElasticResponse) {
       "1-D, viscoelastic, 5 nodes 0 to 2 kyr on the run's clock, no ocean, "
       "rotation none; load (1 term) + tide (1 coefficient); wrote "))
       << summary;
-  EXPECT_TRUE(summary.ends_with("and 5 exchange tables")) << summary;
+  EXPECT_NE(summary.find("and 5 exchange tables; its longest step "),
+            std::string::npos)
+      << summary;
   const auto visco = Output("visco");
   ASSERT_TRUE(visco.time);
   ASSERT_EQ(visco.time->size(), 5u);
@@ -1704,13 +1718,16 @@ TEST_F(AppsTest, AStepThatMissesItsToleranceSaysWhereItStopped) {
   EXPECT_GT(stalled, 1e-14) << floor;
   EXPECT_LT(stalled, 1e-11) << floor;
 
+  // the exponential trapezoid stated: the passes named below are one
+  // stage's, a step of that scheme
   const auto budget = message(
       "budget", std::format(R"({{"problem": "quasi_static",
         "model": {{"deck": "ball.deck", "viscosity": {{"file": "lateral.nc"}}}},
         "discretisation": {{"lmax": 8}},
         "times": {{"unit": "kyr", "end": 2, "nodes": 3}},
         "forcing": {{"load": [{}]}}, "rotation": "none",
-        "solver": {{"step_rtol": 1e-15, "step_max_iterations": 2}},
+        "solver": {{"step_rtol": 1e-15, "step_max_iterations": 2,
+                    "scheme": "exponential_trapezoid"}},
         "output": {{"surface": "out/budget.nc"}}}})",
                             kCap));
   EXPECT_NE(budget.find("the coupled fixed point or its sea level solve did "
@@ -1774,8 +1791,14 @@ TEST_F(AppsTest, ViscoelasticResponseMatchesTheLibraryStepper) {
 
   // 1D: the ball's radial stepper
   {
-    EXPECT_TRUE(Run("radial", std::format("{}, {}, {}", kBall, times, forcing))
-                    .starts_with("1-D, viscoelastic, 4 nodes 0 to 1.5 kyr"));
+    // the exponential trapezoid stated, here and in 3D: the reference below
+    // is the operator stepped by that scheme
+    EXPECT_TRUE(
+        Run("radial",
+            std::format(R"({}, {}, {},
+                           "solver": {{"scheme": "exponential_trapezoid"}})",
+                        kBall, times, forcing))
+            .starts_with("1-D, viscoelastic, 4 nodes 0 to 1.5 kyr"));
     const auto model = ModelOf(dir_ / "ball.deck", app::ModelFormat::Gia);
     const auto mesh = RadialMesh::Create(model, {.lmax = kLmax});
     ASSERT_TRUE(mesh);
@@ -1844,8 +1867,10 @@ TEST_F(AppsTest, ViscoelasticResponseMatchesTheLibraryStepper) {
   {
     EXPECT_TRUE(
         Run("lateral",
-            std::format(R"({}, {}, {}, "solver": {{"step_rtol": 1e-10,
-                                                  "step_max_iterations": 200}})",
+            std::format(R"({}, {}, {},
+                           "solver": {{"step_rtol": 1e-10,
+                                       "step_max_iterations": 200,
+                                       "scheme": "exponential_trapezoid"}})",
                         Prem8(), times, forcing))
             .starts_with("3-D (lateral viscosity), viscoelastic, 4 "
                          "nodes 0 to 1.5 kyr"));
@@ -2254,9 +2279,13 @@ TEST_F(AppsTest, ViscoelasticResponseStepSolversAgree) {
       "kyr on the run's clock, no ocean, rotation none; load (1 term) + tide "
       "(1 coefficient); wrote "))
       << fixed;
-  EXPECT_TRUE(fixed.ends_with("fixed-point iterations over 2 steps)")) << fixed;
-  EXPECT_TRUE(
-      conjugate.ends_with("conjugate-gradient iterations over 2 steps)"))
+  EXPECT_NE(fixed.find("fixed-point iterations over 2 steps); its longest "
+                       "step "),
+            std::string::npos)
+      << fixed;
+  EXPECT_NE(conjugate.find("conjugate-gradient iterations over 2 steps); its "
+                           "longest step "),
+            std::string::npos)
       << conjugate;
   const auto a = Output("fixed");
   const auto b = Output("conjugate");
@@ -2310,7 +2339,9 @@ TEST_F(AppsTest, ViscoelasticResponseTakesItsNodesEitherWay) {
   EXPECT_TRUE(summary.starts_with(
       "1-D, viscoelastic, 11 nodes 1 to 9.5 kyr on the run's clock"))
       << summary;
-  EXPECT_TRUE(summary.ends_with("and 3 exchange tables")) << summary;
+  EXPECT_NE(summary.find("and 3 exchange tables; its longest step "),
+            std::string::npos)
+      << summary;
   const auto uneven = Output("uneven");
   ASSERT_EQ(uneven.time->size(), 11u);
   EXPECT_DOUBLE_EQ(uneven.time->front(), app::KYR);
@@ -2496,16 +2527,17 @@ std::string Calibrated(const std::string& shorelines) {
                      shorelines);
 }
 
-TEST_F(AppsTest, Sdirk2IsTheDampedSchemeOfTheRunsAndTheContinuousKernels) {
+TEST_F(AppsTest, Sdirk2IsTheDampedSchemeOfTheRunsAndTheirKernels) {
   // `solver.scheme` "sdirk2": a load switched on at the start and held
   // converges at second order, as ViscoelasticResponseConvergesUnderStepHalving
-  // measures the trapezoid, the output naming the scheme; its kernels are
-  // the continuous sweep's, stepped by the same stages, the discrete
-  // adjoint (the default `kernels.method`) refused naming the choices, and
-  // so is a recording with gaps (a stride other than 1); the gradient
-  // calibration under migrating shorelines, whose sweep is the discrete
-  // adjoint, is refused naming the choices, and taken under frozen ones
-  // (no sweep), the fixed point calibrating under migrating ones.
+  // measures the trapezoid, the output naming the scheme. Its kernels are
+  // the discrete adjoint's by default (the exact transpose of the
+  // two-stage step), a recording with gaps (a stride other than 1) serving
+  // the same kernels to rounding, and the continuous sweep's where asked,
+  // stepped by the same stages; the viscosity kernel paired with a uniform
+  // change of ln eta is the central difference of two solves' measurement.
+  // The gradient calibration under migrating shorelines, whose sweep is the
+  // discrete adjoint, calibrates as the fixed point does.
   static_cast<void>(Deck());
   const auto final = [&](int nodes) {
     const auto name = std::format("sdirk2_{}", nodes);
@@ -2535,70 +2567,107 @@ TEST_F(AppsTest, Sdirk2IsTheDampedSchemeOfTheRunsAndTheContinuousKernels) {
   RecordProperty("sdirk2_ratios", ratios);
 
   WriteToyHistory(dir_ / "history.nc");
-  // a dated run's kernels under Sdirk2: the kernels block's method member
-  // and a top-level member, each where given
-  const auto kernels = [&](const std::string& method, const std::string& top) {
-    return std::format(R"({{{}, {}, "rotation": "none",
-        "solver": {{"scheme": "sdirk2"}}, {}
-        "kernels": {{"parameters": ["ice", "viscosity"], {}
-          "measurements": [{{"type": "relative_sea_level_cap", "name": "site",
-            "latitude": -30, "longitude": 10, "width_deg": 25}}],
-          "output": "out/sdirk2_kernels"}}}})",
-                       kBall, Window(5), top.empty() ? "" : top + ",",
-                       method.empty() ? "" : method + ",");
-  };
-  constexpr auto kContinuous = R"("method": "continuous")";
-  ExpectRefused(
-      app::ReadKernelInput, Write("bad.json", kernels("", "")), "kernels",
-      "the discrete adjoint (`method` \"discrete\", the default), the "
-      "exact transpose of the stepped map, which is not built for "
-      "`solver.scheme` \"sdirk2\": give `method` \"continuous\"");
-  ExpectRefused(app::ReadKernelInput,
-                Write("bad.json", kernels(R"("method": "discrete")", "")),
-                "kernels.method",
-                "or `solver.scheme` \"exponential_trapezoid\" or "
-                "\"backward_euler\" for the discrete adjoint");
-  ExpectRefused(
-      app::ReadKernelInput,
-      Write("bad.json",
-            kernels(kContinuous, R"("trajectory": {"record_stride": 2})")),
-      "trajectory.record_stride",
-      "a run under `solver.scheme` \"sdirk2\" is recorded at every node");
-  const auto summary =
-      app::RunKernel(Write("sdirk2_kernels.json", kernels(kContinuous, "")));
-  EXPECT_NE(summary.find("wrote 1 measurement(s) of kernels"),
-            std::string::npos)
-      << summary;
-  EXPECT_NE(summary.find("continuous"), std::string::npos) << summary;
-  // the calibrations under migrating and frozen shorelines, by `method`
-  const auto calibrating = [&](const std::string& shorelines,
-                               const std::string& method) {
+  // a dated run's kernels under Sdirk2, by `method` and at a record stride
+  constexpr auto kSite = R"({"type": "relative_sea_level_cap", "name": "site",
+            "latitude": -30, "longitude": 10, "width_deg": 25})";
+  const auto kernels = [&](const std::string& name, const std::string& method,
+                           int stride) {
     return Write(
-        "sdirk2_calibrated.json",
+        name + ".json",
+        std::format(R"({{{}, {}, "rotation": "none",
+        "solver": {{"scheme": "sdirk2"}},
+        "trajectory": {{"record_stride": {}}},
+        "kernels": {{"parameters": ["ice", "viscosity"], {}
+          "measurements": [{}], "output": "out/{}"}}}})",
+                    kBall, Window(9), stride,
+                    method.empty() ? "" : std::format(R"("method": "{}",)", method),
+                    kSite, name));
+  };
+  const auto table = [&](const std::string& name) {
+    return TableRows(dir_ / "out" / name / "site_viscosity_kernel.txt");
+  };
+  const auto summary = app::RunKernel(kernels("sdirk2_discrete", "", 1));
+  EXPECT_TRUE(summary.ends_with(" (ice, viscosity; discrete adjoint)")) << summary;
+  const auto want = table("sdirk2_discrete");
+  auto top = 0.0;
+  for (const auto& row : want) top = std::max(top, std::abs(row[1]));
+  ASSERT_GT(top, 0.0);
+  // a recording with gaps: the states between kept ones, and each step's
+  // first stage, are the run's stages again under their recorded closures
+  static_cast<void>(app::RunKernel(kernels("sdirk2_stride", "discrete", 3)));
+  const auto strided = table("sdirk2_stride");
+  ASSERT_EQ(strided.size(), want.size());
+  auto worst = 0.0;
+  for (auto i = std::size_t{0}; i < want.size(); ++i) {
+    worst = std::max(worst, std::abs(strided[i][1] - want[i][1]));
+  }
+  EXPECT_LT(worst, 1e-10 * top);
+  // the continuous sweep, stepped by the same stages, states its steps
+  const auto continuous = app::RunKernel(kernels("sdirk2_continuous", "continuous", 1));
+  EXPECT_NE(continuous.find("continuous adjoint, its longest step"), std::string::npos)
+      << continuous;
+  // The discrete kernel is the derivative of what `solve` computes: the
+  // measurement's change under ln eta raised and lowered by eps through
+  // the whole ball, against the kernel paired with that change (a row:
+  // radius, kernel per unit viscosity and volume, volume weight; the
+  // ball's viscosity 1e21 Pa s).
+  auto paired = 0.0;
+  for (const auto& row : want) paired += 1e21 * row[1] * row[2];
+  const auto measuredAt = [&](double eps) {
+    const auto name = std::format("sdirk2_eta_{}", eps > 0 ? "up" : "down");
+    static_cast<void>(
+        Write(name + ".deck", BallDeck(0.0, 1e21 * std::exp(eps))));
+    auto config = std::format(R"({{"model": {{"deck": "{}.deck"}},
+        "discretisation": {{"lmax": 8}}, {}, "rotation": "none",
+        "solver": {{"scheme": "sdirk2"}},
+        "kernels": {{"parameters": ["ice"], "measurements": [{}],
+          "output": "out/{}"}}}})",
+                              name, Window(9), kSite, name);
+    static_cast<void>(app::RunKernel(Write(name + ".json", config)));
+    return MeasuredValue(dir_ / "out" / name, "site");
+  };
+  constexpr auto kEps = 1e-2;
+  const auto difference = (measuredAt(kEps) - measuredAt(-kEps)) / (2.0 * kEps);
+  RecordProperty("sdirk2_kernel_gap",
+                 std::format("{:.2e}", std::abs(paired - difference) /
+                                           std::abs(difference)));
+  EXPECT_NEAR(paired, difference, 1e-3 * std::abs(difference));
+
+  // the calibrations under migrating shorelines, by `method`: the gradient
+  // method's sweep is the discrete adjoint about the run's shorelines,
+  // each step's first stage about its own
+  const auto calibrating = [&](const std::string& method) {
+    return Write(
+        std::format("sdirk2_{}.json", method),
         std::format(R"({{{}, {}, "rotation": "none",
                       "solver": {{"scheme": "sdirk2"}},
-                      "output": {{"surface": "out/sdirk2_calibrated.nc"}}}})",
+                      "output": {{"surface": "out/sdirk2_{}.nc"}}}})",
                     kBall,
                     Window(3, "history.nc", "",
-                           std::format(R"("shorelines": "{}", "calibration":
-                            {{"method": "{}", "rtol": 1e-6}})",
-                                       shorelines, method),
-                           "end")));
+                           std::format(R"("shorelines": "migrating",
+                            "calibration": {{"method": "{}", "rtol": 1e-6}})",
+                                       method),
+                           "end"),
+                    method));
   };
-  ExpectRefused(app::ReadSolveInput, calibrating("migrating", "gradient"),
-                "ocean.calibration.method",
-                "is the gradient calibration, whose gradient under migrating "
-                "shorelines is the discrete adjoint's, which is not built for "
-                "`solver.scheme` \"sdirk2\" (its exact derivative runs "
-                "through each step's stages): give \"fixed_point\"");
-  ExpectRefused(app::ReadKernelInput, calibrating("migrating", "gradient"),
-                "ocean.calibration.method", "give \"fixed_point\"");
-  EXPECT_NO_THROW(static_cast<void>(
-      app::ReadSolveInput(calibrating("frozen", "gradient"))));
-  const auto calibrated =
-      app::RunSolve(calibrating("migrating", "fixed_point"));
-  EXPECT_NE(calibrated.find("initial sea level calibrated"), std::string::npos)
-      << calibrated;
+  for (const auto* method : {"fixed_point", "gradient"}) {
+    const auto calibrated = app::RunSolve(calibrating(method));
+    EXPECT_NE(calibrated.find("initial sea level calibrated"), std::string::npos)
+        << method << ": " << calibrated;
+  }
+  // both reach the same present sea level, to their tolerance
+  const auto last = [&](const std::string& method) {
+    const auto file = Output("sdirk2_" + method);
+    return Slice(file, "relative_sea_level_change", file.time->size() - 1);
+  };
+  const auto fixed = last("fixed_point");
+  const auto gradient = last("gradient");
+  auto scale = 0.0, gap = 0.0;
+  for (auto i = std::size_t{0}; i < fixed.size(); ++i) {
+    scale = std::max(scale, std::abs(fixed[i]));
+    gap = std::max(gap, std::abs(gradient[i] - fixed[i]));
+  }
+  EXPECT_LT(gap, 1e-3 * scale);
 }
 
 TEST_F(AppsTest, SolveHoldsTheLandItIsTold) {
@@ -5594,8 +5663,10 @@ TEST_F(AppsTest, SolvePicks1DOr3DFromTheModelBlock) {
   ASSERT_EQ(passes.size(), 5u);
   EXPECT_TRUE(std::all_of(passes.begin() + 1, passes.end(),
                           [](long long n) { return n > 0; }));
-  EXPECT_EQ(std::get<std::string>(uniform.meta.at("scheme")),
-            "exponential_trapezoid");
+  // no `solver.scheme`: the default, Sdirk2
+  EXPECT_EQ(std::get<std::string>(uniform.meta.at("scheme")), "sdirk2");
+  EXPECT_EQ(std::get<std::string>(radial.meta.at("scheme")), "sdirk2");
+  EXPECT_EQ(app::SolverBlock{}.scheme, Scheme::Sdirk2);
 
   // the 1-D kernels on the radial file
   const auto kernels = [&](const std::string& name, const std::string& file) {
@@ -6849,9 +6920,11 @@ TEST_F(AppsTest, SolveWithoutAnOceanIn3DMatchesTheLibrary) {
     // the summary sums the steps' passes, the start's left out
     const auto& passes =
         std::get<std::vector<long long>>(forwards.meta.at("step_iterations"));
-    EXPECT_TRUE(summary.ends_with(std::format(
-        " and 2 exchange tables ({} fixed-point iterations over 3 steps)",
-        passes[1] + passes[2] + passes[3])))
+    EXPECT_NE(summary.find(std::format(
+                  " and 2 exchange tables ({} fixed-point iterations over 3 "
+                  "steps); its longest step ",
+                  passes[1] + passes[2] + passes[3])),
+              std::string::npos)
         << summary;
   }
   EXPECT_EQ(dry.meta.at("solve_iterations"),
@@ -8647,6 +8720,49 @@ TEST_F(AppsTest, Kernel3DWritesIceAndViscosityKernels) {
       EXPECT_EQ(var.values, held_disk.at(name).values) << name;
     }
   }
+}
+
+TEST_F(AppsTest, SolveStatesItsStepsAgainstTheShortestRelaxation) {
+  // `solve` through time states its run's longest step over the shortest
+  // relaxation time of the model as built, and where that time is, at the
+  // end of its summary and in the surface file's metadata: the number a
+  // step's accuracy is read against. On the
+  // homogeneous ball (mu = 5500^3 Pa, eta = 1e21 Pa s) the time is eta /
+  // mu, against steps of 0.5 kyr, under either scheme; the static problem,
+  // which has no steps, states none.
+  namespace pm = planetmodel;
+  static_cast<void>(Deck());
+  const auto mu = 5500.0 * 5500.0 * 5500.0;
+  const auto tau = 1e21 / mu;
+  const auto ratio = 0.5 * app::KYR / tau;
+  for (const auto* scheme : {"exponential_trapezoid", "sdirk2"}) {
+    const auto name = std::format("steps_{}", scheme);
+    const auto summary = Run(
+        name, std::format(R"({}, "times": {{"unit": "kyr", "end": 2, "nodes": 5}},
+            "forcing": {{"load": [{}]}}, "solver": {{"scheme": "{}"}})",
+                          kBall, kCap, scheme));
+    const auto clause = std::format(
+        "; its longest step {:.3g} times the shortest relaxation time ({:.3g} "
+        "kyr, at ",
+        ratio, tau / app::KYR);
+    EXPECT_NE(summary.find(clause), std::string::npos) << summary;
+    EXPECT_TRUE(summary.ends_with("in layer 0, 0 to 6371 km deep)")) << summary;
+    const auto file = Output(name);
+    const auto number = [&](const std::string& key) {
+      return std::get<std::vector<double>>(file.meta.at(key)).front();
+    };
+    EXPECT_NEAR(number("longest_step_over_shortest_relaxation_time"), ratio,
+                1e-12 * ratio);
+    EXPECT_NEAR(number("shortest_relaxation_time_s"), tau, 1e-12 * tau);
+    EXPECT_TRUE(std::get<std::string>(file.meta.at("shortest_relaxation_at"))
+                    .ends_with("in layer 0, 0 to 6371 km deep"));
+  }
+  const auto still = app::RunSolve(Write(
+      "still.json", std::format(R"({{"problem": "static", {},
+      "forcing": {{"load": [{}]}}, "rotation": "none",
+      "output": {{"surface": "out/still.nc"}}}})",
+                                kBall, kCap)));
+  EXPECT_EQ(still.find("relaxation time"), std::string::npos) << still;
 }
 
 TEST_F(AppsTest, ContinuousKernelsStateTheirStepsAgainstTheShortestRelaxation) {
@@ -11307,7 +11423,8 @@ TEST_F(AppsTest, KernelsOnTheRunsClockAreTheDatedRunsKernels) {
       "forcing": {{"ice_change": [{{"change": {{"file": "held.nc"}}}}]}},
       "ocean": {{{}"at": "start", "topography": {{"file": "history.nc"}},
                 "ice": {{"file": "history.nc"}}}},
-      "rotation": "none", "solver": {{"rtol": 1e-12}},
+      "rotation": "none",
+      "solver": {{"rtol": 1e-12, "scheme": "exponential_trapezoid"}},
       "kernels": {{"method": "discrete", "parameters": ["ice"],
         "measurements": [{}], "output": "out/{}"}}}})",
                                              kBall, times, ocean,
@@ -12717,6 +12834,38 @@ TEST_F(AppsTest, KernelsFromARecordedTrajectoryAreTheRunsInMemory) {
           {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
            "longitude": 10, "width_deg": 25}])",
        2},
+      // under Sdirk2 the store holds each step's first-stage closure beside
+      // its nodes (its ocean function under migrating shorelines, its
+      // sources' forces), and the discrete sweep repeats the stage from it
+      {"sdirk2_migrating",
+       std::string{kBall} + ", " +
+           Window(5, "history.nc", "", Calibrated("migrating"), "end") +
+           R"(, "rotation": "full", "moments": "hydrostatic",
+           "solver": {"scheme": "sdirk2"})",
+       R"("method": "discrete", "parameters": ["ice", "viscosity"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
+           "longitude": 10, "width_deg": 25, "date_kyr_bp": 0.5}])",
+       2},
+      {"sdirk2_lateral",
+       Prem8() + ", " + Window(4) +
+           R"(, "rotation": "full", "solver": {"scheme": "sdirk2"})",
+       R"("method": "discrete", "parameters": ["ice", "viscosity"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
+           "longitude": 10, "width_deg": 25}])",
+       2},
+      {"sdirk2_postseismic", R"("problem": "quasi_static",
+        "model": {"deck": "soft.deck"}, "discretisation": {"lmax": 8},
+        "times": {"unit": "yr", "at": [0, 1, 2.5, 3, 6, 10]},
+        "forcing": {"seismic": [)" + atNode + R"(]}, "rotation": "none",
+        "solver": {"scheme": "sdirk2"})",
+       R"("method": "discrete", "parameters": ["moment", "viscosity"],
+        "measurements": [
+          {"type": "displacement_vector_point", "name": "drift",
+           "latitude": 33, "longitude": 42,
+           "direction": {"east": 1, "north": -0.5}, "time": 6}])",
+       1},
       {"loads", std::string{kBall} + R"(, "problem": "quasi_static",
         "times": {"at_kyr_bp": [2, 1.6, 1, 0.3, 0]},
         "forcing": {"ice_change": [{"thickness": {"file": "history.nc"}}],
@@ -12968,7 +13117,8 @@ TEST_F(AppsTest, TheTrajectoryStoreIsTheRunsOwn) {
                                    store.string())),
             std::string::npos)
       << again;
-  EXPECT_TRUE(again.ends_with("), left as it is")) << again;
+  EXPECT_NE(again.find("), left as it is; its longest step "), std::string::npos)
+      << again;
   // another run, another stride, files no store writes
   ExpectRefused(app::RunKernel, config("other", "1e-11", kStore),
                 "trajectory.directory",
@@ -13925,7 +14075,7 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
   const auto solverDated = std::string{
       R"("solver": {"rtol": 1e-9, "step_rtol": 1e-8, "step_max_iterations": 40,
          "transform_degrees": [8, 6], "cache_mb": 4,
-         "scheme": "exponential_trapezoid", "step": "conjugate_gradients"})"};
+         "scheme": "sdirk2", "step": "conjugate_gradients"})"};
   const auto measurement = std::string{
       R"({"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
           "longitude": 10, "width_deg": 25, "date_kyr_bp": 0})"};
@@ -14670,15 +14820,15 @@ TEST_F(AppsTest, TheRunHashesTakeEveryForwardMember) {
        {{R"("step_max_iterations": 40)", R"("step_max_iterations": 41)"}},
        both},
       {"dated", "solver.scheme",
-       {{R"("scheme": "exponential_trapezoid")",
-         R"("scheme": "backward_euler")"}},
+       {{R"("scheme": "sdirk2")", R"("scheme": "backward_euler")"}}, both},
+      {"dated", "solver.scheme \"exponential_trapezoid\"",
+       {{R"("scheme": "sdirk2")", R"("scheme": "exponential_trapezoid")"}},
        both},
-      {"dated", "solver.scheme \"sdirk2\"",
-       {{R"("scheme": "exponential_trapezoid")", R"("scheme": "sdirk2")"}},
-       both},
+      // the hashes take the scheme the run resolves: the default, Sdirk2,
+      // given or left out
       {"dated", "solver.scheme given as its default",
        {{R"(
-         "scheme": "exponential_trapezoid",)",
+         "scheme": "sdirk2",)",
          ""}},
        neither},
       {"dated", "solver.step",
@@ -15241,7 +15391,9 @@ TEST_F(AppsTest, APreviousIceHistoryFileJumpsAtItsStoredTimes) {
         << name;
   }
 
-  // -- a jump the migrating sea level solve does not close
+  // -- a jump the migrating sea level solve does not close (the exponential
+  // trapezoid stated: the first solve to fail is then the jump's own, where
+  // a two-stage step's first stage would fail before it)
   try {
     static_cast<void>(app::RunSolve(Write(
         "unclosed.json",
@@ -15251,7 +15403,8 @@ TEST_F(AppsTest, APreviousIceHistoryFileJumpsAtItsStoredTimes) {
       "ocean": {{"at": "start", "topography": {{"file": "marine.nc"}},
                  "ice": {{"file": "marine.nc"}}, "shorelines": "migrating"}},
       "forcing": {{"ice_change": [{{"thickness": {{"file": "marine.nc"}}}}]}},
-      "rotation": "none", "solver": {{"rtol": 1e-300}},
+      "rotation": "none",
+      "solver": {{"rtol": 1e-300, "scheme": "exponential_trapezoid"}},
       "output": {{"surface": "out/unclosed.nc"}}}})",
                     onNodes))));
     ADD_FAILURE() << "an unclosed jump was not refused";

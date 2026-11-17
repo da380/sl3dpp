@@ -1418,9 +1418,12 @@ TEST(TangentLinear, TheContinuousSecondOrderSweepFormsTheForcingRows) {
         tideOnly.solidSurfaceChange.push_back(scaled(layer0));
       }
       ViscoelasticOperator op(setup.rheology, kLmax);
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
       Evolution evolution(
           op, setup.solver, *background,
-          {.rotation = rotation, .rtol = 1e-12, .record_stride = 1});
+          {.scheme = Scheme::ExponentialTrapezoid,
+           .rotation = rotation, .rtol = 1e-12, .record_stride = 1});
       const auto snapshots = evolution.Run(
           times, Evolution::Forcing{.tide = [&](double t) {
             for (auto n = std::size_t{0}; n < times.size(); ++n) {
@@ -1747,8 +1750,11 @@ TEST(TangentLinear, ContinuousConvergesToDiscreteInItau) {
   for (const auto nodes : {5, 9}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                                {.rtol = 1e-12, .record_stride = 1});
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
     auto measurement = std::map<std::size_t, Measurement>{};
@@ -1781,7 +1787,11 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
   const auto cap = MarineCap::Make(setup, 5);
   const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  Evolution evolution(op, setup.solver, state, {.rtol = 1e-12});
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  Evolution evolution(op, setup.solver, state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   const auto oceans = OceanFunctionsOf(run);
   std::mt19937 rng(3);
@@ -1803,7 +1813,9 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
     // ocean functions are 0 or 1 by flotation, here and below: a point
     // flips only on the threshold itself
     EXPECT_EQ(start.oceanFunction, state.oceanFunction) << "the start flipped";
-    Evolution trial(op, setup.solver, start, {.rtol = 1e-12});
+    Evolution trial(op, setup.solver, start,
+                    {.scheme = Scheme::ExponentialTrapezoid,
+                     .rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
       auto out = cap.Thickness(t);
       for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
@@ -1853,7 +1865,9 @@ TEST(TangentLinear, AboutAMigratingTrajectory) {
 
   // Under frozen shorelines the initial sea level contributes nothing: it
   // forces no node, and the solves of a nil forcing are exactly zero.
-  Evolution frozen(op, setup.solver, state, {.rtol = 1e-12});
+  Evolution frozen(op, setup.solver, state,
+                   {.scheme = Scheme::ExponentialTrapezoid,
+                    .rtol = 1e-12});
   TangentPerturbation seaOnly;
   seaOnly.initialSeaLevel = deltaSea;
   const auto still =
@@ -2080,8 +2094,11 @@ TEST(TangentLinear, AboutAForcedMigratingTrajectory) {
           out.push_back(extra);
           return out;
         }};
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution trial(op, setup.solver, start,
-                    {.rtol = 1e-12,
+                    {.scheme = Scheme::ExponentialTrapezoid,
+                     .rtol = 1e-12,
                      .max_nonlinear_iterations = 200,
                      .record_stride = 1});
     return std::pair{trial.RunMigrating(times, field(base.ice, delta.ice), forcing),
@@ -2326,8 +2343,11 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     for (auto n = std::size_t{0}; n < times.size(); ++n) {
       loads.push_back(setup.Smooth(rng, 100.0 * setup.Sigma()));
     }
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(op, setup.solver, setup.state,
-                                {.rtol = 1e-12, .record_stride = 1});
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory::FromSnapshots(
         evolution.Run(times, History(times, loads)));
     TangentLinearSolver tangent(evolution, {.rtol = 1e-12, .record = true});
@@ -2354,7 +2374,8 @@ TEST(TangentLinear, SecondOrderRunVanishesWithoutAViscosityPerturbation) {
     const auto cap = MarineCap::Make(setup, 5);
     const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
     Evolution evolution(op, setup.solver, state,
-                                {.rtol = 1e-12, .record_stride = 1});
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rtol = 1e-12, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         cap.times, [&](double t) { return cap.Thickness(t); });
     const auto oceans = OceanFunctionsOf(run);
@@ -2402,8 +2423,11 @@ TEST(TangentLinear, ContinuousSecondOrderConvergesToDiscrete) {
   for (const auto nodes : {17, 33}) {
     auto times = std::vector<double>{};
     for (auto n = 0; n < nodes; ++n) times.push_back(span * n / (nodes - 1));
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(op, setup.solver, setup.state,
-                                {.rtol = 1e-12, .record_stride = 1});
+                                {.scheme = Scheme::ExponentialTrapezoid,
+                                 .rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory::FromSnapshots(evolution.Run(times, ramp));
     auto measurement = std::map<std::size_t, Measurement>{};

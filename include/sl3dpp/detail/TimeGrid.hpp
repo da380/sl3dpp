@@ -21,6 +21,9 @@
 #include <string>
 #include <type_traits>
 #include <utility>
+#include <vector>
+
+#include "sl3dpp/PointSource.hpp"
 
 namespace sl3dpp::detail {
 
@@ -105,25 +108,72 @@ void CheckLeftLimits(const Forcing& forcing, bool migrating) {
   }
 }
 
-/// The time of a stage that ends at fraction c of the step ending at node
-/// n (StepRecipe.hpp): the node's own time at c = 1, else times[n - 1] +
-/// c (times[n] - times[n - 1]).
-[[nodiscard]] inline double StageTime(std::span<const double> times,
-                                      std::size_t n, double c) {
-  return c == 1.0 ? times[n] : times[n - 1] + c * (times[n] - times[n - 1]);
+/// A forcing term's value at fraction c of a step from its values at the
+/// step's two nodes, (1 - c) of the start node's and c of the end node's:
+/// fields and coefficient vectors entry by entry (an empty one is none,
+/// zero), interior sources as the start node's with their moments times
+/// 1 - c beside the end node's with theirs times c (the forces are linear
+/// in the moments, so that is the same combination of the forces).
+template <class T>
+[[nodiscard]] std::vector<T> BetweenNodes(std::vector<T> start,
+                                          std::vector<T> end, double c) {
+  if (start.empty() && end.empty()) return end;
+  if (end.empty()) end.assign(start.size(), T{});
+  if (!start.empty() && start.size() != end.size()) {
+    throw std::invalid_argument(
+        "a forcing term's values at the two nodes of a step are of "
+        "different sizes");
+  }
+  for (auto i = std::size_t{0}; i < end.size(); ++i) {
+    end[i] *= c;
+    if (!start.empty()) end[i] += (1.0 - c) * start[i];
+  }
+  return end;
+}
+[[nodiscard]] inline std::vector<PointSource> BetweenNodes(
+    std::vector<PointSource> start, std::vector<PointSource> end, double c) {
+  auto scale = [](PointSource& source, double a) {
+    auto& m = source.moment;
+    for (auto* v : {&m.rr, &m.tt, &m.pp, &m.rt, &m.rp, &m.tp}) *v *= a;
+  };
+  for (auto& source : start) scale(source, 1.0 - c);
+  for (auto& source : end) scale(source, c);
+  start.insert(start.end(), end.begin(), end.end());
+  return start;
+}
+[[nodiscard]] inline std::vector<StressGlut> BetweenNodes(
+    std::vector<StressGlut> start, std::vector<StressGlut> end, double c) {
+  auto scale = [](StressGlut& glut, double a) {
+    auto& m = glut.moment;
+    for (auto* field : {&m.rr, &m.tt, &m.pp, &m.rt, &m.rp, &m.tp}) {
+      for (auto& v : *field) v *= a;
+    }
+  };
+  for (auto& glut : start) scale(glut, 1.0 - c);
+  for (auto& glut : end) scale(glut, c);
+  start.insert(start.end(), std::make_move_iterator(end.begin()),
+               std::make_move_iterator(end.end()));
+  return start;
 }
 
 /// A forcing term at a stage of the step ending at node n: at c = 1 the
 /// node's read (AtNode, its left limit at the first node of a repeated
-/// pair), inside the step `plain` at the stage's time, where the forcing
-/// is continuous (a jump is at a repeated node, whose step has one
-/// stage). The one place a stage decides what it reads.
+/// pair). A stage that ends inside the step (c < 1) reads no time of its
+/// own: it takes (1 - c) of the term at the step's start node, as the
+/// step from there reads it (`plain` at that node's time: the right limit
+/// at a repeated pair's second node), and c of the term at its end node,
+/// as the node reads it (BetweenNodes). A run therefore depends on its
+/// forcing through the values at its nodes alone, under every scheme, and
+/// the derivative runs, which hold the forcing by those values, take the
+/// same combination (detail/StepStages.hpp). The one place a stage
+/// decides what it reads.
 template <class Callback, class Value = std::invoke_result_t<Callback, double>>
 [[nodiscard]] Value AtStage(std::span<const double> times, std::size_t n,
                             double c, const Callback& plain,
                             const Callback& before, Value fallback = {}) {
   if (c == 1.0) return AtNode(times, n, plain, before, std::move(fallback));
-  return plain ? plain(StageTime(times, n, c)) : std::move(fallback);
+  if (!plain) return fallback;
+  return BetweenNodes(plain(times[n - 1]), AtNode(times, n, plain, before), c);
 }
 
 }  // namespace sl3dpp::detail

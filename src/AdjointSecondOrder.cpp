@@ -29,6 +29,7 @@ using detail::CoefficientDualFromColumnDuals;
 using detail::ColumnDualsOf;
 using detail::Complex;
 using detail::NodeWeights;
+using detail::StageRef;
 using detail::TrajectoryCursor;
 
 namespace {
@@ -49,12 +50,13 @@ struct Triples {
 void DerivativeViews(KernelDerivatives& out, std::span<const double> C,
                      double rhoI, double rhoW, std::span<const double> times,
                      std::vector<std::vector<double>> duals,
-                     std::span<const std::vector<double>> oceanFunctions) {
+                     std::span<const std::vector<double>> oceanFunctions,
+                     std::span<const detail::StageLoadKernel> stageLoads = {}) {
   auto views = detail::AssembleIceViews(
       C, rhoI, times, std::move(duals),
       std::vector<std::vector<double>>(times.size(),
                                        std::vector<double>(C.size(), 0.0)),
-      {}, oceanFunctions, rhoW);
+      {}, oceanFunctions, rhoW, stageLoads);
   out.times.assign(times.begin(), times.end());
   out.directLoadKernels = std::move(views.directLoadKernels);
   out.thickness = std::move(views.thickness);
@@ -70,11 +72,22 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     const std::vector<std::vector<double>>& itau,
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
-    const PointMaterialDirection& material) const {
+    const PointMaterialDirection& material,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
-  detail::RefuseDerivativeOfMultiStage(ev.options_.scheme,
-                                       "the second-order adjoint");
+  const bool discrete = options_.method == AdjointMethod::Discrete;
+  if (IsMultiStage(ev.options_.scheme) && !discrete) {
+    throw std::invalid_argument(
+        "the continuous second-order adjoint (Options::method AdjointMethod::"
+        "Continuous) is not built for Sdirk2: its derivative state's drive "
+        "is a one-stage step's. The discrete second-order adjoint "
+        "(AdjointMethod::Discrete, the default method) is the derivative of "
+        "the two-stage step's exact transpose; or state a one-stage scheme, "
+        "Scheme::ExponentialTrapezoid, in the evolution's Options::scheme, "
+        "whose default is Sdirk2");
+  }
   const auto& op = *ev.op_;
   const auto fieldSize = ev.solver_->Grid().FieldSize();
   for (const auto& [node, m] : measurements) {
@@ -94,16 +107,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
         "the first node's state kept (the states between kept ones are "
         "rebuilt forward from the kept one below)");
   }
-  if (tangent.size() != times.size()) {
-    throw std::invalid_argument(
-        "the tangent-linear run must give one snapshot per time node");
-  }
-  for (const auto& snap : tangent) {
-    if (!snap.internalState.has_value() || !snap.internalState->HasStrain()) {
-      throw std::invalid_argument(
-          "the tangent-linear run must be recorded at every node "
-          "(TangentLinearSolver::Options::record)");
-    }
+  detail::CheckRecordedTangent(tangent, ev.options_.scheme, times);
+  if (discrete) {
+    detail::CheckStageOceanFunctions(ev.options_.scheme, times,
+                                     !oceanFunctions.empty(),
+                                     stageOceanFunctions, fieldSize);
   }
   if (!oceanFunctions.empty()) {
     if (oceanFunctions.size() != times.size()) {
@@ -133,9 +141,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
   } else {
     ditauPoints = op.ItauPerturbationAtPoints(itau);
   }
-  return options_.method == AdjointMethod::Discrete
+  return discrete
              ? DiscreteSecondOrder(times, measurements, tangent, ditauPoints,
-                                   trajectory, oceanFunctions, material)
+                                   trajectory, oceanFunctions,
+                                   stageOceanFunctions, material)
              : ContinuousSecondOrder(times, measurements, tangent,
                                      ditauPoints, trajectory, oceanFunctions,
                                      material);
@@ -151,22 +160,27 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     const std::vector<std::vector<double>>& ditauPoints,
     const ForwardTrajectory& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
     const PointMaterialDirection& direction) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto& grid = solver.Grid();
   const auto scheme = ev.options_.scheme;
-  const bool implicit = scheme == Scheme::BackwardEuler;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return oceanFunctions.empty() ? C : oceanFunctions[node];
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage, an inner stage's own before (as the first-order sweep)
+  const bool migrating = !oceanFunctions.empty();
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
-  auto overrideAt = [&](std::size_t node) {
-    return oceanFunctions.empty() ? std::vector<double>{}
-                                  : oceanFunctions[node];
+  auto overrideAt = [&](const StageRef& ref) {
+    return migrating ? oceanAt(ref) : std::vector<double>{};
   };
+  auto nodeRef = [](std::size_t node) { return StageRef{.node = node}; };
   const auto rhoW = solver.WaterDensity();
   const auto rhoI = solver.IceDensity();
   const auto r2 = solver.Radius() * solver.Radius();
@@ -178,17 +192,18 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
-  auto flavours = std::map<double, GRDSolver>{};
-  auto solverFor = [&](double dt) -> const GRDSolver& {
-    auto found = flavours.find(dt);
+  auto flavours = std::map<std::pair<Scheme, double>, GRDSolver>{};
+  auto solverFor = [&](Scheme family, double dt) -> const GRDSolver& {
+    const auto key = std::pair(family, dt);
+    auto found = flavours.find(key);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, GRDSolver(
-                                   grid,
-                                   dt == 0.0 ? op.ElasticLoveNumbers()
-                                             : op.EffectiveLoveNumbers(
-                                                   ev.options_.scheme, dt),
-                                   solver.Parameters()))
+                  .emplace(key, GRDSolver(
+                                    grid,
+                                    dt == 0.0 ? op.ElasticLoveNumbers()
+                                              : op.EffectiveLoveNumbers(
+                                                    family, dt),
+                                    solver.Parameters()))
                   .first;
     }
     return found->second;
@@ -256,11 +271,13 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   // the first sweep.
   auto engineDuals = [&](const std::vector<Complex>& sigmaDual,
                          const std::vector<Complex>& psiDual,
-                         std::size_t node, bool measured) {
+                         const StageRef& ref, bool measured) {
+    const auto node = ref.node;
+    measured = measured && ref.Last();
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
-    duals.oceanFunctionOverride = overrideAt(node);
-    const auto& Cn = oceanAt(node);
+    duals.oceanFunctionOverride = overrideAt(ref);
+    const auto& Cn = oceanAt(ref);
     auto synth = grid.Synthesise(sigmaDual);
     duals.relativeSeaLevelDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -285,17 +302,19 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     duals.angularVelocityDual = gOmega;
     return std::pair(std::move(duals), std::move(synth));
   };
-  auto adjointSolve = [&](double dt, const std::vector<Complex>& sigmaDual,
+  auto adjointSolve = [&](Scheme family, double dt,
+                          const std::vector<Complex>& sigmaDual,
                           const std::vector<Complex>& psiDual,
-                          std::size_t node, bool measured,
+                          const StageRef& ref, bool measured,
                           std::vector<double>& loadDual) {
-    auto [duals, synth] = engineDuals(sigmaDual, psiDual, node, measured);
-    const auto adj = solverFor(dt).SolveAdjoint(ev.state_, duals, sleOptions);
+    auto [duals, synth] = engineDuals(sigmaDual, psiDual, ref, measured);
+    const auto adj =
+        solverFor(family, dt).SolveAdjoint(ev.state_, duals, sleOptions);
     if (!adj.converged) {
       throw std::runtime_error(std::format(
           "the adjoint sea level solve at node {} did not converge "
           "(error {})",
-          node, adj.error));
+          ref.node, adj.error));
     }
     loadDual.assign(fieldSize, 0.0);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -438,31 +457,103 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
                                         byDegree, yT);
   };
   // A base solution under its sources' forces too.
-  auto withSources = [&](std::map<int, std::vector<double>> x, std::size_t node) {
-    if (trajectory.sourceForces.empty()) return x;
-    for (const auto& [l, f] : trajectory.sourceForces[node].spheroidal) {
+  auto withSources = [&](std::map<int, std::vector<double>> x,
+                         const RadialSourceForces* forces) {
+    if (forces == nullptr) return x;
+    for (const auto& [l, f] : forces->spheroidal) {
       const auto add = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
       auto& to = x.at(l);
       for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];
     }
     return x;
   };
+  // The duals of a step's state and their derivatives, as the stages hand
+  // them on: the spheroidal internal variables' and the toroidal systems'.
+  struct StepDual {
+    std::map<int, std::vector<double>> m, dm;
+    ToroidalViscoelastic::Fields twist, dtwist;
+  };
+  const auto ScaledDual = [](double a, const StepDual& d) {
+    auto out = d;
+    for (auto* fields : {&out.m, &out.dm, &out.twist, &out.dtwist}) {
+      for (auto& [l, values] : *fields) {
+        for (auto& v : values) v *= a;
+      }
+    }
+    return out;
+  };
+  const auto AddDual = [](StepDual& to, double a, const StepDual& d) {
+    for (const auto& [from, sum] :
+         {std::pair{&d.m, &to.m}, std::pair{&d.dm, &to.dm},
+          std::pair{&d.twist, &to.twist}, std::pair{&d.dtwist, &to.dtwist}}) {
+      for (const auto& [l, values] : *from) {
+        auto& total = sum->at(l);
+        for (auto i = std::size_t{0}; i < values.size(); ++i) {
+          total[i] += a * values[i];
+        }
+      }
+    }
+  };
+  // The kernels in the surface forcing at an inner stage of a step, and
+  // their derivatives: handed to the step's two nodes after the sweep
+  // (detail/StepStages.hpp).
+  struct InnerKernels {
+    std::size_t node = 0;
+    double c = 1.0;
+    const std::vector<double>* ocean = nullptr;
+    std::vector<double> load, outside, layer, dload, doutside, dlayer;
+    std::vector<Complex> tide, dtide;
+    std::vector<SphericalTensor> moments, dmoments;
+  };
+  auto innerKernels = std::vector<InnerKernels>{};
 
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
-    const double dt = dts[n - 1];
-    const auto& weights = op.SchemeWeightsOf(scheme, dt);
-    const auto& dweights = op.SchemeWeightDerivativesOf(scheme, dt);
-    const auto& d2weights = op.SchemeWeightSecondDerivativesOf(scheme, dt);
-    // the forward states the step pairs with (the later copied: the
-    // cursor's reference lasts until its next request)
-    const ViscoelasticState fwdN = cursor.State(n);
-    const ViscoelasticState& fwdPrev = cursor.State(n - 1);
-    // held through the step: its systems and unit responses below are
+    const double h = dts[n - 1];
+    const auto recipe = RecipeOf(scheme, h);
+    const auto refs = detail::StagesOf(recipe, h, n);
+    // the states of the step's stages the sweep pairs with: the forward
+    // run's, v's tangent run's, and the toroidal systems' of both
+    const auto forward = cursor.Step(n);
+    const auto tangentStates =
+        detail::TangentStepStates(tangent, recipe, h, n);
+    auto forwardTwist = Twist::Stages{};
+    auto alongTwist = Twist::Stages{};
+    if (twisting) {
+      forwardTwist = twist->BaseStages(recipe, refs, h, n);
+      alongTwist = twist->TangentStages(recipe, refs, h, n);
+    }
+    // The transpose of one stage of the step with its derivative along v
+    // (StepRecipe.hpp; the step's one stage under a one-stage scheme).
+    auto stageOf = [&](const StageRef& ref, StepDual& carried) {
+    mdual = std::move(carried.m);
+    dmdual = std::move(carried.dm);
+    if (twisting) {
+      tdual.m = std::move(carried.twist);
+      dtdual.m = std::move(carried.dtwist);
+    }
+    const double dt = ref.length;
+    const auto family = ref.family;
+    const bool implicit = family == Scheme::BackwardEuler;
+    const auto& weights = op.SchemeWeightsOf(family, dt);
+    const auto& dweights = op.SchemeWeightDerivativesOf(family, dt);
+    const auto& d2weights = op.SchemeWeightSecondDerivativesOf(family, dt);
+    const ViscoelasticState& fwdN = forward.ends[ref.index];
+    const ViscoelasticState& fwdPrev = forward.starts[ref.index];
+    const auto closure = detail::ClosureOf(trajectory, ref);
+    // held through the stage: its systems and unit responses below are
     // references into it
-    const auto flavour = op.FlavourOf(scheme, dt);
-    const ViscoelasticState& vN = *tangent[n].internalState;
-    const ViscoelasticState& vPrev = *tangent[n - 1].internalState;
+    const auto flavour = op.FlavourOf(family, dt);
+    const ViscoelasticState& vN = tangentStates.ends[ref.index];
+    const ViscoelasticState& vPrev = tangentStates.starts[ref.index];
+    // the stage's kernels in the surface forcing: the node's at the step's
+    // last stage, an inner stage's kept apart
+    auto* inner = ref.Last() ? nullptr : &innerKernels.emplace_back();
+    if (inner != nullptr) {
+      inner->node = n;
+      inner->c = ref.c;
+      inner->ocean = &oceanAt(ref);
+    }
     // The material's base and tangent quantities at this step: the base
     // full solution and the effective factor 1 - sum_k f_k (1 - w_k);
     // v's full tangent solution and v's decayed tangent memory with its
@@ -470,15 +561,16 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     std::map<int, std::vector<double>> xn, xvn, memv;
     auto factor = std::vector<double>{};
     if (material) {
-      xn = withSources(op.SolveElastic(fwdN, loadsOf(trajectory.loads[n]),
-                                       tidesOf(trajectory.tides[n])),
-                       n);
-      xvn = tools->TangentSolution(tangent[n], xn, &fwdN.m);
-      auto vstep = op.StartStep(vPrev, dt, scheme,
+      xn = withSources(op.SolveElastic(fwdN, loadsOf(*closure.load),
+                                       tidesOf(*closure.tide)),
+                       closure.forces);
+      xvn = tools->TangentSolution(detail::TangentRecordOf(tangent, ref), xn,
+                                   &fwdN.m);
+      auto vstep = op.StartStep(vPrev, dt, family,
                                 loadsOf(tangent[n - 1].loadCoefficients),
                                 tidesOf(tangent[n - 1].tideCoefficients));
       vstep.AddMemory(TangentLinearSolver::FirstOrderDrive(
-          op, AdjointMethod::Discrete, scheme, dt, fwdPrev, fwdN, ditauPoints));
+          op, AdjointMethod::Discrete, family, dt, fwdPrev, fwdN, ditauPoints));
       memv = vstep.mem_;
       factor.assign(tools->PointCount(), 1.0);
       for (auto k = std::size_t{0}; k < K; ++k) {
@@ -545,9 +637,14 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       contract(deg, *unitsOf[l], xd[l], ncols, sigBy[l], psiBy[l]);
     });
     const auto [sigmaDual, psiDual] = pack(sigBy, psiBy);
-    const auto adj = adjointSolve(dt, sigmaDual, psiDual, n, true, directLoadKernels[n]);
-    tideKernels[n] = tideKernelOf(adj, psiDual);
-    otherLoadKernels(adj, directLoadKernels[n], outsideKernels[n], layerKernels[n]);
+    auto& loadKernel = inner != nullptr ? inner->load : directLoadKernels[n];
+    const auto adj =
+        adjointSolve(family, dt, sigmaDual, psiDual, ref, true, loadKernel);
+    (inner != nullptr ? inner->tide : tideKernels[n]) =
+        tideKernelOf(adj, psiDual);
+    otherLoadKernels(adj, loadKernel,
+                     inner != nullptr ? inner->outside : outsideKernels[n],
+                     inner != nullptr ? inner->layer : layerKernels[n]);
 
     // 2. The first sweep's radial solve, and from it the second sweep's
     // dual of the step's solution: the derivative of the effective system
@@ -600,7 +697,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       if (materialV) {
         // -(dK_eff along v) on the first sweep's solution: the dual of
         // the full tangent solution, before the contraction.
-        const auto src = tools->ApplyEffective(*systems[l], dt, ys[l], ncols);
+        const auto src =
+            tools->ApplyEffective(*systems[l], family, dt, ys[l], ncols);
         for (auto j = std::size_t{0}; j < dxd[l].size(); ++j) {
           dxd[l][j] -= src[j];
         }
@@ -608,10 +706,14 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       contract(deg, *unitsOf[l], dxd[l], ncols, sigBy[l], psiBy[l]);
     });
     const auto [dsigmaDual, dpsiDual] = pack(sigBy, psiBy);
-    const auto dadj =
-        adjointSolve(dt, dsigmaDual, dpsiDual, n, false, dloadDuals[n]);
-    dTideKernels[n] = tideKernelOf(dadj, dpsiDual);
-    otherLoadKernels(dadj, dloadDuals[n], dOutsideKernels[n], dLayerKernels[n]);
+    auto& dloadKernel = inner != nullptr ? inner->dload : dloadDuals[n];
+    const auto dadj = adjointSolve(family, dt, dsigmaDual, dpsiDual, ref, false,
+                                   dloadKernel);
+    (inner != nullptr ? inner->dtide : dTideKernels[n]) =
+        tideKernelOf(dadj, dpsiDual);
+    otherLoadKernels(dadj, dloadKernel,
+                     inner != nullptr ? inner->doutside : dOutsideKernels[n],
+                     inner != nullptr ? inner->dlayer : dLayerKernels[n]);
 
     // 3. The second sweep's radial solve, the itau pairings of both
     // sweeps, and the weight recursion closing both dual states.
@@ -755,29 +857,48 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       ToroidalViscoelastic::SecondOrderStep along;
       along.ditau = &ditauPoints;
       along.dmu = direction.mu;
-      along.basePrev = &twist->BaseState(n - 1);
-      along.baseNext = &twist->BaseState(n);
-      along.tangentPrev = &twist->TangentState(n - 1);
-      along.tangentNext = &twist->TangentState(n);
+      along.basePrev = &forwardTwist.starts[ref.index];
+      along.baseNext = &forwardTwist.ends[ref.index];
+      along.tangentPrev = &alongTwist.starts[ref.index];
+      along.tangentNext = &alongTwist.ends[ref.index];
       along.itau = &itauKernel;
       along.dItau = &dItauKernel;
       auto baseStep = ToroidalViscoelastic::BaseStep{};
       auto tangentStep = ToroidalViscoelastic::BaseStep{};
       if (material) {
-        baseStep = twist->BaseStepTo(n, dt);
-        tangentStep = twist->TangentStepTo(n, dt, baseStep);
+        baseStep = twist->BaseStageOf(ref, *along.basePrev);
+        tangentStep = twist->TangentStageOf(ref, *along.tangentPrev,
+                                            *along.basePrev, *along.baseNext,
+                                            baseStep);
         along.base = &baseStep;
         along.tangent = &tangentStep;
         along.mu = &muKernel;
         along.dMu = &dMuKernel;
       }
       const auto [yT, dyT] = toroidal->StepTransposedSecond(
-          tdual, dtdual, dt, scheme, toroidalSurfaceDual(adj), along);
+          tdual, dtdual, dt, family, toroidalSurfaceDual(adj), along);
       if (moments) {
-        momentKernels[n] = momentKernelsOf(ys, yT);
-        dMomentKernels[n] = momentKernelsOf(dys, dyT);
+        (inner != nullptr ? inner->moments : momentKernels[n]) =
+            momentKernelsOf(ys, yT);
+        (inner != nullptr ? inner->dmoments : dMomentKernels[n]) =
+            momentKernelsOf(dys, dyT);
       }
     }
+    carried.m = std::move(mdual);
+    carried.dm = std::move(dmdual);
+    if (twisting) {
+      carried.twist = std::move(tdual.m);
+      carried.dtwist = std::move(dtdual.m);
+    }
+    };
+    auto carried = StepDual{std::move(mdual), std::move(dmdual),
+                            std::move(tdual.m), std::move(dtdual.m)};
+    detail::TransposeByRecipe(recipe, refs, carried, stageOf, ScaledDual,
+                              AddDual);
+    mdual = std::move(carried.m);
+    dmdual = std::move(carried.dm);
+    tdual.m = std::move(carried.twist);
+    dtdual.m = std::move(carried.dtwist);
   }
 
   // The start: the transposed instantaneous elastic solve at times[0],
@@ -802,7 +923,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       contract(deg, units, xd0[l], ncols, sigBy[l], psiBy[l]);
     }
     const auto [sigmaDual, psiDual] = pack(sigBy, psiBy);
-    const auto adj0 = adjointSolve(0.0, sigmaDual, psiDual, 0, true, directLoadKernels[0]);
+    const auto adj0 = adjointSolve(scheme, 0.0, sigmaDual, psiDual, nodeRef(0),
+                                   true, directLoadKernels[0]);
     tideKernels[0] = tideKernelOf(adj0, psiDual);
     otherLoadKernels(adj0, directLoadKernels[0], outsideKernels[0], layerKernels[0]);
     // The first start duals' solutions, where the material needs them.
@@ -829,8 +951,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
                dpsiBy[l]);
     }
     const auto [dsigmaDual, dpsiDual] = pack(dsigBy, dpsiBy);
-    const auto dadj0 =
-        adjointSolve(0.0, dsigmaDual, dpsiDual, 0, false, dloadDuals[0]);
+    const auto dadj0 = adjointSolve(scheme, 0.0, dsigmaDual, dpsiDual,
+                                    nodeRef(0), false, dloadDuals[0]);
     dTideKernels[0] = tideKernelOf(dadj0, dpsiDual);
     otherLoadKernels(dadj0, dloadDuals[0], dOutsideKernels[0], dLayerKernels[0]);
     // The derivative start duals' solutions.
@@ -864,7 +986,8 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
       const auto x0 = withSources(
           op.SolveElastic(cursor.State(0), loadsOf(trajectory.loads[0]),
                           tidesOf(trajectory.tides[0])),
-          0);
+          trajectory.sourceForces.empty() ? nullptr
+                                          : &trajectory.sourceForces[0]);
       const auto xv0 = tools->TangentSolution(tangent[0], x0, nullptr);
       const auto ones = std::vector<double>(tools->PointCount(), 1.0);
       for (auto l = 0; l <= lmax; ++l) {
@@ -889,18 +1012,42 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   for (const auto& [node, m] : measurements) {
     GRDSolver::AdjointForcing duals;
     duals.rotation = rotation;
-    duals.oceanFunctionOverride = overrideAt(node);
+    duals.oceanFunctionOverride = overrideAt(nodeRef(node));
     duals.relativeSeaLevelDual = m.relativeSeaLevelDual;
     duals.displacementDual = m.displacementDual;
     duals.potentialDual = m.potentialDual;
     duals.tangentialPotentialDual = m.tangentialPotentialDual;
     duals.angularVelocityDual = m.angularVelocityDual;
-    const auto adj = solverFor(0.0).SolveAdjoint(ev.state_, duals, sleOptions);
+    const auto adj =
+        solverFor(scheme, 0.0).SolveAdjoint(ev.state_, duals, sleOptions);
     if (!adj.converged) {
       throw std::runtime_error(
           "the instantaneous adjoint fingerprint did not converge");
     }
     lumps.emplace(node, adj.directLoadDual);
+  }
+  // The inner stages' kernels and their derivatives on the step's nodes,
+  // the forcing linear in time across a step (as the first-order sweep).
+  auto stageLoads = std::vector<detail::StageLoadKernel>{};
+  auto dStageLoads = std::vector<detail::StageLoadKernel>{};
+  for (auto& inner : innerKernels) {
+    const auto node = inner.node;
+    const auto c = inner.c;
+    detail::FoldOnNodes(outsideKernels, node, c, inner.outside);
+    detail::FoldOnNodes(layerKernels, node, c, inner.layer);
+    detail::FoldOnNodes(tideKernels, node, c, inner.tide);
+    detail::FoldOnNodes(dOutsideKernels, node, c, inner.doutside);
+    detail::FoldOnNodes(dLayerKernels, node, c, inner.dlayer);
+    detail::FoldOnNodes(dTideKernels, node, c, inner.dtide);
+    if (moments) {
+      detail::FoldMomentsOnNodes(momentKernels, node, c, inner.moments);
+      detail::FoldMomentsOnNodes(dMomentKernels, node, c, inner.dmoments);
+    }
+    detail::FoldOnNodes(directLoadKernels, node, c, inner.load);
+    detail::FoldOnNodes(dloadDuals, node, c, inner.dload);
+    const auto* ocean = migrating ? inner.ocean : nullptr;
+    stageLoads.push_back({node, c, std::move(inner.load), ocean});
+    dStageLoads.push_back({node, c, std::move(inner.dload), ocean});
   }
   const auto w = NodeWeights(times);
   auto densityLoad = std::vector<std::vector<double>>(times.size());
@@ -915,7 +1062,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   }
   auto kernels = AssembleViews(times, std::move(directLoadKernels),
                                std::move(densityLoad), std::move(lumps),
-                               oceanFunctions);
+                               oceanFunctions, stageLoads);
   // the kernels and their derivatives as densities per unit volume
   const auto& kernelMesh = op.BaseMaterial().Mesh();
   auto samples = [&](std::vector<std::vector<double>> atPoints) {
@@ -934,7 +1081,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   kernels.muKernel = pointSamples(std::move(muKernel));
   KernelDerivatives derivatives;
   DerivativeViews(derivatives, C, rhoI, rhoW, times, std::move(dloadDuals),
-                  oceanFunctions);
+                  oceanFunctions, dStageLoads);
   derivatives.itauKernel = samples(std::move(dItauKernel));
   derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
   derivatives.muKernel = pointSamples(std::move(dMuKernel));

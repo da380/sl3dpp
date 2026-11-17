@@ -8,8 +8,15 @@ library's `sl3dpp::io::TrajectoryStore` (`include/sl3dpp/io/TrajectoryStore.hpp`
 writes and reads it; `sl3d solve` records into it and `sl3d kernel`
 sweeps from it (sl3d-configs.md, "The `trajectory` block"). This document
 is the store's specification: its directory layout, its files byte by
-byte, what the run hash must cover, and what a reader must check. Version
-1 is described.
+byte, what the run hash must cover, and what a reader must check. Two
+versions are described: version 1, the store of a run under a one-stage
+time scheme, and version 2, the store of a run under a multi-stage one
+(`Scheme::Sdirk2`, the default scheme), which holds each step's inner
+stages beside its nodes. A writer writes the version its run's scheme
+calls for (`Description::staged`; a snapshot that carries inner stages
+put to a store described without them is refused, the stages never
+dropped); a reader reads both, and refuses a store of one for a run of
+the other.
 
 ## What a store holds
 
@@ -26,7 +33,16 @@ time's nodes), recorded at stride s (every s-th node and the last are
   a run under migrating shorelines, and the 3D closure's diagnostics;
 - for every kept node, on every process, its *state record*: the
   process's internal state at the node and, under interior sources, the
-  sources' forces (and in 1D the toroidal systems' state).
+  sources' forces (and in 1D the toroidal systems' state);
+- in version 2, for every node, what closed each inner stage of the step
+  ending there (Sdirk2's first stage, at t + γ Δt; none at the first
+  node and at the second node of a repeated pair, whose step is one
+  stage): the total-load and centrifugal coefficients the solid body
+  answered at the stage and, under migrating shorelines, the stage's
+  ocean function, in the node's surface record; and, under interior
+  sources, the sources' forces at the stage, in the node's state record.
+  The stages' internal states are not held: a sweep repeats a stage from
+  the node below under its closure (adjoints.md §1a).
 
 That is what the sweeps of `AdjointSolver` and `AdjointSolver3D` read
 from a `ForwardTrajectory` or `ForwardTrajectory3D` built from the run's
@@ -99,7 +115,7 @@ field:
 | --- | --- | --- |
 | tag | 8 bytes | `SL3DTRAJ` (ASCII) |
 | byte order | `u64` | 0x0102030405060708, written little-endian: the bytes 08 07 06 05 04 03 02 01 |
-| version | `u64` | 1 |
+| version | `u64` | 1, or 2 where the run is under a multi-stage scheme |
 | complete | `flag` | 1 once the recording finished, 0 until then |
 | hash | `text` | the run hash (below) |
 | writer | `text` | the program that wrote it, for provenance (`sl3dpp <version>`) |
@@ -110,6 +126,7 @@ field:
 | migrating | `flag` | the shorelines migrate: every surface record holds an ocean function |
 | sources | `flag` | interior sources: s = 1, every state record holds the forces and a state with its strain |
 | tide | `flag` | a prescribed tide forces the run |
+| staged | `flag` | version 2 alone (version 1 has no such field, and is not staged): the records hold the steps' inner stages |
 | field size | `u64` | F, the points of a surface field (`SurfaceGrid::FieldSize`) |
 | cuts | `u64` C, then C `i64` | the radial cuts of the mesh (`Viscoelastic3D::Options::radial_cuts`); none on one process |
 | parts | `u64` R, then R times three `u64` | per rank: its first segment, its count of segments (contiguous), and its grid values (`GridCoupling::GridValueCount`; 0 in 1D) |
@@ -119,8 +136,11 @@ field:
 
 The sizes are 0 until the recording is complete. A reader checks the tag,
 the byte order (a big-endian file reads the mark back byte-swapped, and is
-refused as such) and the version before reading further: a later version
-may lay out what follows otherwise.
+refused as such) and the version before reading further: a version it
+does not know is refused, since it may lay out what follows otherwise.
+Version 2 differs from version 1 in the manifest's `staged` field and in
+the stages its surface and state records carry (below), and in nothing
+else.
 
 ## Records
 
@@ -167,6 +187,7 @@ The node's snapshot beside its state (`Evolution::Snapshot`,
 | ocean function | `vec` (F or 0) | empty unless the shorelines migrate |
 | load coefficients | `cvec` | the total load the body answered (`SurfaceGrid::Index` layout, m >= 0) |
 | tide coefficients | `cvec` | the centrifugal and tidal potential it answered, likewise |
+| stages | `u64` S, then S times (`cvec`, `cvec`, `vec`) | a staged store alone (version 2): the inner stages of the step ending at the node, in order, each its load coefficients, its tide coefficients and its ocean function (F values under migrating shorelines, none otherwise); S = 0 at the first node and at the second node of a repeated pair |
 
 ### A state record (`rank_RRRR/node_NNNNNN.state`, kind 3)
 
@@ -175,6 +196,7 @@ One per kept node and process. In 1D (`Evolution`):
 | Field | Encoding | Meaning |
 | --- | --- | --- |
 | forces | presence flag; `degrees` spheroidal, `degrees` toroidal | the sources' forces (`RadialSourceForces`), under sources |
+| stage forces | `u64` S, then S times (presence flag; `degrees` spheroidal, `degrees` toroidal) | a staged store alone: the sources' forces at each inner stage of the step ending at the node, S the count of the node's surface record |
 | toroidal state | presence flag; `f64` t, `degrees` m, `degrees` strain | the toroidal systems' state (`ToroidalViscoelastic::State`), under sources |
 | state | presence flag; `f64` t, `degrees` m, `u64` count then per entry `i64` degree and `i64` columns, `degrees` strain | the internal state (`ViscoelasticState`: `m`, `columns`, `strain`; the strain empty unless recorded with it, as under sources) |
 
@@ -183,14 +205,16 @@ In 3D (`Evolution3D`), the process's own radial segments:
 | Field | Encoding | Meaning |
 | --- | --- | --- |
 | forces | presence flag; `cdegrees` spheroidal, `cdegrees` toroidal | the sources' forces (`DegreeFields`), under sources |
+| stage forces | `u64` S, then S times (presence flag; `cdegrees` spheroidal, `cdegrees` toroidal) | a staged store alone: the sources' forces at each inner stage of the step ending at the node |
 | state | presence flag; `f64` t, `u64` K then K tensors, presence flag then a tensor (the strain), presence flag then a spectral tensor (the strain's coefficients) | the internal state (`Viscoelastic3D::State`; the strain and its coefficients absent unless recorded with them, as under sources) |
 
 A tensor (`GridCoupling::TensorField`) is `cvec` c[0] (spin -2), `cvec`
 c[1] (spin -1), `vec` r (spin 0) and `u64` S then S `vec` scalar
 companions; a spectral tensor (`GridCoupling::SpectralTensor`) is `cvec`
 c[0], `cvec` c[1], `cvec` r and `u64` S then S `cvec`. A 3D reader reads
-the forces of every node with the snapshots (they lead the record, so the
-state need not be read for them) and each state as the sweep reaches it.
+the forces of every node with the snapshots, the node's and its inner
+stages' (they lead the record, so the state need not be read for them),
+and each state as the sweep reaches it.
 
 ## The run hash
 
@@ -301,7 +325,10 @@ A reader checks, in this order, refusing each fault as its own:
 4. complete = 1 (an incomplete store is refused for reading; a recorder
    may replace it, or the resumed run continue it);
 5. the dimension, times (bitwise), field size and the migrating, sources
-   and tide flags equal the run's;
+   and tide flags equal the run's, and the store is staged where the
+   run's scheme has several stages and not otherwise (a store recorded
+   without the stages, version 1, is refused for a run under Sdirk2 as
+   its own fault: it is recorded again, never read as if it held them);
 6. the stride equals the run's;
 7. the processes' layout: the rank count, the cuts and every rank's part
    equal the run's;
@@ -323,7 +350,8 @@ last always kept):
 
 - surface records: about N (8 F f + 16 (L + 1)(L + 2)) bytes, f = 4
   fields, 5 with a toroidal potential, one more under migrating
-  shorelines;
+  shorelines; a staged store's hold each step's first stage beside,
+  16 (L + 1)(L + 2) bytes more and, under migrating shorelines, 8 F;
 - 1D states: about k * 24 K E (L + 1)(L + 2) bytes, K the relaxing
   branches and E the radial mesh's points (elements times GLL points):
   m holds K x 3 x E values per column, 2 (l + 1) columns at degree l.

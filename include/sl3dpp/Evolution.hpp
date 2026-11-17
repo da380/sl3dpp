@@ -10,8 +10,10 @@
  * channels, the SLE closes the step's equilibrium with the matching
  * per-(scheme, dt) effective Love numbers, and the step finishes under the
  * converged load and centrifugal channels. Under Sdirk2 a step is two such
- * backward Euler stages, the first closed under the forcing at its own
- * time inside the step (StepRecipe.hpp).
+ * backward Euler stages, the first closed under the forcing of the
+ * step's two nodes combined, 1 - gamma of the start node's and gamma of
+ * the end node's (StepRecipe.hpp): the forcing is read at the nodes
+ * alone.
  *
  * Internal component, non-dimensional: the radial operator works in the
  * material's scheme and the sea level solver in its own, with the unit
@@ -121,6 +123,36 @@ class Evolution {
     /// And the sources' forces at the node, which the derivative runs
     /// about this one apply again.
     std::optional<RadialSourceForces> sourceForces;
+    /// An inner stage of the step that ends at the node, under a
+    /// multi-stage scheme (StepRecipe.hpp; Sdirk2's first stage, at
+    /// t + gamma dt): what closed it. A derivative run about the step
+    /// (the discrete adjoint, the tangent-linear run, the second-order
+    /// sweeps) and the rebuild of a state between kept ones repeat the
+    /// stage from the node below under this closure, one stage solve with
+    /// no sea level equation to close, so the stage's internal state is
+    /// not kept. The coefficients are kept whenever the node's are
+    /// (Options::record_stride), the ocean function under migrating
+    /// shorelines, the forces under interior sources.
+    struct Stage {
+      /// The total-load and centrifugal coefficients the stage's solid
+      /// body answered, material units (as loadCoefficients).
+      std::vector<std::complex<double>> loadCoefficients;
+      std::vector<std::complex<double>> tideCoefficients;
+      /// The stage's ocean function under migrating shorelines.
+      std::vector<double> oceanFunction;
+      /// The sources' forces at the stage (the two nodes' combined).
+      std::optional<RadialSourceForces> sourceForces;
+      /// A recorded tangent-linear run's own state at the stage, with its
+      /// strain, and its toroidal systems' (TangentLinearSolver::Options::
+      /// record): a tangent run's stage is not rebuilt from its closure
+      /// alone. Absent on a forward run's snapshots.
+      std::optional<ViscoelasticState> internalState;
+      std::optional<ToroidalViscoelastic::State> toroidalState;
+    };
+    /// The inner stages of the step ending at the node, in order: empty
+    /// under a one-stage scheme, at the first node and at the second node
+    /// of a repeated pair (a zero-length step is one stage).
+    std::vector<Stage> stages;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -142,10 +174,11 @@ class Evolution {
   };
 
   struct Options {
-    /// The time step (StepWeights.hpp): the exponential trapezoid,
-    /// backward Euler, or Sdirk2's two backward Euler stages, each closed
-    /// under the forcing at its own time (StepRecipe.hpp).
-    Scheme scheme = Scheme::ExponentialTrapezoid;
+    /// The time step (StepWeights.hpp): Sdirk2's two backward Euler
+    /// stages (the default), the second closed under the node's forcing
+    /// and the first under the step's two nodes' combined
+    /// (StepRecipe.hpp); the exponential trapezoid; or backward Euler.
+    Scheme scheme = Scheme::Sdirk2;
     RotationalFeedback rotation = RotationalFeedback::Full;
     double rtol = 1e-9;
     int anderson_memory = 5;
@@ -167,7 +200,8 @@ class Evolution {
     /// Under migrating shorelines, the points held as land whatever the
     /// flotation at time t (solver units), a mask on the solver's grid
     /// (empty: none held), for a land mask that changes in time: each
-    /// node's nonlinear solve holds the mask at its time
+    /// node's nonlinear solve holds the mask at its time, and so does a
+    /// stage inside the step ending there
     /// (GRDSolver::NonlinearForcing::forcedLand). Its mask at a run's first
     /// time must be the background state's. Absent, the background state's
     /// at every node; a frozen run's ocean function is the background's

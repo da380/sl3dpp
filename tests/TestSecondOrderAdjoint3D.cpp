@@ -343,10 +343,16 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
   // 1D.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
+  // the continuous second order is built for the one-stage schemes: the
+  // exponential trapezoid stated for it, the default scheme for the discrete
+  const auto scheme = method == AdjointMethod::Continuous
+                          ? Scheme::ExponentialTrapezoid
+                          : Evolution::Options{}.scheme;
   Evolution evolution1(op1, scene.solver, scene.state,
-                               {.rotation = RotationalFeedback::None,
-                                .rtol = 1e-12,
-                                .record_stride = 1});
+                       {.scheme = scheme,
+                        .rotation = RotationalFeedback::None,
+                        .rtol = 1e-12,
+                        .record_stride = 1});
   const auto trajectory1 =
       ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
   TangentPerturbation v1;
@@ -369,7 +375,8 @@ void ZeroLateralMatchesThe1D(AdjointMethod method, double tol) {
                      {.memory_points = MemoryPointSet::Gll});
   Evolution3D evolution3(
       op3, scene.solver, scene.state,
-      {.rotation = RotationalFeedback::None,
+      {.scheme = scheme,
+       .rotation = RotationalFeedback::None,
        .rtol = 1e-12,
        .coupled_rtol = 1e-12,
        .record_stride = 1});
@@ -511,9 +518,12 @@ TEST(SecondOrderAdjoint3D, LateralHessianIsSymmetricAndAdjointToTheSecondOrderRu
                                   [&, eps](double r, double theta, double phi) {
                                     return baseDelta(r, theta, phi) + eps * p(theta, phi);
                                   });
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
       *evOut = new Evolution3D(
           **opOut, scene.solver, scene.state,
-          {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+          {.scheme = Scheme::ExponentialTrapezoid,
+           .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     };
     Viscoelastic3D* op = nullptr;
     Evolution3D* evolution = nullptr;
@@ -960,9 +970,12 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rotation = RotationalFeedback::Full,
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rotation = RotationalFeedback::Full,
          .rtol = 1e-12,
          .coupled_rtol = 1e-12,
          .record_stride = 1});
@@ -1272,9 +1285,12 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli)
       return out;
     };
     const auto thickness = scaled(fieldT, [](double s) { return 1.0 - s; });
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rotation = RotationalFeedback::None,
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rotation = RotationalFeedback::None,
          .rtol = 1e-12,
          .coupled_rtol = kModuliCoupledRtol,
          .record_stride = 1});
@@ -1645,9 +1661,12 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
           return std::vector<PointSource>{at};
         };
       }
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
       Evolution3D evolution(
           op, scene.solver, scene.state,
-          {.rotation = rotationOn ? RotationalFeedback::Full : RotationalFeedback::None, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+          {.scheme = Scheme::ExponentialTrapezoid,
+           .rotation = rotationOn ? RotationalFeedback::Full : RotationalFeedback::None, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
       const auto trajectory =
           ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
       auto measurements = std::map<std::size_t, Measurement>{};
@@ -1714,11 +1733,6 @@ TEST(SecondOrderAdjoint3D, ContinuousHessianRowsConvergeUnderSourcesAndRotation)
     }
     return gaps;
   };
-  loadDriven = true;
-  for (const auto& g : gapsOf(false)) {
-    std::printf("load-driven, along the parameters: viscosity %.3e kappa %.3e mu %.3e\n",
-                g.viscosity, g.kappa, g.mu);
-  }
   // Three cases: about the source-driven run along a direction in the
   // viscosity and the moduli, and along one that perturbs the sources;
   // and about a load-driven run along the moduli alone with the
@@ -1817,8 +1831,11 @@ TEST(SecondOrderAdjoint3D, ContinuousForcingRowsConverge) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[times.size() / 2].relativeSeaLevelDual = gSea;
     measurements[times.size() - 1].displacementDual = gU;
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.rotation = RotationalFeedback::Full,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .record_stride = 1});
@@ -1942,8 +1959,11 @@ TEST(SecondOrderAdjoint3D, OneNodeIsTheElasticProblemInEveryClass) {
         },
         options);
     const auto& coupling = op.Coupling();
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.rotation = RotationalFeedback::Full,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = kModuliCoupledRtol,
                            .record_stride = 1});
@@ -2136,7 +2156,10 @@ TEST(SecondOrderAdjoint3D, PotentialMeasurementUnderRotationAndLateralModuli) {
   };
   for (const auto rotation : {RotationalFeedback::Axial, RotationalFeedback::Full}) {
     const auto name = std::string(rotation == RotationalFeedback::Full ? "full" : "axial");
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     const auto evolutionOptions = Evolution3D::Options{
+        .scheme = Scheme::ExponentialTrapezoid,
         .rotation = rotation, .rtol = 1e-12, .coupled_rtol = kModuliCoupledRtol,
         .record_stride = 1};
     auto runOf = [&](Evolution3D& evolution, const std::vector<double>& f) {
@@ -2327,9 +2350,12 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
     const auto times = onsetGrid(6);
     const auto right = std::size_t{4};
     const auto acting = tensors(1, 1.0).front();
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, baseRun(times, right, acting)));
     auto measurements = std::map<std::size_t, Measurement>{};
@@ -2441,7 +2467,8 @@ TEST(SecondOrderAdjoint3D, HessianAcrossAnOnset) {
     const auto times = onsetGrid(steps);
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution3D evolution(op, scene.solver, scene.state,
-                          {.rotation = RotationalFeedback::Full,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .record_stride = 1});
@@ -2584,9 +2611,12 @@ TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
   {
     const auto times = onsetGrid(6);
     const auto right = std::size_t{4};
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 2});
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 2});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, loadsOn(times[right])));
     ASSERT_FALSE(trajectory.Kept(right - 1));
@@ -2649,7 +2679,8 @@ TEST(SecondOrderAdjoint3D, HessianAcrossALoadJump) {
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(
         evolution.Run(times, loadsOn(times[right])));
     auto measurements = std::map<std::size_t, Measurement>{};

@@ -10,6 +10,7 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepRecipe.hpp"
+#include "sl3dpp/detail/StepStages3D.hpp"
 #include "sl3dpp/StepWeights.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources3D.hpp"
@@ -23,6 +24,7 @@ namespace {
 using Complex = std::complex<double>;
 using Snapshot = Evolution3D::Snapshot;
 using State = Viscoelastic3D::State;
+using detail::StageRef;
 
 void CheckTimes(std::span<const double> times) { detail::CheckTimeGrid(times); }
 
@@ -92,10 +94,36 @@ class TangentLinearSolver3D::ForwardCursor3D {
         scheme_(scheme),
         control_(control),
         loadOf_(std::move(loadOf)),
-        tideOf_(std::move(tideOf)) {
+        tideOf_(std::move(tideOf)),
+        redo_{&op, &trajectory, scheme, control, loadOf_, tideOf_} {
+    redo_.Check(dts_);
     state_ = Kept(0);
     Prime(0);
   }
+
+  /// The forward states of the stages of the step ending at a node >= 1
+  /// (detail::StagePointers3D): under a one-stage scheme the two nodes'
+  /// states; under a multi-stage one an inner stage's end state is the
+  /// stage repeated under its recorded closure. Formed once per node; the
+  /// reference stays valid until the cursor advances past the node.
+  const detail::StagePointers3D& Step(std::size_t node) {
+    if (stagesNode_ != node) {
+      const auto& end = At(node);
+      const auto& start = At(node - 1);
+      const auto dt = dts_[node - 1];
+      const auto recipe = RecipeOf(scheme_, dt);
+      const auto refs = detail::StagesOf(recipe, dt, node);
+      stages_ = redo_.Stages(recipe, refs, dt, start, end);
+      stagesNode_ = node;
+    }
+    return stages_;
+  }
+  /// What closed a stage on the recorded run.
+  [[nodiscard]] detail::StageClosure3D ClosureOf(const StageRef& ref) const {
+    return detail::ClosureOf(*trajectory_, ref);
+  }
+  [[nodiscard]] const std::vector<double>& StepSizes() const { return dts_; }
+  [[nodiscard]] Scheme GetScheme() const { return scheme_; }
 
   /// The forward state at a node, reconstructing as needed; the node
   /// before the current one is served from the kept previous state, so
@@ -106,7 +134,6 @@ class TangentLinearSolver3D::ForwardCursor3D {
     if (node < node_) {
       throw std::logic_error("the forward cursor moves forwards");
     }
-    const auto& op = *op_;
     while (node_ < node) {
       const auto target = node_ + 1;
       if (trajectory_->Kept(target)) {
@@ -117,15 +144,8 @@ class TangentLinearSolver3D::ForwardCursor3D {
         Prime(node_);
         continue;
       }
-      auto step = op.StartStep(state_, dts_[node_], scheme_, LoadsAt(node_),
-                               TidesAt(node_));
-      auto [strain, info] = step.Close(LoadsAt(target), TidesAt(target), control_);
-      if (!info.converged) {
-        throw std::runtime_error(std::format(
-            "rebuilding the forward state at node {} did not converge",
-            target));
-      }
-      auto next = std::move(step).Finish(std::move(strain));
+      // the run's step again, stage by stage under a multi-stage scheme
+      auto next = redo_.Step(target, dts_[node_], state_);
       previous_ = std::move(state_);
       state_ = std::move(next);
       node_ = target;
@@ -161,9 +181,13 @@ class TangentLinearSolver3D::ForwardCursor3D {
   Scheme scheme_;
   Viscoelastic3D::IterationControl control_;
   LoadOf loadOf_, tideOf_;
+  detail::ForwardStages3D redo_;
   std::size_t node_ = 0;
   Viscoelastic3D::State state_;
   std::optional<Viscoelastic3D::State> previous_;
+  /// The stage states of the step ending at stagesNode_.
+  detail::StagePointers3D stages_;
+  std::size_t stagesNode_ = 0;
 };
 
 namespace {
@@ -200,10 +224,7 @@ void Accumulate(std::vector<GridCoupling::TensorField>& total,
 
 TangentLinearSolver3D::TangentLinearSolver3D(const Evolution3D& evolution,
                                              Options options)
-    : evolution_(&evolution), options_(std::move(options)) {
-  detail::RefuseDerivativeOfMultiStage(evolution.options_.scheme,
-                                       "the tangent-linear run");
-}
+    : evolution_(&evolution), options_(std::move(options)) {}
 
 std::vector<std::vector<double>> TangentLinearSolver3D::ItauOfLogViscosity(
     const Viscoelastic3D& op, std::span<const double> field) {
@@ -389,7 +410,9 @@ struct TangentLinearSolver3D::MaterialForcing3D {
   /// The start's forces on a zero-length step instead (the start under
   /// lateral moduli, where the instantaneous response is a fixed point).
   virtual void ApplyStart(Viscoelastic3D::OpenStep& step) const = 0;
-  virtual void Apply(std::size_t node, double dt, Scheme scheme,
+  /// The forces on a stage of a step (the step's one stage under a
+  /// one-stage scheme), on the stage as opened.
+  virtual void Apply(const StageRef& stage,
                      Viscoelastic3D::OpenStep& step) const = 0;
 };
 
@@ -535,17 +558,20 @@ struct TangentLinearSolver3D::MaterialDrive3D
     std::optional<GridCoupling::TensorField> own;
     const GridCoupling::TensorField* strain = nullptr;
   };
-  Base BaseAt(std::size_t node) const {
+  /// (at a stage's end: a node, the first among them, or an inner stage)
+  Base BaseAt(const StageRef& ref) const {
     const auto& op = *ev->op_;
-    const auto& state = cursor->At(node);
+    const auto& state = ref.node == 0 ? cursor->At(0)
+                                      : *cursor->Step(ref.node).ends[ref.index];
+    const auto closure = cursor->ClosureOf(ref);
     Base base;
-    const auto load = ev->Columns(trajectory->loads[node], ev->toMatDensity_);
-    const auto tide = ev->Columns(trajectory->tides[node], ev->toMatPotential_);
+    const auto load = ev->Columns(*closure.load, ev->toMatDensity_);
+    const auto tide = ev->Columns(*closure.tide, ev->toMatPotential_);
     if (!direction.kappa.empty() || !state.strain) {
       base.x = op.SolveElastic(state, load, tide);
-      if (!trajectory->sourceForces.empty()) {
+      if (closure.forces != nullptr) {
         // a source-driven base: under the sources' forces too
-        const auto& forces = trajectory->sourceForces[node];
+        const auto& forces = *closure.forces;
         const auto add = op.SolveUnrelaxed(forces.spheroidal, forces.toroidal);
         // (none where no source acts at the node)
         for (auto* pair : {&base.x->spheroidal, &base.x->toroidal}) {
@@ -573,12 +599,12 @@ struct TangentLinearSolver3D::MaterialDrive3D
   /// whose surface values close the start's sea level solve and whose
   /// strain seeds the first step.
   Solutions StartResponse() const override {
-    const auto base = BaseAt(0);
+    const auto base = BaseAt(StageRef{});
     return UnrelaxedResponse(*base.strain, base.x ? &*base.x : nullptr, nullptr);
   }
 
   void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
-    const auto base = BaseAt(0);
+    const auto base = BaseAt(StageRef{});
     auto [analysed, bulk] =
         Forces(*base.strain, base.x ? &*base.x : nullptr, direction.mu, nullptr);
     step.AddForce(analysed, bulk);
@@ -589,25 +615,26 @@ struct TangentLinearSolver3D::MaterialDrive3D
   /// mu_eff(x) = delta mu(x) (1 - sum_k f_k beta_k(x)) with the step's
   /// own lateral weights — and the memory force of the decayed memory
   /// with delta mu_k = f_k delta mu.
-  void Apply(std::size_t node, double dt, Scheme scheme,
+  void Apply(const StageRef& ref,
              Viscoelastic3D::OpenStep& step) const override {
     const auto& op = *ev->op_;
+    const auto node = ref.node;
     auto shear = std::vector<double>{};
     auto memoryForce = std::optional<Tensor>{};
     if (!direction.mu.empty()) {
-      // The BASE step's decayed memory m~ = e m + alpha d_0 (the step
+      // The BASE stage's decayed memory m~ = e m + alpha d_0 (the step
       // given is the tangent's, whose memory is the tangent's own),
-      // opened on the base state before the node — the weights are the
-      // step's, lateral alike.
-      const auto prev = cursor->At(node - 1);
+      // opened on the base stage's memory state — the weights are the
+      // stage's, lateral alike.
+      const auto& from = *cursor->Step(node).starts[ref.index];
       const auto baseStep = op.StartStep(
-          prev, dt, scheme,
+          from, ref.length, ref.family,
           ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
           ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
       shear = EffectiveShear(baseStep);
       memoryForce = MemoryVariation(baseStep.memory_);
     }
-    const auto base = BaseAt(node);
+    const auto base = BaseAt(ref);
     auto [analysed, extra] = Forces(*base.strain, base.x ? &*base.x : nullptr,
                                     shear, memoryForce ? &*memoryForce : nullptr);
     step.AddForce(analysed, extra);
@@ -639,6 +666,29 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   const ForwardTrajectory3D* trajectory = nullptr;
   ForwardCursor3D* cursor = nullptr;
   std::vector<Part> parts;
+  /// Each part's tangent run's states of the stages of the step in hand.
+  mutable std::vector<detail::StagePointers3D> tangentStages;
+  mutable std::size_t tangentNode = 0;
+
+  /// A recorded tangent run's record at a stage's end.
+  struct Record {
+    const Viscoelastic3D::State* state = nullptr;
+    const std::vector<Complex>* load = nullptr;
+    const std::vector<Complex>* tide = nullptr;
+    const DegreeFields* forces = nullptr;
+  };
+  static Record RecordOf(std::span<const Snapshot> run, const StageRef& ref) {
+    const auto& snap = run[ref.node];
+    if (ref.Last()) {
+      return {&*snap.internalState, &snap.loadCoefficients,
+              &snap.tideCoefficients,
+              snap.sourceForces ? &*snap.sourceForces : nullptr};
+    }
+    const auto& stage = snap.stages[ref.index];
+    return {&*stage.internalState, &stage.loadCoefficients,
+            &stage.tideCoefficients,
+            stage.sourceForces ? &*stage.sourceForces : nullptr};
+  }
 
   Viscoelastic3D::LoadCallable3D Loads(const std::vector<Complex>& c) const {
     return ev->Columns(c, ev->toMatDensity_);
@@ -663,17 +713,15 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   /// b's full tangent solutions at a node: the unrelaxed solve under its
   /// recorded loads and memory, plus its own material force's response
   /// on the base solution (with its strain and memory) there.
-  Solutions TangentSolution(const Part& part, std::size_t node,
+  Solutions TangentSolution(const Part& part, const StageRef& ref,
                             const Tensor& baseStrain, const Solutions* baseX,
                             const std::vector<Tensor>* baseMemory) const {
     const auto& op = *ev->op_;
-    const auto& snap = part.b[node];
-    auto x = op.SolveElastic(*snap.internalState, Loads(snap.loadCoefficients),
-                             Tides(snap.tideCoefficients));
-    if (snap.sourceForces) {
+    const auto snap = RecordOf(part.b, ref);
+    auto x = op.SolveElastic(*snap.state, Loads(*snap.load), Tides(*snap.tide));
+    if (snap.forces != nullptr) {
       // b perturbs the sources: its solution is under their forces too
-      Add(x, op.SolveUnrelaxed(snap.sourceForces->spheroidal,
-                               snap.sourceForces->toroidal));
+      Add(x, op.SolveUnrelaxed(snap.forces->spheroidal, snap.forces->toroidal));
     }
     if (part.bMaterial) {
       Add(x, part.bMaterial->UnrelaxedResponse(baseStrain, baseX, baseMemory));
@@ -685,13 +733,13 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   /// the recorded loads and, about a source-driven run, the sources'
   /// forces.
   Solutions BaseSolution(const Viscoelastic3D::State& state,
-                         std::size_t node) const {
+                         const StageRef& ref) const {
     const auto& op = *ev->op_;
-    auto x = op.SolveElastic(state, Loads(trajectory->loads[node]),
-                             Tides(trajectory->tides[node]));
-    if (!trajectory->sourceForces.empty()) {
-      const auto& forces = trajectory->sourceForces[node];
-      Add(x, op.SolveUnrelaxed(forces.spheroidal, forces.toroidal));
+    const auto closure = cursor->ClosureOf(ref);
+    auto x = op.SolveElastic(state, Loads(*closure.load), Tides(*closure.tide));
+    if (closure.forces != nullptr) {
+      Add(x, op.SolveUnrelaxed(closure.forces->spheroidal,
+                               closure.forces->toroidal));
     }
     return x;
   }
@@ -709,13 +757,14 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   }
 
   Solutions StartResponse() const override {
+    const auto first = StageRef{};
     const auto& base0 = cursor->At(0);
-    const auto x0 = BaseSolution(base0, 0);
+    const auto x0 = BaseSolution(base0, first);
     auto own = std::optional<Tensor>{};
     const auto& strain0 = BaseStrain(base0, x0, own);
     auto total = Solutions{};
     for (const auto& part : parts) {
-      const auto xb = TangentSolution(part, 0, strain0, &x0, nullptr);
+      const auto xb = TangentSolution(part, first, strain0, &x0, nullptr);
       Add(total, part.a->UnrelaxedResponse(*part.b[0].internalState->strain,
                                            &xb, nullptr));
     }
@@ -723,39 +772,59 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
   }
 
   void ApplyStart(Viscoelastic3D::OpenStep& step) const override {
+    const auto first = StageRef{};
     const auto& base0 = cursor->At(0);
-    const auto x0 = BaseSolution(base0, 0);
+    const auto x0 = BaseSolution(base0, first);
     auto own = std::optional<Tensor>{};
     const auto& strain0 = BaseStrain(base0, x0, own);
     for (const auto& part : parts) {
-      const auto xb = TangentSolution(part, 0, strain0, &x0, nullptr);
+      const auto xb = TangentSolution(part, first, strain0, &x0, nullptr);
       auto [analysed, bulk] = part.a->Forces(*part.b[0].internalState->strain,
                                              &xb, part.a->direction.mu, nullptr);
       step.AddForce(analysed, bulk);
     }
   }
 
-  void Apply(std::size_t node, double dt, Scheme scheme,
+  void Apply(const StageRef& ref,
              Viscoelastic3D::OpenStep& step) const override {
     const auto& op = *ev->op_;
-    const Viscoelastic3D::State basePrev = cursor->At(node - 1);
-    const auto& baseN = cursor->At(node);
-    const auto xN = BaseSolution(baseN, node);
+    const auto node = ref.node;
+    const auto& base = cursor->Step(node);
+    if (tangentNode != node) {
+      // each part's tangent run's stage states, from its record
+      const auto dt = cursor->StepSizes()[node - 1];
+      const auto recipe = RecipeOf(cursor->GetScheme(), dt);
+      tangentStages.clear();
+      for (const auto& part : parts) {
+        tangentStages.push_back(detail::ForwardStages3D::PointersOfStages(
+            op, recipe, dt, *part.b[node - 1].internalState,
+            *part.b[node].internalState,
+            [&](std::size_t index, const Viscoelastic3D::State&,
+                detail::StagePointers3D::Owned&) {
+              return &*part.b[node].stages[index].internalState;
+            }));
+      }
+      tangentNode = node;
+    }
+    const auto& basePrev = *base.starts[ref.index];
+    const auto& baseN = *base.ends[ref.index];
+    const auto xN = BaseSolution(baseN, ref);
     auto own = std::optional<Tensor>{};
     const auto& strainN = BaseStrain(baseN, xN, own);
-    // The base step before the node, for its lateral weights.
-    const auto baseStep =
-        op.StartStep(basePrev, dt, scheme, Loads(trajectory->loads[node - 1]),
-                     Tides(trajectory->tides[node - 1]));
-    for (const auto& part : parts) {
-      const auto xb = TangentSolution(part, node, strainN, &xN, &baseN.m);
+    // The base stage, for its lateral weights.
+    const auto baseStep = op.StartStep(basePrev, ref.length, ref.family,
+                                       Loads(trajectory->loads[node - 1]),
+                                       Tides(trajectory->tides[node - 1]));
+    for (auto p = std::size_t{0}; p < parts.size(); ++p) {
+      const auto& part = parts[p];
+      const auto xb = TangentSolution(part, ref, strainN, &xN, &baseN.m);
       const auto& prev = part.b[node - 1];
-      auto tstep = op.StartStep(*prev.internalState, dt, scheme,
-                                Loads(prev.loadCoefficients),
+      auto tstep = op.StartStep(*tangentStages[p].starts[ref.index], ref.length,
+                                ref.family, Loads(prev.loadCoefficients),
                                 Tides(prev.tideCoefficients));
       if (!part.bDitau.empty()) {
-        tstep.AddMemory(FirstOrderDrive(op, method, scheme, dt, basePrev, baseN,
-                                        part.bDitau));
+        tstep.AddMemory(FirstOrderDrive(op, method, ref.family, ref.length,
+                                        basePrev, baseN, part.bDitau));
       }
       const auto shear = part.a->EffectiveShear(baseStep);
       auto memoryForce = std::optional<Tensor>{};
@@ -763,7 +832,7 @@ struct TangentLinearSolver3D::MaterialSecondDrive3D
         memoryForce = part.a->MemoryVariation(tstep.memory_);
       }
       auto [analysed, extra] =
-          part.a->Forces(*part.b[node].internalState->strain, &xb, shear,
+          part.a->Forces(*RecordOf(part.b, ref).state->strain, &xb, shear,
                          memoryForce ? &*memoryForce : nullptr);
       step.AddForce(analysed, extra);
     }
@@ -808,7 +877,9 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
 std::vector<Snapshot> TangentLinearSolver3D::Run(
     std::span<const double> times, const TangentPerturbation3D& direction,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -820,6 +891,8 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   const auto values = op.Coupling().GridValueCount();
 
   CheckTimes(times);
+  detail::CheckStageOceanFunctions(scheme, times, migrating,
+                                   stageOceanFunctions, fieldSize);
   if (direction.Empty()) {
     throw std::invalid_argument("the tangent-linear run needs a direction");
   }
@@ -869,28 +942,46 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   if (!ditau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
-
+  if (IsMultiStage(scheme) && options_.method == AdjointMethod::Continuous &&
+      !ditau.empty()) {
+    throw std::invalid_argument(
+        "the continuous tangent-linear drive of a direction in the "
+        "relaxation times (Options::method AdjointMethod::Continuous) is "
+        "not built for Sdirk2: it serves the continuous second-order sweep, "
+        "which is not built for it either. The discrete run (AdjointMethod::"
+        "Discrete, the default method) steps by the scheme's stages; or "
+        "state a one-stage scheme, Scheme::ExponentialTrapezoid, in the "
+        "evolution's Options::scheme, whose default is Sdirk2");
+  }
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
   const auto& C0 = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return migrating ? oceanFunctions[node] : C0;
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage, an inner stage's own before
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C0;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
-  const Direct directAt = [&, migrating](std::size_t node) {
+  // (the direction's node values combined as the forward run combines its
+  // forcing's at the stage, detail::AtStage; the grounding the stage's own)
+  const Direct directAt = [&, migrating](const StageRef& ref) {
     auto f = std::vector<double>{};
     auto ensure = [&] {
       if (f.empty()) f.assign(fieldSize, 0.0);
     };
     if (!direction.directLoad.empty()) {
       ensure();
-      const auto& df = direction.directLoad[node];
+      const auto df = detail::AtStage(
+          ref, [&](std::size_t node) { return direction.directLoad[node]; });
       for (auto i = std::size_t{0}; i < fieldSize; ++i) f[i] += df[i];
     }
     if (!direction.iceThickness.empty()) {
       ensure();
-      const auto& Cn = oceanAt(node);
-      const auto& dIn = direction.iceThickness[node];
+      const auto& Cn = oceanAt(ref);
+      const auto dIn = detail::AtStage(
+          ref, [&](std::size_t node) { return direction.iceThickness[node]; });
       const auto& dI0 = direction.iceThickness[0];
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         f[i] += rhoI * (1.0 - Cn[i]) * dIn[i] - rhoI * (1.0 - C0[i]) * dI0[i];
@@ -898,7 +989,7 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
     }
     if (migrating && !direction.initialSeaLevel.empty()) {
       ensure();
-      const auto& Cn = oceanAt(node);
+      const auto& Cn = oceanAt(ref);
       const auto& dS = direction.initialSeaLevel;
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         f[i] += rhoW * (Cn[i] - C0[i]) * dS[i];
@@ -914,10 +1005,12 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
                    LoadColumnsOf(), TideColumnsOf());
   }
   if (!ditau.empty()) {
-    drive = [&](std::size_t node, double dt) {
-      const State prev = cursor->At(node - 1);
-      const auto& next = cursor->At(node);
-      return FirstOrderDrive(op, options_.method, scheme, dt, prev, next, ditau);
+    // each stage driven about its own forward states
+    drive = [&](const StageRef& ref) {
+      const auto& forward = cursor->Step(ref.node);
+      return FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                             *forward.starts[ref.index],
+                             *forward.ends[ref.index], ditau);
     };
   }
   std::shared_ptr<MaterialDrive3D> material;
@@ -926,7 +1019,10 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   }
   Tide tideAt{};
   if (!direction.tide.empty()) {
-    tideAt = [&](std::size_t node) { return direction.tide[node]; };
+    tideAt = [&](const StageRef& ref) {
+      return detail::AtStage(
+          ref, [&](std::size_t node) { return direction.tide[node]; });
+    };
   }
   Sources sourcesAt{};
   if (!direction.sources.empty() || !direction.stressGluts.empty()) {
@@ -946,15 +1042,21 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   }
   Direct outsideAt{}, layerAt{};
   if (!direction.directLoadOutsideWaterBudget.empty()) {
-    outsideAt = [&](std::size_t node) {
-      return direction.directLoadOutsideWaterBudget[node];
+    outsideAt = [&](const StageRef& ref) {
+      return detail::AtStage(ref, [&](std::size_t node) {
+        return direction.directLoadOutsideWaterBudget[node];
+      });
     };
   }
   if (!direction.solidSurfaceChange.empty()) {
-    layerAt = [&](std::size_t node) { return direction.solidSurfaceChange[node]; };
+    layerAt = [&](const StageRef& ref) {
+      return detail::AtStage(ref, [&](std::size_t node) {
+        return direction.solidSurfaceChange[node];
+      });
+    };
   }
-  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
-               sourcesAt, outsideAt, layerAt);
+  return March(times, oceanFunctions, stageOceanFunctions, directAt, drive,
+               material.get(), tideAt, sourcesAt, outsideAt, layerAt);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -962,7 +1064,9 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
     std::span<const Snapshot> tangentV,
     const SecondOrderDirection3D& direction,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto scheme = ev.options_.scheme;
@@ -972,6 +1076,23 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const auto values = op.Coupling().GridValueCount();
 
   CheckTimes(times);
+  if (IsMultiStage(scheme) && !discrete) {
+    throw std::invalid_argument(
+        "the continuous second-order tangent-linear run (Options::method "
+        "AdjointMethod::Continuous) is not built for Sdirk2: its drive is a "
+        "one-stage step's. The discrete run (AdjointMethod::Discrete, the "
+        "default method) steps by the scheme's stages; or state a one-stage "
+        "scheme, Scheme::ExponentialTrapezoid, in the evolution's "
+        "Options::scheme, whose default is Sdirk2");
+  }
+  // the tangent runs recorded at every node with their strains and, under
+  // a multi-stage scheme, at every inner stage
+  auto requireRecorded = [&] {
+    for (const auto* run : {&tangentU, &tangentV}) {
+      detail::CheckRecordedTangent3D(*run, scheme, times);
+    }
+    CheckTrajectory(trajectory, nodes);
+  };
   struct Part {
     std::span<const Snapshot> along;  // empty: the forward trajectory
     const std::vector<std::vector<double>>* ditau;
@@ -992,43 +1113,56 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const bool both = !direction.itauU.empty() && !direction.itauV.empty();
   auto cursor = std::optional<ForwardCursor3D>{};
   Drive drive{};
+  // each tangent run's states of the stages of the step in hand
+  auto alongStages =
+      std::map<const Snapshot*, detail::StagePointers3D>{};
+  auto alongNode = std::size_t{0};
   if (!parts.empty()) {
-    for (const auto* run : {&tangentU, &tangentV}) {
-      if (run->size() != nodes) {
-        throw std::invalid_argument(
-            "the tangent-linear runs must give one snapshot per time node");
-      }
-      for (const auto& snap : *run) {
-        if (!snap.internalState.has_value() ||
-            !snap.internalState->strain.has_value()) {
-          throw std::invalid_argument(
-              "the tangent-linear runs must be recorded at every node "
-              "(TangentLinearSolver3D::Options::record)");
-        }
-      }
-    }
-    CheckTrajectory(trajectory, nodes);
+    requireRecorded();
     cursor.emplace(op, *trajectory, StepSizes(times), scheme, Control(),
                    LoadColumnsOf(), TideColumnsOf());
-    drive = [&, both](std::size_t node, double dt) {
-      const State basePrev = cursor->At(node - 1);
-      const auto& baseNext = cursor->At(node);
+    drive = [&, both](const StageRef& ref) {
+      const auto node = ref.node;
+      const auto& base = cursor->Step(node);
+      if (alongNode != node) {
+        const auto dt = cursor->StepSizes()[node - 1];
+        const auto recipe = RecipeOf(scheme, dt);
+        alongStages.clear();
+        for (const auto& part : parts) {
+          if (part.along.empty()) continue;
+          const auto run = part.along;
+          alongStages.insert_or_assign(
+              run.data(),
+              detail::ForwardStages3D::PointersOfStages(
+                  op, recipe, dt, *run[node - 1].internalState,
+                  *run[node].internalState,
+                  [run, node](std::size_t index, const State&,
+                              detail::StagePointers3D::Owned&) {
+                    return &*run[node].stages[index].internalState;
+                  }));
+        }
+        alongNode = node;
+      }
+      const auto& basePrev = *base.starts[ref.index];
+      const auto& baseNext = *base.ends[ref.index];
       auto total = std::vector<GridCoupling::TensorField>{};
       for (const auto& part : parts) {
         if (part.along.empty()) {
-          Accumulate(total, FirstOrderDrive(op, options_.method, scheme, dt,
-                                            basePrev, baseNext, *part.ditau));
-        } else {
           Accumulate(total,
-                     FirstOrderDrive(op, options_.method, scheme, dt,
-                                     *part.along[node - 1].internalState,
-                                     *part.along[node].internalState,
-                                     *part.ditau));
+                     FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                                     basePrev, baseNext, *part.ditau));
+        } else {
+          const auto& along = alongStages.at(part.along.data());
+          Accumulate(total,
+                     FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                                     *along.starts[ref.index],
+                                     *along.ends[ref.index], *part.ditau));
         }
       }
       if (both && discrete) {
-        Accumulate(total, SecondWeightDrive(op, scheme, dt, basePrev, baseNext,
-                                            direction.itauU, direction.itauV));
+        Accumulate(total,
+                   SecondWeightDrive(op, ref.family, ref.length, basePrev,
+                                     baseNext, direction.itauU, direction.itauV));
       }
       return total;
     };
@@ -1038,21 +1172,7 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
   const bool materialV = !direction.materialV.Empty();
   std::shared_ptr<MaterialSecondDrive3D> material;
   if (materialU || materialV) {
-    for (const auto* run : {&tangentU, &tangentV}) {
-      if (run->size() != nodes) {
-        throw std::invalid_argument(
-            "the tangent-linear runs must give one snapshot per time node");
-      }
-      for (const auto& snap : *run) {
-        if (!snap.internalState.has_value() ||
-            !snap.internalState->strain.has_value()) {
-          throw std::invalid_argument(
-              "the tangent-linear runs must be recorded at every node "
-              "(TangentLinearSolver3D::Options::record)");
-        }
-      }
-    }
-    CheckTrajectory(trajectory, nodes);
+    requireRecorded();
     if (!cursor) {
       cursor.emplace(op, *trajectory, StepSizes(times), scheme, Control(),
                      LoadColumnsOf(), TideColumnsOf());
@@ -1075,13 +1195,15 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
       material->parts.push_back({driveV, tangentU, driveU, direction.itauU});
     }
   }
-  const Direct none = [](std::size_t) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, none, drive, material.get());
+  const Direct none = [](const StageRef&) { return std::vector<double>{}; };
+  return March(times, oceanFunctions, stageOceanFunctions, none, drive,
+               material.get());
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
     const Direct& directAt, const Drive& drive,
     const MaterialForcing3D* material, const Tide& tideAt,
     const Sources& sourcesAt, const Direct& outsideAt,
@@ -1115,22 +1237,28 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
           "Evolution3D::Run");
     }
   }
+  detail::CheckStageOceanFunctions(scheme, times, migrating,
+                                   stageOceanFunctions, fieldSize);
   const auto rhoW = solver.WaterDensity();
   const auto& C0 = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return migrating ? oceanFunctions[node] : C0;
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage (and at the first node), an inner stage's own before
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C0;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
-  auto overrideAt = [&](std::size_t node) {
-    return migrating ? oceanFunctions[node] : std::vector<double>{};
+  auto overrideAt = [&](const StageRef& ref) {
+    return migrating ? oceanAt(ref) : std::vector<double>{};
   };
-  // the node's load outside the water budget, which joins the total
+  // the stage's load outside the water budget, which joins the total
   // load, and its layer on the solid surface
   auto outsideNow = std::vector<double>{};
   auto layerNow = std::vector<double>{};
   auto totalLoadCoefficients = [&](const std::vector<double>& f,
                                    const std::vector<double>& slc,
-                                   std::size_t node) {
-    const auto& Cn = oceanAt(node);
+                                   const StageRef& ref) {
+    const auto& Cn = oceanAt(ref);
     auto total = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       total[i] = (f.empty() ? 0.0 : f[i]) +
@@ -1200,7 +1328,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto step = std::optional<Viscoelastic3D::OpenStep>{};
   const GRDSolver* effectiveSolver = nullptr;
   auto f = std::vector<double>{};
-  auto node = std::size_t{0};
+  // the stage in hand (the first node a stage of its own)
+  auto stageNow = StageRef{};
   auto closure = [&](const Viscoelastic3D::Solutions& responses) {
     GRDSolver::GeneralisedForcing coupled;
     coupled.directLoad = f;
@@ -1217,9 +1346,9 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
         ev.Coefficients(op.SurfaceToroidal(responses), ev.toNdLength_);
     coupled.inertiaMomentChange = step->InertiaMoment(responses) * ev.toNdMoment_;
     coupled.rotation = rotation;
-    coupled.oceanFunctionOverride = overrideAt(node);
+    coupled.oceanFunctionOverride = overrideAt(stageNow);
     response = effectiveSolver->SolveGeneralised(ev.state_, coupled, sleOptions);
-    sigma = totalLoadCoefficients(f, response.relativeSeaLevelChange, node);
+    sigma = totalLoadCoefficients(f, response.relativeSeaLevelChange, stageNow);
     psi = centrifugal(response);
     agree();
     return std::pair{ev.Columns(sigma, ev.toMatDensity_),
@@ -1245,18 +1374,27 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   auto startInfo = Viscoelastic3D::StepInfo{};
   const bool lateral = op.HasLateralModuli();
   auto startResponse = std::optional<Viscoelastic3D::Solutions>{};
-  if (tideAt) tideNow = tideAt(0);
-  if (outsideAt) outsideNow = outsideAt(0);
-  if (layerAt) layerNow = layerAt(0);
-  // The perturbed sources' forces at a node, on the open step.
+  const auto first = StageRef{};
+  if (tideAt) tideNow = tideAt(first);
+  if (outsideAt) outsideNow = outsideAt(first);
+  if (layerAt) layerNow = layerAt(first);
+  // The perturbed sources' forces at a stage, on the open step: the
+  // node's at the step's last stage; inside the step the two nodes'
+  // forces, linear in time between them (the forces are linear in the
+  // sources).
   const bool sourced = static_cast<bool>(sourcesAt);
-  auto nodeForces = DegreeFields{};  // the node's perturbed sources' forces
-  auto applySources = [&](std::size_t at) {
-    if (!sourced) return;
+  auto nodeForces = DegreeFields{};  // the stage's perturbed sources' forces
+  auto forcesAtNode = [&](std::size_t at) {
     auto [points, gluts] = sourcesAt(at);
-    nodeForces = detail::ForcesOfSources3D(
-        op, solver.SolverScales(), ev.toNdLength_, std::move(points),
-        std::move(gluts));
+    return detail::ForcesOfSources3D(op, solver.SolverScales(), ev.toNdLength_,
+                                     std::move(points), std::move(gluts));
+  };
+  auto applySources = [&](const StageRef& ref) {
+    if (!sourced) return;
+    nodeForces = ref.Last() ? forcesAtNode(ref.node)
+                            : detail::Blend(1.0 - ref.c,
+                                            forcesAtNode(ref.node - 1), ref.c,
+                                            forcesAtNode(ref.node));
     step->AddDegreeForces(nodeForces.spheroidal, nodeForces.toroidal);
   };
   // the start as a zero-length step: under lateral moduli, and under
@@ -1265,10 +1403,10 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   if (stepStart) {
     // The start under lateral moduli: the instantaneous coupled fixed
     // point of a zero-length step, the material's start forces on it.
-    f = directAt(0);
+    f = directAt(first);
     step.emplace(op.StartStep(tstate, 0.0, scheme));
     if (material != nullptr) material->ApplyStart(*step);
-    applySources(0);
+    applySources(first);
     effectiveSolver = &solverFor(step->EffectiveLove());
     auto [strain, info] = close();
     if (!info.converged || !response.converged) {
@@ -1281,7 +1419,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     startInfo = info;
     op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
     step.reset();
-  } else if (const auto f0 = directAt(0);
+  } else if (const auto f0 = directAt(first);
              !f0.empty() || material != nullptr || tideAt || outsideAt ||
              layerAt) {
     GRDSolver::GeneralisedForcing forcing;
@@ -1290,7 +1428,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     forcing.solidSurfaceChange = layerNow;
     forcing.tide = tideNow;
     forcing.rotation = rotation;
-    forcing.oceanFunctionOverride = overrideAt(0);
+    forcing.oceanFunctionOverride = overrideAt(first);
     if (material != nullptr) {
       // The start solve closes about the material's own start response.
       startResponse = material->StartResponse();
@@ -1312,7 +1450,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
       throw std::runtime_error(
           "the tangent-linear elastic sea level solve did not converge");
     }
-    sigma = totalLoadCoefficients(f0, response.relativeSeaLevelChange, 0);
+    sigma = totalLoadCoefficients(f0, response.relativeSeaLevelChange, first);
     psi = centrifugal(response);
     agree();
   }
@@ -1330,6 +1468,8 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   }
 
   auto snapshots = std::vector<Snapshot>{};
+  // the records of the inner stages of the step in hand
+  auto innerStages = std::vector<Snapshot::Stage>{};
   auto record = [&](std::size_t node, GRDSolver::Response& r,
                     const Viscoelastic3D::StepInfo& info) {
     Snapshot snapshot;
@@ -1344,7 +1484,10 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     snapshot.coupledResidual = info.residual;
     snapshot.solveIterations = info.solveIterations;
     snapshot.converged = info.converged && r.converged;
-    snapshot.oceanFunction = overrideAt(node);
+    snapshot.oceanFunction =
+        migrating ? oceanFunctions[node] : std::vector<double>{};
+    snapshot.stages = std::move(innerStages);
+    innerStages.clear();
     if (options_.record) {
       snapshot.internalState = tstate;
       snapshot.loadCoefficients = sigma;
@@ -1356,30 +1499,69 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   };
   record(0, response, startInfo);
 
-  for (node = 1; node < nodes; ++node) {
+  for (auto node = std::size_t{1}; node < nodes; ++node) {
     if (options_.on_node) options_.on_node(node);
     const auto dt = (times[node] - times[node - 1]) * ev.toMatTime_;
-    step.emplace(op.StartStep(tstate, dt, scheme,
-                              ev.Columns(sigma, ev.toMatDensity_),
-                              ev.Columns(psi, ev.toMatPotential_)));
-    if (drive) step->AddMemory(drive(node, dt));
-    if (material != nullptr) material->Apply(node, dt, scheme, *step);
-    applySources(node);
-    effectiveSolver = &solverFor(step->EffectiveLove());
-    f = directAt(node);
-    if (tideAt) tideNow = tideAt(node);
-    if (outsideAt) outsideNow = outsideAt(node);
-    if (layerAt) layerNow = layerAt(node);
-    auto [strain, info] = close();
-    if (!info.converged || !response.converged) {
-      throw std::runtime_error(std::format(
-          "the tangent-linear coupled fixed point at node {} did not "
-          "converge: {}{}",
-          node, info.Describe(options_.coupled_rtol),
-          response.converged ? "" : "; its sea level solve did not"));
-    }
-    op.Recycle(std::exchange(tstate, std::move(*step).Finish(std::move(strain))));
-    step.reset();
+    const auto recipe = RecipeOf(scheme, dt);
+    const auto refs = detail::StagesOf(recipe, dt, node);
+    // the node's diagnostics, over the step's stages
+    auto info = Viscoelastic3D::StepInfo{};
+    // One stage of the step (StepRecipe.hpp; the step's one stage under a
+    // one-stage scheme), as the forward run takes it: opened from its
+    // memory state, driven, its combined fixed point closed under the
+    // direction as the stage takes it and the stage's own shorelines,
+    // finished.
+    auto stageOf = [&](const State& from, const RecipeStage& stage,
+                       double length, std::size_t index) {
+      const auto& ref = refs[index];
+      stageNow = ref;
+      step.emplace(op.StartStep(from, length, stage.family,
+                                ev.Columns(sigma, ev.toMatDensity_),
+                                ev.Columns(psi, ev.toMatPotential_)));
+      if (drive) step->AddMemory(drive(ref));
+      if (material != nullptr) material->Apply(ref, *step);
+      applySources(ref);
+      effectiveSolver = &solverFor(step->EffectiveLove());
+      f = directAt(ref);
+      if (tideAt) tideNow = tideAt(ref);
+      if (outsideAt) outsideNow = outsideAt(ref);
+      if (layerAt) layerNow = layerAt(ref);
+      auto [strain, stageInfo] = close();
+      if (!stageInfo.converged || !response.converged) {
+        throw std::runtime_error(std::format(
+            "the tangent-linear coupled fixed point at node {} did not "
+            "converge: {}{}",
+            node, stageInfo.Describe(options_.coupled_rtol),
+            response.converged ? "" : "; its sea level solve did not"));
+      }
+      info.iterations += stageInfo.iterations;
+      info.mixedPasses += stageInfo.mixedPasses;
+      info.solveIterations += stageInfo.solveIterations;
+      info.residual = stageInfo.residual;
+      auto next = std::move(*step).Finish(std::move(strain));
+      step.reset();
+      if (!ref.Last()) {
+        // an inner stage's record: a second-order run about this one reads
+        // the stage's state as it reads a node's
+        auto inner = Snapshot::Stage{};
+        inner.oceanFunction = overrideAt(ref);
+        if (options_.record) {
+          inner.internalState = next;
+          inner.loadCoefficients = sigma;
+          inner.tideCoefficients = psi;
+          if (sourced) inner.sourceForces = nodeForces;
+        }
+        innerStages.push_back(std::move(inner));
+      }
+      return next;
+    };
+    op.Recycle(std::exchange(
+        tstate,
+        StepByRecipe(
+            recipe, dt, tstate, stageOf,
+            [&](std::span<const std::pair<double, const State*>> terms,
+                const RecipeStage&) { return op.StageState(terms); },
+            [&](State&& spent) { op.Recycle(std::move(spent)); })));
     record(node, response, info);
   }
   op.ReleaseScratch();

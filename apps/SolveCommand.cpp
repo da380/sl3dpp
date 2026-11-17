@@ -602,7 +602,8 @@ void WriteHistoryFile(const SolveInput& input,
                       const SurfaceGrid& grid, const Reached& reached,
                       const Loaded& world, const BuiltEarth& earth,
                       const std::vector<SurfaceLoads::Node>& loads,
-                      const std::vector<Node>* reference) {
+                      const std::vector<Node>* reference,
+                      const StepsAgainstRelaxation& steps) {
   namespace pm = planetmodel;
   const auto& run = input.run;
   const auto& history = reached.history;
@@ -686,6 +687,17 @@ void WriteHistoryFile(const SolveInput& input,
   }
   AddForcingCounts(file, run.forcing);
   file.meta.emplace("scheme", std::string{SchemeName(run.solver.scheme)});
+  // the steps against the shortest relaxation time of the model as built
+  // (nothing of it where nothing relaxes)
+  if (steps.time_s > 0.0) {
+    file.meta.emplace("longest_step_over_shortest_relaxation_time",
+                      std::vector<double>{steps.ratio});
+    file.meta.emplace("shortest_relaxation_time_s",
+                      std::vector<double>{steps.time_s});
+    file.meta.emplace("shortest_relaxation_radius_m",
+                      std::vector<double>{steps.radius_m});
+    file.meta.emplace("shortest_relaxation_at", steps.where);
+  }
   file.meta.emplace("step_solver",
                     std::string{StepSolverName(run, earth.Lateral())});
   file.meta.emplace("step_iterations", passes);
@@ -1197,12 +1209,15 @@ std::string NodeScalars(const Window& window, std::size_t n) {
 /// returns the summary on every rank: `read`, what the config was taken
 /// to mean with the inputs as read, then the files, then in a 3-D run the
 /// steps' iterations summed, then whether the run resumed and the
-/// checkpoints it replaced.
+/// checkpoints it replaced, the trajectory store's account, and last the
+/// run's steps against the shortest relaxation time (`steps`, which the
+/// surface file's metadata holds too).
 std::string WriteThrough(const std::filesystem::path& config,
                          const SolveInput& input, const BuiltEarth& earth,
                          const GRDSolver& solver, const Loaded& world,
                          const Reached& reached,
                          const std::vector<Node>* reference,
+                         const StepsAgainstRelaxation& steps,
                          std::string_view read) {
   const auto& run = input.run;
   const auto& window = *run.times;
@@ -1212,7 +1227,7 @@ std::string WriteThrough(const std::filesystem::path& config,
   if (first) {
     WriteHistoryFile(input, config, grid, reached, world, earth,
                      LoadsAtNodes(run, solver, reached.loads.get()),
-                     reference);
+                     reference, steps);
   }
   auto wrote = std::format("wrote {}", input.output.surface.string());
   if (!input.output.exchange.empty()) {
@@ -1246,9 +1261,10 @@ std::string WriteThrough(const std::filesystem::path& config,
                          history.size() - 1);
   }
   return std::format(
-      "{}; {}{}{}{}", read, wrote, reached.resumed ? ", resumed" : "",
+      "{}; {}{}{}{}; {}", read, wrote, reached.resumed ? ", resumed" : "",
       Replaced(reached),
-      reached.trajectory.empty() ? std::string{} : "; " + reached.trajectory);
+      reached.trajectory.empty() ? std::string{} : "; " + reached.trajectory,
+      steps.text);
 }
 
 /// A static problem's answer, SI: the sea level change, the radial
@@ -1794,11 +1810,18 @@ std::string Run1D(const std::filesystem::path& config,
         Check1D(snapshot, when, run.solver.rtol);
       },
       trajectory ? &*trajectory : nullptr);
+  // the run's longest step over the shortest relaxation time of the model
+  // as built: what its accuracy is read against
+  const auto steps =
+      StepsAgainst(run, solver, StepGridOf(run, solver.SolverScales()).times,
+                   op.ShortestRelaxation(), earth, rheology.BranchCount());
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(reached.loads.get()));
-  if (reached.stopped) return StoppedSummary(read, input, reached);
+  if (reached.stopped) {
+    return StoppedSummary(read, input, reached) + "; " + steps.text;
+  }
   return WriteThrough(config, input, earth, solver, world, reached, nullptr,
-                      read);
+                      steps, read);
 }
 
 /// The radial reference model of a 3-D run through time under the same
@@ -1863,9 +1886,16 @@ std::string Run3D(const std::filesystem::path& config,
         Check3D(snapshot, when, run.solver.step_rtol);
       },
       trajectory ? &*trajectory : nullptr);
+  // the run's longest step over the shortest relaxation time over the
+  // volume (collective: every rank asks)
+  const auto steps =
+      StepsAgainst(run, solver, StepGridOf(run, solver.SolverScales()).times,
+                   op.ShortestRelaxation(), earth, rheology.BranchCount());
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
                                InputsOf(reached.loads.get()));
-  if (reached.stopped) return StoppedSummary(read, input, reached);
+  if (reached.stopped) {
+    return StoppedSummary(read, input, reached) + "; " + steps.text;
+  }
   // the radial reference is one process's run, the first rank's
   auto reference = std::vector<Node>{};
   if (TheRanks().First()) {
@@ -1873,7 +1903,7 @@ std::string Run3D(const std::filesystem::path& config,
     reference = RadialReference(input, top, earth);
   }
   return WriteThrough(config, input, earth, solver, world, reached, &reference,
-                      read);
+                      steps, read);
 }
 
 }  // namespace

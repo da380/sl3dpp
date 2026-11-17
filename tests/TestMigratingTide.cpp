@@ -380,9 +380,10 @@ TEST(MigratingTide, WhereNoShorelineMovesTheRunIsTheFrozenOneIn3D) {
   }
 }
 
-TEST(MigratingTide, Sdirk2StagesSolveTheNonlinearEquationAtTheirTimes) {
-  // Sdirk2 closes each stage by the nonlinear sea level equation at the
-  // stage's time (the ice, the load, the tide and the land there). On the
+TEST(MigratingTide, Sdirk2StagesSolveTheNonlinearEquation) {
+  // Sdirk2 closes each stage by the nonlinear sea level equation under
+  // the stage's forcing (the ice, the load and the tide of the step's two
+  // nodes combined, the land the end node's). On the
   // steep coasts no cell flips, and the migrating run is the frozen run
   // under the same tide, ice and load, radial and under lateral viscosity,
   // with and without the rotational feedback, to the solves' tolerance; on

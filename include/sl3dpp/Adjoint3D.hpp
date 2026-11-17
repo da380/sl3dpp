@@ -64,6 +64,18 @@ struct ForwardTrajectory3D {
   /// (which records every node, each state with its strain); empty for a
   /// run without them.
   std::vector<DegreeFields> sourceForces;
+  /// What closed an inner stage of a step under a multi-stage scheme
+  /// (Evolution3D::Snapshot::Stage), as ForwardTrajectory::stages: per
+  /// node, the inner stages of the step ending there, each one's
+  /// total-load and centrifugal coefficients and, under interior sources,
+  /// the sources' forces there. Empty for a run under a one-stage scheme.
+  /// A stage's state is the stage repeated from the node below under
+  /// them, with the forward run's own iteration.
+  struct Stage {
+    std::vector<std::complex<double>> load, tide;
+    std::optional<DegreeFields> sourceForces;
+  };
+  std::vector<std::vector<Stage>> stages;
 
   /// A spilled recording (a run with Options::on_state): `fetch(node)`
   /// supplies a kept node's state from wherever the callback put it, for
@@ -88,6 +100,10 @@ struct ForwardTrajectory3D {
 /// for the sweep's linearisation about it; refused for a frozen run's
 /// snapshots, which carry none.
 [[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
+    std::span<const Evolution3D::Snapshot> snapshots);
+/// The ocean functions of the inner stages of a migrating 3D run under a
+/// multi-stage scheme, as StageOceanFunctionsOf a radial run's snapshots.
+[[nodiscard]] StageOceanFunctions StageOceanFunctionsOf(
     std::span<const Evolution3D::Snapshot> snapshots);
 
 /**
@@ -242,10 +258,13 @@ class AdjointSolver3D {
     /// level adjoint nested over that solve); or Continuous. Both carry
     /// the second-order sweep (SecondOrderKernels) and both are
     /// distributed over radius (docs/adjoints.md §17). About an evolution
-    /// under Sdirk2 the continuous first-order sweep steps by its stages
-    /// and reads every node's recorded state; the discrete sweep and the
-    /// second-order sweeps refuse it, the continuous sweep then stated
-    /// here (docs/adjoints.md §1a).
+    /// under Sdirk2 the discrete sweep, first and second order, is the
+    /// transpose of the two-stage step (each first stage about its own
+    /// state, the stage repeated under its recorded closure, and its own
+    /// shorelines: FirstOrderKernels' `stageOceanFunctions`), and the
+    /// continuous first-order sweep steps by the same stages; the
+    /// continuous second-order sweep is not built there and is refused
+    /// (docs/adjoints.md §1a).
     AdjointMethod method = AdjointMethod::Discrete;
     /// The per-solve tolerance of the SLE solves.
     double rtol = 1e-9;
@@ -294,15 +313,19 @@ class AdjointSolver3D {
   /// (OceanFunctionsOf its snapshots), the kernels linearise about that
   /// run's shorelines instead of the frozen background ones, and the
   /// initial sea level kernel is formed; a recorded trajectory must then
-  /// come from the same migrating run. Distributed over radius (the
-  /// evolution's operator's collectives), collective: every rank passes
-  /// the same times, measurements and ocean functions, and its own
-  /// trajectory (its forward run's).
+  /// come from the same migrating run; about a migrating run under Sdirk2
+  /// the discrete sweep also takes `stageOceanFunctions`
+  /// (StageOceanFunctionsOf the run's snapshots), as AdjointSolver's.
+  /// Distributed over radius (the evolution's operator's collectives),
+  /// collective: every rank passes the same times, measurements and ocean
+  /// functions, and its own trajectory (its forward run's).
   [[nodiscard]] Kernels3D FirstOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
   /**
    * @brief The 3D second-order adjoint, by Options::method: the kernels
@@ -344,7 +367,9 @@ class AdjointSolver3D {
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory3D& trajectory,
       std::span<const std::vector<double>> oceanFunctions = {},
-      const MaterialDirection3D& material = {}) const;
+      const MaterialDirection3D& material = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
  private:
   /// The discrete transpose (AdjointDiscrete3D.cpp), carrying the
@@ -355,6 +380,7 @@ class AdjointSolver3D {
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory,
       std::span<const std::vector<double>> oceanFunctions,
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
       std::span<const Evolution3D::Snapshot> tangent,
       const std::vector<std::vector<double>>* ditau,
       const MaterialDirection3D* material) const;

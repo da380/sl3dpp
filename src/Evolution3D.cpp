@@ -585,7 +585,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
   // ending there (c < 1; StepRecipe.hpp), through detail::AtStage, the one
   // place that decides which side of a repeated pair the node reads: a
   // surface term's left limit (Forcing::directLoadBefore and its kin) at
-  // the first node of a pair, where the forcing gives one.
+  // the first node of a pair, where the forcing gives one. A stage inside
+  // the step takes the step's two nodes' values combined, no callback
+  // being called between nodes.
   using Field = std::function<std::vector<double>(double)>;
   using TideField = std::function<std::vector<std::complex<double>>(double)>;
   const auto noField = Field{};
@@ -624,8 +626,9 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     return surfaceAt(node, *iceThickness, iceBefore, c);
   };
   // The interior sources at a node: their left limits at the first node of
-  // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere
-  // and at a stage within a step.
+  // a repeated pair (Forcing::sourcesBefore), the plain callbacks elsewhere;
+  // at a stage within a step the two nodes' sources, their moments times
+  // 1 - c and c.
   auto setSources = [&](std::size_t node, double c = 1.0) {
     if (interior == nullptr || !(interior->sources || interior->stressGluts)) {
       return;
@@ -665,9 +668,10 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     auto& moving = coupled.moving;
     moving = GRDSolver::NonlinearForcing{};
     moving.rotation = options_.rotation;
-    // a land mask that changes in time: the node's (the stage's) own
+    // a land mask that changes in time: the node's own, which a stage
+    // inside the step ending there holds too (a mask is not combined)
     if (options_.land_held) {
-      moving.forcedLand = options_.land_held(detail::StageTime(times, node, c));
+      moving.forcedLand = options_.land_held(times[node]);
     }
     if (interior == nullptr) return;
     setTide(node, c);
@@ -710,12 +714,16 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   auto snapshots = std::vector<Snapshot>{};
   auto recorded = std::size_t{0};
+  // the closures of the inner stages of the step in hand (Snapshot::Stage)
+  auto innerStages = std::vector<Snapshot::Stage>{};
   auto record = [&](double t, GRDSolver::Response& r,
                     const Viscoelastic3D::StepInfo& info, bool converged,
                     bool keepState) {
     auto snapshot =
         MakeSnapshot(t, r, info, converged, std::move(ocean), keepState);
     if (sourced_ && keepState) snapshot.sourceForces = coupled.sourceForces;
+    snapshot.stages = std::move(innerStages);
+    innerStages.clear();
     // With on_state, the kept state is handed out instead.
     auto kept = std::optional<Viscoelastic3D::State>{};
     if (options_.on_state) std::swap(kept, snapshot.internalState);
@@ -732,13 +740,15 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
 
   for (auto node = std::size_t{1}; node < times.size(); ++node) {
     const auto dt = (times[node] - times[node - 1]) * toMatTime_;
+    const auto recipe = RecipeOf(options_.scheme, dt);
     // the node's diagnostics, over the step's stages
     auto info = Viscoelastic3D::StepInfo{};
     // One stage of the step (StepRecipe.hpp; the step's one stage under a
     // one-stage scheme): opened from its memory state, its combined fixed
-    // point closed under the forcing at its time, finished.
+    // point closed under its forcing (detail::AtStage), finished.
     auto stageOf = [&](const Viscoelastic3D::State& from,
-                       const RecipeStage& stage, double length, std::size_t) {
+                       const RecipeStage& stage, double length,
+                       std::size_t index) {
       const auto c = stage.c;
       auto& step = coupled.step;
       step.emplace(op.StartStep(from, length, stage.family,
@@ -770,6 +780,18 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
       info.solveIterations += stageInfo.solveIterations;
       info.residual = stageInfo.residual;
       info.converged = info.converged && stageInfo.converged;
+      if (index + 1 < recipe.stages.size()) {
+        // an inner stage's closure, for the derivative runs about the step
+        // and the rebuild of a state between kept ones (Snapshot::Stage)
+        auto inner = Snapshot::Stage{};
+        if (stride > 0) {
+          inner.loadCoefficients = sigma_;
+          inner.tideCoefficients = psi_;
+        }
+        if (migrating) inner.oceanFunction = ocean;
+        if (sourced_ && kept(node)) inner.sourceForces = coupled.sourceForces;
+        innerStages.push_back(std::move(inner));
+      }
       auto next = std::move(*step).Finish(std::move(strain));
       step.reset();
       return next;
@@ -779,7 +801,7 @@ std::vector<Evolution3D::Snapshot> Evolution3D::March(
     op.Recycle(std::exchange(
         vstate_,
         StepByRecipe(
-            RecipeOf(options_.scheme, dt), dt, vstate_, stageOf,
+            recipe, dt, vstate_, stageOf,
             [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
                     terms,
                 const RecipeStage&) { return op.StageState(terms); },

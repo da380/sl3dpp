@@ -269,15 +269,16 @@ longer free, an unphysical effect.
 - **State.** The evolving state is the internal variables m_k alone; the
   displacement is slaved through one elastic solve, as in pyslfp and
   AdGIA.
-- **Schemes.** The exponential trapezoid (the default; second order, no
+- **Schemes.** The exponential trapezoid (second order, no
   stability limit, one solve per step) with h = Δt itau, e = e^{−h},
   φ₁ = (1 − e)/h, α = φ₁ − e, β = 1 − φ₁, and m⁺ = e m + α dⁿ + β dⁿ⁺¹;
   backward Euler and exponential Euler as alternatives; and Sdirk2, a
-  damped second-order scheme of two stages (below). Step sizes are not
+  damped second-order scheme of two stages (below), the default of the
+  drivers, the operators' steps and the app. Step sizes are not
   limited by the shortest Maxwell time. `ViscoelasticOperator` also offers
   an adaptive step controller (embedded exponential Euler); the evolution
   drivers step on the caller's time grid.
-- **Why a second scheme.** At a point whose h is large the trapezoid's e
+- **Why two stages.** At a point whose h is large the trapezoid's e
   and α vanish and its update is backward Euler's, m⁺ = dⁿ⁺¹. The slow,
   buoyancy-driven modes that carry the observables involve such points (a
   weak layer, a fast branch, the continuous adjoint's relaxation after a
@@ -312,35 +313,55 @@ longer free, an unphysical effect.
   1 kyr step on (TestEvolution, TestAdjoint). On the time-step study's
   problem at 1 kyr (examples/configs/README.md) the values are 0.015 /
   0.043% off against 0.22 / 0.50%, the continuous kernel +1.9 / −1.0%
-  against +14 / +24%. At steps short against the
-  relaxation times the trapezoid, exact for a strain linear in a step, is
-  the closer (the Maxwell sphere without gravity, TestWithoutGravity).
-  The discrete adjoint, the tangent-linear run and the second-order
-  sweeps are not built for it (their exact derivatives of the stepped map
-  run through each step's stages); its continuous adjoint is
-  (adjoints.md §1a).
+  against +14 / +24%. On the closed-form Maxwell sphere
+  without gravity, at 16 steps a relaxation time, the trapezoid, exact
+  for a strain linear in a step, is the closer (7e-9 off against Sdirk2's
+  5.6e-8, TestWithoutGravity). The gravitating time-step study does not
+  show it: at steps 0.58 times the shortest relaxation time Sdirk2's
+  values are 0.000030 / 0.00016% off against the trapezoid's 0.00094 /
+  0.0033%, and it is the closer at every step measured, also against the
+  trapezoid at half the step (running.md, "Choosing a step and scheme").
+  Sdirk2 is the default on that evidence; the trapezoid, stated by name,
+  costs half as much a step where the steps are about the shortest
+  relaxation time or below and both are converged.
+  Its derivatives are built as the one-stage schemes' are: the
+  tangent-linear runs, the discrete adjoint and the discrete second-order
+  sweeps take each step stage by stage, and the continuous adjoint steps
+  by the same stages (adjoints.md §1a). Choosing between the schemes for
+  a run and its kernels is in running.md, "Choosing a step and scheme".
 - **The recipe layer.** A step of any scheme is a list of stages, each a
   one-stage step (`StartStep` with the stage's family and length) from a
   constant combination of the step's start state and the stages before,
-  closed at its own time and finished (`StepRecipe`, `RecipeOf`,
+  closed under its forcing and finished (`StepRecipe`, `RecipeOf`,
   `StepByRecipe`). The evolutions step by it (1D and 3D, with gravity and
   without, the toroidal systems beside the 1D ones a second chain under
   the same stage forces, `StageStart`), and so do the continuous sweeps,
   the one-stage schemes as one stage of themselves, operation for
   operation the one-stage loop; the operators' own `Step` takes it for a
-  multi-stage scheme. A stage inside a step reads the
-  forcing's plain callbacks at its time (`detail::AtStage`); at c = 1 the
-  node's read, a repeated node's left limit included. The record of a run
-  is its nodes': no stage state is kept. Sdirk2's step reads no start
-  strain and no earlier node, so a checkpoint at a node restarts it, and
-  its zero-length step is backward Euler's, the elastic solve with m held.
-  What takes one stage, one set of weights or one effective operator
-  (`StartStep`, the effective solid and its Love numbers, the toroidal
-  `Step`) refuses a multi-stage scheme at a step of nonzero length. A
-  sweep about an Sdirk2 run reads every node's recorded state
-  (record_stride 1): a state between kept ones is rebuilt by forward
-  steps under the recorded node loads, and Sdirk2's first stage closes
-  under the forcing at its own time, which the recording does not hold.
+  multi-stage scheme. The forcing is read at the nodes alone: a stage
+  that ends inside a step, at fraction c of it, takes 1 − c of the
+  forcing at the step's start node and c of it at the end node, term by
+  term (`detail::AtStage`: the loads, the layer, the tide, the ice
+  thickness, the sources' moments; a land mask the end node's), and at
+  c = 1 the node's read, a repeated node's left limit included. A run so
+  depends on its forcing through the node values alone under every
+  scheme, and the derivative runs are exact in them. The record of a run
+  is its nodes' states and, beside each node, what closed the inner
+  stages of the step ending there (their total-load and centrifugal
+  coefficients, their ocean functions under migrating shorelines, their
+  sources' forces: `Snapshot::stages`); no stage state is kept. Sdirk2's
+  step reads no start strain and no earlier node, so a checkpoint at a
+  node restarts it, and its zero-length step is backward Euler's, the
+  elastic solve with m held. What takes one stage, one set of weights or
+  one effective operator (`StartStep`, the effective solid and its Love
+  numbers, the toroidal `Step`) refuses a multi-stage scheme at a step of
+  nonzero length. The derivatives of the stepped map take a step stage by
+  stage, forwards by the recipe and backwards by its transpose
+  (`detail/StepStages.hpp`), each stage about the forward stage's own
+  states: an inner stage's state is the stage repeated from the node below
+  under its recorded closure, one stage solve, and a state between kept
+  nodes of a recording with gaps is the run's steps again in the same
+  way (adjoints.md §1a).
 - **The step.** The implicit step eliminates m⁺ into equilibrium, giving
   an effective operator per (scheme, Δt), forced by the load channels and
   the memory force of m̃ = e m + α dⁿ, finished through cached unit load
@@ -389,9 +410,10 @@ longer free, an unphysical effect.
   migrating shorelines is the nonlinear sea level equation on the
   unrelaxed body with m held, as at any node; it may fail to converge,
   which the node's snapshot reports (its passes and last change). Under
-  Sdirk2 a stage inside a step reads the plain callbacks at its time,
-  where the forcing is continuous, and the step's end node its read: the
-  left limit at a pair's first node, the right at its second. The first
+  Sdirk2 a stage inside a step takes the forcing of the step's two nodes
+  combined, the start node's as the step from it reads it (the right
+  limit at a pair's second node) and the end node's as that node reads
+  it: the left limit at a pair's first node. The first
   node is the right limit at its time already (the instantaneous elastic
   response) and is not repeated, except as a resumed run's checkpoint
   node. `sl3d` puts such a pair at every jump of its forcing after its
@@ -920,8 +942,22 @@ Beyond the fixtures:
   order, 1D and 3D; the moment kernels against the forward run under the
   sources, 15 to 30 times closer than the trapezoid's at 0.5 kyr; the 3D
   sweep the 1D one with no lateral structure (2e-15); distributed against
-  one process (`TestDistributed`); and each derivative not built refused
-  by name.
+  one process (`TestDistributed`). The derivatives of the stepped map
+  (`TestSdirk2Derivatives`, adjoints.md §1a): a run under a forcing
+  curved across its steps the run under the forcing's interpolant through
+  its nodes, the forcing read at nodes alone; the tangent-linear runs
+  against differences of the forward run, the discrete sweeps their
+  transposes to rounding, the discrete Hessian symmetric and the
+  derivative of the gradient, 1D and 3D, about frozen and migrating
+  shorelines, across jumps of the forcing, under interior sources and
+  from recordings with gaps; and what is not built for it (the continuous
+  second-order sweep and its runs) refused by name. The default: the
+  drivers' options, the operator's step and the app's `solver.scheme`
+  resolve Sdirk2 where none is stated, and a run that states none is the
+  run that states it (`Evolution.TheDefaultSchemeIsSdirk2`, `TestApps`);
+  the tests whose references are the exponential trapezoid's (the pyslfp
+  fixtures, the operator stepped by it, the continuous second order)
+  state that scheme.
 - **Tangent-linear runs.** Linear in the loads (the run along a load
   perturbation equals the difference of two forward runs at 1e-8); the
   discrete run and the discrete adjoint exact transposes (the pairing

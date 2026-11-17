@@ -11,6 +11,7 @@
 
 #include "sl3dpp/LoveNumbers.hpp"
 #include "sl3dpp/StepRecipe.hpp"
+#include "sl3dpp/detail/StepStages3D.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/detail/AdjointInternals.hpp"
@@ -43,16 +44,46 @@ std::vector<std::vector<double>> OceanFunctionsOf(
 ForwardTrajectory3D ForwardTrajectory3D::FromSnapshots(
     std::span<const Evolution3D::Snapshot> snapshots) {
   ForwardTrajectory3D out;
+  auto multiStage = false;
   for (const auto& snapshot : snapshots) {
     out.states.push_back(snapshot.internalState);
     out.loads.push_back(snapshot.loadCoefficients);
     out.tides.push_back(snapshot.tideCoefficients);
     if (snapshot.sourceForces) out.sourceForces.push_back(*snapshot.sourceForces);
+    auto inner = std::vector<Stage>{};
+    for (const auto& stage : snapshot.stages) {
+      inner.push_back({stage.loadCoefficients, stage.tideCoefficients,
+                       stage.sourceForces});
+    }
+    multiStage = multiStage || !inner.empty();
+    out.stages.push_back(std::move(inner));
   }
+  if (!multiStage) out.stages.clear();
   if (!out.sourceForces.empty() && out.sourceForces.size() != snapshots.size()) {
     throw std::invalid_argument(
         "a run under interior sources is recorded at every node");
   }
+  return out;
+}
+
+StageOceanFunctions StageOceanFunctionsOf(
+    std::span<const Evolution3D::Snapshot> snapshots) {
+  auto out = StageOceanFunctions{};
+  auto any = false;
+  for (const auto& snapshot : snapshots) {
+    auto inner = std::vector<std::vector<double>>{};
+    for (const auto& stage : snapshot.stages) {
+      if (stage.oceanFunction.empty()) {
+        throw std::invalid_argument(
+            "the snapshots' inner stages carry no ocean functions: a "
+            "migrating run records them");
+      }
+      inner.push_back(stage.oceanFunction);
+    }
+    any = any || !inner.empty();
+    out.push_back(std::move(inner));
+  }
+  if (!any) out.clear();
   return out;
 }
 
@@ -64,10 +95,12 @@ Kernels3D AdjointSolver3D::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   if (options_.method == AdjointMethod::Discrete) {
-    return DiscreteSweep(times, measurements, trajectory, oceanFunctions, {},
-                         nullptr, nullptr)
+    return DiscreteSweep(times, measurements, trajectory, oceanFunctions,
+                         stageOceanFunctions, {}, nullptr, nullptr)
         .first;
   }
   return Sweep(times, measurements, trajectory, oceanFunctions, {}, nullptr,
@@ -82,9 +115,20 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
     const std::vector<std::vector<double>>& itau,
     const ForwardTrajectory3D& trajectory,
     std::span<const std::vector<double>> oceanFunctions,
-    const MaterialDirection3D& material) const {
-  detail::RefuseDerivativeOfMultiStage(evolution_->options_.scheme,
-                                       "the second-order adjoint");
+    const MaterialDirection3D& material,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
+  if (IsMultiStage(evolution_->options_.scheme) &&
+      options_.method != AdjointMethod::Discrete) {
+    throw std::invalid_argument(
+        "the continuous second-order adjoint (Options::method AdjointMethod::"
+        "Continuous) is not built for Sdirk2: its derivative state's drive "
+        "is a one-stage step's. The discrete second-order adjoint "
+        "(AdjointMethod::Discrete, the default method) is the derivative of "
+        "the two-stage step's exact transpose; or state a one-stage scheme, "
+        "Scheme::ExponentialTrapezoid, in the evolution's Options::scheme, "
+        "whose default is Sdirk2");
+  }
   const auto& op = *evolution_->op_;
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
@@ -124,7 +168,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
   }
   if (options_.method == AdjointMethod::Discrete) {
     return DiscreteSweep(times, measurements, &trajectory, oceanFunctions,
-                         tangent, &ditau, materialV);
+                         stageOceanFunctions, tangent, &ditau, materialV);
   }
   return Sweep(times, measurements, &trajectory, oceanFunctions, tangent,
                &ditau, materialV);
@@ -155,8 +199,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   const auto& grid = solver.Grid();
   const auto& coupling = op.Coupling();
   const auto scheme = ev.options_.scheme;
-  if (second) {
-    detail::RefuseDerivativeOfMultiStage(scheme, "the second-order adjoint");
+  if (second && IsMultiStage(scheme)) {
+    throw std::invalid_argument(
+        "the continuous second-order adjoint is not built for Sdirk2: its "
+        "derivative state's drive is a one-stage step's. The discrete "
+        "second-order adjoint (AdjointMethod::Discrete, the default method) "
+        "is built; or state a one-stage scheme, "
+        "Scheme::ExponentialTrapezoid, in the evolution's Options::scheme, "
+        "whose default is Sdirk2");
   }
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
@@ -214,11 +264,6 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           "coefficients (to regenerate each node's strain): build it from "
           "the recording run's snapshots");
     }
-    auto gaps = false;
-    for (auto node = std::size_t{0}; node < times.size(); ++node) {
-      gaps = gaps || !trajectory->Kept(node);
-    }
-    detail::RefuseGapsUnderMultiStage(scheme, gaps);
   }
   if (!oceanFunctions.empty()) {
     if (oceanFunctions.size() != times.size()) {
@@ -675,6 +720,35 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   auto tidesAt = [&](std::size_t node) {
     return ev.Columns(trajectory->tides[node], ev.toMatPotential_);
   };
+  // (each step again under its recorded closure, an inner stage's among
+  // them: detail/StepStages3D.hpp)
+  auto redo = detail::ForwardStages3D{
+      &op, trajectory, scheme,
+      {.max_iterations = ev.options_.max_coupled_iterations,
+       .rtol = ev.options_.coupled_rtol,
+       .anderson_memory = ev.options_.anderson_memory,
+       .anderson_rate = ev.options_.anderson_rate},
+      [&ev](const std::vector<Complex>& c) {
+        return ev.Columns(c, ev.toMatDensity_);
+      },
+      [&ev](const std::vector<Complex>& c) {
+        return ev.Columns(c, ev.toMatPotential_);
+      }};
+  if (trajectory != nullptr) {
+    auto gaps = false;
+    for (auto node = std::size_t{0}; node < times.size(); ++node) {
+      gaps = gaps || !trajectory->Kept(node);
+    }
+    // (a recording kept at every node is read as it is; one with gaps is
+    // rebuilt through the stages, whose closures it must then give)
+    if (gaps) {
+      auto dts = std::vector<double>{};
+      for (auto n = std::size_t{1}; n < times.size(); ++n) {
+        dts.push_back((times[n] - times[n - 1]) * ev.toMatTime_);
+      }
+      redo.Check(dts);
+    }
+  }
   auto rebuilt = std::map<std::size_t, Viscoelastic3D::State>{};
   auto forwardState = [&](std::size_t node) -> const Viscoelastic3D::State& {
     if (trajectory->states[node].has_value()) return *trajectory->states[node];
@@ -695,20 +769,10 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
                                : &(rebuilt[start] = trajectory->fetch(start));
     for (auto j = start + 1; j <= node; ++j) {
       const auto dt = (times[j] - times[j - 1]) * ev.toMatTime_;
-      auto step =
-          op.StartStep(*previous, dt, scheme, loadsAt(j - 1), tidesAt(j - 1));
-      auto [strain, info] = step.Close(
-          loadsAt(j), tidesAt(j),
-          {.max_iterations = ev.options_.max_coupled_iterations,
-           .rtol = ev.options_.coupled_rtol,
-           .anderson_memory = ev.options_.anderson_memory,
-           .anderson_rate = ev.options_.anderson_rate});
-      if (!info.converged) {
-        throw std::runtime_error(std::format(
-            "rebuilding the forward state at node {} did not converge", j));
-      }
+      // the run's step again, stage by stage under a multi-stage scheme
+      auto next = redo.Step(j, dt, *previous);
       if (j > start + 1) rebuilt.at(j - 1).strain.reset();
-      previous = &(rebuilt[j] = std::move(step).Finish(std::move(strain)));
+      previous = &(rebuilt[j] = std::move(next));
     }
     return rebuilt.at(node);
   };

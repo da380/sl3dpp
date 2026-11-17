@@ -577,6 +577,35 @@ struct StepGrid {
 };
 [[nodiscard]] StepGrid StepGridOf(const Run& run, const Scales& scales);
 
+/// A run through time's steps against the model as built (RelaxationSite):
+/// its longest step over the shortest relaxation time, the number the
+/// accuracy of a step and of a kernel is read against (docs/running.md,
+/// "Choosing a step and scheme"), that time in seconds, its radius in
+/// metres, and where it is as a summary states it (`where`: the branch of
+/// a rheology of several, the depth, the layer with its depths, and under
+/// a lateral viscosity the latitude and longitude).
+struct StepsAgainstRelaxation {
+  double ratio = 0.0;
+  double time_s = 0.0;
+  double radius_m = 0.0;
+  std::string where;
+  /// A summary's words: `its longest step <ratio> times the shortest
+  /// relaxation time (<time> <unit>, <where>)`, or `nothing in the model
+  /// relaxing`.
+  std::string text;
+};
+
+/// A run through time's steps against the shortest relaxation time of the
+/// model as built, `site` (ViscoelasticOperator::ShortestRelaxation,
+/// Viscoelastic3D::ShortestRelaxation) on a rheology of `branches`
+/// branches: the longest step of the library's grid `times` (the solver's
+/// time unit, StepGridOf) over that time, the time in the run's unit, and
+/// where it is. What `solve` states of its run and `kernel` of a
+/// continuous sweep's. Information for the user, never a refusal.
+[[nodiscard]] StepsAgainstRelaxation StepsAgainst(
+    const Run& run, const GRDSolver& solver, std::span<const double> times,
+    const RelaxationSite& site, const BuiltEarth& earth, std::size_t branches);
+
 /// The terms' clock (TermClock) against the solver's time: the time on it
 /// at solver time t (SLE units, zero at the window's start) is
 /// `zero + t * rate`, kyr from the window's start in a dated run and in

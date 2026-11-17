@@ -57,7 +57,20 @@
 
 namespace sl3dpp {
 
+namespace detail {
+struct StageRef;
+}  // namespace detail
+
 /// A direction in the evolution's inputs. Empty members are absent.
+///
+/// The members given per time node are the direction's values at the
+/// nodes, which are all a run reads of its forcing. Under a multi-stage
+/// scheme (Sdirk2) a step's inner stage takes 1 - c of the forcing at the
+/// step's start node and c of it at the end node (a repeated node's two
+/// sides are nodes of their own), and the tangent run takes the same
+/// combination of the direction: it is the derivative of the forward run
+/// along the direction, and the exact transpose of the discrete adjoint
+/// sweep, whose node kernels pair with these values.
 struct TangentPerturbation {
   /// Per time node, a perturbation of the direct load inside the water
   /// budget the run was driven by, frozen or migrating.
@@ -135,10 +148,11 @@ struct SecondOrderDirection {
 /// The toroidal systems' drive about a source-driven trajectory, for a
 /// perturbation of the relaxation times or the moduli.
 struct TangentToroidalDrive {
-  /// A step's memory increment and force.
+  /// A stage's memory increment and force (the step's one stage under a
+  /// one-stage scheme).
   std::function<std::pair<ToroidalViscoelastic::Fields,
                           ToroidalViscoelastic::Fields>(
-      const ToroidalViscoelastic& toroidal, std::size_t node, double dt)>
+      const ToroidalViscoelastic& toroidal, const detail::StageRef& stage)>
       step{};
   /// The start's own response (the moduli's).
   std::function<ToroidalViscoelastic::Fields(
@@ -161,19 +175,26 @@ class TangentLinearSolver {
   struct Options {
     /// Discrete (the default, as AdjointSolver's): the forward mode of
     /// the stepped map; or Continuous (FirstOrderDrive). A second-order
-    /// sweep about the run takes the same method as the run.
+    /// sweep about the run takes the same method as the run. About an
+    /// evolution under Sdirk2 the discrete run steps the tangent state by
+    /// the scheme's two stages, each driven by the weights' derivatives at
+    /// the stage's length about the forward stage's states; the continuous
+    /// drive of a direction in the relaxation times or the moduli is not
+    /// built there and is refused (a direction in the forcing alone is the
+    /// same run by either method).
     AdjointMethod method = AdjointMethod::Discrete;
     double rtol = 1e-9;
     int anderson_memory = 5;
     /// Keep the tangent-linear internal state (with its strain) and the
-    /// load and centrifugal coefficients on every snapshot.
+    /// load and centrifugal coefficients on every snapshot; under a
+    /// multi-stage scheme, each inner stage's too (Evolution::Snapshot::
+    /// stages, with the stage's state).
     bool record = false;
     /// Called at the start of each step, with the node it steps to.
     std::function<void(std::size_t node)> on_node{};
   };
 
-  /// Refused for an evolution without gravity (Evolution.hpp), and for one
-  /// under Sdirk2: not built (docs/adjoints.md §1a).
+  /// Refused for an evolution without gravity (Evolution.hpp).
   explicit TangentLinearSolver(const Evolution& evolution,
                                Options options);
   explicit TangentLinearSolver(const Evolution& evolution)
@@ -185,11 +206,16 @@ class TangentLinearSolver {
   /// forward steps under the recorded loads). With `oceanFunctions`, one
   /// grid per node from a migrating run (OceanFunctionsOf its snapshots),
   /// the run linearises about that trajectory instead of the frozen
-  /// background shorelines.
+  /// background shorelines; about a migrating run under Sdirk2 also
+  /// `stageOceanFunctions`, the ocean function of each step's first stage
+  /// (StageOceanFunctionsOf the snapshots), about which that stage is
+  /// linearised.
   [[nodiscard]] std::vector<Evolution::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
   /// The second-order tangent-linear run: the second derivative of the
   /// run's responses along two directions u and v, about the forward
@@ -215,7 +241,9 @@ class TangentLinearSolver {
       std::span<const Evolution::Snapshot> tangentV,
       const SecondOrderDirection& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
   /// The memory increment of a step from `prev` to `next` — two states of
   /// the trajectory with their strains — for a perturbation of the inverse
@@ -228,16 +256,21 @@ class TangentLinearSolver {
       double dt, const ViscoelasticState& prev, const ViscoelasticState& next,
       const std::vector<std::vector<double>>& ditauPoints);
  private:
-  using Direct = std::function<std::vector<double>(std::size_t node)>;
-  using Tide =
-      std::function<std::vector<std::complex<double>>(std::size_t node)>;
+  /// A term of the direction at a stage of a step (detail::StageRef; the
+  /// first node is a stage of its own, ending there): a direct load on the
+  /// grid, a tide's coefficients.
+  using Direct =
+      std::function<std::vector<double>(const detail::StageRef& stage)>;
+  using Tide = std::function<std::vector<std::complex<double>>(
+      const detail::StageRef& stage)>;
   using ToroidalDrive = TangentToroidalDrive;
   /// The interior sources perturbed at a node.
   using Sources = std::function<
       std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
           std::size_t node)>;
-  using Drive =
-      std::function<std::map<int, std::vector<double>>(std::size_t node, double dt)>;
+  /// A stage's memory increment.
+  using Drive = std::function<std::map<int, std::vector<double>>(
+      const detail::StageRef& stage)>;
 
   /// The loop the runs share: the forward problem with the trajectory's
   /// ocean functions prescribed, the direct load given per node (empty
@@ -249,6 +282,7 @@ class TangentLinearSolver {
   [[nodiscard]] std::vector<Evolution::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
       const Direct& directAt, const Drive& drive, MaterialForcing* material,
       const Tide& tideAt = {}, const Sources& sourcesAt = {},
       const ToroidalDrive& toroidalDrive = {}, const Direct& outsideAt = {},

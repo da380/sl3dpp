@@ -719,8 +719,11 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
           out.push_back(extra);
           return out;
         }};
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution3D trial(op, scene.solver, start,
-                      {.rtol = 1e-12,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12,
                        .coupled_rtol = 1e-12,
                        .max_nonlinear_iterations = 200,
                        .record_stride = 1});
@@ -2314,9 +2317,12 @@ TEST(DiscreteAdjoint3D, RotatingStepsSolveTheLateralSystem) {
                     {.solver = Solver::ConjugateGradients,
                      .solve_rtol = 1e-13,
                      .moduli = TestModuli()});
+  // the exponential trapezoid stated: the reference below is the operator
+  // stepped by that scheme
   Evolution3D evolution(
       op, scene.solver, scene.state,
-      {.rotation = RotationalFeedback::Full, .rtol = 1e-13, .coupled_rtol = 1e-13,
+      {.scheme = Scheme::ExponentialTrapezoid,
+       .rotation = RotationalFeedback::Full, .rtol = 1e-13, .coupled_rtol = 1e-13,
        .record_stride = 1, .record_strain = true});
   const auto run = evolution.Run(times, directLoad);
   const auto& material = scene.rheology.BaseMaterial().ModelScales();
@@ -3058,9 +3064,12 @@ TEST(DiscreteAdjoint3D, TheContinuousSweepAcrossALoadJump) {
       if (2 * n == steps) times.push_back(times.back());
     }
     const auto right = static_cast<std::size_t>(steps / 2 + 1);
+    // the exponential trapezoid stated: the convergence numbers held below are
+    // that scheme's
     Evolution3D evolution(
         op, scene.solver, scene.state,
-        {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
     const auto trajectory =
         ForwardTrajectory3D::FromSnapshots(evolution.Run(times, forcing));
     auto measurements = std::map<std::size_t, Measurement>{};

@@ -35,16 +35,6 @@ TrajectoryBlock ReadTrajectoryBlock(const Json& top, const Run& run,
     }
     out.record_stride = Integer(block, "record_stride");
     if (out.record_stride < 1) Fail(member, "is not a positive stride");
-    if (IsMultiStage(run.solver.scheme) && out.record_stride != 1) {
-      Fail(member,
-           std::format("is {}, and a run under `solver.scheme` \"sdirk2\" "
-                       "is recorded at every node: the states between kept "
-                       "ones are rebuilt by forward steps under the recorded "
-                       "node loads, and its first stage closes under the "
-                       "forcing at its own time, which is not recorded: give "
-                       "1",
-                       out.record_stride));
-    }
     if (!run.forcing.seismic.empty() && out.record_stride != 1) {
       Fail(member,
            std::format("is {}, and a run under seismic sources "
@@ -76,6 +66,7 @@ io::TrajectoryStore::Description Described(const Run& run, int stride,
   out.migrating = run.Migrating();
   out.sources = !run.forcing.seismic.empty();
   out.tide = !run.forcing.tide.empty();
+  out.staged = run.times.has_value() && IsMultiStage(run.solver.scheme);
   out.field_size = solver.Grid().FieldSize();
   return out;
 }

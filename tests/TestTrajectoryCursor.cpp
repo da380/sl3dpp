@@ -307,12 +307,17 @@ TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
   direction.material = MaterialAlong(setup, weak.op);
 
   auto run = [&](int stride) {
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution evolution(weak.op, setup.solver, setup.state,
-                        {.rtol = 1e-12, .record_stride = stride});
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12, .record_stride = stride});
     return ForwardTrajectory::FromSnapshots(evolution.Run(times, forced.forcing));
   };
   const auto full = run(1);
-  Evolution evolution(weak.op, setup.solver, setup.state, {.rtol = 1e-12});
+  Evolution evolution(weak.op, setup.solver, setup.state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const TangentLinearSolver tangent(
         evolution, {.method = method, .rtol = 1e-12, .record = true});
@@ -392,8 +397,11 @@ TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
   measurements[13].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[7].displacementDual = setup.Smooth(rng, 0.5);
   auto run = [&](int stride) {
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(weak.op, setup.solver, state,
-                        {.rtol = 1e-12, .record_stride = stride});
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12, .record_stride = stride});
     return evolution.RunMigrating(
         times, [&melted, step](double t) { return melted(t, t >= step); },
         forcing);
@@ -404,7 +412,9 @@ TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
   for (const auto& c : oceans) moved = moved || c != oceans.front();
   ASSERT_TRUE(moved);
   const auto full = ForwardTrajectory::FromSnapshots(fullRun);
-  Evolution evolution(weak.op, setup.solver, state, {.rtol = 1e-12});
+  Evolution evolution(weak.op, setup.solver, state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-12});
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const AdjointSolver adjoint(
         evolution, {.method = method, .rtol = 1e-12, .material_kernels = true});
@@ -432,8 +442,9 @@ TEST(TrajectoryCursor, WhatAGappedRecordingIsRefused) {
   // there) and one without the recorded coefficients are refused by the
   // sweeps and the tangent-linear run; a run under interior sources is
   // recorded at every node, a stride refused (its states are not rebuilt
-  // from the loads alone); a gapped recording under Sdirk2 is refused by
-  // the continuous sweep (TestAdjoint, Sdirk2's refusals).
+  // from the loads alone). (A gapped recording under Sdirk2 is rebuilt
+  // through its stages, under their recorded closures:
+  // TestSdirk2Derivatives.)
   const WeakLayer weak;
   const auto& setup = weak.setup;
   std::mt19937 rng(83);

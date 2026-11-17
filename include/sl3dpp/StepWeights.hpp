@@ -50,7 +50,10 @@
  * scheme for steps long against the shortest relaxation time (the forward
  * run after abrupt forcing, the continuous kernels); at steps short
  * against it the trapezoid, exact for a strain linear in a step, is the
- * closer at half the cost (docs/design.md §5).
+ * closer at half the cost (docs/design.md §5; docs/running.md, "Choosing
+ * a step and scheme"). The derivative runs take its step stage by stage,
+ * each stage's weights' derivatives backward Euler's at gamma dt
+ * (detail/StepStages.hpp).
  */
 
 #include <cmath>
@@ -59,12 +62,13 @@
 namespace sl3dpp {
 
 /// The time-stepping schemes. The first three are one-stage schemes with
-/// the weights below: the exponential trapezoid (second order, the
-/// default), backward Euler (first order) and the exponential Euler
-/// (explicit in the strain). Sdirk2 is Alexander's (1977) two-stage
-/// singly diagonally implicit Runge-Kutta scheme, gamma = 1 - 1/sqrt 2:
-/// second order, L-stable and stiffly accurate, its stages backward Euler
-/// steps of length gamma dt (StepRecipe.hpp).
+/// the weights below: the exponential trapezoid (second order), backward
+/// Euler (first order) and the exponential Euler (explicit in the
+/// strain). Sdirk2, the default of every driver and operator step, is
+/// Alexander's (1977) two-stage singly diagonally implicit Runge-Kutta
+/// scheme, gamma = 1 - 1/sqrt 2: second order, L-stable and stiffly
+/// accurate, its stages backward Euler steps of length gamma dt
+/// (StepRecipe.hpp).
 enum class Scheme {
   ExponentialTrapezoid,
   BackwardEuler,

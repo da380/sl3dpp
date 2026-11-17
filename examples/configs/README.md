@@ -27,9 +27,9 @@ cd build/examples/configs
 ../../apps/sl3d solve sea_level_1d.json   # or one at a time
 ```
 
-The synthetic configs need no data and run in about five minutes
-together on four threads (`OMP_NUM_THREADS=4`), three of them the
-seismic runs; CI runs them with `run_all.sh`. They are
+The synthetic configs need no data and run in some ten minutes
+together on four threads (`OMP_NUM_THREADS=4`), most of it the seismic
+runs; CI runs them with `run_all.sh`. They are
 sized for that, so their degrees are low; raise `discretisation.lmax`
 and `times.nodes` for sharper results. `poetry run python plot_app.py`,
 from `build/examples`, draws each config's figures from `out/<config>/` into
@@ -49,6 +49,11 @@ its files at `ocean.date_kyr_bp`, and its output's nodes in the unit
 (`times`, `time_unit`) rather than in dates (`dates_kyr_bp`). The static
 problem reads a load file with a time axis at `date_kyr_bp`, or at `date`
 with its `unit` on the file's own axis.
+
+A run through time steps by `solver.scheme`, by default `"sdirk2"`, and
+`sl3d solve` ends its summary with the run's longest step over the
+model's shortest relaxation time, the number to read a step against
+(docs/running.md, "Choosing a step and scheme").
 
 The `no_ocean*` configs have no `ocean` block, so the body has no ocean,
 and give `"rotation": "none"`, so the response is the solid body's alone
@@ -79,7 +84,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   holds the radial model's fingerprint of the same melt
   (`*_radial_model`). The stiff craton under North America and the soft
   ridge change the sea level by a few centimetres at most, against a
-  near-field fall of about 12 m; about 3 s and 0.9 GB on four threads.
+  near-field fall of about 12 m.
 - **`sea_level_static_migrating.json`** — the static problem under
   migrating shorelines (`ocean.shorelines`): the elastic
   response to the whole synthetic deglaciation, its state the synthetic
@@ -91,8 +96,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   holds the ocean function the solve reaches (`ocean_function_final`)
   beside the state's. The ocean rises by 80 m on average over the 21 ka
   ocean, and the marine margins of the ice sheets flood: the ocean covers
-  83.75% of the surface at the solve against 83.33% at 21 ka. A fraction
-  of a second.
+  83.75% of the surface at the solve against 83.33% at 21 ka.
 - **`sea_level_static_coseismic.json`** — the static problem forced by a
   fault alone, no ice change (`forcing.seismic`): the
   co-seismic sea level change of a thrust off the synthetic South
@@ -113,7 +117,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   response smoothed over a 2° Gaussian cap (`"smoothing": {"kind":
   "gaussian", "width_deg": 2}`, as `<field>_smoothed`), which the figure
   (`coseismic.png`) draws, with the point values along a profile across
-  the fault for their ripples. About 2.5 s and 1.2 GB on four threads.
+  the fault for their ripples.
 - **`sea_level_static_megathrust.json`** — the static problem forced by a
   fault given by its slip, a planetmodel fault file (`forcing.seismic`'s
   `fault_file`): a curved megathrust off the synthetic South America, its
@@ -141,8 +145,8 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   and trench drawn from the file. The 216 points lie at 102 radii (the
   patch is a surface of revolution about the trench's pole, its points
   pairing across the arc's middle), and the sources at one radius are
-  formed together: about 10 s and 1.2 GB on four threads, against 20 s
-  with every point formed on its own.
+  formed together, at about half the time of forming every point on its
+  own.
 - **`sea_level_postseismic.json`** — that thrust's post-seismic
   relaxation, the quasi-static problem counting forwards
   on the run's own clock in years (`"times": {"unit": "yr", "at": [...]}`,
@@ -155,23 +159,18 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   lmax 96 with full rotational feedback and the hydrostatic moments:
   `out/sea_level_postseismic/sea_level_postseismic.nc`, its time axis the
   run's clock in seconds and its nodes in years in the metadata (`times`,
-  `time_unit`). The first node is the co-seismic answer of
-  `sea_level_static_coseismic.json` to 1.6 mm, and to 0.2 mm in 2° means
-  (this deck's viscous layers are isotropic, the elastic deck's
-  transversely isotropic between 24 and 220 km). Then the asthenosphere relaxes, and the upper mantle after it.
-  In 2° means the uplift over the fault, 0.150 m at the event, grows by
-  6 mm in the first year, to 0.205 m by 10 years and 0.319 m at a
-  century, and falls back to 0.233 m by 300 years; 250 km down dip, on
-  the coast, it rises from 0.052 m to 0.209 m at 140 years and is 0.189 m
-  at 300; 1000 km up dip it goes from +1 mm to -27 mm at 140 years and
-  -22 mm at 300. The relative sea level follows minus the uplift. The
+  `time_unit`). The first node is the co-seismic answer, as
+  `sea_level_static_coseismic.json`'s but on this deck (its viscous
+  layers are isotropic, the elastic deck's transversely isotropic between
+  24 and 220 km). Then the asthenosphere relaxes, and the upper mantle
+  after it: the uplift over the fault grows over the first century and
+  falls back after it, and the relative sea level follows minus the
+  uplift. The
   file holds the east and north components and every field smoothed over
   2° at every node, as `sea_level_static_coseismic.json`'s, and the
   figure (`postseismic.png`) draws the relaxation as those 2° means, in maps
   and at three places on a time axis linear about the event and
-  logarithmic after it, the deck's Maxwell times marked. On nodes three
-  times as close the means move by at most 3.2 mm, 1.8% of their change
-  (at lmax 64). About 46 s and 4.0 GB on four threads.
+  logarithmic after it, the deck's Maxwell times marked.
 - **`sea_level_postseismic_burgers.json`** — that run on the post-seismic
   Earth's Burgers twin: `model.burgers` makes the asthenosphere, the
   deck's viscous layers from the lid's base at 50 km to 217 km, Burgers
@@ -181,28 +180,20 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `out/sea_level_postseismic_burgers/sea_level_postseismic_burgers.nc`.
   It is `ExampleSeismic`'s Burgers twin through the program, the
   rheology the same branch for branch (`TestAppsDecks`). The
-  asthenosphere relaxes a part of the way within months: in 2° means the
-  uplift over the fault grows from 0.150 m at the event to 0.181 m in the
-  first year, against 0.156 m on the Maxwell Earth, the two differing by
-  26 mm at 1.5 to 2 years, by 16 mm at 10 years and by little after about
-  35 years (3 mm less on the Burgers Earth at 55 to 100 years, 0.231 m
-  against 0.233 m at 300 years); 250 km down dip it rises from 0.052 m to
-  0.074 m in the first year, against 0.057 m. A burgers deck holding the
+  asthenosphere relaxes a part of the way within months, where the
+  Maxwell Earth has hardly begun, and the two runs differ little after a
+  few decades. A burgers deck holding the
   same body (`"format": "burgers"`, planetmodel's
   `conversion.prony.burgers_deck`) gives the same run to rounding, and a
   prony deck of its two branches (`"format": "prony"`) the same to the
   eight digits it writes them with and to their joining between knots
-  (docs/sl3d-configs.md, Earth models). About 37 s on four threads.
+  (docs/sl3d-configs.md, Earth models).
 - **`no_ocean_postseismic.json`** — that thrust without an ocean and
   without rotational feedback, on the same Earth, nodes and lmax: the
   solid body's response, `out/no_ocean_postseismic/no_ocean_postseismic.nc`
   (the displacement, the tangential, toroidal and gravitational
   potentials, the east and north components, and each smoothed over 2°),
-  and the twin with gravity of the next. In 2° means over
-  the fault the uplift is 0.147 m at the event, 0.299 m at its peak (75
-  years) and 0.200 m at 300 years; the horizontal motion up dip there
-  0.851 m at the event and 0.701 m at 300 years, and 250 km down dip it
-  grows from 0.631 m to 1.046 m. About 47 s on four threads.
+  and the twin with gravity of the next.
 - **`no_gravity_postseismic.json`** — the problem without gravity
   (`"gravity": "none"`): the same thrust on the same Earth, nodes and
   lmax, without an ocean, a potential or a rotational feedback, the
@@ -213,16 +204,11 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   north components, each smoothed over 2° too; no potential and no sea
   level change) and exchange tables of the displacement at the
   first and last nodes, `out/no_gravity_postseismic/no_gravity_postseismic_{node}.txt`.
-  Against its twin with gravity, `no_ocean_postseismic.json`, in 2° means
-  over the fault: 0.153 m of uplift at the event against 0.147 m, 0.356 m
-  at its peak (100 years) against 0.299 m, and 0.297 m at 300 years
-  against 0.200 m; 250 km down dip 0.238 m at 300 years against 0.170 m.
-  Without self-gravitation and buoyancy nothing but the elastic lid holds
-  the relaxing surface down, and the uplift grows the more; the
-  horizontal motion hardly differs (0.700 m up dip over the fault at 300
-  years against 0.701 m). The figure comparing the two,
+  Against its twin with gravity, `no_ocean_postseismic.json`: without
+  self-gravitation and buoyancy nothing but the elastic lid holds the
+  relaxing surface down, and the uplift grows the more; the horizontal
+  motion hardly differs. The figure comparing the two,
   `with_and_without_gravity/postseismic.png`, draws them on one panel.
-  About 35 s on four threads.
 - **`sea_level_1d.json`** — the quasi-static problem (its
   `times` block the window, its state, the topography and the ice, read at
   the window's start, `"at": "start"`, and the synthetic history a
@@ -255,8 +241,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   held: each step's node holds the elastic response to the step, and the
   nodes after it the relaxation. Dropping the member reads the same
   factors as `linear`, the melt ramped between the dates instead:
-  `out/sea_level_1d_steps/sea_level_1d_steps.nc`. Under a second on four
-  threads.
+  `out/sea_level_1d_steps/sea_level_1d_steps.nc`.
 - **`sea_level_tide_migrating.json`** — that deglaciation with migrating
   shorelines from the state at 21 ka (`"at": "start"`) under a degree-2
   zonal tidal potential beside the ice (`forcing.tide`), switched on over
@@ -267,10 +252,9 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   that places the shorelines. Its equilibrium surface, -psi / g, falls by
   nearly 3 m from pole to equator, but by the present the body has relaxed
   nearly to the fluid response, which follows the equipotential: the
-  tide changes the relative sea level by -0.27 to +0.12 m, and moves no
-  shoreline of the synthetic Earth's steep coasts; the shorelines the
-  figure (`sea_level.png`) shows moved are the deglaciation's. About 1 s
-  on two threads.
+  tide changes the relative sea level by a few tenths of a metre, and
+  moves no shoreline of the synthetic Earth's steep coasts; the shorelines
+  the figure (`sea_level.png`) shows moved are the deglaciation's.
 - **`sea_level_3d.json`** — the same deglaciation with the laterally varying
   viscosity of `../data/viscosity_log.nc` (a planetmodel model file on the
   same body, a zero-mean log perturbation about 1e21 Pa s), at lmax 16 in
@@ -282,7 +266,7 @@ those on lateral structure set `solver.step_rtol` 1e-10 and
   `sea_level_1d_calibrated.json` is in 1D:
   `out/sea_level_3d_calibrated/sea_level_3d_calibrated.nc`. Each pass of the
   3D fixed point solves the nonlinear sea level equation; the calibration
-  takes four runs (about 20 s on 8 threads).
+  takes a few runs.
 The cap measurements of the kernel configs (and of the time-step study,
 below) are caps their runs' truncation resolves. A Gaussian cap of width
 w (`width_deg`, its standard deviation in great-circle distance) is
@@ -306,13 +290,12 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   block): the present sea level averaged over Hudson Bay (an 8° cap), the sea level at
   a far-field point at 10 ka, the length of day (the axial rotation), the
   degree-2 zonal Stokes coefficient J2, and the decay time of the Hudson
-  Bay series over the last 7 kyr (the same cap; 2.8 kyr). Each gets its ice-history kernels and
+  Bay series over the last 7 kyr (the same cap). Each gets its ice-history kernels and
   its radial viscosity kernel (`"parameters": ["ice", "viscosity"]`):
-  `out/kernel1d/`. About 6 s on four threads.
+  `out/kernel1d/`.
 - **`kernel.json`** (`sl3d kernel`) — the 3D counterpart for the Hudson Bay
   sea level and decay time, over a 15° cap at its lmax 12, with the
-  log-viscosity kernels of the 3D viscosity: `out/kernel/`. About 4.5 s on
-  four threads.
+  log-viscosity kernels of the 3D viscosity: `out/kernel/`.
 - **`kernel1d_lateral.json`** (`sl3d kernel`) — the same two measurements
   about the radial Earth (`kernel.json`'s deck without its viscosity file),
   with `"kernels": {"lateral": true}`: the kernels in the log viscosity and
@@ -323,8 +306,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `<name>_moduli_kernel.txt`): `out/kernel1d_lateral/`. The figure
   (`kernel1d_lateral/viscosity_kernels.png`) maps the log-viscosity
   kernel at the depth where it is largest, cuts a section through Hudson
-  Bay and draws its lateral mean and rms against radius. About 1 s on
-  four threads.
+  Bay and draws its lateral mean and rms against radius.
 - **`kernel_static_moduli.json`** (`sl3d kernel`) — the static problem
   without an ocean on the radial `../data/prem8.elastic.deck` at lmax 32,
   under a disk of 1e5 kg m^-2 over Hudson Bay: the kernels in the load and
@@ -332,7 +314,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   centre and of the northward displacement 10° south of it (a vector
   displacement, through the tangential potential). Its `output` block is
   `solve`'s, so `sl3d solve` on the same config writes the response the
-  kernels are of: `out/kernel_static_moduli/`. About 0.2 s.
+  kernels are of: `out/kernel_static_moduli/`.
 - **`kernel_postseismic.json`** (`sl3d solve`, then `sl3d kernel`) —
   `sea_level_postseismic`'s thrust off northern Chile (as 6 by 2 patches,
   at lmax 32) on the post-seismic Earth, on the run's own clock in years,
@@ -348,17 +330,14 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   again; a kernel config of other measurements against the same store
   (the same blocks, another `kernels` block) would too. A run under
   seismic sources is recorded at every node, each state with its strain,
-  its toroidal state and the sources' forces: 8 state records of 86 MB
-  and 8 surface records of 104 kB, 655 MiB in all, the nodes few to keep
-  the store small. On four threads the solve takes about 1 s without
-  recording and 1.2 to 2 s recording (the disk's), and the kernels 3 to
-  4 s, from the store or with the forward run in memory, the same to
-  rounding (about 1e-14 relative; two processes may plan their FFTs
-  differently, and the tests hold the two bitwise within one process).
-  The steps are long against the asthenosphere's Maxwell time: on 33
-  nodes the measurements move by 0.4 to 2.1% and the viscosity kernels
-  by 4% (the GPS station's) and 9% (the gauge's): how a step's error
-  reaches a kernel is the time-step study's (below). The figure
+  its toroidal state and the sources' forces, under the default scheme
+  each step's first stage beside them (some hundreds of MiB in all, the
+  nodes few to keep the store small). The kernels are the same from the
+  store or with the forward run in memory, to rounding (two processes
+  may plan their FFTs differently, and the tests hold the two bitwise
+  within one process). The steps are long against the asthenosphere's
+  Maxwell time: how a step's error reaches a kernel is the time-step
+  study's (below). The figure
   (`kernels.png`)
   draws the moment kernels per patch, held from the onset, and their
   contraction with the fault's own mechanism, which gives back each
@@ -387,7 +366,8 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `out/no_ocean_viscoelastic/no_ocean_viscoelastic_{node}.txt` (the start,
   the peak load, the unloaded state and the end). The quasi-static problem
   (`"problem": "quasi_static"` with a `times` block) is what makes the
-  response viscoelastic; it takes about 5 s on four threads.
+  response viscoelastic. It states its solver's members in full, the
+  exponential trapezoid among them.
 - **`no_ocean_seismic.json`** — the co-seismic and post-seismic response
   of the post-seismic Earth to a thrust fault off north-east Japan (a 400
   by 150 km plane of scalar moment 4e22 N m, laid out as 8 by 3 point
@@ -398,11 +378,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   displacement, the tangential potential V, the toroidal potential W, the
   potential and the east and north components at every node, each
   smoothed over 2° too, which the figure (`postseismic.png`)
-  draws as `sea_level_postseismic`'s without an ocean: in 2° means the
-  uplift over the fault, 0.171 m at the event, peaks at 0.393 m at 75
-  years and is 0.240 m at 300, and 1000 km up dip the surface moves 0.49
-  m towards the fault over the three centuries. About 38 s on four
-  threads.
+  draws as `sea_level_postseismic`'s without an ocean.
 - **`no_ocean_1d_disk.json`** — a disk load of 8 degrees over Hudson Bay, the
   mass of about 2 km of ice, held for 10 kyr and removed over the next half,
   on the radial viscoelastic Earth of `../data/prem8.gia.deck` (no lateral
@@ -410,7 +386,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `out/no_ocean_1d_disk/no_ocean_1d_disk.nc`. The disk is the exact expansion
   to lmax, not a sampled step. The figure shows the displacement against
   distance from the centre, the peripheral bulge growing under the load and
-  the uplift after it; about 5 s on four threads.
+  the uplift after it.
 - **`no_ocean_1d_tide.json`** — a degree-2 tidal potential switched on and
   held on the same radial Earth, at unevenly spaced nodes out to 500 kyr
   (`times.at`, in kyr), with an exchange table at every node:
@@ -418,7 +394,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `out/no_ocean_1d_tide/no_ocean_1d_tide_{node}.txt`. The coefficients over
   the applied potential are the tidal Love numbers through time, from the
   elastic values at the start towards the fluid limit, which the figure
-  draws; a fraction of a second.
+  draws.
 - **`no_ocean_tide_3d.json`** — the lunar body tide on the synthetic 3D
   elastic Earth (`../data/synthetic_moduli.nc` on
   `../data/prem8.elastic.deck`), at lmax 32:
@@ -443,8 +419,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   (0.06% above degree 32). Beyond degree 15 its spectrum sits at a floor
   of about 1e-5 mm, which is the moduli file's linear lateral interpolation
   onto the coupling's grid, not its structure (under a cubic lateral rule
-  the floor is hundreds of times lower). About 3 s and 0.9 GB on four
-  threads.
+  the floor is hundreds of times lower).
 - **`no_ocean_tide_oscillating.json`**, with
   **`no_ocean_tide_oscillating_short.json`** and
   **`no_ocean_tide_oscillating_long.json`** — a degree-2 tide oscillating
@@ -458,12 +433,9 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   `build/examples`), whose amplitude history `history` has a point at
   every node, where the run sees the forcing. With a unit potential the
   degree-2 coefficients
-  are the Love numbers at the forcing's frequency; over the last cycle at
-  P = 1 kyr |h2| = 0.811 lagging the potential by 23.0° and |k2| = 0.409
-  lagging by 24.1°, at 0.1 kyr |k2| = 0.301 lagging by 4.0°, and at
-  10 kyr |k2| = 0.787 lagging by 12.2°: the lag is largest between the
-  elastic and the fluid limits. Against 96 nodes a period, 24 put k2
-  within 0.7% and its lag within 0.4°. A fraction of a second each.
+  are the Love numbers at the forcing's frequency, their amplitude
+  between the elastic and the fluid values and lagging the potential,
+  the lag largest between the two limits.
 - **`sea_level_fingerprint_ice_cap.json`** with **`no_ocean_ice_cap.json`**
   — what the ocean adds: one ice change with an ocean and without one,
   elastic, on the radial Earth of `../data/prem8.elastic.deck` at lmax 128. The
@@ -482,8 +454,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   (from +1.2 m near the cap to -1.78 m far from it). The ice's load alone
   presses the cap's centre down by 25.9 m; the water's unloading changes
   the displacement by -14 to +21 cm, lifting the ocean floor by 11 cm on
-  average and pressing the cap's centre down by a further 12 cm. A
-  fraction of a second each.
+  average and pressing the cap's centre down by a further 12 cm.
 - **`no_ocean_cap_weak.json`** and **`no_ocean_cap_strong.json`** — the
   same Hudson Bay-sized cap (10° wide, 1.834e6 kg m^-2) switched on at 0,
   held, and removed over 6 to 6.5 kyr, from 0 to 12 kyr in half-kyr steps
@@ -495,11 +466,9 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   +0.35 at the two centres at 400 km depth (0.70e21 and 1.42e21 Pa s), a
   factor of two between them. Each writes the radial reference model's
   response beside its own (`displacement_radial_model`), the same at both
-  places. Under the load the weak site subsides faster (by 21 m more than
-  the radial model after 1 kyr, the stiff one 19 m less, of about 255 m)
-  and after the load is removed it rebounds faster (20 m left at 12 kyr,
-  against 32 m in the radial model and 45 m at the stiff site). About 3 s
-  each on four threads, 13 to 15 fixed-point iterations a step.
+  places. Under the load the weak site subsides faster than the radial
+  model and the stiff one more slowly, and after the load is removed the
+  weak site rebounds faster.
 - **`no_ocean_load_cap.json`**, with **`no_ocean_load_field.json`** and
   **`no_ocean_load_coefficients.json`** — one load history given three
   ways, on the radial viscoelastic Earth of `../data/prem8.gia.deck` from 0
@@ -526,8 +495,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   run's lmax: the three responses agree to 1e-14 of their largest values.
   The `load` written by the coefficient run is synthesised from the table
   (band-limited), so it differs from the sampled cap's by about 1% at the
-  centre while the loads' coefficients, and so the responses, agree. About
-  1 s each.
+  centre while the loads' coefficients, and so the responses, agree.
 - **`sea_level_no_ocean.json`** — `no_ocean_load_cap.json`'s run dated:
   its window from 12 kyr BP to the present in quarter-kyr steps and the
   cap's history in dates before present (`history_kyr_bp` `[[10, 0], [9,
@@ -538,7 +506,7 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   node to 1e-11 of their largest values (9e-13 for the displacement), the
   rounding of the two clocks' node times, and its `load` at every node to
   2e-15; its relative sea level change is -(u + phi / g), the height of an
-  equipotential above the surface. About 1 s.
+  equipotential above the surface.
 - **`no_gravity_load.json`** — surface loads in the problem without
   gravity (`"gravity": "none"`), where a load acts by its weight, a normal
   traction g sigma, less its degree-1 part (a net force, which nothing
@@ -552,13 +520,11 @@ lmax 16 (the time-step study, at least 11.25°); the drivers'
   12 kyr, `out/no_gravity_load/no_gravity_load_{node}.txt`. The pair's
   degree-1 part is 4e-16 of its size; a single cap would be answered as
   the cap less its degree-1 part, the run saying how much it removed.
-  Without buoyancy the surface under each cap sinks 203 m
-  once the load is on and 1018 m by 7 kyr (125 m and 327 m with gravity),
-  and after the load is gone it springs back by its elastic part alone,
-  792 m down at 12 kyr against 60 m with gravity, as the figure
+  Without buoyancy the surface under each cap goes on sinking while the
+  load is held, several times further than with gravity, and after the
+  load is gone it springs back by its elastic part alone, as the figure
   comparing it with `no_ocean_load_cap`,
-  `with_and_without_gravity/load.png`, draws. Under 1 s on four
-  threads.
+  `with_and_without_gravity/load.png`, draws.
 - **The time-step study**, the `timestep_*` configs — one problem run at
   steps of 1 kyr and shorter, by `sl3d solve` and by `sl3d kernel` with
   each adjoint, held against a truth taken from forward runs alone: what
@@ -744,29 +710,50 @@ nearly independent of the width (`convergence.png`, (b)).
 
 **Sdirk2.** The full form runs the problem under `solver.scheme`
 `"sdirk2"` too (design.md §5: two backward Euler stages a step, second
-order and damped): the forward run (`timestep_sdirk2_n<N>`) and the
-continuous kernels stepped by its stages (`timestep_sdirk2_continuous_n<N>`;
-its discrete adjoint is not built), against the same truth, the
-exponential trapezoid's at the same step after the slash:
+order and damped): the forward run (`timestep_sdirk2_n<N>`) and its
+kernels by each adjoint, the discrete one the exact transpose of the
+two-stage step (`timestep_sdirk2_discrete_n<N>`) and the continuous one
+stepped by the same stages (`timestep_sdirk2_continuous_n<N>`), against
+the same truth, the exponential trapezoid's at the same step after the
+slash:
 
-| h (kyr) | h/τ_min | J | dJ/d ln η, continuous | along the pulse, continuous |
-| --- | --- | --- | --- | --- |
-| 1 | 9.3 | +0.015 / +0.043 (+0.22 / −0.50) | +1.9 / −1.0 (+14 / +24) | −5.2 / −4.4 (+25 / +41) |
-| 1/2 | 4.6 | +0.0023 / +0.010 (+0.059 / −0.18) | +0.52 / −0.24 (+5.5 / +8.5) | −2.0 / −1.1 (+9.4 / +13) |
-| 1/4 | 2.3 | +0.00052 / +0.0025 (+0.015 / −0.051) | +0.13 / −0.057 (+1.7 / +2.5) | −0.50 / −0.28 (+2.8 / +3.8) |
-| 1/8 | 1.2 | +0.00012 / +0.00063 (+0.0038 / −0.013) | +0.034 / −0.014 (+0.44 / +0.64) | −0.12 / −0.069 (+0.72 / +0.97) |
+| h (kyr) | h/τ_min | J | dJ/d ln η, discrete | continuous | along the pulse, discrete | continuous |
+| --- | --- | --- | --- | --- | --- | --- |
+| 1 | 9.3 | +0.015 / +0.043 (+0.22 / −0.50) | +0.38 / +0.26 (−4.0 / −1.7) | +1.9 / −1.0 (+14 / +24) | −1.2 / −1.1 (−11 / +8.9) | −5.2 / −4.4 (+25 / +41) |
+| 1/2 | 4.6 | +0.0023 / +0.010 (+0.059 / −0.18) | +0.079 / +0.060 (−1.4 / −1.3) | +0.52 / −0.24 (+5.5 / +8.5) | −0.0093 / −0.25 (−3.6 / +3.4) | −2.0 / −1.1 (+9.4 / +13) |
+| 1/4 | 2.3 | +0.00052 / +0.0025 (+0.015 / −0.051) | +0.020 / +0.015 (−0.40 / −0.49) | +0.13 / −0.057 (+1.7 / +2.5) | +0.00081 / −0.061 (−0.98 / +1.0) | −0.50 / −0.28 (+2.8 / +3.8) |
+| 1/8 | 1.2 | +0.00012 / +0.00063 (+0.0038 / −0.013) | +0.0048 / +0.0037 (−0.10 / −0.14) | +0.034 / −0.014 (+0.44 / +0.64) | +0.00065 / −0.015 (−0.25 / +0.26) | −0.12 / −0.069 (+0.72 / +0.97) |
 
-in per cent at 10 ka / 6 ka, every series falling at second order from
-1/2 kyr on (the observed orders 1.92 to 2.14; 1.38 to 2.67 between 1 and
-1/2 kyr). At 1 kyr the sea level over the sphere is 0.042 / 0.035% off
-against 0.62 / 0.48%, and the continuous kernel's worst layer 4.6% at
-10 ka (the base of the mantle) and 1.7% at 6 ka against 33 / 41%. Its
-value is the more accurate by 15 and 12 times at 1 kyr and by 31 and 21
-times at 1/8 kyr, and its continuous kernel by 8 to 24 times in the
-viscosity and 5 to 9 along the pulse at 1 kyr, at twice the solves a
-step: the trapezoid acts as backward Euler on the slow modes the stiff
-points carry at steps long against τ_min, the damped second-order scheme
-does not.
+in per cent at 10 ka / 6 ka, every series falling at second order: the
+observed orders are 1.38 to 2.67 between 1 and 1/2 kyr and 1.90 to 2.14
+from 1/2 to 1/32 kyr, but for the discrete kernel's at 6 ka between the
+two finest steps (1.65, its error there, 3e-6 of the derivative, within
+the truth's uncertainty) and for the discrete kernel along the pulse at
+10 ka, whose error is below 1e-4 of it from 1/2 kyr on and changes
+sign. The
+discrete kernel is the stepped run's gradient under Sdirk2 as under the
+trapezoid: at 1 kyr its pairing with the uniform change is the central
+difference of two Sdirk2 runs (`timestep_sdirk2_up_n10`,
+`timestep_sdirk2_down_n10`) to 1.3e-7, the difference's own accuracy,
+and along the pulse the Sdirk2 run under the pulse alone
+(`timestep_sdirk2_pulse_n10`) to 2e-12, the run reading its forcing at
+its nodes alone (docs/adjoints.md §1a). Its error is the forward
+run's, 7 to 11 times smaller than the trapezoid's discrete kernel's at
+1 kyr and 18 to 33 times from 1/2 kyr on, and at 10 ka it is off by
+about the same in every layer (0.30 to 0.41% at 1 kyr). At 1 kyr the sea
+level over
+the sphere is 0.042 / 0.035% off against 0.62 / 0.48%, and the
+continuous kernel's worst layer 4.6% at 10 ka (the base of the mantle)
+and 1.7% at 6 ka against 33 / 41%. Its value is the more accurate by 15
+and 12 times at 1 kyr and by 31 and 21 times at 1/8 kyr, and its
+continuous kernel by 8 to 24 times in the viscosity and 5 to 9 along the
+pulse at 1 kyr, at twice the solves a step: the trapezoid acts as
+backward Euler on the slow modes the stiff points carry at steps long
+against τ_min, the damped second-order scheme does not. Held against the
+trapezoid at half the step, the same solves, its values are 4 times
+closer at 1 kyr and 5 to 8 times at 1/16 kyr. What this says for the
+choice of a step and a scheme is in docs/running.md, "Choosing a step
+and scheme".
 
 **Running it.** The configs here are the short form: the four kinds of
 run at N = 10, 20 and 40, `et` at 80 and 160, `pulse` at 10 to 160, and
@@ -775,10 +762,10 @@ run at N = 10, 20 and 40, `et` at 80 and 160, `pulse` at 10 to 160, and
 --short` writes the decks and the configs, runs them (about 10 s on four
 threads) and prints the tables above at N = 10 to 40 against a truth from
 N = 80 and 160 (to 3e-4 of the derivatives). `poetry run python
-timestep_study.py` runs the whole study, 133 runs (the Sdirk2 series
-twelve of them, about 45 s on two threads), in about two minutes on four
-threads (75 s with `--jobs 2` before the Sdirk2 series), and prints every
-number quoted here; `plot_app.py` draws `accuracy.png`, `layers.png` and
+timestep_study.py` runs the whole study, 142 runs (the Sdirk2 series 21
+of them), in about nine and a half minutes with `OMP_NUM_THREADS=2` and
+the runs one at a time (the Sdirk2 series three of them; `--jobs J` runs
+J at once), and prints every number quoted here; `plot_app.py` draws `accuracy.png`, `layers.png` and
 `convergence.png` into `figures/sl3d/timestep_study/`.
 
 ### Convergence in lmax of the seismic examples
@@ -805,45 +792,29 @@ draw them, saying so; the configs run at
 lmax 96, where the means are within a few tenths of a per cent of lmax
 128 and 256. On the post-seismic deck with an ocean, along a profile
 across the fault through its centroid, the co-seismic field (the static
-problem; four threads):
+problem):
 
-| lmax | peak uplift, point | peak horizontal, point | point uplift's ripple beyond 400 km | peak uplift, 2° mean | peak horizontal, 2° mean | time, memory |
-| --- | --- | --- | --- | --- | --- | --- |
-| 64 | 0.373 m | 1.96 m | 0.116 m (31% of its peak) | 153.3 mm | 852.9 mm | 1.1 s, 0.5 GB |
-| 96 | 0.585 m | 2.64 m | 0.226 m (39%) | 159.1 mm | 872.6 mm | 2.6 s, 1.2 GB |
-| 128 | 0.726 m | 2.83 m | 0.238 m (33%) | 159.1 mm | 872.6 mm | 4.6 s, 2.2 GB |
-| 256 | 1.335 m | 4.30 m | 0.100 m (7%) | 159.1 mm | 872.6 mm | 18.6 s, 9.4 GB |
+| lmax | peak uplift, point | peak horizontal, point | point uplift's ripple beyond 400 km | peak uplift, 2° mean | peak horizontal, 2° mean |
+| --- | --- | --- | --- | --- | --- |
+| 64 | 0.373 m | 1.96 m | 0.116 m (31% of its peak) | 153.3 mm | 852.9 mm |
+| 96 | 0.585 m | 2.64 m | 0.226 m (39%) | 159.1 mm | 872.6 mm |
+| 128 | 0.726 m | 2.83 m | 0.238 m (33%) | 159.1 mm | 872.6 mm |
+| 256 | 1.335 m | 4.30 m | 0.100 m (7%) | 159.1 mm | 872.6 mm |
 
 From one lmax to the next the point values move by 44%, 38% and 46% of
 their peak uplift (34%, 28% and 38% of the horizontal's), the 2° means
-by 4.0%, 0.20% and 0.04% (2.7%, 0.08% and 0.001%). Through time,
-`sea_level_postseismic`'s series at its three places and at the coast
-(the tide gauge of `ExampleSeismic`, 22° S, 72° W), the largest change
-over the run from one lmax to the next, against the series' largest
-value at lmax 128:
+by 4.0%, 0.20% and 0.04% (2.7%, 0.08% and 0.001%). Through time the
+same holds of `sea_level_postseismic`'s series: their point values move
+by tens of per cent from one lmax to the next, their 2° means by a few
+tenths of a per cent between lmax 96 and 128.
 
-| series | 48 to 64 | 64 to 96 | 96 to 128 |
-| --- | --- | --- | --- |
-| uplift over the fault, point | 164 mm (22%) | 247 mm (33%) | 175 mm (23%) |
-| uplift over the fault, 2° mean | 24 mm (7.6%) | 7.5 mm (2.3%) | 0.7 mm (0.2%) |
-| uplift 250 km down dip, point | 77 mm (10%) | 304 mm (39%) | 223 mm (29%) |
-| uplift 250 km down dip, 2° mean | 10 mm (4.9%) | 6.2 mm (3.0%) | 0.2 mm (0.1%) |
-| uplift 1000 km up dip, point | 47 mm (70%) | 79 mm (118%) | 35 mm (52%) |
-| uplift 1000 km up dip, 2° mean | 5.3 mm (20%) | 1.8 mm (6.6%) | 0.2 mm (0.6%) |
-| sea level at the coast, point | 80 mm (11%) | 309 mm (41%) | 192 mm (26%) |
-| sea level at the coast, 2° mean | 11 mm (5.5%) | 6.2 mm (3.1%) | 0.3 mm (0.1%) |
-
-That run takes 12 s and 0.9 GB at lmax 48, 22 s and 1.7 GB at 64, 46 s
-and 4.0 GB at 96 and 83 s and 7.3 GB at 128 on four threads: time and
-memory grow as lmax squared, held by the sources' forces, a radial
-vector over each degree's whole system for every order although a point
-source touches one element. lmax 256 would take about 27 GB through
-time (and the static problem about 38 GB at lmax 512). The trajectory
-store of `kernel_postseismic` grows as lmax cubed (655 MiB at lmax 32,
-about 5 GB at 64), so it stays at lmax 32, where its measurements, point
-values, are far from converged: it shows the workflow and the kernels'
-form, not converged sensitivities. `ExampleSeismic` runs at lmax 64 and
-draws 2° means too, within a few per cent of converged there.
+Time and memory grow as lmax squared, held by the sources' forces, a
+radial vector over each degree's whole system for every order although a
+point source touches one element. The trajectory store of
+`kernel_postseismic` grows as lmax cubed, so it stays at lmax 32, where
+its measurements, point values, are far from converged: it shows the
+workflow and the kernels' form, not converged sensitivities.
+`ExampleSeismic` runs at lmax 64 and draws 2° means too.
 
 ## ICE-7G
 
@@ -851,9 +822,7 @@ draws 2° means too, within a few per cent of converged there.
 `sea_level_1d_ice7g.json` (26 ka to the present at lmax 64, a node on every
 stored ICE-7G date) and `sea_level_1d_ice7g_calibrated.json` (that run with
 migrating shorelines and its initial sea level calibrated against the
-present day: the misfit falls from about 150 m to a few millimetres in five
-runs, as pyslfp's tutorial 10 reports, and about 45 s) are the same runs on
-ICE-7G. They read
+present day) are the same runs on ICE-7G. They read
 `../data/ice7g.nc`, which `python get_ice7g.py` writes from `build/examples`
 (see `examples/README.md`); `run_all.sh` runs them once that file exists
 and skips them otherwise.
@@ -891,17 +860,15 @@ time takes minutes.
   `sea_level_fingerprint_ice7g.json` (10% of ICE-7G's Greenland ice
   melted, full rotational feedback) on the elastic deck with the S40RTS
   moduli, at lmax 64: the 3D fingerprint, its zero-length step closed by
-  the fixed point in 9 iterations (residual 1.2e-10), with the radial
+  the fixed point, with the radial
   model's beside it (`*_radial_model`). The ocean rises by 0.62 m on
   average (to 0.83 m far from Greenland) and falls by up to 4.5 m at
   Greenland's coast. The lateral moduli change the sea level by up to
   7 cm over the interior of Greenland, under the ice (stiffer mantle,
   less rebound), and by a few millimetres over the ocean (within 3.3 mm
-  over 99% of it, -15 to +8 mm along Greenland's coasts). Measured with
-  `/usr/bin/time -v`: 27 s and 4.2 GB peak on four threads, 25 s and
-  4.5 GB on eight; at lmax 128 (eight threads) 3 min 24 s and 31 GB, the
-  same 9 iterations. Between lmax 64 and 128 the 3D minus radial
-  difference changes by 16% of its rms (7% in the degrees both hold).
+  over 99% of it, -15 to +8 mm along Greenland's coasts). Between lmax 64
+  and 128 the 3D minus radial difference changes by 16% of its rms (7% in
+  the degrees both hold).
 - **`sea_level_3d_ice7g.json`** with **`sea_level_1d_ice7g_custom.json`**
   — GIA through time on ICE-7G, 26 ka to the present in half-kyr steps
   (a node on every stored date) at lmax 32, full rotational feedback and
@@ -910,19 +877,13 @@ time takes minutes.
   the renormalisation made the 3D model's mean) and its lateral moduli;
   and the deck's radial run of the same (`sea_level_1d_ice7g_custom`),
   which is the 3D run's radial reference model. The lateral structure
-  changes the sea level change from 26 ka to the present by -30 to +19 m
-  (an rms of 3.5 m over the sphere, of the change's own 153 m), most
-  under the former Cordilleran and Laurentide ice, and by up to 74 m at
-  some time in the run. In relative sea level it lowers Hudson Bay's by
-  13 m at 26 ka and raises it by 9 m at 8 ka, lowers the Gulf of
-  Bothnia's by 5 m at 11 ka and raises Barbados's by 3 m at 26 ka. Each
-  step is the combined fixed point to `step_rtol` 1e-8, which the first
-  step reaches in about 60 iterations (the default budget is 60, so the
-  config raises `step_max_iterations`); `"step": "conjugate_gradients"`
-  converges within 40 passes a step and gives the same sea level to
-  1.5e-5 m, in somewhat more time. The 3D run takes 4.4 minutes and
-  1.6 GB on four threads, the radial one 1.5 s; at lmax 48 it does not
-  finish in 15 minutes.
+  changes the sea level change from 26 ka to the present by tens of
+  metres, most under the former Cordilleran and Laurentide ice. Each
+  step is the combined fixed point to `step_rtol` 1e-8, and the config
+  raises `step_max_iterations` above the default budget of 60, which the
+  first steps can need; `"step": "conjugate_gradients"` closes the steps
+  by conjugate gradients instead. The 3D run takes minutes on four
+  threads.
 
 
 These read the decks of a three-layer "toy Mars" (a fluid core, a 1e21
@@ -947,6 +908,6 @@ and skips them otherwise.
 - **`no_ocean_tide_planet_relax.json`** — a unit degree-2 potential
   switched on and held on the planet's Maxwell deck, as
   `no_ocean_1d_tide.json` is on the Earth's, at the same nodes out to
-  500 kyr: the Love numbers relax from h2 = 0.34 and k2 = 0.18 to 1.83 and
-  0.99, most of the way between 1 and 10 kyr, several times later than
-  the Earth's under the same viscosity.
+  500 kyr: the Love numbers relax from their elastic values, h2 = 0.34
+  and k2 = 0.18, towards the fluid limit, several times later than the
+  Earth's under the same viscosity.

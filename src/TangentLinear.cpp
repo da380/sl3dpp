@@ -7,6 +7,7 @@
 #include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
 #include "sl3dpp/detail/InteriorSources.hpp"
+#include "sl3dpp/detail/StepStages.hpp"
 #include "sl3dpp/detail/TimeGrid.hpp"
 #include "sl3dpp/detail/TrajectoryCursor.hpp"
 #include "sl3dpp/detail/ToroidalSecondOrder.hpp"
@@ -18,7 +19,36 @@ namespace {
 
 using Complex = std::complex<double>;
 
+using detail::StageRef;
 using detail::TrajectoryCursor;
+
+/// a F1 + b F2 over the forces of two sets of sources (a degree absent
+/// from one has none there).
+RadialSourceForces Blend(double a, const RadialSourceForces& f1, double b,
+                         const RadialSourceForces& f2) {
+  auto out = RadialSourceForces{};
+  auto add = [](std::map<int, std::vector<double>>& to, double factor,
+                const std::map<int, std::vector<double>>& from) {
+    for (const auto& [l, f] : from) {
+      auto& sum = to[l];
+      if (sum.empty()) sum.assign(f.size(), 0.0);
+      for (auto i = std::size_t{0}; i < f.size(); ++i) sum[i] += factor * f[i];
+    }
+  };
+  add(out.spheroidal, a, f1.spheroidal);
+  add(out.spheroidal, b, f2.spheroidal);
+  add(out.toroidal, a, f1.toroidal);
+  add(out.toroidal, b, f2.toroidal);
+  return out;
+}
+
+/// The stages of the step ending at a node of a grid of material steps.
+std::pair<StepRecipe, std::vector<StageRef>> StagesAt(
+    Scheme scheme, const std::vector<double>& dts, std::size_t node) {
+  auto recipe = RecipeOf(scheme, dts[node - 1]);
+  auto refs = detail::StagesOf(recipe, dts[node - 1], node);
+  return {std::move(recipe), std::move(refs)};
+}
 
 void CheckTimes(std::span<const double> times) { detail::CheckTimeGrid(times); }
 
@@ -200,8 +230,6 @@ TangentLinearSolver::TangentLinearSolver(const Evolution& evolution,
         "the tangent-linear runs are not built for the problem without "
         "gravity");
   }
-  detail::RefuseDerivativeOfMultiStage(evolution.options_.scheme,
-                                       "the tangent-linear run");
 }
 
 /// What March takes for the material: a start response and a force per
@@ -210,8 +238,10 @@ TangentLinearSolver::TangentLinearSolver(const Evolution& evolution,
 struct TangentLinearSolver::MaterialForcing {
   virtual ~MaterialForcing() = default;
   [[nodiscard]] virtual std::map<int, std::vector<double>> StartResponse() = 0;
+  /// The force on a stage of a step (the step's one stage under a
+  /// one-stage scheme).
   [[nodiscard]] virtual std::map<int, std::vector<double>> Force(
-      std::size_t node, double dt) = 0;
+      const StageRef& stage) = 0;
 };
 
 struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing {
@@ -221,16 +251,19 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
   std::vector<double> dts;
   // The branch fractions f_k = mu_k / mu_U at the memory points.
   std::vector<std::span<const double>> fractions;
-  // The effective shear's variation per dt at the points, delta mu scaled
-  // by (1 - sum_k f_k (1 - w_k)) there.
-  std::map<double, std::vector<double>> effectiveMu;
+  // The effective shear's variation per stage (its one-stage scheme and
+  // length) at the points, delta mu scaled by (1 - sum_k f_k (1 - w_k))
+  // there.
+  std::map<std::pair<Scheme, double>, std::vector<double>> effectiveMu;
   std::optional<TrajectoryCursor> cursor;
+  // the base states of the stages of the step in hand
+  TrajectoryCursor::StepStates states;
 
-  const std::vector<double>& EffectiveMuOf(double dt) {
-    auto found = effectiveMu.find(dt);
+  const std::vector<double>& EffectiveMuOf(Scheme scheme, double dt) {
+    const auto key = std::pair(scheme, dt);
+    auto found = effectiveMu.find(key);
     if (found != effectiveMu.end()) return found->second;
     const auto& op = *ev->op_;
-    const auto scheme = ev->options_.scheme;
     const auto& weights = op.SchemeWeightsOf(scheme, dt);
     auto effective = direction.mu;
     for (auto i = std::size_t{0}; i < effective.size(); ++i) {
@@ -242,7 +275,7 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
       }
       effective[i] *= factor;
     }
-    return effectiveMu.emplace(dt, std::move(effective)).first->second;
+    return effectiveMu.emplace(key, std::move(effective)).first->second;
   }
 
   /// The moduli's variation of a system along (delta kappa, delta mu) at
@@ -286,15 +319,15 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
   }
 
   /// The direction's force on a full solution and a decayed memory under
-  /// the dt flavour: -(dK_eff) x plus the memory force of the memory with
-  /// the branch moduli's variation.
+  /// the (scheme, dt) flavour of a stage: -(dK_eff) x plus the memory
+  /// force of the memory with the branch moduli's variation.
   std::map<int, std::vector<double>> ForceOn(
-      double dt, const std::map<int, std::vector<double>>& full,
+      Scheme scheme, double dt, const std::map<int, std::vector<double>>& full,
       const std::map<int, std::vector<double>>& mem) {
     const auto& op = *ev->op_;
-    const auto scheme = ev->options_.scheme;
     const auto none = std::vector<double>{};
-    const auto& effective = direction.mu.empty() ? none : EffectiveMuOf(dt);
+    const auto& effective =
+        direction.mu.empty() ? none : EffectiveMuOf(scheme, dt);
     const auto flavour = op.FlavourOf(scheme, dt);
     auto out = std::map<int, std::vector<double>>{};
     for (const auto& [l, x] : full) {
@@ -371,26 +404,26 @@ struct TangentLinearSolver::MaterialDrive : TangentLinearSolver::MaterialForcing
     return UnrelaxedResponse(UnrelaxedForceOn(x0, nullptr));
   }
 
-  /// The force of the step from node - 1 to node: -(dK_eff) x_full plus
-  /// the base decayed memory's force with the branch moduli's variation.
-  /// Acting on the FULL base solution, it carries the material derivative
-  /// of the load response too, so the sea level closure needs nothing
-  /// beyond the memory surface it already reads.
-  std::map<int, std::vector<double>> Force(std::size_t node,
-                                           double dt) override {
+  /// The force on a stage of the step from node - 1 to node (the base
+  /// stage again, from its memory state under its recorded closure):
+  /// -(dK_eff) x_full plus the base decayed memory's force with the branch
+  /// moduli's variation. Acting on the FULL base solution, it carries the
+  /// material derivative of the load response too, so the sea level
+  /// closure needs nothing beyond the memory surface it already reads.
+  std::map<int, std::vector<double>> Force(const StageRef& ref) override {
     const auto& op = *ev->op_;
-    const auto scheme = ev->options_.scheme;
-    const auto& prev = cursor->State(node - 1);
-    auto step = op.StartStep(prev, dt, scheme,
-                             ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
-                             ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
-    if (!trajectory->sourceForces.empty()) {
-      step.AddForce(trajectory->sourceForces[node].spheroidal);
-    }
+    const auto node = ref.node;
+    if (ref.index == 0) states = cursor->Step(node);
+    const auto closure = detail::ClosureOf(*trajectory, ref);
+    auto step = op.StartStep(
+        states.starts[ref.index], ref.length, ref.family,
+        ev->Columns(trajectory->loads[node - 1], ev->toMatDensity_),
+        ev->Columns(trajectory->tides[node - 1], ev->toMatPotential_));
+    if (closure.forces != nullptr) step.AddForce(closure.forces->spheroidal);
     auto [next, full] =
-        step.Finish(ev->Columns(trajectory->loads[node], ev->toMatDensity_),
-                    ev->Columns(trajectory->tides[node], ev->toMatPotential_));
-    return ForceOn(dt, full, step.mem_);
+        step.Finish(ev->Columns(*closure.load, ev->toMatDensity_),
+                    ev->Columns(*closure.tide, ev->toMatPotential_));
+    return ForceOn(ref.family, ref.length, full, step.mem_);
   }
 };
 
@@ -415,6 +448,11 @@ struct TangentLinearSolver::MaterialSecondDrive
   const ForwardTrajectory* trajectory = nullptr;
   std::vector<Part> parts;
   std::optional<TrajectoryCursor> cursor;
+  std::vector<double> dts;
+  // the states of the stages of the step in hand: the base's, and each
+  // part's tangent run's
+  TrajectoryCursor::StepStates baseStates;
+  std::vector<TrajectoryCursor::StepStates> tangentStates;
 
   LoadCallable Loads(const std::vector<Complex>& c) const {
     return ev->Columns(c, ev->toMatDensity_);
@@ -423,20 +461,19 @@ struct TangentLinearSolver::MaterialSecondDrive
     return ev->Columns(c, ev->toMatPotential_);
   }
 
-  /// b's full tangent solution at a node: the unrelaxed solve under its
-  /// recorded loads and memory, plus its own material force's response
-  /// on the base solution there.
+  /// b's full tangent solution at a stage's end (a node, or an inner
+  /// stage): the unrelaxed solve under its recorded loads and memory,
+  /// plus its own material force's response on the base solution there.
   std::map<int, std::vector<double>> TangentSolution(
-      const Part& part, std::size_t node,
+      const Part& part, const StageRef& ref,
       const std::map<int, std::vector<double>>& baseFull,
       const std::map<int, std::vector<double>>* baseMemory) const {
     const auto& op = *ev->op_;
-    const auto& snap = part.b[node];
-    auto x = op.SolveElastic(*snap.internalState, Loads(snap.loadCoefficients),
-                             Tides(snap.tideCoefficients));
-    if (snap.sourceForces) {
+    const auto snap = detail::TangentRecordOf(part.b, ref);
+    auto x = op.SolveElastic(*snap.state, Loads(*snap.load), Tides(*snap.tide));
+    if (snap.forces != nullptr) {
       // b perturbs the sources: its solution is under their forces too
-      AddUnrelaxed(x, snap.sourceForces->spheroidal);
+      AddUnrelaxed(x, snap.forces->spheroidal);
     }
     if (part.bMaterial) {
       const auto extra = part.bMaterial->UnrelaxedResponse(
@@ -460,50 +497,62 @@ struct TangentLinearSolver::MaterialSecondDrive
     }
   }
 
-  /// The base run's full solution at a node: the unrelaxed solve under
-  /// the recorded loads and, about a source-driven run, the sources'
+  /// The base run's full solution at a stage's end: the unrelaxed solve
+  /// under the recorded loads and, about a source-driven run, the sources'
   /// forces.
   std::map<int, std::vector<double>> BaseSolution(const ViscoelasticState& state,
-                                                  std::size_t node) const {
-    auto x = ev->op_->SolveElastic(state, Loads(trajectory->loads[node]),
-                                   Tides(trajectory->tides[node]));
-    if (!trajectory->sourceForces.empty()) {
-      AddUnrelaxed(x, trajectory->sourceForces[node].spheroidal);
-    }
+                                                  const StageRef& ref) const {
+    const auto closure = detail::ClosureOf(*trajectory, ref);
+    auto x = ev->op_->SolveElastic(state, Loads(*closure.load),
+                                   Tides(*closure.tide));
+    if (closure.forces != nullptr) AddUnrelaxed(x, closure.forces->spheroidal);
     return x;
   }
 
   std::map<int, std::vector<double>> StartResponse() override {
+    const auto start = StageRef{};  // the first node
     const auto& base0 = cursor->State(0);
-    const auto x0 = BaseSolution(base0, 0);
+    const auto x0 = BaseSolution(base0, start);
     auto total = std::map<int, std::vector<double>>{};
     for (const auto& part : parts) {
-      const auto xb = TangentSolution(part, 0, x0, nullptr);
+      const auto xb = TangentSolution(part, start, x0, nullptr);
       Accumulate(total, part.a->UnrelaxedResponse(
                             part.a->UnrelaxedForceOn(xb, nullptr)));
     }
     return total;
   }
 
-  std::map<int, std::vector<double>> Force(std::size_t node,
-                                           double dt) override {
+  std::map<int, std::vector<double>> Force(const StageRef& ref) override {
     const auto& op = *ev->op_;
-    const auto scheme = ev->options_.scheme;
-    const ViscoelasticState basePrev = cursor->State(node - 1);
-    const auto& baseN = cursor->State(node);
-    const auto xN = BaseSolution(baseN, node);
+    const auto node = ref.node;
+    if (ref.index == 0) {
+      const auto recipe = RecipeOf(ev->options_.scheme, dts[node - 1]);
+      baseStates = cursor->Step(node);
+      tangentStates.clear();
+      for (const auto& part : parts) {
+        tangentStates.push_back(
+            detail::TangentStepStates(part.b, recipe, dts[node - 1], node));
+      }
+    }
+    const auto& basePrev = baseStates.starts[ref.index];
+    const auto& baseN = baseStates.ends[ref.index];
+    const auto xN = BaseSolution(baseN, ref);
     auto total = std::map<int, std::vector<double>>{};
-    for (const auto& part : parts) {
-      const auto xb = TangentSolution(part, node, xN, &baseN.m);
+    for (auto p = std::size_t{0}; p < parts.size(); ++p) {
+      const auto& part = parts[p];
+      const auto xb = TangentSolution(part, ref, xN, &baseN.m);
+      // (a stage from the step's start node opens under that node's
+      // coefficients, which the trapezoid's start strain was formed
+      // under; a backward Euler stage reads none)
       const auto& prev = part.b[node - 1];
-      auto step = op.StartStep(*prev.internalState, dt, scheme,
-                               Loads(prev.loadCoefficients),
+      auto step = op.StartStep(tangentStates[p].starts[ref.index], ref.length,
+                               ref.family, Loads(prev.loadCoefficients),
                                Tides(prev.tideCoefficients));
       if (!part.bDitauPoints.empty()) {
-        step.AddMemory(FirstOrderDrive(op, method, scheme, dt, basePrev, baseN,
-                                       part.bDitauPoints));
+        step.AddMemory(FirstOrderDrive(op, method, ref.family, ref.length,
+                                       basePrev, baseN, part.bDitauPoints));
       }
-      Accumulate(total, part.a->ForceOn(dt, xb, step.mem_));
+      Accumulate(total, part.a->ForceOn(ref.family, ref.length, xb, step.mem_));
     }
     return total;
   }
@@ -553,7 +602,9 @@ TangentLinearSolver::MakeMaterialDrive(const PointMaterialDirection& d,
 std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
     std::span<const double> times, const TangentPerturbation& direction,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
@@ -593,32 +644,54 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   if (!direction.itau.empty()) CheckTrajectory(trajectory, nodes);
   const bool hasMaterial = !direction.material.Empty();
   if (hasMaterial) CheckTrajectory(trajectory, nodes);
+  if (IsMultiStage(scheme) && options_.method == AdjointMethod::Continuous &&
+      !direction.itau.empty()) {
+    throw std::invalid_argument(
+        "the continuous tangent-linear drive of a direction in the "
+        "relaxation times (Options::method AdjointMethod::Continuous) is "
+        "not built for Sdirk2: it serves the continuous second-order sweep, "
+        "which is not built for it either. The discrete run (AdjointMethod::"
+        "Discrete, the default method) steps by the scheme's stages; or "
+        "state a one-stage scheme, Scheme::ExponentialTrapezoid, in the "
+        "evolution's Options::scheme, whose default is Sdirk2");
+  }
+  detail::CheckStageOceanFunctions(scheme, times, migrating,
+                                   stageOceanFunctions, fieldSize);
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
   const auto& C0 = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return migrating ? oceanFunctions[node] : C0;
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage, an inner stage's own before
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C0;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
+  const auto dts = StepSizes(ev, times);
 
-  // The direct load of a node: the load perturbation, the grounded
+  // The direct load of a stage: the load perturbation, the grounded
   // thickness perturbation relative to the first node's, and the initial
   // sea level through the shorelines that moved; empty when nothing
-  // drives the node.
-  const Direct directAt = [&, migrating](std::size_t node) {
+  // drives it. The direction's node values are combined as the forward
+  // run combines its forcing's at the stage (detail::AtStage), the
+  // grounding is the stage's own.
+  const Direct directAt = [&, migrating](const StageRef& ref) {
     auto f = std::vector<double>{};
     auto ensure = [&] {
       if (f.empty()) f.assign(fieldSize, 0.0);
     };
     if (!direction.directLoad.empty()) {
       ensure();
-      const auto& df = direction.directLoad[node];
+      const auto df = detail::AtStage(
+          ref, [&](std::size_t node) { return direction.directLoad[node]; });
       for (auto i = std::size_t{0}; i < fieldSize; ++i) f[i] += df[i];
     }
     if (!direction.iceThickness.empty()) {
       ensure();
-      const auto& Cn = oceanAt(node);
-      const auto& dIn = direction.iceThickness[node];
+      const auto& Cn = oceanAt(ref);
+      const auto dIn = detail::AtStage(
+          ref, [&](std::size_t node) { return direction.iceThickness[node]; });
       const auto& dI0 = direction.iceThickness[0];
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         f[i] += rhoI * (1.0 - Cn[i]) * dIn[i] - rhoI * (1.0 - C0[i]) * dI0[i];
@@ -626,7 +699,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
     }
     if (migrating && !direction.initialSeaLevel.empty()) {
       ensure();
-      const auto& Cn = oceanAt(node);
+      const auto& Cn = oceanAt(ref);
       const auto& dS = direction.initialSeaLevel;
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         f[i] += rhoW * (Cn[i] - C0[i]) * dS[i];
@@ -636,19 +709,21 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   };
 
   // The relaxation-time drive: the forward trajectory served forwards,
-  // the perturbation carried to the memory points.
+  // the perturbation carried to the memory points; each stage driven
+  // about its own forward states.
   auto cursor = std::optional<TrajectoryCursor>{};
+  auto forward = TrajectoryCursor::StepStates{};
   auto ditauPoints = std::vector<std::vector<double>>{};
   Drive drive{};
   if (!direction.itau.empty()) {
     ditauPoints = op.ItauPerturbationAtPoints(direction.itau);
-    cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
-                   LoadColumnsOf(ev), TideColumnsOf(ev));
-    drive = [&](std::size_t node, double dt) {
-      const ViscoelasticState prev = cursor->State(node - 1);
-      const auto& next = cursor->State(node);
-      return FirstOrderDrive(op, options_.method, scheme, dt, prev, next,
-                             ditauPoints);
+    cursor.emplace(op, *trajectory, dts, scheme, LoadColumnsOf(ev),
+                   TideColumnsOf(ev));
+    drive = [&](const StageRef& ref) {
+      if (ref.index == 0) forward = cursor->Step(ref.node);
+      return FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                             forward.starts[ref.index],
+                             forward.ends[ref.index], ditauPoints);
     };
   }
   std::shared_ptr<MaterialDrive> material;
@@ -657,7 +732,10 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   }
   Tide tideAt{};
   if (!direction.tide.empty()) {
-    tideAt = [&](std::size_t node) { return direction.tide[node]; };
+    tideAt = [&](const StageRef& ref) {
+      return detail::AtStage(
+          ref, [&](std::size_t node) { return direction.tide[node]; });
+    };
   }
   Sources sourcesAt{};
   if (!direction.sources.empty() || !direction.stressGluts.empty()) {
@@ -681,23 +759,37 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   ToroidalDrive toroidalDrive{};
   const bool toroidalItau = sourcedBase && !direction.itau.empty();
   const bool toroidalMaterial = sourcedBase && !direction.material.mu.empty();
+  // the base run's toroidal states of the stages of the step in hand
+  using Twist = detail::ToroidalTrajectories;
+  auto twistOf = std::make_shared<std::optional<Twist>>();
+  auto twistStages = std::make_shared<Twist::Stages>();
   if (toroidalItau || toroidalMaterial) {
-    toroidalDrive.step = [&, trajectory, toroidalItau, toroidalMaterial](
+    toroidalDrive.step = [&, trajectory, toroidalItau, toroidalMaterial,
+                          twistOf, twistStages](
                              const ToroidalViscoelastic& toroidal,
-                             std::size_t node, double dt) {
+                             const StageRef& ref) {
+      if (!twistOf->has_value()) {
+        twistOf->emplace(Twist::Make(toroidal, scheme, true, trajectory, {},
+                                     nullptr, {}));
+      }
+      const auto& base = **twistOf;
+      if (ref.index == 0) {
+        const auto [recipe, refs] = StagesAt(scheme, dts, ref.node);
+        *twistStages =
+            base.BaseStages(recipe, refs, dts[ref.node - 1], ref.node);
+      }
+      const auto& from = twistStages->starts[ref.index];
       auto out = std::pair<ToroidalViscoelastic::Fields,
                            ToroidalViscoelastic::Fields>{};
       if (toroidalItau) {
         out.first = toroidal.FirstOrderDrive(
-            options_.method == AdjointMethod::Discrete, scheme, dt,
-            trajectory->toroidal[node - 1], trajectory->toroidal[node],
-            ditauPoints);
+            options_.method == AdjointMethod::Discrete, ref.family, ref.length,
+            from, twistStages->ends[ref.index], ditauPoints);
       }
       if (toroidalMaterial) {
-        out.second = toroidal.MaterialForce(
-            dt, scheme, direction.material.mu,
-            toroidal.Redo(trajectory->toroidal[node - 1], dt, scheme,
-                          trajectory->sourceForces[node].toroidal));
+        out.second = toroidal.MaterialForce(ref.length, ref.family,
+                                            direction.material.mu,
+                                            base.BaseStageOf(ref, from));
       }
       return out;
     };
@@ -712,15 +804,22 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   }
   Direct outsideAt{}, layerAt{};
   if (!direction.directLoadOutsideWaterBudget.empty()) {
-    outsideAt = [&](std::size_t node) {
-      return direction.directLoadOutsideWaterBudget[node];
+    outsideAt = [&](const StageRef& ref) {
+      return detail::AtStage(ref, [&](std::size_t node) {
+        return direction.directLoadOutsideWaterBudget[node];
+      });
     };
   }
   if (!direction.solidSurfaceChange.empty()) {
-    layerAt = [&](std::size_t node) { return direction.solidSurfaceChange[node]; };
+    layerAt = [&](const StageRef& ref) {
+      return detail::AtStage(ref, [&](std::size_t node) {
+        return direction.solidSurfaceChange[node];
+      });
+    };
   }
-  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
-               sourcesAt, toroidalDrive, outsideAt, layerAt);
+  return March(times, oceanFunctions, stageOceanFunctions, directAt, drive,
+               material.get(), tideAt, sourcesAt, toroidalDrive, outsideAt,
+               layerAt);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
@@ -728,7 +827,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
     std::span<const Evolution::Snapshot> tangentU,
     std::span<const Evolution::Snapshot> tangentV,
     const SecondOrderDirection& direction, const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto scheme = ev.options_.scheme;
@@ -736,6 +837,16 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   const bool discrete = options_.method == AdjointMethod::Discrete;
 
   CheckTimes(times);
+  if (IsMultiStage(scheme) && !discrete) {
+    throw std::invalid_argument(
+        "the continuous second-order tangent-linear run (Options::method "
+        "AdjointMethod::Continuous) is not built for Sdirk2: its drive is a "
+        "one-stage step's. The discrete run (AdjointMethod::Discrete, the "
+        "default method) steps by the scheme's stages; or state a one-stage "
+        "scheme, Scheme::ExponentialTrapezoid, in the evolution's "
+        "Options::scheme, whose default is Sdirk2");
+  }
+  const auto dts = StepSizes(ev, times);
   const bool both = !direction.itauU.empty() && !direction.itauV.empty();
   // Which first-order drives the run carries: v's trajectory with u's
   // perturbation, u's with v's, the forward one with itau_uv.
@@ -761,33 +872,40 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
       !direction.materialV.kappa.empty() || !direction.materialV.mu.empty();
   auto requireRecorded = [&] {
     for (const auto* run : {&tangentU, &tangentV}) {
-      if (run->size() != nodes) {
-        throw std::invalid_argument(
-            "the tangent-linear runs must give one snapshot per time node");
-      }
-      for (const auto& snap : *run) {
-        if (!snap.internalState.has_value() || !snap.internalState->HasStrain()) {
-          throw std::invalid_argument(
-              "the tangent-linear runs must be recorded at every node "
-              "(TangentLinearSolver::Options::record)");
-        }
-      }
+      detail::CheckRecordedTangent(*run, scheme, times);
     }
     CheckTrajectory(trajectory, nodes);
   };
+  // the states of the stages of the step in hand: the base's and the two
+  // tangent runs'
+  auto baseStates = TrajectoryCursor::StepStates{};
+  auto alongStates = std::map<const Evolution::Snapshot*,
+                              TrajectoryCursor::StepStates>{};
   if (!parts.empty()) {
     requireRecorded();
-    cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
-                   LoadColumnsOf(ev), TideColumnsOf(ev));
+    cursor.emplace(op, *trajectory, dts, scheme, LoadColumnsOf(ev),
+                   TideColumnsOf(ev));
     auto uPoints = std::vector<std::vector<double>>{};
     auto vPoints = std::vector<std::vector<double>>{};
     if (both && discrete) {
       uPoints = op.ItauPerturbationAtPoints(direction.itauU);
       vPoints = op.ItauPerturbationAtPoints(direction.itauV);
     }
-    drive = [&, uPoints, vPoints](std::size_t node, double dt) {
-      const ViscoelasticState basePrev = cursor->State(node - 1);
-      const auto& baseNext = cursor->State(node);
+    drive = [&, uPoints, vPoints](const StageRef& ref) {
+      const auto node = ref.node;
+      if (ref.index == 0) {
+        const auto recipe = RecipeOf(scheme, dts[node - 1]);
+        baseStates = cursor->Step(node);
+        alongStates.clear();
+        for (const auto& part : parts) {
+          if (part.along.empty()) continue;
+          alongStates.insert_or_assign(
+              part.along.data(), detail::TangentStepStates(
+                                     part.along, recipe, dts[node - 1], node));
+        }
+      }
+      const auto& basePrev = baseStates.starts[ref.index];
+      const auto& baseNext = baseStates.ends[ref.index];
       auto total = std::map<int, std::vector<double>>{};
       auto add = [&](std::map<int, std::vector<double>> term) {
         for (auto& [l, value] : term) {
@@ -803,17 +921,18 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
       };
       for (const auto& part : parts) {
         if (part.along.empty()) {
-          add(FirstOrderDrive(op, options_.method, scheme, dt, basePrev,
-                              baseNext, part.ditau));
+          add(FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                              basePrev, baseNext, part.ditau));
         } else {
-          add(FirstOrderDrive(op, options_.method, scheme, dt,
-                              *part.along[node - 1].internalState,
-                              *part.along[node].internalState, part.ditau));
+          const auto& along = alongStates.at(part.along.data());
+          add(FirstOrderDrive(op, options_.method, ref.family, ref.length,
+                              along.starts[ref.index], along.ends[ref.index],
+                              part.ditau));
         }
       }
       if (both && discrete) {
-        add(SecondWeightDrive(op, scheme, dt, basePrev, baseNext, uPoints,
-                              vPoints));
+        add(SecondWeightDrive(op, ref.family, ref.length, basePrev, baseNext,
+                              uPoints, vPoints));
       }
       return total;
     };
@@ -826,8 +945,9 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
     material->ev = &ev;
     material->method = options_.method;
     material->trajectory = trajectory;
-    material->cursor.emplace(op, *trajectory, StepSizes(ev, times), scheme,
-                             LoadColumnsOf(ev), TideColumnsOf(ev));
+    material->dts = dts;
+    material->cursor.emplace(op, *trajectory, dts, scheme, LoadColumnsOf(ev),
+                             TideColumnsOf(ev));
     const auto driveU =
         materialU ? MakeMaterialDrive(direction.materialU, *trajectory, times)
                   : nullptr;
@@ -890,40 +1010,62 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
         }
       }
     };
-    toroidalDrive.step = [&, along, add](const ToroidalViscoelastic& toroidal,
-                                         std::size_t node, double dt) {
+    // the toroidal states of the stages of the step in hand: the base's
+    // and the two tangent runs'
+    struct TwistStages {
+      Twist::Stages base, u, v;
+    };
+    auto held = std::make_shared<TwistStages>();
+    toroidalDrive.step = [&, along, add, held](
+                             const ToroidalViscoelastic& toroidal,
+                             const StageRef& ref) {
       const auto& [u, v] = along(toroidal);
+      if (ref.index == 0) {
+        const auto [recipe, refs] = StagesAt(scheme, dts, ref.node);
+        const auto dt = dts[ref.node - 1];
+        held->base = u.BaseStages(recipe, refs, dt, ref.node);
+        held->u = u.TangentStages(recipe, refs, dt, ref.node);
+        held->v = v.TangentStages(recipe, refs, dt, ref.node);
+      }
+      const auto i = ref.index;
+      const auto& basePrev = held->base.starts[i];
+      const auto& baseNext = held->base.ends[i];
       auto out = std::pair<ToroidalViscoelastic::Fields,
                            ToroidalViscoelastic::Fields>{};
       if (!uTimes.empty()) {
         add(out.first,
-            toroidal.FirstOrderDrive(discrete, scheme, dt, v.TangentState(node - 1),
-                                     v.TangentState(node), uTimes));
+            toroidal.FirstOrderDrive(discrete, ref.family, ref.length,
+                                     held->v.starts[i], held->v.ends[i], uTimes));
       }
       if (!vTimes.empty()) {
         add(out.first,
-            toroidal.FirstOrderDrive(discrete, scheme, dt, u.TangentState(node - 1),
-                                     u.TangentState(node), vTimes));
+            toroidal.FirstOrderDrive(discrete, ref.family, ref.length,
+                                     held->u.starts[i], held->u.ends[i], vTimes));
       }
       if (!uvTimes.empty()) {
-        add(out.first,
-            toroidal.FirstOrderDrive(discrete, scheme, dt, u.BaseState(node - 1),
-                                     u.BaseState(node), uvTimes));
+        add(out.first, toroidal.FirstOrderDrive(discrete, ref.family, ref.length,
+                                                basePrev, baseNext, uvTimes));
       }
       if (both && discrete) {
         add(out.first,
-            toroidal.SecondWeightDrive(scheme, dt, u.BaseState(node - 1),
-                                       u.BaseState(node), uTimes, vTimes));
+            toroidal.SecondWeightDrive(ref.family, ref.length, basePrev,
+                                       baseNext, uTimes, vTimes));
       }
       if (!muU.empty() || !muV.empty()) {
-        const auto baseStep = u.BaseStepTo(node, dt);
+        const auto baseStage = u.BaseStageOf(ref, basePrev);
         if (!muU.empty()) {
-          add(out.second, toroidal.MaterialForce(
-                              dt, scheme, muU, v.TangentStepTo(node, dt, baseStep)));
+          add(out.second,
+              toroidal.MaterialForce(
+                  ref.length, ref.family, muU,
+                  v.TangentStageOf(ref, held->v.starts[i], basePrev, baseNext,
+                                   baseStage)));
         }
         if (!muV.empty()) {
-          add(out.second, toroidal.MaterialForce(
-                              dt, scheme, muV, u.TangentStepTo(node, dt, baseStep)));
+          add(out.second,
+              toroidal.MaterialForce(
+                  ref.length, ref.family, muV,
+                  u.TangentStageOf(ref, held->u.starts[i], basePrev, baseNext,
+                                   baseStage)));
         }
       }
       return out;
@@ -944,14 +1086,15 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
     }
   }
   // No direct load under the sharp flotation rule.
-  const Direct none = [](std::size_t) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, none, drive, material.get(), {}, {},
-               toroidalDrive);
+  const Direct none = [](const StageRef&) { return std::vector<double>{}; };
+  return March(times, oceanFunctions, stageOceanFunctions, none, drive,
+               material.get(), {}, {}, toroidalDrive);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     std::span<const double> times,
     std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
     const Direct& directAt, const Drive& drive, MaterialForcing* material,
     const Tide& tideAt, const Sources& sourcesAt,
     const ToroidalDrive& toroidalDrive, const Direct& outsideAt,
@@ -977,6 +1120,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
       }
     }
   }
+  detail::CheckStageOceanFunctions(scheme, times, migrating,
+                                   stageOceanFunctions, fieldSize);
   if (rotation == RotationalFeedback::Full) {
     const auto kHyd = FluidTidalNumber(op.BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
@@ -987,16 +1132,20 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   }
   const auto rhoW = solver.WaterDensity();
   const auto& C0 = ev.state_.oceanFunction;
-  auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
-    return migrating ? oceanFunctions[node] : C0;
+  // the shorelines a stage is linearised about: the node's at the step's
+  // last stage (and at the first node), an inner stage's own before
+  auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
+    if (!migrating) return C0;
+    return ref.Last() ? oceanFunctions[ref.node]
+                      : stageOceanFunctions[ref.node][ref.index];
   };
-  auto overrideAt = [&](std::size_t node) {
-    return migrating ? oceanFunctions[node] : std::vector<double>{};
+  auto overrideAt = [&](const StageRef& ref) {
+    return migrating ? oceanAt(ref) : std::vector<double>{};
   };
   auto totalLoadCoefficients = [&](const std::vector<double>& f,
                                    const std::vector<double>& slc,
-                                   std::size_t node) {
-    const auto& Cn = oceanAt(node);
+                                   const StageRef& ref) {
+    const auto& Cn = oceanAt(ref);
     auto total = std::vector<double>(fieldSize);
     for (auto i = std::size_t{0}; i < fieldSize; ++i) {
       total[i] = (f.empty() ? 0.0 : f[i]) + rhoW * Cn[i] * slc[i];
@@ -1013,12 +1162,12 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   };
   // The potential the radial steps see at a node: the centrifugal one of
   // the response's rotation, and the tide's perturbation.
-  auto centrifugal = [&](const GRDSolver::Response& r, std::size_t node) {
+  auto centrifugal = [&](const GRDSolver::Response& r, const StageRef& ref) {
     auto out = rotation == RotationalFeedback::None
                    ? grid.ZeroCoefficients()
                    : solver.CentrifugalCoefficients(r.angularVelocity);
     if (tideAt) {
-      const auto given = tideAt(node);
+      const auto given = tideAt(ref);
       for (auto i = std::size_t{0}; i < out.size(); ++i) out[i] += given[i];
     }
     return out;
@@ -1026,17 +1175,19 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   GRDSolver::Options sleOptions;
   sleOptions.rtol = options_.rtol;
   sleOptions.anderson_memory = options_.anderson_memory;
-  auto flavours = std::map<double, GRDSolver>{};
-  auto solverFor = [&](double dt) -> const GRDSolver& {
-    auto found = flavours.find(dt);
+  // (keyed by a stage's one-stage scheme and length, as the forward run's)
+  auto flavours = std::map<std::pair<Scheme, double>, GRDSolver>{};
+  auto solverFor = [&](Scheme family, double dt) -> const GRDSolver& {
+    const auto key = std::pair(family, dt);
+    auto found = flavours.find(key);
     if (found == flavours.end()) {
       found = flavours
-                  .emplace(dt, GRDSolver(
-                                   grid,
-                                   dt == 0.0 ? op.ElasticLoveNumbers()
-                                             : op.EffectiveLoveNumbers(
-                                                   scheme, dt),
-                                   solver.Parameters()))
+                  .emplace(key, GRDSolver(
+                                    grid,
+                                    dt == 0.0 ? op.ElasticLoveNumbers()
+                                              : op.EffectiveLoveNumbers(
+                                                    family, dt),
+                                    solver.Parameters()))
                   .first;
     }
     return found->second;
@@ -1076,11 +1227,19 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     tstate = toroidal->ZeroState();
     tstate.t = times[0] * ev.toMatTime_;
   }
-  auto sourceForcesAt = [&](std::size_t node) {
+  auto nodeSourceForces = [&](std::size_t node) {
     auto [points, gluts] = sourcesAt(node);
     return detail::ForcesOfSources(op, *toroidal, solver.SolverScales(),
                                    ev.toNdLength_, std::move(points),
                                    std::move(gluts));
+  };
+  // the perturbed sources' forces at a stage: the node's at the step's
+  // last stage; inside the step the two nodes' forces, linear in time
+  // between them (the forces are linear in the sources)
+  auto sourceForcesAt = [&](const StageRef& ref) {
+    if (ref.Last()) return nodeSourceForces(ref.node);
+    return Blend(1.0 - ref.c, nodeSourceForces(ref.node - 1), ref.c,
+                 nodeSourceForces(ref.node));
   };
   auto toroidalCoefficients = [&] {
     return ev.Coefficients(toroidal->Surface(twist), ev.toNdLength_);
@@ -1090,20 +1249,21 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   // direct load, where there is one (a thickness or initial sea level
   // perturbation gives none there).
   auto startResponse = std::map<int, std::vector<double>>{};
-  if (const auto f0 = directAt(0);
+  const auto first = StageRef{};  // the first node, a stage of its own
+  if (const auto f0 = directAt(first);
       !f0.empty() || material != nullptr || tideAt || sourced || outsideAt ||
       layerAt) {
     GRDSolver::GeneralisedForcing forcing;
     forcing.directLoad = f0;
-    if (outsideAt) forcing.directLoadOutsideWaterBudget = outsideAt(0);
-    if (layerAt) forcing.solidSurfaceChange = layerAt(0);
-    if (tideAt) forcing.tide = tideAt(0);
+    if (outsideAt) forcing.directLoadOutsideWaterBudget = outsideAt(first);
+    if (layerAt) forcing.solidSurfaceChange = layerAt(first);
+    if (tideAt) forcing.tide = tideAt(first);
     forcing.rotation = rotation;
-    forcing.oceanFunctionOverride = overrideAt(0);
+    forcing.oceanFunctionOverride = overrideAt(first);
     if (material != nullptr) startResponse = material->StartResponse();
     if (sourced) {
       // the sources' unrelaxed response joins the start's
-      nodeForces = sourceForcesAt(0);
+      nodeForces = sourceForcesAt(first);
       const auto& forces = nodeForces;
       for (const auto& [l, f] : forces.spheroidal) {
         auto x = op.UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
@@ -1144,12 +1304,13 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
             op.InertiaMoment(found->second, 2)[0] * ev.toNdMoment_;
       }
     }
-    response = solverFor(0.0).SolveGeneralised(ev.state_, forcing, sleOptions);
+    response =
+        solverFor(scheme, 0.0).SolveGeneralised(ev.state_, forcing, sleOptions);
     checkConverged(response, 0);
     sigma = totalLoadCoefficients(
         withOutside(f0, forcing.directLoadOutsideWaterBudget),
-        response.relativeSeaLevelChange, 0);
-    psi = centrifugal(response, 0);
+        response.relativeSeaLevelChange, first);
+    psi = centrifugal(response, first);
   }
   if (options_.record || material != nullptr || sourced) {
     op.PrimeStrain(vstate, ev.Columns(sigma, ev.toMatDensity_),
@@ -1170,6 +1331,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   }
 
   auto snapshots = std::vector<Evolution::Snapshot>{};
+  // the records of the inner stages of the step in hand
+  auto innerStages = std::vector<Evolution::Snapshot::Stage>{};
   auto record = [&](std::size_t node, GRDSolver::Response& r) {
     Evolution::Snapshot snapshot;
     snapshot.t = times[node];
@@ -1180,7 +1343,10 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     snapshot.toroidalPotential = std::move(r.toroidalPotential);
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
-    snapshot.oceanFunction = overrideAt(node);
+    snapshot.oceanFunction =
+        migrating ? oceanFunctions[node] : std::vector<double>{};
+    snapshot.stages = std::move(innerStages);
+    innerStages.clear();
     if (options_.record) {
       snapshot.internalState = vstate;
       snapshot.loadCoefficients = sigma;
@@ -1193,64 +1359,108 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   };
   record(0, response);
 
+  // the toroidal systems' stage states in the step in hand
+  auto toroidalStages = std::vector<ToroidalViscoelastic::State>{};
+  auto toroidalCombined = ToroidalViscoelastic::State{};
   for (auto node = std::size_t{1}; node < nodes; ++node) {
     if (options_.on_node) options_.on_node(node);
     const auto dt = (times[node] - times[node - 1]) * ev.toMatTime_;
-    auto step = op.StartStep(vstate, dt, scheme,
-                             ev.Columns(sigma, ev.toMatDensity_),
-                             ev.Columns(psi, ev.toMatPotential_));
-    if (drive) step.AddMemory(drive(node, dt));
-    if (material != nullptr) step.AddForce(material->Force(node, dt));
-    GRDSolver::GeneralisedForcing coupled;
-    if (twisting) {
-      auto forces = RadialSourceForces{};
-      if (sourced) {
-        forces = sourceForcesAt(node);
-        nodeForces = forces;
-        step.AddForce(forces.spheroidal);
-      }
-      auto increment = ToroidalViscoelastic::Fields{};
-      if (toroidalDrive.step) {
-        auto [memory, force] = toroidalDrive.step(*toroidal, node, dt);
-        increment = std::move(memory);
-        for (auto& [l, f] : force) {
-          auto& to = forces.toroidal[l];
-          if (to.empty()) {
-            to = std::move(f);
-          } else {
-            for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += f[i];
+    const auto recipe = RecipeOf(scheme, dt);
+    const auto refs = detail::StagesOf(recipe, dt, node);
+    // One stage of the step (StepRecipe.hpp; the step's one stage under a
+    // one-stage scheme), as the forward run takes it: opened from its
+    // memory state, driven, closed by the sea level equation under the
+    // direction as the stage takes it and the stage's own shorelines,
+    // finished.
+    auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
+                       double length, std::size_t index) {
+      const auto& ref = refs[index];
+      auto step = op.StartStep(from, length, stage.family,
+                               ev.Columns(sigma, ev.toMatDensity_),
+                               ev.Columns(psi, ev.toMatPotential_));
+      if (drive) step.AddMemory(drive(ref));
+      if (material != nullptr) step.AddForce(material->Force(ref));
+      GRDSolver::GeneralisedForcing coupled;
+      if (twisting) {
+        auto forces = RadialSourceForces{};
+        if (sourced) {
+          forces = sourceForcesAt(ref);
+          nodeForces = forces;
+          step.AddForce(forces.spheroidal);
+        }
+        auto increment = ToroidalViscoelastic::Fields{};
+        if (toroidalDrive.step) {
+          auto [memory, force] = toroidalDrive.step(*toroidal, ref);
+          increment = std::move(memory);
+          for (auto& [l, f] : force) {
+            auto& to = forces.toroidal[l];
+            if (to.empty()) {
+              to = std::move(f);
+            } else {
+              for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += f[i];
+            }
           }
         }
+        const auto& twistFrom = StageStart(
+            stage, dt, tstate,
+            std::span<const ToroidalViscoelastic::State>(toroidalStages),
+            ToroidalViscoelastic::CombinedState, toroidalCombined);
+        auto stepped =
+            toroidal->Step(twistFrom, length, stage.family, forces.toroidal,
+                           increment.empty() ? nullptr : &increment);
+        toroidalStages.push_back(std::move(stepped.first));
+        twist = std::move(stepped.second);
+        coupled.toroidalResponse = toroidalCoefficients();
       }
-      auto stepped = toroidal->Step(tstate, dt, scheme, forces.toroidal,
-                                    increment.empty() ? nullptr : &increment);
-      tstate = std::move(stepped.first);
-      twist = std::move(stepped.second);
-      coupled.toroidalResponse = toroidalCoefficients();
-    }
-    coupled.directLoad = directAt(node);
-    if (outsideAt) coupled.directLoadOutsideWaterBudget = outsideAt(node);
-    if (layerAt) coupled.solidSurfaceChange = layerAt(node);
-    if (tideAt) coupled.tide = tideAt(node);
-    coupled.displacementResponse =
-        ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
-    coupled.potentialResponse =
-        ev.Coefficients(step.MemorySurface(Component::Phi), ev.toNdPotential_);
-    coupled.tangentialResponse =
-        ev.Coefficients(step.MemorySurface(Component::V), ev.toNdLength_);
+      coupled.directLoad = directAt(ref);
+      if (outsideAt) coupled.directLoadOutsideWaterBudget = outsideAt(ref);
+      if (layerAt) coupled.solidSurfaceChange = layerAt(ref);
+      if (tideAt) coupled.tide = tideAt(ref);
+      coupled.displacementResponse =
+          ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
+      coupled.potentialResponse =
+          ev.Coefficients(step.MemorySurface(Component::Phi), ev.toNdPotential_);
+      coupled.tangentialResponse =
+          ev.Coefficients(step.MemorySurface(Component::V), ev.toNdLength_);
 
-    coupled.inertiaMomentChange = step.InertiaMoment()[0] * ev.toNdMoment_;
-    coupled.rotation = rotation;
-    coupled.oceanFunctionOverride = overrideAt(node);
-    response = solverFor(dt).SolveGeneralised(ev.state_, coupled, sleOptions);
-    checkConverged(response, node);
-    sigma = totalLoadCoefficients(
-        withOutside(coupled.directLoad, coupled.directLoadOutsideWaterBudget),
-        response.relativeSeaLevelChange, node);
-    psi = centrifugal(response, node);
-    auto [next, solutions] = step.Finish(ev.Columns(sigma, ev.toMatDensity_),
-                                         ev.Columns(psi, ev.toMatPotential_));
-    vstate = std::move(next);
+      coupled.inertiaMomentChange = step.InertiaMoment()[0] * ev.toNdMoment_;
+      coupled.rotation = rotation;
+      coupled.oceanFunctionOverride = overrideAt(ref);
+      response = solverFor(stage.family, length)
+                     .SolveGeneralised(ev.state_, coupled, sleOptions);
+      checkConverged(response, node);
+      sigma = totalLoadCoefficients(
+          withOutside(coupled.directLoad, coupled.directLoadOutsideWaterBudget),
+          response.relativeSeaLevelChange, ref);
+      psi = centrifugal(response, ref);
+      auto [next, solutions] = step.Finish(ev.Columns(sigma, ev.toMatDensity_),
+                                           ev.Columns(psi, ev.toMatPotential_));
+      if (!ref.Last()) {
+        // an inner stage's record: a second-order run about this one reads
+        // the stage's state as it reads a node's
+        auto inner = Evolution::Snapshot::Stage{};
+        inner.oceanFunction = overrideAt(ref);
+        if (options_.record) {
+          inner.internalState = next;
+          inner.loadCoefficients = sigma;
+          inner.tideCoefficients = psi;
+          if (twisting) inner.toroidalState = toroidalStages.back();
+          if (sourced) inner.sourceForces = nodeForces;
+        }
+        innerStages.push_back(std::move(inner));
+      }
+      return std::move(next);
+    };
+    const auto twistStart = tstate.t;
+    vstate = StepByRecipe(
+        recipe, dt, vstate, stageOf,
+        [](std::span<const std::pair<double, const ViscoelasticState*>> terms,
+           const RecipeStage&) { return CombinedState(terms); });
+    if (twisting) {
+      tstate = std::move(toroidalStages.back());
+      tstate.t = twistStart + dt;
+      toroidalStages.clear();
+    }
     record(node, response);
   }
   return snapshots;

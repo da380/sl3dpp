@@ -607,8 +607,11 @@ TEST(Lateral, WithoutAnOceanIsTheDirectlySteppedBody) {
 
   for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
     const auto label = "rotation " + std::to_string(static_cast<int>(rotation));
+    // the exponential trapezoid stated: the reference below is the operator
+    // stepped by that scheme
     Evolution3D evolution(op, solver, solver.NoOceanState(),
-                          {.rotation = rotation,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = rotation,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-11});
     const auto snapshots = evolution.Run(

@@ -156,8 +156,8 @@ struct CalibrationOptions {
   /// The depth of the Anderson acceleration; 0 is the plain iteration.
   int anderson_memory = 5;
   /// The adjoint sweep of the gradient method (the discrete by default,
-  /// which a scheme of several stages refuses: the continuous one is then
-  /// stated here).
+  /// the exact transpose of the run's steps under every scheme, each stage
+  /// of Sdirk2 about its own shorelines).
   AdjointSolver::Options adjoint{};
   /// The 3D evolution's sweep for the gradient method, as `adjoint`.
   AdjointSolver3D::Options adjoint3D{};

@@ -60,9 +60,14 @@ timestep_[<deck>_]<kind>_n<N>:
     continuous       viscosity kernels of the two measurements by each
                      adjoint
     sdirk2,          the full form alone: sl3d solve by Sdirk2 (second
+    sdirk2_discrete, order, damped, two solves a step), and sl3d kernel's
     sdirk2_continuous
-                     order, damped, two solves a step), and sl3d kernel's
-                     continuous kernels stepped by its stages
+                     kernels under it by each adjoint: the discrete one
+                     the exact transpose of the two-stage step, the
+                     continuous one stepped by the same stages; at the
+                     coarsest step sdirk2_up, sdirk2_down and sdirk2_pulse,
+                     the differences and the ice change under Sdirk2, which
+                     the discrete kernel is held against
     up, down         sl3d solve with ln eta raised and lowered by eps in
                      every viscous layer; layer<l>_up, layer<l>_down in
                      the deck's layer l alone (sl3d's numbering, from the
@@ -80,7 +85,7 @@ and the decks they need are written into data/ as prem8_<deck>_<kind>
 N = 10 to 320 (1 to 1/32 kyr), its truth from N = 80, 160 and 320; on the
 scaled decks the kernels at N = 10 to 80, their truths from N = 80, 160
 and 320 (x4) and 320, 640 and 1280 (x0.25); Sdirk2's forward runs and
-continuous kernels at N = 10 to 320, against the same truth, beside the
+both its kernels at N = 10 to 320, against the same truth, beside the
 trapezoid's. --short runs N = 10, 20 and
 40 with the uniform and the ice derivatives, its truth from N = 80 and
 160: the configs examples/configs holds and run_all.sh runs. Run from
@@ -93,8 +98,8 @@ It writes the decks and the configs, runs each config through
 ../../apps/sl3d from configs/ (SL3D names another program;
 OMP_NUM_THREADS, 4 unless set, its threads; --jobs J runs J at once), and
 prints the truth and every error against it. On four threads the short
-form takes about 10 s and the study about two minutes, 75 s with
---jobs 2. plot_app.py draws its figures, from whatever of these runs
+form takes about 10 s; the study, 142 runs, about nine and a half minutes
+on two threads with the runs one at a time. plot_app.py draws its figures, from whatever of these runs
 exist, into figures/sl3d/timestep_study/.
 """
 from __future__ import annotations
@@ -124,8 +129,13 @@ SITE = {"latitude": 60, "longitude": 275, "width_deg": 12}  # Hudson Bay
 MEASUREMENTS = {f"hudson_bay_{date:g}ka": date for date in DATES}
 SCHEMES = {"et": "exponential_trapezoid", "be": "backward_euler"}
 ADJOINTS = ("discrete", "continuous")
-# the full form's Sdirk2 series: the forward run and the continuous kernels
-DAMPED = {"sdirk2": "sdirk2", "sdirk2_continuous": "sdirk2"}
+# the full form's Sdirk2 series: the forward run and the kernels by each
+# adjoint; and, at the coarsest step, the runs its discrete kernel is held
+# against as the stepped run's own gradient
+DAMPED = {"sdirk2": "sdirk2", "sdirk2_discrete": "sdirk2",
+          "sdirk2_continuous": "sdirk2"}
+DAMPED_CHECKS = {"sdirk2_up": "sdirk2", "sdirk2_down": "sdirk2",
+                 "sdirk2_pulse": "sdirk2"}
 EPS = 3  # the difference step, 10^-EPS in ln eta
 EPS_SWEEP = (1, 2, 3, 4, 5, 6)  # at N = EPS_SWEEP_STEPS
 EPS_SWEEP_STEPS = 10
@@ -281,12 +291,14 @@ def fd_deck(tag: str | None, region: str, sign: int, eps: int = EPS) -> str:
 # ----------------------------------------------------------- the configs
 def kernel_kind(kind: str) -> bool:
     """Whether a kind's runs are sl3d kernel's."""
-    return kind in ADJOINTS or kind in ("widths", "sdirk2_continuous")
+    return kind in ADJOINTS or kind in ("widths", "sdirk2_discrete",
+                                        "sdirk2_continuous")
 
 
 def config(run: str, steps: int, kind: str, deck: Path = DECK) -> dict:
     """The config of a run: a solve (kind "et", "be", "sdirk2", "pulse"
-    or a difference's, fd_kind) or a kernel run ("discrete", "continuous",
+    or a difference's, fd_kind, and Sdirk2's own of DAMPED_CHECKS) or a
+    kernel run ("discrete", "continuous", "sdirk2_discrete",
     "sdirk2_continuous", "widths"), on a deck."""
     out = {
         "problem": "quasi_static",
@@ -294,12 +306,12 @@ def config(run: str, steps: int, kind: str, deck: Path = DECK) -> dict:
         "discretisation": {"lmax": 16},
         "times": {"start_kyr_bp": START, "end_kyr_bp": END,
                   "nodes": steps + 1},
-        "forcing": {"ice_change": ([PULSE] if kind == "pulse" else
+        "forcing": {"ice_change": ([PULSE] if kind.endswith("pulse") else
                                    [{"thickness": {"file": ICE}}])},
         "ocean": {"at": "start", "topography": {"file": ICE},
                   "ice": {"file": ICE}},
         "rotation": "none",
-        "solver": {"scheme": {**SCHEMES, **DAMPED}.get(
+        "solver": {"scheme": {**SCHEMES, **DAMPED, **DAMPED_CHECKS}.get(
             kind, "exponential_trapezoid")},
     }
     if kernel_kind(kind):
@@ -432,6 +444,12 @@ def runs(form: Form) -> list[Run]:
                 add("widths", n)
             for kind in DAMPED:
                 add(kind, n)
+        # Sdirk2's own differences and ice change at the coarsest step
+        add("sdirk2_up", form.steps[0], None,
+            deck_name(fd_deck(None, "uniform", 1)))
+        add("sdirk2_down", form.steps[0], None,
+            deck_name(fd_deck(None, "uniform", -1)))
+        add("sdirk2_pulse", form.steps[0])
         for tag, scale in SCALES.items():
             deck = write_deck(tag, scale)
             for n in form.scaled_steps:
@@ -818,14 +836,18 @@ def results(form: Form | None = None) -> dict | None:
 
 def damped_study(result: dict, region_list: list[str], l2) -> dict:
     """The Sdirk2 series at the steps compared where its runs are present:
-    the values, the sea level's relative L2 error, and the continuous
-    kernels' pairings."""
+    the values, the sea level's relative L2 error, and each adjoint's
+    kernels' pairings; and, at the coarsest step, the discrete kernel's
+    pairings against the stepped run's own derivatives (`gradient`: the
+    central difference of Sdirk2 runs in ln eta and the run under the ice
+    change alone)."""
     truth = result["truth"]
     steps = [n for n in result["steps"]
              if all(exists(name(kind, n)) for kind in DAMPED)]
     if not steps:
         return {}
-    out: dict = {"steps": steps, "value": {}, "field": {}, "derivative": {}}
+    out: dict = {"steps": steps, "value": {}, "field": {}, "derivative": {},
+                 "discrete": {}, "gradient": {}}
     for m, date in MEASUREMENTS.items():
         out["value"][m] = {n: value(name("sdirk2", n), m) for n in steps}
         out["field"][m] = {}
@@ -834,14 +856,25 @@ def damped_study(result: dict, region_list: list[str], l2) -> dict:
             out["field"][m][n] = (l2(values[node(dates, date)]
                                      - truth[m]["field"])
                                   / l2(truth[m]["field"]))
-        row: dict = {region: {} for region in region_list + ["pulse"]}
-        for n in steps:
-            run = name("sdirk2_continuous", n)
-            pairs = viscosity_pairings(run, m)
-            for region in region_list:
-                row[region][n] = pairs[region]
-            row["pulse"][n] = ice_pairing(run, m)
-        out["derivative"][m] = row
+        for key, kind in (("derivative", "sdirk2_continuous"),
+                          ("discrete", "sdirk2_discrete")):
+            row: dict = {region: {} for region in region_list + ["pulse"]}
+            for n in steps:
+                run = name(kind, n)
+                pairs = viscosity_pairings(run, m)
+                for region in region_list:
+                    row[region][n] = pairs[region]
+                row["pulse"][n] = ice_pairing(run, m)
+            out[key][m] = row
+        n = steps[0]
+        up, down, pulse = (name(kind, n) for kind in DAMPED_CHECKS)
+        if all(exists(run) for run in (up, down, pulse)):
+            out["gradient"][m] = {
+                "uniform": (out["discrete"][m]["uniform"][n],
+                            (cap_mean(up, date) - cap_mean(down, date))
+                            / (2.0 * 10.0**-EPS)),
+                "pulse": (out["discrete"][m]["pulse"][n],
+                          cap_mean(pulse, date))}
     return out
 
 
@@ -1069,10 +1102,13 @@ def report_damped(result: dict) -> None:
     for m in MEASUREMENTS:
         t = truth[m]
         d = damped["derivative"][m]
+        e = damped["discrete"][m]
         c = result["derivative"]["continuous"][m]
+        x = result["derivative"]["discrete"][m]
         print(f"  {m}\n    {'h kyr':>7} {'h/tau':>5} | {'value':>19} | "
-              f"{'field':>17} | {'dJ/d ln eta, continuous':>23} | "
-              f"{'ice, continuous':>19}")
+              f"{'field':>17} | {'dJ/d ln eta, discrete':>19} | "
+              f"{'continuous':>19} | {'ice, discrete':>19} | "
+              f"{'continuous':>19}")
         for n in steps:
             ratio = result["ratio"].get(n, np.nan)
             print(f"    {step_kyr(n):7.5g} {ratio:5.2g} | "
@@ -1080,26 +1116,43 @@ def report_damped(result: dict) -> None:
                   f"{result['value'][m][n] / t['value'][0] - 1:+9.2e} | "
                   f"{damped['field'][m][n]:8.2e}/"
                   f"{result['field']['et'][m][n]:8.2e} | "
+                  f"{e['uniform'][n] / t['uniform'][0] - 1:+9.2e}/"
+                  f"{x['uniform'][n] / t['uniform'][0] - 1:+9.2e} | "
                   f"{d['uniform'][n] / t['uniform'][0] - 1:+9.2e}/"
                   f"{c['uniform'][n] / t['uniform'][0] - 1:+9.2e} | "
+                  f"{e['pulse'][n] / t['pulse'][0] - 1:+9.2e}/"
+                  f"{x['pulse'][n] / t['pulse'][0] - 1:+9.2e} | "
                   f"{d['pulse'][n] / t['pulse'][0] - 1:+9.2e}/"
                   f"{c['pulse'][n] / t['pulse'][0] - 1:+9.2e}")
+        if m in damped["gradient"]:
+            g = damped["gradient"][m]
+            print(f"    the discrete kernel against the stepped run's own "
+                  f"derivative at h = {step_kyr(steps[0]):g}: dJ/d ln eta "
+                  f"{g['uniform'][0] / g['uniform'][1] - 1:+.1e}, ice "
+                  f"{g['pulse'][0] / g['pulse'][1] - 1:+.1e}")
         series = [("value", {n: damped["value"][m][n] - t["value"][0]
                              for n in steps}),
-                  ("dJ/d ln eta", {n: d["uniform"][n] - t["uniform"][0]
-                                   for n in steps}),
-                  ("ice", {n: d["pulse"][n] - t["pulse"][0] for n in steps})]
+                  ("dJ/d ln eta, discrete",
+                   {n: e["uniform"][n] - t["uniform"][0] for n in steps}),
+                  ("continuous", {n: d["uniform"][n] - t["uniform"][0]
+                                  for n in steps}),
+                  ("ice, discrete", {n: e["pulse"][n] - t["pulse"][0]
+                                     for n in steps}),
+                  ("continuous", {n: d["pulse"][n] - t["pulse"][0]
+                                  for n in steps})]
         print("    observed orders: " + "; ".join(
             f"{label} {orders(steps, [e[n] for n in steps])}"
             for label, e in series))
-        if layered:
-            print("    by layer, continuous, " + " ".join(
+        for label, rows in (("discrete", e), ("continuous", d)):
+            if not layered:
+                continue
+            print(f"    by layer, {label}, " + " ".join(
                 f"{lay.index:>9d}" for lay in layered))
             for n in steps:
-                errors = [d[f"layer{lay.index}"][n]
+                errors = [rows[f"layer{lay.index}"][n]
                           / t[f"layer{lay.index}"][0] - 1.0 for lay in layered]
                 print(f"    {'h=' + format(step_kyr(n), '.5g'):>24} "
-                      + " ".join(f"{e:+9.2e}" for e in errors))
+                      + " ".join(f"{err:+9.2e}" for err in errors))
 
 
 def report(result: dict) -> None:

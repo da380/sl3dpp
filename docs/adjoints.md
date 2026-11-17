@@ -9,8 +9,10 @@ and the design of the discrete 3D transpose; §8–§17 the tangent-linear
 runs, the second-order adjoints, the discrete 3D transpose (§12), the
 material derivatives and kernels, and their distribution over radius;
 §21 the kernels in lateral structure about a radial background; §1a the
-continuous sweep under Sdirk2 and what is not built for it. The overview
-is [design.md](design.md) §7.*
+derivatives under Sdirk2, the scheme of two stages. The overview is
+[design.md](design.md) §7; choosing a step and a scheme for a run and
+its kernels is in [running.md](running.md), "Choosing a step and
+scheme".*
 
 ## 1. Both formulations, and when each is accurate
 
@@ -49,9 +51,9 @@ the adjoint impulsively, and after it the adjoint state relaxes on the
 model's SHORTEST relaxation time, which the forward run, forced
 smoothly, never has to resolve; and the kernel is a time quadrature of
 the product of the forward and adjoint fields, each discretised on its
-own. Under the default scheme — the exponential trapezoid, exact for a
-strain linear across a step, which acts as backward Euler on a mode
-whose relaxation time is short against the step — **the continuous
+own. Under the exponential trapezoid — exact for a strain linear across
+a step, acting as backward Euler on a mode whose relaxation time is
+short against the step — **the continuous
 kernel is accurate when the steps are short against the shortest
 relaxation time of the layers that matter**, and its error is set by
 their ratio. On the prem8 deck's 1e21 Pa s Maxwell mantle (its
@@ -88,56 +90,170 @@ judged by halvings of the step that each change it about a quarter as
 much as the one before (second order), not by one small change: errors
 of opposite signs (in a cap's degrees, say) can cancel at coarse steps.
 
-## 1a. The continuous sweep under Sdirk2
+Under Sdirk2 (§1a) the same holds with a smaller error in each: the
+discrete kernel is the exact gradient of the two-stage run, 0.38 / 0.26%
+off at a ratio of 9.3 on the study's problem, and the continuous one,
+its adjoint's relaxation damped by the stages, 1.9 / 1.0%. Which scheme
+and step to take for a run and its kernels is in
+[running.md](running.md), "Choosing a step and scheme".
 
-Under `Scheme::Sdirk2` (design.md §5: two backward Euler stages of
-length γ Δt, second order and damped) the continuous sweep steps the
-adjoint state through the reversed step by the same stages
-(`StepByRecipe`), each closed by the memory-only adjoint equilibrium,
-the toroidal adjoint beside it under the same recipe, in 1D and 3D; the
-jumps at the measurements, the equilibria and the kernels' node
-quadrature are the one-stage schemes' unchanged. About a migrating
-trajectory every stage of a reversed step closes under the ocean
-function of the step's end node, the trajectory holding the nodes'
-alone. On the same ramp as the forward gates at steps 9.3 times the
-shortest relaxation time, its viscosity kernel is 1.4% off against the
-trapezoid's continuous 3.4%, and converges at second order to the
-derivative central differences of the forward runs give (0.32% and
-0.077% at the next two halvings, TestAdjoint); its moment kernels, where
-the adjoint's relaxation after a measurement matters most, are 15 to 30
-times closer than the trapezoid's at the same steps. On the time-step
-study's problem (§1, examples/configs/README.md) at 1 kyr, 9.3 times
-the shortest relaxation time, its continuous kernel is +1.9 / −1.0% off
-uniformly (the trapezoid's +14 / +24%), 4.6 / 1.7% in its worst layer
-(33 / 41%) and −5.2 / −4.4% along the ice pulse (+25 / +41%), falling
-at second order.
+## 1a. The derivatives under Sdirk2
 
+Under `Scheme::Sdirk2` (design.md §5) a step of length Δt is two
+backward Euler stages of length γ Δt, γ = 1 − 1/√2: the first from mⁿ to
+tⁿ + γ Δt, closed by the sea level equation under the forcing of the
+step's two nodes combined (below), giving Y₁; the second from (1 − r) mⁿ + r Y₁, r = (1 − γ)/γ, closed
+at tⁿ⁺¹, giving mⁿ⁺¹. Every derivative of the one-stage schemes is built
+for it, 1D and 3D, frozen and migrating shorelines, with the rotational
+feedback, a tide, interior sources, jumps of the forcing (a zero-length
+step is one stage under every scheme), lateral viscosity and moduli,
+over radial segments: the tangent-linear runs, the discrete adjoint and
+the discrete second-order sweeps, which are derivatives of the stepped
+map, and the continuous adjoint, which steps the adjoint state by the
+same stages.
+
+**The stepped map's derivatives, stage by stage.** A stage is a
+one-stage step of its family from a memory state that is a constant
+combination of states, so the derivative of a step is its stages'
+derivatives chained through the combinations (`detail/StepStages.hpp`):
+
+- *Forwards* (the tangent-linear runs, §8 and §10, and the second-order
+  runs): the tangent state is stepped by the recipe as the forward state
+  is (`StepByRecipe`), each stage opened from the same combination of
+  tangent states, driven by the backward Euler weights' derivatives at
+  γ Δt about the forward stage's own states (`FirstOrderDrive`, the
+  material forces, the second derivatives' drive, each called with the
+  stage's family and length), and closed under the direction as the
+  stage takes it and the stage's own shorelines.
+- *Backwards* (the discrete sweeps, §3 and §12, first and second order):
+  the stages are transposed last to first, each the one-stage step's own
+  transpose (the dual of the stage's end state in, the dual of its
+  memory state out), and the dual of a memory state is handed to the
+  states it combines, times their coefficients
+  (`detail::TransposeByRecipe`): the second stage's dual goes r of it to
+  Y₁ and 1 − r of it to mⁿ, and the first stage's adds to the latter.
+  The node's measurement forces the stage that ends at the node alone.
+
+The one-stage schemes are one stage of themselves, and take the same
+code, operation for operation.
+
+**The first stage's state is the stage repeated.** The derivatives pair
+and drive each stage with the forward stage's states: Y₁ and its strain
+beside the nodes'. The recording keeps the nodes' states alone; beside
+each node it keeps what closed the first stage of the step ending there
+(`Evolution::Snapshot::stages`, `ForwardTrajectory::stages`): its
+total-load and centrifugal coefficients, two coefficient vectors, its
+ocean function under migrating shorelines, and its sources' forces under
+interior sources. Y₁ is then the stage again from mⁿ under those
+coefficients (`TrajectoryCursor::Step`, `detail::ForwardStages3D`): one
+stage solve with no sea level equation to close, the forward run's own
+operations on the same numbers in 1D (the state is the run's to
+rounding) and its own within-step iteration in 3D (to that iteration's
+tolerance). Keeping Y₁ instead would double the recording, which is what
+limits a 3D kernel run; repeating the stage costs one stage solve a step
+of the sweep, beside its two transposed ones. A recording with gaps
+(`record_stride` above 1) is served the same way under either adjoint:
+a state between kept ones is the run's steps again, stage by stage, each
+under its own recorded closure; in 1D the first stages those steps take
+are held with the gap's states and handed to the sweep, which takes no
+stage twice. A trajectory that does not give the
+stages' closures is refused by name. A recorded tangent-linear run
+(`Options::record`), which a second-order run about it reads, keeps its
+own state at each first stage, a tangent stage not being rebuilt from
+its closure alone.
+
+**Shorelines.** About a migrating run each stage is linearised about its
+own shorelines, as each node is about the node's: the sweeps and the
+tangent runs take the first stages' ocean functions beside the nodes'
+(`StageOceanFunctionsOf` the run's snapshots), and refuse a migrating
+Sdirk2 run without them.
+
+**The forcing inside a step.** A run reads its forcing at its nodes
+alone, under every scheme. The first stage ends at tⁿ + γ Δt, which is no
+node's time, and no callback is called there: the stage takes 1 − γ of
+the forcing at node n, as the step from there reads it (the right limit
+at a repeated pair), and γ of the forcing at node n + 1, as that node
+reads it (its left limit where it is the first of a pair), term by term
+(`detail::AtStage` in `detail/TimeGrid.hpp`, the one place that decides
+it): the direct loads, the layer on the solid surface, the tide, the ice
+thickness, frozen and migrating, and the sources, whose moments at the
+two nodes are taken times 1 − γ and γ. A land mask that changes in time
+is the end node's. The derivative runs hold the forcing by its node
+values and take the same combination: a direction's value at the first
+stage is 1 − γ of its value at node n and γ of its value at node n + 1,
+and the stage's kernel (the dual of the forcing the stage took) is
+handed to those two nodes with the same weights. The node kernels of
+`Kernels` are therefore the exact derivative of the stepped run in its
+forcing's node values, which are all it depends on, whatever the forcing
+does between nodes; and the tangent-linear run, the derivative along a
+direction in them, is the discrete sweep's transpose to rounding. Under
+migrating shorelines the thickness view grounds the stage's part by the
+stage's own ocean function, ρ_i (1 − C_s), the initial sea level kernel
+takes ρ_w (C_s − C₀) of it, and the quelled view pairs with the
+differences of the thickness between nodes.
+
+**Gates.** `TestSdirk2Derivatives`: under a load and a migrating ice
+history curved in time across every step, the run is the run under their
+piecewise-linear interpolants through its nodes (to rounding in 1D and
+3D, no callback read between nodes), and the tangent-linear run along a
+curved direction's node values is the run's derivative (2e-12 against
+differences, the thickness kernel alike); the tangent-linear run against
+differences of the forward run (the loads and the ice to 2e-12, the
+problem linear in them; the relaxation times and the moduli at second
+order in the difference step, Richardson to 5e-8), the discrete sweep
+its transpose (8e-15 to 3e-12 in 1D, 8e-16 to 7e-14 in 3D under lateral
+viscosity, and to 2e-13 from a stride-2 recording), about a migrating run
+whose shorelines move inside the steps (7e-12 against differences, the
+thickness and initial sea level kernels to 1e-14), across an onset under
+interior sources (the moment kernels to 6e-13, the kernels about the
+source-driven run to 2e-11) and a load jump with a tide, a load outside
+the water budget and a layer (2e-13), the discrete Hessian symmetric and
+equal to the second-order run (7e-13 frozen, 5e-12 migrating, 4e-13 in
+3D) and the derivative of the gradient; in 3D also under lateral moduli
+with migrating shorelines. `TestLateralKernels` holds the radial route's
+lateral kernels to the 3D sweep's at zero lateral structure,
+`TestDistributed` the sweeps, the tangent run and the second-order sweep
+over two to four ranks to the one process's, `TestApps` `sl3d kernel`'s
+discrete viscosity kernel to the difference of two `sl3d solve`s.
+
+**The continuous sweep.** It steps the adjoint state through the reversed
+step by the same stages (`StepByRecipe`), each closed by the memory-only
+adjoint equilibrium, the toroidal adjoint beside it under the same
+recipe, in 1D and 3D; the jumps at the measurements, the equilibria and
+the kernels' node quadrature are the one-stage schemes' unchanged. About
+a migrating trajectory every stage of a reversed step closes under the
+ocean function of the step's end node (the reversed stages fall at
+tⁿ⁺¹ − γ Δt, where the forward run has no stage). On the same ramp as
+the forward gates at steps 9.3 times the shortest relaxation time, its
+viscosity kernel is 1.4% off against the trapezoid's continuous 3.4%,
+and converges at second order to the derivative central differences of
+the forward runs give (0.32% and 0.077% at the next two halvings,
+TestAdjoint); its moment kernels, where the adjoint's relaxation after a
+measurement matters most, are 15 to 30 times closer than the trapezoid's
+at the same steps. On the time-step study's problem (§1,
+examples/configs/README.md) at 1 kyr, 9.3 times the shortest relaxation
+time, its continuous kernel is +1.9 / −1.0% off uniformly (the
+trapezoid's +14 / +24%), 4.6 / 1.7% in its worst layer (33 / 41%) and
+−5.2 / −4.4% along the ice pulse (+25 / +41%), falling at second order.
 The kernels stay the node quadrature of the forward and adjoint fields.
 A quadrature consistent with the stages would integrate the product of
-the two sweeps' within-step trajectories, each given by its stages (for
-the stiffly accurate Sdirk2 the stage values and the step's end define
-its continuous extension); the forward's stages fall at tⁿ + γ Δt and
-the adjoint's at tⁿ⁺¹ − γ Δt, so it needs both sweeps' stage states and
-each interpolated to the other's times. It is not built.
+the two sweeps' within-step trajectories, each given by its stages; the
+forward's stages fall at tⁿ + γ Δt and the adjoint's at tⁿ⁺¹ − γ Δt, so
+it needs both sweeps' stage states and each interpolated to the other's
+times. It is not built.
 
-Not built under Sdirk2, each refused by name (`detail::
-RefuseDerivativeOfMultiStage`): the discrete sweep, the tangent-linear
-runs (1D and 3D) and the second-order sweeps. Their exact form is the
-derivative of the stepped map, which runs through each step's two stages:
-the transpose runs the stages backwards, each a backward Euler stage's
-transpose (the trapezoid code's own) plus the transposed constant
-combination, and reads the first stage's state, which the trajectory
-(the nodes' states) does not hold — kept by the forward run, one more
-state a step, or rebuilt by repeating the step's first stage from the
-node's state under the stage's recorded forcing; the tangent and the
-second-order runs drive each stage with the weights' derivatives at γ Δt
-in the same way. A sweep about an Sdirk2 run also reads every node's
-recorded state (a recording with gaps is refused): a gap is rebuilt by
-forward steps from the kept node below under the recorded node loads
-(§3), and a step of Sdirk2 closes its first stage under the forcing at
-its own time, which the recording does not hold (each step's
-first-stage load and centrifugal coefficients, two coefficient vectors
-a node beside the nodes' own, would let it).
+**Not built under Sdirk2, the default scheme, each refused by name with
+its cure:** the continuous
+second-order sweep, whose derivative state's drive is a one-stage
+step's, and with it the continuous drive of a tangent-linear run along
+the relaxation times (`TangentLinearSolver::Options::method`
+`Continuous` with an `itau` or log-viscosity direction) and the
+continuous second-order tangent-linear run, which serve that sweep
+alone. The discrete second-order sweep and its runs (the default
+method) are built, and a tangent-linear run along the forcing or the
+moduli is the same by either method. The continuous second order is had
+by stating a one-stage scheme, `Scheme::ExponentialTrapezoid`, in the
+evolution's `Options::scheme` (§9, §11): the refusals say so.
 
 ## 2. Scope
 
@@ -224,9 +340,10 @@ code; what follows fixes the sl3dpp mapping only.
   passed below them, so it holds the kept states and at most a stride's
   more, about N/stride + stride of N nodes, fewest near stride √N; it
   pays one step per state of a gap (one effective solve a degree, as
-  the run), once. Not rebuilt: a step of Sdirk2 (§1a) and a run under
-  interior sources, whose states are not the loads' alone (§19); both
-  are recorded at every node, a stride other than 1 refused.
+  the run), once. A step of Sdirk2 is rebuilt stage by stage, its first
+  stage under the stage's own recorded coefficients (§1a). Not rebuilt:
+  a run under interior sources, whose states are not the loads' alone
+  (§19): it is recorded at every node, a stride other than 1 refused.
   `TestTrajectoryCursor` holds it on a layer of 1e19 Pa s, 254 of its
   relaxation times a 1 kyr step, at strides 2, 6 and 5 (an uneven last
   gap) with a repeated node in the gaps, under loads and a tide and about

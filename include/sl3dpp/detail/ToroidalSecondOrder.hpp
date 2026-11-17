@@ -13,6 +13,7 @@
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Evolution.hpp"
 #include "sl3dpp/ToroidalViscoelastic.hpp"
+#include "sl3dpp/detail/StepStages.hpp"
 
 namespace sl3dpp::detail {
 
@@ -136,6 +137,111 @@ struct ToroidalTrajectories {
                                          *ditau);
     }
     return toroidal->Redo(TangentState(node - 1), dt, scheme, force,
+                          memory.empty() ? nullptr : &memory);
+  }
+
+  // -- stage by stage (StepRecipe.hpp), for the derivatives of the stepped
+  // map: the same pieces of one stage of the step ending at a node, about
+  // the stage's own states.
+
+  using Stages = StageStates<State>;
+
+  /// A combined memory state with a zero strain in place of the start
+  /// strain a backward Euler stage does not read.
+  [[nodiscard]] State Combined(
+      std::span<const std::pair<double, const State*>> terms) const {
+    auto out = ToroidalViscoelastic::CombinedState(terms);
+    for (const auto& [l, d] : rest.strain) {
+      out.strain.emplace(l, std::vector<double>(d.size(), 0.0));
+    }
+    return out;
+  }
+  /// The base run's sources' toroidal force at a stage: the node's at the
+  /// step's last stage, an inner stage's recorded one before.
+  [[nodiscard]] Fields BaseForce(const StageRef& ref) const {
+    if (!Sourced()) return Fields{};
+    if (ref.Last()) return base->sourceForces[ref.node].toroidal;
+    const auto& closure = base->stages[ref.node][ref.index];
+    return closure.sourceForces ? closure.sourceForces->toroidal : Fields{};
+  }
+  [[nodiscard]] Fields TangentSourceForce(const StageRef& ref) const {
+    if (tangent.empty()) return Fields{};
+    const auto& snap = tangent[ref.node];
+    const auto& forces =
+        ref.Last() ? snap.sourceForces : snap.stages[ref.index].sourceForces;
+    return forces ? forces->toroidal : Fields{};
+  }
+  /// The base trajectory's toroidal states of the stages of the step
+  /// ending at a node: an inner stage's end state is the stage repeated
+  /// from its memory state under its recorded force.
+  [[nodiscard]] Stages BaseStages(const StepRecipe& recipe,
+                                  std::span<const StageRef> refs, double dt,
+                                  std::size_t node) const {
+    if (!Sourced()) {
+      return {std::vector<State>(refs.size(), rest),
+              std::vector<State>(refs.size(), rest)};
+    }
+    return StatesOfStages(
+        recipe, dt, base->toroidal[node - 1], base->toroidal[node],
+        [&](std::size_t index, const State& from) {
+          const auto& ref = refs[index];
+          return toroidal->Step(from, ref.length, ref.family, BaseForce(ref))
+              .first;
+        },
+        [&](std::span<const std::pair<double, const State*>> terms) {
+          return Combined(terms);
+        });
+  }
+  /// The tangent run's, from its record (each inner stage's state kept).
+  [[nodiscard]] Stages TangentStages(const StepRecipe& recipe,
+                                     std::span<const StageRef> refs, double dt,
+                                     std::size_t node) const {
+    if (!Twists(tangent)) {
+      return {std::vector<State>(refs.size(), rest),
+              std::vector<State>(refs.size(), rest)};
+    }
+    return StatesOfStages(
+        recipe, dt, *tangent[node - 1].toroidalState,
+        *tangent[node].toroidalState,
+        [&](std::size_t index, const State&) {
+          return tangent[node].stages[index].toroidalState.value();
+        },
+        [&](std::span<const std::pair<double, const State*>> terms) {
+          return Combined(terms);
+        });
+  }
+  /// The base stage again, from its memory state.
+  [[nodiscard]] BaseStep BaseStageOf(const StageRef& ref,
+                                     const State& from) const {
+    return toroidal->Redo(from, ref.length, ref.family, BaseForce(ref));
+  }
+  /// The tangent run's stage again: its decayed memory with the
+  /// direction's drive about the base stage's states, its solutions under
+  /// its sources' forces and the direction's material force on the base
+  /// stage.
+  [[nodiscard]] BaseStep TangentStageOf(const StageRef& ref,
+                                        const State& tangentFrom,
+                                        const State& baseFrom,
+                                        const State& baseTo,
+                                        const BaseStep& baseStage) const {
+    auto force = TangentSourceForce(ref);
+    if (!dmu.empty()) {
+      for (auto& [l, f] :
+           toroidal->MaterialForce(ref.length, ref.family, dmu, baseStage)) {
+        auto& to = force[l];
+        if (to.empty()) {
+          to = std::move(f);
+        } else {
+          for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += f[i];
+        }
+      }
+    }
+    auto memory = Fields{};
+    if (ditau != nullptr) {
+      memory = toroidal->FirstOrderDrive(discrete, ref.family, ref.length,
+                                         baseFrom, baseTo, *ditau);
+    }
+    return toroidal->Redo(tangentFrom, ref.length, ref.family, force,
                           memory.empty() ? nullptr : &memory);
   }
 };

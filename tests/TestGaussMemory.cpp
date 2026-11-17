@@ -479,8 +479,12 @@ TEST(GaussMemory, KernelsAgreeWithGllAndContinuousConverges) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[npts - 1].relativeSeaLevelDual = scene.Smooth(local, 1.0);
     const auto op = Operator(scene.body.rheology, set);
+    // the exponential trapezoid stated: the convergence numbers held below
+    // are that scheme's
     auto evolution = Evolution(op, scene.solver, scene.state,
-                                       {.rtol = 1e-12, .record_stride = 1});
+                               {.scheme = Scheme::ExponentialTrapezoid,
+                                .rtol = 1e-12,
+                                .record_stride = 1});
     const auto snapshots = evolution.Run(times, History(times, loads));
     const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
     const auto adjoint =

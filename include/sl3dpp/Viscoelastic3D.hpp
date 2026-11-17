@@ -403,7 +403,7 @@ class Viscoelastic3D {
     StepInfo info;
   };
   [[nodiscard]] StepResult Step(const State& state, double dt,
-                                Scheme scheme = Scheme::ExponentialTrapezoid,
+                                Scheme scheme = Scheme::Sdirk2,
                                 const LoadCallable3D& load = {},
                                 const LoadCallable3D& tide = {}) const;
 
@@ -659,7 +659,7 @@ class Viscoelastic3D {
   /// refused here but at dt = 0, where every scheme's step is backward
   /// Euler's.
   [[nodiscard]] OpenStep StartStep(const State& state, double dt,
-                                   Scheme scheme = Scheme::ExponentialTrapezoid,
+                                   Scheme scheme,
                                    const LoadCallable3D& load = {},
                                    const LoadCallable3D& tide = {}) const;
 

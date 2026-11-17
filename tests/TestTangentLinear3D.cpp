@@ -203,8 +203,11 @@ TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
   // The 1D side: a smooth nodal itau perturbation of the branch.
   ViscoelasticOperator op1(scene.rheology, kLmax,
                            {.memory_points = MemoryPointSet::Gll});
+  // the exponential trapezoid stated: the continuous second order is built for
+  // the one-stage schemes
   Evolution evolution1(op1, scene.solver, scene.state,
-                               {.rtol = 1e-12, .record_stride = 1});
+                               {.scheme = Scheme::ExponentialTrapezoid,
+                                .rtol = 1e-12, .record_stride = 1});
   const auto trajectory1 =
       ForwardTrajectory::FromSnapshots(evolution1.Run(times, directLoad));
   const auto& base = scene.rheology.BranchAt(0);
@@ -228,7 +231,8 @@ TEST(TangentLinear3D, ZeroLateralMatchesThe1DRun) {
                      {.memory_points = MemoryPointSet::Gll});
   Evolution3D evolution3(
       op3, scene.solver, scene.state,
-      {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+      {.scheme = Scheme::ExponentialTrapezoid,
+       .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto trajectory3 =
       ForwardTrajectory3D::FromSnapshots(evolution3.Run(times, directLoad));
   const auto& coupling = op3.Coupling();
@@ -411,15 +415,19 @@ TEST(TangentLinear3D, LateralDirectionIsTheDerivativeOfTheCoupledRun) {
                       [&](double r, double theta, double phi) {
                         return baseDelta(r, theta, phi) + eps * direction(theta, phi);
                       });
+    // the exponential trapezoid stated: the continuous second order is built
+    // for the one-stage schemes
     Evolution3D evolution(op, scene.solver, scene.state,
-                                  {.rtol = 1e-12, .coupled_rtol = 1e-12});
+                                  {.scheme = Scheme::ExponentialTrapezoid,
+                                   .rtol = 1e-12, .coupled_rtol = 1e-12});
     return Objective(scene, g, evolution.Run(times, directLoad).back().relativeSeaLevelChange);
   };
 
   Viscoelastic3D op(scene.rheology, kLmax, baseDelta);
   Evolution3D evolution(
       op, scene.solver, scene.state,
-      {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
+      {.scheme = Scheme::ExponentialTrapezoid,
+       .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
   TangentPerturbation3D d;

@@ -729,7 +729,10 @@ TEST(Distributed, DerivativesMatchTheOneProcess) {
       .parallel = false, .rtol = 1e-12, .memory_points = MemoryPointSet::Gauss,
       .radial_cuts = share.cuts};
   const auto evolutionOptions =
-      Evolution3D::Options{.rotation = RotationalFeedback::Full,
+      // the exponential trapezoid stated: the continuous second order is built
+      // for the one-stage schemes
+      Evolution3D::Options{.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = RotationalFeedback::Full,
                                    .rtol = 1e-12,
                                    .max_coupled_iterations = 100,
                                    .coupled_rtol = 1e-11,
@@ -1125,6 +1128,170 @@ TEST(Distributed, Sdirk2RunAndSweepMatchTheOneProcess) {
     // on two to four ranks
     EXPECT_LT(ice, 1e-9) << label;
     EXPECT_LT(viscosity, 1e-9) << label;
+  }
+}
+
+TEST(Distributed, Sdirk2DerivativesMatchTheOneProcess) {
+  // The derivatives of the Sdirk2 stepped map over radial segments, about
+  // a frozen and a migrating run recorded at stride 2 (its gaps, and each
+  // step's first stage, the run's stages again under their recorded
+  // closures, collective as a step's): the discrete sweep's ice kernels on
+  // every rank and each rank's slice of its log-viscosity kernel, the
+  // discrete tangent-linear run along a uniform log viscosity, and the
+  // discrete second-order sweep's derivatives along it, against one
+  // process; and the sweep's kernel paired with the direction over the
+  // ranks is the tangent run's objective.
+  constexpr auto lmax = 8;
+  const auto body = Body::Make(lmax);
+  const auto share =
+      ShareMesh(body.material.Mesh(), MPI_COMM_WORLD,
+                GridCoupling::TransformWeights(body.rheology, lmax, {}));
+  ViscoelasticOperator reference(body.rheology, lmax);
+  Fingerprint fingerprint(lmax, reference.ElasticLoveNumbers());
+  fingerprint.SetAnalyticTestState(0.0);
+  GRDSolver solver(SurfaceGrid(lmax), reference.ElasticLoveNumbers(),
+                   SeaLevelParameters{});
+  const auto length = solver.SolverScales().Length();
+  auto toNd = [&](std::vector<double> si) {
+    for (auto& v : si) v /= length;
+    return si;
+  };
+  const auto ice = toNd(fingerprint.IceThickness());
+  const auto state = solver.MakeState(ice, toNd(fingerprint.SeaLevel()));
+  const auto kyr = 1000.0 * 3.15576e7 / solver.SolverScales().Time();
+  const auto times =
+      std::vector<double>{0.0, 3.0 * kyr, 6.0 * kyr, 8.0 * kyr, 10.0 * kyr};
+  auto melt = std::vector<double>(ice.size());
+  for (auto i = std::size_t{0}; i < melt.size(); ++i) {
+    melt[i] =
+        -0.1 * solver.IceDensity() * (1.0 - state.oceanFunction[i]) * ice[i];
+  }
+  const auto directLoad = [&](double t) {
+    auto out = melt;
+    for (auto& v : out) v *= t / times.back();
+    return out;
+  };
+  const auto thickness = [&](double t) {
+    auto out = ice;
+    for (auto& v : out) v *= 1.0 - 0.3 * t / times.back();
+    return out;
+  };
+  const auto dual = solver.Grid().FromFunction([](double theta, double phi) {
+    return std::exp(-2.0 * (1.0 - std::sin(theta) * std::cos(phi - 1.1)));
+  });
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].relativeSeaLevelDual = dual;
+  const auto options = Viscoelastic3D::Options{
+      .parallel = false, .rtol = 1e-12, .radial_cuts = share.cuts};
+  const auto evolutionOptions =
+      Evolution3D::Options{.scheme = Scheme::Sdirk2,
+                           .rtol = 1e-12,
+                           .max_coupled_iterations = 100,
+                           .coupled_rtol = 1e-11,
+                           .record_stride = 2};
+  const auto adjointOptions =
+      AdjointSolver3D::Options{.method = AdjointMethod::Discrete,
+                               .rtol = 1e-12,
+                               .max_coupled_iterations = 100,
+                               .coupled_rtol = 1e-11};
+  struct Results {
+    Kernels3D kernels;
+    KernelDerivatives3D along;
+    std::vector<double> tangentSeaLevel;
+    double paired = 0.0;  // the kernel with the direction, this rank's part
+  };
+  auto rank = 0;
+  MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+  for (const auto migrating : {false, true}) {
+    const auto label = migrating ? "migrating" : "frozen";
+    auto run = [&](const Viscoelastic3D& op) {
+      Evolution3D evolution(op, solver, state, evolutionOptions);
+      const auto snapshots = migrating
+                                 ? evolution.RunMigrating(times, thickness)
+                                 : evolution.Run(times, directLoad);
+      const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
+      const auto oceans = migrating ? OceanFunctionsOf(snapshots)
+                                    : std::vector<std::vector<double>>{};
+      const auto stageOceans =
+          migrating ? StageOceanFunctionsOf(snapshots) : StageOceanFunctions{};
+      TangentPerturbation3D direction;
+      direction.logViscosity.assign(op.Coupling().GridValueCount(), 0.1);
+      const TangentLinearSolver3D tangent(
+          evolution, {.method = AdjointMethod::Discrete,
+                      .rtol = 1e-12,
+                      .max_coupled_iterations = 100,
+                      .coupled_rtol = 1e-11,
+                      .record = true});
+      const auto tangentRun =
+          tangent.Run(times, direction, &trajectory, oceans, stageOceans);
+      const AdjointSolver3D adjoint(evolution, adjointOptions);
+      auto [kernels, along] = adjoint.SecondOrderKernels(
+          times, measurements, tangentRun,
+          TangentLinearSolver3D::ItauOfLogViscosity(op, direction.logViscosity),
+          trajectory, oceans, {}, stageOceans);
+      auto out = Results{std::move(kernels), std::move(along),
+                         tangentRun.back().relativeSeaLevelChange, 0.0};
+      out.paired = VolumePairing(op.Coupling(), out.kernels.logViscosityKernel3D[0],
+                                 direction.logViscosity);
+      return out;
+    };
+    const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
+    const auto want = run(whole);
+    auto mine = options;
+    mine.segments = share.segments;
+    mine.collectives = share.collectives;
+    const Viscoelastic3D op(body.rheology, lmax, Peaked, mine);
+    const auto got = run(op);
+    const auto& part = op.Coupling();
+    const auto& all = whole.Coupling();
+    // each rank's slice of a field over the whole mesh's memory nodes
+    auto slice = [&](const std::vector<double>& field, std::size_t size) {
+      auto first = 0;
+      while (all.ElementOfNode(first) != part.ElementOfNode(0)) ++first;
+      return std::span(field).subspan(all.FieldOffset(first), size);
+    };
+    auto worstIce = 0.0, worstAlong = 0.0;
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      worstIce = std::max(worstIce, Relative(got.kernels.ice.thickness[n],
+                                             want.kernels.ice.thickness[n]));
+      worstAlong = std::max(worstAlong, Relative(got.along.ice.thickness[n],
+                                                 want.along.ice.thickness[n]));
+    }
+    auto worstViscosity = 0.0, worstAlongViscosity = 0.0;
+    if (part.NodeCount() > 0) {
+      const auto& kernel = got.kernels.logViscosityKernel3D[0];
+      worstViscosity = Relative(
+          kernel, slice(want.kernels.logViscosityKernel3D[0], kernel.size()));
+      const auto& derivative = got.along.logViscosityKernel3D[0];
+      worstAlongViscosity = Relative(
+          derivative,
+          slice(want.along.logViscosityKernel3D[0], derivative.size()));
+    }
+    const auto tangentGap =
+        MaxOverRanks(Relative(got.tangentSeaLevel, want.tangentSeaLevel));
+    const auto iceGap = MaxOverRanks(worstIce);
+    const auto viscosityGap = MaxOverRanks(worstViscosity);
+    const auto alongGap = MaxOverRanks(std::max(worstAlong, worstAlongViscosity));
+    // the transpose identity over the ranks
+    auto paired = got.paired;
+    MPI_Allreduce(MPI_IN_PLACE, &paired, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+    const auto radius = solver.Radius();
+    auto product = got.tangentSeaLevel;
+    for (auto i = std::size_t{0}; i < product.size(); ++i) product[i] *= dual[i];
+    const auto objective = radius * radius * solver.Grid().Integrate(product);
+    const auto transposeGap = std::abs(paired - objective) / std::abs(objective);
+    if (rank == 0) {
+      std::cout << std::format(
+          "[sdirk2 distributed derivatives] {}: tangent {:.1e}, ice kernels "
+          "{:.1e}, viscosity {:.1e}, second order {:.1e}; transpose over the "
+          "ranks {:.1e}\n",
+          label, tangentGap, iceGap, viscosityGap, alongGap, transposeGap);
+    }
+    EXPECT_LT(tangentGap, 1e-9) << label;
+    EXPECT_LT(iceGap, 1e-9) << label;
+    EXPECT_LT(viscosityGap, 1e-9) << label;
+    EXPECT_LT(alongGap, 1e-8) << label;
+    EXPECT_LT(transposeGap, 1e-8) << label;
   }
 }
 

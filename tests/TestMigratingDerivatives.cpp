@@ -173,7 +173,10 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = setup.Smooth(rng, 0.1 * setup.Metre());
   const auto ditau = setup.DeltaItau(0.1);
-  const Evolution::Options options{
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                   
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
 
   Evolution evolution(op, setup.solver, state, options);
@@ -340,8 +343,11 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(op, setup.solver, state,
-                        {.rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         times, Field(times, Thinning(cap, times, 0.85, 0.35)), Evolution::Forcing{});
     const auto oceans = OceanFunctionsOf(run);
@@ -568,7 +574,10 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   auto rising = deltaIce;
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = scene.Smooth(rng, 0.1 * scene.Metre());
-  const Evolution3D::Options options{.rtol = 1e-12,
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                     .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
                                      .record_stride = 1};
@@ -742,8 +751,11 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution3D evolution(op, scene.solver, state,
-                          {.rtol = 1e-12,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
                            .record_stride = 1});
@@ -964,7 +976,10 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
   measurements[1].displacementDual = setup.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
-  const Evolution::Options options{
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                   
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice),
@@ -1155,8 +1170,11 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun) {
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].tangentialPotentialDual = gTangential;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(op, setup.solver, state,
-                        {.rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         times, Field(times, ice), ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0));
     const auto oceans = OceanFunctionsOf(run);
@@ -1358,7 +1376,10 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   measurements[1].displacementDual = scene.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
-  const Evolution3D::Options options{.rtol = 1e-12,
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                     .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
                                      .record_stride = 1};
@@ -1544,8 +1565,11 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution3D evolution(op, scene.solver, state,
-                          {.rtol = 1e-12,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
                            .record_stride = 1});
@@ -1762,7 +1786,10 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
   measurements[nodes - 1].angularVelocityDual = {0.2, -0.4, 0.8};
-  const Evolution::Options options{
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                   
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
   auto forcingOf = [&](const std::vector<Coefficients>& direction, double eps) {
     auto out = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
@@ -1955,8 +1982,11 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(op, setup.solver, state,
-                        {.rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
+                        {.scheme = Scheme::ExponentialTrapezoid,
+                         .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     auto forcing = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
     forcing.tide = TideField(times, tides);
     const auto run = evolution.RunMigrating(times, Field(times, ice), forcing);
@@ -2029,7 +2059,10 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
   measurements[1].displacementDual = scene.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
-  const Evolution3D::Options options{.rtol = 1e-12,
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                     .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
                                      .record_stride = 1};
@@ -2210,8 +2243,11 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
+    // the exponential trapezoid stated: the calls here are a one-stage run's
+    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution3D evolution(op, scene.solver, state,
-                          {.rtol = 1e-12,
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
                            .record_stride = 1});
@@ -2298,7 +2334,10 @@ TEST(MigratingDerivatives, AcrossAnIceJump) {
   measurements[1].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
   measurements[2].displacementDual = setup.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
-  const Evolution::Options options{
+  // the exponential trapezoid stated: the calls here are a one-stage run's (no
+  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
+                                   
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, sides.plain, forcing);

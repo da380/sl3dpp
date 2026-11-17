@@ -5,7 +5,7 @@
 // finite-difference check of the full 3D log-viscosity kernel with
 // lateral structure on, at the continuous formulation's (commute-error)
 // accuracy in the resolved regime; under Sdirk2 the same, the sweep stepped
-// by its stages, and the derivatives not built for it refused.
+// by its stages, and what is not built for it refused.
 
 #include <gtest/gtest.h>
 
@@ -753,10 +753,12 @@ TEST(Adjoint3D, Sdirk2LateralLogViscosityKernelAgainstFiniteDifferences) {
   EXPECT_LT(errors[1], 0.35 * errors[0]);
 }
 
-TEST(Adjoint3D, Sdirk2RefusesTheDerivativesNotBuilt) {
-  // About a 3D run under Sdirk2 the discrete sweep, the second-order sweep
-  // and the tangent-linear run are not built, and the continuous sweep
-  // reads every node's state: each refused by name.
+TEST(Adjoint3D, Sdirk2RefusesWhatIsNotBuilt) {
+  // About a 3D run under Sdirk2 the derivatives of the stepped map are
+  // built (TestSdirk2Derivatives). What is not, each refused by name: the
+  // continuous second-order sweep, the continuous drive of a tangent-linear
+  // run along the viscosity, and a trajectory that does not give the steps'
+  // first-stage closures.
   auto scene = Scene::Make(1e21);
   const auto kyr = 1000.0 * 3.15576e7 / scene.solver.SolverScales().Time();
   const auto times = std::vector<double>{0.0, kyr, 2.0 * kyr, 3.0 * kyr};
@@ -787,29 +789,47 @@ TEST(Adjoint3D, Sdirk2RefusesTheDerivativesNotBuilt) {
       {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
   const auto snapshots = evolution.Run(times, directLoad);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-  named(
-      [&] {
-        const AdjointSolver3D adjoint(evolution,
-                                      {.method = AdjointMethod::Discrete});
-        static_cast<void>(
-            adjoint.FirstOrderKernels(times, measurements, &trajectory));
-      },
-      "the discrete sweep");
+  // the discrete sweep and the discrete tangent-linear run are built
+  EXPECT_FALSE(AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete})
+                   .FirstOrderKernels(times, measurements, &trajectory)
+                   .itauKernel3D.empty());
+  TangentPerturbation3D alongViscosity;
+  alongViscosity.logViscosity.assign(op.Coupling().GridValueCount(), 0.1);
+  const TangentLinearSolver3D recorded(
+      evolution, {.method = AdjointMethod::Discrete, .record = true});
+  const auto tangent = recorded.Run(times, alongViscosity, &trajectory);
   named(
       [&] {
         const AdjointSolver3D adjoint(evolution,
                                       {.method = AdjointMethod::Continuous});
         static_cast<void>(adjoint.SecondOrderKernels(
-            times, measurements, snapshots, {}, trajectory));
+            times, measurements, tangent, {}, trajectory));
       },
-      "the second-order sweep");
-  named([&] { const TangentLinearSolver3D tangent(evolution); },
-        "the tangent-linear run");
+      "the continuous second-order sweep");
+  named(
+      [&] {
+        const TangentLinearSolver3D continuous(
+            evolution, {.method = AdjointMethod::Continuous});
+        static_cast<void>(continuous.Run(times, alongViscosity, &trajectory));
+      },
+      "the continuous tangent-linear run along the viscosity");
+  auto bare = trajectory;
+  bare.stages.clear();
+  named(
+      [&] {
+        const AdjointSolver3D adjoint(evolution,
+                                      {.method = AdjointMethod::Discrete});
+        static_cast<void>(adjoint.FirstOrderKernels(times, measurements, &bare));
+      },
+      "the discrete sweep about a trajectory without its stages");
+  // a recording with gaps that does not give them: the continuous sweep's
+  // rebuild repeats each stage under its closure
   Evolution3D strided(
       op, scene.solver, scene.state,
       {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 2});
-  const auto gapped =
+  auto gapped =
       ForwardTrajectory3D::FromSnapshots(strided.Run(times, directLoad));
+  gapped.stages.clear();
   named(
       [&] {
         const AdjointSolver3D adjoint(strided,
@@ -817,5 +837,5 @@ TEST(Adjoint3D, Sdirk2RefusesTheDerivativesNotBuilt) {
         static_cast<void>(
             adjoint.FirstOrderKernels(times, measurements, &gapped));
       },
-      "the continuous sweep about a gapped trajectory");
+      "the continuous sweep about a gapped trajectory without its stages");
 }

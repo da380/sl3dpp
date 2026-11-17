@@ -296,9 +296,10 @@ struct SolverBlock {
   /// The cache every transform grid of the run blocks its work for, in
   /// MiB; 0, the library's default.
   std::size_t cache_mb = 0;
-  /// A viscoelastic run's time step, and how a 3D step's linear system is
-  /// closed (Viscoelastic3D::Options::StepSolver).
-  Scheme scheme = Scheme::ExponentialTrapezoid;
+  /// A viscoelastic run's time step (the library's default, Sdirk2), and
+  /// how a 3D step's linear system is closed
+  /// (Viscoelastic3D::Options::StepSolver).
+  Scheme scheme = Scheme::Sdirk2;
   Viscoelastic3D::Options::StepSolver step =
       Viscoelastic3D::Options::StepSolver::FixedPoint;
 };

@@ -234,7 +234,8 @@ FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
       [&](const auto& snapshots, const Measurement& measurement) {
         return AdjointSolver(evolution, std::move(adjoint))
             .FirstOrderKernels(times, {{times.size() - 1, measurement}},
-                               nullptr, OceanFunctionsOf(snapshots))
+                               nullptr, OceanFunctionsOf(snapshots),
+                               StageOceanFunctionsOf(snapshots))
             .initialSeaLevel;
       });
 }
@@ -249,7 +250,8 @@ FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
       [&](const auto& snapshots, const Measurement& measurement) {
         return AdjointSolver3D(evolution, adjoint)
             .FirstOrderKernels(times, {{times.size() - 1, measurement}},
-                               nullptr, OceanFunctionsOf(snapshots))
+                               nullptr, OceanFunctionsOf(snapshots),
+                               StageOceanFunctionsOf(snapshots))
             .ice.initialSeaLevel;
       });
 }

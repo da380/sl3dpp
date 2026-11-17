@@ -16,8 +16,8 @@
  * through the step's reference solves. With no lateral perturbation the
  * channels are strain-independent, the loop converges on its first pass,
  * and the history equals the 1D coupled evolution's. Under Sdirk2 a step
- * is two such opened stages, each its own combined fixed point under the
- * forcing at its time (StepRecipe.hpp).
+ * is two such opened stages, each its own combined fixed point, the first
+ * under the forcing of the step's two nodes combined (StepRecipe.hpp).
  *
  * Units follow Evolution: times, the ice-load callable and the
  * returned fields are in the SLE solver's non-dimensional scheme; the
@@ -89,6 +89,28 @@ class Evolution3D {
     /// Options::on_state): the strain of a source-driven solution is not
     /// regenerated from the loads alone.
     std::optional<DegreeFields> sourceForces;
+    /// An inner stage of the step that ends at the node, under a
+    /// multi-stage scheme (Sdirk2's first stage), as Evolution::Snapshot::
+    /// Stage: what closed it, under which a derivative run about the step
+    /// and the rebuild of a state between kept ones repeat the stage from
+    /// the node below (the stage's fixed point under known channels, no
+    /// sea level equation to close). The coefficients are kept whenever
+    /// the node's are, the ocean function under migrating shorelines, the
+    /// forces under interior sources.
+    struct Stage {
+      std::vector<std::complex<double>> loadCoefficients;
+      std::vector<std::complex<double>> tideCoefficients;
+      std::vector<double> oceanFunction;
+      std::optional<DegreeFields> sourceForces;
+      /// A recorded tangent-linear run's own state at the stage, with its
+      /// strain (TangentLinearSolver3D::Options::record); absent on a
+      /// forward run's snapshots.
+      std::optional<Viscoelastic3D::State> internalState;
+    };
+    /// The inner stages of the step ending at the node, in order: empty
+    /// under a one-stage scheme, at the first node and at the second node
+    /// of a repeated pair.
+    std::vector<Stage> stages;
   };
 
   /// The recurrence at one node, enough to resume a run there: the
@@ -108,8 +130,9 @@ class Evolution3D {
 
   struct Options {
     /// The time step, as Evolution::Options::scheme: under Sdirk2 each
-    /// stage's combined fixed point closed under the forcing at its time.
-    Scheme scheme = Scheme::ExponentialTrapezoid;
+    /// stage's combined fixed point closed under its forcing, the first
+    /// stage's the step's two nodes' combined.
+    Scheme scheme = Scheme::Sdirk2;
     RotationalFeedback rotation = RotationalFeedback::Full;
     /// The SLE's own tolerance per pass.
     double rtol = 1e-9;

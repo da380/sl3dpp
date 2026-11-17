@@ -6,23 +6,22 @@ Python plotting script, and an example config for every command of the
 
 | Driver | What it shows | Default | Plot |
 | --- | --- | --- | --- |
-| `ExampleLoveNumbers` | load and tidal Love numbers of the PREM-like deck, in the conventional (Farrell) normalisation | lmax 256, 0.1 s | `plot_love_numbers.py` |
-| `ExampleFingerprint` | the elastic sea-level fingerprint of a 10% Greenland melt: one solve of the generalised sea level equation with full rotational feedback, SI in and out | lmax 256, 0.8 s | `plot_fingerprint.py` |
-| `ExampleEvolution` | 1D viscoelastic GIA: a West Antarctic melt ramp then hold, the elastic jump and the viscous creep after it, polar motion | lmax 192, 43 s | `plot_evolution.py` |
-| `ExampleLateralViscosity` | 3D viscosity: an analytic lateral pattern of one decade against its radial twin, and the cost of the within-step iteration | lmax 48, 48 s | `plot_lateral.py` |
-| `ExampleModelViscosity` | the route from real tomography: a 3D viscosity read from a planetmodel model file (`io::ModelViscosity`), run through the whole deglaciation against the file's own radial reference | lmax 32, 20 s | `plot_model_viscosity.py` |
-| `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128, 36 s | `plot_kernels.py` |
-| `ExampleViscosityKernels3D` | 3D adjoint kernels by the discrete adjoint (the library's default): the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24, 67 s | `plot_kernels_3d.py` |
-| `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32, 5 s | `plot_static_3d.py` |
-| `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean on the post-seismic Earth (`data/prem8.postseismic.deck`: a 50 km elastic lid over a 1e19 Pa s asthenosphere) and on its twin with a Burgers asthenosphere (`Rheology::Burgers`), the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13); maps and series as 3° Gaussian means, the degree weights of the cap measurements' cap (`CapMeanWeights`) | lmax 64, 73 s | `plot_seismic.py` |
+| `ExampleLoveNumbers` | load and tidal Love numbers of the PREM-like deck, in the conventional (Farrell) normalisation | lmax 256 | `plot_love_numbers.py` |
+| `ExampleFingerprint` | the elastic sea-level fingerprint of a 10% Greenland melt: one solve of the generalised sea level equation with full rotational feedback, SI in and out | lmax 256 | `plot_fingerprint.py` |
+| `ExampleEvolution` | 1D viscoelastic GIA: a West Antarctic melt ramp then hold, the elastic jump and the viscous creep after it, polar motion | lmax 192 | `plot_evolution.py` |
+| `ExampleLateralViscosity` | 3D viscosity: an analytic lateral pattern of one decade against its radial twin, and the cost of the within-step iteration | lmax 48 | `plot_lateral.py` |
+| `ExampleModelViscosity` | the route from real tomography: a 3D viscosity read from a planetmodel model file (`io::ModelViscosity`), run through the whole deglaciation against the file's own radial reference | lmax 32 | `plot_model_viscosity.py` |
+| `ExampleIceKernels` | 1D adjoint kernels of a tide gauge near the melting Greenland ice: rate kernels of the ice history at four intervals, radial viscosity kernels by the continuous and the discrete adjoint; the forward run checkpointed | lmax 128 | `plot_kernels.py` |
+| `ExampleViscosityKernels3D` | 3D adjoint kernels by the discrete adjoint (the library's default): the log-viscosity kernels of a sea-level and a decay-time measurement at Hudson Bay, written as a planetmodel model file (`io::WriteKernels`); the forward run checkpointed | lmax 24 | `plot_kernels_3d.py` |
+| `ExampleStatic3D` | 3D elasticity: the static response of the synthetic 3D elastic Earth (`data/synthetic_moduli.nc`, lateral moduli read by `io::ModelModuli`) to a cap load over Hudson Bay, solved exactly by conjugate gradients on the radial systems, against the radial model's; the response inside the body as a model file for planetmodel's cutaways | lmax 32 | `plot_static_3d.py` |
+| `ExampleSeismic` | a seismic source: a thrust off the synthetic South America as point sources on a planar fault (`PlanarFaultSources`), its co-seismic response and 300 years of relaxation with an ocean on the post-seismic Earth (`data/prem8.postseismic.deck`: a 50 km elastic lid over a 1e19 Pa s asthenosphere) and on its twin with a Burgers asthenosphere (`Rheology::Burgers`), the horizontal motion from the tangential and toroidal potentials (`DisplacementField`); and a tide gauge's kernels in the patches' moment tensors (`AdjointSolver::Options::moment_points`) predicting the change a turn of the rake from 90 to 120 degrees makes, checked against a second run (to 1e-13); maps and series as 3° Gaussian means, the degree weights of the cap measurements' cap (`CapMeanWeights`) | lmax 64 | `plot_seismic.py` |
 
-The defaults keep each run under a minute on 8 threads, the times shown,
-but `ExampleSeismic`'s (two runs through time of 29 nodes, and an
-adjoint sweep and a second run of 26, its fault's 36 point sources
-forcing every step) and `ExampleViscosityKernels3D`'s (two discrete 3D
-sweeps of 21 steps after its forward run: the whole run 73 s on 6
-threads, against 39 s by the continuous sweeps);
-the largest peak memory is 11 GB, for `ExampleIceKernels`. The
+The defaults are sized for a laptop: each run takes from a fraction of a
+second to a minute or two on 8 threads, `ExampleSeismic` (runs through
+time and an adjoint sweep, its fault's 36 point sources forcing every
+step) and `ExampleViscosityKernels3D` (two discrete 3D sweeps after its
+forward run) the longest, and `ExampleIceKernels` takes the most memory.
+The
 configs, one per `sl3d` command, are described in
 [configs/README.md](configs/README.md).
 
@@ -208,29 +207,22 @@ South America lifts the sea floor by up to 0.16 m and moves it 0.87 m
 towards the trench in 2° means, the sea level falling by the uplift over
 the ocean. On the post-seismic Earth the asthenosphere then relaxes over
 years to decades and the upper mantle over decades to centuries: over
-the fault the uplift of 0.150 m doubles to 0.319 m by a century and falls
-back to 0.233 m by 300 years, the curve bending on the logarithmic axis
-at the layers' Maxwell times. Without gravity it grows the more, to
-0.356 m at a century and 0.297 m at 300 years against 0.296 m and 0.200 m
-with gravity and no ocean. `ExampleSeismic`'s Burgers asthenosphere
-relaxes a part of the way within months, where the Maxwell one has
-barely begun: over the fault the uplift, its 3° mean, gains 16 mm in the
-first year against 3 mm, the two Earths' difference peaking at 13 mm at
-1.5 to 2 years and gone by about 40 years, both then relaxing alike; the
-program runs the same twin from a config, `sea_level_postseismic_burgers`
-(`model.burgers`), its 2° means over the fault gaining 31 mm in the first
-year against 6 mm at lmax 96. A GPS station's
-eastward motion 20 years on, -0.64 m (a point value at lmax 32), and the
-moment kernels contracted with the fault's own mechanism and moment give
-back each measurement's value.
+the fault the uplift grows over the first century and falls back after
+it, the curve bending on the logarithmic axis at the layers' Maxwell
+times. Without gravity it grows the more. `ExampleSeismic`'s Burgers
+asthenosphere relaxes a part of the way within months, where the Maxwell
+one has barely begun, the two Earths then relaxing alike; the program
+runs the same twin from a config, `sea_level_postseismic_burgers`
+(`model.burgers`). The moment kernels contracted with the fault's own
+mechanism and moment give back each measurement's value.
 
 The tide figures show three things. On the synthetic 3D Earth the lunar
 body tide is the radial model's to 2e-4: a bulge of 0.21 m, which the
 lateral moduli change by 0.04 mm at most, the 3D model putting 7.0e-5 of
 its rms into degrees other than 2, all of it the lateral coupling. On the
 radial viscoelastic Earth an oscillating tide's response lags the
-potential, most at periods between the elastic and fluid limits (24° at
-1 kyr, 4° at 0.1 kyr, 12° at 10 kyr), its amplitude rising from the
+potential, most at periods between the elastic and fluid limits, its
+amplitude rising from the
 elastic Love numbers towards the fluid ones as the period grows. The toy
 planet's elastic Love numbers are h2 = 0.339 and k2 = 0.182, and a held
 tide relaxes several times more slowly on it than on the Earth.

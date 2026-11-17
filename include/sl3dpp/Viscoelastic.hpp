@@ -24,10 +24,10 @@
  *                   + k^2 S_k e_S(U', V') + k^2 (k^2 - 2) M_k V' ] dr.
  *
  * Steppers: backward Euler, exponential Euler, and the exponential
- * trapezoid (default; second order, no stability limit, one solve per
- * step), with the weight algebra of StepWeights.hpp and one factorised
- * banded system per degree and (scheme, dt) flavour, cached and reused;
- * and Sdirk2 (second order, L-stable, two solves per step), stepped as
+ * trapezoid (second order, no stability limit, one solve per step), with
+ * the weight algebra of StepWeights.hpp and one factorised banded system
+ * per degree and (scheme, dt) flavour, cached and reused; and Sdirk2
+ * (the default; second order, L-stable, two solves per step), stepped as
  * two backward Euler stages of one flavour (StepRecipe.hpp).
  * Each degree's columns are independent right-hand sides: one column for
  * a Love-number history, 2 (l + 1) for the full set of spherical-harmonic
@@ -287,7 +287,7 @@ class ViscoelasticOperator {
   /// under the channels at its own end time.
   [[nodiscard]] std::pair<ViscoelasticState, std::map<int, std::vector<double>>>
   Step(const ViscoelasticState& state, double dt,
-       Scheme scheme = Scheme::ExponentialTrapezoid,
+       Scheme scheme = Scheme::Sdirk2,
        const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
 
   /// Opens an implicit or trapezoid step before the end-time loads are
@@ -298,8 +298,7 @@ class ViscoelasticOperator {
   /// stage by stage by its driver (StepRecipe.hpp), and refused here but
   /// at dt = 0, where every scheme's step is backward Euler's.
   [[nodiscard]] ViscoelasticStep StartStep(
-      const ViscoelasticState& state, double dt,
-      Scheme scheme = Scheme::ExponentialTrapezoid,
+      const ViscoelasticState& state, double dt, Scheme scheme,
       const LoadCallable& load = {}, const LoadCallable& tide = {}) const;
 
   /// One trial trapezoid step with the embedded ETD1 error estimate:

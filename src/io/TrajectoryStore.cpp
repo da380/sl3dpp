@@ -309,6 +309,15 @@ struct Surface {
   const std::vector<double>* fields[6] = {};
   const std::vector<std::complex<double>>* loads = nullptr;
   const std::vector<std::complex<double>>* tides = nullptr;
+  /// What closed the inner stages of the step ending at the node (a
+  /// staged store's): each one's load and tide coefficients and ocean
+  /// function.
+  struct Stage {
+    const std::vector<std::complex<double>>* loads = nullptr;
+    const std::vector<std::complex<double>>* tides = nullptr;
+    const std::vector<double>* ocean = nullptr;
+  };
+  std::vector<Stage> stages;
 };
 
 template <class Snapshot>
@@ -325,6 +334,10 @@ Surface SurfaceOf(const Snapshot& s) {
   out.fields[5] = &s.oceanFunction;
   out.loads = &s.loadCoefficients;
   out.tides = &s.tideCoefficients;
+  for (const auto& stage : s.stages) {
+    out.stages.push_back({&stage.loadCoefficients, &stage.tideCoefficients,
+                          &stage.oceanFunction});
+  }
   if constexpr (std::is_same_v<Snapshot, Evolution3D::Snapshot>) {
     out.coupledIterations = s.coupledIterations;
     out.coupledResidual = s.coupledResidual;
@@ -333,7 +346,7 @@ Surface SurfaceOf(const Snapshot& s) {
   return out;
 }
 
-void PutSurface(std::ostream& out, const Surface& s) {
+void PutSurface(std::ostream& out, const Surface& s, bool staged) {
   PutOne(out, s.t);
   PutOne(out, static_cast<std::uint64_t>(s.converged ? 1 : 0));
   PutOne(out, s.coupledIterations);
@@ -343,10 +356,17 @@ void PutSurface(std::ostream& out, const Surface& s) {
   for (const auto* field : s.fields) PutVector(out, *field);
   PutComplex(out, *s.loads);
   PutComplex(out, *s.tides);
+  if (!staged) return;
+  PutOne(out, static_cast<std::uint64_t>(s.stages.size()));
+  for (const auto& stage : s.stages) {
+    PutComplex(out, *stage.loads);
+    PutComplex(out, *stage.tides);
+    PutVector(out, *stage.ocean);
+  }
 }
 
 template <class Snapshot>
-Snapshot GetSurface(Bounded& in) {
+Snapshot GetSurface(Bounded& in, bool staged) {
   auto s = Snapshot{};
   s.t = GetOne<double>(in);
   s.converged = GetOne<std::uint64_t>(in) != 0;
@@ -366,6 +386,15 @@ Snapshot GetSurface(Bounded& in) {
   }
   s.loadCoefficients = GetComplex(in);
   s.tideCoefficients = GetComplex(in);
+  if (!staged) return s;
+  // (each stage at least its three counts)
+  const auto stages = Counted(in, GetOne<std::uint64_t>(in), 24);
+  for (auto k = std::uint64_t{0}; k < stages; ++k) {
+    auto& stage = s.stages.emplace_back();
+    stage.loadCoefficients = GetComplex(in);
+    stage.tideCoefficients = GetComplex(in);
+    stage.oceanFunction = GetVector(in);
+  }
   return s;
 }
 
@@ -468,6 +497,7 @@ std::string ManifestBytes(const TrajectoryStore::Manifest& m) {
   for (const auto flag : {m.migrating, m.sources, m.tide}) {
     PutOne(out, static_cast<std::uint64_t>(flag ? 1 : 0));
   }
+  if (m.version >= 2) PutOne(out, static_cast<std::uint64_t>(m.staged ? 1 : 0));
   PutOne(out, m.field_size);
   PutOne(out, static_cast<std::uint64_t>(m.cuts.size()));
   for (const auto cut : m.cuts) PutOne(out, static_cast<std::int64_t>(cut));
@@ -523,11 +553,13 @@ TrajectoryStore::Manifest ReadManifest(const fs::path& path) {
   }
   auto m = TrajectoryStore::Manifest{};
   m.version = GetOne<std::uint64_t>(from);
-  if (m.version != TrajectoryStore::kVersion) {
+  if (m.version != TrajectoryStore::kPlainVersion &&
+      m.version != TrajectoryStore::kVersion) {
     Throw(Kind::Version,
           std::format("{} is of trajectory store format version {}, and this "
-                      "program reads version {}",
-                      path.string(), m.version, TrajectoryStore::kVersion));
+                      "program reads versions {} and {}",
+                      path.string(), m.version, TrajectoryStore::kPlainVersion,
+                      TrajectoryStore::kVersion));
   }
   m.complete = GetOne<std::uint64_t>(from) != 0;
   const auto getText = [&from] {
@@ -548,6 +580,7 @@ TrajectoryStore::Manifest ReadManifest(const fs::path& path) {
   m.migrating = GetOne<std::uint64_t>(from) != 0;
   m.sources = GetOne<std::uint64_t>(from) != 0;
   m.tide = GetOne<std::uint64_t>(from) != 0;
+  if (m.version >= 2) m.staged = GetOne<std::uint64_t>(from) != 0;
   m.field_size = GetOne<std::uint64_t>(from);
   const auto cuts = Counted(from, GetOne<std::uint64_t>(from), 8);
   for (auto k = std::uint64_t{0}; k < cuts; ++k) {
@@ -661,6 +694,20 @@ void CheckDescribed(const TrajectoryStore::Manifest& m,
                       "nodes, grid or forcing are not this run's",
                       directory.string()));
   }
+  if (m.staged != run.staged) {
+    Throw(Kind::Stages,
+          run.staged
+              ? std::format(
+                    "{} holds this run recorded without the first stage of "
+                    "each step (trajectory store format version {}, which "
+                    "holds the nodes alone), and a run under Sdirk2 is read "
+                    "with them: remove it and record the run again",
+                    directory.string(), m.version)
+              : std::format("{} holds a store of this run's hash recorded "
+                            "with the stages of a multi-stage scheme, which "
+                            "this run's scheme does not have",
+                            directory.string()));
+  }
   if (m.record_stride != run.record_stride) {
     Throw(Kind::Stride,
           std::format("{} holds this run recorded at record stride {}, and "
@@ -750,8 +797,11 @@ struct TrajectoryStore::Impl {
   std::vector<bool> surfaceWritten;
   std::vector<bool> stateWritten;
   std::vector<std::uint64_t> stateBytes;
-  /// A 3D node's sources' forces, held for its state record.
+  /// A 3D node's sources' forces, held for its state record, and those of
+  /// the inner stages of the step ending there.
   std::map<std::size_t, DegreeFields> pendingForces;
+  std::map<std::size_t, std::vector<std::optional<DegreeFields>>>
+      pendingStageForces;
   std::uint64_t manifestBytes = 0;
   std::size_t statesRead = 0;
   std::size_t recordsWritten = 0;
@@ -792,6 +842,9 @@ struct TrajectoryStore::Impl {
     m.migrating = run.migrating;
     m.sources = run.sources;
     m.tide = run.tide;
+    m.staged = run.staged;
+    m.version = run.staged ? TrajectoryStore::kVersion
+                           : TrajectoryStore::kPlainVersion;
     m.field_size = run.field_size;
     m.cuts = run.cuts;
     m.parts = parts;
@@ -1134,6 +1187,23 @@ void TrajectoryStore::PutStart(const GRDSolver::State& background) const {
   ++s.recordsWritten;
 }
 
+namespace {
+
+/// A snapshot with inner stages put to a store described without them
+/// would lose them: refused.
+void RefuseUnstagedStages(bool staged, bool noStages, std::size_t node) {
+  if (staged || noStages) return;
+  throw std::invalid_argument(std::format(
+      "the snapshot of node {} carries the inner stages of its step (a run "
+      "under a multi-stage scheme: Sdirk2, the default) and the trajectory "
+      "store is described without them: set Description::staged for the "
+      "run, or state a one-stage scheme (Scheme::ExponentialTrapezoid) in "
+      "the evolution's Options::scheme",
+      node));
+}
+
+}  // namespace
+
 void TrajectoryStore::Put(std::size_t node,
                           const Evolution::Snapshot& snapshot) const {
   auto& s = *impl_;
@@ -1142,10 +1212,13 @@ void TrajectoryStore::Put(std::size_t node,
   if (s.run.dimension != 1) {
     throw std::logic_error("a 1D snapshot put to a 3D trajectory store");
   }
+  RefuseUnstagedStages(s.manifest.staged, snapshot.stages.empty(), node);
   if (s.First()) {
     s.manifest.surface_bytes[node] = WriteRecord(
         s.SurfacePath(node), kSurfaceKind, node, 0,
-        [&](std::ostream& out) { PutSurface(out, SurfaceOf(snapshot)); });
+        [&](std::ostream& out) {
+          PutSurface(out, SurfaceOf(snapshot), s.manifest.staged);
+        });
     ++s.recordsWritten;
   }
   s.surfaceWritten[node] = true;
@@ -1158,6 +1231,12 @@ void TrajectoryStore::Put(std::size_t node,
   }
   s.WriteState(node, [&](std::ostream& out) {
     PutOptional(out, snapshot.sourceForces, PutForces1D);
+    if (s.manifest.staged) {
+      PutOne(out, static_cast<std::uint64_t>(snapshot.stages.size()));
+      for (const auto& stage : snapshot.stages) {
+        PutOptional(out, stage.sourceForces, PutForces1D);
+      }
+    }
     PutOptional(out, snapshot.toroidalState, PutToroidal);
     PutOptional(out, snapshot.internalState, PutState1D);
   });
@@ -1171,14 +1250,22 @@ void TrajectoryStore::Put(std::size_t node,
   if (s.run.dimension != 3) {
     throw std::logic_error("a 3D snapshot put to a 1D trajectory store");
   }
+  RefuseUnstagedStages(s.manifest.staged, snapshot.stages.empty(), node);
   if (s.First()) {
     s.manifest.surface_bytes[node] = WriteRecord(
         s.SurfacePath(node), kSurfaceKind, node, 0,
-        [&](std::ostream& out) { PutSurface(out, SurfaceOf(snapshot)); });
+        [&](std::ostream& out) {
+          PutSurface(out, SurfaceOf(snapshot), s.manifest.staged);
+        });
     ++s.recordsWritten;
   }
   s.surfaceWritten[node] = true;
   if (snapshot.sourceForces) s.pendingForces[node] = *snapshot.sourceForces;
+  if (s.manifest.staged && s.manifest.kept[node]) {
+    auto& held = s.pendingStageForces[node];
+    held.clear();
+    for (const auto& stage : snapshot.stages) held.push_back(stage.sourceForces);
+  }
   // a snapshot that keeps its state (no on_state): its record at once
   if (snapshot.internalState) {
     PutState(node, Viscoelastic3D::State(*snapshot.internalState));
@@ -1196,8 +1283,20 @@ void TrajectoryStore::PutState(std::size_t node,
     forces = std::move(found->second);
     s.pendingForces.erase(found);
   }
+  auto stageForces = std::vector<std::optional<DegreeFields>>{};
+  if (const auto found = s.pendingStageForces.find(node);
+      found != s.pendingStageForces.end()) {
+    stageForces = std::move(found->second);
+    s.pendingStageForces.erase(found);
+  }
   s.WriteState(node, [&](std::ostream& out) {
     PutOptional(out, forces, PutForces3D);
+    if (s.manifest.staged) {
+      PutOne(out, static_cast<std::uint64_t>(stageForces.size()));
+      for (const auto& stage : stageForces) {
+        PutOptional(out, stage, PutForces3D);
+      }
+    }
     PutOne(out, std::uint64_t{1});
     PutState3D(out, state);
   });
@@ -1325,13 +1424,28 @@ std::vector<Evolution::Snapshot> TrajectoryStore::Snapshots1D() const {
   auto out = std::vector<Evolution::Snapshot>{};
   for (auto n = std::size_t{0}; n < s.Nodes(); ++n) {
     auto surface = s.Surface(n);
-    out.push_back(GetSurface<Evolution::Snapshot>(surface.From()));
+    out.push_back(
+        GetSurface<Evolution::Snapshot>(surface.From(), s.manifest.staged));
     surface.Finish();
     if (!s.manifest.kept[n]) continue;
     auto record = s.State(n);
     auto& from = record.From();
     auto& snapshot = out.back();
     snapshot.sourceForces = GetOptional(from, GetForces1D);
+    if (s.manifest.staged) {
+      // the inner stages' forces, stage by stage as the surface record's
+      const auto stages = Counted(from, GetOne<std::uint64_t>(from), 8);
+      if (stages != snapshot.stages.size()) {
+        Throw(Kind::Truncated,
+              std::format("{} holds the forces of {} inner stages, and the "
+                          "node's surface record {}",
+                          s.StatePath(n).string(), stages,
+                          snapshot.stages.size()));
+      }
+      for (auto& stage : snapshot.stages) {
+        stage.sourceForces = GetOptional(from, GetForces1D);
+      }
+    }
     snapshot.toroidalState = GetOptional(from, GetToroidal);
     snapshot.internalState = GetOptional(from, GetState1D);
     record.Finish();
@@ -1348,12 +1462,29 @@ std::vector<Evolution3D::Snapshot> TrajectoryStore::Snapshots3D() const {
   auto out = std::vector<Evolution3D::Snapshot>{};
   for (auto n = std::size_t{0}; n < s.Nodes(); ++n) {
     auto surface = s.Surface(n);
-    out.push_back(GetSurface<Evolution3D::Snapshot>(surface.From()));
+    out.push_back(
+        GetSurface<Evolution3D::Snapshot>(surface.From(), s.manifest.staged));
     surface.Finish();
-    // the sources' forces lead a state record, read without its state
+    // the sources' forces lead a state record (the node's, then its inner
+    // stages'), read without its state
     if (s.manifest.sources && s.manifest.kept[n]) {
       auto record = s.State(n);
-      out.back().sourceForces = GetOptional(record.From(), GetForces3D);
+      auto& from = record.From();
+      auto& snapshot = out.back();
+      snapshot.sourceForces = GetOptional(from, GetForces3D);
+      if (s.manifest.staged) {
+        const auto stages = Counted(from, GetOne<std::uint64_t>(from), 8);
+        if (stages != snapshot.stages.size()) {
+          Throw(Kind::Truncated,
+                std::format("{} holds the forces of {} inner stages, and the "
+                            "node's surface record {}",
+                            s.StatePath(n).string(), stages,
+                            snapshot.stages.size()));
+        }
+        for (auto& stage : snapshot.stages) {
+          stage.sourceForces = GetOptional(from, GetForces3D);
+        }
+      }
     }
   }
   return out;
@@ -1369,6 +1500,12 @@ Viscoelastic3D::State TrajectoryStore::State3D(std::size_t node) const {
   auto record = s.State(node);
   auto& from = record.From();
   static_cast<void>(GetOptional(from, GetForces3D));
+  if (s.manifest.staged) {
+    const auto stages = Counted(from, GetOne<std::uint64_t>(from), 8);
+    for (auto k = std::uint64_t{0}; k < stages; ++k) {
+      static_cast<void>(GetOptional(from, GetForces3D));
+    }
+  }
   auto state = GetOptional(from, [](Bounded& in) { return GetState3D(in); });
   record.Finish();
   if (!state) {

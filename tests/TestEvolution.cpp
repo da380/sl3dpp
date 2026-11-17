@@ -24,6 +24,7 @@
 #include "sl3dpp/Deck.hpp"
 #include "sl3dpp/EarthModel.hpp"
 #include "sl3dpp/Evolution.hpp"
+#include "sl3dpp/Evolution3D.hpp"
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/PointSource.hpp"
@@ -580,8 +581,11 @@ TEST(Evolution, APrescribedTideDrivesTheBodyWithAndWithoutAnOcean) {
     for (auto rotation : {RotationalFeedback::None, RotationalFeedback::Full}) {
       const auto label = std::string(background == &dry ? "no ocean" : "ocean") +
                          ", rotation " + std::to_string(static_cast<int>(rotation));
+      // the exponential trapezoid stated: the reference below is the operator
+      // stepped by that scheme
       Evolution evolution(op, solver, *background,
-                          {.rotation = rotation, .rtol = 1e-13});
+                          {.scheme = Scheme::ExponentialTrapezoid,
+                           .rotation = rotation, .rtol = 1e-13});
       const auto snapshots = evolution.Run(times, forcing);
       ASSERT_EQ(snapshots.size(), times.size());
 
@@ -666,7 +670,10 @@ TEST(EvolutionGate, CoupledEvolutionMatchesPyslfp) {
   ASSERT_EQ(setup.solver.Grid().NumberOfLongitudes(), 2 * kLmax + 1)
       << "the GSHTrans grid no longer coincides with pyshtools GLQ here";
   ViscoelasticOperator op(setup.rheology, kLmax);
-  Evolution evolution(op, setup.solver, setup.state, {.rtol = 1e-11});
+  // the exponential trapezoid stated: the pyslfp fixture is that scheme's run
+  Evolution evolution(op, setup.solver, setup.state,
+                      {.scheme = Scheme::ExponentialTrapezoid,
+                       .rtol = 1e-11});
   const auto& grid = setup.solver.Grid();
   const auto& scales = setup.solver.SolverScales();
 
@@ -820,6 +827,52 @@ double Gap(const GRDSolver& solver, std::span<const double> got,
 }
 
 }  // namespace
+
+TEST(Evolution, TheDefaultSchemeIsSdirk2) {
+  // The options of both drivers default to Sdirk2, and a run that states no
+  // scheme is the run that states it: the same steps, so the same numbers.
+  EXPECT_EQ(Evolution::Options{}.scheme, Scheme::Sdirk2);
+  EXPECT_EQ(Evolution3D::Options{}.scheme, Scheme::Sdirk2);
+  const auto scene = Layered::Make(8, 1e21);
+  ViscoelasticOperator op(scene.rheology, scene.lmax);
+  const auto span = 4.0 * scene.Kyr();
+  const auto load = scene.MeltLoad(0.3);
+  const auto direct = [&](double t) {
+    auto out = load;
+    for (auto& v : out) v *= t / span;
+    return out;
+  };
+  Evolution byDefault(op, scene.solver, scene.state, {});
+  Evolution stated(op, scene.solver, scene.state, {.scheme = Scheme::Sdirk2});
+  Evolution trapezoid(op, scene.solver, scene.state,
+                      {.scheme = Scheme::ExponentialTrapezoid});
+  const auto a = byDefault.Run(Even(span, 4), direct);
+  const auto b = stated.Run(Even(span, 4), direct);
+  const auto c = trapezoid.Run(Even(span, 4), direct);
+  ASSERT_EQ(a.size(), b.size());
+  for (auto n = std::size_t{0}; n < a.size(); ++n) {
+    EXPECT_EQ(a[n].relativeSeaLevelChange, b[n].relativeSeaLevelChange) << n;
+    // an inner stage's closure at every step: a two-stage run's
+    EXPECT_EQ(a[n].stages.size(), n == 0 ? 0u : 1u) << n;
+  }
+  // and not the trapezoid's
+  EXPECT_NE(a.back().relativeSeaLevelChange, c.back().relativeSeaLevelChange);
+  // the operator's own step too
+  const auto channel = [](int l, double) -> std::optional<std::vector<double>> {
+    if (l != 2) return std::nullopt;
+    return std::vector<double>{1.0};
+  };
+  const auto zero = op.ZeroState([](int) { return 1; });
+  const auto dt = 0.5 * span * scene.solver.SolverScales().Time() /
+                  scene.model.ModelScales().Time();
+  auto primed = zero;
+  primed.strain = op.Strain(op.SolveElastic(zero, channel));
+  const auto p = op.Step(primed, dt).first;
+  const auto q = op.Step(primed, dt, Scheme::Sdirk2).first;
+  const auto r = op.Step(primed, dt, Scheme::ExponentialTrapezoid).first;
+  EXPECT_EQ(p.m, q.m);
+  EXPECT_NE(p.m, r.m);
+}
 
 TEST(Evolution, Sdirk2ConvergesAtSecondOrderToTheTrapezoidsLimit) {
   // A cap's load ramped on over half the window and held, with an ocean

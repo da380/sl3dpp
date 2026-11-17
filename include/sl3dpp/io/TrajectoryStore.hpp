@@ -85,6 +85,9 @@ class TrajectoryStoreError : public std::runtime_error {
     /// The store's dimension, times or field size are not the caller's
     /// (a hash that does not cover them).
     Mismatch,
+    /// The store holds no inner stages (format version 1) and the caller's
+    /// run is under a multi-stage scheme, or the reverse.
+    Stages,
     /// A record the manifest lists is absent.
     Missing,
     /// A record is not of the size the manifest gives, or not whole.
@@ -102,8 +105,12 @@ class TrajectoryStoreError : public std::runtime_error {
 
 class TrajectoryStore {
  public:
-  /// The format version this program writes and reads.
-  static constexpr std::uint64_t kVersion = 1;
+  /// The format versions this program writes and reads: version 1 for a
+  /// run under a one-stage scheme, and version 2, which holds the inner
+  /// stages of each step beside its nodes, for a run under a multi-stage
+  /// one (Description::staged). kVersion is the latest.
+  static constexpr std::uint64_t kPlainVersion = 1;
+  static constexpr std::uint64_t kVersion = 2;
 
   /// One process's part of a run: the radial segments it owns, contiguous
   /// (Viscoelastic3D::Options::segments; segment 0 of one for a run on one
@@ -137,6 +144,14 @@ class TrajectoryStore {
     bool migrating = false;
     bool sources = false;
     bool tide = false;
+    /// Whether the run is under a multi-stage scheme (IsMultiStage of the
+    /// evolution's Options::scheme): every surface record then carries
+    /// what closed the inner stages of the step ending at its node
+    /// (Evolution::Snapshot::stages: their load and centrifugal
+    /// coefficients and, under migrating shorelines, their ocean
+    /// functions), and every state record their sources' forces. The
+    /// store is then of format version 2.
+    bool staged = false;
     /// The points of a surface field (SurfaceGrid::FieldSize).
     std::uint64_t field_size = 0;
     /// The radial cuts of the run's mesh (Viscoelastic3D::Options::
@@ -155,7 +170,7 @@ class TrajectoryStore {
 
   /// What a store's manifest states (docs/trajectory-store.md).
   struct Manifest {
-    std::uint64_t version = kVersion;
+    std::uint64_t version = kPlainVersion;
     bool complete = false;
     std::string hash;
     /// The program and version that wrote it, for provenance.
@@ -167,6 +182,8 @@ class TrajectoryStore {
     bool migrating = false;
     bool sources = false;
     bool tide = false;
+    /// Whether the records hold the steps' inner stages (version 2).
+    bool staged = false;
     std::uint64_t field_size = 0;
     std::vector<int> cuts;
     std::vector<Part> parts;  ///< one per rank

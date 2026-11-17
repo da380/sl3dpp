@@ -5,7 +5,7 @@
 // delta amplitudes — the structure of pyslfp's
 // test_continuous_adjoint_against_the_discrete; the continuous sweep
 // stepped by Sdirk2's stages against finite differences of its forward
-// runs, and the derivatives not built for it refused.
+// runs, and what is not built for it refused.
 
 #include <gtest/gtest.h>
 
@@ -642,8 +642,10 @@ TEST(AdjointGate, KernelsMatchPyslfp) {
     return out;
   };
   ViscoelasticOperator op(setup.rheology, kLmax);
+  // the exponential trapezoid stated: the pyslfp fixture is that scheme's run
   Evolution evolution(op, setup.solver, setup.state,
-                              {.rtol = 1e-12, .record_stride = 1});
+                              {.scheme = Scheme::ExponentialTrapezoid,
+                               .rtol = 1e-12, .record_stride = 1});
   auto snapshots = evolution.Run(times, load);
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
 
@@ -1435,11 +1437,16 @@ TEST(Adjoint, Sdirk2MomentKernelsAgainstTheForwardRun) {
   }
 }
 
-TEST(Adjoint, Sdirk2RefusesTheDerivativesNotBuilt) {
-  // About a run under Sdirk2 the discrete sweep, the second-order sweep and
-  // the tangent-linear run are not built (their exact derivatives of the
-  // stepped map need each step's stage states), and the continuous sweep
-  // reads every node's state: each refused by name.
+TEST(Adjoint, Sdirk2RefusesWhatIsNotBuilt) {
+  // About a run under Sdirk2 the derivatives of the stepped map are built
+  // (the discrete sweep, the discrete tangent-linear run, the discrete
+  // second-order sweep: TestSdirk2Derivatives). What is not, each refused
+  // by name: the continuous second-order sweep and the continuous drive of
+  // a tangent-linear run along the relaxation times; and a trajectory that
+  // does not give the steps' first-stage closures, which the discrete
+  // sweep and the rebuild of a gap repeat each stage under. A recording
+  // with gaps that gives them serves the continuous sweep as the whole
+  // one does.
   const auto scene = RampScene::Make();
   const ViscoelasticOperator op(scene.rheology, RampScene::lmax);
   const auto times = scene.Times(4);
@@ -1458,41 +1465,68 @@ TEST(Adjoint, Sdirk2RefusesTheDerivativesNotBuilt) {
       {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 1});
   const auto snapshots = evolution.Run(times, scene.Direct());
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
-  named(
-      [&] {
-        const AdjointSolver adjoint(evolution,
-                                    {.method = AdjointMethod::Discrete});
-        static_cast<void>(
-            adjoint.FirstOrderKernels(times, measurements, &trajectory));
-      },
-      "the discrete sweep");
+  // the discrete sweep and the discrete tangent-linear run are built
+  EXPECT_FALSE(AdjointSolver(evolution, {.method = AdjointMethod::Discrete})
+                   .FirstOrderKernels(times, measurements, &trajectory)
+                   .itauKernel.empty());
+  TangentPerturbation alongItau;
+  alongItau.itau.assign(
+      scene.rheology.BranchCount(),
+      std::vector<double>(scene.rheology.BranchAt(0).itau.size(), 0.0));
+  const TangentLinearSolver recorded(
+      evolution, {.method = AdjointMethod::Discrete, .record = true});
+  const auto tangent = recorded.Run(times, alongItau, &trajectory);
   named(
       [&] {
         const AdjointSolver adjoint(evolution,
                                     {.method = AdjointMethod::Continuous});
         static_cast<void>(adjoint.SecondOrderKernels(
-            times, measurements, snapshots, {}, trajectory));
+            times, measurements, tangent, {}, trajectory));
       },
-      "the second-order sweep");
-  named([&] { const TangentLinearSolver tangent(evolution); },
-        "the tangent-linear run");
+      "the continuous second-order sweep");
+  named(
+      [&] {
+        const TangentLinearSolver continuous(
+            evolution, {.method = AdjointMethod::Continuous});
+        static_cast<void>(continuous.Run(times, alongItau, &trajectory));
+      },
+      "the continuous tangent-linear run along the relaxation times");
+  named(
+      [&] {
+        const TangentLinearSolver continuous(
+            evolution, {.method = AdjointMethod::Continuous});
+        static_cast<void>(continuous.RunSecondOrder(
+            times, tangent, tangent, SecondOrderDirection{}, &trajectory));
+      },
+      "the continuous second-order tangent-linear run");
+  // a trajectory without the first stages' closures
+  auto bare = trajectory;
+  bare.stages.clear();
+  named(
+      [&] {
+        const AdjointSolver adjoint(evolution,
+                                    {.method = AdjointMethod::Discrete});
+        static_cast<void>(adjoint.FirstOrderKernels(times, measurements, &bare));
+      },
+      "the discrete sweep about a trajectory without its stages");
+  // a recording with gaps, rebuilt through the stages under their recorded
+  // closures: the continuous sweep's kernel is the whole recording's
   Evolution strided(
       op, scene.solver, scene.state,
       {.scheme = Scheme::Sdirk2, .rtol = 1e-12, .record_stride = 2});
   const auto gapped =
       ForwardTrajectory::FromSnapshots(strided.Run(times, scene.Direct()));
-  named(
-      [&] {
-        const AdjointSolver adjoint(strided,
-                                    {.method = AdjointMethod::Continuous});
-        static_cast<void>(
-            adjoint.FirstOrderKernels(times, measurements, &gapped));
-      },
-      "the continuous sweep about a gapped trajectory");
-  // the continuous sweep about the whole trajectory, and without one
   const AdjointSolver adjoint(evolution, {.method = AdjointMethod::Continuous});
-  EXPECT_FALSE(adjoint.FirstOrderKernels(times, measurements, &trajectory)
-                   .itauKernel.empty());
+  const auto whole = adjoint.FirstOrderKernels(times, measurements, &trajectory);
+  const auto viaGaps = adjoint.FirstOrderKernels(times, measurements, &gapped);
+  ASSERT_FALSE(whole.itauKernel.empty());
+  auto scale = 0.0, gap = 0.0;
+  for (auto i = std::size_t{0}; i < whole.itauKernel[0].size(); ++i) {
+    scale = std::max(scale, std::abs(whole.itauKernel[0][i]));
+    gap = std::max(gap,
+                   std::abs(viaGaps.itauKernel[0][i] - whole.itauKernel[0][i]));
+  }
+  EXPECT_LT(gap, 1e-10 * scale);
   EXPECT_TRUE(
       adjoint.FirstOrderKernels(times, measurements).itauKernel.empty());
 }

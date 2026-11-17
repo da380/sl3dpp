@@ -21,6 +21,7 @@
 #include "sl3dpp/Adjoint.hpp"
 #include "sl3dpp/Material.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
+#include "sl3dpp/detail/StepStages.hpp"
 #include "sl3dpp/detail/TrajectoryCursor.hpp"
 #include "sl3dpp/detail/ViscoelasticDegree.hpp"
 
@@ -92,6 +93,29 @@ inline std::vector<SphericalTensor> MomentKernelsOfDuals(
     out.push_back(e);
   }
   return out;
+}
+
+/// detail::FoldOnNodes for the moment kernels: an inner stage's, per
+/// point, handed to the step's two nodes.
+inline void FoldMomentsOnNodes(
+    std::vector<std::vector<SphericalTensor>>& perNode, std::size_t node,
+    double c, const std::vector<SphericalTensor>& stageKernel) {
+  if (stageKernel.empty()) return;
+  for (const auto& [to, a] :
+       {std::pair{node - 1, 1.0 - c}, std::pair{node, c}}) {
+    auto& kernel = perNode[to];
+    if (kernel.empty()) kernel.assign(stageKernel.size(), SphericalTensor{});
+    for (auto p = std::size_t{0}; p < kernel.size(); ++p) {
+      auto& k = kernel[p];
+      const auto& add = stageKernel[p];
+      k.rr += a * add.rr;
+      k.tt += a * add.tt;
+      k.pp += a * add.pp;
+      k.rt += a * add.rt;
+      k.rp += a * add.rp;
+      k.tp += a * add.tp;
+    }
+  }
 }
 
 /// The transpose of Evolution::Coefficients: a coefficient dual
@@ -190,8 +214,9 @@ struct AdjointSolver::MaterialTools {
   /// delta mu_v / mu_U at the points (zero where mu_U vanishes); empty
   /// without a mu direction.
   std::vector<double> muRatio;
-  /// v's variation of the effective shear of a dt at the points.
-  std::map<double, std::vector<double>> effectiveMu;
+  /// v's variation of the effective shear of a stage (its one-stage
+  /// scheme and length) at the points.
+  std::map<std::pair<Scheme, double>, std::vector<double>> effectiveMu;
 
   MaterialTools(const Evolution& evolution,
                 const PointMaterialDirection& d)
@@ -229,12 +254,12 @@ struct AdjointSolver::MaterialTools {
     return op->UnrelaxedShearAtPoints().size();
   }
 
-  /// v's variation of the effective shear of a dt: delta mu scaled by
-  /// 1 - sum_k f_k (1 - w_k) at the points.
-  const std::vector<double>& EffectiveMu(double dt) {
-    auto found = effectiveMu.find(dt);
+  /// v's variation of the effective shear of a (one-stage scheme, dt):
+  /// delta mu scaled by 1 - sum_k f_k (1 - w_k) at the points.
+  const std::vector<double>& EffectiveMu(Scheme scheme, double dt) {
+    const auto key = std::pair(scheme, dt);
+    auto found = effectiveMu.find(key);
     if (found != effectiveMu.end()) return found->second;
-    const auto scheme = ev->options_.scheme;
     const bool implicit = scheme == Scheme::BackwardEuler;
     const auto& weights = op->SchemeWeightsOf(scheme, dt);
     auto scaled = direction.mu;
@@ -246,19 +271,19 @@ struct AdjointSolver::MaterialTools {
       }
       scaled[i] *= factor;
     }
-    return effectiveMu.emplace(dt, std::move(scaled)).first->second;
+    return effectiveMu.emplace(key, std::move(scaled)).first->second;
   }
 
-  /// v's variation of a step's effective system of a dt on x, and of the
-  /// unrelaxed systems (every weight one).
+  /// v's variation of the effective system of a (one-stage scheme, dt) on
+  /// x, and of the unrelaxed systems (every weight one).
   [[nodiscard]] std::vector<double> ApplyEffective(const DegreeOperator& system,
-                                                   double dt,
+                                                   Scheme scheme, double dt,
                                                    std::span<const double> x,
                                                    int ncols) {
     const auto none = std::vector<double>{};
     return system.ApplyPointVariation(
         op->Points(), direction.kappa,
-        direction.mu.empty() ? none : EffectiveMu(dt), x, ncols);
+        direction.mu.empty() ? none : EffectiveMu(scheme, dt), x, ncols);
   }
   [[nodiscard]] std::vector<double> ApplyUnrelaxed(const DegreeOperator& system,
                                                    std::span<const double> x,
@@ -298,12 +323,14 @@ struct AdjointSolver::MaterialTools {
   /// v's force on a full solution and a decayed memory under the dt
   /// flavour: -(dK_eff) x plus the memory force's variation.
   [[nodiscard]] Fields Force(double dt, const Fields& full, const Fields& mem) {
-    const auto flavour = op->FlavourOf(ev->options_.scheme, dt);
+    const auto scheme = ev->options_.scheme;
+    const auto flavour = op->FlavourOf(scheme, dt);
     auto out = Fields{};
     for (const auto& [l, x] : full) {
       const auto& deg = op->Deg(l);
       const auto ncols = static_cast<int>(x.size() / deg.ndof);
-      auto force = ApplyEffective(op->EffectiveSystem(*flavour, l), dt, x, ncols);
+      auto force =
+          ApplyEffective(op->EffectiveSystem(*flavour, l), scheme, dt, x, ncols);
       for (auto& v : force) v = -v;
       if (!direction.mu.empty()) {
         const auto mf = MemoryVariationForce(deg, ncols, mem.at(l));
@@ -365,12 +392,22 @@ struct AdjointSolver::MaterialTools {
   [[nodiscard]] Fields TangentSolution(const Evolution::Snapshot& snap,
                                        const Fields& baseFull,
                                        const Fields* baseMem) const {
-    auto x = op->SolveElastic(*snap.internalState,
-                              ev->Columns(snap.loadCoefficients, ev->toMatDensity_),
-                              ev->Columns(snap.tideCoefficients, ev->toMatPotential_));
-    if (snap.sourceForces) {
+    return TangentSolution(
+        detail::TangentRecord{&*snap.internalState, &snap.loadCoefficients,
+                              &snap.tideCoefficients,
+                              snap.sourceForces ? &*snap.sourceForces : nullptr},
+        baseFull, baseMem);
+  }
+  /// The same from its record at a stage's end (detail::TangentRecordOf).
+  [[nodiscard]] Fields TangentSolution(const detail::TangentRecord& snap,
+                                       const Fields& baseFull,
+                                       const Fields* baseMem) const {
+    auto x = op->SolveElastic(*snap.state,
+                              ev->Columns(*snap.load, ev->toMatDensity_),
+                              ev->Columns(*snap.tide, ev->toMatPotential_));
+    if (snap.forces != nullptr) {
       // v perturbs the sources: its solution is under their forces too
-      for (const auto& [l, f] : snap.sourceForces->spheroidal) {
+      for (const auto& [l, f] : snap.forces->spheroidal) {
         const auto add = op->UnrelaxedSystem(l).Solve(f, 2 * (l + 1));
         auto& to = x.at(l);
         for (auto i = std::size_t{0}; i < to.size(); ++i) to[i] += add[i];

@@ -51,9 +51,16 @@
 
 namespace sl3dpp {
 
+namespace detail {
+struct StageRef;
+}  // namespace detail
+
 /// A direction in the 3D evolution's inputs. Empty members are absent;
 /// `itau` and `logViscosity` may both be given (they add). The material
-/// direction is MaterialDirection3D (Adjoint3D.hpp).
+/// direction is MaterialDirection3D (Adjoint3D.hpp). The members given per
+/// node are the direction's values at the nodes, a stage of Sdirk2 inside
+/// a step taking the combination of the step's two nodes' that the
+/// forward run takes of its forcing, as TangentPerturbation's.
 struct TangentPerturbation3D {
   std::vector<std::vector<double>> directLoad;    ///< per node
   /// Per node, perturbations of the run's direct load outside the
@@ -111,7 +118,9 @@ class TangentLinearSolver3D {
  public:
   struct Options {
     /// Discrete (the default, as AdjointSolver3D's) or Continuous, as
-    /// TangentLinearSolver's.
+    /// TangentLinearSolver's: about an evolution under Sdirk2 the discrete
+    /// run steps the tangent state by the scheme's stages, and the
+    /// continuous drive of a direction in the relaxation times is refused.
     AdjointMethod method = AdjointMethod::Discrete;
     /// The SLE's own tolerance per pass, and the combined fixed point's
     /// controls (as Evolution3D::Options).
@@ -121,14 +130,13 @@ class TangentLinearSolver3D {
     double coupled_rtol = 1e-9;
     double anderson_rate = 0.5;
     /// Keep the tangent-linear state (with its strain) and the load and
-    /// centrifugal coefficients on every snapshot: what a second-order
-    /// run reads.
+    /// centrifugal coefficients on every snapshot, and under a multi-stage
+    /// scheme each inner stage's (Evolution3D::Snapshot::stages): what a
+    /// second-order run reads.
     bool record = false;
     std::function<void(std::size_t node)> on_node{};
   };
 
-  /// Refused for an evolution under Sdirk2: not built (docs/adjoints.md
-  /// §1a).
   explicit TangentLinearSolver3D(const Evolution3D& evolution,
                                  Options options);
   explicit TangentLinearSolver3D(const Evolution3D& evolution)
@@ -139,11 +147,16 @@ class TangentLinearSolver3D {
   /// is required (the states between kept nodes rebuilt by forward steps
   /// under the recorded loads, with the run's own iteration). With
   /// `oceanFunctions` from a migrating run the run linearises about that
-  /// trajectory. Distributed over radius like the evolution, collective.
+  /// trajectory; about a migrating run under Sdirk2 also
+  /// `stageOceanFunctions` (StageOceanFunctionsOf its snapshots), each
+  /// step's first stage linearised about its own shorelines. Distributed
+  /// over radius like the evolution, collective.
   [[nodiscard]] std::vector<Evolution3D::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
   /// The second-order run along u and v, about the forward trajectory and
   /// the recorded tangent-linear runs of u and v (`Run` with `record`):
@@ -163,7 +176,9 @@ class TangentLinearSolver3D {
       std::span<const Evolution3D::Snapshot> tangentV,
       const SecondOrderDirection3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {}) const;
+      std::span<const std::vector<double>> oceanFunctions = {},
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
+          {}) const;
 
   /// The itau perturbation of a log-viscosity perturbation over the grid
   /// values, per branch: -itau_k(x) field(x) (eta = eta_ref exp(delta)).
@@ -185,15 +200,19 @@ class TangentLinearSolver3D {
       const std::vector<std::vector<double>>& ditau);
 
  private:
-  using Direct = std::function<std::vector<double>(std::size_t node)>;
-  using Tide =
-      std::function<std::vector<std::complex<double>>(std::size_t node)>;
+  /// A term of the direction at a stage of a step (detail::StageRef; the
+  /// first node is a stage of its own, ending there).
+  using Direct =
+      std::function<std::vector<double>(const detail::StageRef& stage)>;
+  using Tide = std::function<std::vector<std::complex<double>>(
+      const detail::StageRef& stage)>;
   /// The interior sources perturbed at a node.
   using Sources = std::function<
       std::pair<std::vector<PointSource>, std::vector<StressGlut>>(
           std::size_t node)>;
+  /// A stage's memory increment.
   using Drive = std::function<std::vector<GridCoupling::TensorField>(
-      std::size_t node, double dt)>;
+      const detail::StageRef& stage)>;
 
   /// The material forcing of a march (TangentLinear3D.cpp): a start
   /// response and a force per step, from a direction (MaterialDrive3D:
@@ -206,6 +225,7 @@ class TangentLinearSolver3D {
   [[nodiscard]] std::vector<Evolution3D::Snapshot> March(
       std::span<const double> times,
       std::span<const std::vector<double>> oceanFunctions,
+      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
       const Direct& directAt, const Drive& drive,
       const MaterialForcing3D* material, const Tide& tideAt = {},
       const Sources& sourcesAt = {}, const Direct& outsideAt = {},

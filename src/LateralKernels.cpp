@@ -741,7 +741,9 @@ Kernels3D LateralKernelSolver::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory& trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   if (route_ != Route::Radial) {
     throw std::invalid_argument(
         "a radial trajectory for a 3D run: the 3D run's lateral kernels are "
@@ -749,21 +751,25 @@ Kernels3D LateralKernelSolver::FirstOrderKernels(
   }
   const AdjointSolver sweeps(*radial_, radialOptions_);
   return sweeps.LateralSweep(*coupling_, options_.viscosity, options_.moduli, times,
-                             measurements, trajectory, oceanFunctions);
+                             measurements, trajectory, oceanFunctions,
+                             stageOceanFunctions);
 }
 
 Kernels3D LateralKernelSolver::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D& trajectory,
-    std::span<const std::vector<double>> oceanFunctions) const {
+    std::span<const std::vector<double>> oceanFunctions,
+    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
+    const {
   if (route_ != Route::Lateral) {
     throw std::invalid_argument(
         "a 3D trajectory for a radial run: the radial run's lateral kernels "
         "are over its own (ForwardTrajectory)");
   }
   auto out = AdjointSolver3D(*lateral_, lateralOptions_)
-                 .FirstOrderKernels(times, measurements, &trajectory, oceanFunctions);
+                 .FirstOrderKernels(times, measurements, &trajectory,
+                                    oceanFunctions, stageOceanFunctions);
   if (!options_.viscosity) {
     out.itauKernel3D.clear();
     out.itauKernelSpherical.clear();

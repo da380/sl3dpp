@@ -247,6 +247,27 @@ void ExpectSameSurface(const Snapshot& got, const Snapshot& want,
   EXPECT_EQ(got.oceanFunction, want.oceanFunction) << node;
   EXPECT_EQ(got.loadCoefficients, want.loadCoefficients) << node;
   EXPECT_EQ(got.tideCoefficients, want.tideCoefficients) << node;
+  // the inner stages of the step ending at the node (a staged store's)
+  ASSERT_EQ(got.stages.size(), want.stages.size()) << node;
+  for (auto k = std::size_t{0}; k < want.stages.size(); ++k) {
+    EXPECT_EQ(got.stages[k].loadCoefficients, want.stages[k].loadCoefficients)
+        << node;
+    EXPECT_EQ(got.stages[k].tideCoefficients, want.stages[k].tideCoefficients)
+        << node;
+    EXPECT_EQ(got.stages[k].oceanFunction, want.stages[k].oceanFunction)
+        << node;
+    ASSERT_EQ(got.stages[k].sourceForces.has_value(),
+              want.stages[k].sourceForces.has_value())
+        << node;
+    if (want.stages[k].sourceForces) {
+      EXPECT_EQ(got.stages[k].sourceForces->spheroidal,
+                want.stages[k].sourceForces->spheroidal)
+          << node;
+      EXPECT_EQ(got.stages[k].sourceForces->toroidal,
+                want.stages[k].sourceForces->toroidal)
+          << node;
+    }
+  }
 }
 
 void ExpectSame1D(std::span<const Evolution::Snapshot> got,
@@ -337,6 +358,8 @@ std::vector<Evolution::Snapshot> Record1D(const fs::path& directory,
 // -- the round trips --------------------------------------------------------------
 
 TEST_F(TrajectoryStore, RoundTripsEveryRecordOf1DRuns) {
+  // the exponential trapezoid stated throughout: the stores here are
+  // one-stage runs' (a staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
   const auto scene = Scene::Make();
   const ViscoelasticOperator op(scene.rheology, kLmax);
   // frozen, under a load and a tide, every other node kept
@@ -348,7 +371,8 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf1DRuns) {
         .directLoad = scene.Melt(times.back()),
         .tide = scene.Tide(times.back())};
     const auto snapshots = Record1D(
-        dir_ / "frozen", run, op, scene.solver, scene.state, {.rtol = 1e-11},
+        dir_ / "frozen", run, op, scene.solver, scene.state,
+        {.scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-11},
         [&](Evolution& e) { return e.Run(times, forcing); });
     ASSERT_TRUE(snapshots[2].internalState.has_value());
     ASSERT_FALSE(snapshots[1].internalState.has_value());
@@ -368,7 +392,8 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf1DRuns) {
     run.migrating = true;
     const auto snapshots = Record1D(
         dir_ / "migrating", run, op, scene.solver, marine.state,
-        {.rtol = 1e-11}, [&](Evolution& e) {
+        {.scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-11},
+        [&](Evolution& e) {
           return e.RunMigrating(
               times, [&](double t) { return marine.Thickness(t); });
         });
@@ -389,7 +414,9 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf1DRuns) {
     const auto dry = scene.solver.NoOceanState();
     const auto snapshots = Record1D(
         dir_ / "sourced", run, op, scene.solver, dry,
-        {.rotation = RotationalFeedback::None, .rtol = 1e-11},
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rotation = RotationalFeedback::None,
+         .rtol = 1e-11},
         [&](Evolution& e) { return e.Run(times, forcing); });
     ASSERT_TRUE(snapshots[1].toroidalState.has_value());
     ASSERT_TRUE(snapshots[1].sourceForces.has_value());
@@ -401,6 +428,8 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf1DRuns) {
 }
 
 TEST_F(TrajectoryStore, RoundTripsEveryRecordOf3DRuns) {
+  // the exponential trapezoid stated throughout: the stores here are
+  // one-stage runs' (a staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
   const auto scene = Scene::Make();
   const Viscoelastic3D op(
       scene.rheology, kLmax,
@@ -435,7 +464,8 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf3DRuns) {
         .tide = scene.Tide(times.back())};
     auto kept = std::map<std::size_t, Viscoelastic3D::State>{};
     const auto snapshots = record(
-        dir_ / "frozen", run, scene.state, {.rtol = 1e-11},
+        dir_ / "frozen", run, scene.state,
+        {.scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-11},
         [&](Evolution3D& e) { return e.Run(times, forcing); }, kept);
     ASSERT_EQ(kept.size(), 3u);
     for (const auto& snapshot : snapshots) {
@@ -473,7 +503,9 @@ TEST_F(TrajectoryStore, RoundTripsEveryRecordOf3DRuns) {
     auto kept = std::map<std::size_t, Viscoelastic3D::State>{};
     const auto snapshots = record(
         dir_ / "sourced", run, dry,
-        {.rotation = RotationalFeedback::None, .rtol = 1e-11},
+        {.scheme = Scheme::ExponentialTrapezoid,
+         .rotation = RotationalFeedback::None,
+         .rtol = 1e-11},
         [&](Evolution3D& e) { return e.Run(times, forcing); }, kept);
     ASSERT_EQ(kept.size(), 3u);
     ASSERT_TRUE(kept.at(1).strain.has_value() ||
@@ -505,7 +537,10 @@ TEST_F(TrajectoryStore, SweepsFromAReopenedStoreAreTheSweepsInMemory) {
     const auto forcing = Evolution::Forcing{
         .directLoad = scene.Melt(times.back()),
         .tide = scene.Tide(times.back())};
-    const auto options = Evolution::Options{.rtol = 1e-11, .record_stride = 3};
+    // the exponential trapezoid stated: the store here is a one-stage run's (a
+    // staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
+    const auto options = Evolution::Options{.scheme = Scheme::ExponentialTrapezoid,
+                                            .rtol = 1e-11, .record_stride = 3};
     Evolution memory(op, scene.solver, scene.state, options);
     const auto snapshots = memory.Run(times, forcing);
     const auto inMemory = ForwardTrajectory::FromSnapshots(snapshots);
@@ -545,7 +580,8 @@ TEST_F(TrajectoryStore, SweepsFromAReopenedStoreAreTheSweepsInMemory) {
         [](double, double theta, double) { return 0.3 * std::cos(theta); });
     const auto forcing =
         Evolution3D::Forcing{.directLoad = scene.Melt(times.back())};
-    auto options = Evolution3D::Options{.rtol = 1e-11, .record_stride = 3};
+    auto options = Evolution3D::Options{.scheme = Scheme::ExponentialTrapezoid,
+                                        .rtol = 1e-11, .record_stride = 3};
     options.coupled_rtol = 1e-11;
     Evolution3D memory(op, scene.solver, scene.state, options);
     const auto snapshots = memory.Run(times, forcing);
@@ -592,8 +628,11 @@ TEST_F(TrajectoryStore, SweepsFromAReopenedStoreAreTheSweepsInMemory) {
 void RecordSmall(const Scene& scene, const fs::path& directory,
                  const Store::Description& run) {
   const ViscoelasticOperator op(scene.rheology, kLmax);
+  // the exponential trapezoid stated: the store here is a one-stage run's (a
+  // staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
   static_cast<void>(Record1D(
-      directory, run, op, scene.solver, scene.state, {.rtol = 1e-10},
+      directory, run, op, scene.solver, scene.state,
+      {.scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-10},
       [&](Evolution& e) { return e.Run(run.times, scene.Melt(run.times.back())); }));
 }
 
@@ -651,7 +690,7 @@ TEST_F(TrajectoryStore, RefusesEachFaultAsItsOwnKind) {
   }
   {
     const auto directory = fresh("version");
-    const auto version = std::uint64_t{2};
+    const auto version = std::uint64_t{3};
     Patch(manifest(directory), 16, &version, 8);
     EXPECT_EQ(opened(directory, run), Kind::Version);
   }
@@ -733,6 +772,141 @@ TEST_F(TrajectoryStore, RefusesEachFaultAsItsOwnKind) {
   }
 }
 
+TEST_F(TrajectoryStore, AStagedRunsStoreHoldsEachStepsFirstStage) {
+  // A run under Sdirk2 is recorded with what closed each step's first
+  // stage (Description::staged, format version 2): its load and
+  // centrifugal coefficients and, under migrating shorelines, its ocean
+  // function in the node's surface record, its sources' forces in the
+  // node's state record; a store of a one-stage run stays of version 1.
+  // The discrete sweep from the reopened store is the sweep in memory. A
+  // store without the stages is refused for a run that has them, and the
+  // reverse, as its own fault.
+  const auto scene = Scene::Make();
+  const ViscoelasticOperator op(scene.rheology, kLmax);
+  const auto sdirk2 = Scheme::Sdirk2;
+  // migrating shorelines, every other node kept
+  {
+    const auto times = scene.Times(5);
+    const auto marine = Marine::Make(scene, times.back());
+    auto run = Describe(scene, times, 2, 1);
+    run.migrating = true;
+    run.staged = true;
+    const auto thickness = [&](double t) { return marine.Thickness(t); };
+    const auto snapshots = Record1D(
+        dir_ / "migrating", run, op, scene.solver, marine.state,
+        {.scheme = sdirk2, .rtol = 1e-11},
+        [&](Evolution& e) { return e.RunMigrating(times, thickness); });
+    ASSERT_EQ(snapshots[1].stages.size(), 1u);
+    ASSERT_FALSE(snapshots[1].stages[0].oceanFunction.empty());
+    ASSERT_FALSE(snapshots[1].stages[0].loadCoefficients.empty());
+    const auto store = Store::Open(dir_ / "migrating", run);
+    EXPECT_EQ(store.GetManifest().version, Store::kVersion);
+    EXPECT_TRUE(store.GetManifest().staged);
+    const auto read = store.Snapshots1D();
+    ExpectSame1D(read, snapshots);
+    // the discrete sweep from the store's snapshots is the run's own
+    auto measurements = std::map<std::size_t, Measurement>{};
+    measurements[times.size() - 1].relativeSeaLevelDual =
+        scene.solver.Grid().FromFunction(
+            [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+    Evolution evolution(op, scene.solver, marine.state,
+                        {.scheme = sdirk2, .rtol = 1e-11});
+    const auto sweep = [&](std::span<const Evolution::Snapshot> from) {
+      const auto trajectory = ForwardTrajectory::FromSnapshots(from);
+      return AdjointSolver(evolution, {.rtol = 1e-11})
+          .FirstOrderKernels(times, measurements, &trajectory,
+                             OceanFunctionsOf(from), StageOceanFunctionsOf(from));
+    };
+    const auto fromStore = sweep(read);
+    const auto inMemory = sweep(snapshots);
+    EXPECT_EQ(fromStore.itauKernel, inMemory.itauKernel);
+    EXPECT_EQ(fromStore.thickness, inMemory.thickness);
+    // the same hash without the stages: refused for this run, not read
+    auto plain = run;
+    plain.staged = false;
+    const auto opened = [&](const fs::path& directory,
+                            const Store::Description& as) {
+      return KindOf([&] { static_cast<void>(Store::Open(directory, as)); });
+    };
+    EXPECT_EQ(opened(dir_ / "migrating", plain), Kind::Stages);
+    static_cast<void>(Record1D(
+        dir_ / "plain", plain, op, scene.solver, marine.state,
+        {.scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-11},
+        [&](Evolution& e) { return e.RunMigrating(times, thickness); }));
+    EXPECT_EQ(Store::ManifestOf(dir_ / "plain").version, Store::kPlainVersion);
+    EXPECT_FALSE(Store::ManifestOf(dir_ / "plain").staged);
+    EXPECT_EQ(opened(dir_ / "plain", run), Kind::Stages);
+    EXPECT_EQ(KindOf([&] { static_cast<void>(Store::Survey(dir_ / "plain", run)); }),
+              Kind::Stages);
+    try {
+      static_cast<void>(Store::Open(dir_ / "plain", run));
+    } catch (const io::TrajectoryStoreError& error) {
+      EXPECT_NE(std::string(error.what()).find("record the run again"),
+                std::string::npos)
+          << error.what();
+    }
+  }
+  // under a point source, without an ocean: each first stage's forces
+  {
+    const auto times = scene.Times(3);
+    auto run = Describe(scene, times, 1, 1);
+    run.sources = true;
+    run.staged = true;
+    const auto sources = scene.Sources();
+    const auto forcing = Evolution::Forcing{
+        .sources = [&](double) { return sources; }};
+    const auto dry = scene.solver.NoOceanState();
+    const auto snapshots = Record1D(
+        dir_ / "sourced", run, op, scene.solver, dry,
+        {.scheme = sdirk2, .rotation = RotationalFeedback::None, .rtol = 1e-11},
+        [&](Evolution& e) { return e.Run(times, forcing); });
+    ASSERT_EQ(snapshots[1].stages.size(), 1u);
+    ASSERT_TRUE(snapshots[1].stages[0].sourceForces.has_value());
+    const auto store = Store::Open(dir_ / "sourced", run);
+    ExpectSame1D(store.Snapshots1D(), snapshots);
+  }
+  // 3D, under a point source: the stages' forces lead the state records
+  {
+    const Viscoelastic3D op3(
+        scene.rheology, kLmax,
+        [](double, double theta, double) { return 0.3 * std::cos(theta); });
+    const auto times = scene.Times(3);
+    auto run = Describe(scene, times, 1, 3);
+    run.sources = true;
+    run.staged = true;
+    run.part = Store::PartOf(op3);
+    const auto sources = scene.Sources();
+    const auto forcing = Evolution3D::Forcing{
+        .sources = [&](double) { return sources; }};
+    const auto dry = scene.solver.NoOceanState();
+    const auto store = Store::Record(dir_ / "sourced3d", run);
+    store.PutStart(dry);
+    auto options = Evolution3D::Options{.scheme = sdirk2,
+                                        .rotation = RotationalFeedback::None,
+                                        .rtol = 1e-11};
+    store.Attach(options);
+    auto kept = std::map<std::size_t, Viscoelastic3D::State>{};
+    options.on_state = [&kept, put = options.on_state](
+                           std::size_t node, Viscoelastic3D::State&& state) {
+      kept.emplace(node, state);
+      put(node, std::move(state));
+    };
+    Evolution3D evolution(op3, scene.solver, dry, options);
+    const auto snapshots = evolution.Run(times, forcing);
+    store.Close();
+    ASSERT_EQ(snapshots[1].stages.size(), 1u);
+    ASSERT_TRUE(snapshots[1].stages[0].sourceForces.has_value());
+    const auto reopened = Store::Open(dir_ / "sourced3d", run);
+    EXPECT_EQ(reopened.GetManifest().version, Store::kVersion);
+    const auto read = reopened.Snapshots3D();
+    ASSERT_EQ(read.size(), snapshots.size());
+    for (auto n = std::size_t{0}; n < read.size(); ++n) {
+      ExpectSameSurface(read[n], snapshots[n], n);
+      ExpectSame(reopened.State3D(n), kept.at(n));
+    }
+  }
+}
+
 TEST_F(TrajectoryStore, AnInterruptedRecordingIsKnownAndReplaced) {
   const auto scene = Scene::Make();
   const auto run = Describe(scene, scene.Times(3), 1, 1);
@@ -742,7 +916,10 @@ TEST_F(TrajectoryStore, AnInterruptedRecordingIsKnownAndReplaced) {
     const ViscoelasticOperator op(scene.rheology, kLmax);
     const auto store = Store::Record(directory, run);
     store.PutStart(scene.state);
-    auto options = Evolution::Options{.rtol = 1e-10};
+    // the exponential trapezoid stated: the store here is a one-stage run's (a
+    // staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
+    auto options = Evolution::Options{
+        .scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-10};
     store.Attach(options);
     Evolution evolution(op, scene.solver, scene.state, options);
     static_cast<void>(evolution.Run(std::vector<double>{run.times[0]},
@@ -788,7 +965,10 @@ TEST_F(TrajectoryStore, AnInterruptedRecordingIsContinuedFromItsCheckpoint) {
     auto checkpoint = std::optional<Evolution::Checkpoint>{};
     const auto store = Store::Record(directory, run);
     store.PutStart(scene.state);
-    auto options = Evolution::Options{.rtol = 1e-10};
+    // the exponential trapezoid stated: the store here is a one-stage run's (a
+    // staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
+    auto options = Evolution::Options{
+        .scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-10};
     options.checkpoint_stride = 1;
     options.on_checkpoint = [&](std::size_t node,
                                 const Evolution::Checkpoint& at) {
@@ -809,7 +989,10 @@ TEST_F(TrajectoryStore, AnInterruptedRecordingIsContinuedFromItsCheckpoint) {
     EXPECT_FALSE(fs::exists(directory / "node_000003.surface"));
     EXPECT_FALSE(fs::exists(directory / ".node_000004.surface.partial"));
     EXPECT_TRUE(fs::exists(directory / "node_000002.surface"));
-    auto options = Evolution::Options{.rtol = 1e-10};
+    // the exponential trapezoid stated: the store here is a one-stage run's (a
+    // staged one is AStagedRunsStoreHoldsEachStepsFirstStage's)
+    auto options = Evolution::Options{
+        .scheme = Scheme::ExponentialTrapezoid, .rtol = 1e-10};
     store.Attach(options);
     EXPECT_EQ(options.record_offset, 2u);
     Evolution evolution(op, scene.solver, scene.state, options);

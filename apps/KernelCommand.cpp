@@ -432,27 +432,6 @@ KernelsBlock ReadKernelsBlock(const Json& block, const Run& run,
         block.At("method"), {{"continuous", AdjointMethod::Continuous},
                              {"discrete", AdjointMethod::Discrete}});
   }
-  // the discrete adjoint, the exact transpose of the stepped map, is not
-  // built for a scheme of several stages (StepRecipe.hpp)
-  if (out.method == AdjointMethod::Discrete &&
-      IsMultiStage(run.solver.scheme)) {
-    const auto choices =
-        "give `method` \"continuous\", whose adjoint steps by the same "
-        "stages, or `solver.scheme` \"exponential_trapezoid\" or "
-        "\"backward_euler\" for the discrete adjoint";
-    if (Has(block, "method")) {
-      Fail(block.At("method"),
-           std::format("is \"discrete\", the exact transpose of the stepped "
-                       "map, which is not built for `solver.scheme` "
-                       "\"sdirk2\": {}",
-                       choices));
-    }
-    Fail(block, std::format("takes the discrete adjoint (`method` "
-                            "\"discrete\", the default), the exact transpose "
-                            "of the stepped map, which is not built for "
-                            "`solver.scheme` \"sdirk2\": {}",
-                            choices));
-  }
   out.parameters = ReadParameters(block, run);
   if (Has(block, "lateral")) {
     out.lateral = block.At("lateral").AsBool();
@@ -797,23 +776,6 @@ std::vector<SourcePoint> SourcePointsOf(const Run& run,
   }
   return out;
 }
-
-/// The continuous sweep's steps against the model as built
-/// (RelaxationSite): the run's longest step over the shortest relaxation
-/// time, which the continuous kernels need small (docs/adjoints.md §1),
-/// that time in seconds, its radius in metres, and where it is as the
-/// summary states it (`where`: the branch of a rheology of several, the
-/// depth, the layer with its depths, and under a lateral viscosity the
-/// latitude and longitude).
-struct StepsAgainstRelaxation {
-  double ratio = 0.0;
-  double time_s = 0.0;
-  double radius_m = 0.0;
-  std::string where;
-  /// The summary's words: `its longest step <ratio> times the shortest
-  /// relaxation time (<time> <unit>, <where>)`.
-  std::string text;
-};
 
 /// What every kernel file of a run is written with: the config, the run,
 /// the solver's grid, scales and radius, each node's place on the files'
@@ -1684,51 +1646,6 @@ Writing WritingOf(const std::filesystem::path& config,
   return w;
 }
 
-/// The continuous sweep's steps against the shortest relaxation time of
-/// the model as built, `site` (ViscoelasticOperator::ShortestRelaxation,
-/// Viscoelastic3D::ShortestRelaxation) on a rheology of `branches`
-/// branches, for a run through time: the longest step of the library's
-/// grid over that time (its steps from the solver's time unit to the
-/// material's), the time in the run's unit, and where it is. Information
-/// for the user, never a refusal.
-StepsAgainstRelaxation StepsAgainst(const Writing& w,
-                                    const RelaxationSite& site,
-                                    const BuiltEarth& earth,
-                                    std::size_t branches) {
-  const auto& scales = earth.material.ModelScales();
-  const auto& window = *w.run->times;
-  auto out = StepsAgainstRelaxation{};
-  if (!std::isfinite(site.time)) {
-    out.where = "nowhere";
-    out.text = "nothing in the model relaxing";
-    return out;
-  }
-  out.ratio = site.StepRatio(w.steps.times,
-                             w.solver->SolverScales().Time() / scales.Time());
-  out.time_s = site.time * scales.Time();
-  out.radius_m = site.radius * scales.Length();
-  const auto surface = earth.model.SurfaceRadius();
-  const auto b = earth.model.Boundaries();
-  const auto layer = static_cast<std::size_t>(site.layer);
-  const auto km = [&](double r) { return (surface - r) / 1e3; };
-  out.where = std::format(
-      "{}at {:.4g} km depth in layer {}, {:g} to {:g} km deep",
-      branches > 1 ? std::format("branch {}, ", site.branch) : std::string{},
-      km(out.radius_m), layer, km(b[layer + 1]), km(b[layer]));
-  if (site.lateral) {
-    const auto degrees = 180.0 / std::numbers::pi;
-    out.where += std::format(", at latitude {:.4g}, longitude {:.4g}",
-                             90.0 - site.colatitude * degrees,
-                             site.longitude * degrees);
-  }
-  out.text = std::format(
-      "its longest step {:.3g} times the shortest relaxation time ({:.3g} {}, "
-      "{})",
-      out.ratio, out.time_s / window.unit.seconds, window.unit.name,
-      out.where);
-  return out;
-}
-
 /// The whole mesh's coupling of a 3-D operator distributed over the ranks,
 /// on the first rank (null elsewhere and on one rank): the layout of the
 /// ranks' parts laid end to end, which the kernel files are written over.
@@ -1894,6 +1811,10 @@ std::string Sweep1D(const KernelInput& input, const Writing& w,
   const auto oceans = input.run.Migrating()
                           ? OceanFunctionsOf(snapshots)
                           : std::vector<std::vector<double>>{};
+  // (under `solver.scheme` "sdirk2", each step's first stage about its own)
+  const auto stageOceans = input.run.Migrating()
+                               ? StageOceanFunctionsOf(snapshots)
+                               : StageOceanFunctions{};
   const auto options = AdjointOptionsOf<AdjointSolver::Options>(input, w);
   const AdjointSolver adjoint(evolution, options);
   auto lateral = std::optional<LateralKernelSolver>{};
@@ -1919,12 +1840,12 @@ std::string Sweep1D(const KernelInput& input, const Writing& w,
         auto fields = std::optional<Kernels3D>{};
         if (lateral) {
           fields = lateral->FirstOrderKernels(times, built.measurements, trajectory,
-                                              oceans);
+                                              oceans, stageOceans);
         }
         const auto kernels =
             fields ? fields->ice
                    : adjoint.FirstOrderKernels(times, built.measurements, &trajectory,
-                                               oceans);
+                                               oceans, stageOceans);
         WriteSurfaceKernels(stem, w, block, spec, kernels, built);
         if (block.Writes(KernelParameter::Viscosity)) {
           WriteViscosityKernel1D(stem.string() + "_viscosity_kernel.txt", w,
@@ -1960,6 +1881,8 @@ std::string Sweep3D(const KernelInput& input, const Writing& w,
   const auto& ranks = TheRanks();
   const auto oceans = run.Migrating() ? OceanFunctionsOf(snapshots)
                                       : std::vector<std::vector<double>>{};
+  const auto stageOceans = run.Migrating() ? StageOceanFunctionsOf(snapshots)
+                                           : StageOceanFunctions{};
   auto options = AdjointOptionsOf<AdjointSolver3D::Options>(input, w);
   options.max_coupled_iterations = run.solver.step_max_iterations;
   options.coupled_rtol = run.solver.step_rtol;
@@ -1977,7 +1900,7 @@ std::string Sweep3D(const KernelInput& input, const Writing& w,
       [&](const MeasurementSpec& spec, const Built& built,
           const std::filesystem::path& stem) {
         const auto kernels = adjoint.FirstOrderKernels(
-            times, built.measurements, &trajectory, oceans);
+            times, built.measurements, &trajectory, oceans, stageOceans);
         if (ranks.First()) {
           WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built);
         }
@@ -2207,7 +2130,8 @@ std::string Kernel1D(const std::filesystem::path& config,
   auto w = WritingOf(config, input, solver);
   // the continuous kernels' steps against the shortest relaxation time
   if (w.method == AdjointMethod::Continuous) {
-    w.relaxation = StepsAgainst(w, op.ShortestRelaxation(), earth,
+    w.relaxation = StepsAgainst(run, solver, w.steps.times,
+                                op.ShortestRelaxation(), earth,
                                 rheology.BranchCount());
   }
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,
@@ -2280,7 +2204,8 @@ std::string Kernel3D(const std::filesystem::path& config,
   // the continuous kernels' steps against the shortest relaxation time
   // over the volume (collective: every rank asks)
   if (w.method == AdjointMethod::Continuous) {
-    w.relaxation = StepsAgainst(w, op.ShortestRelaxation(), earth,
+    w.relaxation = StepsAgainst(run, solver, w.steps.times,
+                                op.ShortestRelaxation(), earth,
                                 rheology.BranchCount());
   }
   const auto read = WithInputs(meaning, run, world.iceRead, world.seaLevelRead,

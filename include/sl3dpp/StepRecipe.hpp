@@ -11,9 +11,9 @@
  * A stage of a step of length h from t_n is a one-stage step of its
  * family (ExponentialTrapezoid or BackwardEuler) of length scale h, ending
  * at t_n + c h: opened (ViscoelasticOperator::StartStep, Viscoelastic3D::
- * StartStep) from a memory state, closed by the driver's equilibrium at
- * the stage's time (the sea level equation, the coupled fixed point, the
- * load channels and the sources there), and finished. Its memory state
+ * StartStep) from a memory state, closed by the driver's equilibrium
+ * under the stage's forcing (the sea level equation, the coupled fixed
+ * point, the load channels and the sources), and finished. Its memory state
  * is a constant combination of the step's start state (index 0) and the
  * end states of the stages before (index i >= 1, the i-th stage's). Every
  * recipe ends with a stage at c = 1, whose end state is the node's (the
@@ -40,20 +40,35 @@
  *    (a jump of the forcing; StepWeights.hpp at h = 0), the elastic solve
  *    with the memory held.
  *
- * What the drivers do at a stage time inside a step: the forcing is read
- * there from its callbacks (at c = 1 at the node, as the node reads it,
- * a repeated node's left limit included); under migrating shorelines the
- * stage solves the nonlinear sea level equation there; under interior
- * sources the stage carries their forces there and steps the toroidal
- * systems through the same recipe. The trajectory a run records is its
- * nodes': a stage state between nodes is not kept.
+ * What the drivers do at a stage. The forcing is read at the nodes alone:
+ * the stage at c = 1 takes the node's, as the node reads it (a repeated
+ * node's left limit included), and a stage that ends inside the step
+ * takes (1 - c) of the forcing at the step's start node and c of the
+ * forcing at its end node, term by term (detail::AtStage: the loads, the
+ * layer on the solid surface, the tide, the ice thickness, the sources'
+ * moments), no callback being called at a time between nodes; a land
+ * mask that changes in time is the end node's. Under migrating shorelines
+ * the stage solves the nonlinear sea level equation under that ice;
+ * under interior sources it carries those forces and steps the toroidal
+ * systems through the same recipe. A run so depends on its forcing
+ * through the node values alone, as under a one-stage scheme, and its
+ * derivative runs, which hold the forcing by those values, are its exact
+ * derivatives. The trajectory a run records is its
+ * nodes' states, and beside them what closed each inner stage (its
+ * total-load and centrifugal coefficients, its ocean function under
+ * migrating shorelines, its sources' forces): a stage's state between
+ * nodes is not kept, and is the stage repeated from the node below under
+ * that closure wherever it is wanted.
+ *
+ * The derivatives of the stepped map (the tangent-linear runs, the
+ * discrete adjoint, the discrete second-order sweeps) take a step stage by
+ * stage, each stage a one-stage step's own derivative about the forward
+ * stage's states, chained through the combinations
+ * (detail/StepStages.hpp).
  */
 
 #include <cstddef>
-#include <format>
 #include <span>
-#include <stdexcept>
-#include <string_view>
 #include <utility>
 #include <vector>
 
@@ -207,41 +222,5 @@ template <class State, class Stage, class Combine>
   return StepByRecipe(recipe, h, start, std::forward<Stage>(stage),
                       std::forward<Combine>(combine), [](State&&) {});
 }
-
-namespace detail {
-
-/// The refusal of a derivative of the stepped map (the discrete adjoint,
-/// the tangent-linear run, the second-order sweeps) under a multi-stage
-/// scheme: not built. Its exact form runs through each step's stages and
-/// needs their states, which a run's trajectory (its nodes') does not
-/// hold. The continuous adjoint steps the adjoint by the same stages: the
-/// one to state (Options::method), the discrete being the default.
-inline void RefuseDerivativeOfMultiStage(Scheme scheme, std::string_view what) {
-  if (!IsMultiStage(scheme)) return;
-  throw std::invalid_argument(std::format(
-      "{} is not built for Sdirk2: its exact derivative of the stepped map "
-      "runs through each step's two stages and needs their states, which "
-      "the trajectory (the nodes' states) does not hold. The continuous "
-      "adjoint (Options::method AdjointMethod::Continuous) steps the "
-      "adjoint by the same stages",
-      what));
-}
-
-/// The refusal of a recording with gaps for a sweep about a run under a
-/// multi-stage scheme: a state between two kept ones is rebuilt by forward
-/// steps under the recorded node coefficients, and a step of Sdirk2 closes
-/// its first stage under the forcing at its own time, which the recording
-/// does not hold.
-inline void RefuseGapsUnderMultiStage(Scheme scheme, bool gaps) {
-  if (!IsMultiStage(scheme) || !gaps) return;
-  throw std::invalid_argument(
-      "a sweep about a run under Sdirk2 reads the forward state at every "
-      "node: record it at every node (record_stride 1). A state between "
-      "kept ones is rebuilt by forward steps under the recorded node loads, "
-      "and Sdirk2's step closes its first stage under the forcing at its "
-      "own time, which the trajectory does not hold");
-}
-
-}  // namespace detail
 
 }  // namespace sl3dpp
