@@ -4,7 +4,9 @@
  * @file detail/StepStages.hpp
  * @brief What the derivatives of the stepped map (the discrete adjoint,
  * the tangent-linear runs, the second-order sweeps) share in taking a step
- * stage by stage (StepRecipe.hpp). Implementation detail.
+ * stage by stage (StepRecipe.hpp), and what the continuous sweeps read of
+ * a step's stages (their quadrature weights, a migrating run's shorelines
+ * inside a step). Implementation detail.
  *
  * A stage is a one-stage step of its family from a memory state that is a
  * constant combination of the step's start state and the stages' end
@@ -184,6 +186,70 @@ template <class State, class InnerEnd, class Combine>
   return out;
 }
 
+/// The quadrature weights of a recipe's stages: a step is
+/// m_n+1 = m_n + h sum_i b_i f(Y_i), Y_i the i-th stage's end state, so
+/// b_i h is the share of the step its i-th stage carries (Sdirk2's
+/// 1 - gamma and gamma; a one-stage recipe's 1). Each state is m_n plus
+/// h times a combination of the stages' f: a stage's memory state takes
+/// its sources' combinations, its end state adds scale times its own f;
+/// b is the last stage's.
+[[nodiscard]] inline std::vector<double> StageQuadratureWeights(
+    const StepRecipe& recipe) {
+  const auto count = recipe.stages.size();
+  // the coefficients of each stage's end state on the stages' f
+  auto ends = std::vector<std::vector<double>>{};
+  for (auto i = std::size_t{0}; i < count; ++i) {
+    const auto& stage = recipe.stages[i];
+    auto row = std::vector<double>(count, 0.0);
+    for (const auto& [j, a] : stage.start) {
+      if (j == 0) continue;  // the step's start state carries none
+      const auto& from = ends.at(static_cast<std::size_t>(j - 1));
+      for (auto k = std::size_t{0}; k < count; ++k) row[k] += a * from[k];
+    }
+    row[i] += stage.scale;
+    ends.push_back(std::move(row));
+  }
+  return ends.back();
+}
+
+/// The ocean function at fraction s of a step (0 at its start node, 1 at
+/// its end node) about a migrating run: the run solved for its shorelines
+/// at the step's two nodes and at its inner stages, which end at their
+/// fractions c of the step (`inner`, in the recipe's order); between those
+/// times it is taken linear in time. At a time where the run solved, that
+/// solve's ocean function itself; elsewhere a combination of the two
+/// either side, a coefficient between 0 and 1 in a cell whose shoreline
+/// moved between them. The continuous adjoint's reversed stages, which
+/// end where the run has no stage, close under it.
+[[nodiscard]] inline std::vector<double> OceanFunctionWithinStep(
+    const StepRecipe& recipe, double s, const std::vector<double>& start,
+    std::span<const std::vector<double>> inner, const std::vector<double>& end) {
+  if (inner.size() + 1 != recipe.stages.size()) {
+    throw std::logic_error(
+        "a step's inner stages and their ocean functions do not match");
+  }
+  auto samples = std::vector<std::pair<double, const std::vector<double>*>>{
+      {0.0, &start}};
+  for (auto i = std::size_t{0}; i < inner.size(); ++i) {
+    samples.emplace_back(recipe.stages[i].c, &inner[i]);
+  }
+  samples.emplace_back(1.0, &end);
+  for (auto k = std::size_t{1}; k < samples.size(); ++k) {
+    const auto [s0, a] = samples[k - 1];
+    const auto [s1, b] = samples[k];
+    if (s > s1 && k + 1 < samples.size()) continue;
+    if (s <= s0) return *a;
+    if (s >= s1) return *b;
+    const auto w = (s - s0) / (s1 - s0);
+    auto out = *a;
+    for (auto i = std::size_t{0}; i < out.size(); ++i) {
+      out[i] = (1.0 - w) * (*a)[i] + w * (*b)[i];
+    }
+    return out;
+  }
+  return end;
+}
+
 /// The inner stages of the step ending at a node: those a multi-stage
 /// scheme takes before the step's last, none for a step of zero length.
 [[nodiscard]] inline std::size_t InnerStageCount(Scheme scheme,
@@ -198,6 +264,8 @@ template <class State, class InnerEnd, class Combine>
 /// The checks a derivative run makes of the inner stages' ocean functions
 /// (OceanFunctions::stages): about a migrating run under a multi-stage
 /// scheme, one grid per inner stage of every step; none otherwise needed.
+/// A list shorter than the nodes gives the nodes past its end none, which
+/// is right where their steps have no inner stage (of zero length).
 inline void CheckStageOceanFunctions(
     Scheme scheme, std::span<const double> times, bool migrating,
     std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
@@ -217,6 +285,7 @@ inline void CheckStageOceanFunctions(
           "stage{}, {} given",
           node, inner, inner == 1 ? "" : "s", given));
     }
+    if (given == 0) continue;  // and none to index past the given nodes
     for (const auto& C : stageOceanFunctions[node]) {
       if (C.size() != fieldSize) {
         throw std::invalid_argument(

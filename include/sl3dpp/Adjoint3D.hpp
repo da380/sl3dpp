@@ -386,7 +386,7 @@ class AdjointSolver3D {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D* trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
+      const OceanFunctions& oceanFunctions,
       std::span<const Evolution3D::Snapshot> tangent,
       const std::vector<std::vector<double>>* ditau,
       const MaterialDirection3D* material) const;

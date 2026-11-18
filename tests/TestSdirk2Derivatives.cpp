@@ -7,7 +7,8 @@
 // symmetric and the derivative of the gradient — about frozen and migrating
 // shorelines, with rotation, across a jump of the forcing, under interior
 // sources, from a recording with gaps, 1D and, under lateral viscosity, 3D;
-// and what stays refused there by name.
+// what the continuous sweep reads of a migrating run's shorelines inside a
+// step; and what stays refused there by name.
 
 #include <gtest/gtest.h>
 
@@ -40,10 +41,12 @@
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/TangentLinear.hpp"
 #include "sl3dpp/TangentLinear3D.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
+#include "sl3dpp/detail/StepStages.hpp"
 
 using namespace sl3dpp;
 
@@ -858,6 +861,130 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
           << error.what();
     }
   }
+}
+
+TEST(Sdirk2Derivatives, TheShorelinesInsideAStep) {
+  // What the continuous sweep reads of a migrating run inside a step: the
+  // quadrature weights of the recipe's stages (Sdirk2's 1 - gamma and
+  // gamma, a one-stage step's 1), and the run's ocean function at a
+  // fraction of the step, its solves' own at the times it solved (the two
+  // nodes and the inner stage) and linear in time between them.
+  constexpr auto gamma = kSdirk2Gamma;
+  const auto b = detail::StageQuadratureWeights(RecipeOf(kSdirk2, 1.0));
+  ASSERT_EQ(b.size(), 2u);
+  EXPECT_NEAR(b[0], 1.0 - gamma, 1e-15);
+  EXPECT_NEAR(b[1], gamma, 1e-15);
+  for (const auto scheme : {Scheme::ExponentialTrapezoid, Scheme::BackwardEuler}) {
+    EXPECT_EQ(detail::StageQuadratureWeights(RecipeOf(scheme, 1.0)),
+              std::vector<double>{1.0});
+  }
+  EXPECT_EQ(detail::StageQuadratureWeights(RecipeOf(kSdirk2, 0.0)), std::vector<double>{1.0});
+
+  // three cells: one whose shoreline moved before the stage, one after,
+  // one that never moved
+  const auto start = std::vector<double>{0.0, 0.0, 1.0};
+  const auto stage = std::vector<std::vector<double>>{{1.0, 0.0, 1.0}};
+  const auto end = std::vector<double>{1.0, 1.0, 1.0};
+  const auto recipe = RecipeOf(kSdirk2, 1.0);
+  EXPECT_EQ(detail::OceanFunctionWithinStep(recipe, 0.0, start, stage, end), start);
+  EXPECT_EQ(detail::OceanFunctionWithinStep(recipe, gamma, start, stage, end), stage[0]);
+  EXPECT_EQ(detail::OceanFunctionWithinStep(recipe, 1.0, start, stage, end), end);
+  // a reversed stage, at 1 - gamma of the step
+  const auto between = detail::OceanFunctionWithinStep(recipe, 1.0 - gamma, start, stage, end);
+  const auto w = (1.0 - 2.0 * gamma) / (1.0 - gamma);
+  EXPECT_NEAR(between[0], 1.0, 1e-15);
+  EXPECT_NEAR(between[1], w, 1e-15);
+  EXPECT_NEAR(between[2], 1.0, 1e-15);
+  const auto early = detail::OceanFunctionWithinStep(recipe, 0.5 * gamma, start, stage, end);
+  EXPECT_NEAR(early[0], 0.5, 1e-15);
+  EXPECT_NEAR(early[1], 0.0, 1e-15);
+}
+
+TEST(Sdirk2Derivatives, TheContinuousSweepReadsTheStagesShorelines) {
+  // About a migrating run the continuous sweep reads the inner stages'
+  // ocean functions (its reversed stages close under the run's shorelines
+  // inside the step, and its ice views take each stage's share by the
+  // stage's own): it is refused by name without them, as the discrete
+  // sweep and the tangent-linear run are.
+  auto setup = Scene::Make(16, 1e21);
+  ViscoelasticOperator op(setup.rheology, setup.lmax);
+  const auto times = UnevenTimes(setup.Kyr(), std::vector<double>{2.0, 3.0, 1.0, 4.0});
+  const auto cap = MarineCap::Make(setup, times.back());
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  Evolution evolution(op, setup.solver, state,
+                      {.scheme = kSdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto run = evolution.RunMigrating(times, [&](double t) { return cap.Thickness(t); });
+  const auto oceans = OceanFunctions::Of(run);
+  const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+  std::mt19937 rng(113);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  const AdjointSolver continuous(evolution,
+                                 {.method = AdjointMethod::Continuous, .rtol = 1e-12});
+  try {
+    (void)continuous.FirstOrderKernels(times, measurements, &trajectory,
+                                       OceanFunctions{.nodes = oceans.nodes});
+    ADD_FAILURE() << "the continuous sweep ran without the stages' ocean functions";
+  } catch (const std::invalid_argument& error) {
+    EXPECT_NE(std::string(error.what()).find("OceanFunctions::Of"), std::string::npos)
+        << error.what();
+  }
+  const auto kernels = continuous.FirstOrderKernels(times, measurements, &trajectory, oceans);
+  EXPECT_EQ(kernels.thickness.size(), times.size());
+}
+
+TEST(Sdirk2Derivatives, StagesGivenForTheStepsThatHaveThem) {
+  // OceanFunctions::stages holds one entry per node, or stops after the
+  // last step that has an inner stage: a migrating run whose last step is
+  // of zero length (a repeated last node, one stage under every scheme)
+  // has none there, and a list that leaves that node out is the same
+  // argument. Every derivative run takes it as the full list, to
+  // rounding: the discrete and continuous sweeps and the tangent-linear
+  // run.
+  auto setup = Scene::Make(16, 1e21);
+  ViscoelasticOperator op(setup.rheology, setup.lmax);
+  auto times = UnevenTimes(setup.Kyr(), std::vector<double>{2.0, 3.0});
+  times.push_back(times.back());
+  const auto cap = MarineCap::Make(setup, 10.0 * setup.Kyr());
+  const auto state = setup.solver.MakeState(cap.ice0, cap.sea0);
+  Evolution evolution(op, setup.solver, state,
+                      {.scheme = kSdirk2, .rtol = 1e-12, .record_stride = 1});
+  const auto run = evolution.RunMigrating(times, [&](double t) { return cap.Thickness(t); });
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_EQ(oceans.stages.size(), times.size());
+  ASSERT_TRUE(oceans.stages.back().empty());
+  const auto shorter = OceanFunctions{
+      .nodes = oceans.nodes,
+      .stages = std::vector<std::vector<std::vector<double>>>(oceans.stages.begin(),
+                                                              oceans.stages.end() - 1)};
+  EXPECT_NO_THROW(detail::CheckStageOceanFunctions(kSdirk2, times, true, shorter.stages,
+                                                   setup.solver.Grid().FieldSize()));
+  const auto trajectory = ForwardTrajectory::FromSnapshots(run);
+  std::mt19937 rng(127);
+  auto measurements = std::map<std::size_t, Measurement>{};
+  measurements[times.size() - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
+  measurements[1].displacementDual = setup.Smooth(rng, 0.5);
+  for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const AdjointSolver sweeps(evolution, {.method = method, .rtol = 1e-12});
+    const auto full = sweeps.FirstOrderKernels(times, measurements, &trajectory, oceans);
+    const auto given = sweeps.FirstOrderKernels(times, measurements, &trajectory, shorter);
+    for (auto n = std::size_t{0}; n < times.size(); ++n) {
+      EXPECT_LE(MaxDiff(given.thickness[n], full.thickness[n]),
+                1e-14 * MaxAbs(full.thickness[n]))
+          << n;
+    }
+    EXPECT_LE(MaxDiff(given.initialSeaLevel, full.initialSeaLevel),
+              1e-14 * MaxAbs(full.initialSeaLevel));
+    EXPECT_LE(MaxDiff(given.itauKernel[0], full.itauKernel[0]),
+              1e-14 * MaxAbs(full.itauKernel[0]));
+  }
+  TangentPerturbation direction;
+  direction.initialSeaLevel = setup.Smooth(rng, 1.0 * setup.Metre());
+  const TangentLinearSolver tangent(evolution, {.rtol = 1e-12});
+  const auto full = tangent.Run(times, direction, nullptr, oceans);
+  const auto given = tangent.Run(times, direction, nullptr, shorter);
+  EXPECT_LE(MaxDiff(given.back().relativeSeaLevelChange, full.back().relativeSeaLevelChange),
+            1e-14 * MaxAbs(full.back().relativeSeaLevelChange));
 }
 
 TEST(Sdirk2Derivatives, AcrossAnOnsetUnderInteriorSources) {

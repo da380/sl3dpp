@@ -651,7 +651,8 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   step's first stage's), the sweeps (1D and 3D) linearise about it: the
   adjoint stays linear with the time-reversed C(t) as its coefficients
   (Yu et al. 2025, §3.3; the shoreline-motion singular terms cancel), the
-  grounding factors are per node, and the initial sea level kernel
+  grounding factors are per node and, under Sdirk2, per inner stage, by
+  either method (adjoints.md §1a), and the initial sea level kernel
   ρ_w Σₙ (Cₙ − C₀) directLoadKernelsₙ is formed (zero under frozen shorelines).
   The loads beside the ice, the layer on the solid surface and the
   interior sources of a migrating run are perturbed, and their kernels

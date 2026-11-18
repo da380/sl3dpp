@@ -343,10 +343,16 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the continuous sweep's approach to the
-    // discrete is gated at that scheme's steps (under Sdirk2 its gaps here do
-    // not fall from 5 to 9 nodes: 5.0e-2 and 5.2e-2 in the thickness view with
-    // the background held)
+    // the exponential trapezoid stated: its continuous and discrete sweeps
+    // sample the run's shorelines alike, at the nodes, and the approach is
+    // gated at second order. Under Sdirk2 the run solves for them at its
+    // inner stages too, which the continuous sweep's reversed stages do not
+    // meet; two cells flip inside steps here, and the continuous kernels
+    // converge to the discrete at first order (docs/adjoints.md §1a): from 5
+    // to 9 nodes 1.0e-3 to 1.8e-3 in the thickness view with the background,
+    // 4.5e-3 to 1.9e-3 with it held, 1.6e-3 to 1.5e-3 in the initial sea
+    // level, 7.2e-3 to 3.2e-3 in the relaxation times; 3.6e-5, 3.9e-6,
+    // 2.5e-5 and 4.7e-6 at 129 nodes, halving with the step after
     Evolution evolution(op, setup.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
@@ -720,13 +726,18 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   EXPECT_LT(Gap(continuous, discrete), 0.2);
 }
 
-TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
+namespace {
+
+void TheContinuousSweepAboutAStartWithAnIceChange3D(Scheme scheme) {
   // The 3D solved start on a slowly relaxing mantle (1e22 Pa s), one
   // problem at 4 and 7 nodes over the 10 kyr: the continuous 3D sweep's
   // thickness view along a direction non-zero at the first node (both
   // readings), its initial sea level kernel and its log-viscosity kernel
   // (in its volume norm) tend to the discrete sweep's, which the gate
-  // above holds exact, as the steps are halved.
+  // above holds exact, as the steps are halved. Under Sdirk2 six cells
+  // flip inside steps (at 4 nodes one of them before its step's inner
+  // stage), and the continuous sweep reads the run's shorelines at the
+  // inner stages (docs/adjoints.md §1a).
   auto scene = Scene3D::Make(1e22);
   const auto [ice0, sea0] = scene.MarineCapState(6000.0, 50.0);
   const auto state = scene.solver.MakeState(ice0, sea0);
@@ -753,11 +764,8 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the continuous sweep's approach to the
-    // discrete is gated at that scheme's steps (under Sdirk2 its initial sea
-    // level kernel's gap falls from 6.3e-2 to 4.7e-2 from 4 to 7 nodes)
     Evolution3D evolution(op, scene.solver, state,
-                          {.scheme = Scheme::ExponentialTrapezoid,
+                          {.scheme = scheme,
                            .rtol = 1e-12,
                            .coupled_rtol = 1e-12,
                            .max_nonlinear_iterations = 200,
@@ -797,11 +805,21 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
       "thickness with the background", "thickness, background held", "initial sea level",
       "log-viscosity kernel"};
   for (auto q = std::size_t{0}; q < names.size(); ++q) {
-    std::cout << std::format("[solved start, 3D continuous] {}: {:.2e} {:.2e}\n", names[q],
+    std::cout << std::format("[solved start, 3D continuous, {}] {}: {:.2e} {:.2e}\n",
+                             scheme == Scheme::Sdirk2 ? "sdirk2" : "trapezoid", names[q],
                              coarse[q], fine[q]);
     EXPECT_LT(coarse[q], 0.2) << names[q];
     EXPECT_GT(coarse[q] / fine[q], 2.0) << names[q];
   }
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
+  TheContinuousSweepAboutAStartWithAnIceChange3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3DUnderTheTrapezoid) {
+  TheContinuousSweepAboutAStartWithAnIceChange3D(Scheme::ExponentialTrapezoid);
 }
 
 // -- a forced migrating trajectory ----------------------------------------

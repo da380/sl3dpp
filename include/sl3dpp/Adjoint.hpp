@@ -382,6 +382,21 @@ struct StageLoadKernel {
     std::span<const std::vector<double>> oceanFunctions = {},
     double waterDensity = 0.0,
     std::span<const StageLoadKernel> stageLoads = {});
+/// The inner stages' load kernels of a continuous sweep about a migrating
+/// run under a multi-stage scheme, for AssembleIceViews: the kernels'
+/// time quadrature within a step is the scheme's own, each inner stage
+/// carrying b_i h of the step (StageQuadratureWeights) at the time the run
+/// solved for that stage's shorelines, the adjoint density there linear
+/// between the step's two nodes. `late[n]` and `early[n]` are node n's
+/// one-sided densities, towards the last node and towards the first (an
+/// empty early side: the late one; an empty late side: zero), per unit of
+/// `perTime` times the grid's time. Empty for a frozen run or a one-stage
+/// scheme.
+[[nodiscard]] std::vector<StageLoadKernel> ContinuousStageLoads(
+    Scheme scheme, std::span<const double> times,
+    std::span<const std::vector<double>> late,
+    std::span<const std::vector<double>> early, double perTime,
+    const OceanFunctions& oceanFunctions);
 }  // namespace detail
 
 /**
@@ -574,7 +589,7 @@ class AdjointSolver {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
+      const OceanFunctions& oceanFunctions,
       detail::LateralAccumulator* lateral = nullptr) const;
   /// The material pieces the second-order sweeps share (the variations
   /// of a direction, its forces, the tangent solution's recovery):

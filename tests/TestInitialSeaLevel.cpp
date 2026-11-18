@@ -16,7 +16,9 @@
 #include <cmath>
 #include <complex>
 #include <filesystem>
+#include <format>
 #include <fstream>
+#include <iostream>
 #include <map>
 #include <numbers>
 #include <random>
@@ -633,88 +635,106 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferencesUnderTheTrapezoid) {
   InitialStateKernelsMatchCentralDifferences(Scheme::ExponentialTrapezoid);
 }
 
+namespace {
+
+/// The relative errors of each method's thickness kernels about a migrating
+/// run (the marine cap melting to nothing over the grid of `nodes` nodes, a
+/// Maxwell mantle of viscosity eta) against central differences of the
+/// run, along perturbations at the quarter dates but the first, under a
+/// sea level measurement at the last node.
+std::map<AdjointMethod, double> TrajectoryKernelErrors(Scheme scheme, double eta,
+                                                       int nodes) {
+  const auto body = Body::Make(kLmax, true, eta);
+  ViscoelasticOperator op(body.rheology, kLmax);
+  const auto cap = MarineCap::Make(body, nodes);
+  const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
+  Evolution evolution(op, body.solver, state,
+                      {.scheme = scheme,
+                       .rtol = 1e-12});
+  const auto thickness = [&](double t) { return cap.Thickness(t); };
+  const auto run = evolution.RunMigrating(cap.times, thickness);
+  const auto oceans = OceanFunctions::Of(run);
+  auto measurement = Measurement{};
+  measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
+  const auto& g = measurement.relativeSeaLevelDual;
+
+  // Perturbations at the quarter dates but the first (the state's own
+  // ice), the same on any refinement of them.
+  auto deltaAt = std::map<int, std::vector<double>>{};
+  for (auto q = 1; q <= 4; ++q) {
+    deltaAt.emplace(q, body.Smooth(1.0 * body.Metre(), 100 + q));
+  }
+  const auto per = (nodes - 1) / 4;
+  auto delta = [&](std::size_t n) -> const std::vector<double>* {
+    if (n == 0 || n % per != 0) return nullptr;
+    return &deltaAt.at(static_cast<int>(n / per));
+  };
+  auto functional = [&](double sign) {
+    Evolution trial(op, body.solver, state,
+                    {.scheme = scheme,
+                     .rtol = 1e-12});
+    const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
+      auto out = cap.Thickness(t);
+      for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
+        const auto* d = delta(n);
+        if (t != cap.times[n] || d == nullptr) continue;
+        for (auto i = std::size_t{0}; i < out.size(); ++i) {
+          out[i] += sign * (*d)[i];
+        }
+      }
+      return out;
+    });
+    // flotation's 0/1: rounding changes it only at a cell on the threshold
+    for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
+    }
+    auto product = g;
+    for (auto i = std::size_t{0}; i < g.size(); ++i) {
+      product[i] *= snaps.back().relativeSeaLevelChange[i];
+    }
+    return body.Integrate(product);
+  };
+  const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
+  auto errors = std::map<AdjointMethod, double>{};
+  for (const auto method :
+       {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
+    const auto kernels =
+        AdjointSolver(evolution, {.method = method, .rtol = 1e-12})
+            .FirstOrderKernels(cap.times,
+                               {{cap.times.size() - 1, measurement}}, nullptr,
+                               oceans);
+    auto predicted = 0.0;
+    for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
+      const auto* d = delta(n);
+      if (d == nullptr) continue;
+      auto product = kernels.thickness[n];
+      for (auto i = std::size_t{0}; i < product.size(); ++i) {
+        product[i] *= (*d)[i];
+      }
+      predicted += body.Integrate(product);
+    }
+    errors[method] = std::abs(predicted - fd) / std::abs(fd);
+  }
+  return errors;
+}
+
+}  // namespace
+
 TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
   // About the moving trajectory the discrete transpose matches central
   // differences of the migrating run to solver precision (the forward is
   // the linearised map while no cell flips), and the continuous method
   // converges at second order once the rheology is resolved: their
   // disagreement on an under-resolved run is the resolution diagnostic.
+  // The exponential trapezoid stated: its continuous and discrete sweeps
+  // sample the run's shorelines alike, at the nodes. Under Sdirk2 the run
+  // solves for its shorelines at its inner stages too, which the reversed
+  // stages of the continuous sweep do not meet, and where cells flip
+  // inside steps the continuous kernel converges at first order
+  // (Migrating.TrajectoryKernelsUnderSdirk2): 2.1e-2 at 5 nodes and 1.4e-2
+  // at 9 on the stiff mantle, a ratio of 1.6 against the 2 gated.
   auto check = [](double eta, int nodes) {
-    const auto body = Body::Make(kLmax, true, eta);
-    ViscoelasticOperator op(body.rheology, kLmax);
-    const auto cap = MarineCap::Make(body, nodes);
-    const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-    // the exponential trapezoid stated: the continuous kernel's error is gated
-    // at that scheme's steps (under Sdirk2 it is 61% at 5 nodes on the stiff
-    // mantle, against the 5% gated)
-    Evolution evolution(op, body.solver, state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
-                         .rtol = 1e-12});
-    const auto thickness = [&](double t) { return cap.Thickness(t); };
-    const auto run = evolution.RunMigrating(cap.times, thickness);
-    const auto oceans = OceanFunctions::Of(run);
-    auto measurement = Measurement{};
-    measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
-    const auto& g = measurement.relativeSeaLevelDual;
-
-    // Perturbations at the quarter dates but the first (the state's own
-    // ice), the same on any refinement of them.
-    auto deltaAt = std::map<int, std::vector<double>>{};
-    for (auto q = 1; q <= 4; ++q) {
-      deltaAt.emplace(q, body.Smooth(1.0 * body.Metre(), 100 + q));
-    }
-    const auto per = (nodes - 1) / 4;
-    auto delta = [&](std::size_t n) -> const std::vector<double>* {
-      if (n == 0 || n % per != 0) return nullptr;
-      return &deltaAt.at(static_cast<int>(n / per));
-    };
-    auto functional = [&](double sign) {
-      Evolution trial(op, body.solver, state,
-                      {.scheme = Scheme::ExponentialTrapezoid,
-                       .rtol = 1e-12});
-      const auto snaps = trial.RunMigrating(cap.times, [&, sign](double t) {
-        auto out = cap.Thickness(t);
-        for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
-          const auto* d = delta(n);
-          if (t != cap.times[n] || d == nullptr) continue;
-          for (auto i = std::size_t{0}; i < out.size(); ++i) {
-            out[i] += sign * (*d)[i];
-          }
-        }
-        return out;
-      });
-      // flotation's 0/1: rounding changes it only at a cell on the threshold
-      for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-        EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
-      }
-      auto product = g;
-      for (auto i = std::size_t{0}; i < g.size(); ++i) {
-        product[i] *= snaps.back().relativeSeaLevelChange[i];
-      }
-      return body.Integrate(product);
-    };
-    const auto fd = 0.5 * (functional(1.0) - functional(-1.0));
-    auto errors = std::map<AdjointMethod, double>{};
-    for (const auto method :
-         {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
-      const auto kernels =
-          AdjointSolver(evolution, {.method = method, .rtol = 1e-12})
-              .FirstOrderKernels(cap.times,
-                                 {{cap.times.size() - 1, measurement}}, nullptr,
-                                 oceans);
-      auto predicted = 0.0;
-      for (auto n = std::size_t{0}; n < cap.times.size(); ++n) {
-        const auto* d = delta(n);
-        if (d == nullptr) continue;
-        auto product = kernels.thickness[n];
-        for (auto i = std::size_t{0}; i < product.size(); ++i) {
-          product[i] *= (*d)[i];
-        }
-        predicted += body.Integrate(product);
-      }
-      errors[method] = std::abs(predicted - fd) / std::abs(fd);
-    }
-    return errors;
+    return TrajectoryKernelErrors(Scheme::ExponentialTrapezoid, eta, nodes);
   };
   const auto stiff = check(1e21, 5);
   EXPECT_LT(stiff.at(AdjointMethod::Discrete), 1e-8);
@@ -729,6 +749,31 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
       2.0)
       << "coarse " << coarse.at(AdjointMethod::Continuous) << " fine "
       << fine.at(AdjointMethod::Continuous);
+}
+
+TEST(Migrating, TrajectoryKernelsUnderSdirk2) {
+  // The same under Sdirk2. The discrete transpose matches central
+  // differences to solver precision. The continuous kernel takes each
+  // inner stage's share of a step by that stage's own shorelines: at 5
+  // nodes on the stiff mantle no ice is grounded at the node at 5 kyr, but
+  // the thickness there loads the run through the inner stage of the step
+  // ending there (at 3.2 kyr, where some still is), 39% of the
+  // differences, which the nodes' shorelines alone would give as zero.
+  // Every cell of the kernels' support floats within a step or two of the
+  // perturbed nodes, so the continuous kernel converges at first order,
+  // as the steps resolve that.
+  const auto stiff = TrajectoryKernelErrors(Scheme::Sdirk2, 1e21, 5);
+  EXPECT_LT(stiff.at(AdjointMethod::Discrete), 1e-8);
+  const auto coarse = TrajectoryKernelErrors(Scheme::Sdirk2, 1e22, 5);
+  const auto fine = TrajectoryKernelErrors(Scheme::Sdirk2, 1e22, 33);
+  std::cout << std::format("[trajectory, sdirk2] continuous: {:.3e} at 5 nodes, {:.3e} at 33\n",
+                           coarse.at(AdjointMethod::Continuous),
+                           fine.at(AdjointMethod::Continuous));
+  EXPECT_LT(coarse.at(AdjointMethod::Discrete), 1e-8);
+  EXPECT_LT(fine.at(AdjointMethod::Discrete), 1e-8);
+  EXPECT_LT(coarse.at(AdjointMethod::Continuous), 5e-2);
+  // first order over the three halvings: 8
+  EXPECT_GT(coarse.at(AdjointMethod::Continuous) / fine.at(AdjointMethod::Continuous), 8.0);
 }
 
 // -- calibration under migrating shorelines -----------------------------------

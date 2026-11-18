@@ -67,8 +67,8 @@ Kernels3D AdjointSolver3D::FirstOrderKernels(
                          nullptr, nullptr)
         .first;
   }
-  return Sweep(times, measurements, trajectory, oceanFunctions.nodes, {},
-               nullptr, nullptr)
+  return Sweep(times, measurements, trajectory, oceanFunctions, {}, nullptr,
+               nullptr)
       .first;
 }
 
@@ -136,7 +136,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
     return DiscreteSweep(times, measurements, &trajectory, oceanFunctions,
                          tangent, &ditau, materialV);
   }
-  return Sweep(times, measurements, &trajectory, oceanFunctions.nodes, tangent,
+  return Sweep(times, measurements, &trajectory, oceanFunctions, tangent,
                &ditau, materialV);
 }
 
@@ -144,7 +144,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
+    const OceanFunctions& theOceanFunctions,
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau,
     const MaterialDirection3D* materialV) const {
@@ -176,9 +176,14 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   }
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
+  const std::span<const std::vector<double>> oceanFunctions =
+      theOceanFunctions.nodes;
   // About a migrating-shoreline trajectory the adjoint stays linear with
-  // the node's ocean function as its coefficient (Yu et al. 2025, §3.3);
-  // frozen, every node has the background's.
+  // the run's ocean function at each time as its coefficient (Yu et al.
+  // 2025, §3.3): a node's at a node, and inside a step the run's
+  // shorelines linear in time between the times it solved for them
+  // (detail::OceanFunctionWithinStep); frozen, every node has the
+  // background's.
   auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
     return oceanFunctions.empty() ? C : oceanFunctions[node];
   };
@@ -243,6 +248,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
       }
     }
   }
+  // the run's shorelines inside a step are read from its inner stages'
+  detail::CheckStageOceanFunctions(scheme, times, !oceanFunctions.empty(),
+                                   theOceanFunctions.stages, fieldSize);
   if (rotation == RotationalFeedback::Full) {
     const auto kHyd = FluidTidalNumber(op.GetRheology().BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
@@ -1235,6 +1243,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
   // state, its sea level in `density`.
   auto reversedStage = [&](Carried& carried, const Viscoelastic3D::State& from,
                            double dt, Scheme family, std::size_t to,
+                           const std::vector<double>& ocean,
                            const std::vector<GridCoupling::TensorField>* drive,
                            const MaterialSource* source, MaterialSource* record,
                            std::vector<double>& density) {
@@ -1269,7 +1278,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     }
     if (record != nullptr) record->memory = step.memory_;
     const auto& effectiveSolver = solverFor(step.EffectiveLove());
-    const auto& Cn = oceanAt(to);
+    const auto& Cn = ocean.empty() ? C : ocean;
     GRDSolver::Response response;
     auto closure = [&](const Viscoelastic3D::Solutions& responses) {
       GRDSolver::GeneralisedForcing coupled;
@@ -1279,7 +1288,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
           op.Surface(responses, Component::Phi), ev.toNdPotential_);
       coupled.inertiaMomentChange = step.InertiaMoment(responses) * ev.toNdMoment_;
       coupled.rotation = rotation;
-      coupled.oceanFunctionOverride = overrideAt(to);
+      coupled.oceanFunctionOverride = ocean;
       response = effectiveSolver.SolveGeneralised(ev.state_, coupled, sleOptions);
       auto sig = std::vector<double>(fieldSize);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
@@ -1327,22 +1336,33 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
     density = std::move(response.relativeSeaLevelChange);
     return std::move(step).Finish(std::move(strain));
   };
-  // The reversed step of a carried state by the scheme's stages, every
-  // stage closed under the ocean function of the step's end node (the
-  // trajectory holds the nodes' alone); returns its last stage's sea level
-  // (the late density at the node stepped to). A drive, a material source
-  // or a record (the second-order sweep's) is a one-stage step's.
+  // The reversed step of a carried state by the scheme's stages, each
+  // closed under the run's ocean function at the stage's end: the last
+  // stage's at the node stepped to, the node's own; an inner one's at
+  // t_to+1 - c dt, where the run did not solve, between the run's
+  // shorelines either side (detail::OceanFunctionWithinStep). Returns its
+  // last stage's sea level (the late density at the node stepped to). A
+  // drive, a material source or a record (the second-order sweep's) is a
+  // one-stage step's.
   auto reversedStep = [&](Carried& carried, double dt, std::size_t to,
                           const std::vector<GridCoupling::TensorField>* drive,
                           const MaterialSource* source,
                           MaterialSource* record) {
     auto density = std::vector<double>{};
+    const auto recipe = RecipeOf(scheme, dt);
     auto next = StepByRecipe(
-        RecipeOf(scheme, dt), dt, carried.state,
+        recipe, dt, carried.state,
         [&](const Viscoelastic3D::State& from, const RecipeStage& stage,
-            double length, std::size_t) {
-          return reversedStage(carried, from, length, stage.family, to, drive,
-                               source, record, density);
+            double length, std::size_t index) {
+          const auto ocean =
+              oceanFunctions.empty() || index + 1 == recipe.stages.size()
+                  ? overrideAt(to)
+                  : detail::OceanFunctionWithinStep(
+                        recipe, 1.0 - stage.c, oceanFunctions[to],
+                        theOceanFunctions.stages.at(to + 1),
+                        oceanFunctions[to + 1]);
+          return reversedStage(carried, from, length, stage.family, to, ocean,
+                               drive, source, record, density);
         },
         [&](std::span<const std::pair<double, const Viscoelastic3D::State*>>
                 terms,
@@ -1729,10 +1749,15 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::Sweep(
            unusedDensity);
   assemble(layer.late, layer.early, layer.lumps, layerKernels, unusedDensity);
 
+  // under a multi-stage scheme the ice views take each inner stage's share
+  // of its step by the stage's own shorelines (detail::ContinuousStageLoads)
+  const auto stageLoads =
+      detail::ContinuousStageLoads(scheme, times, densityLate, densityEarly,
+                                   perTime, theOceanFunctions);
   Kernels3D out;
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
-      std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW);
+      std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW, stageLoads);
   out.ice.momentKernels = std::move(momentKernels);
   out.ice.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.ice.solidSurfaceChangeKernels = std::move(layerKernels);

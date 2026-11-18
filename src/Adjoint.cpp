@@ -110,7 +110,7 @@ Kernels AdjointSolver::FirstOrderKernels(
   return options_.method == AdjointMethod::Discrete
              ? DiscreteSweep(times, measurements, trajectory, oceanFunctions)
              : ContinuousSweep(times, measurements, trajectory,
-                               oceanFunctions.nodes);
+                               oceanFunctions);
 }
 
 Kernels3D AdjointSolver::LateralSweep(
@@ -131,7 +131,7 @@ Kernels3D AdjointSolver::LateralSweep(
           ? sweeps.DiscreteSweep(times, measurements, &trajectory,
                                  oceanFunctions, &lateral)
           : sweeps.ContinuousSweep(times, measurements, &trajectory,
-                                   oceanFunctions.nodes, &lateral);
+                                   oceanFunctions, &lateral);
   return lateral.Finish(std::move(radial));
 }
 
@@ -181,12 +181,12 @@ void AdjointSolver::CheckArguments(
       }
     }
   }
-  // the discrete sweep linearises each inner stage about its own shorelines
-  if (options_.method == AdjointMethod::Discrete) {
-    detail::CheckStageOceanFunctions(ev.options_.scheme, times,
-                                     !oceanFunctions.nodes.empty(),
-                                     oceanFunctions.stages, fieldSize);
-  }
+  // the discrete sweep linearises each inner stage about its own
+  // shorelines; the continuous one reads them for the run's shorelines
+  // inside a step
+  detail::CheckStageOceanFunctions(ev.options_.scheme, times,
+                                   !oceanFunctions.nodes.empty(),
+                                   oceanFunctions.stages, fieldSize);
   if (ev.options_.rotation == RotationalFeedback::Full) {
     // The forward run's stability condition (see Evolution::Run).
     const auto kHyd = FluidTidalNumber(ev.op_->BaseMaterial(), 2);
@@ -1106,7 +1106,7 @@ Kernels AdjointSolver::ContinuousSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
+    const OceanFunctions& theOceanFunctions,
     detail::LateralAccumulator* lateral) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -1115,9 +1115,14 @@ Kernels AdjointSolver::ContinuousSweep(
   const auto scheme = ev.options_.scheme;
   const auto rotation = ev.options_.rotation;
   const auto& C = ev.state_.oceanFunction;
+  const std::span<const std::vector<double>> oceanFunctions =
+      theOceanFunctions.nodes;
   // About a migrating-shoreline trajectory the adjoint stays linear with
-  // the node's ocean function as its coefficient (Yu et al. 2025, §3.3);
-  // frozen, every node has the background's.
+  // the run's ocean function at each time as its coefficient (Yu et al.
+  // 2025, §3.3): a node's at a node, and inside a step the run's
+  // shorelines linear in time between the times it solved for them
+  // (detail::OceanFunctionWithinStep); frozen, every node has the
+  // background's.
   auto oceanAt = [&](std::size_t node) -> const std::vector<double>& {
     return oceanFunctions.empty() ? C : oceanFunctions[node];
   };
@@ -1844,18 +1849,31 @@ Kernels AdjointSolver::ContinuousSweep(
   for (std::size_t n = N; n >= 1; --n) {
     if (options_.on_node) options_.on_node(n);
     const double dt = (times[n] - times[n - 1]) * ev.toMatTime_;
+    const auto recipe = RecipeOf(scheme, dt);
     // The reversed step's stages (StepRecipe.hpp), each closed by the
-    // memory-only adjoint equilibrium, under the ocean function of the
-    // step's end node: the trajectory holds the nodes' alone.
+    // memory-only adjoint equilibrium under the run's ocean function at the
+    // stage's end: the last stage's at node n - 1, the node's own; an inner
+    // one's at t_n - c dt, where the run did not solve, between the run's
+    // shorelines either side (detail::OceanFunctionWithinStep).
+    auto stageOcean = [&](const RecipeStage& stage,
+                          std::size_t index) -> std::vector<double> {
+      if (oceanFunctions.empty() || index + 1 == recipe.stages.size()) {
+        return overrideAt(n - 1);
+      }
+      return detail::OceanFunctionWithinStep(
+          recipe, 1.0 - stage.c, oceanFunctions[n - 1],
+          theOceanFunctions.stages.at(n), oceanFunctions[n]);
+    };
     auto resp = GRDSolver::Response{};
     auto stageOf = [&](const ViscoelasticState& from, const RecipeStage& stage,
-                       double length, std::size_t) {
+                       double length, std::size_t index) {
       const auto step = op.StartStep(from, length, stage.family,
                                      ev.Columns(sigmaC, ev.toMatDensity_),
                                      ev.Columns(psiC, ev.toMatPotential_));
+      const auto ocean = stageOcean(stage, index);
       GRDSolver::GeneralisedForcing f;
       f.rotation = rotation;
-      f.oceanFunctionOverride = overrideAt(n - 1);
+      f.oceanFunctionOverride = ocean;
       f.displacementResponse =
           ev.Coefficients(step.MemorySurface(Component::U), ev.toNdLength_);
       f.potentialResponse = ev.Coefficients(step.MemorySurface(Component::Phi),
@@ -1867,7 +1885,7 @@ Kernels AdjointSolver::ContinuousSweep(
         throw std::runtime_error(std::format(
             "the adjoint coupled solve at node {} did not converge", n - 1));
       }
-      const auto& Cn = oceanAt(n - 1);
+      const auto& Cn = ocean.empty() ? C : ocean;
       auto sig = std::vector<double>(fieldSize);
       for (auto i = std::size_t{0}; i < fieldSize; ++i) {
         sig[i] = rhoW * Cn[i] * resp.relativeSeaLevelChange[i];
@@ -1881,7 +1899,6 @@ Kernels AdjointSolver::ContinuousSweep(
                   ev.Columns(psiC, ev.toMatPotential_))
           .first;
     };
-    const auto recipe = RecipeOf(scheme, dt);
     vstate = StepByRecipe(recipe, dt, vstate, stageOf, Combined);
     densityLate[n - 1] = resp.relativeSeaLevelChange;
     shiftLate[n - 1] = resp.uniformShift;
@@ -1954,8 +1971,13 @@ Kernels AdjointSolver::ContinuousSweep(
     }
   }
 
+  // under a multi-stage scheme the ice views take each inner stage's share
+  // of its step by the stage's own shorelines (detail::ContinuousStageLoads)
+  const auto stageLoads =
+      detail::ContinuousStageLoads(scheme, times, densityLate, densityEarly,
+                                   perTime, theOceanFunctions);
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
-                           std::move(lumps), oceanFunctions);
+                           std::move(lumps), oceanFunctions, stageLoads);
   out.momentKernels = std::move(momentKernels);
   out.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.solidSurfaceChangeKernels = std::move(layerKernels);
@@ -1991,6 +2013,44 @@ Kernels AdjointSolver::AssembleViews(
       ev.state_.oceanFunction, ev.solver_->IceDensity(), times,
       std::move(directLoadKernels), std::move(density), std::move(lumps),
       oceanFunctions, ev.solver_->WaterDensity(), stageLoads);
+}
+
+std::vector<detail::StageLoadKernel> detail::ContinuousStageLoads(
+    Scheme scheme, std::span<const double> times,
+    std::span<const std::vector<double>> late,
+    std::span<const std::vector<double>> early, double perTime,
+    const OceanFunctions& oceanFunctions) {
+  auto out = std::vector<StageLoadKernel>{};
+  if (oceanFunctions.nodes.empty() || oceanFunctions.stages.empty()) return out;
+  // a node's density on the side within the step: late towards the last
+  // node, early towards the first (empty: the late side's)
+  auto side = [&](std::size_t node, bool lateSide) -> const std::vector<double>* {
+    const auto& own = lateSide ? late[node] : early[node];
+    if (!own.empty()) return &own;
+    return lateSide || late[node].empty() ? nullptr : &late[node];
+  };
+  for (auto n = std::size_t{1}; n < times.size(); ++n) {
+    if (n >= oceanFunctions.stages.size() || oceanFunctions.stages[n].empty()) {
+      continue;
+    }
+    const auto h = times[n] - times[n - 1];
+    const auto recipe = RecipeOf(scheme, h);
+    const auto b = StageQuadratureWeights(recipe);
+    const auto* from = side(n - 1, true);
+    const auto* to = side(n, false);
+    for (auto i = std::size_t{0}; i + 1 < recipe.stages.size(); ++i) {
+      const auto c = recipe.stages[i].c;
+      const auto size = oceanFunctions.stages[n][i].size();
+      auto load = std::vector<double>(size, 0.0);
+      for (auto j = std::size_t{0}; j < size; ++j) {
+        const auto k = (1.0 - c) * (from == nullptr ? 0.0 : (*from)[j]) +
+                       c * (to == nullptr ? 0.0 : (*to)[j]);
+        load[j] = b[i] * h * k * perTime;
+      }
+      out.push_back({n, c, std::move(load), &oceanFunctions.stages[n][i]});
+    }
+  }
+  return out;
 }
 
 Kernels detail::AssembleIceViews(

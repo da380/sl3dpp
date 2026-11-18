@@ -139,13 +139,17 @@ namespace detail {
 /// sweeps and the static adjoints form) as the samples of the kernel:
 /// the volume weights divided out. A point at the centre has no volume
 /// weight: its sample is the element's polynomial through the other
-/// points, evaluated there, and its gradient entry is not kept. That
-/// entry is zero for a kernel accumulated at the points themselves; for
-/// the nodal relaxation-time kernel of Gauss memory points, carried to
-/// the nodes by the interpolation's transpose, it is not when the
-/// element at the centre relaxes, and the volume pairing then misses
-/// the sensitivity to the value at the centre alone (about 1e-5 of that
-/// element's).
+/// points, evaluated there, and its gradient entry is not kept. For a
+/// kernel accumulated at the points themselves that entry is small but
+/// not zero by construction: at a GLL point at r = 0 it is the point's
+/// quadrature weight (the degree forms carry no r^2 there) times products
+/// of the solution's departures from regularity at the centre (U and V at
+/// degree 2 and above, U - V at degree 1, W), which are spectrally small,
+/// at rounding on production meshes. For the nodal relaxation-time kernel
+/// of Gauss memory points, carried to the nodes by the interpolation's
+/// transpose, the entry is not small when the element at the centre
+/// relaxes, and the volume pairing then misses the sensitivity to the
+/// value at the centre alone (about 1e-5 of that element's).
 [[nodiscard]] std::vector<double> KernelSamples(const MemoryPoints& points,
                                                 const RadialMesh& mesh,
                                                 std::vector<double> gradient);

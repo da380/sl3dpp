@@ -221,10 +221,9 @@ discrete viscosity kernel to the difference of two `sl3d solve`s.
 step by the same stages (`StepByRecipe`), each closed by the memory-only
 adjoint equilibrium, the toroidal adjoint beside it under the same
 recipe, in 1D and 3D; the jumps at the measurements, the equilibria and
-the kernels' node quadrature are the one-stage schemes' unchanged. About
-a migrating trajectory every stage of a reversed step closes under the
-ocean function of the step's end node (the reversed stages fall at
-tⁿ⁺¹ − γ Δt, where the forward run has no stage). On the same ramp as
+the kernels' node quadrature are the one-stage schemes' unchanged (about
+a migrating trajectory, the run's shorelines within a step are read as
+below). On the same ramp as
 the forward gates at steps 9.3 times the shortest relaxation time, its
 viscosity kernel is 1.4% off against the trapezoid's continuous 3.4%,
 and converges at second order to the derivative central differences of
@@ -236,12 +235,67 @@ examples/configs/README.md) at 1 kyr, 9.3 times the shortest relaxation
 time, its continuous kernel is +1.9 / −1.0% off uniformly (the
 trapezoid's +14 / +24%), 4.6 / 1.7% in its worst layer (33 / 41%) and
 −5.2 / −4.4% along the ice pulse (+25 / +41%), falling at second order.
-The kernels stay the node quadrature of the forward and adjoint fields.
-A quadrature consistent with the stages would integrate the product of
+The kernels in the relaxation times and the moduli stay the node
+quadrature of the forward and adjoint fields. A quadrature consistent
+with the stages would integrate the product of
 the two sweeps' within-step trajectories, each given by its stages; the
 forward's stages fall at tⁿ + γ Δt and the adjoint's at tⁿ⁺¹ − γ Δt, so
 it needs both sweeps' stage states and each interpolated to the other's
 times. It is not built.
+
+**The continuous sweep about migrating shorelines.** The adjoint's
+coefficient at each time is the run's ocean function at that time (Yu et
+al. 2025, §3.3), and a run solves for its shorelines at its nodes and, under
+Sdirk2, at the inner stages (tⁿ + γ Δt) alone. The continuous sweep reads
+both (`OceanFunctions`, refused without the stages' as the discrete sweep
+is), in 1D and 3D:
+
+- *Its reversed stages.* The last stage of the reversed step from node
+  n + 1 closes at node n, under the node's ocean function. The inner one
+  closes at tⁿ⁺¹ − γ Δt, where the run did not solve; it takes the run's
+  ocean function linear in time between the solves either side of that
+  time, the inner stage's at tⁿ + γ Δt and node n + 1's
+  (`detail::OceanFunctionWithinStep`): in a cell whose shoreline moved
+  before the stage the stage's value, in one that moved after it a
+  coefficient between 0 and 1 (the adjoint's closure is linear in it).
+- *Its ice views.* The kernels in the thickness and the initial sea level
+  are time integrals of the load kernel against ρ_i (1 − C(t)) and
+  ρ_w (C(t) − C₀). Their quadrature within a step is the scheme's own:
+  each inner stage carries its share b_i Δt of the step (Sdirk2's
+  (1 − γ) Δt; `detail::StageQuadratureWeights`) at its own time, its load
+  kernel there the adjoint density linear between the step's two nodes,
+  and that part is grounded by the stage's own shorelines and handed to
+  the step's nodes 1 − γ and γ, as the discrete sweep grounds and hands its
+  stage's part (`detail::ContinuousStageLoads`, `AssembleIceViews`). A cell
+  whose shoreline moves inside a step thus enters the views as the run
+  had it there.
+
+*Order.* An ocean function jumps in time where a cell's flotation flips,
+inside some step, and a run samples it at its solves' times alone, so
+every kernel about such a run, discrete or continuous, under either
+scheme, carries an error of first order in the step in the cells that
+flip, against the derivative of the problem continuous in time (zero in
+mean over where in a step the flips fall, but not small for a few cells).
+Under the exponential trapezoid the two sweeps sample the shorelines
+alike, at the nodes, and their difference is of second order. Under
+Sdirk2 the discrete sweep's samples are the run's, at the nodes and the
+inner stages, while the continuous sweep's inner stages fall between them,
+and in the cells that flip inside a step the two differ at first order;
+where the shorelines move only at nodes (a solved start's among them) the
+difference is of second order. On the marine cap of `TestMigratingDerivatives`
+(a solved start on a 1e22 Pa s mantle, two cells flipping inside steps)
+the continuous kernels (the ice views and the relaxation-time kernel) are
+1e-3 to 7e-3 from the discrete at 5 nodes and 2e-7 to 2.4e-6 at 2049,
+halving with the step from about 129 nodes; under the trapezoid 1e-2 to 2.4e-2 at 5 nodes and
+5e-8 to 1e-7 at 2049. Either sweep's ice views, under either scheme,
+differ from a run's at 2049 nodes by 1e-5 to 2e-4 at 513 and 1025 nodes,
+not monotonically: the first-order error both carry is larger than what
+separates them. A kernel at one node whose support floats within a step
+of it is the extreme case: at 5 nodes the thickness at a node with no
+grounded ice still loads the run through the inner stage of the step
+ending there, 39% of the derivative, which the continuous sweep meets
+through that stage's shorelines (the kernels 2.1% from central
+differences; `Migrating.TrajectoryKernelsUnderSdirk2`).
 
 **Not built under Sdirk2, the default scheme, each refused by name with
 its cure:** the continuous
@@ -418,10 +472,14 @@ divide the weights out on return; the pairing above with the weights
 restored is then the exact discrete derivative for the discrete
 sweeps. A node at the centre has no volume: its sample is the element's
 polynomial through the other nodes and its gradient entry is not kept.
-The entry is zero except for the nodal relaxation-time kernel of Gauss
-memory points in an element at the centre that relaxes, where the
-pairing misses the sensitivity to the value at the centre alone (about
-1e-5 of that element's). In 3D no memory node sits at the centre: the
+For a kernel accumulated at the points themselves the entry is small
+but not zero by construction: at a GLL node at r = 0 it is the node's
+quadrature weight (the degree forms carry no r² there) times products of
+the solution's departures from regularity at the centre, spectrally
+small, at rounding on production meshes. For the nodal relaxation-time
+kernel of Gauss memory points in an element at the centre that relaxes
+it is not small, and the pairing misses the sensitivity to the value at
+the centre alone (about 1e-5 of that element's). In 3D no memory node sits at the centre: the
 Gauss points are interior to the element holding it, which the coupling
 carries like any other, and at the GLL points that element is not
 carried (§13k, "The element holding the centre").
@@ -2463,7 +2521,10 @@ forced trajectory, and every continuous kernel (the loads inside and
 outside the water budget, the layer, the thickness, the initial sea
 level, the moments, the relaxation times or log viscosity, the moduli)
 and the continuous Hessian converging to the discrete at second order,
-1D and 3D.
+1D and 3D, under the exponential trapezoid; under Sdirk2, where the
+shorelines move inside steps, the continuous kernels converge to the
+discrete at first order (§1a), and the 3D sweep's about the solved start
+is held to halve at least with the step.
 
 **A jump of the forcing.** A time repeated once in the grid, times[k + 1]
 = times[k], is a jump of the forcing there (an earthquake's onset,
@@ -2821,13 +2882,15 @@ last iterate with `converged` false, and `sl3d kernel` refuses it.
   derivative of the calibrated run as the program computes it, to the
   calibration's and the iteration's tolerances. By the continuous
   method k0 and Aᵀ are the continuous sweep's approximations (it reads
-  the nodes' ocean functions alone), λ is the fixed point of that
-  approximate relation, and the total kernels converge to the discrete
-  ones at second order in the step. A total kernel is the partial one
+  the run's shorelines at its nodes and inner stages, §1a), λ is the
+  fixed point of that approximate relation, and the total kernels
+  converge to the discrete ones as the continuous kernels do: at second
+  order in the step, at first order under Sdirk2 where the shorelines
+  move inside steps. A total kernel is the partial one
   less a correction of comparable size, so it keeps fewer of the
   continuous sweep's digits than either: on the tests' stiff mantle,
-  37%, 8.4% and 2.1% at 5, 9 and 17 nodes where the discrete ones hold
-  1e-7.
+  under the exponential trapezoid, 37%, 8.4% and 2.1% at 5, 9 and 17
+  nodes where the discrete ones hold 1e-7.
 - *The calibration's tolerance.* (22.1) is assumed to hold. A
   calibration stopped at `rtol` leaves a residual of that order, and
   the kernels are the calibrated run's to that order: tighten the
