@@ -146,17 +146,15 @@ class TangentLinearSolver3D {
   /// itau or log-viscosity perturbation the recorded forward `trajectory`
   /// is required (the states between kept nodes rebuilt by forward steps
   /// under the recorded loads, with the run's own iteration). With
-  /// `oceanFunctions` from a migrating run the run linearises about that
-  /// trajectory; about a migrating run under Sdirk2 also
-  /// `stageOceanFunctions` (StageOceanFunctionsOf its snapshots), each
-  /// step's first stage linearised about its own shorelines. Distributed
-  /// over radius like the evolution, collective.
+  /// `oceanFunctions` from a migrating run (OceanFunctions::Of its
+  /// snapshots) the run linearises about that trajectory; about a
+  /// migrating run under Sdirk2 each step's first stage is linearised
+  /// about its own shorelines (OceanFunctions::stages). Distributed over
+  /// radius like the evolution, collective.
   [[nodiscard]] std::vector<Evolution3D::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The second-order run along u and v, about the forward trajectory and
   /// the recorded tangent-linear runs of u and v (`Run` with `record`):
@@ -176,9 +174,7 @@ class TangentLinearSolver3D {
       std::span<const Evolution3D::Snapshot> tangentV,
       const SecondOrderDirection3D& direction,
       const ForwardTrajectory3D* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The itau perturbation of a log-viscosity perturbation over the grid
   /// values, per branch: -itau_k(x) field(x) (eta = eta_ref exp(delta)).
@@ -223,9 +219,7 @@ class TangentLinearSolver3D {
   struct MaterialSecondDrive3D;
   class ForwardCursor3D;
   [[nodiscard]] std::vector<Evolution3D::Snapshot> March(
-      std::span<const double> times,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+      std::span<const double> times, const OceanFunctions& oceanFunctions,
       const Direct& directAt, const Drive& drive,
       const MaterialForcing3D* material, const Tide& tideAt = {},
       const Sources& sourcesAt = {}, const Direct& outsideAt = {},

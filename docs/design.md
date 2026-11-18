@@ -646,11 +646,12 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   (a density in time plus the instantaneous amplitude of each
   measurement; Yu et al. 2025 §3.7), and the quelled view (the kernel
   against the thickness rate on each interval).
-- **About a migrating trajectory.** Given the ocean function of every node
-  of a migrating run, the sweeps (1D and 3D) linearise about it: the adjoint stays
-  linear with the time-reversed C(t) as its coefficients (Yu et al. 2025,
-  §3.3; the shoreline-motion singular terms cancel), the grounding factors
-  are per node, and the initial sea level kernel
+- **About a migrating trajectory.** Given the ocean functions of a
+  migrating run (`OceanFunctions`: every node's and, under Sdirk2, each
+  step's first stage's), the sweeps (1D and 3D) linearise about it: the
+  adjoint stays linear with the time-reversed C(t) as its coefficients
+  (Yu et al. 2025, §3.3; the shoreline-motion singular terms cancel), the
+  grounding factors are per node, and the initial sea level kernel
   ρ_w Σₙ (Cₙ − C₀) directLoadKernelsₙ is formed (zero under frozen shorelines).
   The loads beside the ice, the layer on the solid surface and the
   interior sources of a migrating run are perturbed, and their kernels

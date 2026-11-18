@@ -236,8 +236,7 @@ FinalSeaLevelMisfit ComputeFinalSeaLevelMisfit(
       [&](const auto& snapshots, const Measurement& measurement) {
         return AdjointSolver(evolution, std::move(adjoint))
             .FirstOrderKernels(times, {{times.size() - 1, measurement}},
-                               nullptr, OceanFunctionsOf(snapshots),
-                               StageOceanFunctionsOf(snapshots))
+                               nullptr, OceanFunctions::Of(snapshots))
             .initialSeaLevel;
       });
 }
@@ -252,8 +251,7 @@ FinalSeaLevelMisfit3D ComputeFinalSeaLevelMisfit(
       [&](const auto& snapshots, const Measurement& measurement) {
         return AdjointSolver3D(evolution, adjoint)
             .FirstOrderKernels(times, {{times.size() - 1, measurement}},
-                               nullptr, OceanFunctionsOf(snapshots),
-                               StageOceanFunctionsOf(snapshots))
+                               nullptr, OceanFunctions::Of(snapshots))
             .ice.initialSeaLevel;
       });
 }
@@ -442,19 +440,17 @@ Result WithMultiplier(Kernels kernels, CalibrationMultiplier&& multiplier) {
 CalibrationMultiplier SolveCalibrationMultiplier(
     const Evolution& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     AdjointSolver::Options adjoint) {
   RequireNodes(times);
   const AdjointSolver sweep(evolution, IceOnly(std::move(adjoint)));
   return MultiplierOf(
       evolution.Solver().Grid().FieldSize(), times.size() - 1, measurements,
-      !oceanFunctions.empty(), options,
+      !oceanFunctions.nodes.empty(), options,
       [&](const std::map<std::size_t, Measurement>& forced) {
         return sweep
-            .FirstOrderKernels(times, forced, nullptr, oceanFunctions,
-                               stageOceanFunctions)
+            .FirstOrderKernels(times, forced, nullptr, oceanFunctions)
             .initialSeaLevel;
       });
 }
@@ -462,19 +458,17 @@ CalibrationMultiplier SolveCalibrationMultiplier(
 CalibrationMultiplier SolveCalibrationMultiplier(
     const Evolution3D& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     AdjointSolver3D::Options adjoint) {
   RequireNodes(times);
   const AdjointSolver3D sweep(evolution, IceOnly(std::move(adjoint)));
   return MultiplierOf(
       evolution.Solver().Grid().FieldSize(), times.size() - 1, measurements,
-      !oceanFunctions.empty(), options,
+      !oceanFunctions.nodes.empty(), options,
       [&](const std::map<std::size_t, Measurement>& forced) {
         return sweep
-            .FirstOrderKernels(times, forced, nullptr, oceanFunctions,
-                               stageOceanFunctions)
+            .FirstOrderKernels(times, forced, nullptr, oceanFunctions)
             .ice.initialSeaLevel;
       });
 }
@@ -483,17 +477,14 @@ CalibratedKernels ComputeCalibratedKernels(
     const Evolution& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     AdjointSolver::Options adjoint) {
   auto multiplier = SolveCalibrationMultiplier(
-      evolution, times, measurements, oceanFunctions, stageOceanFunctions,
-      options, adjoint);
+      evolution, times, measurements, oceanFunctions, options, adjoint);
   auto kernels = AdjointSolver(evolution, std::move(adjoint))
                      .FirstOrderKernels(times, multiplier.measurements,
-                                        trajectory, oceanFunctions,
-                                        stageOceanFunctions);
+                                        trajectory, oceanFunctions);
   return WithMultiplier<CalibratedKernels>(std::move(kernels),
                                            std::move(multiplier));
 }
@@ -502,17 +493,14 @@ CalibratedKernels3D ComputeCalibratedKernels(
     const Evolution3D& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     const AdjointSolver3D::Options& adjoint) {
   auto multiplier = SolveCalibrationMultiplier(
-      evolution, times, measurements, oceanFunctions, stageOceanFunctions,
-      options, adjoint);
+      evolution, times, measurements, oceanFunctions, options, adjoint);
   auto kernels = AdjointSolver3D(evolution, adjoint)
                      .FirstOrderKernels(times, multiplier.measurements,
-                                        trajectory, oceanFunctions,
-                                        stageOceanFunctions);
+                                        trajectory, oceanFunctions);
   return WithMultiplier<CalibratedKernels3D>(std::move(kernels),
                                              std::move(multiplier));
 }
@@ -529,8 +517,7 @@ Result CalibratedTangentOf(
     const Solver& solver, std::size_t fieldSize,
     std::span<const double> times, const Direction& direction,
     std::span<const double> finalSeaLevel, const Trajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options, bool finish) {
   RequireNodes(times);
   const auto w = IterationWeights(options, fieldSize);
@@ -553,14 +540,13 @@ Result CalibratedTangentOf(
     }
   }
   const auto last = times.size() - 1;
-  const auto migrating = !oceanFunctions.empty();
+  const auto migrating = !oceanFunctions.nodes.empty();
   Result out;
   // the run along the direction, the calibrated points' initial sea level
   // held, and the right side it leaves at the last node
   auto along = decltype(out.snapshots){};
   if (!direction.Empty()) {
-    along = solver.Run(times, direction, trajectory, oceanFunctions,
-                       stageOceanFunctions);
+    along = solver.Run(times, direction, trajectory, oceanFunctions);
     ++out.runs;
   }
   auto rhs = std::vector<double>(fieldSize, 0.0);
@@ -574,8 +560,7 @@ Result CalibratedTangentOf(
     auto alone = Direction{};
     alone.initialSeaLevel.assign(seaLevel.begin(), seaLevel.end());
     ++out.runs;
-    return solver.Run(times, alone, nullptr, oceanFunctions,
-                      stageOceanFunctions);
+    return solver.Run(times, alone, nullptr, oceanFunctions);
   };
   auto total = [&](std::span<const double> onPoints) {
     auto sum = std::vector<double>(onPoints.begin(), onPoints.end());
@@ -610,8 +595,7 @@ Result CalibratedTangentOf(
   if (finish) {
     auto whole = direction;
     whole.initialSeaLevel = out.initialSeaLevel;
-    out.snapshots = solver.Run(times, whole, trajectory, oceanFunctions,
-                               stageOceanFunctions);
+    out.snapshots = solver.Run(times, whole, trajectory, oceanFunctions);
     ++out.runs;
   }
   return out;
@@ -634,14 +618,13 @@ CalibrationTangent SolveCalibrationTangent(
     const Evolution& evolution, std::span<const double> times,
     const TangentPerturbation& direction,
     std::span<const double> finalSeaLevel, const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     TangentLinearSolver::Options tangent) {
   return WithoutTheRun(CalibratedTangentOf<CalibratedTangent>(
       TangentLinearSolver(evolution, std::move(tangent)),
       evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
-      trajectory, oceanFunctions, stageOceanFunctions, options, false));
+      trajectory, oceanFunctions, options, false));
 }
 
 CalibrationTangent SolveCalibrationTangent(
@@ -649,28 +632,26 @@ CalibrationTangent SolveCalibrationTangent(
     const TangentPerturbation3D& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     TangentLinearSolver3D::Options tangent) {
   return WithoutTheRun(CalibratedTangentOf<CalibratedTangent3D>(
       TangentLinearSolver3D(evolution, std::move(tangent)),
       evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
-      trajectory, oceanFunctions, stageOceanFunctions, options, false));
+      trajectory, oceanFunctions, options, false));
 }
 
 CalibratedTangent ComputeCalibratedTangent(
     const Evolution& evolution, std::span<const double> times,
     const TangentPerturbation& direction,
     std::span<const double> finalSeaLevel, const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     TangentLinearSolver::Options tangent) {
   return CalibratedTangentOf<CalibratedTangent>(
       TangentLinearSolver(evolution, std::move(tangent)),
       evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
-      trajectory, oceanFunctions, stageOceanFunctions, options, true);
+      trajectory, oceanFunctions, options, true);
 }
 
 CalibratedTangent3D ComputeCalibratedTangent(
@@ -678,14 +659,13 @@ CalibratedTangent3D ComputeCalibratedTangent(
     const TangentPerturbation3D& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options,
     TangentLinearSolver3D::Options tangent) {
   return CalibratedTangentOf<CalibratedTangent3D>(
       TangentLinearSolver3D(evolution, std::move(tangent)),
       evolution.Solver().Grid().FieldSize(), times, direction, finalSeaLevel,
-      trajectory, oceanFunctions, stageOceanFunctions, options, true);
+      trajectory, oceanFunctions, options, true);
 }
 
 void RefuseCalibratedSecondOrderKernels() {

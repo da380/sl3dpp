@@ -721,7 +721,7 @@ TEST(Sdirk2Derivatives, TheDiscreteSweepIsTheTangentsTranspose) {
 TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
   // About a migrating run each stage is linearised about its own
   // shorelines, the first stage's recorded beside the nodes'
-  // (StageOceanFunctionsOf): the tangent run along a thickness and an
+  // (OceanFunctions::stages): the tangent run along a thickness and an
   // initial sea level perturbation that flip no flotation cell matches
   // central differences of migrating runs (the map is piecewise affine),
   // the relaxation times' against differences at second order, and the
@@ -737,16 +737,16 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
   const Evolution::Options options{.scheme = kSdirk2, .rtol = 1e-12, .record_stride = 1};
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, thickness);
-  const auto oceans = OceanFunctionsOf(run);
-  const auto stageOceans = StageOceanFunctionsOf(run);
+  const auto oceans = OceanFunctions::Of(run);
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
-  ASSERT_EQ(stageOceans.size(), nodes);
+  ASSERT_EQ(oceans.stages.size(), nodes);
   // the shorelines move through the run, and inside its steps
-  EXPECT_NE(oceans.front(), oceans.back());
+  EXPECT_NE(oceans.nodes.front(), oceans.nodes.back());
   auto between = false;
   for (auto n = std::size_t{1}; n < nodes; ++n) {
-    ASSERT_EQ(stageOceans[n].size(), 1u);
-    between = between || (stageOceans[n][0] != oceans[n] && stageOceans[n][0] != oceans[n - 1]);
+    ASSERT_EQ(oceans.stages[n].size(), 1u);
+    between = between || (oceans.stages[n][0] != oceans.nodes[n] &&
+                          oceans.stages[n][0] != oceans.nodes[n - 1]);
   }
   EXPECT_TRUE(between) << "no stage has shorelines of its own";
 
@@ -775,9 +775,9 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
       return out;
     });
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
       for (auto i = std::size_t{0}; i < snaps[n].stages.size(); ++i) {
-        EXPECT_EQ(snaps[n].stages[i].oceanFunction, stageOceans[n][i])
+        EXPECT_EQ(snaps[n].stages[i].oceanFunction, oceans.stages[n][i])
             << "a stage's cell flipped";
       }
     }
@@ -790,7 +790,7 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
   direction.iceThickness = deltaIce;
   direction.initialSeaLevel = deltaSea;
   const auto along =
-      Objective(setup, tangent.Run(times, direction, nullptr, oceans, stageOceans),
+      Objective(setup, tangent.Run(times, direction, nullptr, oceans),
                 measurements);
   std::cout << std::format("[sdirk2 migrating] tangent against differences: {:.2e}\n",
                            Gap(along, fd));
@@ -798,7 +798,7 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
 
   const auto kernels =
       AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-          .FirstOrderKernels(times, measurements, &trajectory, oceans, stageOceans);
+          .FirstOrderKernels(times, measurements, &trajectory, oceans);
   const auto paired = setup.Surface(kernels.initialSeaLevel, deltaSea) +
                       NodePairing(setup, kernels.thickness, deltaIce);
   std::cout << std::format("[sdirk2 migrating] ice and sea level transpose: {:.2e}\n",
@@ -818,7 +818,7 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
   TangentPerturbation alongItau;
   alongItau.itau = setup.DeltaItau(0.1);
   const auto predicted =
-      Objective(setup, tangent.Run(times, alongItau, &trajectory, oceans, stageOceans),
+      Objective(setup, tangent.Run(times, alongItau, &trajectory, oceans),
                 measurements);
   const auto itau = Difference(
       [&](double eps) {
@@ -826,7 +826,7 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
         Evolution trial(moved, setup.solver, state, options);
         const auto snaps = trial.RunMigrating(times, thickness);
         for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-          EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+          EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
         }
         return Objective(setup, snaps, measurements);
       },
@@ -846,14 +846,15 @@ TEST(Sdirk2Derivatives, AboutAMigratingTrajectory) {
   for (const auto& what : {"tangent", "sweep"}) {
     try {
       if (std::string(what) == "tangent") {
-        (void)tangent.Run(times, direction, nullptr, oceans);
+        (void)tangent.Run(times, direction, nullptr, OceanFunctions{.nodes = oceans.nodes});
       } else {
         (void)AdjointSolver(evolution, {.rtol = 1e-12})
-            .FirstOrderKernels(times, measurements, &trajectory, oceans);
+            .FirstOrderKernels(times, measurements, &trajectory,
+                               OceanFunctions{.nodes = oceans.nodes});
       }
       ADD_FAILURE() << what << " ran without the stages' ocean functions";
     } catch (const std::invalid_argument& error) {
-      EXPECT_NE(std::string(error.what()).find("StageOceanFunctionsOf"), std::string::npos)
+      EXPECT_NE(std::string(error.what()).find("OceanFunctions::Of"), std::string::npos)
           << error.what();
     }
   }
@@ -1154,16 +1155,14 @@ TEST(Sdirk2Derivatives, TheDiscreteHessianIsExactAndSymmetric) {
     struct Base {
       std::vector<Evolution::Snapshot> run;
       ForwardTrajectory trajectory;
-      std::vector<std::vector<double>> oceans;
-      StageOceanFunctions stageOceans;
+      OceanFunctions oceans;
     };
     auto baseOf = [&](Evolution& evolution, double eps) {
       const auto moved = Plus(thickness, u.iceThickness, eps);
       Base out;
       if (migrating) {
         out.run = evolution.RunMigrating(times, Linear(times, moved));
-        out.oceans = OceanFunctionsOf(out.run);
-        out.stageOceans = StageOceanFunctionsOf(out.run);
+        out.oceans = OceanFunctions::Of(out.run);
       } else {
         out.run = evolution.Run(times, Linear(times, FrozenLoads(setup, moved)));
       }
@@ -1175,9 +1174,9 @@ TEST(Sdirk2Derivatives, TheDiscreteHessianIsExactAndSymmetric) {
     TangentLinearSolver tangent(
         evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12, .record = true});
     const auto runU =
-        tangent.Run(times, u, &base.trajectory, base.oceans, base.stageOceans);
+        tangent.Run(times, u, &base.trajectory, base.oceans);
     const auto runW =
-        tangent.Run(times, w, &base.trajectory, base.oceans, base.stageOceans);
+        tangent.Run(times, w, &base.trajectory, base.oceans);
     // a recorded tangent run keeps each step's first stage
     ASSERT_EQ(runU[1].stages.size(), 1u);
     EXPECT_TRUE(runU[1].stages[0].internalState.has_value());
@@ -1185,13 +1184,13 @@ TEST(Sdirk2Derivatives, TheDiscreteHessianIsExactAndSymmetric) {
         .method = AdjointMethod::Discrete, .rtol = 1e-12, .material_kernels = true};
     AdjointSolver adjoint(evolution, adjointOptions);
     const auto first = adjoint.FirstOrderKernels(times, measurements, &base.trajectory,
-                                                 base.oceans, base.stageOceans);
+                                                 base.oceans);
     const auto [kernelsU, alongU] =
         adjoint.SecondOrderKernels(times, measurements, runU, u.itau, base.trajectory,
-                                   base.oceans, u.material, base.stageOceans);
+                                   base.oceans, u.material);
     const auto [kernelsW, alongW] =
         adjoint.SecondOrderKernels(times, measurements, runW, w.itau, base.trajectory,
-                                   base.oceans, w.material, base.stageOceans);
+                                   base.oceans, w.material);
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_LE(MaxDiff(kernelsU.thickness[n], first.thickness[n]),
                 1e-12 * MaxAbs(first.thickness[n]))
@@ -1212,8 +1211,7 @@ TEST(Sdirk2Derivatives, TheDiscreteHessianIsExactAndSymmetric) {
     direction.materialV = w.material;
     const auto forward = Objective(
         setup,
-        tangent.RunSecondOrder(times, runU, runW, direction, &base.trajectory, base.oceans,
-                               base.stageOceans),
+        tangent.RunSecondOrder(times, runU, runW, direction, &base.trajectory, base.oceans),
         measurements);
     std::cout << std::format(
         "[sdirk2 Hessian, {}] symmetry gap {:.2e}, against the second-order run {:.2e}\n",
@@ -1230,13 +1228,13 @@ TEST(Sdirk2Derivatives, TheDiscreteHessianIsExactAndSymmetric) {
           Evolution trial(moved, setup.solver, state, options);
           const auto movedBase = baseOf(trial, eps);
           if (migrating) {
-            EXPECT_EQ(movedBase.oceans, base.oceans) << "a cell flipped";
-            EXPECT_EQ(movedBase.stageOceans, base.stageOceans) << "a stage's cell flipped";
+            EXPECT_EQ(movedBase.oceans.nodes, base.oceans.nodes) << "a cell flipped";
+            EXPECT_EQ(movedBase.oceans.stages, base.oceans.stages) << "a stage's cell flipped";
           }
           return Pairing(setup, moved,
                          AdjointSolver(trial, adjointOptions)
                              .FirstOrderKernels(times, measurements, &movedBase.trajectory,
-                                                movedBase.oceans, movedBase.stageOceans),
+                                                movedBase.oceans),
                          w);
         },
         0.1, uw);
@@ -1480,9 +1478,8 @@ TEST(Sdirk2Derivatives, AStageReadsItsStepsNodesAlone) {
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_EQ(run[n].oceanFunction, viaNodes[n].oceanFunction) << n;
     }
-    const auto oceans = OceanFunctionsOf(run);
-    const auto stageOceans = StageOceanFunctionsOf(run);
-    EXPECT_NE(oceans.front(), oceans.back());
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.front(), oceans.nodes.back());
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
     measurements[2].displacementDual = setup.Smooth(rng, 0.5);
@@ -1498,9 +1495,9 @@ TEST(Sdirk2Derivatives, AStageReadsItsStepsNodesAlone) {
         return out;
       });
       for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-        EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+        EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
         for (auto i = std::size_t{0}; i < snaps[n].stages.size(); ++i) {
-          EXPECT_EQ(snaps[n].stages[i].oceanFunction, stageOceans[n][i])
+          EXPECT_EQ(snaps[n].stages[i].oceanFunction, oceans.stages[n][i])
               << "a stage's cell flipped";
         }
       }
@@ -1512,12 +1509,12 @@ TEST(Sdirk2Derivatives, AStageReadsItsStepsNodesAlone) {
     const auto along = Objective(
         setup,
         TangentLinearSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-            .Run(times, direction, nullptr, oceans, stageOceans),
+            .Run(times, direction, nullptr, oceans),
         measurements);
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     const auto kernels =
         AdjointSolver(evolution, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-            .FirstOrderKernels(times, measurements, &trajectory, oceans, stageOceans);
+            .FirstOrderKernels(times, measurements, &trajectory, oceans);
     const auto paired = NodePairing(setup, kernels.thickness, direction.iceThickness);
     std::cout << std::format(
         "[sdirk2 curved ice, migrating] the run against its nodes' interpolant: {:.2e}; "
@@ -1962,15 +1959,15 @@ TEST(Sdirk2Derivatives, AMigratingRunUnderLateralModuli3D) {
       .scheme = kSdirk2, .rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1};
   Evolution3D evolution(*op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, thickness);
-  const auto oceans = OceanFunctionsOf(run);
-  const auto stageOceans = StageOceanFunctionsOf(run);
+  const auto oceans = OceanFunctions::Of(run);
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
-  ASSERT_EQ(stageOceans.size(), nodes);
+  ASSERT_EQ(oceans.stages.size(), nodes);
   // the shorelines move through the run, and inside its steps
-  EXPECT_NE(oceans.front(), oceans.back());
+  EXPECT_NE(oceans.nodes.front(), oceans.nodes.back());
   auto between = false;
   for (auto n = std::size_t{1}; n < nodes; ++n) {
-    between = between || (stageOceans[n][0] != oceans[n] && stageOceans[n][0] != oceans[n - 1]);
+    between = between || (oceans.stages[n][0] != oceans.nodes[n] &&
+                          oceans.stages[n][0] != oceans.nodes[n - 1]);
   }
   EXPECT_TRUE(between) << "no stage has shorelines of its own";
 
@@ -1998,9 +1995,9 @@ TEST(Sdirk2Derivatives, AMigratingRunUnderLateralModuli3D) {
       return out;
     });
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
       for (auto i = std::size_t{0}; i < snaps[n].stages.size(); ++i) {
-        EXPECT_EQ(snaps[n].stages[i].oceanFunction, stageOceans[n][i])
+        EXPECT_EQ(snaps[n].stages[i].oceanFunction, oceans.stages[n][i])
             << "a stage's cell flipped";
       }
     }
@@ -2013,18 +2010,17 @@ TEST(Sdirk2Derivatives, AMigratingRunUnderLateralModuli3D) {
   direction.iceThickness = deltaIce;
   direction.initialSeaLevel = deltaSea;
   const auto along = Objective(
-      setup, tangent.Run(times, direction, nullptr, oceans, stageOceans), measurements);
+      setup, tangent.Run(times, direction, nullptr, oceans), measurements);
   const auto kernels = AdjointSolver3D(evolution, {.method = AdjointMethod::Discrete,
                                                    .rtol = 1e-12,
                                                    .coupled_rtol = 1e-12})
-                           .FirstOrderKernels(times, measurements, &trajectory, oceans,
-                                              stageOceans);
+                           .FirstOrderKernels(times, measurements, &trajectory, oceans);
   const auto paired = setup.Surface(kernels.ice.initialSeaLevel, deltaSea) +
                       NodePairing(setup, kernels.ice.thickness, deltaIce);
   TangentPerturbation3D alongViscosity;
   alongViscosity.logViscosity = OnCoupling(coupling, kPattern);
   const auto viscosity = Objective(
-      setup, tangent.Run(times, alongViscosity, &trajectory, oceans, stageOceans),
+      setup, tangent.Run(times, alongViscosity, &trajectory, oceans),
       measurements);
   const auto viscosityPaired = VolumePairing(coupling, kernels.logViscosityKernel3D[0],
                                              alongViscosity.logViscosity);
@@ -2037,7 +2033,9 @@ TEST(Sdirk2Derivatives, AMigratingRunUnderLateralModuli3D) {
   ASSERT_NE(viscosity, 0.0);
   EXPECT_NEAR(viscosityPaired, viscosity, 1e-8 * std::abs(viscosity));
   // refused by name without the stages' ocean functions
-  EXPECT_THROW((void)tangent.Run(times, direction, nullptr, oceans), std::invalid_argument);
+  EXPECT_THROW(
+      (void)tangent.Run(times, direction, nullptr, OceanFunctions{.nodes = oceans.nodes}),
+      std::invalid_argument);
 }
 
 TEST(Sdirk2Derivatives, AcrossAnOnsetUnderInteriorSources3D) {

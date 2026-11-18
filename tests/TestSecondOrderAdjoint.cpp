@@ -116,7 +116,7 @@ std::map<std::size_t, Measurement> Measurements(const Scene& setup,
 struct Base {
   GRDSolver::State state;
   std::vector<double> times;
-  std::vector<std::vector<double>> oceans;
+  OceanFunctions oceans;
   ForwardTrajectory trajectory;
 };
 
@@ -133,7 +133,7 @@ Base MakeBase(const Scene& setup, const ViscoelasticOperator& op,
         {.scheme = scheme, .rtol = 1e-12, .record_stride = 1});
     const auto run = (*evolution)->RunMigrating(
         cap.times, [cap](double t) { return cap.Thickness(t); });
-    base.oceans = OceanFunctionsOf(run);
+    base.oceans = OceanFunctions::Of(run);
     base.trajectory = ForwardTrajectory::FromSnapshots(run);
   } else {
     base.state = setup.state;

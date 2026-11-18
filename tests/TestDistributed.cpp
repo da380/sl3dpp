@@ -558,8 +558,7 @@ TEST(Distributed, TheAdjointMatchesTheOneProcessSweep) {
       AdjointSolver3D adjoint(evolution, adjointOptions);
       return adjoint.FirstOrderKernels(
           times, measurements, &trajectory,
-          migrating ? OceanFunctionsOf(snapshots)
-                    : std::vector<std::vector<double>>{});
+          migrating ? OceanFunctions::Of(snapshots) : OceanFunctions{});
     };
     const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
     const auto want = sweep(whole);
@@ -1071,8 +1070,7 @@ TEST(Distributed, Sdirk2RunAndSweepMatchTheOneProcess) {
       const AdjointSolver3D adjoint(evolution, adjointOptions);
       auto kernels = adjoint.FirstOrderKernels(
           times, measurements, &trajectory,
-          migrating ? OceanFunctionsOf(snapshots)
-                    : std::vector<std::vector<double>>{});
+          migrating ? OceanFunctions::Of(snapshots) : OceanFunctions{});
       return std::pair{snapshots, kernels};
     };
     const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
@@ -1211,10 +1209,8 @@ TEST(Distributed, Sdirk2DerivativesMatchTheOneProcess) {
                                  ? evolution.RunMigrating(times, thickness)
                                  : evolution.Run(times, directLoad);
       const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
-      const auto oceans = migrating ? OceanFunctionsOf(snapshots)
-                                    : std::vector<std::vector<double>>{};
-      const auto stageOceans =
-          migrating ? StageOceanFunctionsOf(snapshots) : StageOceanFunctions{};
+      const auto oceans =
+          migrating ? OceanFunctions::Of(snapshots) : OceanFunctions{};
       TangentPerturbation3D direction;
       direction.logViscosity.assign(op.Coupling().GridValueCount(), 0.1);
       const TangentLinearSolver3D tangent(
@@ -1224,12 +1220,12 @@ TEST(Distributed, Sdirk2DerivativesMatchTheOneProcess) {
                       .coupled_rtol = 1e-11,
                       .record = true});
       const auto tangentRun =
-          tangent.Run(times, direction, &trajectory, oceans, stageOceans);
+          tangent.Run(times, direction, &trajectory, oceans);
       const AdjointSolver3D adjoint(evolution, adjointOptions);
       auto [kernels, along] = adjoint.SecondOrderKernels(
           times, measurements, tangentRun,
           TangentLinearSolver3D::ItauOfLogViscosity(op, direction.logViscosity),
-          trajectory, oceans, {}, stageOceans);
+          trajectory, oceans);
       auto out = Results{std::move(kernels), std::move(along),
                          tangentRun.back().relativeSeaLevelChange, 0.0};
       out.paired = VolumePairing(op.Coupling(), out.kernels.logViscosityKernel3D[0],
@@ -1365,8 +1361,7 @@ TEST(Distributed, CalibratedKernelsMatchTheOneProcess) {
     const auto snapshots = evolution.RunMigrating(times, thickness);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
     return ComputeCalibratedKernels(evolution, times, measurements,
-                                    &trajectory, OceanFunctionsOf(snapshots),
-                                    StageOceanFunctionsOf(snapshots),
+                                    &trajectory, OceanFunctions::Of(snapshots),
                                     {.rtol = 1e-10}, adjointOptions);
   };
   const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);

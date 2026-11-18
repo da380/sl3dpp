@@ -286,9 +286,8 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns) {
     const auto base = scene.Calibrate(evolution, none, 0.0, scene.target,
                                       Shorelines::Migrating);
     const auto& run = base.snapshots;
-    const auto oceans = OceanFunctionsOf(run);
-    const auto stageOceans = StageOceanFunctionsOf(run);
-    ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+    const auto oceans = OceanFunctions::Of(run);
+    ASSERT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
 
     // the objective of the run calibrated afresh
@@ -302,7 +301,7 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns) {
           << "the start flipped";
       for (auto n = std::size_t{0}; n < nodes; ++n) {
         EXPECT_TRUE(calibrated.snapshots[n].converged) << "node " << n;
-        EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans[n])
+        EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans.nodes[n])
             << "a cell flipped at node " << n;
       }
       return Objective(setup, calibrated.snapshots, measurements);
@@ -333,10 +332,9 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns) {
                                .material_kernels = true};
     const auto partial =
         AdjointSolver(evolution, adjoint)
-            .FirstOrderKernels(times, measurements, &trajectory, oceans,
-                               stageOceans);
+            .FirstOrderKernels(times, measurements, &trajectory, oceans);
     const auto total = ComputeCalibratedKernels(
-        evolution, times, measurements, &trajectory, oceans, stageOceans,
+        evolution, times, measurements, &trajectory, oceans,
         {.rtol = 1e-12}, adjoint);
     EXPECT_TRUE(total.converged);
     EXPECT_EQ(total.sweeps, static_cast<int>(total.updates.size()) + 1);
@@ -380,7 +378,7 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns) {
 
     // the plain iteration reaches the same multiplier in more sweeps
     const auto plain = SolveCalibrationMultiplier(
-        evolution, times, measurements, oceans, stageOceans,
+        evolution, times, measurements, oceans,
         {.iterations = 60, .rtol = 1e-12, .anderson_memory = 0}, adjoint);
     EXPECT_TRUE(plain.converged);
     EXPECT_GT(plain.sweeps, total.sweeps + 5) << label;
@@ -398,7 +396,7 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns) {
         << label;
     // and the first sweep's, from zero, the partial one's
     const auto first = SolveCalibrationMultiplier(
-        evolution, times, measurements, oceans, stageOceans,
+        evolution, times, measurements, oceans,
         {.iterations = 1, .rtol = 1e-12}, adjoint);
     EXPECT_FALSE(first.converged);
     EXPECT_EQ(first.sweeps, 1);
@@ -440,7 +438,7 @@ TEST(CalibratedKernels, FrozenShorelinesNeedNoMultiplier) {
   const auto adjoint = AdjointSolver::Options{.rtol = 1e-12};
   auto calls = 0;
   const auto total = ComputeCalibratedKernels(
-      evolution, times, measurements, nullptr, {}, {},
+      evolution, times, measurements, nullptr, {},
       {.on_iteration = [&](int, double) { ++calls; }}, adjoint);
   EXPECT_TRUE(total.converged);
   EXPECT_EQ(total.sweeps, 1);
@@ -496,9 +494,8 @@ TEST(CalibratedKernels, WeightsHoldTheUncalibratedPoints) {
   Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
   const auto base = scene.Calibrate(evolution, none, 0.0, scene.target,
                                     Shorelines::Migrating, weights);
-  const auto oceans = OceanFunctionsOf(base.snapshots);
-  const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
-  ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+  const auto oceans = OceanFunctions::Of(base.snapshots);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
   auto objective = [&](const Fields& d, double eps,
                        std::span<const double> guess) {
     Evolution trial(scene.op, setup.solver, setup.state, scene.options);
@@ -508,7 +505,7 @@ TEST(CalibratedKernels, WeightsHoldTheUncalibratedPoints) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     EXPECT_EQ(calibrated.state.oceanFunction, base.state.oceanFunction);
     for (auto n = std::size_t{0}; n < nodes; ++n) {
-      EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans[n])
+      EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans.nodes[n])
           << "a cell flipped at node " << n;
     }
     return Objective(setup, calibrated.snapshots, measurements);
@@ -520,7 +517,7 @@ TEST(CalibratedKernels, WeightsHoldTheUncalibratedPoints) {
              objective(none, 0.0, Moved(scene.target, deltaGuess, -1.0)));
   const auto adjoint = AdjointSolver::Options{.rtol = 1e-12};
   const auto total = ComputeCalibratedKernels(
-      evolution, times, measurements, nullptr, oceans, stageOceans,
+      evolution, times, measurements, nullptr, oceans,
       {.weights = weights, .rtol = 1e-12}, adjoint);
   EXPECT_TRUE(total.converged);
   auto onWeighted = 0.0, offWeighted = 0.0;
@@ -560,11 +557,10 @@ TEST(CalibratedKernels, ARunOutIterationIsReportedAndSecondOrderRefused) {
   Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
   const auto base = scene.Calibrate(evolution, {}, 0.0, scene.target,
                                     Shorelines::Migrating);
-  const auto oceans = OceanFunctionsOf(base.snapshots);
-  const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
+  const auto oceans = OceanFunctions::Of(base.snapshots);
   auto seen = std::vector<double>{};
   const auto cut = ComputeCalibratedKernels(
-      evolution, times, measurements, nullptr, oceans, stageOceans,
+      evolution, times, measurements, nullptr, oceans,
       {.iterations = 2,
        .rtol = 1e-12,
        .on_iteration = [&](int sweep, double update) {
@@ -578,7 +574,7 @@ TEST(CalibratedKernels, ARunOutIterationIsReportedAndSecondOrderRefused) {
   EXPECT_GT(cut.updates.back(), 1e-12);
   EXPECT_THROW(
       static_cast<void>(SolveCalibrationMultiplier(
-          evolution, times, measurements, oceans, stageOceans,
+          evolution, times, measurements, oceans,
           {.iterations = 0})),
       std::invalid_argument);
   // The calibration marks the state it leaves, and a second-order sweep
@@ -591,7 +587,7 @@ TEST(CalibratedKernels, ARunOutIterationIsReportedAndSecondOrderRefused) {
   const auto refused = [&](const AdjointSolver& sweep) {
     try {
       static_cast<void>(sweep.SecondOrderKernels(
-          times, measurements, {}, {}, trajectory, oceans, {}, stageOceans));
+          times, measurements, {}, {}, trajectory, oceans));
       return std::string{};
     } catch (const std::logic_error& error) {
       return std::string{error.what()};
@@ -608,11 +604,11 @@ TEST(CalibratedKernels, ARunOutIterationIsReportedAndSecondOrderRefused) {
   direction.initialSeaLevel = setup.Smooth(rng, 0.1 * setup.Metre());
   const auto tangent =
       TangentLinearSolver(evolution, {.rtol = 1e-12, .record = true})
-          .Run(times, direction, &trajectory, oceans, stageOceans);
+          .Run(times, direction, &trajectory, oceans);
   const auto [kernels, along] =
       AdjointSolver(evolution, {.rtol = 1e-12, .initial_sea_level_held = true})
           .SecondOrderKernels(times, measurements, tangent, {}, trajectory,
-                              oceans, {}, stageOceans);
+                              oceans);
   EXPECT_GT(MaxAbs(kernels.initialSeaLevel), 0.0);
   EXPECT_EQ(along.initialSeaLevel.size(), kernels.initialSeaLevel.size());
   evolution.SetBackgroundState(base.state);
@@ -651,8 +647,8 @@ TEST(CalibratedKernels, TheContinuousSweepConvergesToTheDiscrete) {
     Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
     const auto base = scene.Calibrate(evolution, {}, 0.0, scene.target,
                                       Shorelines::Migrating);
-    const auto oceans = OceanFunctionsOf(base.snapshots);
-    EXPECT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+    const auto oceans = OceanFunctions::Of(base.snapshots);
+    EXPECT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
     auto objective = [&](double eps) {
       Evolution trial(scene.op, setup.solver, setup.state, scene.options);
       const auto calibrated = scene.Calibrate(
@@ -660,7 +656,7 @@ TEST(CalibratedKernels, TheContinuousSweepConvergesToTheDiscrete) {
       // flotation's 0/1: rounding changes it only at a cell on the threshold
       EXPECT_EQ(calibrated.state.oceanFunction, base.state.oceanFunction);
       for (auto n = std::size_t{0}; n < times.size(); ++n) {
-        EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans[n])
+        EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans.nodes[n])
             << "a cell flipped at node " << n;
       }
       return Objective(setup, calibrated.snapshots, measurements);
@@ -671,7 +667,7 @@ TEST(CalibratedKernels, TheContinuousSweepConvergesToTheDiscrete) {
     for (const auto method :
          {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
       const auto total = ComputeCalibratedKernels(
-          evolution, times, measurements, nullptr, oceans, {}, {.rtol = 1e-11},
+          evolution, times, measurements, nullptr, oceans, {.rtol = 1e-11},
           {.method = method, .rtol = 1e-12});
       EXPECT_TRUE(total.converged);
       errors[method] =
@@ -749,9 +745,8 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
     Evolution evolution(scene.op, setup.solver, setup.state, scene.options);
     const auto base = scene.Calibrate(evolution, none, 0.0, scene.target,
                                       Shorelines::Migrating);
-    const auto oceans = OceanFunctionsOf(base.snapshots);
-    const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
-    ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+    const auto oceans = OceanFunctions::Of(base.snapshots);
+    ASSERT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
     const auto trajectory = ForwardTrajectory::FromSnapshots(base.snapshots);
 
     const auto adjoint =
@@ -759,7 +754,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
                                .rtol = 1e-12,
                                .material_kernels = true};
     const auto total = ComputeCalibratedKernels(
-        evolution, times, measurements, &trajectory, oceans, stageOceans,
+        evolution, times, measurements, &trajectory, oceans,
         {.rtol = 1e-12}, adjoint);
     ASSERT_TRUE(total.converged);
     const auto& mesh = setup.material.Mesh();
@@ -776,7 +771,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
         .method = AdjointMethod::Discrete, .rtol = 1e-12};
     const auto tangent = ComputeCalibratedTangent(
         evolution, times, direction, deltaTarget, &trajectory, oceans,
-        stageOceans, {.rtol = 1e-12}, runs);
+        {.rtol = 1e-12}, runs);
     EXPECT_TRUE(tangent.converged);
     // the run along the direction, one per pass after the first, and the
     // run that formed the snapshots
@@ -786,7 +781,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
     const auto held = Objective(
         setup,
         TangentLinearSolver(evolution, runs)
-            .Run(times, direction, &trajectory, oceans, stageOceans),
+            .Run(times, direction, &trajectory, oceans),
         measurements);
 
     // the change of the calibrated initial sea level, against calibrations
@@ -799,7 +794,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
       EXPECT_EQ(found.state.oceanFunction, base.state.oceanFunction)
           << "the start flipped";
       for (auto n = std::size_t{0}; n < nodes; ++n) {
-        EXPECT_EQ(found.snapshots[n].oceanFunction, oceans[n])
+        EXPECT_EQ(found.snapshots[n].oceanFunction, oceans.nodes[n])
             << "a cell flipped at node " << n;
       }
       return found.state.seaLevel;
@@ -814,13 +809,13 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
     auto iceAlone = TangentPerturbation{};
     iceAlone.iceThickness = deltaIce;
     const auto byIce = SolveCalibrationTangent(
-        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        evolution, times, iceAlone, {}, nullptr, oceans,
         {.rtol = 1e-12}, runs);
     EXPECT_TRUE(byIce.converged);
     const auto fdIce = half(calibrated(deltaIce, 1.0, scene.target),
                             calibrated(deltaIce, -1.0, scene.target));
     const auto byTarget = SolveCalibrationTangent(
-        evolution, times, {}, deltaTarget, nullptr, oceans, stageOceans,
+        evolution, times, {}, deltaTarget, nullptr, oceans,
         {.rtol = 1e-12}, runs);
     EXPECT_TRUE(byTarget.converged);
     const auto fdTarget =
@@ -846,7 +841,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
 
     // the plain iteration: the same change in more runs
     const auto plain = SolveCalibrationTangent(
-        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        evolution, times, iceAlone, {}, nullptr, oceans,
         {.iterations = 60, .rtol = 1e-12, .anderson_memory = 0}, runs);
     EXPECT_TRUE(plain.converged);
     EXPECT_GT(plain.runs, byIce.runs + 5) << label;
@@ -855,7 +850,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
         << label;
     // an iteration that runs out says so
     const auto short_ = SolveCalibrationTangent(
-        evolution, times, iceAlone, {}, nullptr, oceans, stageOceans,
+        evolution, times, iceAlone, {}, nullptr, oceans,
         {.iterations = 2, .rtol = 1e-12}, runs);
     EXPECT_FALSE(short_.converged);
     EXPECT_EQ(short_.updates.size(), 2u);
@@ -864,8 +859,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose) {
     auto withSeaLevel = iceAlone;
     withSeaLevel.initialSeaLevel = deltaTarget;
     EXPECT_THROW(static_cast<void>(SolveCalibrationTangent(
-                     evolution, times, withSeaLevel, {}, nullptr, oceans,
-                     stageOceans, {}, runs)),
+                     evolution, times, withSeaLevel, {}, nullptr, oceans, {}, runs)),
                  std::invalid_argument);
   }
 }
@@ -895,7 +889,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationUnderFrozenShorelines) {
   const auto runs = TangentLinearSolver::Options{.rtol = 1e-12};
   auto calls = 0;
   const auto tangent = ComputeCalibratedTangent(
-      evolution, times, direction, deltaTarget, nullptr, {}, {},
+      evolution, times, direction, deltaTarget, nullptr, {},
       {.on_iteration = [&](int, double) { ++calls; }}, runs);
   EXPECT_TRUE(tangent.converged);
   EXPECT_EQ(tangent.runs, 1);
@@ -937,7 +931,7 @@ TEST(CalibratedKernels, TheLinearisedCalibrationUnderFrozenShorelines) {
   // a change of the target alone moves the initial sea level by itself
   // and nothing of the run
   const auto alone = ComputeCalibratedTangent(evolution, times, {}, deltaTarget,
-                                              nullptr, {}, {}, {}, runs);
+                                              nullptr, {}, {}, runs);
   EXPECT_EQ(alone.initialSeaLevel, deltaTarget);
   ASSERT_EQ(alone.snapshots.size(), nodes);
   EXPECT_EQ(MaxAbs(alone.snapshots.back().relativeSeaLevelChange), 0.0);
@@ -1149,9 +1143,8 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns3D) {
 
   Evolution3D evolution(op, scene.solver, state, scene.options);
   const auto base = scene.Calibrate(evolution, none, 0.0);
-  const auto oceans = OceanFunctionsOf(base.snapshots);
-  const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
-  ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+  const auto oceans = OceanFunctions::Of(base.snapshots);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(base.snapshots);
 
   auto objective = [&](const Viscoelastic3D& at, const Fields& d, double eps) {
@@ -1162,7 +1155,7 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns3D) {
         << "the start flipped";
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(calibrated.snapshots[n].converged) << "node " << n;
-      EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans[n])
+      EXPECT_EQ(calibrated.snapshots[n].oceanFunction, oceans.nodes[n])
           << "a cell flipped at node " << n;
     }
     return scene.Objective(calibrated.snapshots, measurements);
@@ -1183,10 +1176,9 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns3D) {
       AdjointSolver3D::Options{.rtol = 1e-12, .coupled_rtol = 1e-12};
   const auto partial =
       AdjointSolver3D(evolution, adjoint)
-          .FirstOrderKernels(times, measurements, &trajectory, oceans,
-                             stageOceans);
+          .FirstOrderKernels(times, measurements, &trajectory, oceans);
   const auto total = ComputeCalibratedKernels(
-      evolution, times, measurements, &trajectory, oceans, stageOceans,
+      evolution, times, measurements, &trajectory, oceans,
       {.rtol = 1e-11}, adjoint);
   EXPECT_TRUE(total.converged);
   const auto pattern = OnCoupling(op.Coupling(), Pattern);
@@ -1220,7 +1212,7 @@ TEST(CalibratedKernels, TotalKernelsPredictReCalibratedRuns3D) {
     static_cast<void>(
         AdjointSolver3D(evolution, adjoint)
             .SecondOrderKernels(times, measurements, {}, {}, trajectory,
-                                oceans, {}, stageOceans));
+                                oceans));
     ADD_FAILURE() << "not refused";
   } catch (const std::logic_error& error) {
     EXPECT_NE(std::string{error.what()}.find("are not built"),
@@ -1255,13 +1247,12 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose3D) {
 
   Evolution3D evolution(op, scene.solver, state, scene.options);
   const auto base = scene.Calibrate(evolution, {}, 0.0);
-  const auto oceans = OceanFunctionsOf(base.snapshots);
-  const auto stageOceans = StageOceanFunctionsOf(base.snapshots);
-  ASSERT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+  const auto oceans = OceanFunctions::Of(base.snapshots);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(base.snapshots);
 
   const auto total = ComputeCalibratedKernels(
-      evolution, times, measurements, &trajectory, oceans, stageOceans,
+      evolution, times, measurements, &trajectory, oceans,
       {.rtol = 1e-11},
       AdjointSolver3D::Options{.rtol = 1e-12, .coupled_rtol = 1e-12});
   ASSERT_TRUE(total.converged);
@@ -1275,12 +1266,12 @@ TEST(CalibratedKernels, TheLinearisedCalibrationIsTheMultipliersTranspose3D) {
       TangentLinearSolver3D::Options{.rtol = 1e-12, .coupled_rtol = 1e-12};
   const auto tangent = ComputeCalibratedTangent(
       evolution, times, direction, deltaTarget, &trajectory, oceans,
-      stageOceans, {.rtol = 1e-11}, runs);
+      {.rtol = 1e-11}, runs);
   EXPECT_TRUE(tangent.converged);
   const auto along = scene.Objective(tangent.snapshots, measurements);
   const auto held = scene.Objective(
       TangentLinearSolver3D(evolution, runs)
-          .Run(times, direction, &trajectory, oceans, stageOceans),
+          .Run(times, direction, &trajectory, oceans),
       measurements);
   std::cout << std::format(
       "[calibrated tangent, 3D] the linearised calibration in {} runs, "

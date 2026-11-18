@@ -387,11 +387,9 @@ std::string TangentOf(const std::filesystem::path& config,
                     block);
   // about a migrating run, its own shorelines (each stage of a two-stage
   // step about its own)
-  const auto oceans = run.Migrating() ? OceanFunctionsOf(recorded.snapshots)
-                                      : std::vector<std::vector<double>>{};
-  const auto stageOceans = run.Migrating()
-                               ? StageOceanFunctionsOf(recorded.snapshots)
-                               : StageOceanFunctions{};
+  const auto oceans = run.Migrating()
+                          ? OceanFunctions::Of(recorded.snapshots)
+                          : OceanFunctions{};
   const auto options = OptionsOf(input, D{});
   auto ran = Ran<typename D::Snapshot>{};
   if (run.Calibrating() && choice.total) {
@@ -402,8 +400,7 @@ std::string TangentOf(const std::filesystem::path& config,
     iteration.rtol = choice.rtol;
     auto solved = ComputeCalibratedTangent(
         *recorded.evolution, times, direction.perturbation,
-        direction.targetSeaLevel, &trajectory, oceans, stageOceans, iteration,
-        options);
+        direction.targetSeaLevel, &trajectory, oceans, iteration, options);
     if (!solved.converged) {
       const auto& tangent = top.At("tangent");
       Fail(Has(tangent, "calibration") ? tangent.At("calibration") : tangent,
@@ -425,8 +422,7 @@ std::string TangentOf(const std::filesystem::path& config,
   } else {
     ran.snapshots =
         typename D::Solver(*recorded.evolution, options)
-            .Run(times, direction.perturbation, &trajectory, oceans,
-                 stageOceans);
+            .Run(times, direction.perturbation, &trajectory, oceans);
     ran.initialSeaLevel = direction.perturbation.initialSeaLevel;
     ran.origin =
         ran.initialSeaLevel.empty()

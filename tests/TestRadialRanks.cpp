@@ -549,8 +549,7 @@ TEST(RadialRanks, AdjointKernelsMatchTheOneProcessSweep) {
       AdjointSolver3D adjoint(evolution, adjointOptions);
       return adjoint.FirstOrderKernels(
           times, measurements, &trajectory,
-          migrating ? OceanFunctionsOf(snapshots)
-                    : std::vector<std::vector<double>>{});
+          migrating ? OceanFunctions::Of(snapshots) : OceanFunctions{});
     };
     const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);
     const auto want = sweep(whole, solvers[count]);
@@ -1379,8 +1378,7 @@ TEST(RadialRanks, CalibratedKernelsMatchTheOneProcess) {
     const auto snapshots = evolution.RunMigrating(times, thickness);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(snapshots);
     return ComputeCalibratedKernels(evolution, times, measurements,
-                                    &trajectory, OceanFunctionsOf(snapshots),
-                                    StageOceanFunctionsOf(snapshots),
+                                    &trajectory, OceanFunctions::Of(snapshots),
                                     {.rtol = 1e-10}, adjointOptions);
   };
   const Viscoelastic3D whole(body.rheology, lmax, Peaked, options);

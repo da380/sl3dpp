@@ -35,6 +35,7 @@
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/ShConventions.hpp"
+#include "sl3dpp/StepRecipe.hpp"
 #include "sl3dpp/Viscoelastic.hpp"
 #include "sl3dpp/Viscoelastic3D.hpp"
 
@@ -488,22 +489,28 @@ TEST(Migrating, AResumedRunIsTheUninterruptedOne) {
 
 // -- kernels about a migrating trajectory -------------------------------------
 
-TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
+namespace {
+
+void ConstantOceanFunctionHistoryIsTheFrozenCalculation(Scheme scheme) {
   const auto body = Body::Make(kLmax, true);
   ViscoelasticOperator op(body.rheology, kLmax);
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
   Evolution evolution(op, body.solver, state,
-                      {.scheme = Scheme::ExponentialTrapezoid,
+                      {.scheme = scheme,
                        .rtol = 1e-12});
   auto measurement = Measurement{};
   measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
   const auto measurements =
       std::map<std::size_t, Measurement>{{cap.times.size() - 1, measurement}};
-  const auto constant =
-      std::vector<std::vector<double>>(cap.times.size(), state.oceanFunction);
+  // the background's ocean function at every node and, under a two-stage
+  // scheme, at each step's first stage
+  auto constant = OceanFunctions{
+      .nodes = std::vector<std::vector<double>>(cap.times.size(), state.oceanFunction)};
+  if (IsMultiStage(scheme)) {
+    constant.stages.assign(cap.times.size(), {state.oceanFunction});
+    constant.stages.front().clear();
+  }
   for (const auto method :
        {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const AdjointSolver adjoint(evolution, {.method = method, .rtol = 1e-12});
@@ -519,7 +526,18 @@ TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
   }
 }
 
-TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
+}  // namespace
+
+TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculation) {
+  ConstantOceanFunctionHistoryIsTheFrozenCalculation(Evolution::Options{}.scheme);
+}
+TEST(Migrating, ConstantOceanFunctionHistoryIsTheFrozenCalculationUnderTheTrapezoid) {
+  ConstantOceanFunctionHistoryIsTheFrozenCalculation(Scheme::ExponentialTrapezoid);
+}
+
+namespace {
+
+void InitialStateKernelsMatchCentralDifferences(Scheme scheme) {
   // The initial-sea-level kernel (assembled from the per-node load duals)
   // and the initial-thickness dual (node 0 plus the baseline, grounded by
   // the INITIAL shorelines) both match central differences with rebuilt
@@ -529,10 +547,8 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
   const auto cap = MarineCap::Make(body, 5);
   const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
   const auto thickness = [&](double t) { return cap.Thickness(t); };
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
   Evolution evolution(op, body.solver, state,
-                      {.scheme = Scheme::ExponentialTrapezoid,
+                      {.scheme = scheme,
                        .rtol = 1e-12});
   const auto run = evolution.RunMigrating(cap.times, thickness);
   auto measurement = Measurement{};
@@ -542,13 +558,13 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
       AdjointSolver(evolution,
                     {.method = AdjointMethod::Discrete, .rtol = 1e-12})
           .FirstOrderKernels(cap.times, {{cap.times.size() - 1, measurement}},
-                             nullptr, OceanFunctionsOf(run));
+                             nullptr, OceanFunctions::Of(run));
   EXPECT_GT(MaxAbs(kernels.initialSeaLevel), 0.0);
 
   auto functional = [&](const GRDSolver::State& start,
                         const std::function<std::vector<double>(double)>& ice) {
     Evolution trial(op, body.solver, start,
-                    {.scheme = Scheme::ExponentialTrapezoid,
+                    {.scheme = scheme,
                      .rtol = 1e-12});
     const auto snaps = trial.RunMigrating(cap.times, ice);
     auto product = g;
@@ -608,6 +624,15 @@ TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
       << "fd " << fd << " predicted " << predicted;
 }
 
+}  // namespace
+
+TEST(Migrating, InitialStateKernelsMatchCentralDifferences) {
+  InitialStateKernelsMatchCentralDifferences(Evolution::Options{}.scheme);
+}
+TEST(Migrating, InitialStateKernelsMatchCentralDifferencesUnderTheTrapezoid) {
+  InitialStateKernelsMatchCentralDifferences(Scheme::ExponentialTrapezoid);
+}
+
 TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
   // About the moving trajectory the discrete transpose matches central
   // differences of the migrating run to solver precision (the forward is
@@ -619,14 +644,15 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
     ViscoelasticOperator op(body.rheology, kLmax);
     const auto cap = MarineCap::Make(body, nodes);
     const auto state = body.solver.MakeState(cap.ice0, cap.sea0);
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous kernel's error is gated
+    // at that scheme's steps (under Sdirk2 it is 61% at 5 nodes on the stiff
+    // mantle, against the 5% gated)
     Evolution evolution(op, body.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12});
     const auto thickness = [&](double t) { return cap.Thickness(t); };
     const auto run = evolution.RunMigrating(cap.times, thickness);
-    const auto oceans = OceanFunctionsOf(run);
+    const auto oceans = OceanFunctions::Of(run);
     auto measurement = Measurement{};
     measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
     const auto& g = measurement.relativeSeaLevelDual;
@@ -659,7 +685,7 @@ TEST(Migrating, TrajectoryKernelsMatchCentralDifferences) {
       });
       // flotation's 0/1: rounding changes it only at a cell on the threshold
       for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-        EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+        EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
       }
       auto product = g;
       for (auto i = std::size_t{0}; i < g.size(); ++i) {
@@ -1186,7 +1212,7 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
       AdjointSolver(evolution1,
                     {.method = AdjointMethod::Continuous, .rtol = 1e-12})
           .FirstOrderKernels(times, measurements, &trajectory1,
-                             OceanFunctionsOf(run1));
+                             OceanFunctions::Of(run1));
 
   const auto op3 =
       setting.Operator(0.0, {.memory_points = MemoryPointSet::Gll});
@@ -1195,9 +1221,9 @@ TEST(Migrating3D, ZeroLateralKernelsMatchThe1DContinuousSweep) {
       {.rtol = 1e-12, .coupled_rtol = 1e-12, .record_stride = 1});
   const auto run3 = evolution3.RunMigrating(times, setting.Thickness());
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(run3);
-  const auto oceans3 = OceanFunctionsOf(run3);
+  const auto oceans3 = OceanFunctions::Of(run3);
   // flotation's 0/1: rounding changes it only at a cell on the threshold
-  EXPECT_EQ(oceans3, OceanFunctionsOf(run1));
+  EXPECT_EQ(oceans3.nodes, OceanFunctions::Of(run1).nodes);
   const auto kernels3 =
       AdjointSolver3D(evolution3, {.method = AdjointMethod::Continuous,
                                    .rtol = 1e-12,
@@ -1250,8 +1276,8 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
                                   {.scheme = Scheme::ExponentialTrapezoid,
                                    .rtol = 1e-12, .coupled_rtol = 1e-12});
     const auto run = evolution.RunMigrating(times, setting.Thickness());
-    const auto oceans = OceanFunctionsOf(run);
-    EXPECT_NE(oceans.back(), oceans.front()) << "no cell flipped";
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.back(), oceans.nodes.front()) << "no cell flipped";
     auto measurement = Measurement{};
     measurement.relativeSeaLevelDual = body.Smooth(1.0, 6);
     const auto& g = measurement.relativeSeaLevelDual;
@@ -1281,7 +1307,7 @@ TEST(Migrating3D, LateralTrajectoryKernelsConvergeToCentralDifferences) {
       });
       // flotation's 0/1: rounding changes it only at a cell on the threshold
       for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
-        EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+        EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
       }
       auto product = g;
       for (auto i = std::size_t{0}; i < g.size(); ++i) {

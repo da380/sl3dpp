@@ -68,8 +68,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>* ditau,
     const MaterialDirection3D* materialV) const {
@@ -85,11 +84,11 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   const auto& C = ev.state_.oceanFunction;
   // the shorelines a stage is linearised about: the node's at the step's
   // last stage, an inner stage's own before (StepRecipe.hpp)
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   auto overrideAt = [&](const StageRef& ref) {
     return migrating ? oceanAt(ref) : std::vector<double>{};
@@ -106,7 +105,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
 
   detail::CheckTimeGrid(times);
   detail::CheckStageOceanFunctions(scheme, times, migrating,
-                                   stageOceanFunctions, fieldSize);
+                                   oceanFunctions.stages, fieldSize);
   // Distributed over radius (Viscoelastic3D::Options::collectives): each
   // rank transposes its own memory nodes' part of every pass, the duals
   // of the load and centrifugal coefficients are the ranks' partial
@@ -168,12 +167,12 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
           "coefficients");
     }
   }
-  if (!oceanFunctions.empty()) {
-    if (oceanFunctions.size() != times.size()) {
+  if (!oceanFunctions.nodes.empty()) {
+    if (oceanFunctions.nodes.size() != times.size()) {
       throw std::invalid_argument(
           "the ocean functions must give one grid per time node");
     }
-    for (const auto& Cn : oceanFunctions) {
+    for (const auto& Cn : oceanFunctions.nodes) {
       if (Cn.size() != fieldSize) {
         throw std::invalid_argument(
             "the ocean functions must be fields on the solver's grid");
@@ -1688,7 +1687,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
   Kernels3D out;
   out.ice = detail::AssembleIceViews(
       C, solver.IceDensity(), times, std::move(directLoadKernels),
-      std::move(densityLoad), std::move(lumps), oceanFunctions, rhoW,
+      std::move(densityLoad), std::move(lumps), oceanFunctions.nodes, rhoW,
       stageLoads);
   out.ice.tideKernels = std::move(tideKernels);
   out.ice.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
@@ -1732,7 +1731,7 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::DiscreteSweep(
         C, solver.IceDensity(), times, std::move(dloadDuals),
         std::vector<std::vector<double>>(times.size(),
                                          std::vector<double>(fieldSize, 0.0)),
-        {}, oceanFunctions, rhoW, dStageLoads);
+        {}, oceanFunctions.nodes, rhoW, dStageLoads);
     derivatives.ice.times.assign(times.begin(), times.end());
     derivatives.ice.directLoadKernels = std::move(views.directLoadKernels);
     derivatives.ice.tideKernels = std::move(dTideKernels);

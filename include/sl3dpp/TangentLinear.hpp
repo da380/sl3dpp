@@ -204,19 +204,17 @@ class TangentLinearSolver {
   /// The derivative of the run over `times` along `direction`. With an
   /// itau perturbation the recorded forward `trajectory` is required (one
   /// entry per node, from a run with record_stride, the gaps refilled by
-  /// forward steps under the recorded loads). With `oceanFunctions`, one
-  /// grid per node from a migrating run (OceanFunctionsOf its snapshots),
-  /// the run linearises about that trajectory instead of the frozen
-  /// background shorelines; about a migrating run under Sdirk2 also
-  /// `stageOceanFunctions`, the ocean function of each step's first stage
-  /// (StageOceanFunctionsOf the snapshots), about which that stage is
-  /// linearised.
+  /// forward steps under the recorded loads). With `oceanFunctions` from
+  /// a migrating run (OceanFunctions::Of its snapshots), the run
+  /// linearises about that trajectory instead of the frozen background
+  /// shorelines; about a migrating run under Sdirk2 each step's first stage
+  /// is linearised about the stage's own ocean function
+  /// (OceanFunctions::stages), and ocean functions without them are
+  /// refused.
   [[nodiscard]] std::vector<Evolution::Snapshot> Run(
       std::span<const double> times, const TangentPerturbation& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The second-order tangent-linear run: the second derivative of the
   /// run's responses along two directions u and v, about the forward
@@ -242,9 +240,7 @@ class TangentLinearSolver {
       std::span<const Evolution::Snapshot> tangentV,
       const SecondOrderDirection& direction,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /// The memory increment of a step from `prev` to `next` — two states of
   /// the trajectory with their strains — for a perturbation of the inverse
@@ -281,9 +277,7 @@ class TangentLinearSolver {
   struct MaterialDrive;
   struct MaterialSecondDrive;
   [[nodiscard]] std::vector<Evolution::Snapshot> March(
-      std::span<const double> times,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+      std::span<const double> times, const OceanFunctions& oceanFunctions,
       const Direct& directAt, const Drive& drive, MaterialForcing* material,
       const Tide& tideAt = {}, const Sources& sourcesAt = {},
       const ToroidalDrive& toroidalDrive = {}, const Direct& outsideAt = {},

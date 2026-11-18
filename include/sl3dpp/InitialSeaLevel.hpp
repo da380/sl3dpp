@@ -312,24 +312,22 @@ struct CalibrationMultiplier {
  * the run about `evolution`'s background state reaches its target at the
  * last node, for the objective `measurements` define.
  *
- * `oceanFunctions` and `stageOceanFunctions` are the calibrated migrating
- * run's (OceanFunctionsOf and StageOceanFunctionsOf its snapshots); empty
- * ocean functions are a frozen run's, whose multiplier is zero and takes no
- * sweep. Each sweep is one of `adjoint`'s method forced by the
- * measurements less the current multiplier at the last node, formed
- * without a trajectory and with the material, tide and moment kernels off
- * (the initial sea level kernel needs none of them): the first, from zero,
- * gives the initial sea level kernel k0 of the objective. By the discrete
- * method the multiplier is that of the stepped run, under every scheme; by
- * the continuous one, of the continuous sweep's approximation to k0 and
- * A^T. `converged` is false when the sweeps ran out first, the last
- * iterate returned.
+ * `oceanFunctions` are the calibrated migrating run's (OceanFunctions::Of
+ * its snapshots); empty ocean functions are a frozen run's, whose
+ * multiplier is zero and takes no sweep. Each sweep is one of `adjoint`'s
+ * method forced by the measurements less the current multiplier at the
+ * last node, formed without a trajectory and with the material, tide and
+ * moment kernels off (the initial sea level kernel needs none of them): the
+ * first, from zero, gives the initial sea level kernel k0 of the objective.
+ * By the discrete method the multiplier is that of the stepped run, under
+ * every scheme; by the continuous one, of the continuous sweep's
+ * approximation to k0 and A^T. `converged` is false when the sweeps ran out
+ * first, the last iterate returned.
  */
 [[nodiscard]] CalibrationMultiplier SolveCalibrationMultiplier(
     const Evolution& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     AdjointSolver::Options adjoint = {});
 
@@ -338,8 +336,7 @@ struct CalibrationMultiplier {
 [[nodiscard]] CalibrationMultiplier SolveCalibrationMultiplier(
     const Evolution3D& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     AdjointSolver3D::Options adjoint = {});
 
@@ -373,8 +370,7 @@ struct CalibratedKernels {
     const Evolution& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     AdjointSolver::Options adjoint = {});
 
@@ -393,8 +389,7 @@ struct CalibratedKernels3D {
     const Evolution3D& evolution, std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     const AdjointSolver3D::Options& adjoint = {});
 
@@ -440,8 +435,7 @@ struct CalibrationTangent {
     const TangentPerturbation& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     TangentLinearSolver::Options tangent = {});
 
@@ -453,8 +447,7 @@ struct CalibrationTangent {
     const TangentPerturbation3D& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     TangentLinearSolver3D::Options tangent = {});
 
@@ -487,8 +480,7 @@ struct CalibratedTangent {
     const TangentPerturbation& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     TangentLinearSolver::Options tangent = {});
 
@@ -508,8 +500,7 @@ struct CalibratedTangent3D {
     const TangentPerturbation3D& direction,
     std::span<const double> finalSeaLevel,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions = {},
+    const OceanFunctions& oceanFunctions,
     const CalibrationMultiplierOptions& options = {},
     TangentLinearSolver3D::Options tangent = {});
 

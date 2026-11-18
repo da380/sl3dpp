@@ -632,7 +632,9 @@ TEST(DiscreteAdjoint3D, InteriorSourcesInThePair) {
   }
 }
 
-TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
+namespace {
+
+void AboutAForcedMigratingTrajectory(Scheme scheme) {
   // Under lateral viscosity, about a migrating run under the forcings
   // beside the ice (a load inside the water budget, one outside it, a
   // layer on the solid surface that moves the start's shorelines, a
@@ -746,10 +748,8 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
           out.push_back(extra);
           return out;
         }};
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution3D trial(op, scene.solver, start,
-                      {.scheme = Scheme::ExponentialTrapezoid,
+                      {.scheme = scheme,
                        .rtol = 1e-12,
                        .coupled_rtol = 1e-12,
                        .max_nonlinear_iterations = 200,
@@ -759,9 +759,9 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
   };
 
   auto [run, evolution] = runAt(0.0, state);
-  const auto oceans = OceanFunctionsOf(run);
-  EXPECT_NE(oceans.front(), state.oceanFunction);
-  EXPECT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  EXPECT_NE(oceans.nodes.front(), state.oceanFunction);
+  EXPECT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
 
   auto measurements = std::map<std::size_t, Measurement>{};
@@ -780,7 +780,7 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
     const auto snaps = runAt(sign, start).first;
     for (auto n = std::size_t{0}; n < snaps.size(); ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped";
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped";
     }
     return Objective(scene, snaps, measurements);
   };
@@ -874,6 +874,15 @@ TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
     check("viscosity", GridPairing(op.Coupling(), kernels.itauKernel3D, ditau), d,
           false);
   }
+}
+
+}  // namespace
+
+TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectory) {
+  AboutAForcedMigratingTrajectory(Evolution3D::Options{}.scheme);
+}
+TEST(DiscreteAdjoint3D, AboutAForcedMigratingTrajectoryUnderTheTrapezoid) {
+  AboutAForcedMigratingTrajectory(Scheme::ExponentialTrapezoid);
 }
 
 TEST(DiscreteAdjoint3D, ViscosityAboutASourceDrivenRun) {

@@ -602,16 +602,14 @@ TangentLinearSolver::MakeMaterialDrive(const PointMaterialDirection& d,
 std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
     std::span<const double> times, const TangentPerturbation& direction,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto fieldSize = solver.Grid().FieldSize();
   const auto scheme = ev.options_.scheme;
   const auto nodes = times.size();
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
 
   CheckTimes(times);
   if (direction.Empty()) {
@@ -656,7 +654,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
         "evolution's Options::scheme, whose default is Sdirk2");
   }
   detail::CheckStageOceanFunctions(scheme, times, migrating,
-                                   stageOceanFunctions, fieldSize);
+                                   oceanFunctions.stages, fieldSize);
 
   const auto rhoI = solver.IceDensity();
   const auto rhoW = solver.WaterDensity();
@@ -665,8 +663,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
   // last stage, an inner stage's own before
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C0;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   const auto dts = StepSizes(ev, times);
 
@@ -817,9 +815,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::Run(
       });
     };
   }
-  return March(times, oceanFunctions, stageOceanFunctions, directAt, drive,
-               material.get(), tideAt, sourcesAt, toroidalDrive, outsideAt,
-               layerAt);
+  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
+               sourcesAt, toroidalDrive, outsideAt, layerAt);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
@@ -827,9 +824,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
     std::span<const Evolution::Snapshot> tangentU,
     std::span<const Evolution::Snapshot> tangentV,
     const SecondOrderDirection& direction, const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto scheme = ev.options_.scheme;
@@ -1087,14 +1082,13 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::RunSecondOrder(
   }
   // No direct load under the sharp flotation rule.
   const Direct none = [](const StageRef&) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, stageOceanFunctions, none, drive,
-               material.get(), {}, {}, toroidalDrive);
+  return March(times, oceanFunctions, none, drive, material.get(), {}, {},
+               toroidalDrive);
 }
 
 std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     std::span<const double> times,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const Direct& directAt, const Drive& drive, MaterialForcing* material,
     const Tide& tideAt, const Sources& sourcesAt,
     const ToroidalDrive& toroidalDrive, const Direct& outsideAt,
@@ -1107,13 +1101,13 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   const auto scheme = ev.options_.scheme;
   const auto rotation = ev.options_.rotation;
   const auto nodes = times.size();
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   if (migrating) {
-    if (oceanFunctions.size() != nodes) {
+    if (oceanFunctions.nodes.size() != nodes) {
       throw std::invalid_argument(
           "the ocean functions must give one grid per time node");
     }
-    for (const auto& Cn : oceanFunctions) {
+    for (const auto& Cn : oceanFunctions.nodes) {
       if (Cn.size() != fieldSize) {
         throw std::invalid_argument(
             "the ocean functions must be fields on the solver's grid");
@@ -1121,7 +1115,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     }
   }
   detail::CheckStageOceanFunctions(scheme, times, migrating,
-                                   stageOceanFunctions, fieldSize);
+                                   oceanFunctions.stages, fieldSize);
   if (rotation == RotationalFeedback::Full) {
     const auto kHyd = FluidTidalNumber(op.BaseMaterial(), 2);
     if (solver.TransverseMarginFor(kHyd) <= 0.0) {
@@ -1136,8 +1130,8 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
   // last stage (and at the first node), an inner stage's own before
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C0;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   auto overrideAt = [&](const StageRef& ref) {
     return migrating ? oceanAt(ref) : std::vector<double>{};
@@ -1344,7 +1338,7 @@ std::vector<Evolution::Snapshot> TangentLinearSolver::March(
     snapshot.angularVelocity = r.angularVelocity;
     snapshot.converged = r.converged;
     snapshot.oceanFunction =
-        migrating ? oceanFunctions[node] : std::vector<double>{};
+        migrating ? oceanFunctions.nodes[node] : std::vector<double>{};
     snapshot.stages = std::move(innerStages);
     innerStages.clear();
     if (options_.record) {

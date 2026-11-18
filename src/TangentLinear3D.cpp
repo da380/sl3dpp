@@ -877,22 +877,20 @@ TangentLinearSolver3D::MakeMaterialDrive3D(const MaterialDirection3D& direction,
 std::vector<Snapshot> TangentLinearSolver3D::Run(
     std::span<const double> times, const TangentPerturbation3D& direction,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto& solver = *ev.solver_;
   const auto fieldSize = solver.Grid().FieldSize();
   const auto scheme = ev.options_.scheme;
   const auto nodes = times.size();
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   const auto K = op.GetRheology().BranchCount();
   const auto values = op.Coupling().GridValueCount();
 
   CheckTimes(times);
   detail::CheckStageOceanFunctions(scheme, times, migrating,
-                                   stageOceanFunctions, fieldSize);
+                                   oceanFunctions.stages, fieldSize);
   if (direction.Empty()) {
     throw std::invalid_argument("the tangent-linear run needs a direction");
   }
@@ -961,8 +959,8 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
   // last stage, an inner stage's own before
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C0;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   // (the direction's node values combined as the forward run combines its
   // forcing's at the stage, detail::AtStage; the grounding the stage's own)
@@ -1055,8 +1053,8 @@ std::vector<Snapshot> TangentLinearSolver3D::Run(
       });
     };
   }
-  return March(times, oceanFunctions, stageOceanFunctions, directAt, drive,
-               material.get(), tideAt, sourcesAt, outsideAt, layerAt);
+  return March(times, oceanFunctions, directAt, drive, material.get(), tideAt,
+               sourcesAt, outsideAt, layerAt);
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
@@ -1064,9 +1062,7 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
     std::span<const Snapshot> tangentV,
     const SecondOrderDirection3D& direction,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
   const auto scheme = ev.options_.scheme;
@@ -1196,14 +1192,12 @@ std::vector<Snapshot> TangentLinearSolver3D::RunSecondOrder(
     }
   }
   const Direct none = [](const StageRef&) { return std::vector<double>{}; };
-  return March(times, oceanFunctions, stageOceanFunctions, none, drive,
-               material.get());
+  return March(times, oceanFunctions, none, drive, material.get());
 }
 
 std::vector<Snapshot> TangentLinearSolver3D::March(
     std::span<const double> times,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const Direct& directAt, const Drive& drive,
     const MaterialForcing3D* material, const Tide& tideAt,
     const Sources& sourcesAt, const Direct& outsideAt,
@@ -1216,13 +1210,13 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
   const auto scheme = ev.options_.scheme;
   const auto rotation = ev.options_.rotation;
   const auto nodes = times.size();
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   if (migrating) {
-    if (oceanFunctions.size() != nodes) {
+    if (oceanFunctions.nodes.size() != nodes) {
       throw std::invalid_argument(
           "the ocean functions must give one grid per time node");
     }
-    for (const auto& Cn : oceanFunctions) {
+    for (const auto& Cn : oceanFunctions.nodes) {
       if (Cn.size() != fieldSize) {
         throw std::invalid_argument(
             "the ocean functions must be fields on the solver's grid");
@@ -1238,15 +1232,15 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     }
   }
   detail::CheckStageOceanFunctions(scheme, times, migrating,
-                                   stageOceanFunctions, fieldSize);
+                                   oceanFunctions.stages, fieldSize);
   const auto rhoW = solver.WaterDensity();
   const auto& C0 = ev.state_.oceanFunction;
   // the shorelines a stage is linearised about: the node's at the step's
   // last stage (and at the first node), an inner stage's own before
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C0;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   auto overrideAt = [&](const StageRef& ref) {
     return migrating ? oceanAt(ref) : std::vector<double>{};
@@ -1485,7 +1479,7 @@ std::vector<Snapshot> TangentLinearSolver3D::March(
     snapshot.solveIterations = info.solveIterations;
     snapshot.converged = info.converged && r.converged;
     snapshot.oceanFunction =
-        migrating ? oceanFunctions[node] : std::vector<double>{};
+        migrating ? oceanFunctions.nodes[node] : std::vector<double>{};
     snapshot.stages = std::move(innerStages);
     innerStages.clear();
     if (options_.record) {

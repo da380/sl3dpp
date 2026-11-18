@@ -33,7 +33,7 @@
  * with load perturbations the same way; densities and rates are per unit
  * SLE time. The sweeps linearise
  * about frozen shorelines (the forward driver's linear equation) or, given
- * the ocean function of every node of a migrating run, about that
+ * the ocean functions of a migrating run (OceanFunctions), about that
  * trajectory: the adjoint stays linear with the time-reversed C(t) as its
  * coefficients (Yu et al. 2025, §3.3; the shoreline-motion singular terms
  * cancel), as pyslfp's `ocean_functions`.
@@ -48,7 +48,9 @@
 #include <functional>
 #include <map>
 #include <optional>
+#include <ranges>
 #include <span>
+#include <stdexcept>
 #include <utility>
 #include <vector>
 
@@ -107,22 +109,66 @@ struct ForwardTrajectory {
       std::span<const Evolution::Snapshot> snapshots);
 };
 
-/// The ocean function of every node of a migrating run (RunMigrating),
-/// for the sweeps' linearisation about it; refused for a frozen run's
-/// snapshots, which carry none.
-[[nodiscard]] std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const Evolution::Snapshot> snapshots);
+/**
+ * @brief The ocean functions of a migrating run (RunMigrating, radial or
+ * 3D), about which the derivative runs linearise: the sweeps, the
+ * tangent-linear runs and what is built on them take them as one argument.
+ *
+ * `nodes` holds the ocean function of every node. `stages` holds, per node,
+ * the ocean function of each inner stage of the step ending there under a
+ * multi-stage scheme (Evolution::Snapshot::Stage; Sdirk2's one, at
+ * t + gamma dt), none where the step has no inner stage; it is empty under
+ * a one-stage scheme. The derivatives of the stepped map linearise each
+ * stage about its own shorelines, as they do each node about the node's.
+ * Both empty: a frozen run, the derivatives linearising about the
+ * background shorelines.
+ */
+struct OceanFunctions {
+  std::vector<std::vector<double>> nodes;
+  std::vector<std::vector<std::vector<double>>> stages;
 
-/// The ocean functions of the inner stages of a migrating run under a
-/// multi-stage scheme: per node, the ocean function of each inner stage of
-/// the step ending there (Evolution::Snapshot::Stage; Sdirk2's one, at
-/// t + gamma dt), none where the step has no inner stage. The derivatives
-/// of the stepped map linearise each stage about its own shorelines, as
-/// they do each node about the node's. Empty for a run under a one-stage
-/// scheme.
-using StageOceanFunctions = std::vector<std::vector<std::vector<double>>>;
-[[nodiscard]] StageOceanFunctions StageOceanFunctionsOf(
-    std::span<const Evolution::Snapshot> snapshots);
+  /// Both, from the snapshots of a migrating run (a range of
+  /// Evolution::Snapshot or Evolution3D::Snapshot); refused for a frozen
+  /// run's, which carry none.
+  template <std::ranges::input_range Snapshots>
+    requires requires(const std::ranges::range_value_t<Snapshots>& s) {
+      s.oceanFunction;
+      s.stages;
+    }
+  [[nodiscard]] static OceanFunctions Of(const Snapshots& snapshots);
+};
+
+template <std::ranges::input_range Snapshots>
+  requires requires(const std::ranges::range_value_t<Snapshots>& s) {
+    s.oceanFunction;
+    s.stages;
+  }
+OceanFunctions OceanFunctions::Of(const Snapshots& snapshots) {
+  auto out = OceanFunctions{};
+  for (const auto& snapshot : snapshots) {
+    if (snapshot.oceanFunction.empty()) {
+      throw std::invalid_argument(
+          "the snapshots carry no ocean functions: a migrating run records "
+          "them");
+    }
+    out.nodes.push_back(snapshot.oceanFunction);
+  }
+  auto inner = false;
+  for (const auto& snapshot : snapshots) {
+    auto& stages = out.stages.emplace_back();
+    for (const auto& stage : snapshot.stages) {
+      if (stage.oceanFunction.empty()) {
+        throw std::invalid_argument(
+            "the snapshots' inner stages carry no ocean functions: a "
+            "migrating run records them");
+      }
+      stages.push_back(stage.oceanFunction);
+    }
+    inner = inner || !stages.empty();
+  }
+  if (!inner) out.stages.clear();
+  return out;
+}
 
 /// The duals of one observation node's outputs: the gains of
 ///   J += int g_xi xi dS + int g_u u dS + int g_phi phi dS + int g_v V dS
@@ -405,14 +451,13 @@ class AdjointSolver {
   /// recorded forward `trajectory` (one entry per node, from a run with
   /// record_stride under the same scheme and loads), the kernels also
   /// carry the inverse-relaxation-time sensitivity. With
-  /// `oceanFunctions`, one grid per node from a migrating run
-  /// (OceanFunctionsOf its snapshots), the kernels linearise about that
-  /// trajectory instead of the frozen background shorelines, and the
-  /// initial sea level kernel is formed; a recorded trajectory must then
-  /// come from the same migrating run. About a migrating run under Sdirk2
-  /// the discrete sweep also takes `stageOceanFunctions`, the ocean
-  /// function of each step's first stage (StageOceanFunctionsOf the run's
-  /// snapshots), about which it linearises that stage.
+  /// `oceanFunctions` from a migrating run (OceanFunctions::Of its
+  /// snapshots), the kernels linearise about that trajectory instead of
+  /// the frozen background shorelines, and the initial sea level kernel is
+  /// formed; a recorded trajectory must then come from the same migrating
+  /// run. About a migrating run under Sdirk2 the discrete sweep linearises
+  /// each step's first stage about the stage's own ocean function
+  /// (OceanFunctions::stages), and refuses ocean functions without them.
   ///
   /// Under Sdirk2 the discrete sweep transposes each step's two stages,
   /// last to first, about the forward stages' own states: the first
@@ -428,9 +473,7 @@ class AdjointSolver {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory = nullptr,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
   /**
    * @brief The second-order adjoint: the kernels of the objective and
@@ -479,10 +522,8 @@ class AdjointSolver {
       std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& itau,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      const PointMaterialDirection& material = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {},
+      const PointMaterialDirection& material = {}) const;
 
  private:
   /// The route of the lateral kernels about this radial run
@@ -498,25 +539,20 @@ class AdjointSolver {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-      const;
+      const OceanFunctions& oceanFunctions) const;
   /// The checks FirstOrderKernels makes of its arguments.
   void CheckArguments(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-      const;
+      const OceanFunctions& oceanFunctions) const;
   [[nodiscard]] std::pair<Kernels, KernelDerivatives> DiscreteSecondOrder(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       std::span<const Evolution::Snapshot> tangent,
       const std::vector<std::vector<double>>& ditauPoints,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+      const OceanFunctions& oceanFunctions,
       const PointMaterialDirection& material) const;
   [[nodiscard]] std::pair<Kernels, KernelDerivatives> ContinuousSecondOrder(
       std::span<const double> times,
@@ -532,8 +568,7 @@ class AdjointSolver {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory* trajectory,
-      std::span<const std::vector<double>> oceanFunctions,
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+      const OceanFunctions& oceanFunctions,
       detail::LateralAccumulator* lateral = nullptr) const;
   [[nodiscard]] Kernels ContinuousSweep(
       std::span<const double> times,

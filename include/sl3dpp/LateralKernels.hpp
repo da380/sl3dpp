@@ -124,18 +124,14 @@ class LateralKernelSolver {
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory& trajectory,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
   /// The kernels over the 3D run's recorded trajectory, as
   /// AdjointSolver3D::FirstOrderKernels gives them.
   [[nodiscard]] Kernels3D FirstOrderKernels(
       std::span<const double> times,
       const std::map<std::size_t, Measurement>& measurements,
       const ForwardTrajectory3D& trajectory,
-      std::span<const std::vector<double>> oceanFunctions = {},
-      std::span<const std::vector<std::vector<double>>> stageOceanFunctions =
-          {}) const;
+      const OceanFunctions& oceanFunctions = {}) const;
 
  private:
   Route route_;

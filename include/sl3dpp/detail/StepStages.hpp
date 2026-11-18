@@ -196,7 +196,7 @@ template <class State, class InnerEnd, class Combine>
 }
 
 /// The checks a derivative run makes of the inner stages' ocean functions
-/// (StageOceanFunctionsOf): about a migrating run under a multi-stage
+/// (OceanFunctions::stages): about a migrating run under a multi-stage
 /// scheme, one grid per inner stage of every step; none otherwise needed.
 inline void CheckStageOceanFunctions(
     Scheme scheme, std::span<const double> times, bool migrating,
@@ -212,8 +212,9 @@ inline void CheckStageOceanFunctions(
       throw std::invalid_argument(std::format(
           "about a migrating run under Sdirk2 each step's first stage is "
           "linearised about its own shorelines: give the stages' ocean "
-          "functions (StageOceanFunctionsOf the run's snapshots). The step "
-          "ending at node {} has {} inner stage{}, {} given",
+          "functions (OceanFunctions::stages, which OceanFunctions::Of the "
+          "run's snapshots fills). The step ending at node {} has {} inner "
+          "stage{}, {} given",
           node, inner, inner == 1 ? "" : "s", given));
     }
     for (const auto& C : stageOceanFunctions[node]) {

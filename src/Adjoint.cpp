@@ -92,41 +92,6 @@ std::vector<std::vector<double>> Kernels::Viscosity(
   return out;
 }
 
-std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const Evolution::Snapshot> snapshots) {
-  auto out = std::vector<std::vector<double>>{};
-  for (const auto& snapshot : snapshots) {
-    if (snapshot.oceanFunction.empty()) {
-      throw std::invalid_argument(
-          "the snapshots carry no ocean functions: a migrating run records "
-          "them");
-    }
-    out.push_back(snapshot.oceanFunction);
-  }
-  return out;
-}
-
-StageOceanFunctions StageOceanFunctionsOf(
-    std::span<const Evolution::Snapshot> snapshots) {
-  auto out = StageOceanFunctions{};
-  auto any = false;
-  for (const auto& snapshot : snapshots) {
-    auto inner = std::vector<std::vector<double>>{};
-    for (const auto& stage : snapshot.stages) {
-      if (stage.oceanFunction.empty()) {
-        throw std::invalid_argument(
-            "the snapshots' inner stages carry no ocean functions: a "
-            "migrating run records them");
-      }
-      inner.push_back(stage.oceanFunction);
-    }
-    any = any || !inner.empty();
-    out.push_back(std::move(inner));
-  }
-  if (!any) out.clear();
-  return out;
-}
-
 AdjointSolver::AdjointSolver(const Evolution& evolution,
                              Options options)
     : evolution_(&evolution), options_(options) {
@@ -140,15 +105,12 @@ Kernels AdjointSolver::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
-  CheckArguments(times, measurements, trajectory, oceanFunctions,
-                 stageOceanFunctions);
+    const OceanFunctions& oceanFunctions) const {
+  CheckArguments(times, measurements, trajectory, oceanFunctions);
   return options_.method == AdjointMethod::Discrete
-             ? DiscreteSweep(times, measurements, trajectory, oceanFunctions,
-                             stageOceanFunctions)
-             : ContinuousSweep(times, measurements, trajectory, oceanFunctions);
+             ? DiscreteSweep(times, measurements, trajectory, oceanFunctions)
+             : ContinuousSweep(times, measurements, trajectory,
+                               oceanFunctions.nodes);
 }
 
 Kernels3D AdjointSolver::LateralSweep(
@@ -156,11 +118,8 @@ Kernels3D AdjointSolver::LateralSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory& trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
-  CheckArguments(times, measurements, &trajectory, oceanFunctions,
-                 stageOceanFunctions);
+    const OceanFunctions& oceanFunctions) const {
+  CheckArguments(times, measurements, &trajectory, oceanFunctions);
   // the moduli's lateral kernels ride on the material pairings, which
   // form the radial moduli kernels as well
   auto options = options_;
@@ -169,10 +128,10 @@ Kernels3D AdjointSolver::LateralSweep(
   detail::LateralAccumulator lateral(*evolution_->op_, coupling, viscosity, moduli);
   auto radial =
       options.method == AdjointMethod::Discrete
-          ? sweeps.DiscreteSweep(times, measurements, &trajectory, oceanFunctions,
-                                 stageOceanFunctions, &lateral)
+          ? sweeps.DiscreteSweep(times, measurements, &trajectory,
+                                 oceanFunctions, &lateral)
           : sweeps.ContinuousSweep(times, measurements, &trajectory,
-                                   oceanFunctions, &lateral);
+                                   oceanFunctions.nodes, &lateral);
   return lateral.Finish(std::move(radial));
 }
 
@@ -180,9 +139,7 @@ void AdjointSolver::CheckArguments(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
   const auto fieldSize = ev.solver_->Grid().FieldSize();
@@ -212,12 +169,12 @@ void AdjointSolver::CheckArguments(
           "coefficients: build it from the recording run's snapshots");
     }
   }
-  if (!oceanFunctions.empty()) {
-    if (oceanFunctions.size() != times.size()) {
+  if (!oceanFunctions.nodes.empty()) {
+    if (oceanFunctions.nodes.size() != times.size()) {
       throw std::invalid_argument(
           "the ocean functions must give one grid per time node");
     }
-    for (const auto& Cn : oceanFunctions) {
+    for (const auto& Cn : oceanFunctions.nodes) {
       if (Cn.size() != fieldSize) {
         throw std::invalid_argument(
             "the ocean functions must be fields on the solver's grid");
@@ -227,8 +184,8 @@ void AdjointSolver::CheckArguments(
   // the discrete sweep linearises each inner stage about its own shorelines
   if (options_.method == AdjointMethod::Discrete) {
     detail::CheckStageOceanFunctions(ev.options_.scheme, times,
-                                     !oceanFunctions.empty(),
-                                     stageOceanFunctions, fieldSize);
+                                     !oceanFunctions.nodes.empty(),
+                                     oceanFunctions.stages, fieldSize);
   }
   if (ev.options_.rotation == RotationalFeedback::Full) {
     // The forward run's stability condition (see Evolution::Run).
@@ -248,8 +205,7 @@ Kernels AdjointSolver::DiscreteSweep(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     detail::LateralAccumulator* lateral) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -262,11 +218,11 @@ Kernels AdjointSolver::DiscreteSweep(
   // the node's ocean function as its coefficient (Yu et al. 2025, §3.3);
   // frozen, every node has the background's. An inner stage of a step
   // (StepRecipe.hpp) has its own, the stage's shorelines.
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   auto overrideAt = [&](const StageRef& ref) {
     return migrating ? oceanAt(ref) : std::vector<double>{};
@@ -1122,7 +1078,7 @@ Kernels AdjointSolver::DiscreteSweep(
   }
 
   auto out = AssembleViews(times, std::move(directLoadKernels), std::move(densityLoad),
-                           std::move(lumps), oceanFunctions, stageLoads);
+                           std::move(lumps), oceanFunctions.nodes, stageLoads);
   out.tideKernels = std::move(tideKernels);
   out.directLoadOutsideWaterBudgetKernels = std::move(outsideKernels);
   out.solidSurfaceChangeKernels = std::move(layerKernels);

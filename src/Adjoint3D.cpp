@@ -28,20 +28,6 @@ using Complex = std::complex<double>;
 
 }  // namespace
 
-std::vector<std::vector<double>> OceanFunctionsOf(
-    std::span<const Evolution3D::Snapshot> snapshots) {
-  auto out = std::vector<std::vector<double>>{};
-  for (const auto& snapshot : snapshots) {
-    if (snapshot.oceanFunction.empty()) {
-      throw std::invalid_argument(
-          "the snapshots carry no ocean functions: a migrating run records "
-          "them");
-    }
-    out.push_back(snapshot.oceanFunction);
-  }
-  return out;
-}
-
 ForwardTrajectory3D ForwardTrajectory3D::FromSnapshots(
     std::span<const Evolution3D::Snapshot> snapshots) {
   ForwardTrajectory3D out;
@@ -67,27 +53,6 @@ ForwardTrajectory3D ForwardTrajectory3D::FromSnapshots(
   return out;
 }
 
-StageOceanFunctions StageOceanFunctionsOf(
-    std::span<const Evolution3D::Snapshot> snapshots) {
-  auto out = StageOceanFunctions{};
-  auto any = false;
-  for (const auto& snapshot : snapshots) {
-    auto inner = std::vector<std::vector<double>>{};
-    for (const auto& stage : snapshot.stages) {
-      if (stage.oceanFunction.empty()) {
-        throw std::invalid_argument(
-            "the snapshots' inner stages carry no ocean functions: a "
-            "migrating run records them");
-      }
-      inner.push_back(stage.oceanFunction);
-    }
-    any = any || !inner.empty();
-    out.push_back(std::move(inner));
-  }
-  if (!any) out.clear();
-  return out;
-}
-
 AdjointSolver3D::AdjointSolver3D(const Evolution3D& evolution,
                                  Options options)
     : evolution_(&evolution), options_(options) {}
@@ -96,16 +61,14 @@ Kernels3D AdjointSolver3D::FirstOrderKernels(
     std::span<const double> times,
     const std::map<std::size_t, Measurement>& measurements,
     const ForwardTrajectory3D* trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions) const {
   if (options_.method == AdjointMethod::Discrete) {
-    return DiscreteSweep(times, measurements, trajectory, oceanFunctions,
-                         stageOceanFunctions, {}, nullptr, nullptr)
+    return DiscreteSweep(times, measurements, trajectory, oceanFunctions, {},
+                         nullptr, nullptr)
         .first;
   }
-  return Sweep(times, measurements, trajectory, oceanFunctions, {}, nullptr,
-               nullptr)
+  return Sweep(times, measurements, trajectory, oceanFunctions.nodes, {},
+               nullptr, nullptr)
       .first;
 }
 
@@ -115,11 +78,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
     std::span<const Evolution3D::Snapshot> tangent,
     const std::vector<std::vector<double>>& itau,
     const ForwardTrajectory3D& trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    const MaterialDirection3D& material,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
-  if (evolution_->Calibrated() && !oceanFunctions.empty() &&
+    const OceanFunctions& oceanFunctions,
+    const MaterialDirection3D& material) const {
+  if (evolution_->Calibrated() && !oceanFunctions.nodes.empty() &&
       !options_.initial_sea_level_held) {
     RefuseCalibratedSecondOrderKernels();
   }
@@ -173,9 +134,9 @@ std::pair<Kernels3D, KernelDerivatives3D> AdjointSolver3D::SecondOrderKernels(
   }
   if (options_.method == AdjointMethod::Discrete) {
     return DiscreteSweep(times, measurements, &trajectory, oceanFunctions,
-                         stageOceanFunctions, tangent, &ditau, materialV);
+                         tangent, &ditau, materialV);
   }
-  return Sweep(times, measurements, &trajectory, oceanFunctions, tangent,
+  return Sweep(times, measurements, &trajectory, oceanFunctions.nodes, tangent,
                &ditau, materialV);
 }
 

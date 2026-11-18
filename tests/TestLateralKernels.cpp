@@ -254,11 +254,8 @@ Gaps RunGate(const Scene& scene, const Case& c, AdjointMethod method,
   const auto run1 = migrating ? evolution1.RunMigrating(c.times, c.iceThickness, forcing1)
                               : evolution1.Run(c.times, forcing1);
   const auto trajectory1 = ForwardTrajectory::FromSnapshots(run1);
-  const auto oceans1 =
-      migrating ? OceanFunctionsOf(run1) : std::vector<std::vector<double>>{};
   // (under Sdirk2, each step's first stage's shorelines too)
-  const auto stageOceans1 =
-      migrating ? StageOceanFunctionsOf(run1) : StageOceanFunctions{};
+  const auto oceans1 = migrating ? OceanFunctions::Of(run1) : OceanFunctions{};
 
   const auto zero = [](double, double, double) { return 0.0; };
   auto options3 = Viscoelastic3D::Options{.memory_points = c.points};
@@ -274,23 +271,18 @@ Gaps RunGate(const Scene& scene, const Case& c, AdjointMethod method,
   const auto run3 = migrating ? evolution3.RunMigrating(c.times, c.iceThickness, forcing3)
                               : evolution3.Run(c.times, forcing3);
   const auto trajectory3 = ForwardTrajectory3D::FromSnapshots(run3);
-  const auto oceans3 =
-      migrating ? OceanFunctionsOf(run3) : std::vector<std::vector<double>>{};
-  const auto stageOceans3 =
-      migrating ? StageOceanFunctionsOf(run3) : StageOceanFunctions{};
+  const auto oceans3 = migrating ? OceanFunctions::Of(run3) : OceanFunctions{};
 
   const LateralKernelSolver radial(evolution1, {.method = method, .rtol = 1e-12},
                                    {.viscosity = c.viscosity, .moduli = true});
   EXPECT_EQ(radial.GetRoute(), LateralKernelSolver::Route::Radial);
   const auto viaRadial =
-      radial.FirstOrderKernels(c.times, c.measurements, trajectory1, oceans1,
-                               stageOceans1);
+      radial.FirstOrderKernels(c.times, c.measurements, trajectory1, oceans1);
   const auto via3D = AdjointSolver3D(evolution3, {.method = method,
                                                   .rtol = 1e-12,
                                                   .coupled_rtol = 1e-12,
                                                   .material_kernels = true})
-                         .FirstOrderKernels(c.times, c.measurements, &trajectory3, oceans3,
-                                            stageOceans3);
+                         .FirstOrderKernels(c.times, c.measurements, &trajectory3, oceans3);
   const auto gaps = Compare(viaRadial, c.viscosity ? via3D : [&] {
     auto out = via3D;
     out.itauKernel3D.clear();

@@ -165,9 +165,9 @@ its closure alone.
 
 **Shorelines.** About a migrating run each stage is linearised about its
 own shorelines, as each node is about the node's: the sweeps and the
-tangent runs take the first stages' ocean functions beside the nodes'
-(`StageOceanFunctionsOf` the run's snapshots), and refuse a migrating
-Sdirk2 run without them.
+tangent runs take the run's ocean functions as one argument, the nodes'
+and the first stages' (`OceanFunctions`, `OceanFunctions::Of` the run's
+snapshots), and refuse a migrating Sdirk2 run's without the stages'.
 
 **The forcing inside a step.** A run reads its forcing at its nodes
 alone, under every scheme. The first stage ends at tⁿ + γ Δt, which is no
@@ -2816,7 +2816,7 @@ last iterate with `converged` false, and `sl3d kernel` refuses it.
   transposes of the stepped run under every scheme. Under Sdirk2 each
   step's first stage has its own shorelines, about which the sweep
   grounds that stage's part of the initial sea level kernel (§1a,
-  `stageOceanFunctions`); the multiplier's measurement sits at the last
+  `OceanFunctions::stages`); the multiplier's measurement sits at the last
   node, a node value like any other. The total kernels are then the
   derivative of the calibrated run as the program computes it, to the
   calibration's and the iteration's tolerances. By the continuous

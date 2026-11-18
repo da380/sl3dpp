@@ -173,17 +173,17 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = setup.Smooth(rng, 0.1 * setup.Metre());
   const auto ditau = setup.DeltaItau(0.1);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  // the exponential trapezoid stated: the continuous tangent-linear run along
+  // the relaxation times taken here is built for the one-stage schemes
   const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
                                    
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
 
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice), Evolution::Forcing{});
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction) << "the start moves no shoreline";
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction) << "the start moves no shoreline";
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
 
   // The objective of a migrating run from a state, under the ice history
@@ -198,7 +198,7 @@ TEST(MigratingDerivatives, AStartWithAnIceChange) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective(setup, snaps, measurements);
   };
@@ -343,14 +343,16 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous sweep's approach to the
+    // discrete is gated at that scheme's steps (under Sdirk2 its gaps here do
+    // not fall from 5 to 9 nodes: 5.0e-2 and 5.2e-2 in the thickness view with
+    // the background held)
     Evolution evolution(op, setup.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         times, Field(times, Thinning(cap, times, 0.85, 0.35)), Evolution::Forcing{});
-    const auto oceans = OceanFunctionsOf(run);
+    const auto oceans = OceanFunctions::Of(run);
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     auto kernels = std::map<AdjointMethod, Kernels>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
@@ -574,8 +576,8 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   auto rising = deltaIce;
   rising[0].assign(rising[0].size(), 0.0);
   const auto deltaSea = scene.Smooth(rng, 0.1 * scene.Metre());
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  // the exponential trapezoid stated: the continuous tangent-linear run along
+  // the log viscosity taken here is built for the one-stage schemes
   const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
@@ -585,9 +587,9 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
   const auto& coupling = op.Coupling();
   Evolution3D evolution(op, scene.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice), Evolution3D::Forcing{});
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction) << "the start moves no shoreline";
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction) << "the start moves no shoreline";
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
 
   auto objective = [&](const Viscoelastic3D& at, const GRDSolver::State& start,
@@ -600,7 +602,7 @@ TEST(MigratingDerivatives, AStartWithAnIceChange3D) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective3D(scene, snaps, measurements);
   };
@@ -751,8 +753,9 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
     auto measurements = std::map<std::size_t, Measurement>{};
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous sweep's approach to the
+    // discrete is gated at that scheme's steps (under Sdirk2 its initial sea
+    // level kernel's gap falls from 6.3e-2 to 4.7e-2 from 4 to 7 nodes)
     Evolution3D evolution(op, scene.solver, state,
                           {.scheme = Scheme::ExponentialTrapezoid,
                            .rtol = 1e-12,
@@ -761,7 +764,7 @@ TEST(MigratingDerivatives, TheContinuousSweepAboutAStartWithAnIceChange3D) {
                            .record_stride = 1});
     const auto run = evolution.RunMigrating(
         times, Field(times, Thinning3D(ice0, times, 0.85, 0.55)), Evolution3D::Forcing{});
-    const auto oceans = OceanFunctionsOf(run);
+    const auto oceans = OceanFunctions::Of(run);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
     auto kernels = std::map<AdjointMethod, Kernels3D>{};
     for (auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
@@ -976,17 +979,17 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
   measurements[1].displacementDual = setup.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  // the exponential trapezoid stated: the continuous tangent-linear run along
+  // the relaxation times taken here is built for the one-stage schemes
   const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
                                    
       .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice),
                                           ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0));
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction);
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
   auto objective = [&](const ViscoelasticOperator& at) {
     Evolution trial(at, setup.solver, state, options);
@@ -995,7 +998,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective(setup, snaps, measurements);
   };
@@ -1170,15 +1173,16 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun) {
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].tangentialPotentialDual = gTangential;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous second-order sweep taken
+    // here, and the continuous tangent-linear run along the relaxation times it
+    // reads, are built for the one-stage schemes
     Evolution evolution(op, setup.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     const auto run = evolution.RunMigrating(
         times, Field(times, ice), ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0));
-    const auto oceans = OceanFunctionsOf(run);
-    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.front(), state.oceanFunction);
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     TangentPerturbation u;
     for (const auto t : times) {
@@ -1376,8 +1380,8 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   measurements[1].displacementDual = scene.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+  // the exponential trapezoid stated: the continuous tangent-linear run along
+  // the log viscosity taken here is built for the one-stage schemes
   const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
@@ -1388,9 +1392,9 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
   Evolution3D evolution(op, scene.solver, state, options);
   const auto forcing = ForcingOf<Evolution3D::Forcing>(times, base, nullptr, 0.0);
   const auto run = evolution.RunMigrating(times, Field(times, ice), forcing);
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction);
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
   auto objective = [&](const Viscoelastic3D& at) {
     Evolution3D trial(at, scene.solver, state, options);
@@ -1398,7 +1402,7 @@ TEST(MigratingDerivatives, TheViscosityAndTheModuliAboutAForcedRun3D) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective3D(scene, snaps, measurements);
   };
@@ -1565,8 +1569,9 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous second-order sweep taken
+    // here, and the continuous tangent-linear run along the relaxation times it
+    // reads, are built for the one-stage schemes
     Evolution3D evolution(op, scene.solver, state,
                           {.scheme = Scheme::ExponentialTrapezoid,
                            .rtol = 1e-12,
@@ -1576,8 +1581,8 @@ TEST(MigratingDerivatives, TheContinuousSweepsAboutAForcedRun3D) {
     const auto run = evolution.RunMigrating(
         times, Field(times, Thinning3D(ice0, times, 1.0, 0.55)),
         ForcingOf<Evolution3D::Forcing>(times, base, nullptr, 0.0));
-    const auto oceans = OceanFunctionsOf(run);
-    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.front(), state.oceanFunction);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
     TangentPerturbation3D u;
     for (const auto t : times) {
@@ -1742,7 +1747,9 @@ double TideDistance(const SurfaceGrid& grid, const std::vector<Coefficients>& x,
 
 }  // namespace
 
-TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
+namespace {
+
+void TheTideAboutAForcedRun(Scheme scheme) {
   // About the forced migrating run of the marine cap with a tide of a few
   // metres beside its loads, layer and source, the derivative classes
   // take the tide, a direction of every degree from 2:
@@ -1786,11 +1793,10 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[nodes - 1].tangentialPotentialDual = setup.Smooth(rng, 0.6);
   measurements[nodes - 1].angularVelocityDual = {0.2, -0.4, 0.8};
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
-  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
-                                   
-      .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
+  const Evolution::Options options{.scheme = scheme,
+                                   .rtol = 1e-12,
+                                   .max_nonlinear_iterations = 200,
+                                   .record_stride = 1};
   auto forcingOf = [&](const std::vector<Coefficients>& direction, double eps) {
     auto out = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
     out.tide = TideField(times, tides, direction, eps);
@@ -1798,9 +1804,9 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
   };
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction);
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
   // the steps saw the tide
   ASSERT_GT(MaxDiff(AsReal(trajectory.tides[2]),
@@ -1814,7 +1820,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective(setup, snaps, measurements);
   };
@@ -1927,11 +1933,12 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
         const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
         // flotation's 0/1: rounding changes it only at a cell on the threshold
         for (auto n = std::size_t{0}; n < nodes; ++n) {
-          EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+          EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
         }
         const auto path = ForwardTrajectory::FromSnapshots(snaps);
         const auto k = AdjointSolver(trial, {.method = AdjointMethod::Discrete, .rtol = 1e-12})
-                           .FirstOrderKernels(times, measurements, &path, OceanFunctionsOf(snaps));
+                           .FirstOrderKernels(times, measurements, &path,
+                                              OceanFunctions::Of(snaps));
         return TidePairing(grid, k.tideKernels, deltaTide);
       },
       0.004, predicted);
@@ -1939,6 +1946,15 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
                            Gap(fdKernel.richardson, predicted));
   ASSERT_NE(predicted, 0.0);
   EXPECT_NEAR(fdKernel.richardson, predicted, 1e-6 * std::abs(predicted));
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheTideAboutAForcedRun) {
+  TheTideAboutAForcedRun(Evolution::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheTideAboutAForcedRunUnderTheTrapezoid) {
+  TheTideAboutAForcedRun(Scheme::ExponentialTrapezoid);
 }
 
 TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
@@ -1982,16 +1998,17 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[NodeOf(times, 0.5 * times.back())].displacementDual = gMid;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous second-order sweep taken
+    // here, and the continuous tangent-linear run along the relaxation times it
+    // reads, are built for the one-stage schemes
     Evolution evolution(op, setup.solver, state,
                         {.scheme = Scheme::ExponentialTrapezoid,
                          .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1});
     auto forcing = ForcingOf<Evolution::Forcing>(times, base, nullptr, 0.0);
     forcing.tide = TideField(times, tides);
     const auto run = evolution.RunMigrating(times, Field(times, ice), forcing);
-    const auto oceans = OceanFunctionsOf(run);
-    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.front(), state.oceanFunction);
     const auto trajectory = ForwardTrajectory::FromSnapshots(run);
     TangentPerturbation u;
     u.itau = ditau;
@@ -2026,7 +2043,9 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun) {
   EXPECT_GT(coarse.second / fine.second, 2.0);
 }
 
-TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
+namespace {
+
+void TheTideAboutAForcedRun3D(Scheme scheme) {
   // The 1D tide gate under lateral viscosity, four nodes over 10 kyr, the
   // wide marine cap melting to 55% under the loads, the layer, the source
   // and a tide: the 3D tangent along a tide direction is the derivative of
@@ -2059,9 +2078,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
   measurements[1].displacementDual = scene.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = scene.Smooth(rng, 1.0);
   measurements[nodes - 1].toroidalPotentialDual = scene.Smooth(rng, 0.5);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
-  const Evolution3D::Options options{.scheme = Scheme::ExponentialTrapezoid,
+  const Evolution3D::Options options{.scheme = scheme,
                                      .rtol = 1e-12,
                                      .coupled_rtol = 1e-12,
                                      .max_nonlinear_iterations = 200,
@@ -2075,9 +2092,9 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
   };
   Evolution3D evolution(op, scene.solver, state, options);
   const auto run = evolution.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans.front(), state.oceanFunction);
-  ASSERT_NE(oceans.back(), oceans.front());
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes.front(), state.oceanFunction);
+  ASSERT_NE(oceans.nodes.back(), oceans.nodes.front());
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
   auto objective = [&](const Viscoelastic3D& at, const std::vector<Coefficients>& direction,
                        double eps) {
@@ -2087,7 +2104,7 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
     // flotation's 0/1: rounding changes it only at a cell on the threshold
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective3D(scene, snaps, measurements);
   };
@@ -2190,13 +2207,14 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
         const auto snaps = trial.RunMigrating(times, Field(times, ice), forcingOf({}, 0.0));
         // flotation's 0/1: rounding changes it only at a cell on the threshold
         for (auto n = std::size_t{0}; n < nodes; ++n) {
-          EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+          EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
         }
         const auto path = ForwardTrajectory3D::FromSnapshots(snaps);
         const auto k = AdjointSolver3D(trial, {.method = AdjointMethod::Discrete,
                                                .rtol = 1e-12,
                                                .coupled_rtol = 1e-12})
-                           .FirstOrderKernels(times, measurements, &path, OceanFunctionsOf(snaps));
+                           .FirstOrderKernels(times, measurements, &path,
+                                              OceanFunctions::Of(snaps));
         return TidePairing(grid, k.ice.tideKernels, deltaTide);
       },
       0.004, predicted);
@@ -2204,6 +2222,15 @@ TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
                            Gap(fdKernel.richardson, predicted));
   ASSERT_NE(predicted, 0.0);
   EXPECT_NEAR(fdKernel.richardson, predicted, 1e-6 * std::abs(predicted));
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, TheTideAboutAForcedRun3D) {
+  TheTideAboutAForcedRun3D(Evolution3D::Options{}.scheme);
+}
+TEST(MigratingDerivatives, TheTideAboutAForcedRun3DUnderTheTrapezoid) {
+  TheTideAboutAForcedRun3D(Scheme::ExponentialTrapezoid);
 }
 
 TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
@@ -2243,8 +2270,9 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
     measurements[0].relativeSeaLevelDual = g0;
     measurements[times.size() - 1].relativeSeaLevelDual = gEnd;
     measurements[times.size() - 1].displacementDual = gDisp;
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
+    // the exponential trapezoid stated: the continuous second-order sweep taken
+    // here, and the continuous tangent-linear run along the relaxation times it
+    // reads, are built for the one-stage schemes
     Evolution3D evolution(op, scene.solver, state,
                           {.scheme = Scheme::ExponentialTrapezoid,
                            .rtol = 1e-12,
@@ -2255,8 +2283,8 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
     forcing.tide = TideField(times, tides);
     const auto run = evolution.RunMigrating(
         times, Field(times, Thinning3D(ice0, times, 1.0, 0.55)), forcing);
-    const auto oceans = OceanFunctionsOf(run);
-    EXPECT_NE(oceans.front(), state.oceanFunction);
+    const auto oceans = OceanFunctions::Of(run);
+    EXPECT_NE(oceans.nodes.front(), state.oceanFunction);
     const auto trajectory = ForwardTrajectory3D::FromSnapshots(run);
     TangentPerturbation3D u;
     u.itau = TangentLinearSolver3D::ItauOfLogViscosity(op, pattern);
@@ -2295,7 +2323,9 @@ TEST(MigratingDerivatives, TheContinuousTideKernelsAboutAForcedRun3D) {
   EXPECT_GT(coarse.second / fine.second, 2.0);
 }
 
-TEST(MigratingDerivatives, AcrossAnIceJump) {
+namespace {
+
+void AcrossAnIceJump(Scheme scheme) {
   // A melting marine cap whose melt steps at a repeated node, its left
   // limit the ice before the step (Forcing::iceThicknessBefore), the start
   // solved: the zero-length step is the nonlinear equation as at any node,
@@ -2334,22 +2364,21 @@ TEST(MigratingDerivatives, AcrossAnIceJump) {
   measurements[1].relativeSeaLevelDual = setup.Smooth(rng, 0.4);
   measurements[2].displacementDual = setup.Smooth(rng, 0.7);
   measurements[nodes - 1].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
-  // the exponential trapezoid stated: the calls here are a one-stage run's (no
-  // stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
-  const Evolution::Options options{.scheme = Scheme::ExponentialTrapezoid,
-                                   
-      .rtol = 1e-12, .max_nonlinear_iterations = 200, .record_stride = 1};
+  const Evolution::Options options{.scheme = scheme,
+                                   .rtol = 1e-12,
+                                   .max_nonlinear_iterations = 200,
+                                   .record_stride = 1};
   Evolution evolution(op, setup.solver, state, options);
   const auto run = evolution.RunMigrating(times, sides.plain, forcing);
-  const auto oceans = OceanFunctionsOf(run);
-  ASSERT_NE(oceans[2], oceans[1]);  // the step moves the shorelines
+  const auto oceans = OceanFunctions::Of(run);
+  ASSERT_NE(oceans.nodes[2], oceans.nodes[1]);  // the step moves the shorelines
   const auto trajectory = ForwardTrajectory::FromSnapshots(run);
   auto objective = [&](const ViscoelasticOperator& at) {
     Evolution trial(at, setup.solver, state, options);
     const auto snaps = trial.RunMigrating(times, sides.plain, forcing);
     for (auto n = std::size_t{0}; n < nodes; ++n) {
       EXPECT_TRUE(snaps[n].converged) << "node " << n;
-      EXPECT_EQ(snaps[n].oceanFunction, oceans[n]) << "a cell flipped at node " << n;
+      EXPECT_EQ(snaps[n].oceanFunction, oceans.nodes[n]) << "a cell flipped at node " << n;
     }
     return Objective(setup, snaps, measurements);
   };
@@ -2421,4 +2450,13 @@ TEST(MigratingDerivatives, AcrossAnIceJump) {
   ASSERT_NE(forward, 0.0);
   EXPECT_NEAR(uw, wu, 1e-9 * std::abs(uw));
   EXPECT_NEAR(uw, forward, 1e-9 * std::abs(forward));
+}
+
+}  // namespace
+
+TEST(MigratingDerivatives, AcrossAnIceJump) {
+  AcrossAnIceJump(Evolution::Options{}.scheme);
+}
+TEST(MigratingDerivatives, AcrossAnIceJumpUnderTheTrapezoid) {
+  AcrossAnIceJump(Scheme::ExponentialTrapezoid);
 }

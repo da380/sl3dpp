@@ -1563,9 +1563,8 @@ std::optional<Multiplier> CalibratedForcing(
     const KernelInput& input, const Json& top, const Writing& w,
     const EvolutionT& evolution, std::span<const double> times,
     const MeasurementSpec& spec, const Built& built,
-    std::span<const std::vector<double>> oceans,
-    std::span<const std::vector<std::vector<double>>> stageOceans,
-    const Options& adjoint, std::map<std::size_t, Measurement>& measurements,
+    const OceanFunctions& oceans, const Options& adjoint,
+    std::map<std::size_t, Measurement>& measurements,
     int& mostSweeps) {
   measurements = built.measurements;
   if (!w.total || !*w.total) return std::nullopt;
@@ -1574,8 +1573,8 @@ std::optional<Multiplier> CalibratedForcing(
   options.iterations = block.calibration_iterations;
   options.rtol = block.calibration_rtol;
   auto solved = SolveCalibrationMultiplier(evolution, times,
-                                           built.measurements, oceans,
-                                           stageOceans, options, adjoint);
+                                           built.measurements, oceans, options,
+                                           adjoint);
   if (!solved.converged) {
     const auto& kernels = top.At("kernels");
     Fail(Has(kernels, "calibration") ? kernels.At("calibration") : kernels,
@@ -1810,13 +1809,9 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
   const auto& material = earth.material;
   const auto trajectory = ForwardTrajectory::FromSnapshots(snapshots);
   // about a migrating run, the sweeps linearise about its own shorelines
-  const auto oceans = input.run.Migrating()
-                          ? OceanFunctionsOf(snapshots)
-                          : std::vector<std::vector<double>>{};
   // (under `solver.scheme` "sdirk2", each step's first stage about its own)
-  const auto stageOceans = input.run.Migrating()
-                               ? StageOceanFunctionsOf(snapshots)
-                               : StageOceanFunctions{};
+  const auto oceans = input.run.Migrating() ? OceanFunctions::Of(snapshots)
+                                            : OceanFunctions{};
   const auto options = AdjointOptionsOf<AdjointSolver::Options>(input, w);
   const AdjointSolver adjoint(evolution, options);
   auto lateral = std::optional<LateralKernelSolver>{};
@@ -1843,18 +1838,18 @@ std::string Sweep1D(const KernelInput& input, const Json& top,
         // a calibrated run's total kernels: the measurement less the
         // calibration's multiplier at the window's end
         auto measurements = std::map<std::size_t, Measurement>{};
-        const auto multiplier = CalibratedForcing(
-            input, top, w, evolution, times, spec, built, oceans, stageOceans,
-            options, measurements, mostSweeps);
+        const auto multiplier =
+            CalibratedForcing(input, top, w, evolution, times, spec, built,
+                              oceans, options, measurements, mostSweeps);
         auto fields = std::optional<Kernels3D>{};
         if (lateral) {
           fields = lateral->FirstOrderKernels(times, measurements, trajectory,
-                                              oceans, stageOceans);
+                                              oceans);
         }
         const auto kernels =
             fields ? fields->ice
                    : adjoint.FirstOrderKernels(times, measurements, &trajectory,
-                                               oceans, stageOceans);
+                                               oceans);
         WriteSurfaceKernels(stem, w, block, spec, kernels, built,
                             multiplier ? &*multiplier : nullptr);
         if (block.Writes(KernelParameter::Viscosity)) {
@@ -1889,10 +1884,8 @@ std::string Sweep3D(const KernelInput& input, const Json& top,
   const auto& run = input.run;
   const auto& block = input.kernels;
   const auto& ranks = TheRanks();
-  const auto oceans = run.Migrating() ? OceanFunctionsOf(snapshots)
-                                      : std::vector<std::vector<double>>{};
-  const auto stageOceans = run.Migrating() ? StageOceanFunctionsOf(snapshots)
-                                           : StageOceanFunctions{};
+  const auto oceans =
+      run.Migrating() ? OceanFunctions::Of(snapshots) : OceanFunctions{};
   auto options = AdjointOptionsOf<AdjointSolver3D::Options>(input, w);
   options.max_coupled_iterations = run.solver.step_max_iterations;
   options.coupled_rtol = run.solver.step_rtol;
@@ -1913,11 +1906,11 @@ std::string Sweep3D(const KernelInput& input, const Json& top,
         // a calibrated run's total kernels, as the radial run's (collective:
         // every rank sweeps for the multiplier)
         auto measurements = std::map<std::size_t, Measurement>{};
-        const auto multiplier = CalibratedForcing(
-            input, top, w, evolution, times, spec, built, oceans, stageOceans,
-            options, measurements, mostSweeps);
+        const auto multiplier =
+            CalibratedForcing(input, top, w, evolution, times, spec, built,
+                              oceans, options, measurements, mostSweeps);
         const auto kernels = adjoint.FirstOrderKernels(
-            times, measurements, &trajectory, oceans, stageOceans);
+            times, measurements, &trajectory, oceans);
         if (ranks.First()) {
           WriteSurfaceKernels(stem, w, block, spec, kernels.ice, built,
                               multiplier ? &*multiplier : nullptr);

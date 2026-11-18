@@ -364,14 +364,17 @@ TEST(TrajectoryCursor, SecondOrderSweepsAreTheFullRecordingsAtAnyStride) {
   }
 }
 
-TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
+namespace {
+
+void AMigratingRunsKernelsAtAnyStride(Scheme scheme) {
   // About a migrating run (the marine cap melting over the weak layer, its
   // shorelines moving, a tenth of the cap gone at a stroke at a repeated
   // node, Forcing::iceThicknessBefore), whose radial steps read only the
   // recorded coefficients, the ocean functions entering the sea level
   // solves the sweeps take from the snapshots: the relaxation-time and
   // moduli kernels of both sweeps at each stride are the full recording's
-  // (measured: within 4.1e-12 discrete, 1.1e-10 continuous).
+  // (measured: within 4.1e-12 discrete, 1.1e-10 continuous under the
+  // trapezoid; 2.9e-12 and 2.1e-11 under Sdirk2).
   const WeakLayer weak;
   const auto& setup = weak.setup;
   const auto cap = MarineCap::Make(setup, 13);
@@ -397,23 +400,21 @@ TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
   measurements[13].relativeSeaLevelDual = setup.Smooth(rng, 1.0);
   measurements[7].displacementDual = setup.Smooth(rng, 0.5);
   auto run = [&](int stride) {
-    // the exponential trapezoid stated: the calls here are a one-stage run's
-    // (no stage ocean functions; Sdirk2's are TestSdirk2Derivatives')
     Evolution evolution(weak.op, setup.solver, state,
-                        {.scheme = Scheme::ExponentialTrapezoid,
+                        {.scheme = scheme,
                          .rtol = 1e-12, .record_stride = stride});
     return evolution.RunMigrating(
         times, [&melted, step](double t) { return melted(t, t >= step); },
         forcing);
   };
   const auto fullRun = run(1);
-  const auto oceans = OceanFunctionsOf(fullRun);
+  const auto oceans = OceanFunctions::Of(fullRun);
   auto moved = false;
-  for (const auto& c : oceans) moved = moved || c != oceans.front();
+  for (const auto& c : oceans.nodes) moved = moved || c != oceans.nodes.front();
   ASSERT_TRUE(moved);
   const auto full = ForwardTrajectory::FromSnapshots(fullRun);
   Evolution evolution(weak.op, setup.solver, state,
-                      {.scheme = Scheme::ExponentialTrapezoid,
+                      {.scheme = scheme,
                        .rtol = 1e-12});
   for (const auto method : {AdjointMethod::Discrete, AdjointMethod::Continuous}) {
     const AdjointSolver adjoint(
@@ -421,7 +422,9 @@ TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
     const auto want = adjoint.FirstOrderKernels(times, measurements, &full, oceans);
     for (const auto stride : kStrides) {
       const auto sparseRun = run(stride);
-      EXPECT_EQ(OceanFunctionsOf(sparseRun), oceans);
+      const auto sparseOceans = OceanFunctions::Of(sparseRun);
+      EXPECT_EQ(sparseOceans.nodes, oceans.nodes);
+      EXPECT_EQ(sparseOceans.stages, oceans.stages);
       const auto sparse = ForwardTrajectory::FromSnapshots(sparseRun);
       const auto got = adjoint.FirstOrderKernels(times, measurements, &sparse,
                                                  oceans);
@@ -435,6 +438,15 @@ TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
       EXPECT_LT(mu, gate) << label;
     }
   }
+}
+
+}  // namespace
+
+TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStride) {
+  AMigratingRunsKernelsAtAnyStride(Evolution::Options{}.scheme);
+}
+TEST(TrajectoryCursor, AMigratingRunsKernelsAtAnyStrideUnderTheTrapezoid) {
+  AMigratingRunsKernelsAtAnyStride(Scheme::ExponentialTrapezoid);
 }
 
 TEST(TrajectoryCursor, WhatAGappedRecordingIsRefused) {

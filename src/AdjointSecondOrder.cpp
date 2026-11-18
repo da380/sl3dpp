@@ -72,13 +72,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
     std::span<const Evolution::Snapshot> tangent,
     const std::vector<std::vector<double>>& itau,
     const ForwardTrajectory& trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    const PointMaterialDirection& material,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions)
-    const {
+    const OceanFunctions& oceanFunctions,
+    const PointMaterialDirection& material) const {
   detail::CheckTimeGrid(times);
   const auto& ev = *evolution_;
-  if (ev.Calibrated() && !oceanFunctions.empty() &&
+  if (ev.Calibrated() && !oceanFunctions.nodes.empty() &&
       !options_.initial_sea_level_held) {
     RefuseCalibratedSecondOrderKernels();
   }
@@ -115,15 +113,15 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
   detail::CheckRecordedTangent(tangent, ev.options_.scheme, times);
   if (discrete) {
     detail::CheckStageOceanFunctions(ev.options_.scheme, times,
-                                     !oceanFunctions.empty(),
-                                     stageOceanFunctions, fieldSize);
+                                     !oceanFunctions.nodes.empty(),
+                                     oceanFunctions.stages, fieldSize);
   }
-  if (!oceanFunctions.empty()) {
-    if (oceanFunctions.size() != times.size()) {
+  if (!oceanFunctions.nodes.empty()) {
+    if (oceanFunctions.nodes.size() != times.size()) {
       throw std::invalid_argument(
           "the ocean functions must give one grid per time node");
     }
-    for (const auto& Cn : oceanFunctions) {
+    for (const auto& Cn : oceanFunctions.nodes) {
       if (Cn.size() != fieldSize) {
         throw std::invalid_argument(
             "the ocean functions must be fields on the solver's grid");
@@ -148,11 +146,10 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::SecondOrderKernels(
   }
   return discrete
              ? DiscreteSecondOrder(times, measurements, tangent, ditauPoints,
-                                   trajectory, oceanFunctions,
-                                   stageOceanFunctions, material)
+                                   trajectory, oceanFunctions, material)
              : ContinuousSecondOrder(times, measurements, tangent,
-                                     ditauPoints, trajectory, oceanFunctions,
-                                     material);
+                                     ditauPoints, trajectory,
+                                     oceanFunctions.nodes, material);
 }
 
 // -- the discrete second-order sweep
@@ -164,8 +161,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
     std::span<const Evolution::Snapshot> tangent,
     const std::vector<std::vector<double>>& ditauPoints,
     const ForwardTrajectory& trajectory,
-    std::span<const std::vector<double>> oceanFunctions,
-    std::span<const std::vector<std::vector<double>>> stageOceanFunctions,
+    const OceanFunctions& oceanFunctions,
     const PointMaterialDirection& direction) const {
   const auto& ev = *evolution_;
   const auto& op = *ev.op_;
@@ -176,11 +172,11 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   const auto& C = ev.state_.oceanFunction;
   // the shorelines a stage is linearised about: the node's at the step's
   // last stage, an inner stage's own before (as the first-order sweep)
-  const bool migrating = !oceanFunctions.empty();
+  const bool migrating = !oceanFunctions.nodes.empty();
   auto oceanAt = [&](const StageRef& ref) -> const std::vector<double>& {
     if (!migrating) return C;
-    return ref.Last() ? oceanFunctions[ref.node]
-                      : stageOceanFunctions[ref.node][ref.index];
+    return ref.Last() ? oceanFunctions.nodes[ref.node]
+                      : oceanFunctions.stages[ref.node][ref.index];
   };
   auto overrideAt = [&](const StageRef& ref) {
     return migrating ? oceanAt(ref) : std::vector<double>{};
@@ -1067,7 +1063,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   }
   auto kernels = AssembleViews(times, std::move(directLoadKernels),
                                std::move(densityLoad), std::move(lumps),
-                               oceanFunctions, stageLoads);
+                               oceanFunctions.nodes, stageLoads);
   // the kernels and their derivatives as densities per unit volume
   const auto& kernelMesh = op.BaseMaterial().Mesh();
   auto samples = [&](std::vector<std::vector<double>> atPoints) {
@@ -1086,7 +1082,7 @@ std::pair<Kernels, KernelDerivatives> AdjointSolver::DiscreteSecondOrder(
   kernels.muKernel = pointSamples(std::move(muKernel));
   KernelDerivatives derivatives;
   DerivativeViews(derivatives, C, rhoI, rhoW, times, std::move(dloadDuals),
-                  oceanFunctions, dStageLoads);
+                  oceanFunctions.nodes, dStageLoads);
   derivatives.itauKernel = samples(std::move(dItauKernel));
   derivatives.kappaKernel = pointSamples(std::move(dKappaKernel));
   derivatives.muKernel = pointSamples(std::move(dMuKernel));

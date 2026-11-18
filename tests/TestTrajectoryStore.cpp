@@ -815,7 +815,7 @@ TEST_F(TrajectoryStore, AStagedRunsStoreHoldsEachStepsFirstStage) {
       const auto trajectory = ForwardTrajectory::FromSnapshots(from);
       return AdjointSolver(evolution, {.rtol = 1e-11})
           .FirstOrderKernels(times, measurements, &trajectory,
-                             OceanFunctionsOf(from), StageOceanFunctionsOf(from));
+                             OceanFunctions::Of(from));
     };
     const auto fromStore = sweep(read);
     const auto inMemory = sweep(snapshots);
