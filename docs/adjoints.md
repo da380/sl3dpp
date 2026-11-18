@@ -421,7 +421,10 @@ polynomial through the other nodes and its gradient entry is not kept.
 The entry is zero except for the nodal relaxation-time kernel of Gauss
 memory points in an element at the centre that relaxes, where the
 pairing misses the sensitivity to the value at the centre alone (about
-1e-5 of that element's).
+1e-5 of that element's). In 3D no memory node sits at the centre: the
+Gauss points are interior to the element holding it, which the coupling
+carries like any other, and at the GLL points that element is not
+carried (§13k, "The element holding the centre").
 The kernels with respect to the ice history are fields on the surface
 grid and pair by ∫ · dS (below).
 
@@ -944,8 +947,10 @@ of the degree form, pointwise in angle). Then δx = −K⁻¹ (dK) x with the
 reference (radial, unrelaxed) systems, spheroidal and toroidal: a
 lateral perturbation couples the degrees by the selection rules of the
 products and couples spheroidal to toroidal motion. The nodes are the
-GLL nodes of every solid element above the one holding the centre (the
-spherical strain components divide by r); they come from a throwaway
+GLL nodes of every solid element above the one holding the centre (that
+element's first GLL node is the centre itself, where the spherical
+strain components, which divide by r, are not evaluated: §13k, "The
+element holding the centre"); they come from a throwaway
 Maxwell rheology over the isotropic Voigt average of the material (a
 branch may not be active where the material is anisotropic), while the
 reference systems and the perturbation's meaning — an isotropic
@@ -1340,10 +1345,13 @@ problem: `Viscoelastic3D::Options::moduli`, relative perturbations
 sampled like the log-viscosity — μ_U(x) = μ̄_U(r)(1 + s(x)) with every
 branch modulus scaled alike (fractions and relaxation times held, the
 material derivatives' convention), κ(x) = κ̄(r)(1 + b(x)). With them
-set the coupling carries every solid element above the centre
-(`GridCoupling::Options::all_solid`; an elastic element's memory is
-inert), so a perturbation can live in the lithosphere or the inner
-core as well as the Maxwell mantle. The fluid is not covered: the
+set the coupling carries every solid element where they are non-zero
+beside the viscous ones (`Viscoelastic3D::ActiveElementsFor`,
+`GridCoupling::Options::active_elements`; an elastic element's memory
+is inert), the element holding the centre included at the Gauss points
+(below), so a perturbation can live in the lithosphere or the inner
+core, down to the centre, as well as the Maxwell mantle. The fluid is
+not covered: the
 fluid form (κ, ρ, g; no deviatoric strain) has no grid pipeline, so a
 lateral κ in the outer core is not representable.
 
@@ -1392,6 +1400,86 @@ within-step passes grow from 2 (zero lateral) to about 10 at 10%
 moduli contrast — the lateral elastic term is a stronger coupling than
 mild viscosity and contracts under Picard at roughly 0.1 a pass; the
 step by conjugate gradients (§13n) is the alternative.
+
+**The element holding the centre.** At the Gauss memory points the
+coupling carries it like any other element: under lateral moduli where
+they are non-zero there or where it relaxes, under a lateral viscosity
+where it relaxes. What divides by r is the spherical form of a tensor
+at a memory node: the five deviatoric strain components are
+combinations of U, V, W and their r ∂r over r (`DeviatoricComponents`,
+`AddStrainOfSolution`), an internal-variable state's components its
+scalars over r (`ComponentsFromScalars`, `AddScalarState`), and the 3D
+kernels are densities, the accumulated gradient over the node's volume
+weight w r². The dilatation r div u = r ∂r U + 2U − k²V does not
+divide, nor do the force rows, which take the factor of r back (the
+pointwise rows under jac·w·r, the derivative rows with r²), so that the
+assembled force is the 1D degree form's, whose scalars never divide.
+r = 0 is a regular singular point: the regular solution makes the
+numerators vanish with r (U and V go as r^(l−1) at degree l, and the
+rigid translation at l = 1, U = V, carries no strain), so the
+components are bounded and the spherical form is only a change of
+variables away from the radial one. The Gauss points are interior (the
+innermost at 0.069 of the element's width for five GLL nodes), so no
+point at r = 0 is ever evaluated, and the division by r and the
+multiplication by r that undoes it cost rounding alone: with zero
+lateral moduli a run equals the run without them to rounding on bodies
+viscous to the centre, and an angle-uniform shift reaching the centre
+equals the 1D stepper to rounding (gates below). At the GLL points the
+element's first node is the centre itself, where the components are
+0/0: the coupling never carries that element (its memory is inert
+where it does not relax; a lateral perturbation of the moduli there
+is not applied), and a coupling over a range holding it is refused, by
+name, where it relaxes (`GridCoupling`'s constructor), lateral
+viscosity or lateral moduli alike; the Gauss points, the default, take
+every such body. `ElasticPerturbation3D`, whose nodes are GLL nodes,
+starts above that element.
+
+GATES, on bodies viscous to their centre where not said otherwise (lmax
+6 for the forward gates, 8 for the derivatives; the default Gauss
+points):
+`Lateral.TheElementHoldingTheCentreIsCarriedAtTheGaussPoints` — on the
+Maxwell ball the Gauss points carry that element under every rule (the
+rheology's, `all_solid`, a mask), none of its nodes at r = 0, and the
+GLL points are refused there by name, a range above it built; on prem8
+(an elastic inner core) the GLL points carry every solid element above
+it and the Gauss points every solid element;
+`LateralModuli3D.ZeroModuliOnBodiesViscousToTheirCentreAreTheRunWithout`
+— lateral moduli set to zero equal the run without them on the
+homogeneous Maxwell ball and on PREM with a Maxwell inner core, four
+steps from rest, at 0 (Sdirk2) and 1.2e-13 and 3.8e-13 (trapezoid), the
+unrelaxed solve at 4.0e-12 and 3.2e-12;
+`LateralModuli3D.ShiftsReachingTheCentreMatchThe1DStepperOnABallViscousToItsCentre`
+— on the Maxwell ball a shear shift constant per element (25% in the
+element holding the centre) equals the 1D stepper on the shifted
+rheology at 3.9e-12 (both schemes; the unrelaxed solve 4.6e-12), smooth
+shifts of shear and bulk the 1D stepper given them at its points at
+4.3e-12, the centre element's own shift moving the run by 9.9e-7;
+`TangentLinear3D.DirectionsInTheCentreMatchDifferencesOnABallViscousToItsCentre`
+— on the ball meshed in 1500 km elements, directions confined to the
+element holding the centre (κ and μ; ln η) match central differences at
+second order (ratio 4.00), Richardson within 1e-8 of the tangent, both
+schemes; `DiscreteAdjoint3D.PairsWithTheTangentOnABallViscousToItsCentre`
+— the discrete load, itau, κ and μ kernels pair with the tangent along
+loads, ln η and the moduli concentrated about the centre to 1e-10 at
+worst, both schemes, the kernels non-zero in that element;
+`DiscreteAdjoint3D.ContinuousGapClosesOnABallViscousToItsCentre` — the
+continuous sweep's gap falls by 3.6 to 3.8 as the steps halve;
+`SecondOrderAdjoint3D.DiscreteMaterialHessianIsExactOnABallViscousToItsCentre`
+— symmetric and adjoint to the second-order run to 1e-13 relative;
+`TangentTest.In3DOnABallViscousToItsCentreTheViscosityIsTheDecks` —
+`sl3d tangent` along a uniform ln η equals the difference of two `solve`
+runs on the deck's viscosity scaled at 1.3e-6 (Maxwell ball) and 1.1e-6
+(Burgers ball), the gate's tolerance 1e-5, and the kernel's uniform
+pairing is the tangent's change at 1e-13;
+`TangentTest.In3DAChangeOfTheModuliAtTheCentreIsAChangeLikeAnyOther` —
+on prem8 under a lateral viscosity alone (an elastic inner core the run
+carries no nodes in) a change of the moduli about the centre is refused
+at the member, naming the depth of the centre element's first memory
+point, as a change in any element the run does not carry; and over two
+and three ranks
+`AppsOverRanks.OnABallViscousToItsCentreSolveKernelAndTangentMatchOneProcess`
+— `solve`, `kernel` and `tangent` on the ball are the one process's at
+5e-12, 3e-11 and 8e-12.
 
 **The sweeps under lateral moduli.** Three things change
 for the tangent, the adjoints and the second-order sweeps, and nothing
@@ -2504,11 +2592,13 @@ of a source-driven run are the trajectory's.
 
 **Where the nodes are.** `LateralCoupling`: the operator's memory points
 at its lmax, over the viscous elements when the viscosity's kernels
-alone are asked for, and over every solid element above the one holding
-the centre when the moduli's are (an elastic element's viscosity kernel
-is then zero) — the elements the 3D operator carries for a lateral
-viscosity and for lateral moduli over the whole solid, and
-`ElasticPerturbation3D`'s. The transforms may be cut by depth
+alone are asked for, and over every solid element when the moduli's are
+(an elastic element's viscosity kernel is then zero), the element
+holding the centre included at the Gauss points and left out at the
+GLL points (§13k, "The element holding the centre") — the elements the
+3D operator carries for a lateral viscosity and for lateral moduli over
+the whole solid, and at the GLL points `ElasticPerturbation3D`'s. The
+transforms may be cut by depth
 (`transform_degrees`) as the 3D classes' are.
 
 **The entry point.** `LateralKernelSolver` (`LateralKernels.hpp`) is the

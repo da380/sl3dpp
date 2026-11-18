@@ -69,8 +69,10 @@ struct LateralKernelOptions {
 /// The coupling a radial operator's lateral kernels are laid out on: the
 /// operator's memory points at its lmax, over its viscous elements when
 /// the viscosity's kernels alone are asked for, and over every solid
-/// element above the one holding the centre when the moduli's are (an
-/// elastic element's viscosity kernel is then zero). These are the
+/// element when the moduli's are (an elastic element's viscosity kernel
+/// is then zero), the element holding the centre at the Gauss points but
+/// not at the GLL points, whose first node there is the centre itself
+/// (GridCoupling::Options). These are the
 /// elements the 3D operator carries for a lateral viscosity and for
 /// lateral moduli over the whole solid.
 [[nodiscard]] GridCoupling LateralCoupling(const ViscoelasticOperator& op,

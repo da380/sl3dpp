@@ -90,6 +90,29 @@ struct Scene {
       }
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
+    return Complete(std::move(model), std::move(material), std::move(rheology));
+  }
+
+  /// The homogeneous test ball (AdGIA's E1 body) as a Maxwell body of the
+  /// given viscosity throughout: viscous down to its centre.
+  static Scene Ball(double viscositySI) {
+    auto deck =
+        Deck::Read(
+            std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "e1_homogeneous.deck",
+            DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
+                       0))
+            .value();
+    auto model = EarthModel::FromDeck(deck).value();
+    auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
+    auto material = Material::Create(model, mesh).value();
+    const auto viscosity =
+        viscositySI / model.ModelScales().Factor(ViscosityDimensions);
+    auto rheology = Rheology::Maxwell(material, RadialValue(viscosity)).value();
+    return Complete(std::move(model), std::move(material), std::move(rheology));
+  }
+
+  /// The body's elastic sea level solver and the analytic test state.
+  static Scene Complete(EarthModel model, Material material, Rheology rheology) {
     ViscoelasticOperator reference(rheology, kLmax);
     GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                           SeaLevelParameters{});
@@ -1069,12 +1092,17 @@ TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConverges) {
 /// rounding floor there (forward, tangent and adjoint) is 2e-13 to 7e-13.
 constexpr auto kModuliCoupledRtol = 1e-11;
 
-void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver) {
+void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver solver,
+                                                     bool ball = false) {
   // The discrete second-order sweep with lateral elastic moduli in the
   // background as well as lateral viscosity: the carried kernels equal the
   // first-order sweep's, <H u, w> = <H w, u>, and both equal the second-
-  // order tangent-linear run's objective less the itau cross term.
-  auto scene = Scene::Make(1e22);
+  // order tangent-linear run's objective less the itau cross term. On the
+  // prem8 body at the GLL points, or (`ball`) on the homogeneous Maxwell
+  // ball, viscous down to its centre, at the Gauss points, where the
+  // element holding the centre is carried (and the ball's moduli are the
+  // same at every node and point).
+  auto scene = ball ? Scene::Ball(1e22) : Scene::Make(1e22);
   std::mt19937 rng(23);
   const auto fieldT = scene.Smooth(rng, 100.0 * scene.Metre());
   const auto fieldU = scene.Smooth(rng, 20.0 * scene.Metre());
@@ -1118,7 +1146,7 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
       scene.rheology, kLmax, baseDelta,
       {.solver = solver,
        .solve_rtol = 1e-12,
-       .memory_points = MemoryPointSet::Gll,
+       .memory_points = ball ? MemoryPointSet::Gauss : MemoryPointSet::Gll,
        .moduli = {.shear =
                       [](double r, double theta, double phi) {
                         return 0.1 * (0.5 + r * r) *
@@ -1135,6 +1163,9 @@ void DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::S
        .coupled_rtol = kModuliCoupledRtol,
        .record_stride = 1});
   const auto& coupling = op.Coupling();
+  if (ball) {
+    ASSERT_EQ(coupling.ElementOfNode(0), 0);
+  }
   const auto trajectory = ForwardTrajectory3D::FromSnapshots(
       evolution.Run(times, FrozenLoad(scene, times, thickness)));
   auto direction = [&](const std::vector<double>& field,
@@ -1223,6 +1254,14 @@ TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderLateralModuli) {
 // transpose's and its derivative state's included.
 TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactUnderConjugateGradientSteps) {
   DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver::ConjugateGradients);
+}
+
+// On the ball viscous to its centre, the element holding the centre
+// carried, the steps closed by the fixed point (the default two-stage
+// step).
+TEST(SecondOrderAdjoint3D, DiscreteMaterialHessianIsExactOnABallViscousToItsCentre) {
+  DiscreteMaterialHessianIsExactUnderLateralModuli(Viscoelastic3D::Options::StepSolver::FixedPoint,
+                                                   true);
 }
 
 TEST(SecondOrderAdjoint3D, ContinuousMaterialHessianConvergesUnderLateralModuli) {

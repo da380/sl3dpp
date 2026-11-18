@@ -13,6 +13,7 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdlib>
 #include <complex>
@@ -20,6 +21,7 @@
 #include <format>
 #include <iostream>
 #include <map>
+#include <string>
 #include <tuple>
 #include <vector>
 
@@ -31,6 +33,7 @@
 #include "sl3dpp/Fingerprint.hpp"
 #include "sl3dpp/SeaLevel.hpp"
 #include "sl3dpp/Material.hpp"
+#include "sl3dpp/MemoryPoints.hpp"
 #include "sl3dpp/RadialMesh.hpp"
 #include "sl3dpp/Rheology.hpp"
 #include "sl3dpp/SurfaceGrid.hpp"
@@ -76,7 +79,9 @@ struct Body {
   Rheology rheology;
   double inner = 0.0, outer = 0.0;  // the viscous range, dimensionless
 
-  static Body Make() {
+  /// With `viscousInnerCore`, the inner core takes the mantle's viscosity
+  /// too: a body viscous down to its centre.
+  static Body Make(bool viscousInnerCore = false) {
     auto deck =
         Deck::Read(
             std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "prem8.elastic.deck",
@@ -95,12 +100,33 @@ struct Body {
     body.inner = 3.4799e6 / scales.Length();
     body.outer = 6.1511e6 / scales.Length();
     for (auto i = std::size_t{0}; i < body.model.LayerCount(); ++i) {
-      if (!body.model.IsFluid(i) && b[i] >= body.inner && b[i + 1] <= body.outer) {
+      if (body.model.IsFluid(i)) continue;
+      if ((b[i] >= body.inner && b[i + 1] <= body.outer) ||
+          (viscousInnerCore && b[i + 1] <= body.inner)) {
         viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
       }
     }
     body.rheology = Rheology::Maxwell(body.material, viscosity).value();
     return body;
+  }
+
+  /// The homogeneous test ball (AdGIA's E1 body) as a Maxwell body of
+  /// 1e21 Pa s throughout: viscous down to its centre; the viscous range
+  /// is the whole ball.
+  static Body Ball() {
+    auto deck =
+        Deck::Read(
+            std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "e1_homogeneous.deck",
+            DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
+                       0))
+            .value();
+    auto model = EarthModel::FromDeck(deck).value();
+    auto mesh = RadialMesh::Create(model, {.lmax = kLmax}).value();
+    auto material = Material::Create(model, mesh).value();
+    const auto viscosity = 1e21 / model.ModelScales().Factor(ViscosityDimensions);
+    auto rheology = Rheology::Maxwell(material, RadialValue(viscosity)).value();
+    const auto outer = material.Radius();
+    return Body{std::move(model), std::move(material), std::move(rheology), 0.0, outer};
   }
 
   /// The rheology with the moduli shifted nodally over the SOLID
@@ -1000,5 +1026,195 @@ TEST(LateralModuli3D, DISABLED_StepTiming) {
               << passes << " passes (" << last / passes << " s a pass), nodes "
               << op.Coupling().NodeCount() << ", companions " << op.CompanionCount()
               << '\n';
+  }
+}
+
+// -- the element holding the centre ----------------------------------------
+
+namespace {
+
+/// The surface U, V and phi per degree (complex m >= 0 columns) after
+/// `steps` steps of `dt` from rest under the noise load.
+std::array<std::map<int, std::vector<Complex>>, 3> Steps3D(const Viscoelastic3D& op,
+                                                           Scheme scheme, double dt,
+                                                           int steps) {
+  const auto load = [](int l, double) { return LoadColumns(l); };
+  auto state = op.ZeroState();
+  Viscoelastic3D::Solutions solutions;
+  for (auto step = 0; step < steps; ++step) {
+    auto result = op.Step(state, dt, scheme, load);
+    EXPECT_TRUE(result.info.converged) << "step " << step;
+    state = std::move(result.state);
+    solutions = std::move(result.solutions);
+  }
+  return {op.Surface(solutions, Component::U), op.Surface(solutions, Component::V),
+          op.Surface(solutions, Component::Phi)};
+}
+
+/// The unrelaxed solve of a zero state under the noise load, as Steps3D's.
+std::array<std::map<int, std::vector<Complex>>, 3> Unrelaxed3D(const Viscoelastic3D& op) {
+  const auto x = op.SolveElastic(op.ZeroState(), [](int l, double) { return LoadColumns(l); });
+  return {op.Surface(x, Component::U), op.Surface(x, Component::V),
+          op.Surface(x, Component::Phi)};
+}
+
+/// The worst difference of two such surfaces, per component over its
+/// largest magnitude.
+double SurfaceGap(const std::array<std::map<int, std::vector<Complex>>, 3>& got,
+                  const std::array<std::map<int, std::vector<Complex>>, 3>& want) {
+  auto worst = 0.0;
+  for (auto c = 0; c < 3; ++c) {
+    auto scale = 0.0, diff = 0.0;
+    for (const auto& [l, w] : want[c]) {
+      for (auto m = std::size_t{0}; m < w.size(); ++m) {
+        scale = std::max(scale, std::abs(w[m]));
+        diff = std::max(diff, std::abs(got[c].at(l)[m] - w[m]));
+      }
+    }
+    EXPECT_GT(scale, 0.0);
+    worst = std::max(worst, diff / scale);
+  }
+  return worst;
+}
+
+/// The schemes the centre gates run: the default two-stage step and the
+/// trapezoid.
+constexpr auto kCentreSchemes = std::array{Scheme::Sdirk2, Scheme::ExponentialTrapezoid};
+
+const char* SchemeName(Scheme scheme) {
+  return scheme == Scheme::Sdirk2 ? "sdirk2" : "trapezoid";
+}
+
+}  // namespace
+
+TEST(LateralModuli3D, ZeroModuliOnBodiesViscousToTheirCentreAreTheRunWithout) {
+  // On bodies viscous down to the centre (the homogeneous Maxwell ball,
+  // and PREM's Voigt average with a Maxwell inner core beside its Maxwell
+  // mantle), lateral moduli set but zero everywhere are the run without
+  // them: the coupling carries the element holding the centre at its
+  // interior Gauss points either way, so that element's relaxation is
+  // stepped alike. Four steps from rest under both schemes, and the
+  // unrelaxed solve (the conjugate-gradient lateral solve against the
+  // reference solve), to rounding.
+  const auto zero = [](double, double, double) { return 0.0; };
+  auto check = [&](const std::string& name, const Body& body) {
+    const auto tau = body.rheology.MinRelaxationTime();
+    const Viscoelastic3D plain(body.rheology, kLmax, zero);
+    const Viscoelastic3D zeroModuli(body.rheology, kLmax, zero,
+                                    {.moduli = {.shear = zero, .bulk = zero}});
+    ASSERT_TRUE(zeroModuli.HasLateralModuli());
+    // the same memory nodes, the element holding the centre among them
+    ASSERT_EQ(zeroModuli.Coupling().NodeCount(), plain.Coupling().NodeCount()) << name;
+    EXPECT_EQ(zeroModuli.Coupling().ElementOfNode(0), 0) << name;
+    const auto unrelaxed = SurfaceGap(Unrelaxed3D(zeroModuli), Unrelaxed3D(plain));
+    std::cout << std::format("[{}] the unrelaxed solve: {:.3e}\n", name, unrelaxed);
+    RecordProperty(name + "_unrelaxed", std::format("{:.3e}", unrelaxed));
+    EXPECT_LT(unrelaxed, 1e-10) << name;
+    for (const auto scheme : kCentreSchemes) {
+      const auto gap = SurfaceGap(Steps3D(zeroModuli, scheme, 0.7 * tau, 4),
+                                  Steps3D(plain, scheme, 0.7 * tau, 4));
+      std::cout << std::format("[{}, {}] four steps: {:.3e}\n", name, SchemeName(scheme), gap);
+      RecordProperty(name + "_" + SchemeName(scheme), std::format("{:.3e}", gap));
+      EXPECT_LT(gap, 1e-11) << name << " " << SchemeName(scheme);
+    }
+  };
+  check("ball", Body::Ball());
+  check("prem_viscous_inner_core", Body::Make(true));
+}
+
+TEST(LateralModuli3D, ShiftsReachingTheCentreMatchThe1DStepperOnABallViscousToItsCentre) {
+  // Lateral moduli over every element of the homogeneous Maxwell ball, the
+  // element holding the centre included, angle-uniform:
+  //  - a shift of the shear constant over each element, 25% in the element
+  //    holding the centre and 10% to 15% above it (the long-term modulus of
+  //    a Maxwell body vanishes, so at the Gauss points every shear term is
+  //    a point term), is exactly the 1D stepper on the ball with the
+  //    shifted modulus in its rheology, and the unrelaxed solve the shifted
+  //    ball's;
+  //  - smooth shifts of the shear and the bulk modulus, non-zero at the
+  //    centre, are the 1D stepper given them at its memory points;
+  // both schemes, four steps from rest, to rounding. The departure where
+  // the element holding the centre is left out is printed for scale.
+  const auto body = Body::Ball();
+  const auto tau = body.rheology.MinRelaxationTime();
+  const auto& mesh = body.material.Mesh();
+  const auto zero = [](double, double, double) { return 0.0; };
+  // the element holding an interior radius (the Gauss points are interior)
+  const auto elementOf = [&](double r) {
+    auto e = 0;
+    while (e + 1 < mesh.ElementCount() && r >= mesh.Right(e)) ++e;
+    return e;
+  };
+  const auto stepped = [&](double r) { return r < mesh.Right(0) ? 0.25 : 0.1 + 0.05 * r; };
+  const auto midpoint = [&](double r) {
+    const auto e = elementOf(r);
+    return stepped(0.5 * (mesh.Left(e) + mesh.Right(e)));
+  };
+  const auto none = [](double) { return 0.0; };
+  const auto shifted = body.Shifted(stepped, none, true);
+  const auto points = MemoryPoints::Of(MemoryPointSet::Gauss, mesh);
+  {
+    const Viscoelastic3D op3(body.rheology, kLmax, zero,
+                             {.moduli = {.shear = [&](double r, double, double) {
+                                return midpoint(r);
+                              }}});
+    EXPECT_EQ(op3.Coupling().ElementOfNode(0), 0);
+    const ViscoelasticOperator op1(shifted, kLmax);
+    const Viscoelastic3D shifted3(shifted, kLmax, zero);
+    const auto unrelaxed = SurfaceGap(Unrelaxed3D(op3), Unrelaxed3D(shifted3));
+    std::cout << std::format("[per-element shear] the unrelaxed solve: {:.3e}\n", unrelaxed);
+    RecordProperty("per_element_unrelaxed", std::format("{:.3e}", unrelaxed));
+    EXPECT_LT(unrelaxed, 1e-10);
+    for (const auto scheme : kCentreSchemes) {
+      auto iterations = 0;
+      const auto gap = CompareSteps(op1, op3, scheme, 0.7 * tau, 4, iterations);
+      std::cout << std::format("[per-element shear, {}] four steps: {:.3e} ({} passes)\n",
+                               SchemeName(scheme), gap, iterations);
+      RecordProperty(std::string{"per_element_"} + SchemeName(scheme),
+                     std::format("{:.3e}", gap));
+      EXPECT_LT(gap, 1e-10) << SchemeName(scheme);
+    }
+    // for scale: the same shift with the element holding the centre left
+    // at its reference
+    const Viscoelastic3D above(body.rheology, kLmax, zero,
+                               {.moduli = {.shear = [&](double r, double, double) {
+                                  return elementOf(r) == 0 ? 0.0 : midpoint(r);
+                                }}});
+    auto unused = 0;
+    const auto centre =
+        CompareSteps(op1, above, Scheme::Sdirk2, 0.7 * tau, 4, unused);
+    std::cout << std::format("[per-element shear] without the centre's shift: {:.3e}\n",
+                             centre);
+    RecordProperty("centre_shift_share", std::format("{:.3e}", centre));
+    EXPECT_GT(centre, 1e-8);
+  }
+  {
+    const auto shear = [](double r) {
+      return 0.1 * (0.4 + 0.6 * std::sin(3.0 * r) * std::sin(3.0 * r));
+    };
+    const auto bulk = [](double r) { return 0.1 * (1.0 - 0.5 * r); };
+    ViscoelasticOperator::Options::PointModuli moduli;
+    moduli.shear.assign(static_cast<std::size_t>(mesh.ElementCount()) * points.count, 0.0);
+    moduli.bulk = moduli.shear;
+    for (auto e = 0; e < mesh.ElementCount(); ++e) {
+      for (auto p = 0; p < points.count; ++p) {
+        const auto i = static_cast<std::size_t>(e) * points.count + p;
+        const auto r = points.RadiusAt(mesh, e, p);
+        moduli.shear[i] = shear(r);
+        moduli.bulk[i] = bulk(r);
+      }
+    }
+    const ViscoelasticOperator op1(body.rheology, kLmax, {.moduli = moduli});
+    const Viscoelastic3D op3(body.rheology, kLmax, zero,
+                             {.moduli = {.shear = [&](double r, double, double) { return shear(r); },
+                                         .bulk = [&](double r, double, double) { return bulk(r); }}});
+    for (const auto scheme : kCentreSchemes) {
+      auto iterations = 0;
+      const auto gap = CompareSteps(op1, op3, scheme, 0.7 * tau, 4, iterations);
+      std::cout << std::format("[smooth shear and bulk, {}] four steps: {:.3e} ({} passes)\n",
+                               SchemeName(scheme), gap, iterations);
+      RecordProperty(std::string{"smooth_"} + SchemeName(scheme), std::format("{:.3e}", gap));
+      EXPECT_LT(gap, 1e-10) << SchemeName(scheme);
+    }
   }
 }

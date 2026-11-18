@@ -766,9 +766,13 @@ homogeneous body is the elastic one times (1 + t / tau), and so is degree
   check of the kernel route there. Realistic contrasts converge in under
   ten iterations (docs/adjoints.md §13j).
 - **Lateral moduli in the 3D stepper** (`Viscoelastic3D::Options::
-  moduli`): relative δμ_U(x), δκ(x) over every solid element above the
-  centre (the branch moduli scaled with the unrelaxed shear, times
-  held), joining the lateral viscosity in the step's pointwise weight;
+  moduli`): relative δμ_U(x), δκ(x) over every solid element (the
+  branch moduli scaled with the unrelaxed shear, times held), the
+  element holding the centre included at the Gauss memory points, which
+  are interior to it (r = 0 is a regular singular point of the spherical
+  components; at the GLL points that element's first node is the centre,
+  and it is not carried: docs/adjoints.md §13k), joining the lateral
+  viscosity in the step's pointwise weight;
   the dilatation rides along as a scalar companion of the iterate for
   the bulk term; the unrelaxed start solve is the conjugate-gradient
   solve on the reference systems (docs/adjoints.md §13k). The fluid

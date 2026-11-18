@@ -1447,19 +1447,22 @@ TEST_F(AppsOverRanks, KernelRefusesOnRanksWhatOneProcessForms) {
           "\"discrete\", the default)");
 }
 
-/// A planetmodel model file over the prem8 deck's solid layers holding
-/// the fields given, each a function of (r, theta, phi) in SI metres and
-/// radians: a perturbation of the Earth's parameters, a field of a
-/// direction in the viscosity with its spec (test::LogViscositySpec).
-/// Written by rank 0.
+/// A planetmodel model file over the prem8 deck's solid layers (or those
+/// of `deck`, a deck in sl3d's own format) holding the fields given, each
+/// a function of (r, theta, phi) in SI metres and radians: a perturbation
+/// of the Earth's parameters, a field of a direction in the viscosity with
+/// its spec (test::LogViscositySpec). Written by rank 0.
 void WriteModelFields(
     const fs::path& path,
     const std::map<std::string, std::function<double(double, double, double)>>&
-        fields) {
+        fields,
+    const fs::path& own = {}) {
   if (Rank() == 0) {
     const auto data = std::string{SL3DPP_TEST_DATA_DIR};
-    const auto deck = Deck::Read(data + "/prem8.elastic.deck",
-                                 app::FormatOf(app::ModelFormat::Elastic));
+    const auto deck =
+        own.empty() ? Deck::Read(data + "/prem8.elastic.deck",
+                                 app::FormatOf(app::ModelFormat::Elastic))
+                    : Deck::Read(own, app::FormatOf(app::ModelFormat::Gia));
     ASSERT_TRUE(deck);
     const auto model = EarthModel::FromDeck(*deck);
     ASSERT_TRUE(model);
@@ -1594,6 +1597,116 @@ TEST_F(AppsOverRanks, TangentMatchesOneProcess) {
       "{:.1e} from the one-process run\n",
       fields, changes);
   EXPECT_LT(fields, kOverRanks);
+  EXPECT_LT(changes, kOverRanks);
+}
+
+TEST_F(AppsOverRanks, OnABallViscousToItsCentreSolveKernelAndTangentMatchOneProcess) {
+  // The homogeneous test ball, viscous down to its centre, on lateral
+  // moduli (non-zero throughout): the 3-D run carries the element holding
+  // the centre, on the first rank's segment. Over the ranks, solve's
+  // fields, kernel's kernels in the ice, the viscosity and the moduli, and
+  // tangent's run along the ice, ln viscosity and the moduli at once (its
+  // file and its measurements' changes) are the one process's to the
+  // substructured solves' round-off.
+  if (Rank() == 0) {
+    auto deck = std::string{"homogeneous test ball\ngia deck for the sl3d tests\n"};
+    for (const auto r : {0.0, 6371000.0}) {
+      deck += std::format("{} 5500 10000 5500 10000 5500 1 1e21\n", r);
+    }
+    std::ofstream(dir_ / "ball.deck") << deck;
+    const auto read = Deck::Read(dir_ / "ball.deck", app::FormatOf(app::ModelFormat::Gia));
+    ASSERT_TRUE(read);
+    const auto model = EarthModel::FromDeck(*read);
+    ASSERT_TRUE(model);
+    ASSERT_TRUE(io::WriteModuli(
+        dir_ / "moduli.nc", *model, SurfaceGrid(8),
+        [](double, double theta, double phi) {
+          return 0.1 * std::sin(theta) * std::cos(phi);
+        },
+        [](double, double theta, double) { return 0.05 * std::cos(theta); },
+        {.name = "toy moduli", .elementMetres = 500e3}));
+    test::WriteToyChange(dir_ / "d_ice.nc", true, 0.02);
+  }
+  Barrier();
+  WriteModelFields(
+      dir_ / "d_earth.nc",
+      {{"ln_viscosity",
+        [](double r, double theta, double phi) {
+          return 0.5 + (1.0 - r / 6371000.0) * std::sin(theta) * std::cos(phi);
+        }},
+       {"mu",
+        [](double r, double theta, double phi) {
+          return 2e9 * (1.0 - 0.5 * r / 6371000.0) * std::sin(theta) * std::sin(phi);
+        }},
+       {"kappa",
+        [](double, double theta, double) { return 3e9 * std::cos(theta); }}},
+      dir_ / "ball.deck");
+  const auto config = [&](const std::string& name) {
+    return Write(name + ".json", R"({
+      "problem": "quasi_static",
+      "model": {"deck": "ball.deck", "moduli": {"file": "moduli.nc"}},
+      "discretisation": {"lmax": 8},
+      "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 4},
+      "forcing": {"ice_change": [{"thickness": {"file": "history.nc"}}]},
+      "ocean": {"at": "start", "topography": {"file": "history.nc"},
+                "ice": {"file": "history.nc"}},
+      "rotation": "full", "moments": "hydrostatic",
+      "output": {"surface": "out/)" + name + R"(.nc"},
+      "kernels": {"parameters": ["ice", "viscosity", "moduli"],
+        "measurements": [
+          {"type": "relative_sea_level_cap", "name": "site", "latitude": -30.0,
+           "longitude": 10.0, "width_deg": 25.0},
+          {"type": "displacement_point", "name": "uplift", "latitude": 55.0,
+           "longitude": 10.0, "date_kyr_bp": 0.0}],
+        "output": "out/)" + name + R"(_kernels"},
+      "perturbation": {
+        "forcing": {"ice_change": [{"change": {"file": "d_ice.nc"}}]},
+        "model": {"viscosity": {"file": "d_earth.nc"},
+                  "moduli": {"file": "d_earth.nc"}}},
+      "tangent": {"output": {"surface": "out/)" + name + R"(_tangent.nc"}}})");
+  };
+  const auto one = config("one");
+  const auto over = config("over");
+  OneProcess([&] {
+    static_cast<void>(app::RunSolve(one));
+    static_cast<void>(app::RunKernel(one));
+    static_cast<void>(app::RunTangent(one));
+  });
+  const auto solved = app::RunSolve(over);
+  static_cast<void>(app::RunKernel(over));
+  static_cast<void>(app::RunTangent(over));
+  Barrier();
+  if (Rank() != 0) return;
+  EXPECT_TRUE(solved.starts_with("3-D (lateral moduli), viscoelastic")) << solved;
+  const auto reference = pm::ReadSurfaceFile(dir_ / "out" / "one.nc");
+  const auto distributed = pm::ReadSurfaceFile(dir_ / "out" / "over.nc");
+  auto fields = 0.0;
+  for (const auto* name : {"relative_sea_level_change", "displacement", "potential"}) {
+    fields = std::max(fields, Relative(distributed.variables.at(name).values,
+                                       reference.variables.at(name).values));
+  }
+  const auto kernels = std::max(
+      {SurfaceKernelDeparture(dir_ / "out" / "over_kernels" / "site_ice_kernels.nc",
+                              dir_ / "out" / "one_kernels" / "site_ice_kernels.nc"),
+       KernelFileDeparture(dir_ / "out" / "over_kernels" / "site_viscosity_kernels.nc",
+                           dir_ / "out" / "one_kernels" / "site_viscosity_kernels.nc"),
+       KernelFileDeparture(dir_ / "out" / "over_kernels" / "site_moduli_kernels.nc",
+                           dir_ / "out" / "one_kernels" / "site_moduli_kernels.nc"),
+       KernelFileDeparture(dir_ / "out" / "over_kernels" / "uplift_moduli_kernels.nc",
+                           dir_ / "out" / "one_kernels" / "uplift_moduli_kernels.nc")});
+  const auto tangent = TangentDeparture(dir_ / "out" / "over_tangent.nc",
+                                        dir_ / "out" / "one_tangent.nc");
+  const auto changes =
+      Relative(ChangesIn(dir_ / "out" / "over_tangent_measurements.txt"),
+               ChangesIn(dir_ / "out" / "one_tangent_measurements.txt"));
+  std::cout << std::format(
+      "[ball viscous to its centre, over the ranks] solve {:.1e}, kernels "
+      "{:.1e}, tangent {:.1e}, measurements' changes {:.1e} from the one "
+      "process\n",
+      fields, kernels, tangent, changes);
+  EXPECT_LT(fields, kOverRanks);
+  EXPECT_LT(kernels, 1e-7);
+  EXPECT_LT(tangent, kOverRanks);
   EXPECT_LT(changes, kOverRanks);
 }
 

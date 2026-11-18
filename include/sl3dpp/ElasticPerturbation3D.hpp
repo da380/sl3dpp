@@ -32,9 +32,13 @@
  *
  * Conventions: directions over the coupling's grid values
  * ([FieldOffset(node) + x]), material units; the nodes are the GLL nodes
- * of every solid element (the coupling of a throwaway Maxwell rheology
- * over the solid, so the perturbation can live anywhere solid, and the
- * reference systems are the Love-number operators of the material).
+ * of every solid element above the one holding the centre, if the body
+ * has one (the coupling of a throwaway Maxwell rheology over the solid,
+ * so the perturbation can live anywhere solid but there, and the
+ * reference systems are the Love-number operators of the material). That
+ * element's first GLL node is the centre itself, where the spherical
+ * components, which divide by the radius, are not evaluated
+ * (GridCoupling::Options).
  */
 
 #include <complex>

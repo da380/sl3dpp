@@ -1067,13 +1067,12 @@ viscosity takes the member too, a radial model file being how a radial
 profile is given. In a 3D run the fields are read at the points the run
 samples its lateral structure at, the memory nodes of its coupling; a
 layer the file gives no field on is not changed, and a change where
-nothing relaxes (an elastic layer) changes nothing. Where the run carries
-no memory nodes, the change is not taken, as the run's own
-`model.viscosity` is not: under lateral moduli the element holding the
-centre is never carried, and where it is viscous a change of the deck's
-viscosity moves the run there and the member does not (a share of the
-response of about 1e-5 on a ball viscous to its centre; none where the
-core is elastic).
+nothing relaxes (an elastic layer) changes nothing. The run carries
+memory nodes in every element that relaxes, the element holding the
+centre among them (the memory points are interior to each element, so
+none is the centre itself), with or without lateral moduli: a change is
+taken wherever the viscosity moves the run, down to the centre of a body
+viscous to it, as a change of the deck's viscosity is.
 
 Refused at the member's `file`, each named: a field `ln_viscosity_branch_<b>`
 of a branch the run's rheology does not have, and one that is not zero at
@@ -1119,8 +1118,9 @@ radial moduli and the reference does not move with the change: a change
 of no lateral mean under `"reference": "lateral_mean"`, any change under
 `"file_radial"`. A radial field is a radial change (a 1D run's and a 3D
 run's); a lateral one a 3D run's alone. The fluid takes no shear, and a 3D
-run takes lateral moduli in neither the fluid nor the element holding the
-centre, a direction's no more than its own. A 3D run carries its lateral
+run takes no lateral moduli in the fluid, a direction's no more than its
+own; it takes them down to the centre, the element holding it included
+(its memory points are interior to it). A 3D run carries its lateral
 structure in its viscous elements and those its own lateral moduli
 perturb: a change of the moduli that is not zero in another element (an
 elastic lithosphere under a lateral viscosity alone) is refused at the
@@ -2275,7 +2275,10 @@ file's grid, in the format of AdGIA's benchmarks:
 The volume file holds `radial_displacement` (m), `deviatoric_strain`
 (sqrt(e:e), dimensionless) and, on lateral moduli, `mu_relative` and
 `kappa_relative` (the perturbations applied) at the memory nodes of every
-solid element but the one holding the centre, with the model's density
+solid element but the one holding the centre (the GLL nodes of the
+static reference solve the file is written from, `ElasticPerturbation3D`,
+whose first node in that element is the centre itself; the run takes
+the perturbations there too), with the model's density
 as the radial reference; planetmodel's `slices.cutaway` and
 `plotting.cutaway` draw it (as `examples/python/plot_static_3d.py` does
 for the library's example of the same problem). The response inside the
@@ -3386,8 +3389,8 @@ are, line for line, those of the run without the member. They are the
 kernels a 3D run of the same model with no lateral structure gives, by
 the same method. Their nodes are the memory points of the viscous
 elements when the viscosity's kernels alone are written, and of every
-solid element above the one holding the centre when the moduli's are
-(the viscosity kernel is then zero in the elastic elements); the files'
+solid element, the one holding the centre included, when the moduli's
+are (the viscosity kernel is then zero in the elastic elements); the files'
 pairings with the run's own lateral structure are zero, it having none,
 and `uniform_log_viscosity_pairing` is the radial kernel's pairing with a
 uniform change of ln eta over the viscous mantle. The grids' members of

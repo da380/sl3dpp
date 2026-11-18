@@ -21,6 +21,36 @@ auto Nodes(Vector& values, const std::vector<std::size_t>& offsets, int first,
                                    offsets[last] - offsets[first]);
 }
 
+// Whether element e holds a memory point at r = 0: the element at the
+// centre of a body without a hole under GLL points, whose first node is
+// the centre. The spherical components of a tensor at a node divide by
+// its radius (SpinComponents.hpp), so no such point is ever carried;
+// Gauss points are interior and never sit there.
+bool HoldsCentrePoint(const RadialMesh& mesh, MemoryPointSet set, int e) {
+  return set == MemoryPointSet::Gll && e == 0 && mesh.Left(0) == 0.0;
+}
+
+// Whether element e carries memory nodes under the options: where a
+// rheology branch is active, or every solid element (all_solid), or the
+// solid elements of the mask (active_elements); an element holding a
+// point at r = 0 never.
+bool Carries(const Rheology& rheology, const GridCoupling::Options& options,
+             int e) {
+  const auto& material = rheology.BaseMaterial();
+  const auto& mesh = material.Mesh();
+  if (HoldsCentrePoint(mesh, options.memory_points, e)) return false;
+  if (!options.active_elements.empty()) {
+    return options.active_elements[static_cast<std::size_t>(e)] != 0 &&
+           !material.IsFluid(e);
+  }
+  if (options.all_solid) return !material.IsFluid(e);
+  const auto n = mesh.NGll();
+  for (auto i = 0; i < n; ++i) {
+    if (rheology.IsActive(static_cast<std::size_t>(e) * n + i)) return true;
+  }
+  return false;
+}
+
 }  // namespace
 
 GridCoupling::GridCoupling(const Rheology& rheology, int lmax, Options options)
@@ -57,18 +87,20 @@ GridCoupling::GridCoupling(const Rheology& rheology, int lmax,
                     firstElement, endElement, mesh.ElementCount()));
   }
   for (auto e = firstElement; e < end; ++e) {
-    auto active = false;
-    for (auto i = 0; i < n && !active; ++i) {
-      active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
+    if (HoldsCentrePoint(mesh, options.memory_points, e)) {
+      // An element at the centre that relaxes needs its memory carried,
+      // and under GLL points one of its nodes is the centre itself.
+      for (auto i = 0; i < n; ++i) {
+        if (rheology.IsActive(static_cast<std::size_t>(e) * n + i)) {
+          throw std::invalid_argument(
+              "the element holding the centre relaxes, and at the GLL memory "
+              "points one of its nodes is the centre, where the coupling's "
+              "spherical components (divided by the radius) are not built: "
+              "take the Gauss memory points, which are interior");
+        }
+      }
     }
-    if (options.all_solid) {
-      active = !material.IsFluid(e) && !(e == 0 && mesh.Left(0) == 0.0);
-    }
-    if (!options.active_elements.empty()) {
-      active = options.active_elements[static_cast<std::size_t>(e)] != 0 &&
-               !material.IsFluid(e) && !(e == 0 && mesh.Left(0) == 0.0);
-    }
-    if (!active) continue;
+    if (!Carries(rheology, options, e)) continue;
     for (auto p = 0; p < points_.count; ++p) {
       nodes_.push_back({e, p, points_.RadiusAt(mesh, e, p)});
     }
@@ -144,26 +176,13 @@ std::vector<int> GridCoupling::TransformDegrees(const Rheology& rheology,
   std::ranges::sort(degrees);
   degrees.erase(std::ranges::unique(degrees).begin(), degrees.end());
   const auto& mesh = rheology.BaseMaterial().Mesh();
-  const auto n = mesh.NGll();
   auto first = std::vector<int>(lmax + 1, 0);
   for (auto l = 1; l <= lmax; ++l) {
     first[l] = mesh.StartElement(l, options.truncation, options.eps);
   }
   auto out = std::vector<int>(mesh.ElementCount(), 0);
   for (auto e = 0; e < mesh.ElementCount(); ++e) {
-    auto active = false;
-    for (auto i = 0; i < n && !active; ++i) {
-      active = rheology.IsActive(static_cast<std::size_t>(e) * n + i);
-    }
-    if (options.all_solid) {
-      active = !rheology.BaseMaterial().IsFluid(e) &&
-               !(e == 0 && mesh.Left(0) == 0.0);
-    }
-    if (!options.active_elements.empty()) {
-      active = options.active_elements[static_cast<std::size_t>(e)] != 0 &&
-               !rheology.BaseMaterial().IsFluid(e) && !(e == 0 && mesh.Left(0) == 0.0);
-    }
-    if (!active) continue;
+    if (!Carries(rheology, options, e)) continue;
     auto reach = 0;
     for (auto l = 0; l <= lmax; ++l) {
       if (first[l] <= e) reach = l;

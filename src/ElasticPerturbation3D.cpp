@@ -63,9 +63,11 @@ ElasticPerturbation3D::ElasticPerturbation3D(const Material& material, int lmax,
                  .parallel = options.parallel,
                  .cache_bytes = options.cache_bytes,
                  .memory_points = MemoryPointSet::Gll,
-                 // The strain components of the spherical decomposition
-                 // divide by r, so the element holding the centre carries
-                 // no nodes: a perturbation starts above it.
+                 // The nodes are GLL nodes, and the first of the element
+                 // holding the centre is r = 0, where the spherical
+                 // components (divided by the radius) are not evaluated:
+                 // the nodes, and a perturbation, start above that
+                 // element.
                  .elements = {material.Mesh().Left(0) == 0.0 ? 1 : 0, -1}}) {
   if (lmax < 0) throw std::invalid_argument("lmax must be non-negative");
 }

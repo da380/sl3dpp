@@ -10,10 +10,14 @@
 
 #include <cmath>
 #include <filesystem>
+#include <format>
 #include <functional>
+#include <iostream>
 #include <map>
 #include <memory>
+#include <optional>
 #include <random>
+#include <tuple>
 #include <vector>
 
 #include "sl3dpp/Adjoint.hpp"
@@ -87,6 +91,34 @@ struct Scene {
       }
     }
     auto rheology = Rheology::Maxwell(material, viscosity).value();
+    return Complete(std::move(model), std::move(material), std::move(rheology));
+  }
+
+  /// The homogeneous test ball (AdGIA's E1 body) as a Maxwell body of the
+  /// given viscosity throughout: viscous down to its centre. With
+  /// `elementMetres`, a mesh of elements that wide at most rather than one
+  /// sized for lmax (a coarse mesh makes the element holding the centre a
+  /// sizeable share of the body).
+  static Scene Ball(double viscositySI, std::optional<double> elementMetres = {}) {
+    auto deck =
+        Deck::Read(
+            std::filesystem::path(SL3DPP_TEST_DATA_DIR) / "e1_homogeneous.deck",
+            DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"},
+                       0))
+            .value();
+    auto model = EarthModel::FromDeck(deck).value();
+    auto mesh = (elementMetres ? RadialMesh::Create(model, {.drmax = *elementMetres})
+                               : RadialMesh::Create(model, {.lmax = kLmax}))
+                    .value();
+    auto material = Material::Create(model, mesh).value();
+    const auto viscosity =
+        viscositySI / model.ModelScales().Factor(ViscosityDimensions);
+    auto rheology = Rheology::Maxwell(material, RadialValue(viscosity)).value();
+    return Complete(std::move(model), std::move(material), std::move(rheology));
+  }
+
+  /// The body's elastic sea level solver and the analytic test state.
+  static Scene Complete(EarthModel model, Material material, Rheology rheology) {
     ViscoelasticOperator reference(rheology, kLmax);
     GRDSolver solver(SurfaceGrid(kLmax), reference.ElasticLoveNumbers(),
                           SeaLevelParameters{});
@@ -1454,4 +1486,131 @@ TEST(TangentLinear3D, ModuliAcrossAnOnset) {
       VolumePairing(op.Coupling(), kernels.kappaKernel3D, direction.material.kappa) +
       VolumePairing(op.Coupling(), kernels.muKernel3D, direction.material.mu);
   EXPECT_NEAR(paired, predicted, 1e-8 * std::abs(predicted));
+}
+
+TEST(TangentLinear3D, DirectionsInTheCentreMatchDifferencesOnABallViscousToItsCentre) {
+  // On the homogeneous Maxwell ball, viscous down to its centre, meshed in
+  // elements of at most 1500 km (so that the element holding the centre is
+  // a sizeable share of the body), under a lateral viscosity and lateral
+  // moduli non-zero throughout, at the default Gauss memory points: the
+  // coupling carries the element holding the centre, and the 3D tangent
+  // run along a direction confined to that element (a lateral direction in
+  // kappa and mu; a lateral log viscosity) matches central differences of
+  // the coupled run with the background moduli (the lateral log viscosity)
+  // moved along it there, second order with Richardson at 1e-6, both
+  // schemes (the two-stage step and the trapezoid).
+  auto scene = Scene::Ball(1e21, 1.5e6);
+  const auto& mesh = scene.material.Mesh();
+  const auto centre = mesh.Right(0);
+  auto times = std::vector<double>{};
+  for (auto n = 0; n <= 4; ++n) times.push_back(2.5 * n * scene.Kyr());
+  const auto load = scene.MeltLoad(-0.1);
+  const auto directLoad = Ramp(load, times.back());
+  const auto g = scene.solver.Grid().FromFunction(
+      [](double t, double p) { return Cap(t, p, 1.2, 0.8, 0.5); });
+  // the background
+  const auto delta0 = [](double, double theta, double phi) {
+    return 0.6 * std::sin(theta) * std::cos(theta) * std::cos(phi);
+  };
+  const auto shear0 = [](double r, double theta, double phi) {
+    return 0.1 * (0.5 + r * r) *
+           (std::sin(theta) * std::cos(theta) * std::cos(phi) +
+            0.3 * std::cos(2 * phi) * std::sin(theta) * std::sin(theta));
+  };
+  const auto bulk0 = [](double r, double theta, double) {
+    return 0.05 * (1.0 - 0.5 * r) * std::cos(theta);
+  };
+  // the directions, confined to the element holding the centre (the
+  // memory points are interior, so the element of each is plain)
+  const auto inCentre = [=](double r) { return r < centre ? 1.0 : 0.0; };
+  const auto vShear = [=](double r, double theta, double phi) {
+    return 0.5 * inCentre(r) *
+           (1.0 + Cap(theta, phi, 1.9, 4.4, 0.7) - 0.5 * Cap(theta, phi, 0.9, 1.1, 0.6));
+  };
+  const auto vBulk = [=](double r, double theta, double phi) {
+    return 0.3 * inCentre(r) * (1.0 + 0.5 * std::sin(theta) * std::sin(phi));
+  };
+  const auto vEta = [=](double r, double theta, double phi) {
+    return inCentre(r) * (1.0 + 0.5 * std::sin(theta) * std::cos(phi));
+  };
+  constexpr auto kCoupledRtol = 1e-11;
+  for (auto scheme : {Scheme::Sdirk2, Scheme::ExponentialTrapezoid}) {
+    const auto label = scheme == Scheme::Sdirk2 ? "sdirk2" : "trapezoid";
+    // the ball's own moments make the transverse feedback unstable against
+    // its fluid limit: the axial feedback
+    const auto options = Evolution3D::Options{.scheme = scheme,
+                                              .rotation = RotationalFeedback::Axial,
+                                              .rtol = 1e-12,
+                                              .coupled_rtol = kCoupledRtol};
+    auto functional = [&](double moduli, double eta) {
+      Viscoelastic3D op(
+          scene.rheology, kLmax,
+          [&](double r, double t, double p) { return delta0(r, t, p) + eta * vEta(r, t, p); },
+          {.solve_rtol = 1e-12,
+           .moduli = {.shear = [&](double r, double t, double p) {
+                        return shear0(r, t, p) + moduli * vShear(r, t, p);
+                      },
+                      .bulk = [&](double r, double t, double p) {
+                        return bulk0(r, t, p) + moduli * vBulk(r, t, p);
+                      }}});
+      Evolution3D evolution(op, scene.solver, scene.state, options);
+      return Objective(scene, g, evolution.Run(times, directLoad).back().relativeSeaLevelChange);
+    };
+    Viscoelastic3D op(scene.rheology, kLmax, delta0,
+                      {.solve_rtol = 1e-12, .moduli = {.shear = shear0, .bulk = bulk0}});
+    const auto& coupling = op.Coupling();
+    ASSERT_EQ(coupling.ElementOfNode(0), 0);
+    auto recording = options;
+    recording.record_stride = 1;
+    Evolution3D evolution(op, scene.solver, scene.state, recording);
+    const auto trajectory =
+        ForwardTrajectory3D::FromSnapshots(evolution.Run(times, directLoad));
+    // the directions over the grid values: the moduli's absolute (the
+    // relative one times the reference moduli at the nodes)
+    TangentPerturbation3D moduli, viscosity;
+    moduli.material.mu.assign(coupling.GridValueCount(), 0.0);
+    moduli.material.kappa.assign(coupling.GridValueCount(), 0.0);
+    viscosity.logViscosity.assign(coupling.GridValueCount(), 0.0);
+    for (auto rn = 0; rn < coupling.NodeCount(); ++rn) {
+      const auto r = coupling.RadiusOfNode(rn);
+      const auto at = coupling.FieldOffset(rn);
+      const auto& grid = coupling.GridOf(rn);
+      const auto mu = grid.FromFunction(
+          [&](double t, double p) { return vShear(r, t, p) * op.UnrelaxedShearAtNodes()[rn]; });
+      const auto kappa = grid.FromFunction(
+          [&](double t, double p) { return vBulk(r, t, p) * op.BulkModulusAtNodes()[rn]; });
+      const auto eta = grid.FromFunction([&](double t, double p) { return vEta(r, t, p); });
+      for (auto x = std::size_t{0}; x < mu.size(); ++x) {
+        moduli.material.mu[at + x] = mu[x];
+        moduli.material.kappa[at + x] = kappa[x];
+        viscosity.logViscosity[at + x] = eta[x];
+      }
+    }
+    const TangentLinearSolver3D tangent(evolution, {.method = AdjointMethod::Discrete,
+                                                    .rtol = 1e-12,
+                                                    .coupled_rtol = kCoupledRtol});
+    for (const auto& [name, direction, alongModuli] :
+         {std::tuple{"moduli", &moduli, true}, std::tuple{"log viscosity", &viscosity, false}}) {
+      const auto predicted = Objective(
+          scene, g, tangent.Run(times, *direction, &trajectory).back().relativeSeaLevelChange);
+      auto fd = std::map<double, double>{};
+      for (double eps : {0.04, 0.02}) {
+        const auto up = alongModuli ? functional(eps, 0.0) : functional(0.0, eps);
+        const auto down = alongModuli ? functional(-eps, 0.0) : functional(0.0, -eps);
+        fd[eps] = (up - down) / (2.0 * eps);
+      }
+      const auto r1 = std::abs(fd[0.04] - predicted);
+      const auto r2 = std::abs(fd[0.02] - predicted);
+      const auto richardson = (4.0 * fd[0.02] - fd[0.04]) / 3.0;
+      std::cout << std::format(
+          "[ball, {}, {}] tangent {:.6e}; differences {:.6e}, {:.6e} (ratio {:.2f}); "
+          "Richardson {:.3e} from the tangent; base objective {:.6e}\n",
+          label, name, predicted, fd[0.04], fd[0.02], r1 / r2,
+          std::abs(richardson - predicted) / std::abs(predicted), functional(0.0, 0.0));
+      EXPECT_NE(predicted, 0.0) << name << " " << label;
+      EXPECT_GT(r1 / r2, 3.0) << name << " " << label;
+      EXPECT_LT(r1 / r2, 5.0) << name << " " << label;
+      EXPECT_NEAR(richardson, predicted, 1e-6 * std::abs(predicted)) << name << " " << label;
+    }
+  }
 }

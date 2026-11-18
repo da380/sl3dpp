@@ -3002,12 +3002,10 @@ TEST_F(TangentTest, In3DOnBurgersBodiesTheViscosityIsTheirBranches) {
   //    against 0.4 of the pairing `kernel` gives its branches' kernels
   //    with it (`uniform_log_viscosity_pairing`, the sum over
   //    `K_ln_eta_0` and `K_ln_eta_1`).
-  // The core is elastic below 1000 km radius: a 3-D run under lateral
-  // moduli carries no memory nodes in the element holding the centre
-  // (GridCoupling), so a direction in the viscosity, taken where the run
-  // samples its lateral structure, is not taken there, where a deck's
-  // viscosity moved moves the run (by about 1e-5 of the response on the
-  // homogeneous ball); the core makes the two one input.
+  // The core is elastic below 1000 km radius, so the direction is confined
+  // to a shell; the ball viscous down to its centre, whose centre element
+  // is carried at the Gauss points, has its own gate
+  // (In3DOnABallViscousToItsCentreTheViscosityIsTheDecks).
   constexpr auto kStep = 1e-3;
   constexpr auto kUniform = 0.4;
   const auto half = 0.5 * (std::log(1.0 + kStep) - std::log(1.0 - kStep));
@@ -3124,6 +3122,158 @@ TEST_F(TangentTest, In3DOnBurgersBodiesTheViscosityIsTheirBranches) {
   RecordProperty("pairing_gap", std::format("{:.3e}", Gap(got, predicted)));
   EXPECT_NE(got, 0.0);
   EXPECT_LT(Gap(got, predicted), 1e-8);
+}
+
+TEST_F(TangentTest, In3DOnABallViscousToItsCentreTheViscosityIsTheDecks) {
+  // The gate of In3DOnBurgersBodiesTheViscosityIsTheirBranches on balls
+  // viscous down to their centre, under lateral moduli: the 3-D run
+  // carries the element holding the centre at its interior Gauss points,
+  // so a direction in the viscosity is taken there as a deck's viscosity
+  // moved moves the run. On the homogeneous Maxwell ball, and on the same
+  // ball a Burgers body from its surface to its centre (`model.burgers`),
+  // the toy history:
+  //  - `ln_viscosity` equal to one against the central difference of two
+  //    solve runs with the deck's viscosity (and the Kelvin viscosity)
+  //    scaled by 1 +- 1e-3, at the 3-D gate's tolerance along ln viscosity;
+  //  - and the change of a measurement along 0.4 of the uniform change
+  //    against 0.4 of the pairing `kernel` gives with it
+  //    (`uniform_log_viscosity_pairing`).
+  constexpr auto kStep = 1e-3;
+  constexpr auto kUniform = 0.4;
+  const auto half = 0.5 * (std::log(1.0 + kStep) - std::log(1.0 - kStep));
+  for (const auto& [name, scale] : {std::pair{"ball.deck", 1.0},
+                                    std::pair{"plus.deck", 1.0 + kStep},
+                                    std::pair{"minus.deck", 1.0 - kStep}}) {
+    static_cast<void>(Write(name, BallDeck(0.0, 1e21 * scale)));
+  }
+  const auto model = ModelOf(dir_ / "ball.deck");
+  WriteToyHistory(dir_ / "history.nc");
+  WriteLateralModuli(dir_ / "moduli.nc", model);
+  WriteModelFields(dir_ / "d_one.nc", model,
+                   {{"ln_viscosity", [](double, double, double) { return 1.0; }}},
+                   true);
+  WriteModelFields(dir_ / "d_part.nc", model,
+                   {{"ln_viscosity",
+                     [](double, double, double) { return kUniform; }}},
+                   true);
+  constexpr auto kMeasurements = R"("measurements": [
+      {"type": "relative_sea_level_cap", "name": "site", "latitude": -30,
+       "longitude": 10, "width_deg": 25}])";
+  for (const auto burgers : {false, true}) {
+    const auto body = std::string{burgers ? "burgers" : "maxwell"};
+    const auto config = [&](const std::string& name, const std::string& deck,
+                            double scale, const std::string& direction = "",
+                            bool kernels = false) {
+      return Write(
+          body + "_" + name + ".json",
+          Config({std::format(R"("model": {{"deck": "{}",
+    "moduli": {{"file": "moduli.nc"}}{}}},
+  "discretisation": {{"lmax": 8}})",
+                              deck,
+                              burgers ? std::format(R"(,
+    "burgers": [{{"depth_km": [0, 6371], "kelvin_viscosity": {:.17g},
+                  "kelvin_modulus_fraction": 0.5}}])",
+                                                    1e20 * scale)
+                                      : std::string{}),
+                  kDated,
+                  R"("forcing": {"ice_change": [
+    {"thickness": {"file": "history.nc"}}]})",
+                  R"("ocean": {"at": "start",
+    "topography": {"file": "history.nc"}, "ice": {"file": "history.nc"}})",
+                  std::string{kTight3D} + "}",
+                  Outputs(body + "_" + name, std::string{", "} + kMeasurements),
+                  kernels ? std::format(R"("kernels": {{
+    "parameters": ["viscosity"], {}, "output": "out/{}_kernels"}})",
+                                        kMeasurements, body + "_" + name)
+                          : std::string{},
+                  direction.empty()
+                      ? std::string{}
+                      : std::format(R"("perturbation": {{"model": {{"viscosity":
+    {{"file": "{}"}}}}}})",
+                                    direction)}));
+    };
+    const auto solved = [&](const std::string& name, const std::string& deck,
+                            double scale) {
+      static_cast<void>(app::RunSolve(config(name, deck, scale)));
+      return Out(body + "_" + name);
+    };
+    const auto summary =
+        app::RunTangent(config("one", "ball.deck", 1.0, "d_one.nc"));
+    EXPECT_TRUE(summary.starts_with("3-D (lateral moduli), ")) << summary;
+    const auto agreement = AgainstDifference(
+        Out(body + "_one_tangent"), solved("plus", "plus.deck", 1.0 + kStep),
+        solved("minus", "minus.deck", 1.0 - kStep), half);
+    std::cout << std::format(
+        "[tangent, 3-D, {} ball viscous to its centre, ln_viscosity] the worst "
+        "{:.3e} from solve's difference ({})\n",
+        body, agreement.worst, agreement.where);
+    RecordProperty(body + "_gap", std::format("{:.3e}", agreement.worst));
+    EXPECT_LT(agreement.worst, 1e-5) << body << " " << agreement.where;
+
+    static_cast<void>(app::RunKernel(config("k", "ball.deck", 1.0, "", true)));
+    static_cast<void>(
+        app::RunTangent(config("part", "ball.deck", 1.0, "d_part.nc")));
+    const auto got =
+        ChangesIn(dir_ / "out" / (body + "_part_tangent_measurements.txt"))
+            .change.at("site");
+    const auto predicted =
+        kUniform * MetaOf(dir_ / "out" / (body + "_k_kernels") /
+                              "site_viscosity_kernels.nc",
+                          "uniform_log_viscosity_pairing");
+    std::cout << std::format(
+        "[tangent against kernels, 3-D, {} ball viscous to its centre] change "
+        "{:.6e}; {:.3e} from the kernels' uniform pairing\n",
+        body, got, Gap(got, predicted));
+    RecordProperty(body + "_pairing_gap", std::format("{:.3e}", Gap(got, predicted)));
+    EXPECT_NE(got, 0.0) << body;
+    EXPECT_LT(Gap(got, predicted), 1e-8) << body;
+  }
+}
+
+TEST_F(TangentTest, In3DAChangeOfTheModuliAtTheCentreIsAChangeLikeAnyOther) {
+  // A 3-D run on prem8 under a lateral viscosity alone carries no memory
+  // nodes in its elastic inner core, and the element holding the centre is
+  // an element like any other there: a change of the moduli about the
+  // centre is refused at the member, naming the depth of that element's
+  // first memory point (below 6330 km), and not dropped.
+  const auto data = std::string{SL3DPP_TEST_DATA_DIR};
+  WriteToyHistory(dir_ / "history.nc");
+  WriteModelFields(dir_ / "d_centre.nc",
+                   ModelOf(data + "/prem8.elastic.deck", app::ModelFormat::Elastic),
+                   {{"mu", [](double r, double, double) { return r < 30e3 ? 1e9 : 0.0; }}},
+                   true);
+  const auto config = Write(
+      "centre.json",
+      Config({std::format(R"("model": {{"deck": "{}/prem8.elastic.deck",
+    "format": "elastic", "viscosity": {{"file": "{}/viscosity_log.nc"}}}},
+  "discretisation": {{"lmax": 8}})",
+                          data, data),
+              R"("problem": "quasi_static",
+  "times": {"start_kyr_bp": 2.0, "end_kyr_bp": 0.0, "nodes": 2})",
+              R"("forcing": {"ice_change": [
+    {"thickness": {"file": "history.nc"}}]})",
+              R"("ocean": {"at": "start",
+    "topography": {"file": "history.nc"}, "ice": {"file": "history.nc"}})",
+              R"("rotation": "full")", Outputs("centre"),
+              R"("perturbation": {"model": {"moduli": {"file": "d_centre.nc"}}})"}));
+  auto message = std::string{};
+  try {
+    static_cast<void>(app::RunTangent(config));
+    ADD_FAILURE() << "a change of the moduli at the centre was taken";
+  } catch (const pm::Error& error) {
+    message = error.what();
+  }
+  EXPECT_NE(message.find("perturbation.model.moduli.file"), std::string::npos) << message;
+  EXPECT_NE(message.find("in an element where the 3-D run carries no memory nodes"),
+            std::string::npos)
+      << message;
+  const auto at = message.find(" km depth");
+  ASSERT_NE(at, std::string::npos) << message;
+  const auto from = message.rfind(' ', at - 1);
+  const auto depth = std::stod(message.substr(from + 1, at - from - 1));
+  std::cout << std::format("[a change of the moduli at the centre] refused at {:.6g} km depth\n",
+                           depth);
+  EXPECT_GT(depth, 6330.0) << message;
 }
 
 TEST_F(TangentTest, TheContinuousMethodIsTheDiscreteButAlongTheViscosity) {

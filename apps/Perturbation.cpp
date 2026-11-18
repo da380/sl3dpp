@@ -738,12 +738,10 @@ void AddEarthDirection(TangentPerturbation3D& direction,
     const auto uncovered = [&](const io::ModelField& field,
                                std::string_view name) {
       for (auto e = first; e < end; ++e) {
-        // a 3-D run takes no lateral moduli in the fluid or in the element
-        // holding the centre, its own or a direction's
-        if (carried.contains(e) || material.IsFluid(e) ||
-            mesh.Radius(e, 0) == 0.0) {
-          continue;
-        }
+        // a 3-D run takes no lateral moduli in the fluid, its own or a
+        // direction's; the element holding the centre is an element like
+        // any other (its memory points are interior to it)
+        if (carried.contains(e) || material.IsFluid(e)) continue;
         const auto layer = static_cast<std::size_t>(mesh.LayerOf(e));
         for (auto p = 0; p < points.count; ++p) {
           const auto r = points.RadiusAt(mesh, e, p);

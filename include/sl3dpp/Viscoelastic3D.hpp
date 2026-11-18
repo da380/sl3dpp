@@ -146,7 +146,9 @@ class Viscoelastic3D {
     /// phi)); either may be empty. With any set the coupling carries,
     /// beside the viscous elements, every solid element where a
     /// perturbation is non-zero at some memory point (the functions are
-    /// sampled on a probe of the whole solid first), the
+    /// sampled on a probe of the whole solid first), the element holding
+    /// the centre among them at the Gauss points (GridCoupling::Options),
+    /// the
     /// unrelaxed start solve is the preconditioned conjugate-gradient
     /// solve of detail/LateralSolve.hpp on the reference systems
     /// (elastic_rtol, elastic_max_iterations), and the within-step

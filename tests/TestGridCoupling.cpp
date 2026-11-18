@@ -12,6 +12,8 @@
 #include <complex>
 #include <filesystem>
 #include <map>
+#include <stdexcept>
+#include <string>
 #include <vector>
 
 #include "sl3dpp/Deck.hpp"
@@ -392,4 +394,79 @@ TEST(Lateral, DegreeOneToroidalForceIsTorqueFree) {
           << "region " << k << ", column " << column;
     }
   }
+}
+
+TEST(Lateral, TheElementHoldingTheCentreIsCarriedAtTheGaussPoints) {
+  // On the homogeneous Maxwell ball, viscous down to its centre: at the
+  // Gauss points (interior to every element) the coupling carries the
+  // element holding the centre under every rule (the rheology's, every
+  // solid element, a mask), no node at r = 0; at the GLL points that
+  // element's first node is the centre, and a coupling over it is refused,
+  // by name, where it relaxes, while a range above it (ElasticPerturbation3D's)
+  // is built. On prem8 with a Maxwell mantle (an elastic inner core) the
+  // GLL points carry every solid element above the one holding the
+  // centre and the Gauss points every solid element.
+  constexpr auto lmax = 4;
+  const auto read = [](const char* name) {
+    return EarthModel::FromDeck(
+               Deck::Read(std::filesystem::path(SL3DPP_TEST_DATA_DIR) / name,
+                          DeckFormat("elastic", {"rho", "vpv", "vsv", "vph", "vsh", "eta"}, 0))
+                   .value())
+        .value();
+  };
+  const auto ballModel = read("e1_homogeneous.deck");
+  const auto ballMaterial =
+      Material::Create(ballModel, RadialMesh::Create(ballModel, {.lmax = lmax}).value()).value();
+  const auto ball =
+      Rheology::Maxwell(ballMaterial,
+                        RadialValue(1e21 / ballModel.ModelScales().Factor(ViscosityDimensions)))
+          .value();
+  const auto& mesh = ballMaterial.Mesh();
+  auto mask = std::vector<char>(static_cast<std::size_t>(mesh.ElementCount()), 0);
+  mask[0] = 1;
+  for (const auto& options :
+       {GridCoupling::Options{}, GridCoupling::Options{.all_solid = true},
+        GridCoupling::Options{.active_elements = mask}}) {
+    const GridCoupling coupling(ball, lmax, options);
+    ASSERT_GT(coupling.NodeCount(), 0);
+    EXPECT_EQ(coupling.ElementOfNode(0), 0);
+    EXPECT_GT(coupling.RadiusOfNode(0), 0.0);
+    EXPECT_EQ(GridCoupling::TransformDegrees(ball, lmax, options)[0], lmax);
+  }
+  for (const auto& options :
+       {GridCoupling::Options{.memory_points = MemoryPointSet::Gll},
+        GridCoupling::Options{.memory_points = MemoryPointSet::Gll, .all_solid = true},
+        GridCoupling::Options{.memory_points = MemoryPointSet::Gll, .active_elements = mask}}) {
+    try {
+      static_cast<void>(GridCoupling(ball, lmax, options));
+      ADD_FAILURE() << "a GLL coupling over a relaxing element at the centre was built";
+    } catch (const std::invalid_argument& error) {
+      const auto message = std::string{error.what()};
+      EXPECT_NE(message.find("the element holding the centre relaxes"), std::string::npos)
+          << message;
+      EXPECT_NE(message.find("Gauss memory points"), std::string::npos) << message;
+    }
+    EXPECT_EQ(GridCoupling::TransformDegrees(ball, lmax, options)[0], 0);
+  }
+  auto above = GridCoupling::Options{.memory_points = MemoryPointSet::Gll,
+                                     .elements = {1, -1}, .all_solid = true};
+  EXPECT_EQ(GridCoupling(ball, lmax, above).ElementOfNode(0), 1);
+
+  const auto premModel = read("prem8.elastic.deck");
+  const auto premMaterial =
+      Material::Create(premModel, RadialMesh::Create(premModel, {.lmax = lmax}).value()).value();
+  const auto& scales = premModel.ModelScales();
+  auto viscosity = std::map<std::size_t, RadialValue>{};
+  const auto b = premModel.DimensionlessView().Boundaries();
+  for (auto i = std::size_t{0}; i < premModel.LayerCount(); ++i) {
+    if (!premModel.IsFluid(i) && b[i] >= 3.4799e6 / scales.Length() &&
+        b[i + 1] <= 6.1511e6 / scales.Length()) {
+      viscosity.emplace(i, 1e21 / scales.Factor(ViscosityDimensions));
+    }
+  }
+  const auto prem = Rheology::Maxwell(premMaterial, viscosity).value();
+  EXPECT_EQ(GridCoupling(prem, lmax, {.memory_points = MemoryPointSet::Gll, .all_solid = true})
+                .ElementOfNode(0),
+            1);
+  EXPECT_EQ(GridCoupling(prem, lmax, {.all_solid = true}).ElementOfNode(0), 0);
 }
